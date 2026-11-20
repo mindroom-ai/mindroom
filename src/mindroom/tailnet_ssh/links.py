@@ -17,6 +17,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 import aiohttp
+import httpx
 from pydantic import BaseModel
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION, unbound_agent_cli_shell_env
@@ -36,7 +37,8 @@ from mindroom.tailnet_ssh.store import (
     update_links,
 )
 from mindroom.terminal.resolution import agent_terminals
-from mindroom.tool_system.sandbox_proxy import worker_call
+from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, worker_call, worker_proxy_client_config
+from mindroom.tool_system.worker_proxy_client import worker_request_headers
 from mindroom.tool_system.worker_routing import (
     build_requester_execution_identity,
     normalize_worker_key_part,
@@ -44,7 +46,7 @@ from mindroom.tool_system.worker_routing import (
     worker_key_agent_name,
 )
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.models import WorkerSpec
+from mindroom.workers.models import WorkerSpec, worker_api_root
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
@@ -68,6 +70,7 @@ _OPERATOR_SYNC_SECONDS = 60.0
 # A gateway report older than this says nothing about open connections.
 _STATUS_SECONDS = 90.0
 _START_TIMEOUT_SECONDS = 30.0
+_STOP_TIMEOUT_SECONDS = 10.0
 _MAX_ANSWER_BYTES = 16384
 _NO_SSH_PORT = (
     "This worker has no SSH port; with Docker, MINDROOM_DOCKER_WORKER_PUBLISH_HOST must not be a wildcard address."
@@ -241,7 +244,8 @@ def desired_links(
     link would be removed at once; one that is not eligible now is added and suspended. Only a report of this primary
     session tells an operator key: the stored mode may be one the gateway left while the primary restarted. A link its person parked as
     ``off`` is a link, so it is not added again. A key gone from a person's keys, as when the operator removes one
-    from the config, closes their open sessions.
+    from the config, closes their open sessions. A link it removes leaves its worker's sshd admitting nobody, and
+    stopped, once the store is updated (``close_removed_links``).
     """
     workers: list[WorkerHandle] = []
     # The backend and the shared directories are read outside the store's lock, which connects and the portal wait for.
@@ -271,7 +275,7 @@ def desired_links(
             directories=directories,
         )
 
-    def reconcile(book: LinkBook) -> list[dict[str, object]]:
+    def reconcile(book: LinkBook) -> tuple[list[dict[str, object]], list[Link]]:
         for handle in workers if book.enrollment == "auth_key" else []:
             requester_id = user_agent_worker_key_requester(handle.worker_key)
             agent_name = agent_names.get(worker_key_agent_name(handle.worker_key) or "")
@@ -288,8 +292,8 @@ def desired_links(
             now=now,
         )
         verdicts = {link.id: desired(link) for link in book.links if link.desired == "on"}
-        remove_links(book, lambda link: verdicts.get(link.id) == "removing", now=now)
-        return [
+        removed = remove_links(book, lambda link: verdicts.get(link.id) == "removing", now=now)
+        rows = [
             {
                 "id": link.id,
                 "hostname": link.hostname,
@@ -301,8 +305,11 @@ def desired_links(
             for link in book.links
             if link.desired != "off"
         ]
+        return rows, removed
 
-    return update_links(runtime_paths, reconcile)
+    rows, removed = update_links(runtime_paths, reconcile)
+    close_removed_links(runtime_paths, removed)
+    return rows
 
 
 def record_status(
@@ -536,7 +543,8 @@ async def connect(
 def refresh_projections(config: Config, runtime_paths: RuntimePaths, requester_id: str) -> None:
     """Rewrite sshd's files in each of the person's workers that serves SSH, after their keys changed. Blocking.
 
-    A worker that is not listed with an SSH port gets them at its next connect, before its sshd starts.
+    A worker that is not listed with an SSH port gets them at its next connect, before its sshd starts. The worker of a
+    link being removed or parked gets none: its removal left it admitting nobody.
     Call it after the keys are stored: the workers are listed first, so one a connect made ready before is among them.
     """
     endpoints = {handle.worker_key: handle.ssh_endpoint for handle in listed_workers(runtime_paths)}
@@ -545,10 +553,61 @@ def refresh_projections(config: Config, runtime_paths: RuntimePaths, requester_i
         key_lines = authorized_key_lines(config, book, requester_id)
         for link in book.links:
             endpoint = endpoints.get(link.worker_key)
-            if link.requester_id == requester_id and endpoint is not None:
+            if link.requester_id == requester_id and link.desired == "on" and endpoint is not None:
                 write_projection(endpoint.projection_dir, link, key_lines)
 
     _projected(runtime_paths, project)
+
+
+def _stop_sshd(runtime_paths: RuntimePaths, link_id: str, handle: WorkerHandle) -> None:
+    """Have the worker's runner stop sshd, as a shell call reaches it. Blocking; a failure is logged, never raised."""
+    try:
+        config = worker_proxy_client_config(sandbox_proxy_config(runtime_paths), runtime_paths)
+        response = httpx.post(
+            f"{worker_api_root(handle)}/ssh/stop",
+            headers=worker_request_headers(handle, config=config),
+            timeout=_STOP_TIMEOUT_SECONDS,
+            follow_redirects=False,
+            # A worker is reached directly, never through the primary's egress proxy.
+            trust_env=False,
+        )
+    except (httpx.HTTPError, RuntimeError) as error:
+        # The error's words name the worker's address.
+        logger.warning("tailnet_ssh_sshd_not_stopped", link_id=link_id, error_type=type(error).__name__)
+        return
+    if response.status_code != 204:
+        logger.warning("tailnet_ssh_sshd_not_stopped", link_id=link_id, status_code=response.status_code)
+
+
+def close_removed_links(runtime_paths: RuntimePaths, removed: Sequence[Link]) -> None:
+    """Leave the worker of each link ``remove_links`` returned admitting nobody, then have its runner stop sshd. Blocking.
+
+    Call it once the removal is stored, never under the store's lock. The empty ``authorized_keys`` is written under
+    that lock, so no connect or key change writes keys after it; the stop is best effort, as the empty file already
+    admits nobody. A worker that is not listed with an SSH port is left alone: its sshd does not run, and only a connect
+    of a link that is on starts it again, which writes the keys first. A worker a link that is on serves by now keeps
+    its keys and sshd.
+    """
+    if not removed:
+        return
+    handles = {handle.worker_key: handle for handle in listed_workers(runtime_paths)}
+
+    def clear(book: LinkBook) -> list[tuple[str, WorkerHandle]]:
+        served = {link.worker_key for link in book.links if link.desired == "on"}
+        cleared: list[tuple[str, WorkerHandle]] = []
+        for link in removed:
+            handle = handles.get(link.worker_key)
+            if handle is None or handle.ssh_endpoint is None or link.worker_key in served:
+                continue
+            try:
+                write_projection(handle.ssh_endpoint.projection_dir, link, ())
+            except OSError as error:
+                logger.warning("tailnet_ssh_keys_not_cleared", link_id=link.id, error=str(error))
+            cleared.append((link.id, handle))
+        return cleared
+
+    for link_id, handle in _projected(runtime_paths, clear):
+        _stop_sshd(runtime_paths, link_id, handle)
 
 
 def _is_fresh(report: _GatewayReport, *, monotonic: float) -> bool:

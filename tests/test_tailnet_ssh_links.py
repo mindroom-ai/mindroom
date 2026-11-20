@@ -7,6 +7,7 @@ import json
 import threading
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, Self, cast
 
@@ -44,7 +45,7 @@ from tests.access_schema_support import membership_index
 from tests.conftest import bind_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from contextlib import AbstractContextManager
     from pathlib import Path
 
@@ -292,6 +293,54 @@ def _wire_connect(
     return manager
 
 
+class FakeRunner:
+    """A worker's sandbox runner that records each ``POST`` it gets, with its runner token, and answers ``status``."""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.status = 204
+        self.posts: list[tuple[str, str | None]] = []
+
+    def handle(self, worker_key: str, ssh_dir: Path | None, *, token: str = "runner-token") -> WorkerHandle:  # noqa: S107
+        """Return a listed worker whose runner this is."""
+        endpoint = f"{self.url}/api/sandbox-runner/execute"
+        return replace(_handle(worker_key, ssh_dir), endpoint=endpoint, auth_token=token)
+
+
+@pytest.fixture
+def fake_runner() -> Iterator[FakeRunner]:
+    """Serve a ``FakeRunner`` on a local port, on a thread of its own, as the blocking link service calls it."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            runner.posts.append((self.path, self.headers.get("x-mindroom-sandbox-token")))
+            self.send_response(runner.status)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    runner = FakeRunner(f"http://127.0.0.1:{server.server_port}")
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        yield runner
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+_STOP = ("/api/sandbox-runner/ssh/stop", "runner-token")
+
+
+def _projected_keys(ssh_dir: Path, link: Link) -> None:
+    """Write the files a connect of ``link`` would have left in its worker, Alice's key admitted."""
+    links.write_projection(ssh_dir, link, [f"restrict,pty {PUBLIC_KEY}"])
+
+
 async def _connect(
     config: Config,
     paths: RuntimePaths,
@@ -448,6 +497,113 @@ def test_removal_triggers_set_removing(config: Config, paths: RuntimePaths, trig
     # A removal already under way is not started again.
     _rows(config, paths, status, now=NOW + 5)
     assert _stored(paths, link) == removed
+
+
+@pytest.mark.parametrize("trigger", ["not_authorized", "worker_key_changed"])
+def test_reconcile_removal_clears_keys_of_listed_worker(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: FakeRunner,
+    trigger: str,
+) -> None:
+    """A link the reconcile removes leaves its worker's sshd admitting nobody, and stopped; another worker keeps its own."""
+    removed = {
+        "not_authorized": _enrolled(BOB),
+        "worker_key_changed": _enrolled(worker_key="v1:elsewhere:user_agent:~@alice:example.org:mine"),
+    }[trigger]
+    kept = _enrolled(agent="mind")
+    _store(paths, removed, kept)
+    _projected_keys(tmp_path / "removed", removed)
+    _projected_keys(tmp_path / "kept", kept)
+    _manager(
+        monkeypatch,
+        fake_runner.handle(removed.worker_key, tmp_path / "removed"),
+        fake_runner.handle(kept.worker_key, tmp_path / "kept", token="kept-token"),  # noqa: S106
+    )
+
+    rows = _rows(config, paths)
+
+    assert [(row["id"], row["desired"]) for row in rows] == [(removed.id, "removing"), (kept.id, "on")]
+    assert (tmp_path / "removed" / "authorized_keys").read_text() == ""
+    assert (tmp_path / "removed" / "ssh_host_ed25519_key").read_text() == removed.host_key
+    assert (tmp_path / "kept" / "authorized_keys").read_text() == f"restrict,pty {PUBLIC_KEY}\n"
+    assert fake_runner.posts == [_STOP]
+
+    # A removal under way is not started again, so its worker is not called again.
+    _rows(config, paths, now=NOW + 5)
+    assert fake_runner.posts == [_STOP]
+
+
+def test_removal_of_unlisted_worker_makes_no_runner_call(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: FakeRunner,
+) -> None:
+    """A worker that is asleep, or listed without an SSH port, runs no sshd, so its removed link calls nothing."""
+    asleep, portless = _enrolled(BOB), _enrolled(agent="gone")
+    _store(paths, asleep, portless)
+    manager = _manager(monkeypatch, fake_runner.handle(portless.worker_key, None))
+
+    rows = _rows(config, paths)
+
+    assert [row["desired"] for row in rows] == ["removing", "removing"]
+    assert manager.calls == ["list_workers"]
+    assert fake_runner.posts == []
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["config.yaml", "mindroom_data"]
+
+
+@pytest.mark.parametrize("failure", ["refused", "unreachable"])
+def test_stop_failure_does_not_fail_removal(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: FakeRunner,
+    failure: str,
+) -> None:
+    """A runner that does not stop sshd is logged, without keys or addresses; the removal and the cleared keys stand."""
+    removed = _enrolled(BOB)
+    _store(paths, removed)
+    _projected_keys(tmp_path / "ssh", removed)
+    handle = fake_runner.handle(removed.worker_key, tmp_path / "ssh")
+    if failure == "refused":
+        fake_runner.status = 500
+    else:
+        handle = replace(handle, endpoint="http://127.0.0.1:1/api/sandbox-runner/execute")
+    _manager(monkeypatch, handle)
+
+    with capture_logs() as logs:
+        rows = _rows(config, paths)
+
+    assert [(row["id"], row["desired"]) for row in rows] == [(removed.id, "removing")]
+    assert (tmp_path / "ssh" / "authorized_keys").read_text() == ""
+    [logged] = [entry for entry in logs if entry["event"] == "tailnet_ssh_sshd_not_stopped"]
+    assert logged["link_id"] == removed.id
+    text = repr(logs)
+    for secret in (PUBLIC_KEY.split()[1], "runner-token", "127.0.0.1", str(tmp_path)):
+        assert secret not in text
+
+
+def test_a_cleared_worker_another_link_serves_keeps_its_keys(
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: FakeRunner,
+) -> None:
+    """A link back on for the worker by the time its old removal is cleared keeps the keys and sshd its connect set up."""
+    back_on = _enrolled()
+    _store(paths, back_on)
+    _projected_keys(tmp_path / "ssh", back_on)
+    _manager(monkeypatch, fake_runner.handle(back_on.worker_key, tmp_path / "ssh"))
+
+    links.close_removed_links(paths, [back_on.model_copy(update={"desired": "removing"})])
+
+    assert (tmp_path / "ssh" / "authorized_keys").read_text() == f"restrict,pty {PUBLIC_KEY}\n"
+    assert fake_runner.posts == []
 
 
 def test_a_node_waiting_for_approval_is_not_dropped_at_a_day(config: Config, paths: RuntimePaths) -> None:
@@ -1335,3 +1491,26 @@ def test_key_change_rewrites_projection_of_running_workers_only(
     assert (tmp_path / "running" / "authorized_keys").read_text() == f"restrict,pty {PUBLIC_KEY}\n"
     assert (tmp_path / "running" / "ssh_host_ed25519_key").read_text() == running.host_key
     assert sorted(path.name for path in tmp_path.iterdir() if path.is_dir()) == ["mindroom_data", "running"]
+
+
+def test_key_change_gives_no_keys_back_to_a_removed_link(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker of a link being removed, or parked, keeps the keys its removal cleared, whatever keys the person adds."""
+    removing, parked = _enrolled(desired="removing"), _enrolled(agent="mind", desired="off")
+    _store(paths, removing, parked)
+    update_links(paths, lambda book: set_keys(book, ALICE, [PUBLIC_KEY], now=NOW))
+    for link in (removing, parked):
+        links.write_projection(tmp_path / link.agent_name, link, [])
+    _manager(
+        monkeypatch,
+        _handle(removing.worker_key, tmp_path / removing.agent_name),
+        _handle(parked.worker_key, tmp_path / parked.agent_name),
+    )
+
+    refresh_projections(config, paths, ALICE)
+
+    assert [(tmp_path / name / "authorized_keys").read_text() for name in ("mine", "mind")] == ["", ""]

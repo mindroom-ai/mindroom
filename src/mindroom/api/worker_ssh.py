@@ -1,11 +1,12 @@
-"""Runner route that starts a dedicated worker's SSH server, which tailnet SSH connections reach.
+"""Runner routes that start and stop a dedicated worker's SSH server, which tailnet SSH connections reach.
 
 The primary calls ``/start`` for every SSH connection it has admitted to this worker, with the request a shell call
 would send. The runner prepares that request as a terminal's (``prepare_terminal_launch``) and keeps the shell's
 environment and workspace where ``mindroom.tailnet_ssh.session``, which sshd runs for every session, reads them. Then
 it starts sshd unless one runs, on the files the primary wrote into ``<worker root>/.runtime/ssh``.
 
-sshd never starts at boot, so a worker has no SSH server until the primary has passed a connect for it.
+sshd never starts at boot, so a worker has no SSH server until the primary has passed a connect for it. The primary
+calls ``/stop`` when it removes the worker's link, after it has emptied ``authorized_keys``.
 """
 
 from __future__ import annotations
@@ -213,7 +214,7 @@ async def _ensure_sshd(app: FastAPI, state: _WorkerSsh) -> None:
 
 
 async def stop_worker_ssh(app: FastAPI) -> None:
-    """End this runner's sshd as the runner stops."""
+    """End this runner's sshd, as the runner stops or its link is removed; its open sessions are not waited for."""
     state = _worker_ssh(app)
     async with state.lock:
         if state.sshd is not None:
@@ -232,3 +233,9 @@ async def start(request: Request, payload: _Start) -> dict[str, int]:
     async with state.lock:
         await _ensure_sshd(request.app, state)
     return {"port": WORKER_SSH_PORT}
+
+
+@router.post("/stop", status_code=204, dependencies=[Depends(validate_runner_token)])
+async def stop(request: Request) -> None:
+    """End sshd if it runs; the gateway has closed the removed link's sessions already."""
+    await stop_worker_ssh(request.app)

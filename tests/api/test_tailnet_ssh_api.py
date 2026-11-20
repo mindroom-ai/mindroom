@@ -667,6 +667,52 @@ def test_disconnect_sets_removing_and_parks_in_operator_mode(portal: _Portal) ->
     assert (parked.desired, parked.park_when_removed) == ("removing", True)
 
 
+@pytest.fixture
+def sshd_stops(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Record each link and worker whose runner is asked to stop sshd.
+
+    The portal resolves every host to a public address, so no local runner is reachable here; the link service's
+    tests serve one.
+    """
+    stops: list[tuple[str, str]] = []
+    monkeypatch.setattr(links, "_stop_sshd", lambda _paths, link_id, handle: stops.append((link_id, handle.worker_key)))
+    return stops
+
+
+def test_disconnect_clears_authorized_keys_and_stops_sshd(portal: _Portal, sshd_stops: list[tuple[str, str]]) -> None:
+    """A disconnected link's worker admits nobody and its sshd is stopped; another person's worker keeps its own."""
+    alices, bobs = _connected(portal), _connected(portal, "team_mind", "team-mind", user="bob")
+    for link in (alices, bobs):
+        links.write_projection(portal.tmp_path / link.id, link, [f"restrict,pty {_public_key()}"])
+    bobs_keys = (portal.tmp_path / bobs.id / "authorized_keys").read_text()
+    portal.manager.handles = [
+        _handle(alices.worker_key, ssh_dir=portal.tmp_path / alices.id),
+        _handle(bobs.worker_key, ssh_dir=portal.tmp_path / bobs.id),
+    ]
+
+    assert portal.client.delete(f"{BASE}/agents/mind", headers=portal.headers["alice"]).status_code == 204
+
+    assert portal.link(ALICE, "mind").desired == "removing"
+    assert (portal.tmp_path / alices.id / "authorized_keys").read_text() == ""
+    assert (portal.tmp_path / bobs.id / "authorized_keys").read_text() == bobs_keys
+    assert sshd_stops == [(alices.id, alices.worker_key)]
+
+
+def test_operator_park_clears_keys(portal: _Portal, sshd_stops: list[tuple[str, str]]) -> None:
+    """A link an operator key enrolled is parked on disconnect, and its worker's sshd admits nobody all the same."""
+    link = _connected(portal, "team_mind", "team-mind")
+    portal.report(link.id, enrollment="auth_key")
+    ssh_dir = portal.tmp_path / "ssh"
+    links.write_projection(ssh_dir, link, [f"restrict,pty {_public_key()}"])
+    portal.manager.handles = [_handle(link.worker_key, ssh_dir=ssh_dir)]
+
+    assert portal.client.delete(f"{BASE}/agents/team_mind", headers=portal.headers["alice"]).status_code == 204
+
+    assert portal.link(ALICE, "team_mind").park_when_removed
+    assert (ssh_dir / "authorized_keys").read_text() == ""
+    assert sshd_stops == [(link.id, link.worker_key)]
+
+
 def test_a_disconnect_right_after_a_restart_stays_disconnected(portal: _Portal, tmp_path: Path) -> None:
     """Disconnecting an operator key's link before the restarted primary hears from the gateway parks it all the same.
 

@@ -41,7 +41,13 @@ from mindroom.oauth.credential_lifecycle import (
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.shared_directories.store import is_shareable_agent, load_shared_directories, shared_directory_access
 from mindroom.tailnet_ssh.eligibility import link_ineligibility
-from mindroom.tailnet_ssh.links import fresh_link_statuses, link_state, listed_workers, refresh_projections
+from mindroom.tailnet_ssh.links import (
+    close_removed_links,
+    fresh_link_statuses,
+    link_state,
+    listed_workers,
+    refresh_projections,
+)
 from mindroom.tailnet_ssh.projection import authorized_key_lines
 from mindroom.tailnet_ssh.store import (
     HOSTNAME,
@@ -405,15 +411,16 @@ async def request_login(agent_name: str, person: _Changing) -> None:
 
 @router.delete("/agents/{agent_name}", status_code=204)
 async def disconnect_agent(agent_name: str, person: _Changing) -> None:
-    """Disconnect the link: its sessions close and the gateway logs its node out.
+    """Disconnect the link: its sessions close, its worker's sshd admits nobody and stops, and the gateway logs its node out.
 
     With an operator key the link is parked ``off``, so the gateway does not add it again; the stored mode decides,
     so a disconnect right after a primary restart parks too.
     """
 
-    def disconnect(book: LinkBook) -> None:
+    def disconnect(book: LinkBook) -> list[Link]:
         link = _own_link(book, person.requester_id, agent_name)
         park = book.enrollment == "auth_key"
-        remove_links(book, lambda candidate: candidate is link, now=time.time(), park=park)
+        return remove_links(book, lambda candidate: candidate is link, now=time.time(), park=park)
 
-    await asyncio.to_thread(update_links, person.user.runtime_paths, disconnect)
+    removed = await asyncio.to_thread(update_links, person.user.runtime_paths, disconnect)
+    await asyncio.to_thread(close_removed_links, person.user.runtime_paths, removed)

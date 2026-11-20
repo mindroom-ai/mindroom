@@ -1,4 +1,4 @@
-"""The runner's SSH start route, and the session sshd runs for every connection."""
+"""The runner's SSH start and stop routes, and the session sshd runs for every connection."""
 
 from __future__ import annotations
 
@@ -464,6 +464,52 @@ async def test_start_refuses_a_shell_without_a_workspace(
     assert response.status_code == 400
     assert response.json() == {"detail": "This shell has no workspace for an SSH session to start in."}
     assert fake_sshd.argvs == []
+
+
+@pytest.mark.asyncio
+async def test_stop_route_kills_sshd_and_is_idempotent(client: httpx.AsyncClient, fake_sshd: _FakeSshd) -> None:
+    """A stop ends sshd, and answers the same when none runs; the next start runs a new one."""
+    assert (await client.post("/api/sandbox-runner/ssh/stop")).status_code == 204
+    await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
+
+    responses = [await client.post("/api/sandbox-runner/ssh/stop") for _ in range(2)]
+
+    assert [response.status_code for response in responses] == [204, 204]
+    assert fake_sshd.processes[0].returncode == -signal.SIGKILL
+    assert (await client.post("/api/sandbox-runner/ssh/start", json=_BODY)).status_code == 200
+    assert len(fake_sshd.argvs) == 2
+    assert fake_sshd.processes[1].returncode is None
+
+
+@pytest.mark.asyncio
+async def test_stop_route_requires_runner_token(client: httpx.AsyncClient, fake_sshd: _FakeSshd) -> None:
+    """Only the primary, which holds the runner token, stops sshd."""
+    await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
+
+    response = await client.post("/api/sandbox-runner/ssh/stop", headers={"x-mindroom-sandbox-token": ""})
+
+    assert response.status_code == 401
+    assert fake_sshd.processes[0].returncode is None
+
+
+@pytest.mark.asyncio
+async def test_stop_route_does_not_wait_for_open_sessions(
+    client: httpx.AsyncClient,
+    tmp_path: Path,
+    install_fake_sshd: Callable[..., _FakeSshd],
+) -> None:
+    """A stop ends the listener at once; the gateway has cut the removed link's sessions already."""
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    fake = install_fake_sshd(_LISTENS_WITH_A_SESSION, str(sessions))
+    await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
+
+    async with asyncio.timeout(10):
+        response = await client.post("/api/sandbox-runner/ssh/stop")
+
+    assert response.status_code == 204
+    assert fake.processes[0].returncode == -signal.SIGKILL
+    await _session_finds_stderr_closed(fake.processes[0], sessions)
 
 
 @pytest.mark.asyncio
