@@ -38,35 +38,35 @@ Every command also prints its options with `--help`.
 │ --help                -h        Show this message and exit.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Get started ──────────────────────────────────────────────────────────────────────────╮
-│ run                      Set up on first run, pair, and start MindRoom.                │
-│ connect                  Pair this machine with your MindRoom Chat account.            │
-│ doctor                   Check your setup for common problems.                         │
+│ run                     Set up on first run, pair, and start MindRoom.                 │
+│ connect                 Pair this machine with your MindRoom Chat account.             │
+│ doctor                  Check your setup for common problems.                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Configure ────────────────────────────────────────────────────────────────────────────╮
-│ config                   Create, edit, and validate config.yaml.                       │
-│ plugins                  Check, install, and update MindRoom plugins.                  │
-│ avatars                  Generate and sync agent, room, and space avatars.             │
+│ config                  Create, edit, and validate config.yaml.                        │
+│ plugins                 Check, install, and update MindRoom plugins.                   │
+│ avatars                 Generate and sync agent, room, and space avatars.              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Keep running ─────────────────────────────────────────────────────────────────────────╮
-│ service                  Run MindRoom in the background, starting at login.            │
+│ service                 Run MindRoom in the background, starting at login.             │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Desktop ──────────────────────────────────────────────────────────────────────────────╮
-│ desktop                  Share local apps, folders, and shell commands with cloud      │
-│                          MindRoom.                                                     │
+│ desktop                 Share local apps, folders, and shell commands with cloud       │
+│                         MindRoom.                                                      │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Troubleshoot ─────────────────────────────────────────────────────────────────────────╮
-│ debug-report             Collect what MindRoom stored about a reported conversation,   │
-│                          as JSON.                                                      │
-│ version                  Show the MindRoom version.                                    │
-│ threads                  Export Matrix threads to searchable files.                    │
-│ journal                  Inspect and rebind the durable event journal.                 │
+│ debug-report            Collect what MindRoom stored about a reported conversation, as │
+│                         JSON.                                                          │
+│ version                 Show the MindRoom version.                                     │
+│ threads                 Export Matrix threads to searchable files.                     │
+│ journal                 Inspect and rebind the durable event journal.                  │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Automation ───────────────────────────────────────────────────────────────────────────╮
-│ check-active-responses   Check whether MindRoom has live work.                         │
-│ trigger                  Send signed external triggers.                                │
+│ check-active-responses  Check whether MindRoom has live work.                          │
+│ trigger                 Send signed external triggers.                                 │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Development ──────────────────────────────────────────────────────────────────────────╮
-│ local-stack-setup        Start local Synapse + MindRoom Chat using Docker only.        │
+│ local-stack-setup       Start local Synapse + MindRoom Chat using Docker only.         │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -202,24 +202,24 @@ Create, view, edit, and validate `config.yaml`.
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Create and edit ──────────────────────────────────────────────────────────────────────╮
-│ init              Create a starter config.yaml with a personal agent and model.        │
-│ edit              Open config.yaml in your default editor.                             │
-│ use-local-model   Make a local model the default, keeping agents' explicit model       │
-│                   choices.                                                             │
-│ migrate           Migrate config.yaml to membership access settings.                   │
+│ init             Create a starter config.yaml with a personal agent and model.         │
+│ edit             Open config.yaml in your default editor.                              │
+│ use-local-model  Make a local model the default, keeping agents' explicit model        │
+│                  choices.                                                              │
+│ migrate          Migrate config.yaml to membership access settings.                    │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Inspect ──────────────────────────────────────────────────────────────────────────────╮
-│ show              Display the current config file with syntax highlighting.            │
-│ validate          Validate config.yaml and check for common issues.                    │
-│ resolve           Print the fully merged config YAML with all !include tags resolved.  │
-│ path              Show the resolved config file path and search locations.             │
+│ show             Display the current config file with syntax highlighting.             │
+│ validate         Validate config.yaml and check for common issues.                     │
+│ resolve          Print the fully merged config YAML with all !include tags resolved.   │
+│ path             Show the resolved config file path and search locations.              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Deployment ───────────────────────────────────────────────────────────────────────────╮
-│ fingerprint       Print the SHA-256 of the config and every file it includes.          │
-│ install-bundle    Validate and install a complete config tree.                         │
-│ classify-change   Classify the differences between two config trees.                   │
-│ apply-bundle      Hot-apply a config tree change limited to YAML or include sources.   │
-│ check-applied     Confirm that the runtime applied a config.                           │
+│ fingerprint      Print the SHA-256 of the config and every file it includes.           │
+│ install-bundle   Validate and install a complete config tree.                          │
+│ classify-change  Classify the differences between two config trees.                    │
+│ apply-bundle     Hot-apply a config tree change limited to YAML or include sources.    │
+│ check-applied    Confirm that the runtime applied a config.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -420,13 +420,13 @@ To install later, run `mindroom service install` or `mindroom run --service`.
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ install     Install and start MindRoom as a background user service.                   │
-│ uninstall   Stop and remove the MindRoom user service.                                 │
-│ start       Start the installed MindRoom user service.                                 │
-│ stop        Stop the installed MindRoom user service without removing it.              │
-│ restart     Restart the installed MindRoom user service.                               │
-│ status      Show MindRoom service status and recent logs.                              │
-│ logs        Follow MindRoom service logs.                                              │
+│ install    Install and start MindRoom as a background user service.                    │
+│ uninstall  Stop and remove the MindRoom user service.                                  │
+│ start      Start the installed MindRoom user service.                                  │
+│ stop       Stop the installed MindRoom user service without removing it.               │
+│ restart    Restart the installed MindRoom user service.                                │
+│ status     Show MindRoom service status and recent logs.                               │
+│ logs       Follow MindRoom service logs.                                               │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -731,14 +731,14 @@ See the [Matrix Desktop Bridge](tools/desktop.md) guide for setup, security, and
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Set up and run ───────────────────────────────────────────────────────────────────────╮
-│ setup    Pair and save the connection shared with the macOS app.                       │
-│ access   Save the read-only folders and shell access shared with the macOS app.        │
-│ run      Run the bridge with the saved app, folder, and shell setup.                   │
+│ setup   Pair and save the connection shared with the macOS app.                        │
+│ access  Save the read-only folders and shell access shared with the macOS app.         │
+│ run     Run the bridge with the saved app, folder, and shell setup.                    │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Advanced ─────────────────────────────────────────────────────────────────────────────╮
-│ app      Serve the macOS app's private helper over standard input and output.          │
-│ login    Log in once, create an Olm device, and save its access token privately.       │
-│ pair     Claim one requester-agent pairing through authenticated Matrix E2EE.          │
+│ app     Serve the macOS app's private helper over standard input and output.           │
+│ login   Log in once, create an Olm device, and save its access token privately.        │
+│ pair    Claim one requester-agent pairing through authenticated Matrix E2EE.           │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -1038,8 +1038,8 @@ Generate and sync managed avatars; see [Managed Avatars](matrix.md#managed-avata
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ generate   Generate missing managed avatar files in the workspace.                     │
-│ sync       Sync room and root-space avatars to Matrix.                                 │
+│ generate  Generate missing managed avatar files in the workspace.                      │
+│ sync      Sync room and root-space avatars to Matrix.                                  │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -1138,7 +1138,7 @@ Export Matrix threads to local YAML files.
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ export   Export Matrix threads from a running MindRoom to searchable YAML files.       │
+│ export  Export Matrix threads from a running MindRoom to searchable YAML files.        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -1235,7 +1235,7 @@ Inspect and rebind the event journal; see [Journal binding](deployment/storage.m
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ adopt   Bind this install to the configured event-journal database.                    │
+│ adopt  Bind this install to the configured event-journal database.                     │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -1373,8 +1373,8 @@ Send signed external trigger requests from cron jobs and watcher scripts; see [E
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ keygen   Generate an Ed25519 trigger signing key.                                      │
-│ send     Send a signed external trigger request.                                       │
+│ keygen  Generate an Ed25519 trigger signing key.                                       │
+│ send    Send a signed external trigger request.                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
