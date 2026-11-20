@@ -135,7 +135,7 @@ def test_without_its_vocabulary_a_size_that_must_not_undercount_counts_bytes() -
 
 
 def test_without_its_vocabulary_no_text_counts_as_free() -> None:
-    """A short line costs at least one token, so a preload cap still binds on a file of short lines."""
+    """A short line costs at least one token, so a token limit still binds on text of short lines."""
     counter = TokenCounter(estimate=lambda _text: None)
     assert count(counter, "ab\n") == 1
     assert count(counter, "") == 0

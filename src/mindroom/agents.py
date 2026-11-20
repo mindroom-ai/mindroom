@@ -38,7 +38,7 @@ from mindroom.llm.provider import DeferredTools, ModelRequest
 from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.path_confinement import read_regular_file_within_root
-from mindroom.preload_cap import cap_preload_text, preload_text
+from mindroom.preload_cap import cap_preload_text
 from mindroom.prompt_templates import openai_compat_identity, render_prompt_template
 from mindroom.providers import registry as provider_registry
 from mindroom.runtime_resolution import (
@@ -122,14 +122,10 @@ _MAX_WORKSPACE_CONTEXT_FILE_BYTES = 1 << 20
 
 @dataclass(frozen=True)
 class _PreloadChunk:
-    """One preloaded context file: its path as ``title`` and its text; the preload cuts only what it renders.
-
-    ``read_cut`` marks a file longer than the read cap, whose ``body`` holds only its first part.
-    """
+    """One preloaded context file: its path as ``title`` and its text; the preload cuts only what it renders."""
 
     title: str
     body: str
-    read_cut: bool = False
 
 
 @dataclass(frozen=True)
@@ -303,23 +299,23 @@ def _load_context_files(
             owning_workspace = agent_workspace_root_path(storage_path, agent_name).resolve()
         else:
             resolved_path = constants.resolve_config_relative_path(raw_path, runtime_paths)
-        read = _read_context_file(resolved_path, workspace_root=owning_workspace, agent_name=agent_name)
-        if read is None:
+        body = _read_context_file(resolved_path, workspace_root=owning_workspace, agent_name=agent_name)
+        if body is None:
             continue
-        # The title is the full path so the rendered prompt tells the
-        # model exactly which file on disk each part came from.
-        loaded_parts.append(_PreloadChunk(title=str(resolved_path), body=read[0], read_cut=read[1]))
+        loaded_parts.append(
+            # The title is the full path so the rendered prompt tells the
+            # model exactly which file on disk each part came from.
+            _PreloadChunk(
+                title=str(resolved_path),
+                body=body,
+            ),
+        )
     return loaded_parts
 
 
 @timed("system_prompt_assembly.agent_create.context_file_read")
-def _read_context_file(
-    resolved_path: Path,
-    *,
-    workspace_root: Path | None,
-    agent_name: str | None,
-) -> tuple[str, bool] | None:
-    """Return one context file's text and whether the read cap cut it, or warn and return ``None`` when it is missing or refused."""
+def _read_context_file(resolved_path: Path, *, workspace_root: Path | None, agent_name: str | None) -> str | None:
+    """Return one context file's text, or warn and return ``None`` when it is missing or refused."""
     try:
         if workspace_root is None:
             payload = resolved_path.read_bytes()
@@ -328,7 +324,7 @@ def _read_context_file(
             payload = read_regular_file_within_root(
                 workspace_root,
                 relative_path,
-                max_bytes=_MAX_WORKSPACE_CONTEXT_FILE_BYTES + 1,
+                max_bytes=_MAX_WORKSPACE_CONTEXT_FILE_BYTES,
                 truncate=True,
             )
     except FileNotFoundError:
@@ -337,15 +333,16 @@ def _read_context_file(
     except (OSError, ValueError) as exc:
         logger.warning("context_file_refused", agent=agent_name, path=str(resolved_path), error_type=type(exc).__name__)
         return None
-    read_cut = len(payload) > _MAX_WORKSPACE_CONTEXT_FILE_BYTES
-    if read_cut:
+    if len(payload) >= _MAX_WORKSPACE_CONTEXT_FILE_BYTES:
         logger.warning("context_file_truncated", agent=agent_name, path=str(resolved_path))
-    return preload_text(payload[:_MAX_WORKSPACE_CONTEXT_FILE_BYTES], read_cut=read_cut), read_cut
+    # The preload counts the file as it is, so nothing is stripped before its cut.
+    return payload.decode("utf-8", errors="replace")
 
 
 def _render_context_chunks(
     chunks: list[_PreloadChunk],
     *,
+    agent_name: str,
     section_heading: str,
     max_chars: int,
     cut_marker_template: str,
@@ -353,13 +350,18 @@ def _render_context_chunks(
     """Render each non-empty file under its path, cut on its own to ``max_chars`` and marked where it was cut."""
     rendered: list[str] = []
     for chunk in chunks:
-        body, cut = cap_preload_text(chunk.body, max_chars)
-        if not body:
-            continue
-        if cut or chunk.read_cut:
-            logger.warning("context_file_preload_cut", path=chunk.title, max_preload_file_chars=max_chars)
-            body += "\n" + render_prompt_template(cut_marker_template, path=chunk.title, max_chars=max_chars)
-        rendered.append(f"### {chunk.title}\n{body}")
+        kept, cut = cap_preload_text(chunk.body, max_chars)
+        parts = [kept.strip()]
+        if cut:
+            logger.warning(
+                "context_file_preload_cut",
+                agent=agent_name,
+                path=chunk.title,
+                max_preload_file_chars=max_chars,
+            )
+            parts.append(render_prompt_template(cut_marker_template, path=chunk.title, max_chars=max_chars))
+        if block := "\n".join(part for part in parts if part):
+            rendered.append(f"### {chunk.title}\n{block}")
     if not rendered:
         return ""
     return f"{section_heading}\n" + "\n\n".join(rendered) + "\n\n"
@@ -400,6 +402,7 @@ def _render_preloaded_files(
     context_documents.extend(personality_chunks)
     return _render_context_chunks(
         personality_chunks,
+        agent_name=agent_name,
         section_heading=personality_section_heading,
         max_chars=max_preload_file_chars,
         cut_marker_template=cut_marker_template,

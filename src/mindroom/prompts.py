@@ -210,9 +210,9 @@ PERSONALITY_CONTEXT_SECTION_HEADING = (
 )
 # It holds no count that changes as the file grows, so lines added past the cut leave the prompt byte-identical.
 PRELOAD_FILE_CUT_MARKER_TEMPLATE = (
-    "⚠️ `{path}` is over its {max_chars}-character prompt limit, so everything after this point is left out of "
-    "your prompt; read the file for the rest. Condense it now without losing information: merge duplicates, "
-    "shorten wording, and move detail into searchable `memory/` files; do not delete facts."
+    "⚠️ `{path}` is over its {max_chars}-character prompt limit; everything after this point is left out of "
+    "your prompt. Condense this file now without losing information: merge duplicates, shorten wording, and move "
+    "detail into other files you can read or search on demand."
 )
 
 DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE = """## Deferred Tools

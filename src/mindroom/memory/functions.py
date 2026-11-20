@@ -211,11 +211,11 @@ async def _entrypoint_preamble(
         execution_identity=execution_identity,
     )
     max_chars = config.defaults.max_preload_file_chars
-    text, cut = cap_preload_text(entrypoint.text, max_chars)
-    cut = cut or entrypoint.read_cut
+    kept, cut = cap_preload_text(entrypoint.text, max_chars)
+    text = kept.strip()
     body = (
         _render_entrypoint_body(entrypoint.source_path, text, config, kept_copy=conversation is not None)
-        if text
+        if text or cut
         else ""
     )
     marker_template = config.get_prompt("PRELOAD_FILE_CUT_MARKER_TEMPLATE")
@@ -230,13 +230,14 @@ async def _entrypoint_preamble(
         entrypoint.source_path,
         body,
         preamble,
-        # The marker follows the body, so its template and limit join the prompts that frame the copy.
+        # The marker follows the body, so its template, the limit, and whether it is shown frame the copy too.
         frame=[
             *(config.get_prompt(f"FILE_MEMORY_ENTRYPOINT_{key}") for key in ("HEADER_TEMPLATE", "KEPT_COPY_NOTICE")),
             marker_template,
             str(max_chars),
+            str(cut),
         ],
-        lines=None if cut else entrypoint.lines,
+        lines=None if cut else tuple(entrypoint.text.split("\n")),
         now=time.time(),
     )
 

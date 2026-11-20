@@ -1844,6 +1844,7 @@
         "max_preload_file_chars": {
           "default": 30000,
           "description": "Characters of each file inlined into the system prompt, context files and MEMORY.md alike; a longer file keeps its first whole lines within this limit",
+          "maximum": 200000,
           "minimum": 1,
           "title": "Max Preload File Chars",
           "type": "integer"

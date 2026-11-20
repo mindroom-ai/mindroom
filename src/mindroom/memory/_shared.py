@@ -91,12 +91,8 @@ class MemoryEntrypointContext:
     """One agent's memory entrypoint, whole; the preamble cuts what it inlines to ``defaults.max_preload_file_chars``."""
 
     source_path: Path | None = None
-    # The file's text, which the preload is cut from (``preload_cap.preload_text``).
+    # The file's text as read, at most its first 1 MiB, which the preload is cut from.
     text: str = ""
-    # The file's whole lines as they are, which a conversation's kept copy is compared with.
-    lines: tuple[str, ...] = ()
-    # Whether reading the file stopped at its size cap, so the text misses its end.
-    read_cut: bool = False
 
 
 FILE_MEMORY_ENTRYPOINT = "MEMORY.md"

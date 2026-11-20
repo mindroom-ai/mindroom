@@ -615,6 +615,8 @@ class DefaultsConfig(BaseModel):
     max_preload_file_chars: int = Field(
         default=30000,
         ge=1,
+        # The limit's next character must fit the 1 MiB read of a file even at 4 bytes a character.
+        le=200_000,
         description=(
             "Characters of each file inlined into the system prompt, context files and MEMORY.md alike; "
             "a longer file keeps its first whole lines within this limit"

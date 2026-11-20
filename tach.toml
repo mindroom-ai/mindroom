@@ -3965,7 +3965,6 @@ visibility = ["mindroom.memory._mem0_backend", "mindroom.memory.config"]
 [[modules]]
 path = "mindroom.memory._file_backend"
 depends_on = [
-    "mindroom.preload_cap",
     "mindroom.atomic_file",
     "mindroom.embeddings.errors",
     "mindroom.knowledge.retrieval",
@@ -4034,7 +4033,6 @@ depends_on = []
 visibility = [
     "mindroom.agents",
     "mindroom.automations.prompt_curation",
-    "mindroom.memory._file_backend",
     "mindroom.memory.functions",
 ]
 

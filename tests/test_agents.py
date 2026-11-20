@@ -3103,7 +3103,7 @@ def test_load_context_files_reads_a_huge_workspace_file_up_to_its_cap(
         workspace_root=agent_workspace_root_path(storage_path, "general"),
     )
 
-    assert [chunk.body for chunk in loaded] == [("soul " * 4).strip()]
+    assert [chunk.body for chunk in loaded] == ["soul " * 4]
 
 
 def test_context_files_in_a_workspace_reached_through_a_link_are_refused(tmp_path: Path) -> None:
@@ -3183,7 +3183,7 @@ def test_load_context_files_keeps_internal_workspace_links(tmp_path: Path) -> No
     )
 
     assert [(chunk.title, chunk.body) for chunk in loaded] == [
-        (str(workspace.resolve() / "docs" / "soul.md"), "Linked soul."),
+        (str(workspace.resolve() / "docs" / "soul.md"), "Linked soul.\n"),
     ]
 
 
@@ -3213,7 +3213,7 @@ def test_load_context_files_prefers_projected_assets_over_workspace_shadows(
     )
 
     assert len(loaded) == 1
-    assert loaded[0].body == "config"
+    assert loaded[0].body == "config\n"
 
 
 def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_root(

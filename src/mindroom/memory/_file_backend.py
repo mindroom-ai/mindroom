@@ -21,7 +21,6 @@ from mindroom.knowledge.utils import configured_reranker
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
-from mindroom.preload_cap import preload_text
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.timing import timed
 
@@ -661,11 +660,12 @@ def _load_scope_entrypoint_context(scope: MemoryScope) -> MemoryEntrypointContex
             path=str(entrypoint_path),
             max_bytes=_MAX_MEMORY_FILE_BYTES,
         )
-    # The preload keeps a partial last line the read cap left, unlike search and writes, so a cut at the limit can
-    # still show the start of a file whose first line is longer than the cap.
-    text = preload_text(payload.payload, read_cut=payload.truncated)
-    lines = tuple(_decode_capped_text(payload).splitlines())
-    return MemoryEntrypointContext(source_path=entrypoint_path, text=text, lines=lines, read_cut=payload.truncated)
+    # Unlike search and writes, the preload keeps a partial last line the read cap left: a limit of at most 200,000
+    # characters always ends inside the read, so the cut never depends on what the read left out.
+    return MemoryEntrypointContext(
+        source_path=entrypoint_path,
+        text=payload.payload.decode("utf-8", errors="replace"),
+    )
 
 
 def _read_scope_entrypoint_payload(scope_path: Path) -> _CappedPayload | None:
