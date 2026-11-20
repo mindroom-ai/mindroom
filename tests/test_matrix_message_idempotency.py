@@ -556,14 +556,3 @@ async def test_pending_write_uncertainty_prevents_retry_transport(
     assert transport.attempts[0]["tx_id"] == transaction_id
     assert transport.attempts[0]["content"] == pending_rows[0]["payload"]
     assert result["event_id"] == f"${transaction_id}"
-
-
-async def test_keyed_send_omits_the_image_note(context: ToolRuntimeContext, transport: MatrixTransport) -> None:
-    """A keyed send has no delivered payload to read, so it reports no image note rather than guess."""
-    with tool_runtime_context(context):
-        payload = json.loads(
-            await MatrixMessageTools().matrix_message(message="![logo](mxc://placeholder)", idempotency_key="image"),
-        )
-    assert payload["status"] == "ok"
-    assert "note" not in payload
-    assert "Image not sent" in next(iter(transport.events.values()))["content"]["formatted_body"]

@@ -36,7 +36,7 @@ from mindroom.matrix.client_visible_messages import (
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.guarded_rooms import allowed_send
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.matrix.message_builder import IMAGE_NOT_SENT_NOTE, build_reaction_content
+from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.message_extras import build_message_extras_content
 from mindroom.matrix.thread_forks import with_fork_prefix
 from mindroom.requester_identity import is_human_requester_id
@@ -56,7 +56,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_NO_IMAGE_NOTE = "an image with no uploaded file went out as a note; send files via matrix_message(attachments=[...])"
 _DIRECT_INTERACTIVE_ERROR = "Interactive prompts are only supported in normal agent responses."
 _CONTACT_TEXT_ONLY_ERROR = "Error: contact rooms accept text only"
 
@@ -94,14 +93,11 @@ class _MessageSendState:
     newly_registered_attachment_ids: list[str] = field(default_factory=list)
 
 
-def _sent_fields(verdict: ContactVerdict | None, done: str, content: dict[str, Any] | None = None) -> dict[str, str]:
-    """Return the result fields that tell the agent what changed on the way out: the contact policy, image notes."""
-    html, body = (content or {}).get("formatted_body", ""), (content or {}).get("body", "")  # body: the author's text
-    image = _NO_IMAGE_NOTE if IMAGE_NOT_SENT_NOTE in html and IMAGE_NOT_SENT_NOTE not in body else ""
-    policy = "changed by the contact policy" if verdict is not None and verdict.rewritten else ""
-    changes = "; ".join(change for change in (policy, image) if change)
-    fields = {"note": f"{done} ({changes})"} if changes else {}
-    return {**fields, "sent_text": verdict.text} if policy and verdict is not None else fields
+def _contact_policy_fields(verdict: ContactVerdict | None, done: str) -> dict[str, str]:
+    """Return the result fields that tell the agent the contact policy changed what went out, and to what."""
+    if verdict is None or not verdict.rewritten:
+        return {}
+    return {"note": f"{done} (changed by the contact policy)", "sent_text": verdict.text}
 
 
 def _policy_approved(verdict: ContactVerdict | None) -> AbstractContextManager[None]:
@@ -192,7 +188,7 @@ class MatrixMessageOperations:
         send_claim: MatrixMessageSendClaim | None = None,
         recipient_name: str | None = None,
         starts_thread: bool = False,
-    ) -> tuple[str | None, dict[str, Any]]:
+    ) -> str | None:
         latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
             room_id=room_id,
             thread_id=thread_id,
@@ -236,9 +232,9 @@ class MatrixMessageOperations:
                 starts_thread=starts_thread,
             )
             event_id, _ = await send_claim.deliver()
-            return event_id, {}  # no delivered payload to read, so no image note
+            return event_id
         delivered = await send_message_result(context.client, room_id, content)
-        return (delivered.event_id, delivered.content_sent) if delivered is not None else (None, {})
+        return delivered.event_id if delivered is not None else None
 
     async def _send_message_attachments(
         self,
@@ -370,10 +366,9 @@ class MatrixMessageOperations:
             )
             if error is not None:
                 return self._result("error", action="send", message=error, **asdict(state))
-        sent: dict[str, Any] = {}
         if text is not None or recipient_user_id is not None:
             with _policy_approved(contact_verdict):
-                state.event_id, sent = await self._send_matrix_text(
+                state.event_id = await self._send_matrix_text(
                     context,
                     room_id=room_id,
                     text=text or "",
@@ -410,7 +405,7 @@ class MatrixMessageOperations:
                 return self._result("error", action="send", message=error, **asdict(state))
         if state.event_id is None and state.attachment_event_ids:
             state.event_id = state.attachment_event_ids[0]
-        return self._result("ok", action="send", **asdict(state), **_sent_fields(contact_verdict, "Sent", sent))
+        return self._result("ok", action="send", **asdict(state), **_contact_policy_fields(contact_verdict, "Sent"))
 
     async def _message_react(
         self,
@@ -453,7 +448,7 @@ class MatrixMessageOperations:
                 reacted_event_id=event_id,
                 reaction=reaction,
                 event_id=response.event_id,
-                **_sent_fields(contact_verdict, "Reacted"),
+                **_contact_policy_fields(contact_verdict, "Reacted"),
             )
         return self._result(
             "error",
@@ -631,7 +626,7 @@ class MatrixMessageOperations:
             thread_id=thread_id,
             edited_event_id=event_id,
             event_id=delivered.event_id,
-            **_sent_fields(contact_verdict, "Edited", delivered.content_sent),
+            **_contact_policy_fields(contact_verdict, "Edited"),
         )
 
     async def dispatch_action(

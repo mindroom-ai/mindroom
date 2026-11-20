@@ -320,24 +320,20 @@ def _escape_unterminated_html_fragments(html_text: str) -> str:
 
 
 # HTML rendered from Markdown never keeps an <img> no client can load; explicit or relayed formatted_body is not checked.
-IMAGE_NOT_SENT_NOTE = "⚠️ Image not sent:"
-
-
 def _image_not_sent_note(attrs: list[tuple[str, str | None]]) -> str | None:
     """Return the text replacing an ``<img>`` whose first ``src`` no client can load, or None to keep it."""
     src = unescape(next((value or "" for name, value in attrs if name == "src"), "")).strip()  # the src as emitted
     server, _, media_id = src.removeprefix("mxc://").partition("/")
     try:
         parts = urlsplit(src)
-        host = parts.hostname or "%"
-        web = parts.scheme.lower() in {"http", "https"} and "%" not in host and parts.port != -1  # port may raise
+        web = parts.scheme.lower() in {"http", "https"} and bool(parts.hostname) and parts.port != -1  # port may raise
     except ValueError:
         web = False
     mxc = src.startswith("mxc://") and valid_matrix_server_name(server) and re.fullmatch(r"[A-Za-z0-9_-]+", media_id)
     if (web or mxc) and not any(char.isspace() for char in src):
         return None
     alt = next((value for name, value in attrs if name == "alt" and value), "image")
-    return escape(f"{IMAGE_NOT_SENT_NOTE} {alt} (no uploaded file)")
+    return escape(f"⚠️ Image not sent: {alt} (no uploaded file)")
 
 
 def _format_sanitized_attributes(tag_name: str, attrs: list[tuple[str, str | None]]) -> str:
