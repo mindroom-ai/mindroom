@@ -399,7 +399,8 @@ def _render_preloaded_files(
             workspace_root=workspace_root,
         )
 
-    context_documents.extend(personality_chunks)
+    # CLI reads get each whole file stripped, as before; the preload cuts the text as it is.
+    context_documents.extend(replace(chunk, body=chunk.body.strip()) for chunk in personality_chunks)
     return _render_context_chunks(
         personality_chunks,
         agent_name=agent_name,

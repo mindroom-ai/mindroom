@@ -103,7 +103,7 @@
           "role": "system"
         },
         {
-          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>\n\n[File memory entrypoint (agent)] Your curated long-term memory file `<TMP>/mindroom_data/agents/assistant/workspace/MEMORY.md` is inlined below automatically every turn. Do not re-read it to recall what it says; open it to edit it, or when a marker says lines were omitted.\nThis conversation keeps the copy it last loaded, so entries added from other conversations since then may be missing; open the file to look for them.\n# Memory\n\n- The user flies to Berlin every quarter.\n\n<mindroom_system_context>\n<item key=\"team_calendar\" cache_policy=\"stable\">\nThe offsite is on Friday.\n</item>\n</mindroom_system_context>",
+          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>\n\n[File memory entrypoint (agent)] Your curated long-term memory file `<TMP>/mindroom_data/agents/assistant/workspace/MEMORY.md` is inlined below automatically every turn. Do not re-read it to recall what it says; open it to edit it, or when a marker says content was omitted.\nThis conversation keeps the copy it last loaded, so entries added from other conversations since then may be missing; open the file to look for them.\n# Memory\n\n- The user flies to Berlin every quarter.\n\n<mindroom_system_context>\n<item key=\"team_calendar\" cache_policy=\"stable\">\nThe offsite is on Friday.\n</item>\n</mindroom_system_context>",
           "role": "system"
         },
         {
@@ -977,7 +977,7 @@
           "role": "system"
         },
         {
-          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>\n\n[File memory entrypoint (agent)] Your curated long-term memory file `<TMP>/mindroom_data/agents/assistant/workspace/MEMORY.md` is inlined below automatically every turn. Do not re-read it to recall what it says; open it to edit it, or when a marker says lines were omitted.\nThis conversation keeps the copy it last loaded, so entries added from other conversations since then may be missing; open the file to look for them.\n# Memory\n\n- The user flies to Berlin every quarter.\n\n<mindroom_system_context>\n<item key=\"team_calendar\" cache_policy=\"stable\">\nThe offsite is on Friday.\n</item>\n</mindroom_system_context>",
+          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>\n\n[File memory entrypoint (agent)] Your curated long-term memory file `<TMP>/mindroom_data/agents/assistant/workspace/MEMORY.md` is inlined below automatically every turn. Do not re-read it to recall what it says; open it to edit it, or when a marker says content was omitted.\nThis conversation keeps the copy it last loaded, so entries added from other conversations since then may be missing; open the file to look for them.\n# Memory\n\n- The user flies to Berlin every quarter.\n\n<mindroom_system_context>\n<item key=\"team_calendar\" cache_policy=\"stable\">\nThe offsite is on Friday.\n</item>\n</mindroom_system_context>",
           "role": "system"
         },
         {
