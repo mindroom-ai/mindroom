@@ -18,9 +18,11 @@ from mindroom import constants
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, _VoiceNormalizationResult
+from mindroom.response_sources import Owned, SourceFate
 from mindroom.routing_judgment import ResponderSelection
 from tests.conftest import approval_manager_for_test, bind_runtime_paths, test_runtime_paths
 from tests.test_approval_receipt_transport import (  # noqa: F401 - sending_clients is a pytest fixture
@@ -49,6 +51,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.event_journal import EventJournalStore
+    from mindroom.reply_turn.request import ResponseRequest
 
 pytestmark = pytest.mark.asyncio
 
@@ -128,8 +131,8 @@ async def _deliver(harness: _Harness, room: nio.MatrixRoom, event: nio.Event) ->
         await harness.deliver(room, event)
 
 
-# What the answering account shows the room on each path: (replies, messages it sends itself). A reply is the one
-# message its runner posts; a voice turn also posts the transcript, and a command posts its result and no reply.
+# The messages the answering account sends the room on each path: (answers, others). An answer is the one final
+# message of its reply; a voice turn also sends the transcript, and a command sends its result and no answer.
 SHOWN = {
     "text": (1, 0),
     "voice": (1, 1),
@@ -139,10 +142,31 @@ SHOWN = {
 }
 
 
+_ANSWER = "Here is the answer."
+
+
+def _posts_its_answer(harness: _Harness) -> None:
+    """Have the stand-in runner send its reply's final message once the real source gate lets the reply through.
+
+    The harness holds no model, so the answer's text is fixed; a reply the gate ends sends nothing, as in production.
+    """
+    generate = harness.runner.generate_response
+
+    async def generate_and_post(request: ResponseRequest) -> SourceFate:
+        fate = await generate(request)
+        if isinstance(fate, Owned):
+            target = request.response_envelope.target
+            await harness.gateway.send_text(SendTextRequest(target=target, response_text=_ANSWER))
+        return fate
+
+    harness.runner.generate_response = generate_and_post
+
+
 def _shown(harness: _Harness) -> tuple[int, int, int, int]:
-    """Return what this account showed the room: its replies, the messages it sent, its edits and its reactions."""
+    """Return what this account sent the room: its answers, its other messages, its edits and its reactions."""
     gateway = harness.gateway
-    return (len(harness.runner.requests), len(gateway.sent), len(gateway.edited), len(gateway.reactions))
+    answers = [sent for sent in gateway.sent if sent.response_text == _ANSWER]
+    return (len(answers), len(gateway.sent) - len(answers), len(gateway.edited), len(gateway.reactions))
 
 
 async def _run_cell(
@@ -164,6 +188,7 @@ async def _run_cell(
     harnesses: dict[str, _Harness] = {}
     for name in accounts:
         harness = harnesses[name] = _build_harness(config, tmp_path / name, agent_name=name)
+        _posts_its_answer(harness)
         harness.runtime.orchestrator.journal_store = journal_store
         harness.runtime.orchestrator.steward = accounts[0]
 
@@ -194,17 +219,22 @@ async def test_one_account_answers_and_no_other_account_shows_anything(
 
     harnesses, event = await _run_cell(tmp_path, monkeypatch, journal_store, room_name, path)
 
-    # Every reply, message, edit and reaction is counted, so one more of any of them from any account fails the cell.
+    # Every message sent, edit and reaction is counted, so one more of any of them from any account fails the cell.
     assert {name: _shown(harness) for name, harness in harnesses.items()} == {
         name: (*SHOWN[path], 0, 0) if name == answerer else (0, 0, 0, 0) for name in accounts
     }
     answering = harnesses[answerer]
+    # Each answer sent is one reply's, so no reply started without sending its answer.
+    assert len(answering.runner.requests) == SHOWN[path][0]
     for request in answering.runner.requests:
         envelope = request.response_envelope
         assert (envelope.agent_name, envelope.requester_id, envelope.room_id) == (answerer, _SENDER, _ROOM_ID)
         assert envelope.target.reply_to_event_id == event.event_id
     for sent in answering.gateway.sent:
         assert sent.target.room_id == _ROOM_ID
+        if sent.response_text == _ANSWER:
+            assert sent.target.reply_to_event_id == event.event_id
+            continue
         assert "router" not in sent.response_text.lower()
         # The one message a voice turn sends is the transcript, marked so that no account takes it as a turn.
         marked = (sent.extra_content or {}).get(constants.VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
