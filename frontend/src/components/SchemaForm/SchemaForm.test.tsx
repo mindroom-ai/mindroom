@@ -544,6 +544,10 @@ describe("SchemaFields", () => {
     fireEvent.blur(editor);
     expect(lastValue()).toEqual({ settings: { retries: 3 } });
 
+    fireEvent.change(editor, { target: { value: "# nothing yet\n" } });
+    fireEvent.blur(editor);
+    expect(lastValue()).toEqual({});
+
     fireEvent.change(editor, { target: { value: "retries: [" } });
     fireEvent.blur(editor);
     expect(

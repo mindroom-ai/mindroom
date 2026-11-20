@@ -1,7 +1,7 @@
 // Leaf widgets for schema-driven config forms. Nothing here renders nested
 // schema nodes, so SchemaField.tsx can compose these without import cycles.
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
-import yaml from "js-yaml";
+import { dump, load, loadAll } from "js-yaml";
 import {
   ArrowDown,
   ArrowUp,
@@ -688,7 +688,12 @@ export function MapKeyInput({
 }
 
 function dumpYaml(value: unknown): string {
-  return value === undefined ? "" : yaml.dump(value);
+  return value === undefined ? "" : dump(value);
+}
+
+/** Parse the editor's YAML; a draft with no document (blank or only comments) clears the value. */
+function loadYaml(draft: string): unknown {
+  return loadAll(draft).length === 0 ? undefined : load(draft);
 }
 
 export function YamlEditor({
@@ -746,7 +751,7 @@ export function YamlEditor({
             return;
           }
           try {
-            onChange(draft.trim() === "" ? undefined : yaml.load(draft));
+            onChange(loadYaml(draft));
             setParseError(null);
           } catch (error) {
             setParseError(
