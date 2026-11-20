@@ -31,13 +31,18 @@ def _preamble(
     path: Path = MEMORY,
     now: float = 0.0,
     root: str = "agent",
+    whole: str | None = None,
 ) -> str:
-    """Return the preamble sent for a file whose inlined text is ``text``; the preamble names that text."""
+    """Return the preamble sent for a file whose inlined text is ``text``; the preamble names that text.
+
+    ``whole`` is the text of the whole file when a preload cap cut ``text`` from it.
+    """
     return snapshots.stable_entrypoint_preamble(
         ConversationRef((summary, None), _snapshot(session, root)),
         path,
         text,
         f"preamble of {text!r}",
+        whole_body=text if whole is None else whole,
         now=now,
     )
 
@@ -56,6 +61,34 @@ def test_edited_or_deleted_lines_load_the_file_again() -> None:
     assert _preamble("a") == "preamble of 'a'"
     assert _preamble("a2") == "preamble of 'a2'"
     assert _preamble("a2\nb") == "preamble of 'a2'"
+
+
+def test_lines_inserted_anywhere_keep_the_preamble() -> None:
+    """Curating MEMORY.md adds notes at its top or inside a section, which must not change the system prompt."""
+    _preamble("## Work\na\n## Home\nb")
+    assert _preamble("new\n## Work\na\n## Home\nb") == "preamble of '## Work\\na\\n## Home\\nb'"
+    assert _preamble("new\n## Work\na\na2\n## Home\nb\nc") == "preamble of '## Work\\na\\n## Home\\nb'"
+
+
+def test_an_edited_middle_line_loads_the_file_again() -> None:
+    """A line changed anywhere is no longer in the file, so the copy must not keep showing it."""
+    _preamble("a\nb\nc")
+    assert _preamble("new\na\nb2\nc") == "preamble of 'new\\na\\nb2\\nc'"
+
+
+def test_a_deleted_or_moved_line_loads_the_file_again() -> None:
+    """A forgotten line, even with others inserted around it, must not keep reaching the model."""
+    _preamble("a\nb\nc")
+    assert _preamble("a\nnew\nc") == "preamble of 'a\\nnew\\nc'"
+    assert _preamble("c\na\nnew") == "preamble of 'c\\na\\nnew'"
+
+
+def test_lines_a_cap_withholds_keep_the_preamble() -> None:
+    """A capped file drops its oldest kept entry for each new one, but the whole file still holds every kept line."""
+    _preamble("head\nb\nc", whole="head\na\nb\nc")
+    assert _preamble("head\nc\nd", whole="head\na\nb\nc\nd") == "preamble of 'head\\nb\\nc'"
+    # A kept line deleted from the whole file still loads it again.
+    assert _preamble("head\nd\ne", whole="head\na\nb\nd\ne") == "preamble of 'head\\nd\\ne'"
 
 
 def test_empty_copy_loads_the_file_once_it_gains_lines() -> None:

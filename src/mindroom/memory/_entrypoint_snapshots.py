@@ -1,8 +1,8 @@
-"""Keep a conversation's inlined MEMORY.md unchanged while its copy only gains lines and its prompt cache can be reused.
+"""Keep a conversation's inlined MEMORY.md unchanged while the file keeps its every line and its cache is warm.
 
 The preamble is part of the system prompt, so a changed preamble makes the provider re-read the whole
-conversation after it. A conversation therefore keeps the preamble it last sent while its inlined copy only gains
-lines (a file over a preload cap drops its oldest kept entry for each new one, so its copy loads again),
+conversation after it. A conversation therefore keeps the preamble it last sent while the whole file still holds
+every line of its copy in order, so lines added anywhere, or pushed out of a preload cap by newer entries, keep it,
 until it idles past the cache lifetime or its history is compacted; the conversation already shows the agent
 its own memory writes as tool calls. Each conversation's copy is a file in its agent's state root, so a restart keeps
 it and one requester's private memory stays out of another's; the file's modification time is the last model request
@@ -62,11 +62,13 @@ def stamp_entrypoint_snapshot(path: Path, *, now: float) -> None:
         os.utime(path, (now, now))
 
 
-def _only_added_lines(snapshot: str, fresh: str) -> bool:
-    return fresh == snapshot or fresh.startswith(f"{snapshot}\n")
+def _keeps_every_line(snapshot: str, whole: str) -> bool:
+    """Return whether ``whole`` holds every line of ``snapshot`` in order; an empty copy is kept only while empty."""
+    remaining = iter(whole.splitlines())
+    return whole == snapshot or (bool(snapshot) and all(line in remaining for line in snapshot.splitlines()))
 
 
-def _kept_preamble(conversation: ConversationRef, source_path: Path, fresh_body: str, now: float) -> str | None:
+def _kept_preamble(conversation: ConversationRef, source_path: Path, whole_body: str, now: float) -> str | None:
     """Return the preamble the conversation's file keeps when this turn may reuse it, else None."""
     path = conversation.snapshot
     try:
@@ -78,7 +80,7 @@ def _kept_preamble(conversation: ConversationRef, source_path: Path, fresh_body:
         idle < PROMPT_CACHE_IDLE_SECONDS
         and source == str(source_path)
         and (summary, checkpoint) == conversation.compaction
-        and _only_added_lines(str(body), fresh_body)
+        and _keeps_every_line(str(body), whole_body)
     )
     return str(preamble) if reusable else None
 
@@ -89,12 +91,15 @@ def stable_entrypoint_preamble(
     fresh_body: str,
     fresh_preamble: str,
     *,
+    whole_body: str,
     now: float,
 ) -> str:
     """Return the preamble this conversation last sent for the file, or ``fresh_preamble`` when reuse would mislead.
 
     ``fresh_body`` is this turn's preamble without the truncation marker, whose counts change as lines are added
-    past a cap; its header is compared too, so an edited prompt override loads again.
+    past a cap, and ``whole_body`` is it rendered from the whole file before the caps cut it. The copy is kept while
+    ``whole_body`` holds every line of it in order, so lines inserted anywhere or withheld by a cap keep it; the
+    header is compared too, so an edited prompt override loads again.
     A changed compaction loads the file again: the request that carries a compaction misses after the system prompt
     anyway, and the turn after one costs only its compacted history.
     An edited or deleted line loads at once. A route that holds the system prompt tells that as a system prompt
@@ -109,7 +114,7 @@ def stable_entrypoint_preamble(
             for other in path.parent.glob("*.json"):
                 if now - other.stat().st_mtime >= _PRUNE_IDLE_SECONDS:
                     other.unlink()
-            if (kept := _kept_preamble(conversation, source_path, fresh_body, now)) is None:
+            if (kept := _kept_preamble(conversation, source_path, whole_body, now)) is None:
                 row = [str(source_path), fresh_preamble, fresh_body, *conversation.compaction]
                 write_text_atomic(path, json.dumps(row))
             os.utime(path, (now, now))

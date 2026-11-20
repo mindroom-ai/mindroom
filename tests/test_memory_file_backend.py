@@ -1896,6 +1896,51 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
 
 
 @pytest.mark.asyncio
+async def test_file_backend_conversation_keeps_its_capped_entrypoint_after_a_memory_is_added(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A new entry pushes the oldest kept one out of a capped preload, which must leave the conversation's copy as sent."""
+    config.memory.file.max_entrypoint_lines = 3
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    memory_path = workspace / "MEMORY.md"
+    memory_path.write_text(
+        "# Memory\n- [id=m1] Fact one.\n- [id=m2] Fact two.\n- [id=m3] Fact three.\n",
+        encoding="utf-8",
+    )
+
+    async def preamble(conversation: ConversationRef | None) -> str:
+        prompt_parts = await public_build_memory_prompt_parts(
+            "What should I remember?",
+            "general",
+            config,
+            runtime_paths_for(config),
+            current_execution_identity(),
+            conversation=conversation,
+            counter=fake_token_counter(),
+        )
+        return prompt_parts.session_preamble
+
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    first = await preamble(thread)
+    await add_agent_memory("Fact four.", "general", config)
+
+    assert await preamble(thread) == first
+    fresh = await preamble(None)
+    assert "Fact four." in fresh
+    assert "Fact two." in first
+    assert "Fact two." not in fresh
+
+    # Deleting a line the copy shows loads the file again.
+    memory_path.write_text(
+        memory_path.read_text(encoding="utf-8").replace("- [id=m3] Fact three.\n", ""),
+        encoding="utf-8",
+    )
+    assert "Fact three." not in await preamble(thread)
+
+
+@pytest.mark.asyncio
 async def test_file_backend_entrypoint_preamble_reports_truncated_lines(
     storage_path: Path,
     config: Config,
