@@ -4661,6 +4661,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix.room_history_reads"
 depends_on = [
+    "mindroom.constants",
     "mindroom.matrix.event_info",
 ]
 visibility = [
@@ -7179,6 +7180,7 @@ expose = [
     "enumerate_room_thread_root_ids",
     "find_outbox_delivery_event_id_via_room_messages",
     "find_response_event_ids_via_room_messages",
+    "find_route_event_id_via_room_messages",
     "get_room_threads_page",
     "missing_outbox_delivery_copy_indices_via_room_messages",
 ]

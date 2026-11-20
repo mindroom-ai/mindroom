@@ -18,6 +18,7 @@ from aiohttp import ClientError
 from nio.responses import Response, RoomThreadsError, RoomThreadsResponse, verify
 from nio.schemas import Schemas
 
+from mindroom.constants import ROUTE_EVENT_TYPE, SILENT_SCHEDULE_EVENT_TYPE
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 
@@ -97,9 +98,8 @@ async def find_response_event_ids_via_room_messages(
     response_source_filter: Callable[[Mapping[str, Any]], bool] | None = None,
     response_content: Mapping[str, Any] | None = None,
     event_types: Collection[str] = _ROOM_HISTORY_MESSAGE_TYPES,
-    answers: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> frozenset[str]:
-    """Find responses by source relation or exact frozen content, or by ``answers`` for ones with no relation."""
+    """Find responses by source relation or exact frozen content."""
     sources = set(source_event_ids)
     remaining_sources = set(sources)
     response_event_ids: set[str] = set()
@@ -135,10 +135,9 @@ async def find_response_event_ids_via_room_messages(
             replies_to_source = (
                 not event_info.is_edit and not event_info.is_thread_fallback and event_info.reply_to_event_id in sources
             )
-            answers_source = replies_to_source if answers is None else answers(event_source)
             if (
                 event_source.get("sender") == response_sender
-                and (exact_content if response_content is not None else answers_source)
+                and (exact_content if response_content is not None else replies_to_source)
                 and (response_source_filter is None or response_source_filter(event_source))
             ):
                 response_event_ids.add(event.event_id)
@@ -161,6 +160,52 @@ async def find_response_event_ids_via_room_messages(
         from_token = response.end
 
     return frozenset(response_event_ids)
+
+
+async def find_route_event_id_via_room_messages(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    source_event_ids: Collection[str],
+) -> str | None:
+    """Return the hidden route this client's account sent for exactly these messages, None when history holds none.
+
+    The walk starts at the room's newest event and ends at the route, at the oldest of the messages, which every route
+    of them follows, or at the scan's page bound: a route older than that was lost long ago.
+    """
+    sources = sorted(source_event_ids)
+    remaining = set(sources)
+    from_token: str | None = None
+    for _page in range(_MAX_EXACT_DELIVERY_SCAN_PAGES):
+        response = await client.room_messages(
+            room_id,
+            start=from_token,
+            limit=100,
+            message_filter={"types": [*_ROOM_HISTORY_MESSAGE_TYPES, ROUTE_EVENT_TYPE, SILENT_SCHEDULE_EVENT_TYPE]},
+            direction=nio.MessageDirection.back,
+        )
+        if not isinstance(response, nio.RoomMessagesResponse):
+            msg = f"route recovery room scan failed for {room_id}: {response}"
+            raise RuntimeError(msg)  # noqa: TRY004
+        for event in response.chunk:
+            event_source = event.source if isinstance(event, nio.Event) and isinstance(event.source, dict) else {}
+            content = event_source.get("content")
+            route = content.get(ROUTE_EVENT_TYPE) if isinstance(content, dict) else None
+            routed = route.get("event_ids") if isinstance(route, dict) else None
+            if (
+                event_source.get("sender") == client.user_id
+                and event_source.get("type") == ROUTE_EVENT_TYPE
+                and isinstance(routed, list)
+                and sorted(map(str, routed)) == sources
+            ):
+                return event.event_id
+            remaining.discard(event_source.get("event_id"))
+            if not remaining:
+                return None
+        if not response.end:
+            return None
+        from_token = response.end
+    return None
 
 
 def _refuse_opaque_exact_delivery_candidate(
