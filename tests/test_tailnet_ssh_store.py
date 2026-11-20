@@ -176,7 +176,7 @@ def test_update_links_round_trips_and_writes_under_tracking(tmp_path: Path) -> N
 
 
 def test_invalid_file_error_names_fields_but_not_secrets(tmp_path: Path) -> None:
-    """A corrupt record is reported by path and schema field, never with its values or input-derived names."""
+    """A corrupt file is reported by path and error types, never with its values or input-derived names."""
     runtime_paths = test_runtime_paths(tmp_path)
     record = new_link(ALICE, "mind_alice", ALICE_KEY, "mind-alice", now=1.0).model_dump(mode="json")
     secret = record["host_key"].splitlines()[1]
@@ -185,17 +185,28 @@ def test_invalid_file_error_names_fields_but_not_secrets(tmp_path: Path) -> None
     record[f"unknown {secret}"] = True
     path = tracking_dir(runtime_paths) / "tailnet_ssh.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"links": [record], "keys": {f"key {secret}": "not a list"}}), encoding="utf-8")
+    stored = {"links": [record], "keys": {f"key {secret}": "not a list", "hostname": "not a list"}, "host_key": secret}
+    path.write_text(json.dumps(stored), encoding="utf-8")
 
     for call in (lambda: read_links(runtime_paths), lambda: update_links(runtime_paths, lambda _book: None)):
         with pytest.raises(ValueError, match="invalid") as caught:
             call()
         rendered = "".join(traceback.format_exception(caught.value))
         assert str(path) in rendered
-        assert "links.0.hostname: missing" in rendered
-        assert "links.0.desired: literal_error" in rendered
-        assert "links.0.<key>: extra_forbidden" in rendered
-        assert "keys.<key>: list_type" in rendered
+        prefix = f"Tailnet SSH file {path} is invalid: 6 validation errors ("
+        message = str(caught.value)
+        assert message.startswith(prefix)
+        assert message.endswith(")")
+        assert sorted(message.removeprefix(prefix).removesuffix(")").split(", ")) == [
+            "extra_forbidden",
+            "extra_forbidden",
+            "list_type",
+            "list_type",
+            "literal_error",
+            "missing",
+        ]
+        assert "hostname" not in rendered
+        assert "host_key" not in rendered
         assert secret not in rendered
         assert "sideways" not in rendered
         assert "mind-alice" not in rendered
