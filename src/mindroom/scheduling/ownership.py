@@ -36,18 +36,17 @@ def legacy_router_task_owner(
     room: nio.MatrixRoom,
     workflow: ScheduledWorkflow,
     *,
-    router_id: str,
     agent_ids: Sequence[str],
 ) -> str | None:
     """Return the agent or team that runs a stored task the router owned, None where none can.
 
     ``agent_ids`` names the candidates in order of preference: those the task's message mentions, then every agent
-    and team by Matrix ID.
+    and team by Matrix ID. The candidates never include the router.
     The first one that is joined and may post the task's trigger wins, read from the room's full state, never from
     which bots run, so every bot that restores the room agrees.
     """
     return next(
-        (agent_id for agent_id in agent_ids if agent_id != router_id and _may_send_trigger(room, agent_id, workflow)),
+        (agent_id for agent_id in agent_ids if _may_send_trigger(room, agent_id, workflow)),
         None,
     )
 

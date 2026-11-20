@@ -164,7 +164,7 @@ class ScheduledTaskRuntime:
         config = self.config_provider()
         registry = entity_identity_registry(config, self.runtime_paths)
         router_id = owner_matrix_id(self.runtime_paths)
-        agent_ids = sorted(matrix_id.full_id for matrix_id in registry.current_ids.values())
+        agent_ids = sorted(m.full_id for m in registry.current_ids.values() if m.full_id != router_id)
         room = room_from_state(room_id, client.user_id, response.events)
         restored = 0
         for task in tasks:
@@ -189,7 +189,6 @@ class ScheduledTaskRuntime:
                 owner_id = legacy_router_task_owner(
                     room,
                     task.workflow,
-                    router_id=router_id,
                     agent_ids=[*(user_id for user_id in mentioned if user_id in agent_ids), *agent_ids],
                 )
                 if owner_id is None:

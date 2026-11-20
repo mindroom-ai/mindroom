@@ -990,9 +990,8 @@ def test_router_owned_task_goes_to_first_mentioned_joined_agent() -> None:
     owner = ownership.legacy_router_task_owner(
         room,
         _owner_workflow(),
-        router_id=_ROUTER_ID,
         # The message mentions an agent that left, then one that is joined; every agent follows by Matrix ID.
-        agent_ids=[_ZETA, _BETA, _ALPHA, _BETA, _ROUTER_ID, _ZETA],
+        agent_ids=[_ZETA, _BETA, _ALPHA, _BETA, _ZETA],
     )
 
     assert owner == _BETA
@@ -1005,8 +1004,7 @@ def test_router_owned_task_without_mention_goes_to_lowest_id_agent() -> None:
     owner = ownership.legacy_router_task_owner(
         room,
         _owner_workflow(),
-        router_id=_ROUTER_ID,
-        agent_ids=[_ALPHA, _BETA, _ROUTER_ID, _ZETA],
+        agent_ids=[_ALPHA, _BETA, _ZETA],
     )
 
     assert owner == _BETA
@@ -1015,11 +1013,11 @@ def test_router_owned_task_without_mention_goes_to_lowest_id_agent() -> None:
 def test_router_owned_task_with_no_agent_is_skipped() -> None:
     """A task the router owned has no owner in a room that only the router, or an agent that may not post, is in."""
     workflow = _owner_workflow()
-    candidates = [_ALPHA, _BETA, _ROUTER_ID]
+    candidates = [_ALPHA, _BETA]
     router_only = ownership.room_from_state(_OWNER_ROOM, _ROUTER_ID, _owner_room_state({_ROUTER_ID: 100}))
     muted_state = _owner_room_state({_ROUTER_ID: 100, _ALPHA: 0})
     muted_state[0]["content"]["events_default"] = 50
     muted = ownership.room_from_state(_OWNER_ROOM, _ROUTER_ID, muted_state)
 
-    assert ownership.legacy_router_task_owner(router_only, workflow, router_id=_ROUTER_ID, agent_ids=candidates) is None
-    assert ownership.legacy_router_task_owner(muted, workflow, router_id=_ROUTER_ID, agent_ids=candidates) is None
+    assert ownership.legacy_router_task_owner(router_only, workflow, agent_ids=candidates) is None
+    assert ownership.legacy_router_task_owner(muted, workflow, agent_ids=candidates) is None
