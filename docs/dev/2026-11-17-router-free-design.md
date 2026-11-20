@@ -47,7 +47,9 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
    It is registered only when the config needs such rooms, and no feature depends on it being in a room.
    It counts as a MindRoom account for the steward rule, so in the rooms it created it is the steward by its power level, which keeps member tracking and state writes in managed rooms as they are today.
 5. **Hooks gain `scope="room"` and `scope="service"`.**
-   A room-scoped hook runs once per event, on the room's steward; a service-scoped hook runs once per process.
+   A room-scoped hook runs once per event; a service-scoped hook runs once per process.
+   Room-scoped message and reaction hooks run on the first eligible emitter, the first bot that admitted the sender and emits the event, not on the steward.
+   Room-scoped member hooks, and emissions without a Matrix event, run on the room's steward.
    `agents=(ROUTER_AGENT_NAME,)` stays as a deprecated alias: service scope on `bot:ready` and `config:reloaded`, room scope on every other event.
 6. **Config keeps the `router:` section.**
    `model` and `judgment` configure routing.

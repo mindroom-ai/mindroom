@@ -433,11 +433,9 @@ class PersonalRoomLifecycle:
         if settings is None or not self.is_steward(room.room_id):
             return False
         body = event.body.strip()
-        if (
-            f"!{body[1:]}" if body.startswith("/") else body
-        ) not in settings.commands or room.room_id not in resolve_room_aliases(
-            settings.onboarding_rooms, self.runtime_paths
-        ):
+        command = f"!{body[1:]}" if body.startswith("/") else body
+        onboarding_rooms = resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
+        if command not in settings.commands or room.room_id not in onboarding_rooms:
             return False
         if is_human_requester_id(
             event.sender,

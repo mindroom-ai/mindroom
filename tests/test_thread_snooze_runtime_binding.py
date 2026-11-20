@@ -154,7 +154,7 @@ async def test_restore_reads_the_room_again_when_every_bot_left_it(tmp_path: Pat
     await coordinator.restore_room(code, ROOM)
     assert router.client.room_get_state.await_count + code.client.room_get_state.await_count == 1
 
-    # Both bots leave the room, then code joins it again.
+    # The bot that read the room leaves it; code reads it again.
     router.client.rooms = {}
     code.client.room_get_state = AsyncMock(
         return_value=nio.RoomGetStateResponse(

@@ -150,7 +150,7 @@ class ConfigUpdatePlan:
     reply_authorization_changed: bool = False
     # A continuing agent's responder access changed, so background scripts it runs must be re-authorized.
     responder_access_changed: bool = False
-    # Room-membership grant inputs changed, so every room-backed grant is revoked until the router refreshes.
+    # Room-membership grant inputs changed, so every room-backed grant is revoked until each room's observer refreshes.
     reply_membership_policy_changed: bool = False
 
     @property
