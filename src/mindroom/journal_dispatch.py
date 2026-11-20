@@ -29,8 +29,8 @@ from mindroom.constants import (
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
     ROUTE_EVENT_TYPE,
+    ROUTE_PROMPT_FILE_KEY,
     ROUTE_PROMPT_STRUCTURED_KEY,
-    ROUTE_REVISIONS_KEY,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SCHEDULED_MODEL_KEY,
@@ -468,6 +468,8 @@ def _completing(
 
 
 # The relay context a route carries for its responder. Any other content of a route is dropped.
+# What ties a route too long for one event to the file that holds all of it.
+_LONG_TEXT_FILE_KEYS = ("io.mindroom.long_text", "url", "file")
 _ROUTE_CONTEXT_KEYS = (
     SOURCE_KIND_KEY,
     ORIGINAL_SENDER_KEY,
@@ -480,7 +482,6 @@ _ROUTE_CONTEXT_KEYS = (
     VOICE_TRANSCRIPT_KEY,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
     ROUTE_PROMPT_STRUCTURED_KEY,
-    ROUTE_REVISIONS_KEY,
 )
 
 
@@ -546,13 +547,14 @@ def _route_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFormatted:
     message = _as_message(
         event,
         build_message_content(
-            # A route carries its steward's prompt for the turn. One without, an older or a very large one, has
-            # no text until its responder reads the messages it names.
+            # A route carries its steward's prompt for the turn: all of it, or a preview beside its long-text file,
+            # which the responder reads as the route's own and no reader of a message's text resolves.
             body if isinstance(body, str) else "",
             mentioned_user_ids=[entity],
             thread_event_id=thread_id,
             reply_to_event_id=event_ids[-1],
-            extra_content={key: content[key] for key in _ROUTE_CONTEXT_KEYS if key in content},
+            extra_content={key: content[key] for key in _ROUTE_CONTEXT_KEYS if key in content}
+            | {ROUTE_PROMPT_FILE_KEY: {key: content[key] for key in _LONG_TEXT_FILE_KEYS if key in content}},
         ),
     )
     # What makes a message a route stands outside its content, which any message could carry: only this dispatch

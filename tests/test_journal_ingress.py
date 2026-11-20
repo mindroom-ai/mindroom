@@ -20,6 +20,7 @@ from mindroom.constants import (
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTE_EVENT_TYPE,
+    ROUTE_PROMPT_FILE_KEY,
     SILENT_SCHEDULE_EVENT_TYPE,
     SOURCE_KIND_KEY,
     STREAM_STATUS_CANCELLED,
@@ -5539,6 +5540,7 @@ class TestRouteDispatch:
                 STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
                 "m.mentions": {"user_ids": ["@mallory:example.org"]},
                 "m.relates_to": {"m.in_reply_to": {"event_id": "$other"}},
+                "url": "mxc://example.org/prompt",
             },
         )
 
@@ -5550,7 +5552,7 @@ class TestRouteDispatch:
         assert delivered.source["type"] == "m.room.message"
         assert delivered.source["content"] == {
             "msgtype": "m.text",
-            # This route carries no prompt, so it has no text until its responder reads the message it names.
+            # This route carries no prompt, so its responder starts no turn for it.
             "body": "",
             "format": "org.matrix.custom.html",
             "formatted_body": "",
@@ -5563,6 +5565,8 @@ class TestRouteDispatch:
             },
             SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             ORIGINAL_SENDER_KEY: ALICE,
+            # What names a long prompt's file is set apart: the message's own text is not read from it.
+            ROUTE_PROMPT_FILE_KEY: {"url": "mxc://example.org/prompt"},
         }
         # What makes the message a route is outside its content, where only this dispatch writes.
         assert delivered.source[ROUTE_EVENT_TYPE] == ["$earlier", "$question"]

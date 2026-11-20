@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence  # noqa: TC003
+from collections.abc import Mapping, Sequence  # noqa: TC003
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
-
-import nio
+from typing import TYPE_CHECKING, Any
 
 from mindroom.attachments.ids import merge_attachment_ids
 from mindroom.attachments.media import attachment_records_to_media, resolve_scoped_attachments
@@ -24,18 +22,16 @@ from mindroom.dispatch_handoff import MediaDispatchEvent, PreparedIngress
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client_visible_messages import resolve_visible_event_source
-from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.image_handler import download_image
 from mindroom.matrix.media import (
     AudioMessageEvent,
     FileMessageEvent,
     FileOrVideoMessageEvent,
-    is_file_message_event,
     is_file_or_video_message_event,
     is_image_message_event,
     is_matrix_media_dispatch_event,
 )
-from mindroom.matrix.message_content import is_v2_sidecar_text_preview
+from mindroom.matrix.message_content import is_v2_sidecar_text_preview, resolve_event_source_content
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.matrix.thread_forks import fork_parent_thread_ids
 from mindroom.media_inputs import MediaInputs
@@ -46,6 +42,7 @@ from mindroom.voice.handler import prepare_raw_voice_fallback_message, prepare_v
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import nio
     import structlog
 
     from mindroom.constants import RuntimePaths
@@ -237,23 +234,10 @@ class InboundTurnNormalizer:
             return None
         return await self.resolve_text_event(TextNormalizationRequest(event=event))
 
-    async def fetched_message_text(self, room_id: str, event_id: str, revision_id: str | None) -> str | None:
-        """Return a message's whole text, read by its ID or by its sender's edit ``revision_id``, else None."""
-        read = [await self._client().room_get_event(room_id, i) for i in (event_id, revision_id) if i is not None]
-        event, revision = (r.event if isinstance(r, nio.RoomGetEventResponse) else None for r in (read[0], read[-1]))
-        if event is None or revision is None or revision.sender != event.sender:
-            return None
-        if EventInfo.from_event(revision.source).original_event_id != (revision_id and event_id):
-            # Only its sender's edit of this message is a revision of it.
-            return None
-        if is_file_message_event(revision):
-            prepared = await self.prepare_file_sidecar_text_event(revision)
-        elif isinstance(revision, nio.RoomMessageFormatted):
-            prepared = await self.resolve_text_event(TextNormalizationRequest(event=revision))
-        else:
-            return None
-        # A preview is not the message: the file is read on a later try.
-        return None if prepared is None or holds_unresolved_sidecar(prepared.source["content"]) else prepared.body
+    async def long_text_content(self, preview: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Return the whole content a long-text preview stands for, or none of it while its file cannot be read."""
+        content = (await resolve_event_source_content({"content": dict(preview)}, self._client()))["content"]
+        return {} if holds_unresolved_sidecar(content) else content
 
     async def register_routed_attachment(
         self,

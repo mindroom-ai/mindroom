@@ -417,7 +417,6 @@ class TurnIngress:
         )
         if edited is None:
             return False
-        edited[1].revision_event_id = event.event_id
         self._renew_queued_notice(room, *edited)
         return True
 

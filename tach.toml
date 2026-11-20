@@ -6433,7 +6433,6 @@ depends_on = [
     "mindroom.attachments.media",
     "mindroom.constants",
     "mindroom.matrix.client_visible_messages",
-    "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.sidecar_content",
     "mindroom.runtime_protocols",

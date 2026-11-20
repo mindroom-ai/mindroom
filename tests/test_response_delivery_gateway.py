@@ -4317,6 +4317,34 @@ def _own_route(event_id: str, *routed: str) -> nio.Event:
     return _history_event(event_id, ROUTE_EVENT_TYPE, sender=_AGENT_USER_ID, **{ROUTE_EVENT_TYPE: route})
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uploads", [True, False])
+async def test_a_route_too_long_for_one_event_is_sent_with_its_file_or_not_at_all(
+    tmp_path: Path,
+    uploads: bool,
+) -> None:
+    """A route's prompt, such as a long scheduled one, reaches its responder whole: it is never sent cut short."""
+    gateway = _gateway(tmp_path)
+    client = gateway.deps.runtime.client
+    uploaded = nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/route"})
+    client.upload.return_value = (uploaded if uploads else nio.UploadError("unavailable"), None)
+    client.room_send.return_value = nio.RoomSendResponse(event_id="$route", room_id=_ROOM_ID)
+    route = {"entity": "@other:localhost", "event_ids": ["$question"]}
+
+    sent = await gateway.send_route(_ROOM_ID, {ROUTE_EVENT_TYPE: route, "body": "Poll the queue. " * 5_000})
+
+    if not uploads:
+        assert sent is None
+        client.room_send.assert_not_awaited()
+        return
+    assert sent == "$route"
+    wire = client.room_send.await_args.kwargs
+    assert wire["message_type"] == ROUTE_EVENT_TYPE
+    assert wire["content"][ROUTE_EVENT_TYPE] == route
+    assert wire["content"]["url"] == "mxc://localhost/route"
+    assert "io.mindroom.long_text" in wire["content"]
+
+
 def _history(gateway: DeliveryGateway, *pages: list[nio.Event]) -> AsyncMock:
     """Serve the room's history newest first, one `/messages` page per list, each but the last with a next page."""
     responses = [

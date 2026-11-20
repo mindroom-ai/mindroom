@@ -16,8 +16,8 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTE_EVENT_TYPE,
+    ROUTE_PROMPT_FILE_KEY,
     ROUTE_PROMPT_STRUCTURED_KEY,
-    ROUTE_REVISIONS_KEY,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SCHEDULED_MODEL_KEY,
@@ -200,8 +200,6 @@ def _attachment_parts(prepared: _PreparedTextDispatch) -> tuple[list[str], list[
         extra_content[SCHEDULED_HISTORY_LIMIT_KEY] = prepared.dispatch.scheduled_history_budget.limit
     if prepared.dispatch.scheduled_model is not None:
         extra_content[SCHEDULED_MODEL_KEY] = prepared.dispatch.scheduled_model
-    if turn.revisions:
-        extra_content[ROUTE_REVISIONS_KEY] = turn.revisions
     return message_attachment_ids, trusted_attachment_ids, extra_content
 
 
@@ -455,24 +453,22 @@ class TurnDispatcher:
         )
 
     async def _with_routed_text(self, turn: PreparedTurn) -> PreparedTurn | None:
-        """Return a routed turn with the prompt its steward read as its text, or None while that cannot be read."""
-        content = turn.event.source["content"]
+        """Return a routed turn with its steward's whole prompt as its text, or None while that cannot be read.
+
+        The prompt is the route's own text or, when too long for one event, its long-text file's.
+        No prompt is made from the messages a route names.
+        """
+        content, body = turn.event.source["content"], turn.event.body
         if not turn.facts.routed_event_ids:
             return turn
-        if turn.event.body:
-            return replace(turn, current_prompt_is_structured=content.get(ROUTE_PROMPT_STRUCTURED_KEY) is True)
-        bodies: list[str] = []
-        for event_id in turn.facts.routed_event_ids:
-            voice = await self.deps.turn_store.prepared_voice_for_source(event_id)
-            body = voice.body if voice is not None else content.get(ROUTE_VOICE_TRANSCRIPTS_KEY, {}).get(event_id)
-            if body is None:
-                revision = content.get(ROUTE_REVISIONS_KEY, {}).get(event_id)
-                body = await self.deps.normalizer.fetched_message_text(turn.room.room_id, event_id, revision)
-                if body is None:
-                    self.deps.logger.warning("Cannot read a routed message; its turn stays pending", event_id=event_id)
-                    return None
-            bodies.append(body)
-        return replace(turn, event=replace(turn.event, body="\n\n".join(bodies)))
+        if prompt_file := content.get(ROUTE_PROMPT_FILE_KEY):
+            content = await self.deps.normalizer.long_text_content(prompt_file)
+            body = content.get("body")
+        if not body:
+            self.deps.logger.warning("Cannot read a route's prompt; its turn waits", event_id=turn.event.event_id)
+            return None
+        structured = content.get(ROUTE_PROMPT_STRUCTURED_KEY) is True
+        return replace(turn, event=replace(turn.event, body=body), current_prompt_is_structured=structured)
 
     async def _prepare_text_dispatch(
         self,

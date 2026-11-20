@@ -99,14 +99,12 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     The responder keeps only those keys, and only an event journaled as a route is read as one: every other journal event loses the route key when it is rebuilt.
     It has no `m.relates_to` and no `m.mentions`, so no homeserver counts it in a thread and no mention rule fires for it, and its `body` is the steward's prompt for the turn: the batch as the steward coalesced it, with each voice message as transcribed.
     The steward read every message of the turn, which the responder may not: a batch can span threads, and a source can be older than the thread page the responder reads, or encrypted with a key it lacks.
-    A prompt over 16 KiB is left out unless it is a scheduled task's, to keep the route a small event.
+    Every route carries that whole prompt, whatever the kinds of the messages it names.
+    A route too long for one event is sent as any long message is: its content goes in an uploaded long-text file, encrypted in an encrypted room, the event keeps a preview and the route's keys, and a route whose file cannot be uploaded is not sent.
     The responder's current message is that prompt, and the messages the route names are left out of the thread history beside it.
-    For a route without a `body` (an older or a very large one) the responder reads each named message by its event ID, and when it cannot read one it starts no turn and leaves the route pending.
-    Recovery answers only the complete text the steward selected, and otherwise waits.
-    It reads each message as ingress reads one, a long text sent as a file whole: while that file cannot be downloaded the event's preview is not answered.
-    A message its sender edited while it waited at the steward is named with that edit's event ID under `io.mindroom.route_revisions`, and the responder reads that edit by its ID after checking that it is the same sender's replacement of that message.
-    An edit the route does not name came after the selection and is not read.
-    No model is ever sent a stand-in text.
+    The responder reads the prompt from the route or from the route's file, and never makes one from the messages the route names.
+    While it cannot read the file, and for a route without a `body`, it starts no turn and leaves the route pending.
+    No model is ever sent a preview or a stand-in text.
     Only the responder a route names processes it: every other bot settles it unread, having run its hooks for the person's own message.
     The steward routes under `router.access` alone, so a candidate steward whose own access denies the person still routes the person's message, and answers it itself, runs the person's commands and runs its own `message:received` hooks only when its own access allows.
     Every bot journals the event from sync, in encrypted rooms too, the way a silent schedule trigger is journaled, and only when its sender is an account the identity registry manages.

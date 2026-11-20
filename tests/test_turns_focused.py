@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 from dataclasses import dataclass, field, fields, replace
 from functools import partial
 from types import SimpleNamespace
@@ -3226,7 +3225,7 @@ async def test_voice_message_is_routed_on_its_transcript(
 ) -> None:
     """A steward selects a voice message's responder from its transcript and posts nothing itself.
 
-    Its route carries the transcript for the responder to post, unless that would make the route a large event.
+    Its route carries the transcript as its prompt, and again for the responder to post unless it is a long one.
     """
     config = _two_agent_config(tmp_path)
     harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
@@ -3262,7 +3261,7 @@ async def test_voice_message_is_routed_on_its_transcript(
     [route] = harness.gateway.routes
     carried = {event.event_id: spoken} if len(spoken) < constants.ROUTE_VOICE_TRANSCRIPTS_LIMIT else None
     assert route.get(constants.ROUTE_VOICE_TRANSCRIPTS_KEY) == carried
-    assert len(json.dumps(route)) < 20_000
+    assert route["body"] == spoken
     assert harness.gateway.sent == []
 
 
@@ -8230,22 +8229,27 @@ def _route_message(
     event_ids: tuple[str, ...] = ("$question:localhost",),
     body: str | None = "who can help with this?",
 ) -> nio.RoomMessageFormatted:
-    """Return a steward's route of the person's ``event_ids`` to an entity, as journal dispatch hands it to ingress.
+    """Return a steward's route of the person's ``event_ids`` to an entity, as journal dispatch hands it to ingress."""
+    content = _route_content(config, entity=entity, thread_id=thread_id, event_ids=event_ids, body=body)
+    return _route_as_delivered(config, content, steward=steward, event_id=event_id)
 
-    It carries the steward's prompt as ``body``; an older route, or one of a very large prompt, carries none.
-    """
+
+def _route_content(
+    config: Config,
+    *,
+    entity: str = "general",
+    thread_id: str | None = None,
+    event_ids: tuple[str, ...] = ("$question:localhost",),
+    body: str | None = "who can help with this?",
+) -> dict[str, Any]:
+    """Return what a steward sends as a route: its prompt for the turn as ``body``, which only a broken one lacks."""
     route = {"entity": _entity_user_id(config, entity), "event_ids": list(event_ids)}
-    return _route_as_delivered(
-        config,
-        {
-            **({} if body is None else {"body": body}),
-            constants.ROUTE_EVENT_TYPE: route if thread_id is None else {**route, "thread_id": thread_id},
-            constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            constants.ORIGINAL_SENDER_KEY: _SENDER,
-        },
-        steward=steward,
-        event_id=event_id,
-    )
+    return {
+        **({} if body is None else {"body": body}),
+        constants.ROUTE_EVENT_TYPE: route if thread_id is None else {**route, "thread_id": thread_id},
+        constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        constants.ORIGINAL_SENDER_KEY: _SENDER,
+    }
 
 
 def _two_agent_config(tmp_path: Path) -> Config:
@@ -8372,32 +8376,19 @@ async def test_a_routed_responders_model_input_holds_the_persons_text_and_the_th
     )
     harness = _build_harness(config, tmp_path, thread_history=thread)
     room = _room_with_members(config, "general", "research")
-    harness.runtime.client.room_get_event = AsyncMock(side_effect=_events_by_id(thread))
+    text = "Which release is next?" if len(routed) == 1 else "One more thing first\n\nWhich release is next?"
 
-    route = _route_message(config, steward="research", thread_id=_THREAD_ROOT, event_ids=routed, body=None)
+    route = _route_message(config, steward="research", thread_id=_THREAD_ROOT, event_ids=routed, body=text)
     await harness.deliver(room, route)
 
     [request] = harness.runner.requests
-    # A route that carries no text names the person's messages, which its responder reads by their IDs, in order.
-    text = "Which release is next?" if len(routed) == 1 else "One more thing first\n\nWhich release is next?"
+    # The route's text is the current message, and the messages it names are no history beside it.
     assert request.response_envelope.body == text
     assert request.prompt_source_event_ids == routed
     before, current = _model_input(config, request, thread)
     assert current == f'<msg event_id="$question:localhost" from="{_SENDER}"><![CDATA[{text}]]></msg>'
     assert "We deploy on Fridays" in before
     assert "Which release is next?" not in before
-
-
-def _events_by_id(messages: Iterable[ResolvedVisibleMessage]) -> Callable[[str, str], nio.RoomGetEventResponse]:
-    """Return a homeserver's answer to an exact event read: each message as the text event it is."""
-    bodies = {message.event_id: message.body for message in messages}
-
-    def read(_room_id: str, event_id: str) -> nio.RoomGetEventResponse:
-        response = nio.RoomGetEventResponse()
-        response.event = _text_event(bodies[event_id], event_id=event_id)
-        return response
-
-    return read
 
 
 def _model_input(config: Config, request: ResponseRequest, thread: ThreadHistoryResult) -> list[str]:
@@ -8481,7 +8472,7 @@ async def test_a_routed_responders_current_message_is_the_prompt_its_route_carri
 
 @pytest.mark.asyncio
 async def test_a_route_is_answered_with_the_text_it_carries_whatever_the_person_wrote(tmp_path: Path) -> None:
-    """Only a route with no text has its messages read: no wording of the person's stands for a missing one."""
+    """A route is answered with the text it carries: its responder reads none of the messages it names."""
     config = _two_agent_config(tmp_path)
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research")
@@ -8500,35 +8491,11 @@ async def test_a_route_is_answered_with_the_text_it_carries_whatever_the_person_
     harness.runtime.client.room_get_event.assert_not_awaited()
 
 
-def _read_by_id(content: dict[str, Any], *others: dict[str, Any], **source: Any) -> AsyncMock:  # noqa: ANN401
-    """Return a homeserver that answers an exact read of the person's question, of this content, and of ``others``."""
-    question = {
-        "content": content,
-        "event_id": "$question:localhost",
-        "sender": _SENDER,
-        "origin_server_ts": 1_000_000,
-        "room_id": _ROOM_ID,
-        "type": "m.room.message",
-        **source,
-    }
-
-    def read(_room_id: str, event_id: str) -> nio.RoomGetEventResponse | nio.RoomGetEventError:
-        stored = next((event for event in (question, *others) if event["event_id"] == event_id), None)
-        if stored is None:
-            return nio.RoomGetEventError("not found")
-        response = nio.RoomGetEventResponse()
-        response.event = nio.Event.parse_event(stored)
-        return response
-
-    return AsyncMock(side_effect=read)
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("downloads", [True, False], ids=["readable", "download fails"])
-async def test_a_route_without_a_prompt_reads_a_long_message_in_full(tmp_path: Path, downloads: bool) -> None:
-    """A message too long for one event is a file with its text beside it, which its routed responder reads whole.
+async def test_a_route_too_large_for_one_event_is_read_whole_from_its_file(tmp_path: Path) -> None:
+    """A prompt too long for one event travels as the route's long-text file, which its responder reads whole.
 
-    While the file cannot be downloaded the responder waits: the event's own text is only a preview of the message.
+    While the file cannot be downloaded the responder waits: the route's own text is only a preview of the prompt.
     """
     config = _two_agent_config(tmp_path)
     harness = _build_harness(config, tmp_path)
@@ -8537,103 +8504,45 @@ async def test_a_route_without_a_prompt_reads_a_long_message_in_full(tmp_path: P
 
     async def upload(**kwargs: Any) -> tuple[nio.UploadResponse, None]:  # noqa: ANN401
         uploads.append(kwargs["data_provider"](None, None).read())
-        return nio.UploadResponse("mxc://localhost/long-question"), None
+        return nio.UploadResponse("mxc://localhost/long-prompt"), None
 
     upload_client = make_matrix_client_mock()
     upload_client.upload = AsyncMock(side_effect=upload)
-    body = "Which release is next? " + "Details. " * 8_000
-    text = {"body": body, "msgtype": "m.text"}
+    prompt = "Which release is next? " + "Details. " * 8_000
+    sent = _route_content(config, thread_id="$question:localhost", body=prompt)
+    settings = {constants.SCHEDULED_MODEL_KEY: "default", constants.SCHEDULED_HISTORY_LIMIT_KEY: 3}
+    sent |= {constants.ROUTE_PROMPT_STRUCTURED_KEY: True, **settings}
+    wire = await prepare_large_message(upload_client, _ROOM_ID, sent, room_encrypted=False, sidecar_required=True)
+    assert wire["body"] != prompt
+    # The event keeps what its responder reads beside the prompt, as a long scheduled task's per-run settings.
+    assert {key: wire.get(key) for key in settings} == settings
     client = harness.runtime.client
-    client.room_get_event = _read_by_id(
-        await prepare_large_message(upload_client, _ROOM_ID, text, room_encrypted=False),
-    )
-    full_text = MagicMock(spec=nio.DownloadResponse, body=uploads[0])
-    client.download = AsyncMock(return_value=full_text if downloads else nio.DownloadError("unavailable"))
+    client.room_get_event = AsyncMock(return_value=nio.RoomGetEventError("unreadable"))
 
-    await harness.deliver(room, _route_message(config, steward="research", thread_id="$question:localhost", body=None))
+    client.download = AsyncMock(return_value=nio.DownloadError("unavailable"))
+    await harness.deliver(room, _route_as_delivered(config, wire, steward="research"))
 
-    assert [request.prompt for request in harness.runner.requests] == ([body] if downloads else [])
+    assert harness.runner.requests == []
     assert harness.ignored_dispatch_sources == []
 
-
-def _correction(*, sender: str = _SENDER, of: str = "$question:localhost") -> dict[str, Any]:
-    """Return an edit of the person's question to its corrected text."""
-    return {
-        "content": {
-            "body": "* July, not June.",
-            "msgtype": "m.text",
-            "m.new_content": {"body": "July, not June.", "msgtype": "m.text"},
-            "m.relates_to": {"rel_type": "m.replace", "event_id": of},
-        },
-        "event_id": "$correction:localhost",
-        "sender": sender,
-        "origin_server_ts": 1_000_001,
-        "room_id": _ROOM_ID,
-        "type": "m.room.message",
-    }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("bundled", "stored", "prompts"),
-    [
-        # However much of the edit the homeserver bundles with the question, the edit is read by its own ID.
-        ({"m.replace": _correction()}, [_correction()], ["July, not June."]),
-        ({"m.replace": {"event_id": "$correction:localhost"}}, [_correction()], ["July, not June."]),
-        ({}, [_correction()], ["July, not June."]),
-        # Only the sender's own edit of this message is a revision of it, and only one that can be read.
-        ({}, [_correction(sender="@mallory:localhost")], []),
-        ({}, [_correction(of="$other:localhost")], []),
-        ({}, [], []),
-    ],
-    ids=["bundled", "bundled by ID", "not bundled", "another sender's", "of another message", "unreadable"],
-)
-async def test_a_route_without_a_prompt_reads_the_edit_its_steward_selected(
-    tmp_path: Path,
-    bundled: dict[str, Any],
-    stored: list[dict[str, Any]],
-    prompts: list[str],
-) -> None:
-    """The steward routed the person's correction, so its responder answers that or, until it can read it, nothing."""
-    config = _two_agent_config(tmp_path)
-    harness = _build_harness(config, tmp_path)
-    room = _room_with_members(config, "general", "research")
-    question = {"body": "June.", "msgtype": "m.text"}
-    harness.runtime.client.room_get_event = _read_by_id(question, *stored, unsigned={"m.relations": bundled})
-    route = _route_message(config, steward="research", thread_id="$question:localhost", body=None)
-    route.source["content"][constants.ROUTE_REVISIONS_KEY] = {"$question:localhost": "$correction:localhost"}
-
-    await harness.deliver(room, route)
-
-    assert [request.prompt for request in harness.runner.requests] == prompts
-    assert harness.ignored_dispatch_sources == []
-
-
-@pytest.mark.asyncio
-async def test_a_route_without_a_prompt_reads_a_message_as_sent_when_its_steward_selected_no_edit(
-    tmp_path: Path,
-) -> None:
-    """An edit the route does not name came after the steward read the message, so it is not what was routed."""
-    config = _two_agent_config(tmp_path)
-    harness = _build_harness(config, tmp_path)
-    room = _room_with_members(config, "general", "research")
-    harness.runtime.client.room_get_event = _read_by_id(
-        {"body": "June.", "msgtype": "m.text"},
-        unsigned={"m.relations": {"m.replace": _correction()}},
-    )
-
-    await harness.deliver(room, _route_message(config, steward="research", thread_id="$question:localhost", body=None))
+    # The same route, delivered again once the file can be read, is answered in full.
+    client.download = AsyncMock(return_value=MagicMock(spec=nio.DownloadResponse, body=uploads[0]))
+    await harness.deliver(room, _route_as_delivered(config, wire, steward="research"))
 
     [request] = harness.runner.requests
-    assert request.prompt == "June."
+    assert request.prompt == prompt
+    assert request.current_prompt_is_structured is True
+    assert request.user_id == _SENDER
+    assert request.prompt_source_event_ids == ("$question:localhost",)
+    client.room_get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_a_steward_names_the_edit_it_selected_on_a_route_without_a_prompt(
+async def test_a_steward_routes_a_message_as_its_sender_edited_it_while_it_waited(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A message edited while it waited is routed as edited: a route too large for its text names that edit."""
+    """A message edited while it waited is routed as edited, whatever the length of the correction."""
     config = _two_agent_config(tmp_path)
     harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
     room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
@@ -8661,25 +8570,25 @@ async def test_a_steward_names_the_edit_it_selected_on_a_route_without_a_prompt(
 
     [route] = harness.gateway.routes
     assert route[constants.ROUTE_EVENT_TYPE]["event_ids"] == [original.event_id]
-    assert "body" not in route
-    assert route[constants.ROUTE_REVISIONS_KEY] == {original.event_id: edit.event_id}
+    assert route["body"] == corrected
 
 
 @pytest.mark.asyncio
-async def test_a_route_without_a_prompt_whose_message_cannot_be_read_starts_no_turn(tmp_path: Path) -> None:
-    """A responder that can read neither a prompt on its route nor the message it names answers nothing yet."""
+async def test_a_route_without_a_prompt_starts_no_turn(tmp_path: Path) -> None:
+    """A responder makes no prompt of its own from the messages a route names: a route without one answers nothing."""
     config = _two_agent_config(tmp_path)
-    harness = _build_harness(config, tmp_path)
+    question = make_visible_message(sender=_SENDER, body="Which release is next?", event_id="$question:localhost")
+    harness = _build_harness(config, tmp_path, thread_history=thread_history_result([question], is_full_history=True))
     room = _room_with_members(config, "general", "research")
-    undecrypted = nio.RoomGetEventResponse()
-    undecrypted.event = MagicMock(spec=nio.MegolmEvent)
-    harness.runtime.client.room_get_event = AsyncMock(return_value=undecrypted)
+    readable = nio.RoomGetEventResponse()
+    readable.event = _text_event("Which release is next?", event_id="$question:localhost")
+    harness.runtime.client.room_get_event = AsyncMock(return_value=readable)
 
     await harness.deliver(room, _route_message(config, steward="research", thread_id="$question:localhost", body=None))
 
-    # No model is asked the route's placeholder, and the route stays pending for when the message can be read.
     assert harness.runner.requests == []
     assert harness.ignored_dispatch_sources == []
+    harness.runtime.client.room_get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -8712,7 +8621,7 @@ async def test_a_route_runs_nothing_in_an_agent_it_does_not_name(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_a_steward_routes_the_prompt_it_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A route carries its steward's prompt for the turn, the batch as the steward coalesced it, unless too large."""
+    """A route carries its steward's prompt for the turn, the batch as the steward coalesced it, whatever its size."""
     config = _two_agent_config(tmp_path)
     harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
     room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
@@ -8729,8 +8638,42 @@ async def test_a_steward_routes_the_prompt_it_read(tmp_path: Path, monkeypatch: 
     turn = harness.gate_batches[0]
     assert carried["body"] == turn.event.body == "What day did I say?"
     assert carried[constants.ROUTE_PROMPT_STRUCTURED_KEY] is turn.current_prompt_is_structured
-    # A route stays a small event: its responder reads a message this large by its ID.
-    assert "body" not in oversize
+    assert oversize["body"] == large
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("msgtype", ["m.image", "m.file"])
+async def test_an_upload_with_a_long_caption_is_routed_and_answered_whole(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    msgtype: str,
+) -> None:
+    """A route's prompt does not depend on the kinds of the messages it names: an upload beside a long text starts."""
+    config = _two_agent_config(tmp_path)
+    steward = _build_harness(config, tmp_path / "steward", agent_name=ROUTER_AGENT_NAME, debounce_seconds=1.0)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("general")),
+    )
+    upload = _thread_upload_event(msgtype, event_id="$upload:localhost", origin_server_ts=1_000_000)
+    caption = "What does this show? " + "x" * constants.ROUTE_VOICE_TRANSCRIPTS_LIMIT
+    text = _text_event(caption, event_id="$caption:localhost", thread_id=_THREAD_ROOT, origin_server_ts=1_000_001)
+
+    await steward.ingress.handle_media_event(room, upload)
+    await steward.deliver(room, text)
+
+    [route] = steward.gateway.routes
+    assert route[constants.ROUTE_EVENT_TYPE]["event_ids"] == [upload.event_id, text.event_id]
+    assert caption in route["body"]
+
+    responder = _build_harness(config, tmp_path / "responder")
+    responder.runtime.client.room_get_event = AsyncMock(return_value=nio.RoomGetEventError("unreadable"))
+    await responder.deliver(room, _route_as_delivered(config, route, steward=ROUTER_AGENT_NAME))
+
+    [request] = responder.runner.requests
+    assert request.prompt == route["body"]
+    responder.runtime.client.room_get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -8751,6 +8694,7 @@ async def test_a_routed_responder_reads_a_voice_message_as_its_steward_transcrib
             constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             constants.ORIGINAL_SENDER_KEY: _SENDER,
             constants.ROUTE_VOICE_TRANSCRIPTS_KEY: {"$question:localhost": "Which release is next?"},
+            "body": "Which release is next?",
         },
         steward="research",
     )
@@ -8922,16 +8866,7 @@ async def test_a_routed_batch_links_every_message_it_names_to_its_answer(tmp_pat
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
     first, question, route_id = "$first:localhost", "$question:localhost", "$route:localhost"
-    route = _route_as_delivered(
-        config,
-        {
-            constants.ROUTE_EVENT_TYPE: {"entity": _entity_user_id(config, "general"), "event_ids": [first, question]},
-            constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            constants.ORIGINAL_SENDER_KEY: _SENDER,
-        },
-        steward=ROUTER_AGENT_NAME,
-        event_id=route_id,
-    )
+    route = _route_message(config, steward=ROUTER_AGENT_NAME, event_id=route_id, event_ids=(first, question))
 
     await harness.deliver(room, route)
 

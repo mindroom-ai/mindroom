@@ -352,11 +352,8 @@ async def execute_router_relay(  # noqa: PLR0911
         route["thread_id"] = thread_event_id
     transcripts = await _voice_transcripts(deps, route["event_ids"])
     content: dict[str, Any] = {**routed_extra_content, ROUTE_EVENT_TYPE: route, **transcripts}
-    prompt = scheduled_prompt or message or event.body
-    if scheduled_prompt is not None or len(prompt.encode()) <= ROUTE_VOICE_TRANSCRIPTS_LIMIT:
-        # The steward read every message of the turn, which its responder may not: the route carries its prompt.
-        # A scheduled task's prompt may be in no visible message, so it is carried whatever its size.
-        content |= {"body": prompt, ROUTE_PROMPT_STRUCTURED_KEY: prompt_is_structured}
+    # The steward read every message of the turn, which its responder may not: the route carries its whole prompt.
+    content |= {"body": scheduled_prompt or message or event.body, ROUTE_PROMPT_STRUCTURED_KEY: prompt_is_structured}
     event_id = await deps.delivery_gateway.send_route(room.room_id, content)
     with bound_log_context(**resolved_target.log_context):
         if event_id is None:
