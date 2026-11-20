@@ -71,7 +71,7 @@ def _verify(client: PyJWKClient, token: str) -> dict[str, Any]:
     request = SimpleNamespace(headers={"X-Trusted-Jwt": token})
     return asyncio.run(
         auth._verified_trusted_upstream_jwt_claims(
-            request,  # ty: ignore[invalid-argument-type]
+            request,
             client,
             header="X-Trusted-Jwt",
             audience="mindroom-dashboard",
