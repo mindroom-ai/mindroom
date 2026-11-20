@@ -8,7 +8,7 @@ of them added.
 from __future__ import annotations
 
 from dataclasses import fields
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, field_validator, model_serializer
 
@@ -22,15 +22,26 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerSco
 #    protocol, so mixed releases fail instead of dropping fields; a request names its workspace in `base_dir`.
 # 7: a call's arguments arrive as the model sent them, and the worker validates and coerces them.
 # 8: a worker pinned to one subagent (`subagent=<id>` in its key) serves its normal worker's workspaces and credentials.
-# 9: a call that asks for a structured result gets it whole, with the facts its tool reported in `metadata`.
-# A wire model change bumps this; `tests/test_worker_protocol_schema.py` pins each version's schema.
-WORKER_PROTOCOL_VERSION = 9
+# A wire model change bumps this, except an opt-in field (see ``_WireModel.opt_in_fields``);
+# `tests/test_worker_protocol_schema.py` pins each version's schema.
+WORKER_PROTOCOL_VERSION = 8
 
 FailureKind = Literal["tool", "worker"]
 
 
 class _WireModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    # The fields a body carries only when set, each added without a protocol bump: every other body is byte for byte
+    # what it was, so a peer that predates such a field refuses only the calls that ask for what it adds.
+    opt_in_fields: ClassVar[frozenset[str]] = frozenset()
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_opt_in_fields(self, dump: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        body = dump(self)
+        for name in self.opt_in_fields:
+            if not body.get(name):
+                body.pop(name, None)
+        return body
 
 
 _EXECUTION_IDENTITY_FIELDS = frozenset(field.name for field in fields(ToolExecutionIdentity))
@@ -98,6 +109,7 @@ class ExecuteRequest(WorkerRoute):
     run_as_job: bool = False
     # The caller stores the result itself: no size moves it to a workspace file, and the answer carries `metadata`.
     structured_result: bool = False
+    opt_in_fields = frozenset({"structured_result"})
 
 
 class SaveAttachmentRequest(WorkerRoute):
@@ -151,14 +163,7 @@ class ExecuteResponse(_WireModel):
     failure_kind: FailureKind | None = None
     # What the tool reported about a structured result, such as a command's exit status.
     metadata: dict[str, Any] | None = None
-
-    @model_serializer(mode="wrap")
-    def _omit_absent_metadata(self, dump: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        # A call that asked for no structured result gets the answer it always got.
-        answer = dump(self)
-        if answer.get("metadata") is None:
-            answer.pop("metadata", None)
-        return answer
+    opt_in_fields = frozenset({"metadata"})
 
 
 class SaveAttachmentResponse(_WireModel):

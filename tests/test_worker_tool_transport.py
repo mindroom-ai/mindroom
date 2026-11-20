@@ -203,7 +203,8 @@ def test_a_plain_worker_call_answers_without_metadata(
     monkeypatch.setattr(sandbox_runner, "_execute_request_inprocess", recording)
 
     assert "Exit code 3" in str(_worker_shell(tmp_path, "exit 3"))
-    assert (worker_requests[0]["structured_result"], answers[0].metadata) == (False, None)
+    assert ("structured_result" in worker_requests[0], answers[0].metadata) == (False, None)
+    assert "metadata" not in answers[0].model_dump(mode="json")
 
 
 @pytest.mark.asyncio
