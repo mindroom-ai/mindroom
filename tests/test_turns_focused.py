@@ -174,6 +174,7 @@ from tests.conftest import (
     make_pending_event,
     make_relation_lookup,
     make_visible_message,
+    parsed_route,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -8206,17 +8207,13 @@ def _route_as_delivered(
     event_id: str = "$route:localhost",
 ) -> nio.RoomMessageFormatted:
     """Return a steward's hidden route event as journal dispatch hands it to turn ingress."""
-    event = nio.Event.parse_event(
-        {
-            "content": content,
-            "event_id": event_id,
-            "sender": _entity_user_id(config, steward),
-            "origin_server_ts": 1_000_001,
-            "room_id": _ROOM_ID,
-            "type": constants.ROUTE_EVENT_TYPE,
-        },
+    event = parsed_route(
+        content,
+        sender=_entity_user_id(config, steward),
+        event_id=event_id,
+        origin_server_ts=1_000_001,
+        room_id=_ROOM_ID,
     )
-    assert isinstance(event, nio.UnknownEvent)
     return _route_as_message(event)
 
 

@@ -60,6 +60,7 @@ from tests.conftest import (
     make_pending_event,
     make_visible_message,
     message_origin,
+    parsed_route,
     runtime_paths_for,
     swap_fleet_bot,
     test_runtime_paths,
@@ -804,16 +805,10 @@ class TestRoutingRegression:
         ):
             await _router_relay(router_bot, room, "$crash-after-send")
 
-        route_event = nio.Event.parse_event(
-            {
-                "type": ROUTE_EVENT_TYPE,
-                "event_id": "$route",
-                "sender": router_bot.client.user_id,
-                "origin_server_ts": 1_001,
-                "content": router_bot.client.room_send.await_args.kwargs["content"],
-            },
+        route_event = parsed_route(
+            router_bot.client.room_send.await_args.kwargs["content"],
+            sender=router_bot.client.user_id,
         )
-        assert isinstance(route_event, nio.UnknownEvent)
         router_bot.client.room_messages.return_value = nio.RoomMessagesResponse(
             room_id=room.room_id,
             chunk=[route_event, _router_readiness_event("$crash-after-send")],
@@ -862,14 +857,11 @@ class TestRoutingRegression:
                 conversation_target=MessageTarget.resolve(room.room_id, None, "$second"),
             ),
         )
-        route_of_the_first = nio.Event.parse_event(
-            {
-                "type": ROUTE_EVENT_TYPE,
-                "event_id": "$route-of-the-first",
-                "sender": router_bot.client.user_id,
-                "origin_server_ts": 900,
-                "content": {ROUTE_EVENT_TYPE: {"entity": "@mindroom_healthy:localhost", "event_ids": ["$first"]}},
-            },
+        route_of_the_first = parsed_route(
+            {ROUTE_EVENT_TYPE: {"entity": "@mindroom_healthy:localhost", "event_ids": ["$first"]}},
+            sender=router_bot.client.user_id,
+            event_id="$route-of-the-first",
+            origin_server_ts=900,
         )
         router_bot.client.room_messages.return_value = nio.RoomMessagesResponse(
             room_id=room.room_id,
@@ -1184,17 +1176,7 @@ class TestRoutingRegression:
         assert news_bot.client.room_send.call_count == 0
 
         # Every bot receives the route; the one it names answers the person's message, the other stays silent.
-        route_event = nio.Event.parse_event(
-            {
-                "type": ROUTE_EVENT_TYPE,
-                "event_id": "$route",
-                "sender": router_agent.user_id,
-                "origin_server_ts": 1001,
-                "content": route_send["content"],
-            },
-        )
-        assert isinstance(route_event, nio.UnknownEvent)
-        route = _route_as_message(route_event)
+        route = _route_as_message(parsed_route(route_send["content"], sender=router_agent.user_id))
         await research_bot._on_message(mock_room, route)
         await drain_coalescing(research_bot)
         await news_bot._on_message(mock_room, route)
@@ -1949,16 +1931,7 @@ class TestRoutingRegression:
         assert route_send["content"][ROUTE_EVENT_TYPE]["entity"] == ids["beta"].full_id
         mock_stream_agent_response.assert_not_called()
 
-        route_event = nio.Event.parse_event(
-            {
-                "type": ROUTE_EVENT_TYPE,
-                "event_id": "$route",
-                "sender": ids["alpha"].full_id,
-                "origin_server_ts": 1_001,
-                "content": route_send["content"],
-            },
-        )
-        assert isinstance(route_event, nio.UnknownEvent)
+        route_event = parsed_route(route_send["content"], sender=ids["alpha"].full_id)
         for bot in bots.values():
             await bot._on_message(room, _route_as_message(route_event))
             await drain_coalescing(bot)

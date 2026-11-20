@@ -46,7 +46,7 @@ from mindroom.journal_dispatch import _route_as_message
 from mindroom.turn_origin import TurnIntent
 from mindroom.turns.facts import command_for, is_voice_echo
 from tests.access_schema_support import with_current_room_member_access
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, parsed_route, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids
 from tests.runtime_fakes import ready_runtime
 
@@ -381,21 +381,15 @@ def test_a_route_is_trusted_from_any_managed_account_and_names_the_message_it_ro
 
 def _route(sender: str, entity: str) -> nio.UnknownEvent:
     """Return the hidden route event one account sent to route `$human` to an entity."""
-    event = nio.Event.parse_event(
+    return parsed_route(
         {
-            "type": ROUTE_EVENT_TYPE,
-            "event_id": "$route",
-            "sender": sender,
-            "origin_server_ts": 1,
-            "content": {
-                ROUTE_EVENT_TYPE: {"entity": entity, "event_ids": ["$earlier", "$human"]},
-                ORIGINAL_SENDER_KEY: "@user:localhost",
-                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            },
+            ROUTE_EVENT_TYPE: {"entity": entity, "event_ids": ["$earlier", "$human"]},
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         },
+        sender=sender,
+        origin_server_ts=1,
     )
-    assert isinstance(event, nio.UnknownEvent)
-    return event
 
 
 def test_route_content_from_an_unmanaged_account_is_not_a_route(tmp_path: Path) -> None:
