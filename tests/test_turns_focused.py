@@ -9281,6 +9281,20 @@ async def test_a_route_names_every_message_of_the_batch_it_routes(
 
 
 @pytest.mark.asyncio
+async def test_a_steward_routes_an_event_without_content_with_no_revision(config: Config, tmp_path: Path) -> None:
+    """An event with no content took no edit while it waited, so its route names none."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    event = PreparedIngress(sender=_SENDER, event_id="$question:localhost", body="who can help?", source={})
+
+    await execute_router_relay(harness.dispatcher.deps, room, event, (), requester_user_id=_SENDER)
+
+    [route] = harness.gateway.routes
+    assert route["body"] == "who can help?"
+    assert constants.ROUTE_REVISION_KEY not in route
+
+
+@pytest.mark.asyncio
 async def test_a_routed_batch_links_every_message_it_names_to_its_answer(tmp_path: Path) -> None:
     """The responder answers the last message a route names, and a deletion of any of them finds the answer."""
     config = _two_agent_config(tmp_path)

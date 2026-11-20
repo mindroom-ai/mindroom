@@ -344,7 +344,8 @@ async def execute_router_relay(  # noqa: PLR0911
     # The route carries its steward's whole prompt or, past what a responder reads of its long-text file, a notice.
     content |= {"body": message or event.body, ROUTE_PROMPT_STRUCTURED_KEY: prompt_is_structured}
     # Which edit of a lone message that prompt is, when the message took one while it waited.
-    content |= {key: event.source["content"][key] for key in (ROUTE_REVISION_KEY,) if key in event.source["content"]}
+    source_content = event.source.get("content", {})
+    content |= {key: source_content[key] for key in (ROUTE_REVISION_KEY,) if key in source_content}
     readable = len(json.dumps(content, ensure_ascii=False, separators=(",", ":")).encode()) <= MXC_TEXT_MAX_BYTES
     content |= {} if readable else {"body": ROUTE_TOO_LARGE_NOTICE, ROUTE_TOO_LARGE_KEY: True}
     event_id = await deps.delivery_gateway.send_route(room.room_id, content)
