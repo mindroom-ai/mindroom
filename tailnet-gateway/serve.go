@@ -42,7 +42,7 @@ func (g *Gateway) serve(ctx context.Context, link DesiredLink, n Node) {
 // carry takes one accepted connection to the link's worker and closes it: the peer has to be the link's login, the
 // primary has to name the worker, and until then the peer is told to wait.
 //
-// It decides nothing of the status but what Status reads: the open connection and the link's last error.
+// It posts no status: it leaves the open connection and the link's last error for Run to report.
 func (g *Gateway) carry(ctx context.Context, id string, n Node, conn net.Conn) {
 	defer conn.Close()
 	if !g.open(id, conn) {

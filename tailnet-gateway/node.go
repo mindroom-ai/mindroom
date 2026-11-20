@@ -92,8 +92,8 @@ func (n *tsnetNode) watch(ctx context.Context, id string) {
 				loginURL = told.BrowseToURL
 			}
 			// The bus tells that something changed, and the status what: the names come with the first netmap.
-			if now, err := n.client.Status(ctx); err == nil {
-				status = now
+			if fresh, statusErr := n.client.Status(ctx); statusErr == nil {
+				status = fresh
 			}
 			seen := observe(state, loginURL, status)
 			n.mu.Lock()
