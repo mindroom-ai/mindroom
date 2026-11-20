@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom.attachments.ids import merge_attachment_ids
+from mindroom.constants import INCOMPLETE_TEXT_KEY
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
     DispatchPayloadWithAttachmentsRequest,
@@ -89,6 +90,8 @@ class ResponsePayloadPreparation:
     target_member_names: tuple[str, ...] | None
     dispatch_started_at: float
     context_ready_monotonic: float
+    # A route's ``ROUTE_REVISION_KEY`` as it arrived: which edit of its lone message its prompt is.
+    routed_revision: Any = None
 
 
 @dataclass
@@ -112,10 +115,13 @@ class ResponsePayloadPreparer:
         if pipeline_timing is not None:
             pipeline_timing.mark("response_payload_start")
 
-        # A lone routed message its sender edited since is answered as this responder's own thread holds it.
+        # A lone routed message is answered as this thread holds it, when that is a whole edit newer than the route's.
         lone = request.prompt_source_event_ids if len(request.prompt_source_event_ids) == 1 else ()
-        edited = [m.body for m in request.thread_history if m.event_id in lone and m.latest_event_id != m.event_id]
-        preparation = replace(preparation, prompt=edited[0]) if edited else preparation
+        read = preparation.routed_revision
+        read = tuple(read) if isinstance(read, list) and [type(part) for part in read] == [int, str] else (0, "")
+        held = [m for m in request.thread_history if m.event_id in lone and INCOMPLETE_TEXT_KEY not in m.content]
+        newer = [m.body for m in held if m.edited_timestamp and (m.edited_timestamp, m.latest_event_id) > read]
+        preparation = replace(preparation, prompt=newer[0]) if newer else preparation
         payload = await self._build_payload(preparation, thread_history=request.thread_history)
 
         prepared_payload = await self.ingress_hook_runner.apply_message_enrichment(

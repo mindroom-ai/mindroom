@@ -15,6 +15,7 @@ from mindroom.constants import (
     PER_FIRE_THREAD_ROOT_KEY,
     ROUTE_EVENT_TYPE,
     ROUTE_PROMPT_STRUCTURED_KEY,
+    ROUTE_REVISION_KEY,
     ROUTE_TOO_LARGE_KEY,
     ROUTE_TOO_LARGE_NOTICE,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
@@ -212,22 +213,13 @@ async def _router_handoff_with_attachments(
             routed_media_events.append(event)
     if not routed_media_events:
         return extra_content
+    register = deps.normalizer.register_routed_attachment
+    registered = await asyncio.gather(
+        *(register(room_id=room_id, thread_id=thread_id, event=media_event) for media_event in routed_media_events),
+    )
     routed_attachment_ids = merge_attachment_ids(
         parse_attachment_ids_from_event_source({"content": extra_content}),
-        [
-            attachment_id
-            for attachment_id in await asyncio.gather(
-                *(
-                    deps.normalizer.register_routed_attachment(
-                        room_id=room_id,
-                        thread_id=thread_id,
-                        event=media_event,
-                    )
-                    for media_event in routed_media_events
-                ),
-            )
-            if attachment_id is not None
-        ],
+        [attachment_id for attachment_id in registered if attachment_id is not None],
     )
     if routed_attachment_ids:
         extra_content[ATTACHMENT_IDS_KEY] = routed_attachment_ids
@@ -271,15 +263,7 @@ async def execute_router_relay(  # noqa: PLR0911
     replayed = await _earlier_attempt_outcome(deps, room.room_id, event.event_id)
     if replayed is not None:
         return replayed
-    suggested_entity = await _select_responder(
-        deps,
-        room,
-        event,
-        thread_history,
-        thread_id,
-        message,
-        requester_user_id,
-    )
+    suggested_entity = await _select_responder(deps, room, event, thread_history, thread_id, message, requester_user_id)
     if suggested_entity is None:
         await deps.visible_responses.settle_source_events_ignored(source_turn)
         return False
@@ -346,6 +330,8 @@ async def execute_router_relay(  # noqa: PLR0911
     content: dict[str, Any] = {**routed_extra_content, ROUTE_EVENT_TYPE: route, **transcripts}
     # The route carries its steward's whole prompt or, past what a responder reads of its long-text file, a notice.
     content |= {"body": message or event.body, ROUTE_PROMPT_STRUCTURED_KEY: prompt_is_structured}
+    # Which edit of a lone message that prompt is, when the message took one while it waited.
+    content |= {key: event.source["content"][key] for key in (ROUTE_REVISION_KEY,) if key in event.source["content"]}
     readable = len(json.dumps(content, ensure_ascii=False, separators=(",", ":")).encode()) <= MXC_TEXT_MAX_BYTES
     content |= {} if readable else {"body": ROUTE_TOO_LARGE_NOTICE, ROUTE_TOO_LARGE_KEY: True}
     event_id = await deps.delivery_gateway.send_route(room.room_id, content)

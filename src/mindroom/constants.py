@@ -1074,6 +1074,10 @@ ROUTE_PROMPT_FILE_KEY = "io.mindroom.route_prompt_file"
 # In a route's content: the turn is too long to read, and its responder posts ROUTE_TOO_LARGE_NOTICE instead of a reply.
 ROUTE_TOO_LARGE_KEY = "io.mindroom.route_too_large"
 ROUTE_TOO_LARGE_NOTICE = "Your message is too long for me to read."
+# In a waiting message's content and its route's: the sender's edit its text is, as [origin_server_ts, event ID].
+ROUTE_REVISION_KEY = "io.mindroom.route_revision"
+# In a projected message's content: its body ends in a notice of text, a file's or a later edit's, that was not read.
+INCOMPLETE_TEXT_KEY = "io.mindroom.incomplete_text"
 # In a route's content: the steward's transcript of each voice message it routes, by event ID.
 ROUTE_VOICE_TRANSCRIPTS_KEY = "io.mindroom.voice_transcripts"
 # Transcripts over this many encoded bytes are left to the responder's own checkpoint.

@@ -8478,17 +8478,15 @@ async def test_a_route_is_answered_with_the_text_it_carries_whatever_the_person_
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research")
     harness.runtime.client.room_get_event = AsyncMock(return_value=nio.RoomGetEventError("unreadable"))
-    route = _route_message(
-        config,
-        steward="research",
-        thread_id="$question:localhost",
-        body="could you help with this?",
-    )
+    content = _route_content(config, thread_id="$question:localhost", body="could you help with this?")
+    content[constants.ROUTE_REVISION_KEY] = [1_000_001, "$correction:localhost"]
 
-    await harness.deliver(room, route)
+    await harness.deliver(room, _route_as_delivered(config, content, steward="research"))
 
     [request] = harness.runner.requests
     assert request.prompt == "could you help with this?"
+    # Which edit that text is reaches the step that reads the thread, where a newer one may stand in for it.
+    assert request.payload_preparation.routed_revision == [1_000_001, "$correction:localhost"]
     harness.runtime.client.room_get_event.assert_not_awaited()
 
 
@@ -8763,6 +8761,10 @@ async def test_a_correction_a_waiting_message_took_survives_a_restart(
             request.prompt for request in restarted.runner.requests
         ]
         assert answered == ["July, not June."]
+        # The replayed message still says which edit its text is, so its route does too.
+        assert [route[constants.ROUTE_REVISION_KEY] for route in restarted.gateway.routes] == [
+            [1_000_001, edit.event_id] for _ in restarted.gateway.routes
+        ]
 
         await replay.settle_intentionally_ignored_turn_sources((original.event_id,))
         idle, settled = process("idle")
@@ -8807,6 +8809,8 @@ async def test_a_steward_routes_a_message_as_its_sender_edited_it_while_it_waite
     [route] = harness.gateway.routes
     assert route[constants.ROUTE_EVENT_TYPE]["event_ids"] == [original.event_id]
     assert route["body"] == corrected
+    # The route says which edit its text is, so its responder takes no older one of its own for a correction.
+    assert route[constants.ROUTE_REVISION_KEY] == [1_000_001, edit.event_id]
 
 
 @pytest.mark.asyncio
@@ -8874,6 +8878,8 @@ async def test_a_steward_routes_the_prompt_it_read(tmp_path: Path, monkeypatch: 
     turn = harness.gate_batches[0]
     assert carried["body"] == turn.event.body == "What day did I say?"
     assert carried[constants.ROUTE_PROMPT_STRUCTURED_KEY] is turn.current_prompt_is_structured
+    # No edit made this text, so the route names none.
+    assert constants.ROUTE_REVISION_KEY not in carried
     assert oversize["body"] == large
 
 

@@ -681,6 +681,7 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.conversation_hydration"
 depends_on = [
+    "mindroom.constants",
     "mindroom.runtime_protocols",
     "mindroom.event_journal",
     "mindroom.matrix.message_content",
@@ -6271,6 +6272,7 @@ visibility = ["mindroom.turns.ingress"]
 [[modules]]
 path = "mindroom.response_payload_preparation"
 depends_on = [
+    "mindroom.constants",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.thread_history_result",
     "mindroom.reply_turn.request",
@@ -6374,6 +6376,7 @@ visibility = ["mindroom.bot"]
 [[modules]]
 path = "mindroom.turns.ingress"
 depends_on = [
+    "mindroom.constants",
     "mindroom.approval.inbound",
     "mindroom.approval.tool_approval",
     "mindroom.coalescing.ingress_ticket",

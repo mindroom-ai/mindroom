@@ -19,6 +19,7 @@ from mindroom.coalescing.batch import (
 from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
 from mindroom.coalescing.ingress_ticket import IngressTicket
 from mindroom.commands.parsing import CommandType
+from mindroom.constants import ROUTE_REVISION_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import (
     DispatchEvent,
@@ -412,7 +413,7 @@ class TurnIngress:
             source_event_id=original_event_id,
             sender=event.sender,
             body=body,
-            new_content=content,
+            new_content={**content, ROUTE_REVISION_KEY: [event.server_timestamp, event.event_id]},
             for_another_participant=self._mentions_another_participant(room, {"content": content}),
         )
         if edited is None:

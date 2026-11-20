@@ -104,6 +104,9 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     The responder's current message is that prompt, and the messages the route names are left out of the thread history beside it.
     The responder reads the prompt from the route or from the route's file, and never makes one from the messages the route names.
     One exception keeps what the visible relay did: when a route names a single message and the responder's own thread already holds a newer edit of it by its sender, the responder answers that edit's text, with no fetch from the homeserver.
+    Newer means strictly after the edit the route's prompt was made from, ordered by `origin_server_ts` and then event ID as the projection orders revisions: a message that takes an edit while it waits keeps that edit's time and ID under `io.mindroom.route_revision`, and its route carries them.
+    A route without them was made from the original message, so any edit by the sender is newer.
+    An edit the responder could not read whole, whose long-text file or own later edit was unreadable, is marked `io.mindroom.incomplete_text` in the projection and never stands in for the route's prompt.
     While it cannot read the file, and for a route without a `body`, it starts no turn and leaves the route pending.
     No model is ever sent a preview or a stand-in text.
     Writer and reader share one size limit, the most a responder downloads of a long-text file: a steward whose serialized route would pass it sends the route with a notice in the prompt's place and the `io.mindroom.route_too_large` mark, and the responder posts that notice to the person as its answer without asking a model.

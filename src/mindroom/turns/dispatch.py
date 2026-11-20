@@ -18,6 +18,7 @@ from mindroom.constants import (
     ROUTE_EVENT_TYPE,
     ROUTE_PROMPT_FILE_KEY,
     ROUTE_PROMPT_STRUCTURED_KEY,
+    ROUTE_REVISION_KEY,
     ROUTE_TOO_LARGE_KEY,
     ROUTE_TOO_LARGE_NOTICE,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
@@ -1082,6 +1083,7 @@ class TurnDispatcher:
                 target_member_names=target_member_names,
                 dispatch_started_at=dispatch_started_at,
                 context_ready_monotonic=context_ready_monotonic,
+                routed_revision=event.source["content"].get(ROUTE_REVISION_KEY),
             )
 
             response_request = ResponseRequest(
