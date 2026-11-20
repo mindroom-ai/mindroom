@@ -218,7 +218,6 @@ class LoadedPlugin:
         # The running bots: a reader of the kit's own, in every room and a member of none, and each agent, team or
         # owner account a room lists among its members, in the rooms that list it.
         self._bots: dict[str, AgentBot] = {}
-        self._clients: dict[str, nio.AsyncClient] = {}
         self._client = self._bot_client("", f"@plugin-testing-reader-{uuid4().hex}:localhost")
         self._app = FastAPI()
         state = ensure_app_state(self._app)
@@ -258,8 +257,8 @@ class LoadedPlugin:
         for user_id, name in {self._client.user_id: "", **self._entity_names}.items():
             if name == "" or user_id in members:
                 self._bot_client(name, user_id).rooms[room_id] = nio.MatrixRoom(room_id, user_id)
-            elif name in self._clients:
-                self._clients[name].rooms.pop(room_id, None)
+            elif name in self._bots:
+                self._bot_client(name, user_id).rooms.pop(room_id, None)
         if key is not None:
             update_matrix_state(self.runtime_paths, lambda state: state.add_room(key, room_id, "", key))
         # The next decision reads every room again, as membership events make the bots do live.
@@ -268,7 +267,7 @@ class LoadedPlugin:
 
     def _bot_client(self, name: str, user_id: str) -> nio.AsyncClient:
         """Return the client of the stand-in for the running bot of that entity name, which reads the rooms it is in."""
-        if name not in self._clients:
+        if name not in self._bots:
             rooms: dict[str, nio.MatrixRoom] = {}
 
             async def joined_rooms() -> nio.JoinedRoomsResponse:
@@ -293,9 +292,8 @@ class LoadedPlugin:
                 hook_context=_StandIn("bot hooks", send_message=self._send),
                 admission_fence=nullcontext,
             )
-            self._clients[name] = cast("nio.AsyncClient", client)
             self._bots[name] = cast("AgentBot", bot)
-        return self._clients[name]
+        return cast("nio.AsyncClient", self._bots[name].client)
 
     def client(self, user_id: str | None = None) -> TestClient:
         """Return a test client of the plugin's routes, signed in as ``user_id`` with a client session when given."""

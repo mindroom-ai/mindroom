@@ -135,6 +135,9 @@ def test_a_rooms_bots_are_the_entities_among_its_members_and_no_owner_runs_unask
     assert set(plugin._bots) == {"", "helper", ROUTER_AGENT_NAME}
     assert list(plugin._bots[ROUTER_AGENT_NAME].client.rooms) == ["!owned:example.org"]
 
+    plugin.add_room(ROOM, members={ALICE: "Alice"})
+    assert ROOM not in plugin._bots["helper"].client.rooms
+
 
 @pytest.mark.asyncio
 async def test_tool_call_answers_with_the_plugin_settings_and_the_gate_declines(plugin: LoadedPlugin) -> None:
