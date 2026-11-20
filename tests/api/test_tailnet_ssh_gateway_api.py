@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import threading
 import time
 from contextlib import asynccontextmanager, nullcontext
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
@@ -48,7 +50,14 @@ from mindroom.runtime_env_policy import (
     worker_extra_env,
 )
 from mindroom.tailnet_ssh import links as link_service
-from mindroom.tailnet_ssh.links import ConnectRefused, GatewayStatus, LinkStatus, _GatewayReport, _resolve_target
+from mindroom.tailnet_ssh.links import (
+    ConnectRefused,
+    GatewayStatus,
+    LinkReport,
+    LinkStatus,
+    _GatewayReport,
+    _resolve_target,
+)
 from mindroom.tailnet_ssh.store import Link, new_link, read_links, update_links
 from mindroom.worker_computer.sessions import ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
@@ -58,7 +67,6 @@ from tests.test_computer_sessions import authorized_target
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
-    from pathlib import Path
 
 ALICE = "@alice:example.org"
 AUTH = {"Authorization": "Bearer tok"}
@@ -72,6 +80,8 @@ CALLS: list[tuple[str, str, dict[str, object] | None]] = [
 ROUTES = [(method, path) for method, path, _body in CALLS]
 LOGIN_URL = "https://login.tailscale.com/a/1c0ffee"
 BAD_BODY = "The request body is not what the gateway contract describes."
+# What the Go gateway's own tests parse and send; the two sides are checked against each other nowhere else.
+GATEWAY_FIXTURES = Path(__file__).parents[2] / "tailnet-gateway" / "testdata"
 # Bodies neither POST route takes: not JSON, not an object, and an object without the route's fields.
 BAD_BODIES = [
     (path, body)
@@ -409,6 +419,53 @@ def test_connect_of_an_unknown_link_is_the_services_404(client: TestClient) -> N
     response = client.post("/links/abc/connect", headers=AUTH, json=PEER)
 
     assert (response.status_code, response.json()) == (404, {"detail": "No such link."})
+
+
+def test_the_go_gateways_fixtures_are_what_this_listener_takes_and_answers(
+    api_app: FastAPI,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bodies the Go gateway sends are read field by field, and ``GET /links`` answers rows it can parse."""
+    status_body = (GATEWAY_FIXTURES / "status.json").read_bytes()
+    connect_body = (GATEWAY_FIXTURES / "connect.json").read_bytes()
+    gateway_rows = json.loads((GATEWAY_FIXTURES / "links.json").read_bytes())
+    sent_peer = json.loads(connect_body)
+    ((link_id, sent_report),) = json.loads(status_body)["links"].items()
+    link = _stored_link(api_app)
+    _config, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
+    update_links(paths, lambda book: setattr(book.by_id(link.id), "id", link_id))
+    peers: list[tuple[object, ...]] = []
+
+    async def connect(*args: object) -> tuple[str, int]:
+        peers.append(args[-3:])
+        return ("10.0.0.5", 2222)
+
+    monkeypatch.setattr(tailnet_ssh_gateway, "connect", connect)
+
+    rows = client.get("/links", headers=AUTH).json()
+    posted = client.post("/status", headers=AUTH, content=status_body)
+    connected = client.post(f"/links/{link_id}/connect", headers=AUTH, content=connect_body)
+
+    # A field the listener does not know would be dropped without a word, so each one is read back.
+    assert (posted.status_code, posted.content) == (204, b"")
+    status = tailnet_ssh_status(api_app)
+    assert status is not None
+    assert status.report.enrollment == json.loads(status_body)["enrollment"] == "auth_key"
+    assert sent_report.keys() == LinkReport.model_fields.keys()
+    assert None not in sent_report.values()
+    report = status.report.links[link_id]
+    assert {field: getattr(report, field) for field in sent_report} == sent_report
+    assert (connected.status_code, connected.json()) == (200, {"host": "10.0.0.5", "port": 2222})
+    assert peers == [(link_id, sent_peer["peer_login"], sent_peer["peer_node"])]
+    # The rows have the keys and value types of the ones the Go client's test parses.
+    assert [row["id"] for row in rows] == [link_id]
+    assert {row["desired"] for row in gateway_rows} == {"on", "removing"}
+    for row in rows:
+        assert all(row.keys() == gateway_row.keys() for gateway_row in gateway_rows)
+        for key, value in row.items():
+            assert type(value) in {type(gateway_row[key]) for gateway_row in gateway_rows}, key
+    assert {type(gateway_row["allowed_login"]) for gateway_row in gateway_rows} == {str, type(None)}
 
 
 @pytest.mark.parametrize(("method", "path", "body"), CALLS)
