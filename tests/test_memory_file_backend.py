@@ -1895,6 +1895,113 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
     assert (await preamble(thread)).startswith("Edited header")
 
 
+async def _conversation_preamble(config: Config, conversation: ConversationRef | None) -> str:
+    prompt_parts = await public_build_memory_prompt_parts(
+        "What should I remember?",
+        "general",
+        config,
+        runtime_paths_for(config),
+        current_execution_identity(),
+        conversation=conversation,
+        counter=fake_token_counter(),
+    )
+    return prompt_parts.session_preamble
+
+
+def _memory_file(storage_path: Path, text: str) -> Path:
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    memory_path = workspace / "MEMORY.md"
+    memory_path.write_text(text, encoding="utf-8")
+    return memory_path
+
+
+_ENTRIES = "# Memory\n- [id=m1] Fact one.\n- [id=m2] Fact two.\n- [id=m3] Fact three.\n"
+
+
+@pytest.mark.asyncio
+async def test_file_backend_conversation_keeps_its_entrypoint_after_lines_are_inserted(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Curating MEMORY.md inserts lines at its top or mid-file, which must leave an uncapped copy as sent."""
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    first = await _conversation_preamble(config, thread)
+
+    memory_path.write_text(
+        _ENTRIES.replace("# Memory\n", "# Memory\nNewest note.\n").replace("Fact two.\n", "Fact two.\nMid note.\n"),
+        encoding="utf-8",
+    )
+    assert await _conversation_preamble(config, thread) == first
+    assert "Mid note." in await _conversation_preamble(config, None)
+
+    # Deleting a line the copy shows loads the file again.
+    memory_path.write_text(memory_path.read_text(encoding="utf-8").replace("- [id=m3] Fact three.\n", ""), "utf-8")
+    assert "Fact three." not in await _conversation_preamble(config, thread)
+
+
+@pytest.mark.asyncio
+async def test_file_backend_capped_conversation_reloads_its_entrypoint_after_a_line_is_inserted(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A capped copy keeps main's rule, only lines added at its end, so a line inserted mid-file loads it again."""
+    config.memory.file.max_entrypoint_lines = 3
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    assert "truncated" in await _conversation_preamble(config, thread)
+
+    memory_path.write_text(_ENTRIES.replace("Fact two.\n", "Fact two.\nInserted.\n"), encoding="utf-8")
+    assert "Inserted." in await _conversation_preamble(config, thread)
+
+
+@pytest.mark.asyncio
+async def test_file_backend_conversation_reloads_its_entrypoint_when_its_framing_prompts_change(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A header or kept-copy notice override that only adds a line must reach the conversation."""
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    await _conversation_preamble(config, thread)
+
+    for name in ("FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE", "FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE"):
+        memory_path.write_text(f"# Memory\nNote above {name}.\n" + _ENTRIES.removeprefix("# Memory\n"), "utf-8")
+        config.prompts[name] = f"{PROMPT_DEFAULTS[name]}\nAdded to {name}."
+        assert f"Added to {name}." in await _conversation_preamble(config, thread)
+
+
+@pytest.mark.asyncio
+async def test_file_backend_conversation_clears_its_entrypoint_once_memory_is_emptied(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A copy whose token cap showed no line keeps only a header and marker, which an emptied file must clear."""
+    config.memory.file.max_entrypoint_tokens = 1
+    memory_path = _memory_file(storage_path, "A fact longer than the token cap.\n")
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    assert "showing 0 of 1 lines" in await _conversation_preamble(config, thread)
+
+    memory_path.write_text("", encoding="utf-8")
+    assert await _conversation_preamble(config, thread) == ""
+
+
+@pytest.mark.asyncio
+async def test_file_backend_conversation_keeps_its_entrypoint_whose_first_line_is_indented(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """The preload trims the file's first line, which must not read as an edit once a line is inserted above it."""
+    memory_path = _memory_file(storage_path, "  - [id=m1] Indented fact.\nSecond fact.\n")
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    first = await _conversation_preamble(config, thread)
+    assert "\n- [id=m1] Indented fact." in first
+
+    memory_path.write_text("Newest note.\n" + memory_path.read_text(encoding="utf-8"), encoding="utf-8")
+    assert await _conversation_preamble(config, thread) == first
+
+
 @pytest.mark.asyncio
 async def test_file_backend_entrypoint_preamble_reports_truncated_lines(
     storage_path: Path,
