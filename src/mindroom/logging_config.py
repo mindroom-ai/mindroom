@@ -575,7 +575,7 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
     _route_agno_loggers_to_root(loggers)
     global _previous_excepthook
     if _previous_excepthook is None:
-        # Hooks set later, such as Typer's when a command runs, call this one in turn, so wrapping once is enough.
+        # Once is enough: Typer installs its own hook before running the command that sets up logging.
         _previous_excepthook, sys.excepthook = sys.excepthook, _flush_logs_before_excepthook
     return renderer_name
 
