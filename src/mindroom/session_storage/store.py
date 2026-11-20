@@ -158,6 +158,15 @@ class ConversationStore:
             ).fetchone()
         return None if row is None else decoded_mapping(row[0])
 
+    def has_session(self, session_id: str) -> bool:
+        """Return whether session ``session_id`` has a stored row, without reading its state or runs."""
+        with self.transaction(write=False) as connection:
+            row = connection.execute(
+                f"SELECT 1 FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",  # noqa: S608
+                (session_id,),
+            ).fetchone()
+        return row is not None
+
     def load_session(self, session_id: str) -> ConversationSession | None:
         """Load one session with the runs a reply reasons over, or None when it is missing.
 

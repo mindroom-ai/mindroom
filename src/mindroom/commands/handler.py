@@ -11,6 +11,7 @@ from mindroom.authorization import (
 )
 from mindroom.commands import config_confirmation
 from mindroom.commands.auto_approve_commands import handle_auto_approve_command
+from mindroom.commands.compact_commands import handle_compact_command
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.desktop_commands import (
     DesktopCommandScope,
@@ -88,6 +89,7 @@ COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
         CommandType.DESKTOP,
         CommandType.MODEL,
         CommandType.MODE,
+        CommandType.COMPACT,
         CommandType.ROOM_MODEL,
         CommandType.THREAD_MODE,
         CommandType.REPLY_MODE,
@@ -500,6 +502,20 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     elif command.type == CommandType.MODE:
         response_text = handle_mode_command(
+            command.args.get("args_text", ""),
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            target=MessageTarget.resolve(
+                room.room_id,
+                context.stable_target.source_thread_id or EventInfo.from_event(event.source).thread_id,
+                event.event_id,
+            ),
+            requester_id=requester_user_id,
+            membership_index=context.agent_reply_memberships,
+        )
+
+    elif command.type == CommandType.COMPACT:
+        response_text = await handle_compact_command(
             command.args.get("args_text", ""),
             config=context.config,
             runtime_paths=context.runtime_paths,
