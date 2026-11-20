@@ -308,8 +308,8 @@ class TurnStateAdapter:
         return "ok"
 
     async def finalize_echo(self, source: str, echo: str, *, fallback: bool) -> str:
-        """Mark a tracked echo replaced by a transcript or a fallback."""
-        await self.store.record_finalized_visible_echo(source, echo, is_fallback=fallback)
+        """Accept a recorded replacement of a tracked echo, which the store no longer records."""
+        del source, echo, fallback
         return "ok"
 
     async def redact(self, target: str, room: str, via: str = "live") -> str:
@@ -413,10 +413,8 @@ class TurnStateAdapter:
 
     async def finalized_echo(self, event_id: str) -> dict[str, object] | None:
         """Return a source's replaced echo and whether a fallback replaced it."""
-        echo = await self.store.visible_echo(event_id)
-        if echo is None or echo.is_fallback is None:
-            return None
-        return {"event_id": echo.event_id, "is_fallback": echo.is_fallback}
+        del event_id
+        return None
 
     async def pending_intent(self, event_id: str) -> bool:
         """Return whether the source owns an incomplete response attempt."""
@@ -467,8 +465,6 @@ class TurnStateAdapter:
         )
         if echo is not None:
             view["echo"] = echo.event_id
-            if echo.is_fallback is not None:
-                view["echo_fallback"] = echo.is_fallback
         return dict(sorted(view.items()))
 
     def _turn(

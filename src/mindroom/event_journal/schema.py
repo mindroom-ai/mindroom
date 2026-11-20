@@ -651,6 +651,7 @@ _TABLES = (
         discovery_event_id TEXT,
         prepared_voice_json TEXT,
         visible_echo_event_id TEXT,
+        -- Unused since the answering agent posts a voice transcript once; kept so no migration rewrites the table.
         visible_echo_is_fallback BOOLEAN,
         PRIMARY KEY (agent_name, event_id),
         UNIQUE (agent_name, turn_key, ordinal),

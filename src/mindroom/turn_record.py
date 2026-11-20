@@ -124,11 +124,9 @@ SourceEventRevision = tuple[int, str]
 
 @dataclass(frozen=True)
 class SourceVisibleEcho:
-    """The visible echo published for one voice source, and how its replacement ended."""
+    """The visible echo published for one voice source."""
 
     event_id: str
-    # None until a replacement lands; True when a fallback replaced it, False for a transcript.
-    is_fallback: bool | None = None
 
 
 class RevisionSnapshotChangedError(RuntimeError):

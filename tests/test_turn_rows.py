@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -273,17 +272,10 @@ class TestReshape:
         await write(store, turn_rows.record_prepared_voice, room_id=ROOM, source_event_id="$m2", prepared=VOICE)
 
         batch = await accepted(store, turn(["$m1", "$m2"]))
-        await write(
-            store,
-            turn_rows.record_finalized_visible_echo,
-            source_event_id="$m1",
-            echo_event_id="$echo",
-            is_fallback=False,
-        )
 
         assert batch.visible_echoes == {"$m1": SourceVisibleEcho("$echo")}
         assert batch.prepared_voice_sources == {"$m2": VOICE}
-        assert await read(store, turn_rows.visible_echo, "$m1") == SourceVisibleEcho("$echo", is_fallback=False)
+        assert await read(store, turn_rows.visible_echo, "$m1") == SourceVisibleEcho("$echo")
 
     async def test_a_pending_write_stores_the_checkpoint_and_echo_it_carries_and_keeps_stored_ones(
         self,
@@ -295,7 +287,7 @@ class TestReshape:
 
         again = await accepted(
             store,
-            turn(["$v"], voice={"$v": other}, echoes={"$v": SourceVisibleEcho("$other-echo", is_fallback=True)}),
+            turn(["$v"], voice={"$v": other}, echoes={"$v": SourceVisibleEcho("$other-echo")}),
         )
 
         assert first.prepared_voice_sources == {"$v": VOICE}
@@ -724,13 +716,6 @@ class TestCompletion:
         await accepted(store, turn(["$v1", "$v2"]))
         for source, echo in (("$v1", "$echo1"), ("$v2", "$echo2")):
             await write(store, turn_rows.record_visible_echo, room_id=ROOM, source_event_id=source, echo_event_id=echo)
-            await write(
-                store,
-                turn_rows.record_finalized_visible_echo,
-                source_event_id=source,
-                echo_event_id=echo,
-                is_fallback=False,
-            )
 
         found = await lookup(store, "$v1")
         assert found is not None
@@ -739,46 +724,6 @@ class TestCompletion:
         owner = await read(store, turn_rows.turn_for_response_event, "$echo2")
         assert owner is not None
         assert owner.turn_key == found.turn_key
-
-    async def test_a_write_read_before_the_echo_was_replaced_keeps_the_replacement(
-        self,
-        store: EventJournalStore,
-    ) -> None:
-        """A write carrying the echo as it was before its replacement landed keeps the replacement."""
-        await write(store, turn_rows.record_visible_echo, room_id=ROOM, source_event_id="$v", echo_event_id="$e")
-        stale = await accepted(store, turn(["$v"]))
-        assert stale.visible_echoes == {"$v": SourceVisibleEcho("$e")}
-        await write(
-            store,
-            turn_rows.record_finalized_visible_echo,
-            source_event_id="$v",
-            echo_event_id="$e",
-            is_fallback=False,
-        )
-
-        await write(store, turn_rows.record_responded_turn, replace(stale, response_event_id="$relay"), room_id=ROOM)
-
-        assert await read(store, turn_rows.visible_echo, "$v") == SourceVisibleEcho("$e", is_fallback=False)
-
-    async def test_a_transcript_is_never_overwritten_by_a_fallback(self, store: EventJournalStore) -> None:
-        """A transcript is never overwritten by a fallback."""
-        await write(store, turn_rows.record_visible_echo, room_id=ROOM, source_event_id="$v", echo_event_id="$e")
-        await write(
-            store,
-            turn_rows.record_finalized_visible_echo,
-            source_event_id="$v",
-            echo_event_id="$e",
-            is_fallback=False,
-        )
-        await write(
-            store,
-            turn_rows.record_finalized_visible_echo,
-            source_event_id="$v",
-            echo_event_id="$e",
-            is_fallback=True,
-        )
-
-        assert await read(store, turn_rows.visible_echo, "$v") == SourceVisibleEcho("$e", is_fallback=False)
 
     async def test_command_checkpoints_only_grow(self, store: EventJournalStore) -> None:
         """Command checkpoints only grow."""

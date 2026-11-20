@@ -444,21 +444,6 @@ class TurnStore:
             echo_event_id=echo_event_id,
         )
 
-    async def record_finalized_visible_echo(
-        self,
-        source_event_id: str,
-        echo_event_id: str,
-        *,
-        is_fallback: bool,
-    ) -> None:
-        """Mark a tracked visible echo as successfully replaced; the turn's answer stays as it was."""
-        await self.deps.turn_records.write(
-            turn_rows.record_finalized_visible_echo,
-            source_event_id=source_event_id,
-            echo_event_id=echo_event_id,
-            is_fallback=is_fallback,
-        )
-
     async def claim(self, turn_record: TurnRecord) -> TurnClaim | ClaimRefused | ClaimContended:
         """Claim a turn's sources and aliases for one live owner.
 

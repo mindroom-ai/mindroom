@@ -59,7 +59,7 @@ _TURN_COLUMNS = (
 )
 _SOURCE_COLUMNS = (
     "turn_key, event_id, prompt, selected_rev_ts, selected_rev_id, sender, timestamp_ms, speaker, "
-    "discovery_event_id, prepared_voice_json, visible_echo_event_id, visible_echo_is_fallback"
+    "discovery_event_id, prepared_voice_json, visible_echo_event_id"
 )
 
 # A revision a turn learns about: (revision event id, the event it edits, its timestamp in ms).
@@ -137,7 +137,6 @@ class _Source:
     discovery_event_id: str | None = None
     prepared_voice_json: str | None = None
     visible_echo_event_id: str | None = None
-    visible_echo_is_fallback: bool | None = None
 
     @property
     def selected(self) -> SourceEventRevision | None:
@@ -174,10 +173,6 @@ def fetch_in(transaction: Transaction, sql: str, prefix: tuple[object, ...], val
     return rows
 
 
-def _optional_bool(value: object) -> bool | None:
-    return None if value is None else bool(value)
-
-
 def _turn_from_row(row: Row) -> _Turn:
     return _Turn(
         turn_key=str(row["turn_key"]),
@@ -209,7 +204,6 @@ def _source_from_row(row: Row) -> _Source:
         discovery_event_id=row["discovery_event_id"],
         prepared_voice_json=row["prepared_voice_json"],
         visible_echo_event_id=row["visible_echo_event_id"],
-        visible_echo_is_fallback=_optional_bool(row["visible_echo_is_fallback"]),
     )
 
 
@@ -395,7 +389,7 @@ def _assemble(rows: _Rows) -> TurnRecord:
         ),
         turn_key=turn.turn_key,
         visible_echoes={
-            source.event_id: SourceVisibleEcho(source.visible_echo_event_id, source.visible_echo_is_fallback)
+            source.event_id: SourceVisibleEcho(source.visible_echo_event_id)
             for source in sources
             if source.visible_echo_event_id is not None
         },
@@ -624,11 +618,11 @@ def prepared_voice(transaction: Transaction, agent_name: str, source_event_id: s
 
 
 def visible_echo(transaction: Transaction, agent_name: str, source_event_id: str) -> SourceVisibleEcho | None:
-    """Return the echo published for one physical source, and how its replacement ended."""
+    """Return the echo published for one physical source."""
     found = _source_row(transaction, agent_name, source_event_id)
     if found is None or found[0].visible_echo_event_id is None:
         return None
-    return SourceVisibleEcho(found[0].visible_echo_event_id, found[0].visible_echo_is_fallback)
+    return SourceVisibleEcho(found[0].visible_echo_event_id)
 
 
 # Row writes.
@@ -659,7 +653,7 @@ def _insert_rows(transaction: Transaction, agent_name: str, rows: _Rows) -> None
     for ordinal, source in enumerate(rows.sources):
         transaction.execute(
             f"INSERT INTO turn_sources (agent_name, ordinal, {_SOURCE_COLUMNS}) "  # noqa: S608
-            f"VALUES (?, ?, {_placeholders(range(12))})",
+            f"VALUES (?, ?, {_placeholders(range(11))})",
             (
                 agent_name,
                 ordinal,
@@ -674,7 +668,6 @@ def _insert_rows(transaction: Transaction, agent_name: str, rows: _Rows) -> None
                 source.discovery_event_id,
                 source.prepared_voice_json,
                 source.visible_echo_event_id,
-                source.visible_echo_is_fallback,
             ),
         )
     for alias in rows.aliases:
@@ -719,7 +712,7 @@ def _write_source(transaction: Transaction, agent_name: str, turn_key: str, sour
         """
         UPDATE turn_sources SET
             prompt = ?, selected_rev_ts = ?, selected_rev_id = ?, sender = ?, timestamp_ms = ?, speaker = ?,
-            discovery_event_id = ?, prepared_voice_json = ?, visible_echo_event_id = ?, visible_echo_is_fallback = ?
+            discovery_event_id = ?, prepared_voice_json = ?, visible_echo_event_id = ?
         WHERE agent_name = ? AND turn_key = ? AND event_id = ?
         """,
         (
@@ -732,7 +725,6 @@ def _write_source(transaction: Transaction, agent_name: str, turn_key: str, sour
             source.discovery_event_id,
             source.prepared_voice_json,
             source.visible_echo_event_id,
-            source.visible_echo_is_fallback,
             agent_name,
             turn_key,
             source.event_id,
@@ -917,31 +909,6 @@ def record_visible_echo(
     )
 
 
-def record_finalized_visible_echo(
-    transaction: Transaction,
-    agent_name: str,
-    *,
-    source_event_id: str,
-    echo_event_id: str,
-    is_fallback: bool,
-) -> None:
-    """Mark one source's tracked echo replaced; a transcript is never overwritten by a fallback.
-
-    Echo publication never becomes the turn's answer: its response stays as it was.
-    """
-    found = _source_row(transaction, agent_name, source_event_id)
-    if found is None:
-        return
-    source, turn_key = found
-    if source.visible_echo_event_id != echo_event_id or (source.visible_echo_is_fallback is False and is_fallback):
-        return
-    transaction.execute(
-        "UPDATE turn_sources SET visible_echo_is_fallback = ? WHERE agent_name = ? AND event_id = ?",
-        (is_fallback, agent_name, source_event_id),
-    )
-    _touch(transaction, agent_name, turn_key)
-
-
 def record_placeholder(transaction: Transaction, agent_name: str, *, turn_key: str, response_event_id: str) -> None:
     """Record the visible placeholder an unfinished turn's reply streams into."""
     transaction.execute(
@@ -1117,7 +1084,6 @@ def _detached_turn(room_id: str | None, source: _Source) -> _Rows:
     rows = _new_one_source_turn(room_id, source.event_id)
     rows.sources[0].prepared_voice_json = source.prepared_voice_json
     rows.sources[0].visible_echo_event_id = source.visible_echo_event_id
-    rows.sources[0].visible_echo_is_fallback = source.visible_echo_is_fallback
     return rows
 
 
@@ -1300,7 +1266,6 @@ def _apply_payload(
         echo = (candidate.visible_echoes or {}).get(source.event_id)
         if echo is not None and source.visible_echo_event_id is None:
             source.visible_echo_event_id = echo.event_id
-            source.visible_echo_is_fallback = echo.is_fallback
         if source.event_id in deleted:
             source.prompt = None
             source.prepared_voice_json = None
@@ -1849,7 +1814,6 @@ __all__ = [
     "record_command_result",
     "record_command_started",
     "record_edit",
-    "record_finalized_visible_echo",
     "record_pending_turn",
     "record_placeholder",
     "record_prepared_voice",

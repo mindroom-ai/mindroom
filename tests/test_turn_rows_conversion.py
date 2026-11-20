@@ -347,7 +347,6 @@ _OBSERVABLES = (
     "is_handled",
     "turn_record",
     "visible_echo",
-    "finalized_echo",
     "pending_intent",
     "record_for_response",
     "prepared_voice",
@@ -369,8 +368,6 @@ async def _observe_event(store: EventJournalStore, event_id: str) -> dict[str, A
     echo = await read(store, turn_rows.visible_echo, event_id)
     if echo is not None:
         observed["visible_echo"] = echo.event_id
-        if echo.is_fallback is not None:
-            observed["finalized_echo"] = {"event_id": echo.event_id, "is_fallback": echo.is_fallback}
     if (owner := await read(store, turn_rows.turn_for_response_event, event_id)) is not None:
         observed["record_for_response"] = record_json(owner)
     if (voice := await read(store, turn_rows.prepared_voice, event_id)) is not None:
@@ -639,7 +636,7 @@ async def test_a_legacy_echo_reaches_every_source_and_is_not_an_answer(journal: 
     upgraded = journal.upgraded()
 
     for source in ("$text", "$voice"):
-        assert await read(upgraded, turn_rows.visible_echo, source) == SourceVisibleEcho("$echo", is_fallback=False)
+        assert await read(upgraded, turn_rows.visible_echo, source) == SourceVisibleEcho("$echo")
     routing = await read(upgraded, turn_rows.get_turn_record, "$v2")
     assert routing.response_event_id is None
     assert not routing.completed
