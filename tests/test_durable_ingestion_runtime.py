@@ -26,7 +26,9 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.personal_rooms import PersonalRoomsConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.event_journal import DeliveryStage, RoomMembershipPosition
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+from mindroom.event_journal import DeliveryStage, EventClass, EventKind, RoomMembershipPosition
+from mindroom.hooks import EVENT_BOT_READY, HookRegistry, hook
 from mindroom.matrix._owned_session import MatrixCredentials, open_owned_matrix_session
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from mindroom.matrix.personal_rooms import PersonalRoomService
@@ -36,13 +38,13 @@ from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoor
 from mindroom.personal_room_lifecycle import PersonalRoomTarget
 from mindroom.runtime_shutdown import ShutdownBudget
 from mindroom.scheduling.runtime import ScheduledTaskRuntime
-from tests.bot_helpers import make_matrix_client_mock
+from tests.bot_helpers import _hook_plugin, make_matrix_client_mock
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, legacy_default_store_client, start_call_manager
 from tests.durable_sync_helpers import skip_crypto_maintenance
-from tests.journal_helpers import membership_position
+from tests.journal_helpers import admit_dispatch_event, membership_position
 from tests.matrix_state_helpers import save_matrix_state
 from tests.test_bot_ready_hook import _agent_bot
-from tests.test_durable_ingestion_admission import ROOM, Session
+from tests.test_durable_ingestion_admission import ROOM, Session, message
 from tests.test_event_journal_store import admit, interactive_edit, interactive_prompt, projection
 from tests.test_room_invites import _handle_invite, _live_router_invite_scenario, _pending_room_invites
 
@@ -132,6 +134,105 @@ async def test_personal_room_reconciliation_does_not_delay_sync_ack(
         release.set()
         if preparation is not None:
             await preparation
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slow_side_effect", ["bot_ready_hook", "room_state_reconcile"])
+async def test_slow_first_frame_side_effect_does_not_delay_router_dispatch(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slow_side_effect: str,
+) -> None:
+    """While a bot:ready hook or a room state reconcile runs, the router dispatches its waiting message and the next batch's."""
+    bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+    # Access by listed users needs no grant refresh, so only the first frame's completion releases dispatch.
+    listed_users = ResponderAccessConfig(current_room_members=False, members_of_rooms=[], users=["@alice:localhost"])
+    bot.config.router.access = bot.config.agents["code"].access = listed_users
+    assert not bot.orchestrator.agent_reply_memberships.needs_refresh(bot.config)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    dispatched = asyncio.Event()
+    dispatched_ids: list[str] = []
+
+    @hook(EVENT_BOT_READY)
+    async def slow_ready(_ctx: object) -> None:
+        entered.set()
+        await release.wait()
+
+    async def slow_reconcile(_room_id: str) -> bool:
+        entered.set()
+        await release.wait()
+        return True
+
+    if slow_side_effect == "bot_ready_hook":
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("slow-ready", [slow_ready])],
+        )
+    else:
+        assert bot._router is not None
+        bot._router.mark_joined_for_room_state(ROOM)
+        monkeypatch.setattr(bot._router, "_reconcile_room_state", slow_reconcile)
+
+    async def on_message(_room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
+        dispatched_ids.append(event.event_id)
+        dispatched.set()
+        return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+    bot._journal_dispatcher.callbacks = replace(bot._journal_dispatcher.callbacks, on_message=on_message)
+    # A message an earlier batch of the first frame admitted waits for that frame to complete.
+    waiting = nio.RoomMessageText.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": "$voice:localhost",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1,
+            "content": {"msgtype": "m.text", "body": "hello"},
+        },
+    )
+    await admit_dispatch_event(
+        bot._journal_dispatcher,
+        nio.MatrixRoom(ROOM, bot.agent_user.user_id),
+        waiting,
+        EventKind.MESSAGE,
+        EventClass.ACTIONABLE,
+    )
+    batch = SyncBatch(uuid4(), 1, (), completes_sync=True)
+    next_batch = SyncBatch(batch.stream_id, 2, (message("$next:localhost"),), completes_sync=True)
+    principal = bot.journal_principal()
+    consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
+    await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=batch.stream_id)
+    session = Session(batch)
+
+    async def pump() -> None:
+        """Consume the first frame, then the batch behind it, waking the dispatcher as the pump does."""
+        for following in (next_batch, None):
+            await consume_one_ingestion_batch(
+                session,
+                principal,
+                account_id=bot.agent_user.user_id,
+                after_sync=bot._on_ingestion_frame_completion,
+            )
+            bot._journal_dispatcher.wake()
+            session.batch = following
+
+    frames = asyncio.create_task(pump())
+    try:
+        async with asyncio.timeout(2):
+            await entered.wait()
+            await dispatched.wait()
+            # Neither holds the frame's acknowledgement, so the batch behind it is admitted and dispatched as well.
+            await frames
+            while "$next:localhost" not in dispatched_ids:
+                dispatched.clear()
+                await dispatched.wait()
+        assert session.acked == [batch, next_batch]
+        assert not release.is_set()
+    finally:
+        release.set()
+        await frames
+        await bot._journal_dispatcher.stop()
         await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
 

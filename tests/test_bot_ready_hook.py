@@ -43,7 +43,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.matrix_rtc.call_manager import CallManager
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, ShutdownBudget
 from mindroom.tool_system.plugins import config_plugins
 from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot
@@ -221,6 +221,12 @@ async def _complete_frame(bot: AgentBot) -> None:
     await bot._on_ingestion_frame_completion(True)
 
 
+async def _complete_frame_and_ready_hooks(bot: AgentBot) -> None:
+    """Complete a frame, then let the bot:ready hooks it started in the background finish."""
+    await _complete_frame(bot)
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+
+
 @pytest.mark.asyncio
 async def test_turn_recovery_cleans_ledger_after_reading_unsettled_sources(tmp_path: Path) -> None:
     """Startup cleanup must run after recovery and preserve every raw unsettled source."""
@@ -318,9 +324,43 @@ async def test_bot_ready_fires_on_first_sync_response(tmp_path: Path) -> None:
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        await _complete_frame(bot)
+        await _complete_frame_and_ready_hooks(bot)
 
     assert fired_events == ["bot:ready"]
+
+
+@pytest.mark.asyncio
+async def test_running_bot_ready_hook_leaves_the_shutdown_budget_to_reply_cleanup(tmp_path: Path) -> None:
+    """Stopping cancels a bot:ready hook still running at once, so the replies drained after it keep their time."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock()
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    @hook(EVENT_BOT_READY)
+    async def on_ready(_ctx: AgentLifecycleContext) -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
+    drain = AsyncMock(return_value=True)
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch.object(bot._response_runner.inbox, "drain_inbox_responses", drain),
+    ):
+        await _complete_frame(bot)
+        await asyncio.wait_for(entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        bot._sync_shutdown_budget = ShutdownBudget.start(1.0)
+        await bot.prepare_for_sync_shutdown()
+
+    assert cancelled.is_set()
+    # The drain gets half of what is left of the 1 s budget; a hook waited for would have left it nothing.
+    assert drain.await_args.kwargs["cancel_after_seconds"] > 0.25
 
 
 @pytest.mark.asyncio
@@ -1023,9 +1063,9 @@ async def test_bot_ready_fires_only_once(tmp_path: Path) -> None:
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        await _complete_frame(bot)
-        await _complete_frame(bot)
-        await _complete_frame(bot)
+        await _complete_frame_and_ready_hooks(bot)
+        await _complete_frame_and_ready_hooks(bot)
+        await _complete_frame_and_ready_hooks(bot)
 
     assert fired_count == 1
 
@@ -1076,7 +1116,7 @@ async def test_bot_ready_fires_after_agent_started(tmp_path: Path) -> None:
 
     # bot:ready fires on first sync
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        await _complete_frame(bot)
+        await _complete_frame_and_ready_hooks(bot)
 
     assert event_order == ["agent:started", "bot:ready"]
 
@@ -1103,7 +1143,7 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
         patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send),
     ):
-        await _complete_frame(bot)
+        await _complete_frame_and_ready_hooks(bot)
 
     assert captured_content[SOURCE_KIND_KEY] == "hook"
     assert captured_content["com.mindroom.hook_source"] == "test-plugin:bot:ready"
@@ -1184,18 +1224,18 @@ async def test_bot_ready_fires_after_shutdown_clears(tmp_path: Path) -> None:
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
         # First sync arrives during shutdown — bot:ready suppressed
         bot._runtime_view.begin_draining()
-        await _complete_frame(bot)
+        await _complete_frame_and_ready_hooks(bot)
         assert fired_count == 0
 
         # Shutdown clears (restart)
         bot.mark_sync_loop_started()
 
         # Next sync — bot:ready must fire now
-        await _complete_frame(bot)
+        await _complete_frame_and_ready_hooks(bot)
         assert fired_count == 1
 
         # Subsequent syncs must not re-fire
-        await _complete_frame(bot)
+        await _complete_frame_and_ready_hooks(bot)
         assert fired_count == 1
 
 
@@ -1214,7 +1254,7 @@ async def test_bot_ready_context_has_correct_entity_info(tmp_path: Path) -> None
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        await _complete_frame(bot)
+        await _complete_frame_and_ready_hooks(bot)
 
     assert len(captured_ctx) == 1
     ctx = captured_ctx[0]
@@ -1285,7 +1325,7 @@ async def test_bot_ready_context_includes_joined_rooms_from_first_sync(tmp_path:
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        await _complete_frame(bot)
+        await _complete_frame_and_ready_hooks(bot)
 
     assert len(captured_ctx) == 1
     assert captured_ctx[0].rooms == ("!room:localhost",)

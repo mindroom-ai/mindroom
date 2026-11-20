@@ -249,6 +249,7 @@ class AgentBot:
     last_sync_time: datetime | None
     _last_sync_monotonic: float | None
     _first_sync_done: bool
+    _bot_ready_hooks_task: asyncio.Task[None] | None = None
     _sync_shutdown_budget: ShutdownBudget | None
     _deferred_stop_required: bool
     _deferred_stop_phase: DeferredStopPhase | None
@@ -1379,19 +1380,30 @@ class AgentBot:
         *,
         first_sync_response: bool,
     ) -> None:
-        """Run side effects that do not own raw sync checkpoint safety."""
+        """Run side effects that do not own raw sync checkpoint safety.
+
+        Only the grant refresh is awaited, because sources the first frame releases must find reply grants rebuilt or
+        failed closed, and it waits at most 10 s. Nothing else here decides what a source may do, so the rest runs in
+        background tasks and holds neither dispatch nor this frame's acknowledgement.
+        """
         if self._router is not None:
             await self._router.refresh_memberships_if_needed()
-            await self._router.publish_joined_room_state()
         self._schedule_delivery_recovery()
         self._schedule_handled_turn_cleanup()
         if first_sync_response:
-            await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
+            # Observer hooks may each run until their timeout.
+            self._bot_ready_hooks_task = create_background_task(
+                self._emit_agent_lifecycle_event(EVENT_BOT_READY),
+                name=f"bot_ready_hooks_{self.agent_name}",
+                owner=self._runtime_view,
+            )
         self._personal_room_lifecycle.schedule_reconciliation()
 
         if self._first_sync_done and not self._orchestrator_ready_handled:
             await self.orchestrator.handle_bot_ready(self)
             self._orchestrator_ready_handled = True
+        if self._router is not None:
+            self._router.publish_joined_room_state()
 
     def _before_ingestion_admission(
         self,
@@ -1956,6 +1968,9 @@ class AgentBot:
             self._sync_shutdown_budget = shutdown_budget
         if self._router is not None:
             self._router.stopping()
+        if self._bot_ready_hooks_task is not None:
+            # Waiting for an observer hook would spend the budget the replies drained below need to finish.
+            self._bot_ready_hooks_task.cancel()
         await self._personal_room_lifecycle.cancel_reconciliation(timeout_seconds=shutdown_budget.remaining_seconds())
         background_tasks_completed = await wait_for_background_tasks(
             timeout=shutdown_budget.remaining_seconds(),
