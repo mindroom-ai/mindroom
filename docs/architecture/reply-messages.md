@@ -100,6 +100,13 @@ Tool calls:
 
 - In a team, only the leader is told which tool calls an interrupted attempt made.
 
+Routing:
+
+- A burst of a person's messages that the steward's coalescing queue splits into two turns is routed twice, and each route is answered, by one agent or by two; each message is still answered once.
+- Two bots that both pass the steward check in the same moment, as when the room's power levels change while a message is routed, both route the turn, which can then get two answers.
+- An edit of one of several messages a route names regenerates nothing, as an edit of one of several relayed messages did.
+- At the upgrade from a release with a router, a message the router admitted but had not relayed is not answered, and one whose relay the router sent but had not recorded can be answered twice.
+
 Delivery and recovery:
 
 - A reply write made while its create's outcome is unknown is sized as a plain message and wrapped as an edit only when claimed, so after a homeserver outage an answer near the event size limit can be refused and end with the delivery-failed note.
