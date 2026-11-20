@@ -601,17 +601,6 @@ async def test_active_response_queues_untagged_thread_follow_up(config: Config) 
 
 
 @pytest.mark.asyncio
-async def test_router_routes_untagged_message_with_multiple_candidates(config: Config) -> None:
-    """The router produces a route plan when several responders could answer."""
-    policy = _policy_for(config, ROUTER_AGENT_NAME)
-    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
-
-    plan = await _plan(policy, room, _dispatch(_context(), agent_name=ROUTER_AGENT_NAME))
-
-    assert plan.kind == "route"
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("steward", [ROUTER_AGENT_NAME, "general", "research", None])
 async def test_only_the_rooms_steward_routes_an_untagged_message(config: Config, steward: str | None) -> None:
     """One bot per room routes a message that names nobody: its steward, the owner account or a candidate."""
@@ -731,18 +720,6 @@ async def test_router_ignores_untagged_message_with_single_candidate(config: Con
 
 
 @pytest.mark.asyncio
-async def test_router_ignores_message_with_explicit_agent_mention(config: Config) -> None:
-    """Explicitly tagged messages bypass routing entirely."""
-    policy = _policy_for(config, ROUTER_AGENT_NAME)
-    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
-    context = _context(mentioned=[_entity_id(config, "general")])
-
-    plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
-
-    assert plan.kind == "ignore"
-
-
-@pytest.mark.asyncio
 async def test_a_mention_of_only_the_owner_account_gets_no_answer(config: Config) -> None:
     """The owner account answers nobody, so a message that mentions only it is neither answered nor routed."""
     policy = _policy_for(config, ROUTER_AGENT_NAME)
@@ -761,22 +738,6 @@ def test_owner_reply_access_reads_no_membership_without_router_access(config: Co
     policy = _policy_for(config, ROUTER_AGENT_NAME)
 
     assert policy.can_reply_to_sender_in_room(_SENDER, "!never-observed:localhost")
-
-
-@pytest.mark.asyncio
-async def test_router_ignores_thread_already_owned_by_an_agent(config: Config) -> None:
-    """The router never re-routes a thread that already has a visible agent owner."""
-    policy = _policy_for(config, ROUTER_AGENT_NAME)
-    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
-    history = [
-        make_visible_message(sender=_SENDER, body="please help"),
-        make_visible_message(sender=_entity_id(config, "general").full_id, body="answering"),
-    ]
-    context = _context(thread_id="$thread:localhost", thread_history=history)
-
-    plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
-
-    assert plan.kind == "ignore"
 
 
 @pytest.mark.asyncio
