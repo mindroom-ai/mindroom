@@ -321,6 +321,17 @@ CORS for `/api/client-sessions`, `/api/plugins`, `/api/plugins/`, `/api/call-tra
 Browsers let only those origins read these paths' responses, with credentials off, and every response carries `Cache-Control: no-store`; behind a proxy that serves MindRoom under a root path, the paths are matched below that root path.
 CORS limits which pages may read a response, not which requests reach MindRoom: a simple request from any origin still reaches a public plugin route.
 
+## Tailnet SSH
+
+Tailnet SSH is on only while the primary has `MINDROOM_TAILNET_SSH_GATEWAY_TOKEN`.
+The primary then serves the gateway's three routes on a listener of their own, `MINDROOM_TAILNET_SSH_PORT` (default 8769), which must differ from the API's port and the script gateway's; that app holds no other route, and a request without `Authorization: Bearer <token>` gets the same 401 on every path, before a route is matched or a body read.
+The token is a control-plane variable, so it is in no worker's or tool request's environment and never passed through to a shell.
+Only a dedicated worker per person and agent gets the tailnet SSH mark and its port 2222, and only for an agent that opts in, whose workspace is that person's alone, and that mounts no shared directory another agent owns; a Docker worker's port is published only on `publish_host`, and never when that is a wildcard address.
+A worker's sshd never starts at boot: the primary asks the runner to start it only for a connect it has passed, for a link that is on, a peer whose Tailscale login the link admits, a link eligible now, and the worker the person's turns of that agent run in.
+Before it starts sshd, the primary writes `sshd_config`, `authorized_keys` with every line `restrict,pty`, and the link's own Ed25519 host private key into `<worker root>/.runtime/ssh/`, which the worker mounts read-only, so worker code can read the host key, as sshd's own uid, but cannot change what sshd admits.
+The links, each person's SSH public keys, and every link's host private key live in `tracking/tailnet_ssh.json`, which only the primary reads and no worker mounts.
+A removed key, portal or operator, and a disconnected or removed link move the link's `closed_before`, which tells the gateway to close the sessions opened before it.
+
 ## Known gaps
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
@@ -341,6 +352,7 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
   The one-time merge of the team memory copies earlier releases kept there refuses a member store holding a link when it starts, but not a link swapped in while Chroma opens it.
   Chroma also bundles its own SQLite 3.46, so a journal planted beside that store makes the primary delete the file the journal names when Chroma next opens it.
   Only code in the Kubernetes `static_runner` sidecar can write below `agents/`, and team memory itself lives in `team_memory/`, which no worker mounts.
+- A disconnected tailnet SSH link's sshd and files stay in its worker until the worker stops, so port 2222 stays reachable directly on the worker network, such as Docker's bridge, with a key `authorized_keys` still lists.
 
 ## Intentional behaviors
 

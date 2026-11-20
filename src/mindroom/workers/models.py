@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal, get_args
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
     from uuid import UUID
 
     from mindroom.agent_policy import ResolvedAgentPolicy
@@ -18,6 +19,9 @@ WorkerStatus = Literal["starting", "ready", "idle", "failed"]
 WorkerReadyPhase = Literal["cold_start", "waiting", "ready", "failed"]
 ScriptResourceProfileName = Literal["small", "standard", "large"]
 SCRIPT_RESOURCE_PROFILE_NAMES: frozenset[ScriptResourceProfileName] = frozenset(get_args(ScriptResourceProfileName))
+# The port a worker's sshd listens on, and the label on a container whose launch passed the tailnet SSH rule.
+WORKER_SSH_PORT = 2222
+LABEL_TAILNET_SSH = "mindroom.ai/tailnet-ssh"
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +72,18 @@ class WorkerSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerSshEndpoint:
+    """Where a worker launched with the tailnet SSH mark serves sshd.
+
+    ``projection_dir`` is the primary's path to the worker's ``.runtime/ssh``, which sshd reads its files from.
+    """
+
+    host: str
+    port: int
+    projection_dir: Path
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerHandle:
     """Generic worker handle used by the execution layer."""
 
@@ -84,6 +100,7 @@ class WorkerHandle:
     failure_count: int = 0
     failure_reason: str | None = None
     debug_metadata: dict[str, str] = field(default_factory=dict)
+    ssh_endpoint: WorkerSshEndpoint | None = None
 
 
 @dataclass(frozen=True, slots=True)

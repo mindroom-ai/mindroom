@@ -24,7 +24,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import httpx
 
@@ -40,6 +40,7 @@ from mindroom.runtime_env_policy import (
     isolated_worker_runtime_env,
     worker_extra_env,
 )
+from mindroom.tailnet_ssh.eligibility import ssh_eligible_launch
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,
     worker_log_id,
@@ -69,9 +70,10 @@ from mindroom.workers.backends.kubernetes_pod_names import (
     WORKER_STORAGE_VOLUME_NAME,
     WORKER_TMP_VOLUME_NAME,
 )
+from mindroom.workers.models import LABEL_TAILNET_SSH, WORKER_SSH_PORT
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.config.main import Config
@@ -189,6 +191,14 @@ class KubernetesDeployment(Protocol):
     def status(self) -> _KubernetesDeploymentStatus: ...  # noqa: D102
 
 
+@dataclass(frozen=True, slots=True)
+class _AppliedDeployment:
+    """What applying one worker Deployment did; ``ssh`` says the template it rendered has the tailnet SSH mark."""
+
+    recreated: bool
+    ssh: bool
+
+
 @dataclass(slots=True)
 class _DeploymentMetadataSnapshot:
     name: str
@@ -293,8 +303,6 @@ class _CoreApiProtocol(Protocol):
 
     def create_namespaced_service(self, namespace: str, body: dict[str, object]) -> object: ...
 
-    def patch_namespaced_service(self, name: str, namespace: str, body: dict[str, object]) -> object: ...
-
     def delete_namespaced_service(self, name: str, namespace: str) -> None: ...
 
     def read_namespaced_secret(self, name: str, namespace: str) -> object: ...
@@ -308,9 +316,14 @@ class _CoreApiProtocol(Protocol):
     def read_namespaced_pod(self, name: str, namespace: str) -> _KubernetesPod: ...
 
 
+def service_dns_name(service_name: str, namespace: str) -> str:
+    """Return the cluster-local DNS name of one worker Service."""
+    return f"{service_name}.{namespace}.svc.cluster.local"
+
+
 def service_host(service_name: str, namespace: str, port: int) -> str:
     """Return the cluster-local HTTP root for one worker Service."""
-    return f"http://{service_name}.{namespace}.svc.cluster.local:{port}"
+    return f"http://{service_dns_name(service_name, namespace)}:{port}"
 
 
 def worker_auth_token(shared_token: str | None, worker_key: str) -> str | None:
@@ -704,14 +717,18 @@ class KubernetesResourceManager:
                 return None
             raise
 
-    def apply_service(self, worker_id: str) -> None:
-        """Create-or-patch one worker Service."""
+    def apply_service(self, worker_id: str, *, ssh: bool) -> None:
+        """Create-or-patch one worker Service, with the sshd port when the worker has the tailnet SSH mark.
+
+        The patch is a JSON merge patch, which replaces the port list.
+        The client's default strategic merge keeps a port the manifest no longer names, such as a lost mark's 2222.
+        """
         self._apply_object(
             read_fn=self._core.read_namespaced_service,
             create_fn=self._core.create_namespaced_service,
-            patch_fn=self._core.patch_namespaced_service,
+            patch_fn=lambda name, _namespace, body: self._merge_patch("services", name, body),
             resource_name=worker_id,
-            manifest=self._service_manifest(worker_id),
+            manifest=self._service_manifest(worker_id, ssh=ssh),
         )
 
     def apply_auth_secret(self, *, worker_key: str, worker_id: str) -> None:
@@ -751,10 +768,11 @@ class KubernetesResourceManager:
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
         recreate: bool = False,
-    ) -> bool:
+    ) -> _AppliedDeployment:
         """Create-or-patch one worker Deployment, recreating it for pod-template drift or when asked.
 
-        Returns whether the Deployment was recreated.
+        Returns whether the Deployment was recreated, and the tailnet SSH mark of the template rendered for it,
+        which the worker's Service follows.
         """
         manifest = self._deployment_manifest(
             worker_key=worker_key,
@@ -767,17 +785,18 @@ class KubernetesResourceManager:
             state_scope_worker_key=state_scope_worker_key,
             resource_profile=resource_profile,
         )
+        desired_metadata = cast("dict[str, object]", manifest.get("metadata", {}))
+        ssh = cast("dict[str, str]", desired_metadata["labels"]).get(LABEL_TAILNET_SSH) == "true"
         existing = self.read_deployment(worker_id)
         if existing is not None:
             existing_annotations = existing.metadata.annotations or {}
-            desired_metadata = cast("dict[str, object]", manifest.get("metadata", {}))
             desired_annotations = cast("dict[str, str]", desired_metadata.get("annotations", {}))
             if (
                 recreate
                 or existing_annotations.get(ANNOTATION_TEMPLATE_HASH) != desired_annotations[ANNOTATION_TEMPLATE_HASH]
             ):
                 self._recreate_deployment(worker_id, manifest, timeout_seconds=self.config.ready_timeout_seconds)
-                return True
+                return _AppliedDeployment(recreated=True, ssh=ssh)
         self._apply_object(
             read_fn=self._apps.read_namespaced_deployment,
             create_fn=self._apps.create_namespaced_deployment,
@@ -785,7 +804,7 @@ class KubernetesResourceManager:
             resource_name=worker_id,
             manifest=manifest,
         )
-        return False
+        return _AppliedDeployment(recreated=False, ssh=ssh)
 
     def patch_deployment(
         self,
@@ -913,11 +932,15 @@ class KubernetesResourceManager:
         self._delete_object(self._core.delete_namespaced_secret, secret_name)
 
     def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:
+        self._merge_patch("secrets", secret_name, body)
+
+    def _merge_patch(self, resource: Literal["secrets", "services"], name: str, body: dict[str, object]) -> None:
+        """Send one JSON merge patch (RFC 7386), under which a list in ``body`` replaces the stored one."""
         api_client = self._core.api_client
         api_client.call_api(
-            "/api/v1/namespaces/{namespace}/secrets/{name}",
+            f"/api/v1/namespaces/{{namespace}}/{resource}/{{name}}",
             "PATCH",
-            {"name": secret_name, "namespace": self.config.namespace},
+            {"name": name, "namespace": self.config.namespace},
             [],
             {
                 "Accept": api_client.select_header_accept(
@@ -928,7 +951,7 @@ class KubernetesResourceManager:
             body=body,
             post_params=[],
             files={},
-            response_type="V1Secret",
+            response_type={"secrets": "V1Secret", "services": "V1Service"}[resource],
             auth_settings=["BearerToken"],
             _return_http_data_only=True,
             _preload_content=True,
@@ -1071,8 +1094,13 @@ class KubernetesResourceManager:
         self.core_api = cast("_CoreApiProtocol", kubernetes_client.CoreV1Api())
         self.api_exception_cls = cast("type[_ApiStatusError]", kubernetes_exceptions.ApiException)
 
-    def _service_manifest(self, worker_id: str) -> dict[str, object]:
+    def _service_manifest(self, worker_id: str, *, ssh: bool) -> dict[str, object]:
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
+        ports: list[dict[str, object]] = [
+            {"name": "api", "port": self.config.worker_port, "targetPort": self.config.worker_port},
+        ]
+        if ssh:
+            ports.append({"name": "ssh", "port": WORKER_SSH_PORT, "targetPort": WORKER_SSH_PORT})
         metadata: dict[str, object] = {
             "name": worker_id,
             "namespace": self.config.namespace,
@@ -1087,13 +1115,7 @@ class KubernetesResourceManager:
             "metadata": metadata,
             "spec": {
                 "selector": worker_labels,
-                "ports": [
-                    {
-                        "name": "api",
-                        "port": self.config.worker_port,
-                        "targetPort": self.config.worker_port,
-                    },
-                ],
+                "ports": ports,
             },
         }
 
@@ -1183,6 +1205,23 @@ class KubernetesResourceManager:
         recorded_hash = dict(deployment.metadata.annotations or {}).get(ANNOTATION_TEMPLATE_HASH)
         return recorded_hash != _template_hash(template)
 
+    def ssh_marked(
+        self,
+        worker_key: str,
+        *,
+        launch: WorkerLaunchConfig,
+        private_agent_names: frozenset[str] | None,
+        state_scope_worker_key: str | None,
+        shared_mounts: Sequence[SharedDirectoryMount],
+    ) -> bool:
+        """Return whether a launch with ``shared_mounts`` gets the tailnet SSH mark; a pinned worker never does."""
+        return resolve_state_scope_worker_key(worker_key, state_scope_worker_key) == worker_key and ssh_eligible_launch(
+            worker_key,
+            launch,
+            private_agent_names,
+            shared_mounts,
+        )
+
     def _pod_template(
         self,
         *,
@@ -1215,6 +1254,22 @@ class KubernetesResourceManager:
             msg = "A worker auth token is required for Kubernetes workers."
             raise WorkerBackendError(msg)
         template_annotations[_ANNOTATION_RUNNER_TOKEN_HASH] = token_hash
+        container_ports: list[dict[str, object]] = [{"containerPort": self.config.worker_port, "name": "api"}]
+        # One plan gives the shared mounts and the SSH mark, so a marked pod never mounts another agent's directory.
+        shared_mounts = self.plan_shared_directory_mounts(
+            worker_key,
+            state_scope_worker_key=state_scope_worker_key,
+            agent_policies=launch.agent_policies,
+        )
+        if self.ssh_marked(
+            worker_key,
+            launch=launch,
+            private_agent_names=private_agent_names,
+            state_scope_worker_key=state_scope_worker_key,
+            shared_mounts=shared_mounts,
+        ):
+            worker_labels[LABEL_TAILNET_SSH] = "true"
+            container_ports.append({"containerPort": WORKER_SSH_PORT, "name": "ssh"})
         template_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,
             "automountServiceAccountToken": False,
@@ -1235,7 +1290,7 @@ class KubernetesResourceManager:
                     # A container command replaces the image's tini entrypoint, so name tini here:
                     # PID 1 must reap the children a killed command's process group leaves behind.
                     "command": ["tini", "--", "/app/run-sandbox-runner.sh"],
-                    "ports": [{"containerPort": self.config.worker_port, "name": "api"}],
+                    "ports": container_ports,
                     "env": self._worker_env(
                         worker_key=worker_key,
                         worker_id=worker_id,
@@ -1246,6 +1301,7 @@ class KubernetesResourceManager:
                         state_subpath,
                         private_agent_names,
                         launch=launch,
+                        shared_mounts=shared_mounts,
                         state_scope_worker_key=state_scope_worker_key,
                     ),
                     "readinessProbe": {
@@ -1320,7 +1376,6 @@ class KubernetesResourceManager:
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
     ) -> dict[str, object]:
-        worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
         startup_manifest_hash = self._write_startup_manifest(
             worker_key=worker_key,
             state_subpath=state_subpath,
@@ -1336,10 +1391,12 @@ class KubernetesResourceManager:
             state_scope_worker_key=state_scope_worker_key,
             resource_profile=resource_profile,
         )
+        # The Deployment carries its pods' labels, the tailnet SSH mark among them; its selector never has the mark.
+        template_labels = cast("dict[str, dict[str, str]]", template["metadata"])["labels"]
         metadata: dict[str, object] = {
             "name": worker_id,
             "namespace": self.config.namespace,
-            "labels": worker_labels,
+            "labels": dict(template_labels),
         }
         owner_reference = self._owner_reference_or_none()
         if owner_reference is not None:
@@ -1368,7 +1425,9 @@ class KubernetesResourceManager:
             "metadata": metadata,
             "spec": {
                 "replicas": replicas,
-                "selector": {"matchLabels": worker_labels},
+                "selector": {
+                    "matchLabels": _labels(extra_labels=self.config.extra_labels, worker_id=worker_id),
+                },
                 "template": template,
             },
         }
@@ -1482,6 +1541,7 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None,
         *,
         launch: WorkerLaunchConfig,
+        shared_mounts: Sequence[SharedDirectoryMount],
         state_scope_worker_key: str | None = None,
     ) -> list[dict[str, object]]:
         agent_policies = launch.agent_policies
@@ -1499,11 +1559,7 @@ class KubernetesResourceManager:
                 "subPath": str(shared_mount.local_path.relative_to(self.storage_root)),
                 **({"readOnly": True} if shared_mount.read_only else {}),
             }
-            for shared_mount in self.plan_shared_directory_mounts(
-                worker_key,
-                state_scope_worker_key=state_scope_worker_key,
-                agent_policies=agent_policies,
-            )
+            for shared_mount in shared_mounts
         )
         mounts.append({"name": WORKER_TMP_VOLUME_NAME, "mountPath": "/tmp"})  # noqa: S108
         mounts.extend(

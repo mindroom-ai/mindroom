@@ -258,6 +258,15 @@ Matrix sync callback
 | `script_runs/worker_client.py` | The primary's HTTP client for a worker's script routes |
 | `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
 | `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through, and the listener helper the second listeners beside the API share |
+| `tailnet_ssh/eligibility.py` | The one rule whether a person's tailnet SSH link to an agent's worker may exist, shared by config load, the worker launch's SSH mark, links, and the portal; room membership not known yet suspends a link instead of denying it |
+| `tailnet_ssh/store.py` | The primary-only store of tailnet SSH links, each with its own host key, each person's SSH public keys, how the gateway enrols nodes, and the sign-in keys last seen per person |
+| `tailnet_ssh/projection.py` | The `sshd_config`, `authorized_keys`, and host key the primary writes into a worker's read-only `.runtime/ssh/` |
+| `tailnet_ssh/links.py` | The tailnet SSH link service: what the gateway is told to run, what its reports settle, and each connect, which admits the peer, wakes the worker, writes sshd's files, and starts sshd |
+| `tailnet_ssh/session.py` | The `ForceCommand` a worker's sshd runs for every session: the shell, a command, or SFTP, in the agent's workspace with its shell environment |
+| `api/tailnet_ssh.py` | Connections portal routes under `/api/connections/tailnet-ssh`: the person's SSH keys, pasted or imported from their GitHub account, and their links, with connect, sign-in, and disconnect |
+| `api/tailnet_ssh_gateway.py` | The gateway-only listener on `MINDROOM_TAILNET_SSH_PORT`, behind the gateway's bearer token: `GET /links`, `POST /status`, and `POST /links/{id}/connect` |
+| `api/worker_ssh.py` | The worker runner's `/ssh/start` route, which keeps the agent's shell environment for sessions and starts sshd on port 2222 on the projected files |
+| `config/tailnet_ssh.py` | The root `tailnet_ssh` section, the Tailscale login and SSH keys an operator names per person, and SSH public key normalization |
 | `script_sdk.py` | The standard-library `MindRoomTools` client a script calls tools with |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
@@ -699,4 +708,5 @@ A database converted from the Agno layout keeps its pre-conversion copy beside i
 `tracking/personal_agents.json` is the roster of agents generated from `personal_agents` templates, read on every config load.
 `tracking/contacts.json` holds the contacts between personal agents and people, written only by the primary.
 `tracking/listening_markers.json` holds where each listening agent has heard each listened room up to.
+`tracking/tailnet_ssh.json` holds the tailnet SSH links with each link's host private key, each person's SSH public keys, how the gateway enrols nodes, and the sign-in keys last seen per person, written only by the primary and mounted by no worker.
 `call_transcripts/calls.db` holds live and recently ended calls between people, each call's lines until its transcript message is posted, what each call's row was last edited to say, who paused each call and since when, and when each person's app last checked in to each call.

@@ -618,6 +618,12 @@
           "description": "Allow run_subagent to run a subagent in its own dedicated worker on the docker or kubernetes worker backend",
           "title": "Dedicated Subagent Workers",
           "type": "boolean"
+        },
+        "tailnet_ssh": {
+          "default": false,
+          "description": "Let each person reach their own worker for this agent with ssh from their tailnet; needs worker_scope user_agent and a private agent or access.users of concrete IDs with no room grants",
+          "title": "Tailnet Ssh",
+          "type": "boolean"
         }
       },
       "required": [
@@ -5429,6 +5435,41 @@
       "title": "StreamingConfig",
       "type": "object"
     },
+    "TailnetSshConfig": {
+      "additionalProperties": false,
+      "description": "Operator-supplied tailnet SSH settings, keyed by concrete Matrix user ID.",
+      "properties": {
+        "logins": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "With an operator key: the Tailscale login, such as bas@github, each person's link admits",
+          "title": "Logins",
+          "type": "object",
+          "x-mindroom": {
+            "key_placeholder": "@alice:example.org"
+          }
+        },
+        "authorized_keys": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "description": "SSH public key lines each person may sign in with, for installs where the operator knows them",
+          "title": "Authorized Keys",
+          "type": "object",
+          "x-mindroom": {
+            "key_placeholder": "@alice:example.org"
+          }
+        }
+      },
+      "title": "TailnetSshConfig",
+      "type": "object"
+    },
     "TeamConfig": {
       "additionalProperties": false,
       "description": "Configuration for a team of agents.",
@@ -6525,6 +6566,14 @@
         "matrix_user_id_template": null
       },
       "description": "Slack integration: how Slack workspace members map to Matrix users"
+    },
+    "tailnet_ssh": {
+      "$ref": "#/$defs/TailnetSshConfig",
+      "default": {
+        "logins": {},
+        "authorized_keys": {}
+      },
+      "description": "Tailnet SSH: the Tailscale login and SSH keys an operator sets for each person"
     },
     "timezone": {
       "default": "UTC",

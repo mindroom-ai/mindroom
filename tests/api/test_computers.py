@@ -575,7 +575,7 @@ def test_worker_maintenance_touches_computer_stream_before_cleanup(
         api_main._cleanup_workers_once(
             config_lifecycle.require_api_state(app).snapshot.runtime_paths,
             touch_live_workers=lambda _manager: None,
-            computer_worker_keys=computers.active_computer_worker_keys(app),
+            held_worker_keys=computers.active_computer_worker_keys(app),
         )
         assert actions == ["touch:worker", "maintain"]
 

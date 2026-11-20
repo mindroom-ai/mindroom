@@ -61,6 +61,8 @@ from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.api.secret_requests import router as secret_requests_router
 from mindroom.api.skills import router as skills_router
+from mindroom.api.tailnet_ssh import router as tailnet_ssh_router
+from mindroom.api.tailnet_ssh_gateway import active_tailnet_ssh_worker_keys
 from mindroom.api.thread_exports import router as thread_exports_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.usage import router as usage_router
@@ -270,7 +272,7 @@ def _cleanup_workers_once(
     runtime_paths: constants.RuntimePaths,
     *,
     touch_live_workers: Callable[[WorkerBackend], None],
-    computer_worker_keys: frozenset[str] = frozenset(),
+    held_worker_keys: frozenset[str] = frozenset(),
 ) -> int:
     """Run one worker maintenance pass when a backend is configured; return how many idle workers it cleaned."""
     worker_lease = lease_configured_primary_worker_manager(runtime_paths)
@@ -280,7 +282,7 @@ def _cleanup_workers_once(
         maintenance = maintain_leased_workers(
             worker_manager,
             touch_live_workers=touch_live_workers,
-            computer_worker_keys=computer_worker_keys,
+            held_worker_keys=held_worker_keys,
         )
     if maintenance.cleaned:
         logger.info(
@@ -324,7 +326,7 @@ async def _worker_cleanup_loop(
                         _cleanup_workers_once,
                         _app_runtime_paths(api_app),
                         touch_live_workers=touch_live_workers,
-                        computer_worker_keys=active_computer_worker_keys(api_app),
+                        held_worker_keys=active_computer_worker_keys(api_app) | active_tailnet_ssh_worker_keys(api_app),
                     )
                 except Exception:
                     logger.exception("Background worker cleanup failed")
@@ -504,6 +506,7 @@ app.include_router(connections_native_router)
 app.include_router(connections_router)
 app.include_router(connections_contacts_router)
 app.include_router(egress_credentials_router)
+app.include_router(tailnet_ssh_router)
 install_gateway_routes(app)
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
 app.include_router(egress_broker_router, dependencies=[Depends(verify_user)])
