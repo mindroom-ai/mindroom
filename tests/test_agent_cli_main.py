@@ -16,6 +16,7 @@ import pytest
 from mindroom.agent_cli.client import AgentCliUnavailableError
 from mindroom.agent_cli.main import main, parse_arguments, read_call_arguments
 from mindroom.script_runs.launch_contract import digest_arguments
+from mindroom.shell.output_capture import format_shell_completion, format_shell_timeout
 
 
 def test_call_accepts_json_object() -> None:
@@ -89,6 +90,13 @@ def test_help_and_imports_need_no_runtime() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "tools" in result.stdout
+
+
+def test_help_says_what_workers_run_needs(capsys: pytest.CaptureFixture[str]) -> None:
+    """The CLI knows no config, so its help says the command works only for an agent that may name workers."""
+    with pytest.raises(SystemExit):
+        parse_arguments(["--help"])
+    assert "needs the agent's named_workers setting" in " ".join(capsys.readouterr().out.split())
 
 
 def test_main_reports_missing_authority(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -363,6 +371,145 @@ def test_workers_run_exits_with_the_command_s_exit_code(result, exit_code, print
 
     assert main(["workers", "run", "w", "--timeout", "60", "--", "pytest"]) == exit_code
     assert capsys.readouterr().out == printed
+
+
+@pytest.mark.parametrize(
+    ("return_code", "exit_code"),
+    [(1, 1), (3, 3), (137, 137), (255, 255), (-9, 137), (-15, 143)],
+)
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [("", ""), ("ran 4 tests", ""), ("", "Killed"), ("ran 4 tests", "1 failed")],
+)
+def test_workers_run_reads_a_failure_as_the_shell_words_it(
+    return_code,
+    exit_code,
+    stdout,
+    stderr,
+    capsys,
+    monkeypatch,
+) -> None:
+    """The shell's own wording of a failed command gives the exit code; a command a signal killed exits 128 + signal."""
+    result = format_shell_completion(stdout, stderr, return_code=return_code)
+    _worker_client(monkeypatch, _completed(f"[worker: w]\n[cwd: /workspace]\n{result}"))
+
+    assert main(["workers", "run", "w", "--", "pytest"]) == exit_code
+    streams = result.partition("\n")[2]
+    assert capsys.readouterr().out == (f"{streams}\n" if streams else "")
+
+
+@pytest.mark.parametrize("timeout", [1, 90, 3600])
+@pytest.mark.parametrize(("stdout", "stderr"), [("", ""), ("still going", ""), ("still going", "warning")])
+def test_workers_run_reads_a_stop_at_the_time_limit_as_the_shell_words_it(
+    timeout,
+    stdout,
+    stderr,
+    capsys,
+    monkeypatch,
+) -> None:
+    """The shell's own wording of a command stopped at its time limit makes the CLI exit 124."""
+    result = format_shell_timeout(stdout, stderr, timeout=timeout)
+    _worker_client(monkeypatch, _completed(f"[worker: w]\n[cwd: /workspace]\n{result}"))
+
+    assert main(["workers", "run", "w", "--timeout", str(timeout), "--", "sleep", "9999"]) == 124
+    assert capsys.readouterr().out == f"{result}\n"
+
+
+class _Clock:
+    """The CLI's clock, which only its own waiting moves."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def _unreachable_worker_client(monkeypatch, *, failed_reads: int | None, fail_submission: bool = False) -> tuple:
+    """Run a command whose result cannot be read ``failed_reads`` times in a row, or ever, and return what happened."""
+    clock = _Clock()
+    reads: list[float] = []
+    submissions: list[dict[str, object]] = []
+
+    class Client:
+        def operation(self, payload) -> dict[str, object]:
+            submissions.append(payload)
+            if fail_submission:
+                msg = "Agent CLI transport outcome is unknown"
+                raise AgentCliUnavailableError(msg)
+            return {"status": "running"}
+
+        def receipt(self, call_id) -> dict[str, object]:
+            del call_id
+            reads.append(clock.now)
+            if failed_reads is None or len(reads) <= failed_reads:
+                msg = "Agent CLI transport outcome is unknown"
+                raise AgentCliUnavailableError(msg)
+            return _completed("[worker: w]\n[cwd: /workspace]\nshard ok")
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setattr("mindroom.agent_cli.main.time", clock)
+    return clock, reads, submissions
+
+
+def test_workers_run_keeps_waiting_when_reading_the_result_fails_for_a_while(capsys, monkeypatch) -> None:
+    """The command runs on in its worker, so a read that fails is tried again."""
+    _clock, reads, _submissions = _unreachable_worker_client(monkeypatch, failed_reads=5)
+
+    assert main(["workers", "run", "w", "--", "bash", "shard.sh"]) == 0
+    assert len(reads) == 6
+    output = capsys.readouterr()
+    assert (output.out, output.err) == ("shard ok\n", "")
+
+
+def test_workers_run_exits_125_when_the_result_stays_unreachable(capsys, monkeypatch) -> None:
+    """After a minute of failed reads the CLI gives up and says the command may still run."""
+    clock, reads, _submissions = _unreachable_worker_client(monkeypatch, failed_reads=None)
+
+    assert main(["workers", "run", "w", "--", "bash", "shard.sh"]) == 125
+    assert len(reads) > 1
+    assert 60 <= clock.now - reads[0] < 65
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "Agent CLI transport outcome is unknown" in output.err
+    assert "may still be running in worker w" in output.err
+
+
+def test_workers_run_counts_a_minute_of_failed_reads_from_the_last_one_that_worked(monkeypatch) -> None:
+    clock = _Clock()
+    answers = iter([*[None] * 20, {"status": "running"}, *[None] * 20, _completed("[worker: w]\nok")])
+
+    class Client:
+        def operation(self, payload) -> dict[str, object]:
+            del payload
+            return {"status": "running"}
+
+        def receipt(self, call_id) -> dict[str, object]:
+            del call_id
+            answer = next(answers)
+            if answer is None:
+                msg = "Agent CLI transport outcome is unknown"
+                raise AgentCliUnavailableError(msg)
+            return answer
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setattr("mindroom.agent_cli.main.time", clock)
+
+    # Each run of failed reads is shorter than a minute, and both together are longer.
+    assert main(["workers", "run", "w", "--", "true"]) == 0
+    assert clock.now > 60
+
+
+def test_workers_run_exits_125_at_once_when_the_command_cannot_be_submitted(capsys, monkeypatch) -> None:
+    """A submission is sent once, since a second one could run the command twice."""
+    clock, reads, submissions = _unreachable_worker_client(monkeypatch, failed_reads=None, fail_submission=True)
+
+    assert main(["workers", "run", "w", "--", "true"]) == 125
+    assert (len(submissions), reads, clock.now) == (1, [], 0.0)
+    assert "may still be running" not in capsys.readouterr().err
 
 
 def test_workers_run_prints_the_start_of_a_long_result_and_where_the_rest_is(capsys, monkeypatch) -> None:

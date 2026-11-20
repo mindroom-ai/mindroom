@@ -1832,7 +1832,7 @@ agents:
 | `allow_self_config` | bool | `null` | Give the agent a tool to read and change its own entry under `agents:`; see [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) |
 | `delegate_to` | list | `[]` | Agents this agent may run as subagents, including itself only when listed; see [Agent Delegation](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation) |
 | `dedicated_subagent_workers` | bool | `false` | Let this agent run a subagent in a worker of its own on the Docker or Kubernetes worker backend; see [Dedicated workers](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) |
-| `named_workers` | int | `0` | How many [named workers](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) this agent's shell commands may run at once for one requester on the Kubernetes worker backend, or for all requesters together when the agent's workers are not per requester; `0` turns named workers off |
+| `named_workers` | int | `0` | How many [named workers](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) this agent's shell commands may have at once for one requester on the Kubernetes worker backend; the agent's workers must be per requester and agent (`worker_scope: user_agent`, or `private.per: user_agent`); `0` turns named workers off |
 | `thread_exports` | bool or object | `null` | Keep YAML exports of the agent's threads under `<workspace>/thread_exports/`; `true` uses the defaults. See [Thread Exports](https://docs.mindroom.chat/thread-exports/#thread-exports) |
 
 Unset fields that appear in the inheritance table under [Defaults](#defaults) take the `defaults` value; a per-agent value overrides it.
@@ -9446,6 +9446,7 @@ If shell permissions or deployment settings change after minimal mode was select
 The minimal prompt identifies the agent, lists its loaded workspace context files, and names the toolkits available through `mindroom-agent`.
 When the agent has skills, it names them; the agent reads one with `mindroom-agent context read skill:<name>`, which also gives the skill's directory.
 With file memory, it also names the workspace-relative `MEMORY.md` and `memory/` locations.
+When the agent may run [named workers](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers), it names [`mindroom-agent workers run`](#run-commands-in-named-workers), because Bash itself takes no `worker`.
 File contents, the role, ordinary instructions, and tool guidance are not in the prompt; the agent reads them through `mindroom-agent context` when it needs them.
 
 `minimal_instructions` (list of strings, default `[]`) is appended to the minimal prompt on every minimal request:
@@ -9554,12 +9555,14 @@ mindroom-agent workers run NAME [--resource-profile small|standard|large] [--tim
 The command is everything after `--`: several arguments run as that exact argument list, and a single argument runs as a `bash -c` command line.
 The CLI waits until the command ends and prints the last `--tail` lines (default 100) of its output; for a failed command it prints stdout under `Output:` and stderr under `Stderr:`.
 `--timeout` (default 3600 seconds) stops the command, and `--resource-profile` sizes the worker when its name is first used.
+While the command runs, a result the CLI cannot read is read again for up to a minute before the CLI gives up.
+Stopping `workers run` itself, with Ctrl-C or at the `timeout` of the shell command it runs in, does not stop its command, which runs on in its worker until it ends or reaches `--timeout`.
 
 | Code | Meaning |
 | --- | --- |
-| The command's exit code | The command ran in the named worker |
+| The command's exit code | The command ran in the named worker; a command a signal killed exits with 128 plus the signal's number, such as `137` |
 | `124` | The command was stopped at `--timeout` |
-| `125` | The command did not run in the named worker, or its outcome is unknown: the call was refused, failed, or cancelled, or MindRoom could not be reached; the reason is on stderr |
+| `125` | The command did not run in the named worker, or its outcome is unknown: the call was refused, failed, or cancelled, MindRoom could not be reached to submit it, or its result stayed unreadable for a minute while the command may still run; the reason is on stderr |
 | `2` | Invalid CLI arguments |
 
 This script runs eight shards at once, each in a worker of its own, and fails if any shard fails:
@@ -10875,7 +10878,8 @@ run_shell_command("nohup npm run dev > dev.log 2>&1 &")
 ### Named workers
 
 On the Kubernetes worker backend, an agent's shell commands can run in extra workers that the agent names, so one reply runs several isolated environments side by side, such as end-to-end test stacks that listen on the same ports, or the shards of a test suite or a build.
-Set [`named_workers`](https://docs.mindroom.chat/configuration/agents/#configuration-options) on the agent to the most named workers it may run at once; MindRoom then offers `worker` and `resource_profile` in its `run_shell_command`.
+Set [`named_workers`](https://docs.mindroom.chat/configuration/agents/#configuration-options) on the agent to the most named workers it may have at once for one requester; MindRoom then offers `worker` and `resource_profile` in its `run_shell_command`.
+The agent's workers must be per requester and agent: set `worker_scope: user_agent`, or make it a [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) with `private.per: user_agent`.
 The runtime must also run idle-worker cleanup, as for [dedicated subagent workers](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers).
 
 ```yaml
@@ -10884,6 +10888,7 @@ agents:
     display_name: Code
     tools: [shell]
     worker_tools: [shell]
+    worker_scope: user_agent
     named_workers: 8
 ```
 
@@ -10906,19 +10911,22 @@ Named workers are removed, with their processes and package caches, when the rep
 A named worker in which no command has run for 10 minutes is removed sooner, and every named worker is removed 4 hours after it started, whatever runs in it; [worker settings](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) lists both limits.
 Run long work as the call's own command rather than detached with `nohup`, and keep results in the workspace.
 Stopping the reply or cancelling a job stops its command in the named worker, as in the normal worker.
-A MindRoom restart ends a reply's use of its named workers: they are removed once idle, and a later reply's calls start new ones.
+A MindRoom restart ends a reply's use of its named workers: the first cleanup pass after the restart removes them, and a later reply's calls start new ones.
 If a named worker crashes, the call that ran in it fails, and the next call with its name starts a new one.
+A reply that pauses for a [tool approval](https://docs.mindroom.chat/tool-approval/) gives up its named workers unless one of its background jobs still runs, and its calls after the approval start new ones, so an agent whose shell commands need approval gets a new worker for each command.
 
-A call that would start more named workers than `named_workers` allows for its requester, or than `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` allows for the whole deployment, fails instead of waiting; calls to workers that already run always go through.
+A named worker counts against `named_workers` for its requester, and against `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` for the whole deployment, from the call that starts it until it is removed, so also while it starts, sits idle, or has failed.
+A call that would start one more than either limit allows fails instead of waiting; calls to workers the reply already started always go through.
 Only calls of a reply in a Matrix conversation can name a worker, so [background scripts](https://docs.mindroom.chat/tools/background-scripts/) and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) requests cannot.
 [Approved egress](https://docs.mindroom.chat/deployment/approved-egress/#requesting-access) grants do not reach named workers.
 
 Errors:
 
 - `Named workers are off for this agent; named_workers in its config allows them.` - set `named_workers` on the agent.
+- `Named workers need an agent whose workers are per requester and agent: worker_scope: user_agent, or private.per: user_agent.` - set one of the two on the agent.
 - `Named workers need the kubernetes worker backend and idle-worker cleanup, which the API server runs when MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS is above 0.` - use the Kubernetes worker backend, run the API server, and set the cleanup interval.
-- `Cannot start worker '<name>': <n> of the <n> named workers this agent may run for you are running.` - run the command in a worker that already runs, wait until an idle one is removed, or raise `named_workers`.
-- `Cannot start worker '<name>': this deployment runs its limit of <n> named workers.` - try again later, or raise `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX`.
+- `Cannot start worker '<name>': this agent already has <n> of the <n> named workers it may have for you.` - run the command in a worker this reply started, wait until an idle one is removed, or raise `named_workers`.
+- `Cannot start worker '<name>': this deployment already has its limit of <n> named workers.` - try again later, or raise `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX`.
 - `Worker '<name>' was started with resource_profile <profile> in this reply; omit resource_profile, or name another worker.` - a name keeps the size its first call gave it.
 - `A named worker belongs to a reply in a conversation, and this call runs outside one, or after its reply and that reply's background jobs ended.` - the call came from a background script, an API request, or a job that outlived a restart.
 

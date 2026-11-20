@@ -478,7 +478,7 @@ class AgentConfig(BaseModel):
     named_workers: int = Field(
         default=0,
         ge=0,
-        description="How many named workers this agent's shell calls may run at once for one requester on the kubernetes worker backend; 0 turns them off",
+        description="How many named workers this agent's shell calls may have at once for one requester on the kubernetes worker backend, for an agent whose workers are per requester and agent; 0 turns them off",
     )
 
     @property

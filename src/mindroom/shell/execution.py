@@ -29,6 +29,7 @@ from mindroom.shell.output_capture import (
     ShellOutputCapture,
     ShellOutputDestination,
     format_shell_completion,
+    format_shell_timeout,
 )
 from mindroom.tool_jobs.control import job_owns_execution
 
@@ -473,12 +474,12 @@ async def _stop_timed_out_process(
     """Stop a command at its timeout and report its output so far; a stopped command saves no output file."""
     await _terminate_process_group(process)
     await _await_reader_tasks_with_grace(stdout_reader, stderr_reader, grace_seconds=_POST_EXIT_READER_GRACE_SECONDS)
-    lines = [f"Stopped after {timeout:g}s." + (" No output file was saved." if output_capture is not None else "")]
-    if output := stdout_buf.render(tail=tail):
-        lines += ["Output:", output]
-    if errors := stderr_buf.render():
-        lines += ["Stderr:", errors]
-    message = "\n".join(lines)
+    message = format_shell_timeout(
+        stdout_buf.render(tail=tail),
+        stderr_buf.render(),
+        timeout=timeout,
+        no_output_file=output_capture is not None,
+    )
     if output_capture is None:
         return ShellRunResult(message=message)
     output_capture.incomplete = True

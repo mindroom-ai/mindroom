@@ -44,6 +44,7 @@ If shell permissions or deployment settings change after minimal mode was select
 The minimal prompt identifies the agent, lists its loaded workspace context files, and names the toolkits available through `mindroom-agent`.
 When the agent has skills, it names them; the agent reads one with `mindroom-agent context read skill:<name>`, which also gives the skill's directory.
 With file memory, it also names the workspace-relative `MEMORY.md` and `memory/` locations.
+When the agent may run [named workers](execution-and-coding.md#named-workers), it names [`mindroom-agent workers run`](#run-commands-in-named-workers), because Bash itself takes no `worker`.
 File contents, the role, ordinary instructions, and tool guidance are not in the prompt; the agent reads them through `mindroom-agent context` when it needs them.
 
 `minimal_instructions` (list of strings, default `[]`) is appended to the minimal prompt on every minimal request:
@@ -152,12 +153,14 @@ mindroom-agent workers run NAME [--resource-profile small|standard|large] [--tim
 The command is everything after `--`: several arguments run as that exact argument list, and a single argument runs as a `bash -c` command line.
 The CLI waits until the command ends and prints the last `--tail` lines (default 100) of its output; for a failed command it prints stdout under `Output:` and stderr under `Stderr:`.
 `--timeout` (default 3600 seconds) stops the command, and `--resource-profile` sizes the worker when its name is first used.
+While the command runs, a result the CLI cannot read is read again for up to a minute before the CLI gives up.
+Stopping `workers run` itself, with Ctrl-C or at the `timeout` of the shell command it runs in, does not stop its command, which runs on in its worker until it ends or reaches `--timeout`.
 
 | Code | Meaning |
 | --- | --- |
-| The command's exit code | The command ran in the named worker |
+| The command's exit code | The command ran in the named worker; a command a signal killed exits with 128 plus the signal's number, such as `137` |
 | `124` | The command was stopped at `--timeout` |
-| `125` | The command did not run in the named worker, or its outcome is unknown: the call was refused, failed, or cancelled, or MindRoom could not be reached; the reason is on stderr |
+| `125` | The command did not run in the named worker, or its outcome is unknown: the call was refused, failed, or cancelled, MindRoom could not be reached to submit it, or its result stayed unreadable for a minute while the command may still run; the reason is on stderr |
 | `2` | Invalid CLI arguments |
 
 This script runs eight shards at once, each in a worker of its own, and fails if any shard fails:

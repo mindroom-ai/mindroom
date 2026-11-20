@@ -1958,6 +1958,12 @@ def create_agent(
                 else None
             ),
             runtime_context=_get_mind_runtime_context(agent_name, config, runtime_paths),
+            # Minimal Bash has no `worker` argument, so its prompt names the CLI command where the shell offers one.
+            named_workers=any(
+                function.registered_toolkit == "shell" and "worker" in function.parameters.get("properties", {})
+                for toolkit in tool_assembly.toolkits
+                for function in toolkit.functions
+            ),
             minimal_instructions=tuple(agent_config.minimal_instructions) if persona is None else (),
             interactive_prompt=config.get_prompt("INTERACTIVE_QUESTION_PROMPT")
             if include_interactive_questions

@@ -11,10 +11,14 @@ from typing import TYPE_CHECKING, Any, cast
 import httpx
 import pytest
 
+from mindroom import agents
+from mindroom.agent_cli.minimal_agent import minimal_turn
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.llm.messages import system_text
 from mindroom.message_target import MessageTarget
 from mindroom.response_turn import AttemptResolved, CompletedAttempt
 from mindroom.tool_jobs.resources import ExecutionResourceReference, current_execution_resources, execution_resources
@@ -22,6 +26,7 @@ from mindroom.tool_system import sandbox_proxy as sandbox_proxy_module
 from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.catalog import builtin_tool_registry
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -43,9 +48,11 @@ from mindroom.workers.named import (
 from mindroom.workers.runtime import idle_worker_cleanup_owner
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, make_conversation_reader_mock, make_relation_lookup
+from tests.identity_helpers import persist_entity_accounts
 from tests.test_kubernetes_worker_backend import _FakeAppsApi, _named_backend
 from tests.test_response_turn import _collect_turn, _ctx
 from tests.test_sandbox_proxy import _offered_entrypoint, _recording_client_class, _static_worker_manager_lease
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Iterator
@@ -857,6 +864,47 @@ def test_the_shell_offers_named_workers_only_to_an_agent_that_may_run_them(
     assert ({"worker", "resource_profile"} <= offered) is bool(named_workers)
     assert {"args", "tail", "timeout"} <= offered
     assert ("mindroom-agent workers run" in (function.description or "")) is bool(named_workers)
+
+
+@pytest.mark.parametrize("named_workers", [0, 2])
+def test_a_minimal_agent_is_told_of_named_workers_only_when_it_may_run_them(
+    runtime_paths: RuntimePaths,
+    named_workers: int,
+) -> None:
+    """Minimal Bash has no ``worker`` argument, so its prompt names the command that runs in a named worker."""
+    config = Config(
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+        agents={
+            "code": AgentConfig(
+                display_name="Code",
+                tools=["shell"],
+                worker_tools=["shell"],
+                named_workers=named_workers,
+                worker_scope="user_agent",
+            ),
+        },
+    )
+    persist_entity_accounts(config, runtime_paths)
+    build = agents.create_agent(
+        "code",
+        config,
+        runtime_paths,
+        _identity(),
+        agent_mode="minimal",
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "code"),
+        plugins=config_plugins(config, runtime_paths),
+    )
+    turn = minimal_turn(
+        build,
+        session_preamble="",
+        transient_memory="",
+        system_enrichment=(),
+        transient_enrichment=(),
+    )
+
+    told = "mindroom-agent workers run NAME -- COMMAND" in system_text(turn.system_messages)
+    assert told is bool(named_workers)
 
 
 @pytest.mark.asyncio

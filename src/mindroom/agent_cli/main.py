@@ -27,10 +27,12 @@ _WORKER_COMMAND_TIMEOUT_SECONDS = 3600
 # `docker run` do: the command was stopped at its time limit, or it never ran or its outcome is unknown.
 _EXIT_TIMED_OUT = 124
 _EXIT_NOT_RUN = 125
-# How a shell result leads when its command failed: its exit code, then the streams it kept under their labels.
-# A command that succeeds while printing exactly these lines first reads as failed, which the shell result cannot
-# tell apart.
-_FAILED_COMMAND = re.compile(r"Exit code (\d+)(?:\n(?=(?:Output|Stderr):\n)|\Z)")
+# How long `workers run` keeps reading a result it cannot reach before it gives up on a command that may still run.
+_RESULT_UNREACHABLE_SECONDS = 60
+# How a shell result leads when its command failed (`format_shell_completion`): its exit code, negative for the
+# signal that killed it, then the streams it kept under their labels. A command that succeeds while printing exactly
+# these lines first reads as failed, which the shell result cannot tell apart.
+_FAILED_COMMAND = re.compile(r"Exit code (-?\d+)(?:\n(?=(?:Output|Stderr):\n)|\Z)")
 # Parsed options the CLI handles itself instead of sending in the operation payload.
 _LOCAL_ARGUMENTS = frozenset(
     {"group", "action", "json", "json_argument", "json_file", "json_stdin", "call_id", "timeout"},
@@ -128,7 +130,10 @@ def _add_workers_run(groups: argparse._SubParsersAction[argparse.ArgumentParser]
     """Add `workers run`, whose command follows `--` and is split off before parsing."""
     workers = groups.add_parser(
         "workers",
-        help="run NAME -- COMMAND (run a command in a named worker of its own and exit with its exit code)",
+        help=(
+            "run NAME -- COMMAND (run a command in a named worker of its own and exit with its exit code; "
+            "needs the agent's named_workers setting)"
+        ),
     ).add_subparsers(dest="action", required=True)
     run = workers.add_parser("run", usage="mindroom-agent workers run NAME [options] -- COMMAND [ARG ...]")
     run.add_argument("name", help="the worker's name: 1 to 32 lowercase letters, digits, or hyphens")
@@ -203,6 +208,31 @@ def _wait(client: AgentCliClient, call_id: str, result: dict[str, object], timeo
     return result
 
 
+def _settled(client: AgentCliClient, call_id: str, result: dict[str, object]) -> dict[str, object]:
+    """Read a submitted call's receipt until it settles, however long its command runs.
+
+    The command runs on in its worker, so a read that fails is tried again, until reads have failed for
+    ``_RESULT_UNREACHABLE_SECONDS``.
+    """
+    delay = 0.2
+    unreachable_since: float | None = None
+    while _exit_code(result) == 3:
+        time.sleep(delay)
+        # A long command is polled less often, so many of them at once stay cheap for MindRoom.
+        delay = min(delay * 1.5, 2.0)
+        try:
+            result = client.receipt(call_id)
+        except AgentCliUnavailableError:
+            now = time.monotonic()
+            if unreachable_since is None:
+                unreachable_since = now
+            if now - unreachable_since >= _RESULT_UNREACHABLE_SECONDS:
+                raise
+        else:
+            unreachable_since = None
+    return result
+
+
 def _run_in_worker(args: argparse.Namespace) -> int:
     """Run one command in a named worker, print its output, and return its exit code.
 
@@ -218,8 +248,10 @@ def _run_in_worker(args: argparse.Namespace) -> int:
     if args.resource_profile is not None:
         arguments["resource_profile"] = args.resource_profile
     call_id = str(uuid4())
+    submitted = False
     try:
         client = AgentCliClient()
+        # Sent once: a second submission after an unknown outcome could run the command twice.
         result = client.operation(
             {
                 "operation": "tools.call",
@@ -229,14 +261,11 @@ def _run_in_worker(args: argparse.Namespace) -> int:
                 "arguments": arguments,
             },
         )
-        delay = 0.2
-        while _exit_code(result) == 3:
-            time.sleep(delay)
-            # A long command is polled less often, so many of them at once stay cheap for MindRoom.
-            delay = min(delay * 1.5, 2.0)
-            result = client.receipt(call_id)
+        submitted = True
+        result = _settled(client, call_id, result)
     except (AgentCliUnavailableError, ValueError) as exc:
-        print(f"mindroom-agent: {exc} (call {call_id})", file=sys.stderr)
+        running = f"; the command may still be running in worker {args.name}" if submitted else ""
+        print(f"mindroom-agent: {exc}{running} (call {call_id})", file=sys.stderr)
         return _EXIT_NOT_RUN
     outcome = result.get("outcome")
     saved_path = None
@@ -263,7 +292,10 @@ def _run_in_worker(args: argparse.Namespace) -> int:
     if saved_path is not None:
         print(f"mindroom-agent: full output saved to {saved_path}", file=sys.stderr)
     if failed is not None:
-        return int(failed[1])
+        code = int(failed[1])
+        # A command a signal killed exits as a shell reports it: 128 plus the signal.
+        return code if code >= 0 else 128 - code
+    # How `format_shell_timeout` leads the result of a command stopped at its time limit.
     return _EXIT_TIMED_OUT if body.startswith(f"Stopped after {args.timeout:g}s.") else 0
 
 
