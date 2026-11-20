@@ -244,6 +244,34 @@ async def test_matrix_message_reports_an_image_sent_as_a_note(action: str, targe
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "target"),
+    [("send", "send_message_result"), ("edit", "edit_message_result")],
+)
+async def test_matrix_message_omits_the_image_note_when_the_delivered_payload_lacks_it(
+    action: str,
+    target: str,
+) -> None:
+    """The note follows what Matrix received: a text-only fallback preview gets no image note."""
+    tool = MatrixMessageTools()
+    preview = delivered_matrix_event("$sent", {"msgtype": "m.text", "body": "Logo: ![logo](mxc://placeholder)"})
+    with (
+        patch(f"mindroom.custom_tools.matrix_conversation_operations.{target}", new=AsyncMock(return_value=preview)),
+        tool_runtime_context(_make_context()),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action=action,
+                event_id="$evt" if action == "edit" else None,
+                message="Logo: ![logo](mxc://placeholder)",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert "note" not in payload
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_active_mentions_mark_trusted_human_relay() -> None:
     """Intentional mention dispatch should preserve a trusted human requester."""
     tool = MatrixMessageTools()

@@ -235,9 +235,9 @@ class MatrixMessageOperations:
                 starts_thread=starts_thread,
             )
             event_id, _ = await send_claim.deliver()
-            return event_id, content
+            return event_id, {}  # no delivered payload to read, so no image note
         delivered = await send_message_result(context.client, room_id, content)
-        return (delivered.event_id if delivered is not None else None), content
+        return (delivered.event_id, delivered.content_sent) if delivered is not None else (None, {})
 
     async def _send_message_attachments(
         self,
@@ -630,7 +630,7 @@ class MatrixMessageOperations:
             thread_id=thread_id,
             edited_event_id=event_id,
             event_id=delivered.event_id,
-            **_sent_fields(contact_verdict, "Edited", content),
+            **_sent_fields(contact_verdict, "Edited", delivered.content_sent),
         )
 
     async def dispatch_action(
