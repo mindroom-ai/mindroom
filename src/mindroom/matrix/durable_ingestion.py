@@ -1,8 +1,9 @@
 """Convert trusted nio batches and commit application effects before acknowledgement."""
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 import nio
@@ -14,13 +15,24 @@ from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from mindroom.matrix.room_membership import invalidate_membership_lookups
 from mindroom.matrix.transport_progress import is_transport_progress_source
 
-__all__ = ["consume_one_ingestion_batch", "run_ingestion_pump", "validate_ingestion_batch"]
+__all__ = ["IngestionStats", "consume_one_ingestion_batch", "run_ingestion_pump", "validate_ingestion_batch"]
 
 # The longest a batch that admits nothing new may wait to wake the dispatcher,
 # counted from the last wake, so a busy agent scans at most this often for such
 # batches. Another agent's write can make this agent's pending work runnable
 # without waking it: a departing router fails the paused approvals its cards held.
 _RECHECK_SECONDS = 20.0
+
+
+@dataclass
+class IngestionStats:
+    """What one sync loop's pump has admitted so far, for the line a bot logs when its first frame completes."""
+
+    started: float = field(default_factory=time.monotonic)
+    batches: int = 0
+    records: int = 0
+    admit_seconds: float = 0.0
+    ack_seconds: float = 0.0
 
 
 class _OwnedIngestionSession(Protocol):
@@ -132,6 +144,7 @@ async def consume_one_ingestion_batch(
     after_sync: Callable[[bool], Awaitable[None]] | None = None,
     on_decryption_failure: Callable[[SyncRecord], None] | None = None,
     sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    stats: IngestionStats | None = None,
 ) -> ej.AdmissionFacts | None:
     """Commit the whole batch, run ordered hooks and callbacks, then acknowledge."""
     batch = await session.next_batch()
@@ -146,7 +159,7 @@ async def consume_one_ingestion_batch(
     if before_admission is not None:
         for record, converted_record in zip(batch.records, converted.records, strict=True):
             before_admission(converted_record, record.provenance)
-    result = await admission.admit_ingestion_batch(converted)
+    result = await _admit(admission, converted, stats)
     for record, converted_record, facts in zip(batch.records, converted.records, result.record_facts, strict=True):
         if after_admission is not None:
             await after_admission(converted_record, facts, record.provenance)
@@ -162,8 +175,29 @@ async def consume_one_ingestion_batch(
             await _dispatch_auxiliary_record(session, record, account_id)
     if batch.completes_sync and after_sync is not None:
         await after_sync(result.receipt_new)
-    await session.ack(batch)
+    await _ack(session, batch, stats)
     return result
+
+
+async def _admit(
+    admission: IngestionBatchAdmissionView,
+    converted: ej.IngestionBatchAdmission,
+    stats: IngestionStats | None,
+) -> ej.AdmissionFacts:
+    started = time.monotonic()
+    result = await admission.admit_ingestion_batch(converted)
+    if stats is not None:
+        stats.batches += 1
+        stats.records += len(converted.records)
+        stats.admit_seconds += time.monotonic() - started
+    return result
+
+
+async def _ack(session: _OwnedIngestionSession, batch: SyncBatch, stats: IngestionStats | None) -> None:
+    started = time.monotonic()
+    await session.ack(batch)
+    if stats is not None:
+        stats.ack_seconds += time.monotonic() - started
 
 
 async def _dispatch_auxiliary_record(
@@ -194,6 +228,7 @@ async def run_ingestion_pump(
     after_ack: Callable[[], None] | None = None,
     on_decryption_failure: Callable[[SyncRecord], None] | None = None,
     sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    stats: IngestionStats | None = None,
 ) -> None:
     """Drain batches, waiting on work or the existing delivery projection barrier."""
     loop = asyncio.get_running_loop()
@@ -219,6 +254,7 @@ async def run_ingestion_pump(
                 after_sync=after_sync,
                 on_decryption_failure=on_decryption_failure,
                 sender_is_managed=sender_is_managed,
+                stats=stats,
             )
         except ej.DeliveryProjectionPendingError:
             if wait_for_delivery_projection is None:
