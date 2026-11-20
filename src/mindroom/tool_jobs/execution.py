@@ -246,8 +246,8 @@ def offered_definitions(actor: JobActor, definitions: Sequence[ToolSpec]) -> tup
 
 def _default_wait(function: ToolFunction) -> float | None:
     """Return how long a managed call of ``function`` that sets no budget waits, None until completion."""
-    if (function.registered_toolkit, function.name) == ("workflow", "start_workflow"):
-        # A workflow run takes as long as its agents do, so its call returns the run's handle at once.
+    if function.registered_toolkit == "workflow" and function.name in ("start_workflow", "resume_workflow"):
+        # A workflow run takes as long as its agents do, so the call that starts or resumes one returns its handle at once.
         return 0.0
     return shell_job_wait_seconds(function.registered_toolkit, function.name)
 

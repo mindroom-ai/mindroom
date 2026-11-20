@@ -45,10 +45,12 @@ from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
-from mindroom.workflow_runs.engine import WorkflowEngine
+from mindroom.workflow_runs.engine import WorkflowEngine, WorkflowLimits
 from mindroom.workflow_runs.models import (
     NodeReceipt,
     NodeRequest,
+    WorkflowNode,
+    WorkflowNodeState,
     WorkflowRun,
     new_workflow_run_id,
 )
@@ -65,7 +67,7 @@ from tests.scripted_agent_helpers import registered_toolkit
 from tests.tool_job_helpers import call_job_tool, job_actor, tool_job_runtime, toolkit_job_tools
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Awaitable, Callable, Iterator, Mapping
     from pathlib import Path
 
     import pytest
@@ -227,7 +229,10 @@ class CountingTool:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.calls = 0
+        self.failures = 0
         self.before_effect: Callable[[], object] | None = None
+        self.after_effect: Callable[[], Awaitable[object]] | None = None
+        """Awaited after the line is written and before the tool answers; one that never returns leaves the call open."""
 
     @property
     def lines(self) -> list[str]:
@@ -240,16 +245,33 @@ class CountingTool:
 
         class CounterTools(Toolkit):
             def __init__(self) -> None:
-                super().__init__(name="counter", tools=[self.append, self.fail, self.text])
+                tools = [self.append, self.fail, self.fail_once, self.text, self.count]
+                super().__init__(name="counter", tools=tools)
 
-            def append(self, line: str) -> str:
+            async def append(self, line: str) -> str:
                 """Append one line to the file."""
                 counter.calls += 1
                 if counter.before_effect is not None:
                     counter.before_effect()
                 with counter.path.open("a", encoding="utf-8") as file:
                     file.write(f"{line}\n")
+                if counter.after_effect is not None:
+                    await counter.after_effect()
                 return "appended"
+
+            def fail_once(self) -> str:
+                """Raise the first time, answer afterwards."""
+                counter.calls += 1
+                counter.failures += 1
+                if counter.failures == 1:
+                    msg = "The counter failed once."
+                    raise RuntimeError(msg)
+                return "ok"
+
+            def count(self) -> int:
+                """Return how many calls the toolkit has had, which differs on every call."""
+                counter.calls += 1
+                return counter.calls
 
             def fail(self) -> str:
                 """Raise."""
@@ -464,6 +486,10 @@ class WorkflowStack:
         self.run_id = ""
         self.tokens: dict[str, str] = {}
         self.admission: JobGrant = "allowed"
+        self.now = 0.0
+        """What the engine's clock reads, in seconds; a test moves it to let working time pass."""
+        self.limits: WorkflowLimits | None = None
+        """The limits `start` launches with; the engine's defaults when None."""
         self._open()
 
     def _open(self) -> None:
@@ -476,7 +502,7 @@ class WorkflowStack:
         self.broker.open_call_admission()
         self.scripts = FakeScripts(self.script_store, self.broker)
         self.scripts.tokens = self.tokens
-        self.engine = WorkflowEngine(self.store, self.scripts, self.broker)  # type: ignore[arg-type]
+        self.engine = WorkflowEngine(self.store, self.scripts, self.broker, clock=lambda: self.now)  # type: ignore[arg-type]
         # What a turn of the owner sees: the context with the orchestrator that holds the engine.
         self.context = replace(self.context, orchestrator=SimpleNamespace(workflow_engine=self.engine, running=True))  # type: ignore[arg-type]
 
@@ -494,7 +520,7 @@ class WorkflowStack:
 
     async def start(self, source: str = "", args: object = None, **options: object) -> WorkflowRun:
         """Reserve a run for the owner and launch its first attempt."""
-        return await self.engine.launch(self.reserve(source, args, **options).run_id, self.context)
+        return await self.engine.launch(self.reserve(source, args, **options).run_id, self.context, self.limits)
 
     def reserve(self, source: str = "", args: object = None, **options: object) -> WorkflowRun:
         """Write the intent of a run for the owner, which nothing has launched yet."""
@@ -544,6 +570,22 @@ class WorkflowStack:
         if receipt.state != "completed":
             raise NodeFailed(receipt)
         return receipt.result
+
+    async def leave_indeterminate(self, key: str, args: dict[str, object]) -> WorkflowNode:
+        """Leave the call at *key* as a primary that stopped mid-call does, and end the attempt as failed.
+
+        The tool's effect happened and its receipt has no end, so the node ends `indeterminate`.
+        """
+        calls = self.counting_tool.calls
+        self.counting_tool.after_effect = asyncio.Event().wait
+        await self.submit(key, "tool", args)
+        await self.until(lambda: self.counting_tool.calls == calls + 1)
+        self.counting_tool.after_effect = None
+        await self.end_attempt(ScriptRunState.FAILED)
+        node = self.store.get_node(self.run_id, key)
+        assert node is not None
+        assert node.state is WorkflowNodeState.INDETERMINATE
+        return node
 
     async def end_attempt(self, state: ScriptRunState, reason: str | None = None, *, output: str = "") -> None:
         """End the attempt's process in *state* and let the engine see it."""

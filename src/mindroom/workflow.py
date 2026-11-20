@@ -20,6 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Self, cast
 
@@ -28,7 +29,19 @@ from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, RUN_ID_ENV, TO
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-__all__ = ["AgentError", "ShellResult", "ToolError", "WorkflowError", "log", "phase", "run_workflow", "shell", "tool"]
+__all__ = [
+    "AgentError",
+    "ShellResult",
+    "ToolError",
+    "WorkflowError",
+    "log",
+    "now",
+    "phase",
+    "random",
+    "run_workflow",
+    "shell",
+    "tool",
+]
 
 _NODE_WAIT_SECONDS = 25
 _HTTP_TIMEOUT_SECONDS = 40.0
@@ -257,6 +270,16 @@ def log(text: str) -> None:
     """Show a progress line on the run."""
     _current_lane()
     _gateway().log(str(text))
+
+
+def now() -> datetime:
+    """Return the current UTC time, remembered across resume."""
+    return datetime.fromisoformat(str(_call("value", {"op": "now"})))
+
+
+def random() -> float:
+    """Return a random float in [0, 1), remembered across resume."""
+    return float(cast("float", _call("value", {"op": "random"})))
 
 
 def run_workflow(source_path: str) -> None:

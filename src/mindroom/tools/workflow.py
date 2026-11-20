@@ -33,7 +33,7 @@ def _limit(name: str, label: str, default: float | None, minimum: float = 1) -> 
 @register_tool_with_metadata(
     name="workflow",
     display_name="Workflows",
-    description="Run a Python script that calls your tools in the background, and read or cancel the run",
+    description="Run a Python script that calls your tools in the background, and read, cancel or resume the run",
     docs_url="https://docs.mindroom.chat/tools/workflows/",
     category=ToolCategory.DEVELOPMENT,
     file_access=ToolFileAccess.NONE,
@@ -53,8 +53,8 @@ def _limit(name: str, label: str, default: float | None, minimum: float = 1) -> 
     ],
     managed_init_args=(ToolManagedInitArg.RUNTIME_CONFIG,),
     requires_room_context=True,
-    function_names=("start_workflow", "get_workflow", "cancel_workflow"),
-    workspace_writers=("start_workflow",),
+    function_names=("start_workflow", "get_workflow", "cancel_workflow", "resume_workflow"),
+    workspace_writers=("start_workflow", "resume_workflow"),
     supports_toolkit_filters=False,
 )
 def workflow_tools() -> type[WorkflowTools]:

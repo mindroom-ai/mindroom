@@ -1,4 +1,4 @@
-"""The `workflow` toolkit: start a workflow run as a background job, read it, and cancel it."""
+"""The `workflow` toolkit: start a workflow run as a background job, read it, cancel it, and resume it."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRun, Workfl
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStoreError, owned_run
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from mindroom.workflow_runs.models import WorkflowNode
 
 _START = "start_workflow"
+_RESUME = "resume_workflow"
 # The spec's teaching text, cut to what this release runs: each later release adds the lines for what it adds. The
 # list of models follows it.
 _START_DESCRIPTION = """\
@@ -46,17 +47,23 @@ Run a workflow: a Python script that runs your tools and shell commands in the b
 Give exactly one of `source` (inline Python) or `path` (a file in your workspace).
 The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
 
-    from mindroom.workflow import shell, tool, phase, log
+    from mindroom.workflow import shell, tool, phase, log, now, random
 
 - shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
   shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - phase(title) groups the calls that follow; log(text) shows a progress line.
 
-Every tool and shell call is saved with its result.
+Every tool and shell call is saved with its result. The Python between the calls runs again on every resume,
+so do writes (files, git, HTTP) through shell() or tool(), never with plain Python.
+resume_workflow reuses saved calls: in each sequence of calls, those before the first changed call are reused; that call and the
+calls after it run again.
+Use now() and random() from the SDK instead of time and random when the value goes into a prompt.
+shell(..., cached=False) and tool(..., cached=False) run again on every resume: use it for a check of something outside the run.
 The call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.
 Where the call cannot be a background job, it waits and returns the report itself.
 """
 _ONE_SOURCE = "Give exactly one of source or path."
+_AT_MOST_ONE_SOURCE = "Give at most one of source or path."
 _NEEDS_JOBS = "Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow."
 
 _ACTIVE = frozenset({WorkflowNodeState.QUEUED, WorkflowNodeState.RUNNING, WorkflowNodeState.WAITING})
@@ -93,7 +100,8 @@ class WorkflowTools(Toolkit):
         levels = [f"{name}@{model.reasoning.levels[-1]}" for name, model in models if model.reasoning]
         effort = f" (add an effort as in {levels[0]})" if levels else ""
         self._start_description = f"{_START_DESCRIPTION}\nModels: {', '.join(name for name, _ in models)}{effort}."
-        super().__init__(name="workflow", tools=[self.start_workflow, self.get_workflow, self.cancel_workflow])
+        tools = [self.start_workflow, self.get_workflow, self.cancel_workflow, self.resume_workflow]
+        super().__init__(name="workflow", tools=tools)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Describe `start_workflow` with the teaching text and this deployment's models."""
@@ -129,10 +137,7 @@ class WorkflowTools(Toolkit):
             "max_concurrent": max_concurrent,
             "resource_profile": resource_profile,
         }
-        engine, context = _runtime()
-        if running_child_id() is None and not _jobs_enabled(context):
-            # A top-level call is a job or nothing; only an agent inside another's turn waits for its run here.
-            raise WorkflowRunStoreError(_NEEDS_JOBS)
+        engine, context = _waiting_runtime()
         origin = _inline_origin(context)
         reserve = partial(self._reserve, engine, context, origin, arguments)
         return _outcome_text(await engine.attend(origin, reserve, context, self.limits))
@@ -171,7 +176,7 @@ class WorkflowTools(Toolkit):
         return json.dumps(status, indent=2)
 
     async def cancel_workflow(self, run_id: str) -> str:
-        """Stop a run and its agents. Finished calls stay saved.
+        """Stop a run and its agents. Finished calls stay saved, so resume_workflow can continue it.
 
         Args:
             run_id: The run's ID, as start_workflow returned it.
@@ -182,6 +187,29 @@ class WorkflowTools(Toolkit):
         ended = await engine.cancel(run.run_id, reason="Cancelled by the agent.")
         return json.dumps({"run_id": ended.run_id, "status": ended.state.value})
 
+    async def resume_workflow(
+        self,
+        run_id: str,
+        source: str | None = None,
+        path: str | None = None,
+        rerun: list[str] | None = None,
+    ) -> str:
+        """Continue a stopped or failed run, or run a finished one again; saved calls are reused as start_workflow explains. Pass source or path to run an edited script, and rerun=[node ids] to make calls run again, such as one that ended indeterminate.
+
+        Args:
+            run_id: The run's ID, as start_workflow returned it.
+            source: Inline Python source that replaces the run's script.
+            path: Workspace-relative path of a Python file that replaces the run's script.
+            rerun: IDs of saved calls to run again, such as ["n4"].
+
+        """
+        engine, context = _waiting_runtime()
+        arguments = {"run_id": run_id, "source": source, "path": path, "rerun": rerun}
+        run, options = await self._resumption(engine, context, arguments)
+        # One of the calls that wait for this run, as an inline start is: the last one to leave stops the run.
+        reopen = partial(engine.reopen, run.run_id, **options)
+        return _outcome_text(await engine.attend(run.run_id, reopen, context, self.limits))
+
     async def managed_job(
         self,
         function_name: str,
@@ -190,13 +218,14 @@ class WorkflowTools(Toolkit):
         job_id: str,
         runtime: ToolJobRuntime,
     ) -> JobSpec | str | None:
-        """Write the intent of the run a managed `start_workflow` call starts and return the run's job, or why not.
+        """Return the job of the run a managed `start_workflow` or `resume_workflow` call starts, or why not.
 
-        Nothing runs here: the job's operation, which runs only once the runtime admitted the job, launches the
-        first attempt. The other functions run as any tool's call does (None).
+        Nothing runs here: a start writes its intent, a resume is only checked, and the job's operation, which runs
+        only once the runtime admitted the job, launches the attempt. The other functions run as any tool's call
+        does (None).
         """
         del runtime
-        if function_name != _START:
+        if function_name not in (_START, _RESUME):
             return None
         try:
             engine, context = _runtime()
@@ -206,47 +235,39 @@ class WorkflowTools(Toolkit):
                 execution_identity=context.execution_identity,
                 config=context.config,
                 runtime_paths=context.runtime_paths,
-                tool_name=_START,
+                tool_name=function_name,
                 arguments=arguments,
             )
             if (declined := await hooks(before=True, registered_toolkit="workflow")) is not None:
                 await hooks(before=False, result=declined, blocked=True)
                 return declined
-            run, _ = await self._reserve(engine, context, job_id, arguments)
+            refused = None
+            if function_name == _START:
+                run, _ = await self._reserve(engine, context, job_id, arguments)
+                begin: Callable[[], Awaitable[object]] = partial(engine.launch, run.run_id, context, self.limits)
+                refused = partial(asyncio.to_thread, engine.store.delete_intent, run.run_id)
+            else:
+                run, options = await self._resumption(engine, context, arguments)
+                begin = partial(engine.resume, context, run.run_id, **options)
         except ValueError as exc:
             return str(exc)
-        store, run_id, limits = engine.store, run.run_id, self.limits
+        return _run_job(engine, run, job_id, begin, after=partial(hooks, before=False), refused=refused)
 
-        async def operation() -> BackgroundOutcome:
-            await asyncio.to_thread(store.update_run, run_id, job_id=job_id)
-            await engine.launch(run_id, context, limits)
-            outcome = _workflow_job_outcome(await engine.wait(run_id))
-            await hooks(before=False, result=outcome.result)
-            return outcome
-
-        async def cancel(_job: BackgroundJob) -> BackgroundOutcome | None:
-            if job_stopped_by_shutdown():
-                # A stopping primary cancels nothing: the run is the restart's to continue or to end.
-                return None
-            try:
-                return _workflow_job_outcome(await engine.cancel(run_id, reason="The run's job was cancelled."))
-            except WorkflowRunNotFoundError:
-                return None
-
-        def handle(job: BackgroundJob) -> str:
-            return json.dumps({"job_id": job.job_id, "run_id": run_id, "status": job.status, "title": run.title})
-
-        return JobSpec(
-            tool_name="workflow",
-            kind="workflow",
-            toolkit_name="workflow",
-            # Never changed afterwards, so a redelivered call names the same job and reattaches to it.
-            adapter={"workflow_job": job_id, "workflow": run_id},
-            operation=operation,
-            cancel=cancel,
-            refused=partial(asyncio.to_thread, store.delete_intent, run_id),
-            handle=handle,
-        )
+    async def _resumption(
+        self,
+        engine: WorkflowEngine,
+        context: ToolRuntimeContext,
+        arguments: Mapping[str, Any],
+    ) -> tuple[WorkflowRun, dict[str, Any]]:
+        """Check one resume and return its run and what its next attempt starts with; a refusal raises."""
+        source, path, rerun = arguments.get("source"), arguments.get("path"), arguments.get("rerun") or ()
+        if source is not None and path is not None:
+            raise WorkflowRunStoreError(_AT_MOST_ONE_SOURCE)
+        run = _owned(engine, context, str(arguments.get("run_id")))
+        engine.resumable(run.run_id, rerun)
+        edited = source is not None or path is not None
+        text = (await engine.scripts.resolve_source(context, source=source, path=path)).decode() if edited else None
+        return run, {"source": text, "rerun": rerun, "limits": self.limits}
 
     async def _reserve(
         self,
@@ -300,6 +321,54 @@ class WorkflowTools(Toolkit):
         return await run_blocking_or_compensate(reserve, take_back)
 
 
+def _run_job(
+    engine: WorkflowEngine,
+    run: WorkflowRun,
+    job_id: str,
+    begin: Callable[[], Awaitable[object]],
+    *,
+    after: Callable[..., Awaitable[object]] | None = None,
+    refused: Callable[[], Awaitable[object]] | None = None,
+) -> JobSpec:
+    """Return the job of *run*: it starts the run's next attempt with *begin*, waits, and ends as the run ends.
+
+    *after* gets the report for the plugins' hooks, and *refused* undoes a start the runtime did not admit.
+    """
+    store, run_id = engine.store, run.run_id
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.to_thread(store.update_run, run_id, job_id=job_id)
+        await begin()
+        outcome = _workflow_job_outcome(await engine.wait(run_id))
+        if after is not None:
+            await after(result=outcome.result)
+        return outcome
+
+    async def cancel(_job: BackgroundJob) -> BackgroundOutcome | None:
+        if job_stopped_by_shutdown():
+            # A stopping primary cancels nothing: the run is the restart's to continue or to end.
+            return None
+        try:
+            return _workflow_job_outcome(await engine.cancel(run_id, reason="The run's job was cancelled."))
+        except WorkflowRunNotFoundError:
+            return None
+
+    def handle(job: BackgroundJob) -> str:
+        return json.dumps({"job_id": job.job_id, "run_id": run_id, "status": job.status, "title": run.title})
+
+    return JobSpec(
+        tool_name="workflow",
+        kind="workflow",
+        toolkit_name="workflow",
+        # Never changed afterwards, so a redelivered call names the same job and reattaches to it.
+        adapter={"workflow_job": job_id, "workflow": run_id},
+        operation=operation,
+        cancel=cancel,
+        refused=refused,
+        handle=handle,
+    )
+
+
 def _workflow_job_outcome(run: WorkflowRun) -> BackgroundOutcome:
     """Return how the job of an ended run ends: with the whole report, or with why the run did not finish."""
     text = _outcome_text(run)
@@ -329,6 +398,15 @@ def _runtime() -> tuple[WorkflowEngine, ToolRuntimeContext]:
         msg = "Workflows need an active room context."
         raise WorkflowRunStoreError(msg)
     return context.orchestrator.workflow_engine, context
+
+
+def _waiting_runtime() -> tuple[WorkflowEngine, ToolRuntimeContext]:
+    """Return the runtime of a call that waits for its run itself, which only a call inside another agent's turn may."""
+    engine, context = _runtime()
+    if running_child_id() is None and not _jobs_enabled(context):
+        # A top-level call is a job or nothing.
+        raise WorkflowRunStoreError(_NEEDS_JOBS)
+    return engine, context
 
 
 def _owned(engine: WorkflowEngine, context: ToolRuntimeContext, run_id: str) -> WorkflowRun:

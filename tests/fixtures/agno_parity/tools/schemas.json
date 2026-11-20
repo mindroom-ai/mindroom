@@ -30257,7 +30257,7 @@
     "functions": [
       {
         "name": "start_workflow",
-        "description": "Run a workflow: a Python script that runs your tools and shell commands in the background.\n\nGive exactly one of `source` (inline Python) or `path` (a file in your workspace).\nThe script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.\n\n    from mindroom.workflow import shell, tool, phase, log\n\n- shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.\n  shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.\n- phase(title) groups the calls that follow; log(text) shows a progress line.\n\nEvery tool and shell call is saved with its result.\nThe call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.\nWhere the call cannot be a background job, it waits and returns the report itself.\n\nModels: default.",
+        "description": "Run a workflow: a Python script that runs your tools and shell commands in the background.\n\nGive exactly one of `source` (inline Python) or `path` (a file in your workspace).\nThe script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.\n\n    from mindroom.workflow import shell, tool, phase, log, now, random\n\n- shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.\n  shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.\n- phase(title) groups the calls that follow; log(text) shows a progress line.\n\nEvery tool and shell call is saved with its result. The Python between the calls runs again on every resume,\nso do writes (files, git, HTTP) through shell() or tool(), never with plain Python.\nresume_workflow reuses saved calls: in each sequence of calls, those before the first changed call are reused; that call and the\ncalls after it run again.\nUse now() and random() from the SDK instead of time and random when the value goes into a prompt.\nshell(..., cached=False) and tool(..., cached=False) run again on every resume: use it for a check of something outside the run.\nThe call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.\nWhere the call cannot be a background job, it waits and returns the report itself.\n\nModels: default.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -30383,13 +30383,80 @@
       },
       {
         "name": "cancel_workflow",
-        "description": "Stop a run and its agents. Finished calls stay saved.",
+        "description": "Stop a run and its agents. Finished calls stay saved, so resume_workflow can continue it.",
         "parameters": {
           "type": "object",
           "properties": {
             "run_id": {
               "type": "string",
               "description": "The run's ID, as start_workflow returned it."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "run_id"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "resume_workflow",
+        "description": "Continue a stopped or failed run, or run a finished one again; saved calls are reused as start_workflow explains. Pass source or path to run an edited script, and rerun=[node ids] to make calls run again, such as one that ended indeterminate.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "run_id": {
+              "type": "string",
+              "description": "The run's ID, as start_workflow returned it."
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inline Python source that replaces the run's script."
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Workspace-relative path of a Python file that replaces the run's script."
+            },
+            "rerun": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "IDs of saved calls to run again, such as [\"n4\"]."
             },
             "mindroom_output_path": {
               "anyOf": [

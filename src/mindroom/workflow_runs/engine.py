@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import secrets
+import time
 from collections import Counter
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 from uuid import NAMESPACE_OID, uuid5
@@ -34,11 +38,11 @@ from mindroom.workflow_runs.models import (
     WorkflowRun,
     WorkflowRunState,
 )
-from mindroom.workflow_runs.replay import node_digest, split_key
+from mindroom.workflow_runs.replay import DirtyLanes, decide, node_digest, split_key, stale_keys
 from mindroom.workflow_runs.store import WorkflowRunStoreError
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine, Sequence
 
     from mindroom.script_runs.broker import ScriptToolBroker
     from mindroom.script_runs.manager import ScriptResourceProfileName, ScriptRunManager
@@ -51,6 +55,8 @@ logger = get_logger(__name__)
 
 _UNSETTLED_NODE_STATES = frozenset({WorkflowNodeState.QUEUED, WorkflowNodeState.RUNNING})
 _LIVE_RUN_STATES = frozenset(WorkflowRunState) - TERMINAL_RUN_STATES
+# The states in which a run's attempt may submit calls: a run that is starting names no attempt that may.
+_SERVED_RUN_STATES = frozenset({WorkflowRunState.RUNNING, WorkflowRunState.WAITING})
 _SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
 _MAX_LABEL_CHARS = 80
 # The owner of the tasks that admit calls: they outlive their requests, and a run's end waits for them, not stops them.
@@ -60,6 +66,15 @@ _NO_RETURN = "The script ended without returning from main(args)."
 _STOPPED_STARTING = "MindRoom stopped while the run was starting."
 _ABANDONED = "The call that waited was cancelled."
 _ATTEMPT_GONE = "The record of the run's attempt is gone."
+_CHANGED_WITHOUT_EDIT = (
+    "Call n{seq} changed between attempts without a script edit. It probably contains the time or a random value; "
+    "use now() or random() from mindroom.workflow."
+)
+_OUT_OF_TIME = "The run used its {hours:g} hours of working time. resume_workflow continues it."
+# How often a running run's working time is saved, so a primary that dies loses at most this much of the count.
+_CHARGE_SECONDS = 60.0
+# In place of a saved result: the call ran because a rule said so, and its lane is dirty whatever it answers.
+_RAN = object()
 _INTERRUPTED: dict[str, object] = {"kind": "interrupted", "message": "The call was interrupted before its tool ran."}
 # How long a waiter sleeps before it reads the store again, with or without a wake.
 _RECHECK_SECONDS = 1.0
@@ -79,6 +94,14 @@ class WorkflowLimits:
     max_concurrent_agents: int | None = None
 
 
+@dataclass(slots=True)
+class _Replay:
+    """What one attempt keeps while its script replays: the calls a resume named, and the lanes in which a call ran."""
+
+    rerun: frozenset[str] = frozenset()
+    dirty: DirtyLanes = field(default_factory=DirtyLanes)
+
+
 class SupersededAttemptError(RuntimeError):
     """Raised for a request of an attempt its run no longer names, so a leftover process cannot act."""
 
@@ -86,10 +109,20 @@ class SupersededAttemptError(RuntimeError):
 class WorkflowEngine:
     """Run workflow attempts on the script runtime and their nodes through its broker."""
 
-    def __init__(self, store: WorkflowRunStore, scripts: ScriptRunManager, broker: ScriptToolBroker) -> None:
+    def __init__(
+        self,
+        store: WorkflowRunStore,
+        scripts: ScriptRunManager,
+        broker: ScriptToolBroker,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.store = store
         self.scripts = scripts
         self.broker = broker
+        self._clock = clock
+        self._replays: dict[str, _Replay] = {}
+        # When each running run's working time was last charged, by the engine's clock.
+        self._charged: dict[str, float] = {}
         # One per run with a waiter or a launch in progress: polls and `wait` sleep on it, a launch holds its lock.
         self._changed: WeakValueDictionary[str, asyncio.Condition] = WeakValueDictionary()
         self._tasks: dict[str, set[asyncio.Task[Any]]] = {}
@@ -165,24 +198,89 @@ class WorkflowEngine:
                     # The run ended while its process started, so nothing names this attempt: stop it.
                     await self.scripts.revoke(attempt.run_id, reason=launched.error or launched.state.value)
                     await self.scripts.reconcile_durable(run_id=attempt.run_id)
+                else:
+                    self._charged[run_id] = self._clock()
+                    self._spawn(run_id, self._watch_time(run_id, limits.max_runtime_hours))
                 return launched
         # The gate is free again, which ending a run takes.
         return await self._end_run(run, WorkflowRunState.FAILED, refusal)
 
     async def cancel(self, run_id: str, *, reason: str) -> WorkflowRun:
         """Revoke the run's attempt, end its process and end the run cancelled; completed nodes stay saved."""
+        return await self._stop(run_id, WorkflowRunState.CANCELLED, reason)
+
+    async def _stop(self, run_id: str, state: WorkflowRunState, reason: str) -> WorkflowRun:
+        """Revoke the run's attempt, end its process and end the run in *state*, unless the attempt ended before."""
         async with self._condition(run_id):
             run = self.store.get_run(run_id)
         if run.state in TERMINAL_RUN_STATES:
             return run
-        outcome: tuple[WorkflowRunState, str | None] = (WorkflowRunState.CANCELLED, reason)
+        outcome: tuple[WorkflowRunState, str | None] = (state, reason)
         if run.script_run_id is not None:
             await self.scripts.revoke(run.script_run_id, reason=reason)
             attempt = await self.scripts.reconcile_durable(run_id=run.script_run_id)
             if attempt.state in TERMINAL_SCRIPT_RUN_STATES:
-                # The same rule as the maintenance pass: an attempt that ended before the cancel ends as it did.
-                outcome = _run_outcome(self.store.get_run(run_id), attempt)
+                # The same rule as the maintenance pass: an attempt that ended before the stop ends as it did.
+                outcome = _run_outcome(self.store.get_run(run_id), attempt, stopped=state)
         return await self._end_run(run, *outcome)
+
+    def resumable(self, run_id: str, rerun: Sequence[str] = ()) -> frozenset[str]:
+        """Return the keys of the calls *rerun* names, for a run that has ended; a live run or an unknown ID is refused."""
+        if self.store.get_run(run_id).state not in TERMINAL_RUN_STATES:
+            msg = f"Run {run_id} is still running. Cancel it first."
+            raise WorkflowRunStoreError(msg)
+        try:
+            return frozenset(self._node(run_id, str(node_id)).key for node_id in rerun)
+        except LookupError as exc:
+            raise WorkflowRunStoreError(str(exc)) from exc
+
+    async def reopen(
+        self,
+        run_id: str,
+        *,
+        source: str | None = None,
+        rerun: Sequence[str] = (),
+        limits: WorkflowLimits | None = None,
+    ) -> tuple[WorkflowRun, bool]:
+        """Make an ended run ready for its next attempt, with the full working time; `launch` then starts it.
+
+        The saved calls stay: the next attempt replays the script, with *source* when given, and reuses them, except
+        the calls *rerun* names. The answer has the form of a reservation that found its run.
+        """
+        hours = (limits or WorkflowLimits()).max_runtime_hours
+        async with self._condition(run_id):
+            keys = self.resumable(run_id, rerun)
+            run = self.store.get_run(run_id)
+            text = run.source if source is None else source
+            reopened = await asyncio.to_thread(
+                self.store.update_run,
+                run_id,
+                when=TERMINAL_RUN_STATES,
+                state=WorkflowRunState.STARTING,
+                source=text,
+                source_digest=hashlib.sha256(text.encode()).hexdigest(),
+                previous_source_digest=run.source_digest,
+                runtime_seconds_left=hours * 3600 if hours else None,
+                idle_resumes=0,
+                result=None,
+                error=None,
+                finished_at=None,
+            )
+            self._replays[run_id] = _Replay(rerun=keys)
+        return reopened, False
+
+    async def resume(
+        self,
+        context: ToolRuntimeContext,
+        run_id: str,
+        *,
+        source: str | None = None,
+        rerun: Sequence[str] = (),
+        limits: WorkflowLimits | None = None,
+    ) -> WorkflowRun:
+        """Start the next attempt of an ended run for a person; see `reopen`."""
+        await self.reopen(run_id, source=source, rerun=rerun, limits=limits)
+        return await self.launch(run_id, context, limits)
 
     async def wait(self, run_id: str) -> WorkflowRun:
         """Return the run once it has ended."""
@@ -271,51 +369,110 @@ class WorkflowEngine:
         async with self._condition(run_id):
             return await self._admit_gated(self.store.get_run(run_id), attempt, request)
 
-    async def _admit_gated(self, run: WorkflowRun, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
-        saved = self.store.get_node(run.run_id, request.key)
-        if saved is not None:
+    async def _admit_gated(self, run: WorkflowRun, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:  # noqa: C901
+        key, kind, meta = request.key, request.kind, request.meta
+        replay = self._replays.setdefault(run.run_id, _Replay())
+        digest = node_digest(kind, request.args)
+        cached, dirty, rerun = meta.get("cached") is not False, replay.dirty.is_dirty(key), key in replay.rerun
+        members = _members(meta) if kind == "group" else None
+        saved = self.store.get_node(run.run_id, key)
+        decision = partial(decide, digest=digest, attempt=run.attempt, dirty=dirty, rerun=rerun, cached=cached)
+        action = decision(saved).action
+        if saved is not None and action == "return":
             # A request the script sent twice never repeats work, not even failed work.
             return _receipt(saved)
-        if run.script_run_id != attempt.run_id or run.state in TERMINAL_RUN_STATES:
+        if run.script_run_id != attempt.run_id or run.state not in _SERVED_RUN_STATES:
             msg = f"Run {run.run_id} takes no more calls from attempt {attempt.run_id}."
             raise SupersededAttemptError(msg)
-        if request.kind != "tool":
-            msg = f"This MindRoom cannot run a '{request.kind}' call in a workflow yet."
+        if saved is not None and action == "reconcile":
+            # Left unsettled by an attempt that ended: its handle says how it ended, before any rule may run it again.
+            await asyncio.to_thread(self.settle_from_handle, saved)
+            saved = self.store.get_node(run.run_id, key)
+            action = decision(saved).action
+        if saved is not None and action != "run":
+            # Reused: the node is this attempt's now, and a fan-out whose items changed dirties what follows it.
+            stamp: dict[str, object] = {"attempt": run.attempt, "stale": False}
+            if members != saved.members:
+                stamp["members"] = members
+                replay.dirty.mark_after(key)
+            await asyncio.to_thread(partial(self.store.update_node, run.run_id, key, saved.generation, **stamp))
+            if action == "raise_indeterminate":
+                # It may have run, so nothing is dispatched until a resume names it.
+                return replace(_receipt(saved), state=WorkflowNodeState.FAILED)
+            return replace(_receipt(saved), cached=action == "hit")
+        # The completed node this call replaces although no rule before it said so: the call itself changed, or it
+        # runs on every resume.
+        completed = saved is not None and saved.state is WorkflowNodeState.COMPLETED and not (dirty or rerun)
+        previous = saved if completed else None
+        changed = previous is not None and previous.digest != digest
+        if previous is not None and changed and cached and run.source_digest == run.previous_source_digest:
+            notice = _CHANGED_WITHOUT_EDIT.format(seq=previous.seq)
+            await asyncio.to_thread(self.store.append_log, run.run_id, notice)
+        lane, index = split_key(key)
+        generation = 1 if saved is None else saved.generation + 1
+        node = WorkflowNode(
+            run_id=run.run_id,
+            key=key,
+            kind=kind,
+            lane=lane,
+            idx=index,
+            digest=digest,
+            request=request.args,
+            generation=generation,
+            state=WorkflowNodeState.COMPLETED,
+            attempt=run.attempt,
+            label=str(meta.get("label") or _default_label(kind, request.args))[:_MAX_LABEL_CHARS],
+            name=cast("str | None", meta.get("name")),
+            phase=cast("str | None", meta.get("phase")),
+            members=members,
+            cached=cached,
+            started_at=utc_timestamp(),
+        )
+        if kind == "tool":
+            same_as = _RAN if previous is None or changed else previous.result
+            return await self._dispatch_tool(run, attempt, node, replay, same_as)
+        if kind == "value":
+            node = replace(node, result=_value(request.args))
+        elif kind != "group":
+            msg = f"This MindRoom cannot run a '{kind}' call in a workflow yet."
             raise WorkflowRunStoreError(msg)
-        arguments = request.args.get("arguments")
+        # A value and a group are complete when they are submitted, so no restart finds one half done.
+        node = await asyncio.to_thread(self.store.put_node, replace(node, ended_at=node.started_at))
+        replay.dirty.mark(key)
+        return _receipt(node)
+
+    async def _dispatch_tool(
+        self,
+        run: WorkflowRun,
+        attempt: ScriptRunRecord,
+        node: WorkflowNode,
+        replay: _Replay,
+        same_as: object,
+    ) -> NodeReceipt:
+        """Save a tool node with the handle of its call, then run the call as the engine's own task."""
+        request = node.request
+        arguments = request.get("arguments")
         if not isinstance(arguments, dict) or not all(
-            isinstance(request.args.get(name), str) for name in ("toolkit", "function")
+            isinstance(request.get(name), str) for name in ("toolkit", "function")
         ):
             msg = "A tool call needs a toolkit, a function and its arguments."
             raise WorkflowRunStoreError(msg)
-        grant = ScriptToolGrant(str(request.args["toolkit"]), str(request.args["function"]))
-        lane, index = split_key(request.key)
-        call_id = uuid5(NAMESPACE_OID, f"{run.run_id}:{request.key}:1").hex
-        meta = request.meta
+        grant = ScriptToolGrant(str(request["toolkit"]), str(request["function"]))
+        call_id = uuid5(NAMESPACE_OID, f"{run.run_id}:{node.key}:{node.generation}").hex
         node = await asyncio.to_thread(
             self.store.put_node,
-            WorkflowNode(
-                run_id=run.run_id,
-                key=request.key,
-                kind=request.kind,
-                lane=lane,
-                idx=index,
-                digest=node_digest(request.kind, request.args),
-                request=request.args,
+            replace(
+                node,
                 state=WorkflowNodeState.RUNNING,
                 # Saved before the dispatch, so a crash after the tool ran reads the broker's receipt for this call.
                 handle=DispatchHandle("broker", f"{attempt.run_id}:{call_id}", dispatched=False),
-                attempt=run.attempt,
-                label=str(meta.get("label") or f"{grant.toolkit_name}.{grant.function_name}")[:_MAX_LABEL_CHARS],
-                name=cast("str | None", meta.get("name")),
-                phase=cast("str | None", meta.get("phase")),
-                cached=meta.get("cached") is not False,
-                started_at=utc_timestamp(),
             ),
         )
+        if same_as is _RAN:
+            replay.dirty.mark(node.key)
         kept = cast("list[str] | None", (run.persona or {}).get("tools"))
-        call = self._run_tool_node(attempt, node, call_id, grant, cast("dict[str, object]", arguments), kept)
-        self._spawn(run.run_id, call)
+        call = partial(self.broker.execute_for_workflow, attempt, call_id=call_id, grant=grant, arguments=arguments)
+        self._spawn(run.run_id, self._run_tool_node(node, grant, call, kept, replay, same_as))
         return _receipt(node)
 
     async def node_receipt(self, attempt: ScriptRunRecord, node_id: str, *, wait: float) -> NodeReceipt:
@@ -416,24 +573,54 @@ class WorkflowEngine:
 
     async def _run_tool_node(
         self,
-        attempt: ScriptRunRecord,
         node: WorkflowNode,
-        call_id: str,
         grant: ScriptToolGrant,
-        arguments: dict[str, object],
+        call: Callable[[], Awaitable[ScriptCallRecord]],
         kept: list[str] | None,
+        replay: _Replay,
+        same_as: object,
     ) -> None:
-        """Run one tool call and settle its node; *kept* is the tool list of the narrowed agent that started the run."""
+        """Run one tool call and settle its node; *kept* is the tool list of the narrowed agent that started the run.
+
+        *same_as* is the saved result of a call that runs on every resume: its lane stays clean when it answers that.
+        """
         try:
             _require_kept(kept, grant)
-            call = await self.broker.execute_for_workflow(attempt, call_id=call_id, grant=grant, arguments=arguments)
-            state, result, error = _call_outcome(node, call)
+            state, result, error = _call_outcome(node, await call())
         except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
             # Refused before any claim: the rate limit, a revoked attempt, a broker that takes no calls now.
             state, result, error = WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(exc)}
+        if same_as is not _RAN and (state is not WorkflowNodeState.COMPLETED or result != same_as):
+            # Before the node shows its end, so the script's next call already finds the lane dirty.
+            replay.dirty.mark(node.key)
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation)
         await asyncio.to_thread(settle, state=state, result=result, error=error)
         await self._notify(node.run_id)
+
+    async def _watch_time(self, run_id: str, hours: float) -> None:
+        """Save a running run's working time as it is used, and stop the run when none is left."""
+        while True:
+            run = self.store.get_run(run_id)
+            if charge := self._time_left(run):
+                run = await asyncio.to_thread(partial(self.store.update_run, run_id, when=_SERVED_RUN_STATES, **charge))
+            left = run.runtime_seconds_left
+            if left is None:
+                return
+            if left <= 0 and run.state is WorkflowRunState.RUNNING:
+                break
+            await asyncio.sleep(min(_CHARGE_SECONDS, left or _CHARGE_SECONDS))
+        await self._stop(run_id, WorkflowRunState.INTERRUPTED, _OUT_OF_TIME.format(hours=hours))
+
+    def _time_left(self, run: WorkflowRun) -> dict[str, object]:
+        """Return, as a change to save, the working time *run* has left after what it used since the last charge.
+
+        Only a running run uses any: time spent waiting for a person, starting or ended is not charged.
+        """
+        now = self._clock()
+        since, self._charged[run.run_id] = self._charged.get(run.run_id, now), now
+        if run.state is not WorkflowRunState.RUNNING or run.runtime_seconds_left is None:
+            return {}
+        return {"runtime_seconds_left": max(0.0, run.runtime_seconds_left - (now - since))}
 
     async def _observe_exit(self, script_run_id: str) -> None:
         """End the run soon after its script reported: look for the exit instead of waiting for the next pass."""
@@ -455,17 +642,24 @@ class WorkflowEngine:
             current = self.store.get_run(run.run_id)
             if current.state in TERMINAL_RUN_STATES:
                 return current
-            for node in self.store.nodes(run.run_id, include_stale=True):
+            nodes = self.store.nodes(run.run_id, include_stale=True)
+            for node in nodes:
                 if node.state in _UNSETTLED_NODE_STATES and node.handle is not None:
                     await asyncio.to_thread(self.settle_from_handle, node)
+            if state is WorkflowRunState.COMPLETED:
+                # What the completed script no longer reaches leaves the run's current view.
+                await asyncio.to_thread(self.store.mark_stale, run.run_id, stale_keys(nodes, current.attempt))
+            changes: dict[str, object] = {
+                "state": state,
+                "error": error,
+                "finished_at": current.finished_at or utc_timestamp(),
+                **self._time_left(current),
+            }
             ended = await asyncio.to_thread(
-                self.store.update_run,
-                run.run_id,
-                when=_LIVE_RUN_STATES,
-                state=state,
-                error=error,
-                finished_at=current.finished_at or utc_timestamp(),
+                partial(self.store.update_run, run.run_id, when=_LIVE_RUN_STATES, **changes),
             )
+            self._replays.pop(run.run_id, None)
+            self._charged.pop(run.run_id, None)
             condition.notify_all()
         return ended
 
@@ -475,6 +669,30 @@ def _require_kept(kept: list[str] | None, grant: ScriptToolGrant) -> None:
     if kept is not None and not persona_allows(tuple(kept), grant.toolkit_name, grant.function_name):
         msg = f"{grant.toolkit_name}.{grant.function_name} is not a tool of the agent that started this run."
         raise ScriptRunStoreError(msg)
+
+
+def _default_label(kind: str, args: dict[str, object]) -> object:
+    """Return what a node is called when its script gave no label: the tool's function, or the operation."""
+    return f"{args.get('toolkit')}.{args.get('function')}" if kind == "tool" else args.get("op") or kind
+
+
+def _members(meta: dict[str, object]) -> tuple[str, ...]:
+    """Return the ordered lanes a group's request names."""
+    members = meta.get("members")
+    if not isinstance(members, list) or not all(isinstance(member, str) for member in members):
+        msg = "A group call needs the list of its members."
+        raise WorkflowRunStoreError(msg)
+    return tuple(str(member) for member in members)
+
+
+def _value(args: dict[str, object]) -> object:
+    """Make the value a `now()` or `random()` call of a script gets, once: a resume returns the saved one."""
+    if args.get("op") == "now":
+        return datetime.now(UTC).isoformat()
+    if args.get("op") == "random":
+        return secrets.SystemRandom().random()
+    msg = f"A value call is now or random, not {args.get('op')!r}."
+    raise WorkflowRunStoreError(msg)
 
 
 def _receipt(node: WorkflowNode) -> NodeReceipt:
@@ -529,15 +747,20 @@ def _call_outcome(node: WorkflowNode, call: ScriptCallRecord) -> _Outcome:
     return _indeterminate(node)
 
 
-def _run_outcome(run: WorkflowRun, attempt: ScriptRunRecord | None) -> tuple[WorkflowRunState, str | None]:
-    """Return how a run whose attempt ended ends: an accepted cancel first, then a failed exit, then the report.
+def _run_outcome(
+    run: WorkflowRun,
+    attempt: ScriptRunRecord | None,
+    stopped: WorkflowRunState = WorkflowRunState.CANCELLED,
+) -> tuple[WorkflowRunState, str | None]:
+    """Return how a run whose attempt ended ends: an accepted stop first, then a failed exit, then the report.
 
-    An attempt whose record is gone ended with the primary, for all that is known.
+    A stop is a cancel unless the engine stopped the run as *stopped*. An attempt whose record is gone ended with the
+    primary, for all that is known.
     """
     state = ScriptRunState.INTERRUPTED if attempt is None else attempt.state
     reason = _ATTEMPT_GONE if attempt is None else attempt.cancellation_reason
     if state is ScriptRunState.CANCELLED:
-        return WorkflowRunState.CANCELLED, reason
+        return stopped, reason
     if attempt is not None and state is ScriptRunState.FAILED:
         tail = (attempt.error or attempt.output).encode()[-_ERROR_TAIL_BYTES:]
         return WorkflowRunState.FAILED, run.error or tail.decode(errors="ignore")

@@ -267,3 +267,21 @@ def test_result_over_the_inline_limit_is_fetched_in_full_and_keeps_its_type(
     gateway.results["n0"] = full
     gateway.respond = lambda _request: completed("x" * 64, result_ref="n0")
     assert sdk.tool("files", "read_all") == full
+
+
+@pytest.mark.usefixtures("in_main")
+def test_now_and_random_are_value_nodes_whose_saved_results_they_return(
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
+) -> None:
+    """The gateway makes the value, so a resume replays it; the SDK only gives it its type."""
+    values = {"now": "2026-11-20T08:15:00+00:00", "random": 0.25}
+    gateway.respond = lambda request: completed(values[request["args"]["op"]])
+
+    moment, number = sdk.now(), sdk.random()
+
+    assert (moment.isoformat(), moment.utcoffset().total_seconds(), number) == ("2026-11-20T08:15:00+00:00", 0, 0.25)
+    assert [(node["key"], node["kind"], node["args"]) for node in gateway.nodes] == [
+        ("@0", "value", {"op": "now"}),
+        ("@1", "value", {"op": "random"}),
+    ]

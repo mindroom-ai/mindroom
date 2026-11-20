@@ -937,6 +937,135 @@ async def test_a_start_after_the_engine_stopped_interrupts_its_run(stack: Workfl
     assert stack.scripts.launched == []
 
 
+async def _failed(stack: WorkflowStack, **arguments: object) -> dict[str, str]:
+    """Start a run as its job, let one call finish and the script fail, and return the handle once the job ended."""
+    handle = await _started(stack, **arguments)
+    assert await stack.result("@0", "tool", tool_args("counter", "append", line="a")) == "appended"
+    await stack.end_attempt(ScriptRunState.FAILED, output="KeyError: 'tide'")
+    assert (await _ended_job(stack, handle["job_id"])).status == "failed"
+    return handle
+
+
+@pytest.mark.asyncio
+async def test_resume_registers_a_new_job_when_the_old_one_ended(stack: WorkflowStack) -> None:
+    """The resumed run is a new job with the same handle shape; the run keeps the job that first started it."""
+    first = await _failed(stack, title="Count things")
+
+    handle = json.loads(await stack.call("resume_workflow", run_id=first["run_id"]))
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+
+    assert handle.keys() == {"job_id", "run_id", "status", "title"}
+    assert (handle["run_id"], handle["status"], handle["title"]) == (first["run_id"], "running", "Count things")
+    assert handle["job_id"] != first["job_id"]
+    assert (await stack.submit("@0", "tool", tool_args("counter", "append", line="a"))).cached
+    await stack.finish_attempt(result="the second report")
+    job = await _ended_job(stack, handle["job_id"])
+    run = stack.store.get_run(first["run_id"])
+    assert (job.kind, job.status, await stack.collect(job)) == ("workflow", "completed", "the second report")
+    assert job.adapter == {"workflow_job": handle["job_id"], "workflow": first["run_id"]}
+    assert (run.origin_job_id, run.job_id) == (first["job_id"], handle["job_id"])
+    assert stack.counting_tool.lines == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_resume_of_a_run_that_still_runs_is_refused_and_admits_no_job(stack: WorkflowStack) -> None:
+    """The model reads the sentence that says what to do first, and the run goes on untouched."""
+    handle = await _started(stack)
+
+    refusal = await _refused(stack, "resume_workflow", run_id=handle["run_id"])
+
+    assert refusal == f"Run {handle['run_id']} is still running. Cancel it first."
+    assert [job.job_id for job in stack.jobs.retained_jobs()] == [handle["job_id"]]
+    assert len(stack.scripts.launched) == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_is_refused_before_any_job_for_a_wrong_call_two_sources_or_another_owner(
+    stack: WorkflowStack,
+) -> None:
+    """A refused resume starts nothing and leaves the run as it ended."""
+    handle = await _failed(stack)
+    run_id = handle["run_id"]
+
+    assert await _refused(stack, "resume_workflow", run_id=run_id, rerun=["n9"]) == f"Run {run_id} has no call n9."
+    assert await _refused(stack, "resume_workflow", run_id=run_id, source=SCRIPT, path="wf.py") == (
+        "Give at most one of source or path."
+    )
+    assert await _refused(stack, "resume_workflow", context=_other_requester(stack), run_id=run_id) == (
+        _UNKNOWN.format(run_id)
+    )
+    assert stack.store.get_run(run_id).state is WorkflowRunState.FAILED
+    assert [job.job_id for job in stack.jobs.retained_jobs()] == [handle["job_id"]]
+
+
+@pytest.mark.asyncio
+async def test_resume_runs_an_edited_script_and_the_calls_rerun_names(stack: WorkflowStack) -> None:
+    """`source` replaces the script the next attempt runs, and `rerun` makes a saved call run again."""
+    handle = await _failed(stack)
+    edited = "def main(args):\n    return 'edited'\n"
+
+    await stack.call("resume_workflow", run_id=handle["run_id"], source=edited, rerun=["n1"])
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+
+    assert stack.store.get_run(handle["run_id"]).source == edited
+    assert await stack.result("@0", "tool", tool_args("counter", "append", line="a")) == "appended"
+    assert stack.counting_tool.lines == ["a", "a"]
+
+
+@pytest.mark.asyncio
+async def test_refused_admission_of_a_resume_leaves_the_run_as_it_ended(stack: WorkflowStack) -> None:
+    """A resume whose job is not admitted starts no process, and the run can be resumed later."""
+    handle = await _failed(stack)
+    stack.refuse_admission()
+
+    with pytest.raises(CallFailed, match="not available"):
+        await stack.call("resume_workflow", run_id=handle["run_id"])
+
+    run = stack.store.get_run(handle["run_id"])
+    assert (run.state, run.attempt, len(stack.scripts.launched)) == (WorkflowRunState.FAILED, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_inline_resume_waits_for_the_run_and_returns_its_report(stack: WorkflowStack) -> None:
+    """Where the call cannot be a job, it waits for the resumed run as an inline start does."""
+    handle = await _failed(stack)
+
+    call = asyncio.create_task(stack.call("resume_workflow", depth=1, run_id=handle["run_id"]))
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+    await stack.finish_attempt(result="resumed")
+
+    assert await asyncio.wait_for(call, SETTLE_TIMEOUT_SECONDS) == "resumed"
+
+
+@pytest.mark.asyncio
+async def test_an_inline_resume_that_is_cancelled_cancels_its_run(stack: WorkflowStack) -> None:
+    """The engine's one rule for a run with no job: when its last waiting call leaves, the run stops."""
+    handle = await _failed(stack)
+    call = asyncio.create_task(stack.call("resume_workflow", depth=1, run_id=handle["run_id"]))
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.CANCELLED
+    assert stack.script_store.get_run(stack.scripts.launched[-1].run_id).state is ScriptRunState.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_job_that_is_cancelled_cancels_the_run(stack: WorkflowStack) -> None:
+    """The resumed run's job stops it as the first job did."""
+    handle = await _failed(stack)
+    resumed = json.loads(await stack.call("resume_workflow", run_id=handle["run_id"]))
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+
+    await stack.jobs.cancel(resumed["job_id"], owner=stack.context.execution_identity, depth=0)
+    await wait_for_status(stack.jobs, resumed["job_id"], "cancelled")
+
+    assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.CANCELLED
+    assert stack.script_store.get_run(stack.scripts.launched[-1].run_id).state is ScriptRunState.CANCELLED
+
+
 @pytest.mark.asyncio
 async def test_failed_run_delivers_the_error_tail(stack: WorkflowStack) -> None:
     """A failed run's job fails with the end of the script's traceback, so the agent can fix the script."""
@@ -1067,13 +1196,18 @@ Run a workflow: a Python script that runs your tools and shell commands in the b
 Give exactly one of `source` (inline Python) or `path` (a file in your workspace).
 The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
 
-    from mindroom.workflow import shell, tool, phase, log
+    from mindroom.workflow import shell, tool, phase, log, now, random
 
 - shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
   shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - phase(title) groups the calls that follow; log(text) shows a progress line.
 
-Every tool and shell call is saved with its result.
+Every tool and shell call is saved with its result. The Python between the calls runs again on every resume,
+so do writes (files, git, HTTP) through shell() or tool(), never with plain Python.
+resume_workflow reuses saved calls: in each sequence of calls, those before the first changed call are reused; that call and the
+calls after it run again.
+Use now() and random() from the SDK instead of time and random when the value goes into a prompt.
+shell(..., cached=False) and tool(..., cached=False) run again on every resume: use it for a check of something outside the run.
 The call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.
 Where the call cannot be a background job, it waits and returns the report itself.
 
@@ -1083,7 +1217,7 @@ Models: haiku, opus (add an effort as in opus@high)."""
 def test_description_teaches_what_this_release_runs_and_lists_the_configured_models(stack: WorkflowStack) -> None:
     """The offered description names the four calls a script has now, how the report arrives, and the models.
 
-    It promises nothing a later release adds: no agents, no resume, no graph.
+    It promises nothing a later release adds: no agents, no fan-out, no graph.
     """
     config = stack.context.config
     levels = {"levels": ["low", "high"], "default": "low"}
@@ -1104,7 +1238,15 @@ def test_description_teaches_what_this_release_runs_and_lists_the_configured_mod
         "max_concurrent",
         "resource_profile",
     }
-    assert "Stop a run" in (functions["cancel_workflow"].description or "")
+    assert (functions["cancel_workflow"].description or "").startswith(
+        "Stop a run and its agents. Finished calls stay saved, so resume_workflow can continue it.",
+    )
+    assert (functions["resume_workflow"].description or "").startswith(
+        "Continue a stopped or failed run, or run a finished one again; saved calls are reused as start_workflow "
+        "explains. Pass source or path to run an edited script, and rerun=[node ids] to make calls run again, such "
+        "as one that ended indeterminate.",
+    )
+    assert set(functions["resume_workflow"].parameters["properties"]) == {"run_id", "source", "path", "rerun"}
 
 
 def test_the_registered_toolkit_takes_its_limits_from_the_agents_tool_entry(stack: WorkflowStack) -> None:
@@ -1131,5 +1273,5 @@ def test_no_function_name_is_shared_with_dynamic_workflow(stack: WorkflowStack) 
     """An agent can hold both toolkits while it migrates."""
     names = set(toolkit_function_names(WorkflowTools(stack.context.config)))
 
-    assert names == {"start_workflow", "get_workflow", "cancel_workflow"}
+    assert names == {"start_workflow", "get_workflow", "cancel_workflow", "resume_workflow"}
     assert names.isdisjoint(toolkit_function_names(DynamicWorkflowTools()))
