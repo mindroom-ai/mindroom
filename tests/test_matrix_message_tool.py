@@ -210,6 +210,40 @@ async def test_matrix_message_send_defaults_to_current_conversation() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "target", "done"),
+    [("send", "send_message_result", "Sent"), ("edit", "edit_message_result", "Edited")],
+)
+async def test_matrix_message_reports_an_image_sent_as_a_note(action: str, target: str, done: str) -> None:
+    """The result tells the agent an image with no uploaded file went out as a note; the body keeps the link."""
+    tool = MatrixMessageTools()
+    with (
+        patch(
+            f"mindroom.custom_tools.matrix_conversation_operations.{target}",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$sent")),
+        ) as mock_deliver,
+        tool_runtime_context(_make_context()),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action=action,
+                event_id="$evt" if action == "edit" else None,
+                message="Logo: ![logo](mxc://placeholder)",
+            ),
+        )
+
+    content = mock_deliver.await_args.args[3 if action == "edit" else 2]
+    assert payload["status"] == "ok"
+    assert content["body"] == "Logo: ![logo](mxc://placeholder)"
+    assert "Logo: ⚠️ Image not sent: logo (no uploaded file)" in content["formatted_body"]
+    assert (
+        payload["note"]
+        == f"{done} (an image with no uploaded file went out as a note; send files via matrix_message(attachments=[...]))"
+    )
+    assert "sent_text" not in payload
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_active_mentions_mark_trusted_human_relay() -> None:
     """Intentional mention dispatch should preserve a trusted human requester."""
     tool = MatrixMessageTools()
