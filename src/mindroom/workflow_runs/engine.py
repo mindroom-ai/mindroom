@@ -6,7 +6,7 @@ import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import NAMESPACE_OID, uuid5
 from weakref import WeakValueDictionary
 
@@ -50,6 +50,8 @@ _UNSETTLED_NODE_STATES = frozenset({WorkflowNodeState.QUEUED, WorkflowNodeState.
 _LIVE_RUN_STATES = frozenset(WorkflowRunState) - TERMINAL_RUN_STATES
 _SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
 _MAX_LABEL_CHARS = 80
+# The owner of the tasks that admit calls: they outlive their requests, and a run's end waits for them, not stops them.
+_ADMISSIONS = "admissions"
 _ERROR_TAIL_BYTES = 4096
 _NO_RETURN = "The script ended without returning from main(args)."
 _ATTEMPT_GONE = "The record of the run's attempt is gone."
@@ -83,7 +85,7 @@ class WorkflowEngine:
         self.broker = broker
         # One per run with a waiter or a launch in progress: polls and `wait` sleep on it, a launch holds its lock.
         self._changed: WeakValueDictionary[str, asyncio.Condition] = WeakValueDictionary()
-        self._tasks: dict[str, set[asyncio.Task[None]]] = {}
+        self._tasks: dict[str, set[asyncio.Task[Any]]] = {}
 
     async def launch(
         self,
@@ -181,15 +183,23 @@ class WorkflowEngine:
     async def submit_node(self, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
         """Save and dispatch one call of the attempt's script, or return the receipt of the node its key has."""
         run = await self._current_run(attempt)
-        # Held from the lookup to the dispatch, so two requests with one key cannot both find it free.
-        async with self._condition(run.run_id):
-            return await self._submit_node(run, attempt, request)
+        # The engine owns a call from its insert to its dispatch, so a caller that goes away strands no running node.
+        return await asyncio.shield(self._spawn(_ADMISSIONS, self._admit(run.run_id, attempt, request)))
 
-    async def _submit_node(self, run: WorkflowRun, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
+    async def _admit(self, run_id: str, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
+        # Held from the lookup to the dispatch: two requests with one key cannot both find it free, and the run
+        # cannot end in between.
+        async with self._condition(run_id):
+            return await self._admit_gated(self.store.get_run(run_id), attempt, request)
+
+    async def _admit_gated(self, run: WorkflowRun, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
         saved = self.store.get_node(run.run_id, request.key)
         if saved is not None:
             # A request the script sent twice never repeats work, not even failed work.
             return _receipt(saved)
+        if run.script_run_id != attempt.run_id or run.state in TERMINAL_RUN_STATES:
+            msg = f"Run {run.run_id} takes no more calls from attempt {attempt.run_id}."
+            raise SupersededAttemptError(msg)
         if request.kind != "tool":
             msg = f"This MindRoom cannot run a '{request.kind}' call in a workflow yet."
             raise WorkflowRunStoreError(msg)
@@ -297,11 +307,13 @@ class WorkflowEngine:
             async with condition:
                 condition.notify_all()
 
-    def _spawn(self, run_id: str, work: Coroutine[None, None, None]) -> None:
-        tasks = self._tasks.setdefault(run_id, set())
-        task = asyncio.create_task(work, name=f"workflow:{run_id}")
+    def _spawn[T](self, owner: str, work: Coroutine[None, None, T]) -> asyncio.Task[T]:
+        """Start *work* as the engine's own task, stopped when the run *owner* ends or the engine closes."""
+        tasks = self._tasks.setdefault(owner, set())
+        task = asyncio.create_task(work, name=f"workflow:{owner}")
         tasks.add(task)
         task.add_done_callback(tasks.discard)
+        return task
 
     async def _current_run(self, attempt: ScriptRunRecord) -> WorkflowRun:
         """Return the run *attempt* is the current attempt of."""
@@ -350,25 +362,28 @@ class WorkflowEngine:
 
     async def _end_run(self, run: WorkflowRun, state: WorkflowRunState, error: str | None) -> WorkflowRun:
         """End *run*: stop its node tasks, read each unsettled node from its handle, store the state, wake waiters."""
-        tasks = self._tasks.pop(run.run_id, set()) - {asyncio.current_task()}
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        current = self.store.get_run(run.run_id)
-        if current.state in TERMINAL_RUN_STATES:
-            return current
-        for node in self.store.nodes(run.run_id, include_stale=True):
-            if node.state in _UNSETTLED_NODE_STATES and node.handle is not None:
-                await asyncio.to_thread(self.settle_from_handle, node)
-        ended = await asyncio.to_thread(
-            self.store.update_run,
-            run.run_id,
-            when=_LIVE_RUN_STATES,
-            state=state,
-            error=error,
-            finished_at=current.finished_at or utc_timestamp(),
-        )
-        await self._notify(run.run_id)
+        condition = self._condition(run.run_id)
+        # Held to the run's last write, so no call is admitted between the look at its nodes and its end.
+        async with condition:
+            tasks = self._tasks.pop(run.run_id, set()) - {asyncio.current_task()}
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            current = self.store.get_run(run.run_id)
+            if current.state in TERMINAL_RUN_STATES:
+                return current
+            for node in self.store.nodes(run.run_id, include_stale=True):
+                if node.state in _UNSETTLED_NODE_STATES and node.handle is not None:
+                    await asyncio.to_thread(self.settle_from_handle, node)
+            ended = await asyncio.to_thread(
+                self.store.update_run,
+                run.run_id,
+                when=_LIVE_RUN_STATES,
+                state=state,
+                error=error,
+                finished_at=current.finished_at or utc_timestamp(),
+            )
+            condition.notify_all()
         return ended
 
 

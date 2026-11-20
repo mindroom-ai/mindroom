@@ -761,6 +761,83 @@ async def test_store_writes_wait_for_the_database_lock_off_the_event_loop(stack:
     assert (stack.store.log(stack.run_id), stack.counting_tool.lines) == (["The tide is in."], ["a"])
 
 
+class _HeldInsert:
+    """Hold the store's node insert at its write, so a test acts while a call is being admitted."""
+
+    def __init__(self, stack: WorkflowStack, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.entered, self.release = threading.Event(), threading.Event()
+        put_node = stack.store.put_node
+
+        def held(node: WorkflowNode) -> WorkflowNode:
+            self.entered.set()
+            self.release.wait(SETTLE_TIMEOUT_SECONDS)
+            return put_node(node)
+
+        monkeypatch.setattr(stack.store, "put_node", held)
+
+    async def reached(self) -> None:
+        """Wait until an insert is at its write."""
+        await asyncio.to_thread(self.entered.wait, SETTLE_TIMEOUT_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_request_cancelled_during_the_insert_still_dispatches_its_call_once(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine owns a call from its insert to its dispatch, so a caller that goes away strands no running node."""
+    insert = _HeldInsert(stack, monkeypatch)
+    request = asyncio.create_task(stack.submit("@0", "tool", _APPEND))
+    await insert.reached()
+
+    request.cancel()
+    insert.release.set()
+    await asyncio.gather(request, return_exceptions=True)
+
+    assert request.cancelled()
+    await stack.until(lambda: stack.counting_tool.lines == ["a"])
+    assert await stack.result("@0", "tool", _APPEND) == "appended"
+    assert stack.counting_tool.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_end_while_a_call_is_being_admitted(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ending a run looks at its nodes only once no insert is in flight, so every node it has is settled."""
+    insert = _HeldInsert(stack, monkeypatch)
+    request = asyncio.create_task(stack.submit("@0", "tool", _APPEND))
+    await insert.reached()
+    ending = asyncio.create_task(stack.end_attempt(ScriptRunState.INTERRUPTED))
+    await asyncio.sleep(0.2)
+
+    insert.release.set()
+    await ending
+    await request
+
+    run, nodes = stack.engine.status(stack.run_id)
+    assert run.state is WorkflowRunState.INTERRUPTED
+    assert [(node.key, node.state) for node in nodes] == [("@0", WorkflowNodeState.FAILED)]
+    assert stack.counting_tool.lines == []
+
+
+@pytest.mark.asyncio
+async def test_ended_run_admits_no_new_call(stack: WorkflowStack) -> None:
+    """A request authenticated just before its run ended adds no node, and one sent again still gets its receipt."""
+    attempt = stack.attempt
+    first = await stack.engine.submit_node(attempt, NodeRequest("@0", "tool", _APPEND, {}))
+    await stack.until(lambda: stack.counting_tool.lines == ["a"])
+    await stack.engine.cancel(stack.run_id, reason="Stopped by the user.")
+
+    again = await stack.engine.submit_node(attempt, NodeRequest("@0", "tool", _APPEND, {}))
+    with pytest.raises(SupersededAttemptError):
+        await stack.engine.submit_node(attempt, NodeRequest("@1", "tool", _APPEND, {}))
+
+    assert (again.id, again.state) == (first.id, "completed")
+    assert [node.key for node in stack.engine.status(stack.run_id)[1]] == ["@0"]
+
+
 @pytest.mark.asyncio
 async def test_cancel_revokes_attempt_and_keeps_completed_nodes(stack: WorkflowStack) -> None:
     """Cancelling ends the attempt and the run, runs nothing that was still waiting, and keeps what finished."""
