@@ -69,6 +69,12 @@ class _Paused:
 
 
 @dataclass(frozen=True, slots=True)
+class _Freed:
+    principal_id: str
+    approval_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class _Ended:
     principal_id: str
     approval_id: str
@@ -99,6 +105,11 @@ def ended(
 ) -> None:
     """Record that the paused reply of ``approval_id`` is gone, with what ended it when the continuation was there."""
     transaction.signal(_Ended(principal_id, approval_id, approval))
+
+
+def freed(transaction: Transaction, principal_id: str, approval_id: str) -> None:
+    """Record that another principal's write made the sources the paused reply of ``approval_id`` holds runnable."""
+    transaction.signal(_Freed(principal_id, approval_id))
 
 
 def decided(transaction: Transaction, call: CallKey, card: DecidedCard | None) -> None:
@@ -166,6 +177,7 @@ class _Listener:
 class _PausedReplyListener(_Listener):
     paused: Callable[[PausedReply], None] = field(kw_only=True)
     ended: Callable[[str], None] = field(kw_only=True)
+    freed: Callable[[str], None] = field(kw_only=True)
 
 
 @dataclass(eq=False, slots=True)
@@ -208,6 +220,11 @@ class ApprovalSignals:
     def _apply(self, signal: object) -> list[tuple[_Listener, Callable[[], None]]]:
         if isinstance(signal, _Paused):
             return self._add(signal.reply)
+        if isinstance(signal, _Freed):
+            # The principal's listeners hear the room whose replay has to go back for the freed sources.
+            reply = self._paused.get(signal.principal_id, {}).get(signal.approval_id)
+            listeners = self._paused_listeners.get(signal.principal_id, ()) if reply else ()
+            return [(listener, partial(listener.freed, reply.room_id)) for listener in listeners if reply]
         if isinstance(signal, _Ended):
             ended = [] if signal.approval is None else self._ended_listeners
             return [
@@ -258,13 +275,16 @@ class ApprovalSignals:
         *,
         paused: Callable[[PausedReply], None],
         ended: Callable[[str], None],
+        freed: Callable[[str], None] = lambda _room_id: None,
     ) -> Callable[[], None]:
         """Report each paused reply of ``principal_id`` as it pauses and ends; return how to stop listening.
+
+        ``freed`` hears the room of a paused reply whose sources another principal's write made runnable.
 
         The replies paused now are reported before this returns, in the same step that registers the listener, so
         no change falls between them.
         """
-        listener = _PausedReplyListener(asyncio.get_running_loop(), paused=paused, ended=ended)
+        listener = _PausedReplyListener(asyncio.get_running_loop(), paused=paused, ended=ended, freed=freed)
         with self._lock:
             current = tuple(self._paused.get(principal_id, {}).values())
             self._paused_listeners.setdefault(principal_id, []).append(listener)

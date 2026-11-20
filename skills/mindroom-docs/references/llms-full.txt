@@ -767,6 +767,18 @@ The default chat website is `https://chat.mindroom.chat`; for a self-hosted clie
 Use **Open in Browser** to use your browser session or a sign-in provider that requires a browser.
 **Reload** returns to the configured chat website, or reloads the approval page while you connect local agents.
 
+## Install MindRoom Chat
+
+MindRoom Chat is the separate chat app for the Mac, with voice messages, Quick Capture, and its own updates.
+On **Overview**, select **Install MindRoom Chat**, or choose **Install MindRoom Chat…** from the menu bar.
+MindRoom downloads the newest release from GitHub, checks that it is the notarized MindRoom Chat signed by MindRoom, and copies it to `/Applications/MindRoom Chat.app`, or to `~/Applications` when you cannot write to `/Applications`.
+It installs only into a folder that just you and this Mac's administrators can change.
+It then opens the app, and the button and menu item change to **Open MindRoom Chat**.
+If MindRoom Chat is already on this Mac, from the Mac App Store, Homebrew, or a disk image, MindRoom opens that copy and installs nothing.
+MindRoom checks the copy's signature first; if **Overview** says a copy was not opened because it is not the MindRoom Chat that MindRoom publishes, remove the app at the path it names and install again.
+MindRoom never replaces or updates MindRoom Chat; the app updates itself.
+The **Chat** section keeps working with or without it.
+
 ## Set Up Local Agents
 
 **Local agents** has four numbered steps, each with its own status.
@@ -1704,7 +1716,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 | `MINDROOM_SANDBOX_PROXY_URL` | Sandbox proxy endpoint URL (static runner) | _(none)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy | _(none)_ |
-| `MINDROOM_EGRESS_BROKER_PORT` | Port of the [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/#environment-variables) egress broker; setting it turns Agent Keys on, and that page lists the other `MINDROOM_EGRESS_BROKER_*` variables | _(unset; off)_ |
+| `MINDROOM_EGRESS_BROKER_PORT` | Port of the [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/#environment-variables) egress broker for workers; `off` turns Agent Keys off, and that page lists the other `MINDROOM_EGRESS_BROKER_*` variables | _(unset; a loopback broker for shell calls in the primary)_ |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Worker-reachable background-script gateway base URL, including `/api/script-gateway` | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_PORT` | Port for a second listener that serves only the script gateway and Agent CLI routes | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | `true` attests that the Kubernetes script-gateway listener exposes only the gateway and Agent CLI routes | `false` |
@@ -3783,7 +3795,7 @@ memory:
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
 Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
-An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` since it last loaded the file, for example from another conversation, until an hour passes without a model request that sends that copy or its history is compacted; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
+An ongoing conversation's inlined copy can miss lines added to `MEMORY.md` since it last loaded the file, for example from another conversation: lines added anywhere while the file fits the preload caps below, and lines added at the end of a file a cap truncates, until an hour passes without a model request that sends that copy or its history is compacted; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
 On a route that keeps the system prompt unchanged while its cache is warm and sends changes as a system prompt update, such as Claude Opus through OpenRouter with the hour-long prompt cache, an edited or deleted line that an update can state exactly reaches the conversation as such an update, and the old line can stay quoted in that conversation's later requests until its held prompt starts over: when it idles past the cache lifetime, its history is compacted or its updates alone would need that, the route or model changes, or a change comes that an update cannot state, such as one too long or one whose lines appear more than once in the prompt.
 Such a change, and the first request after the hold starts over, sends the current prompt without the old line.
 `memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their size in the turn model's tokens ([how tokens are counted](https://docs.mindroom.chat/configuration/history/#how-tokens-are-counted)).
@@ -5574,6 +5586,7 @@ When an agent calls tools, MindRoom shows inline markers in the message text:
 ```
 
 The number in brackets counts tool calls within the message, and `io.mindroom.tool_trace.events[N-1]` in the event content holds the tool name, argument preview, result preview, and `tool_call_id` for call `[N]`.
+A completed call that did not succeed (it errored, was refused or denied, or was cancelled or interrupted) also carries `is_error: true`, and its result preview says why; the key is omitted on a call that succeeded and on a started one, in live frames and the final event alike.
 A secret request card (`io.mindroom.secret_request`) that a reply's tool call posted names that reply's event (`response_event_id`) and the call (`tool_call_id`), so a client can draw the card at the call's line; a call made through the CLI from a Bash call has its own line, which the card names.
 Tools that start in quick succession appear together in one edit.
 Markers and tool-trace metadata are shown by default; to hide them, set `show_tool_calls: false` on one agent or under `defaults` for every agent that leaves it unset (see [Agent Configuration](https://docs.mindroom.chat/configuration/agents/#defaults)).
@@ -6562,7 +6575,8 @@ The shipped MindRoom Chat configuration sets `enabled` to `false`, so only whoev
 
 ### Let pages load libraries
 
-Pages can also load libraries such as Chart.js, D3, Mermaid, or KaTeX from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
+Chart.js, D3, Mermaid, and KaTeX need no switch: MindRoom Chat serves its own copies to pages whose agent names them in `show_canvas`, and no viewer's address reaches a CDN.
+Pages can also load any other npm library from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
 This takes two more switches, both off by default; turn on both, because a page that needs a library breaks where Chat blocks it.
 
 ```yaml
@@ -6590,7 +6604,7 @@ agents:
 
 `enable_canvas_libraries` (boolean, default `false`) tells the agent it may use the source, and Chat's `libraries` lets pages load from it.
 Pages may then load scripts, styles, and fonts from `/npm/` paths only; fetching data, external images, workers, and every other site stay blocked, and libraries that evaluate strings, such as Alpine or Vue in-page templates, do not run.
-Opening a page that uses a library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
+Opening a page that uses a CDN library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
 
 ### Let pages load remote assets
 
@@ -9334,7 +9348,7 @@ Use them for agents with many optional tools.
 | `initial` | bool | `false` | Send a deferred tool as an ordinary tool on every request; requires `defer: true`. |
 
 A tool with neither flag is eager and appears in every request.
-The starter Mind agent from `mindroom config init` keeps `shell`, `memory`, `scheduler`, `update_awareness`, `todo`, and `matrix_message` eager and defers its other tools.
+The starter Mind agent from `mindroom config init` keeps `shell`, `coding`, `memory`, `scheduler`, `update_awareness`, and `matrix_message` eager and defers its other tools.
 
 ```yaml
 agents:
@@ -10776,9 +10790,13 @@ save_file("temporary notes\n", "scratch/notes.txt")
 `shell` provides `run_shell_command()`, which accepts a shell command string or a list of argv strings.
 It runs commands only in a worker unless [`defaults.allow_shell_without_worker: true`](https://docs.mindroom.chat/configuration/agents/#defaults) lets them run in the MindRoom process; otherwise each call there is refused.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
-The tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and stderr under `Stderr:`.
-With a working directory, the returned output and any saved file start with a `[cwd: <dir>]` line.
+The tool returns the last `tail` lines of stdout (default 100), then the last `tail` lines of any stderr under `Stderr:`, each capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and all of stderr under `Stderr:`.
+When `tail` or the cap leaves lines out of a successful result, it starts with a notice for each stream that lost lines, such as `[Showing the last 100 of 230 lines. Pass a larger tail, or narrow the command.]` or `[Showing the last 100 of 230 stderr lines. ...]`.
+Blank lines count as lines in a notice and in the tail; output shown whole loses only its trailing newlines, and stderr of only blank lines still gets its `Stderr:` heading.
+A result that leads with a status line keeps it first and puts the notice at the start of the stream it describes: `Exit code <code>` on a failure, `Stopped after <timeout>s.` at the timeout, and `Status: FINISHED` or `Status: RUNNING` when a background command is checked.
+The command runs in the agent's workspace, or in its workdir, and the result holds only the command's output.
 With `mindroom_output_path`, the complete output is saved to that file instead, and the receipt includes `exit_code` whenever the command exits non-zero or is killed, such as by the OOM killer, even when no file is saved; a command stopped at its `timeout` reports the stop instead.
+A successful command saves its stdout alone, and when it also printed to stderr, the receipt gives its size as `stderr_bytes`; add `2>&1` to the command to save that text too.
 
 A command still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`; a stopped command saves no `mindroom_output_path` file.
 Without `timeout`, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) has no time limit, even while the reply waits for it, and any other command stops after 120 seconds.
@@ -15969,7 +15987,7 @@ Authoring errors:
 ### Delegation Records
 
 Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in the child's workspace, dated by the delegation's start in UTC.
-`run.json` and `events.jsonl` update as the child runs, and `transcript.md` is written when the turn finishes.
+`events.jsonl` gets each event as the child runs, `run.json` and the caller's receipt catch up on each status change and at least every 32 events, and when the turn finishes both are rewritten and `transcript.md` is written.
 The `usage` in `run.json` reports the child turn's token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), and `time_to_first_token` and `duration` in seconds.
 It covers every model run of the turn, also across an approval pause.
 Each `usage` event of `events.jsonl` reports the same values for one model run as it stood when the event was written, so a run's last `usage` event is that run's total.
@@ -16064,6 +16082,7 @@ Ended jobs that no reply collected get one follow-up: a new message in the conve
 A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
 Cancelled jobs and a silent schedule's jobs get no follow-up, so a cancel never makes the agent speak; the next standard reply (not a minimal-mode one) collects cancelled jobs like any other, and a silent schedule's next run hears of its own.
 Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
+The agent then posts one notice in the conversation that results wait for a reply, which starts no turn of its own.
 Another requester's reply in a shared room never hears of these results.
 A tool's job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own; a subagent's job [continues instead](#running-subagents).
 
@@ -18316,6 +18335,7 @@ Do not report or "fix" these; they are deliberate.
   A folder swapped for a link between that walk and its watch moves its own watch, and those of the folders the walk found below it, to the link's target and the matching folders below that target; each watch stays not recursive and within the folder cap, and lasts until the watcher next rebuilds its watches, such as when a folder appears in the base.
   A change there can start a refresh of the base, which still reads only files reached inside the base without links, as code that writes inside the base can already do by writing a file there.
 - `egress_broker.private_networks` lets the broker, which runs in the primary, dial the listed private ranges for workers, including primary-host addresses in them (such as the `docker0` gateway) and destinations a Kubernetes worker's NetworkPolicy blocks; loopback and metadata addresses stay refused, and [Private networks](https://docs.mindroom.chat/deployment/egress-broker/#private-networks) describes the exposure.
+  For `shell` calls in the primary, whose broker tokens say so, the broker dials every private range without a list, because such a call can reach those addresses directly anyway; loopback, link-local, and metadata addresses stay refused for them too.
 - The egress broker streams request bodies, so a valid request head can reach the right upstream before a bad or oversized body gets 400 or 413 and the upstream connection is aborted; the head carries the secret only to the host the request was routed to, and [Egress Broker Design Decisions](https://docs.mindroom.chat/architecture/egress-broker-design/#where-a-secret-may-go) gives the reason.
 - The egress broker's check for stray bytes on a reused tunnel upstream cannot see bytes that reach the socket just after the check polls it.
   Such bytes can only come from that tunnel's own upstream, and no other tunnel, host, or requester is affected.
@@ -23701,17 +23721,21 @@ The TTL applies to new requests: an expired token gets 407 on every new request,
 Those calls' `NO_PROXY` is replaced with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's own callback URLs, so a call to any other internal host goes to the broker, which refuses private addresses with 403 `destination_blocked`.
 That includes LAN and Tailscale addresses and names that resolve to them, unless [`private_networks`](#private-networks) lists them.
 Without that, a command that needs one can bypass the broker, for example with `curl --noproxy '*'`, where the worker's network allows direct connections.
+A `shell` call that runs in the primary process can always bypass the broker that way, so the broker does not refuse private addresses for it; see [Private networks](#private-networks).
 
 ## Configuration
 
 ### Environment variables
 
-Set these on the primary runtime to enable the broker:
+The broker is on by default.
+With none of these set, it listens on `127.0.0.1` on a free port the system picks, and only `shell` calls that run in the primary process use it: no worker-facing URL is known, so worker-routed calls get no broker environment.
+The port is picked at each start, so two MindRoom instances on one machine never collide; nothing outside the primary needs to know it.
+Set the port and URL to serve workers too:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `MINDROOM_EGRESS_BROKER_PORT` | Yes (when using the broker) | Unset (broker disabled) | Port the broker listens on, such as 8768; when unset the broker stays off |
-| `MINDROOM_EGRESS_BROKER_HOST` | No | `0.0.0.0` | Bind address for the broker listener |
+| `MINDROOM_EGRESS_BROKER_PORT` | Yes (to serve workers) | Unset (loopback broker for primary shells) | Port the broker listens on, such as 8768; `off` or `0` turns the broker off |
+| `MINDROOM_EGRESS_BROKER_HOST` | No | `0.0.0.0` (`127.0.0.1` when the port is unset) | Bind address for the broker listener; used only when the port is set |
 | `MINDROOM_EGRESS_BROKER_URL` | Yes (when port is set) | None | Worker-facing first hop, such as `http://host.docker.internal:8768` for Docker workers or `http://squid:3128` in an approved-egress chain |
 | `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` | No | `604800` (7 days) | How long each minted worker token remains valid |
 
@@ -23720,11 +23744,12 @@ Its CA variables (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_
 Every tool gets the same files, and their system roots are the file the primary's exported `SSL_CERT_FILE` names when one is set, otherwise OpenSSL's default file or certifi, so a tool that used roots of its own before, such as Python Requests with certifi, trusts these instead.
 On macOS, Go programs such as `gh` verify certificates with the system keychain and ignore these variables, so from a primary shell there they do not trust the broker CA.
 
-When `MINDROOM_EGRESS_BROKER_PORT` is unset, the broker does not start, workers get no broker environment, and Agent Keys is hidden: its pages, API routes, dashboard panel, and the `egress_credentials` tool are unavailable.
-Keys and accounts can only be entered while the port is set.
-With the port set, the request log and CA download routes return 409 while the broker is not running.
+With `MINDROOM_EGRESS_BROKER_PORT=off`, the broker does not start, workers get no broker environment, and Agent Keys is hidden: its pages, API routes, dashboard panel, and the `egress_credentials` tool are unavailable.
+Keys and accounts can only be entered while the broker is on.
+While it is on, the request log and CA download routes return 409 when the broker is not running.
 
-Running MindRoom with `--no-api` disables the broker along with the API.
+Running MindRoom with `--no-api` disables the broker along with the API, since nobody could answer a key request; with a set port, MindRoom logs a warning and keeps running.
+Without a port, the broker is also off when the primary's `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` is set in any case, exported or in the `.env` beside `config.yaml`, so shell calls on a proxied network keep using that proxy as before; set a port to use the broker there. It is off as well when it fails to start, for example on an invalid token TTL, unreadable broker state, or a loopback port it cannot bind. MindRoom stops whatever the broker started, logs a warning, and keeps running without it. With a set port, a failure to start stops startup instead.
 
 ### Service rules
 
@@ -23933,7 +23958,11 @@ On the personal page, users who can manage the agent get **Limit to repositories
 ### Private networks
 
 The broker refuses private addresses, so by default worker calls through it cannot reach your LAN or your Tailscale network.
-List the ranges agents may reach in `private_networks`:
+`shell` calls that run in the primary process are the exception: they can reach any address directly, so the guard would protect nothing and only break Home Assistant, a NAS, or Ollama.
+The broker dials private, unique-local, and Tailscale addresses for them as if every range were listed, and still refuses loopback, link-local, and cloud metadata addresses.
+It also resolves `*.local` names for them, such as `homeassistant.local`, and checks the addresses they resolve to by the same rule.
+The token of each call says which kind it is, signed by the broker, so a worker cannot claim the primary's rule.
+List the ranges worker calls may reach in `private_networks`:
 
 ```yaml
 egress_broker:

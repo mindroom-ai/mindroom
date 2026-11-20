@@ -46,17 +46,16 @@ class ShellOutputDestination:
         return cls(workspace_root=workspace_root, path=path, max_bytes=max_bytes, tools_use_workdir=tools_use_workdir)
 
 
-def format_shell_completion(stdout: str, stderr: str, *, return_code: int) -> str:
-    """Format completed output, leading a failure with its exit code and keeping both of its streams.
+def format_shell_completion(stdout: str, stderr: str | None, *, return_code: int) -> str:
+    """Format completed output: stdout, then any stderr under ``Stderr:``; a failure leads with its exit code.
 
     The exit code comes first so a bounded job summary still shows that the command failed.
+    ``stderr`` is None when the command printed nothing to it, so stderr of only blank lines keeps its section.
     """
-    if return_code == 0:
-        return stdout
-    lines = [f"Exit code {return_code}"]
+    lines = [f"Exit code {return_code}"] if return_code else []
     if stdout:
-        lines += ["Output:", stdout]
-    if stderr:
+        lines += ["Output:", stdout] if return_code else [stdout]
+    if stderr is not None:
         lines += ["Stderr:", stderr]
     return "\n".join(lines)
 
@@ -72,11 +71,11 @@ class CapturedShellStream:
         self.reached_eof = False
 
     def append(self, text: str) -> None:
-        """Append decoded output until the cap or a storage error is reached."""
-        if self.error is not None or self.file.closed:
-            return
+        """Count decoded output, and spool it until the cap or a storage error is reached."""
         payload = text.encode("utf-8", errors="replace")
         self.byte_count += len(payload)
+        if self.error is not None or self.file.closed:
+            return
         if self.byte_count > self.max_bytes:
             self.error = f"Redirected shell output exceeds the {self.max_bytes} byte limit."
             return
@@ -94,9 +93,8 @@ class CapturedShellStream:
 class ShellOutputCapture:
     """Own both output streams and publish only a complete supported result."""
 
-    def __init__(self, destination: ShellOutputDestination, cwd: str | None) -> None:
+    def __init__(self, destination: ShellOutputDestination) -> None:
         self.destination = destination
-        self.cwd = cwd
         self.stdout = CapturedShellStream(destination)
         try:
             self.stderr = CapturedShellStream(destination)
@@ -115,6 +113,9 @@ class ShellOutputCapture:
             # The receipt is all the caller sees, so a failed or killed command, saved or not, must say how it
             # exited. A command its owner stopped, such as at its timeout, is explained by the interruption instead.
             receipt["mindroom_tool_output"]["exit_code"] = return_code
+        if return_code == 0 and self.stderr.byte_count:
+            # A success saves its stdout alone, so the receipt says how much it printed to stderr.
+            receipt["mindroom_tool_output"]["stderr_bytes"] = self.stderr.byte_count
         return json.dumps(receipt)
 
     def _publish_receipt(self, return_code: int | None) -> dict[str, dict[str, object]]:
@@ -158,10 +159,8 @@ class ShellOutputCapture:
             output = (
                 selected.read()
                 if selected is not None
-                else format_shell_completion(self.stdout.read(), self.stderr.read(), return_code=return_code)
+                else format_shell_completion(self.stdout.read(), self.stderr.read() or None, return_code=return_code)
             )
-            if self.cwd is not None:
-                output = f"[cwd: {self.cwd}]\n{output}"
             return cast("dict[str, dict[str, object]]", finalize_tool_output_file(request, output))
         except OSError:
             return {"mindroom_tool_output": {"status": "error", "error": "Failed to publish complete shell output."}}

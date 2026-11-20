@@ -61,8 +61,10 @@ async def test_interrupted_event_publication_preserves_committed_log(
     handle = await _start(owner)
     event_path = _record_dir(handle) / "events.jsonl"
     committed = event_path.read_bytes()
+    flushes: list[int] = []
 
-    def interrupted_flush(_fd: int) -> None:
+    def interrupted_flush(fd: int) -> None:
+        flushes.append(fd)
         message = "Interrupted durable write"
         raise OSError(message)
 
@@ -70,6 +72,9 @@ async def test_interrupted_event_publication_preserves_committed_log(
         fault.setattr(os, "fsync", interrupted_flush)
         with pytest.raises(OSError, match="Interrupted durable write"):
             await owner.append_event(handle, DelegationEvent(kind="output", data={"content": "Résumé 🙂"}))
+    # The failed append's rollback is flushed too, so a power loss cannot bring the event back.
+    assert len(flushes) == 2
+    assert (handle.state_dir / "events.jsonl").read_bytes() == committed
     assert event_path.read_bytes() == committed
     reopened = await owner.reopen(handle.locator)
     await owner.append_event(reopened, DelegationEvent(kind="output", data={"content": "Resumed"}))
@@ -81,33 +86,140 @@ async def test_interrupted_event_publication_preserves_committed_log(
 
 
 @pytest.mark.asyncio
-async def test_an_append_whose_state_never_committed_is_dropped(
+@pytest.mark.parametrize(
+    "torn",
+    [
+        b'{"sequence": 5, "kind": "out',
+        b'{"data": {}, "event_id": "torn", "kind": "output", "schema_version": 1, "sequence": 5, "status": null, '
+        b'"timestamp": "t"}',
+        b"\0" * 16 + b"\n",
+        b'{"sequence": 9}\n',
+    ],
+    ids=["partial", "no-newline", "zeros", "out-of-order"],
+)
+async def test_events_logged_after_the_state_snapshot_survive_a_restart_and_a_torn_line_does_not(
+    tmp_path: Path,
+    torn: bytes,
+) -> None:
+    """The event log is the commit point, so events past the state snapshot count, dedupe, and number on."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    owner = DelegationRecordOwner(_config(), runtime_paths)
+    handle = await _start(owner)
+    for index in range(3):
+        await owner.append_event(
+            handle,
+            DelegationEvent(kind="output", data={"content": f"part {index}"}, event_id=f"part-{index}"),
+        )
+    # Plain events rewrite neither the snapshot nor run.json, so these three live only in the logs.
+    assert _read_json(handle.state_dir / "state.json")["run"]["event_count"] == 1
+    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 1
+    with (handle.state_dir / "events.jsonl").open("ab") as log:
+        log.write(torn)
+
+    restarted = DelegationRecordOwner(_config(), runtime_paths)
+    reopened = await restarted.reopen(DelegationRecordLocator.from_dict(handle.locator.to_dict()))
+    assert await restarted.highest_event_index(reopened, "part-") == 2
+    await restarted.append_event(reopened, DelegationEvent(kind="output", data={"content": "x"}, event_id="part-1"))
+    await restarted.append_event(reopened, DelegationEvent(kind="output", data={"content": "after"}, event_id="after"))
+    await restarted.finish(reopened, status="completed", output="Done")
+
+    expected = ["delegation_started", "part-0", "part-1", "part-2", "after", "delegation_finished"]
+    for path in (handle.state_dir / "events.jsonl", _record_dir(handle) / "events.jsonl"):
+        events = _read_events(path)
+        assert [(event["sequence"], event["event_id"]) for event in events] == list(enumerate(expected, start=1))
+    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 6
+
+
+@pytest.mark.asyncio
+async def test_run_json_and_the_receipt_catch_up_every_32_events_and_256_kib(tmp_path: Path) -> None:
+    """A long run's views and snapshot lag its event log by fewer than 32 events and about 256 KiB."""
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
+    for index in range(31):
+        await owner.append_event(handle, DelegationEvent(kind="output", data={"content": f"part {index}"}))
+
+    run = _read_json(_record_dir(handle) / "run.json")
+    assert run["event_count"] == 32
+    assert _read_json(_receipt_path(handle))["updated_at"] == run["updated_at"]
+    assert _read_json(handle.state_dir / "state.json")["run"]["event_count"] == 32
+
+    large = {f"field_{index}": "x" * 60_000 for index in range(5)}
+    await owner.append_event(handle, DelegationEvent(kind="output", data=large))
+    run = _read_json(_record_dir(handle) / "run.json")
+    assert run["event_count"] == 33
+    assert _read_json(_receipt_path(handle))["updated_at"] == run["updated_at"]
+    assert _read_json(handle.state_dir / "state.json")["run"]["event_count"] == 33
+
+
+@pytest.mark.asyncio
+async def test_a_failed_state_snapshot_still_exports_the_committed_events_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The state file is the commit point, so an event logged before a failed state write never counts."""
+    """An event the log committed keeps its oversized value, which only the export holds, when its snapshot fails."""
     owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
     handle = await _start(owner)
-    commit_state = records.write_json_file_durable
+    paused = DelegationEvent(kind="status", data={"result": "x" * 100_000}, status="paused", event_id="paused")
 
-    def interrupted_commit(*_args: object, **_kwargs: object) -> None:
-        message = "Interrupted state commit"
+    def failed_snapshot(*_args: object, **_kwargs: object) -> None:
+        message = "Interrupted snapshot"
         raise OSError(message)
 
     with monkeypatch.context() as fault:
-        fault.setattr(records, "write_json_file_durable", interrupted_commit)
-        with pytest.raises(OSError, match="Interrupted state commit"):
-            await owner.append_event(handle, DelegationEvent(kind="output", data={"content": "Lost"}))
-    assert records.write_json_file_durable is commit_state
-    assert len(_read_events(handle.state_dir / "events.jsonl")) == 2
+        fault.setattr(records, "write_json_file_durable", failed_snapshot)
+        with pytest.raises(OSError, match="Interrupted snapshot"):
+            await owner.append_event(handle, paused)
+    await owner.append_event(handle, paused)
+    await owner.finish(handle, status="completed", output="Done")
 
-    await owner.append_event(handle, DelegationEvent(kind="output", data={"content": "Kept"}))
+    event = _read_events(_record_dir(handle) / "events.jsonl")[1]
+    assert event["event_id"] == "paused"
+    artifact = _record_dir(handle) / event["data"]["result"]["artifact_path"]
+    assert hashlib.sha256(artifact.read_bytes()).hexdigest() == event["data"]["result"]["sha256"]
 
-    for path in (handle.state_dir / "events.jsonl", _record_dir(handle) / "events.jsonl"):
-        assert [(event["sequence"], event["data"]) for event in _read_events(path)] == [
-            (1, {}),
-            (2, {"content": "Kept"}),
-        ]
+
+@pytest.mark.asyncio
+async def test_a_replayed_event_repairs_an_event_export_a_crash_left_short(tmp_path: Path) -> None:
+    """An event the log committed before a crash cut its export short reaches the workspace log on its replay."""
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
+    event_path = _record_dir(handle) / "events.jsonl"
+    before = event_path.read_bytes()
+    event = DelegationEvent(kind="tool_call", data={"tool_name": "lookup"}, event_id="call")
+    await owner.append_event(handle, event)
+    event_path.write_bytes(before)
+
+    await owner.append_event(handle, event)
+
+    assert event_path.read_bytes() == (handle.state_dir / "events.jsonl").read_bytes()
+    assert [entry["event_id"] for entry in _read_events(event_path)] == ["delegation_started", "call"]
+
+
+@pytest.mark.asyncio
+async def test_acknowledging_an_event_the_log_already_holds_flushes_the_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A writer that crashed before its fsync may have left the line unsynced, so a replay that finds it flushes it."""
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
+    event = DelegationEvent(kind="output", data={"content": "once"}, event_id="once")
+    await owner.append_event(handle, event)
+    await owner.finish(handle, status="completed", output="Done")
+    log_inode = (handle.state_dir / "events.jsonl").stat().st_ino
+    flushed: list[int] = []
+    fsync = os.fsync
+
+    def spy_fsync(fd: int) -> None:
+        flushed.append(os.fstat(fd).st_ino)
+        fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    await owner.append_event(handle, event)
+    assert flushed == [log_inode]
+    flushed.clear()
+    await owner.finish(handle, status="completed", output="Done")
+    assert log_inode in flushed
 
 
 @pytest.mark.asyncio
@@ -258,7 +370,8 @@ async def test_concurrent_appends_to_one_record_keep_one_gapless_sequence(tmp_pa
 
     events = _read_events(_record_dir(handle) / "events.jsonl")
     assert [event["sequence"] for event in events] == list(range(1, 10))
-    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 9
+    await owner.finish(handle, status="completed", output="Done")
+    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 10
     assert not (_record_dir(handle) / ".record.lock").exists()
 
 
@@ -323,8 +436,6 @@ async def test_an_edited_or_deleted_export_is_rewritten_from_the_primary_copy(tm
     primary_log = handle.state_dir / "events.jsonl"
     assert event_path.read_bytes() == primary_log.read_bytes()
     assert [event["event_id"] for event in _read_events(event_path)] == ["delegation_started", "call", "next"]
-    assert _read_json(record_dir / "run.json")["event_count"] == 3
-    assert _read_json(record_dir / "run.json")["status"] == "running"
 
     await owner.finish(handle, status="completed", output="Done")
 
@@ -670,8 +781,8 @@ async def test_append_event_preserves_order_and_actual_tool_payloads(tmp_path: P
         "tool_call_id": "call-1",
         "result": {"items": [{"name": "first"}, {"name": "second"}]},
     }
-    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 3
     await owner.finish(handle, status="completed", output="Done")
+    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 4
     transcript = (_record_dir(handle) / "transcript.md").read_text(encoding="utf-8")
     assert "Investigate the failure" in transcript
     assert transcript.index("tool_call") < transcript.index("tool_result") < transcript.index("delegation_finished")
@@ -717,13 +828,14 @@ async def test_append_event_deduplicates_stable_event_id_after_reopen(tmp_path: 
         "delegation_started",
         "tool:call-1:result",
     ]
-    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 2
+    await owner.finish(reopened, status="completed", output="Done")
+    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 3
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fresh_event", [False, True])
 async def test_event_append_repairs_views_after_interrupted_write(tmp_path: Path, fresh_event: bool) -> None:
-    """A replayed or fresh event must repair views left stale by interruption."""
+    """A replayed or fresh status change must repair views left stale by interruption."""
     owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
     handle = await _start(owner, delegation_id="event-repair")
     run_path = _record_dir(handle) / "run.json"
@@ -740,7 +852,7 @@ async def test_event_append_repairs_views_after_interrupted_write(tmp_path: Path
     _receipt_path(handle).write_bytes(stale_receipt)
 
     if fresh_event:
-        event = DelegationEvent(kind="output", data={"content": "Still waiting"}, event_id="fresh-output")
+        event = DelegationEvent(kind="status", data={"status": "paused"}, status="paused", event_id="fresh-status")
     await owner.append_event(handle, event)
 
     assert _read_json(run_path)["event_count"] == 2 + fresh_event
@@ -970,7 +1082,8 @@ async def test_record_exports_never_follow_a_symlinked_leaf(leaf_name: str, tmp_
     outside.write_text('{"victim": "victim-only note"}\n', encoding="utf-8")
     target.symlink_to(outside)
 
-    if leaf_name == "transcript.md":
+    # run.json, the receipt, and the transcript are rewritten when the record settles.
+    if leaf_name != "events.jsonl":
         await owner.finish(handle, status="completed", output="written")
     else:
         await owner.append_event(

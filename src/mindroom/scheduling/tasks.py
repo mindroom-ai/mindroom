@@ -223,6 +223,8 @@ class ScheduledWorkflow(BaseModel):
     # The IANA timezone the task's times are interpreted and shown in. MindRoom sets it from the scheduling agent,
     # so the schema the parser model fills leaves it out.
     timezone: SkipJsonSchema[str | None] = None
+    # The message the scheduling reply answered, so a client can show the task under that reply; MindRoom sets it.
+    source_event_id: SkipJsonSchema[str | None] = None
 
     @field_validator("execute_at")
     @classmethod
@@ -426,6 +428,7 @@ def build_edited_scheduled_workflow(  # noqa: C901
         new_thread=existing_workflow.new_thread,
         silent=existing_workflow.silent if silent is None else silent,
         timezone=existing_workflow.timezone,
+        source_event_id=existing_workflow.source_event_id,
     )
 
 
@@ -1094,6 +1097,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     history_limit: int | None = None,
     silent: bool | None = None,
     model: str | None = None,
+    source_event_id: str | None = None,
 ) -> str:
     """Schedule a workflow from natural language request and return the confirmation.
 
@@ -1208,6 +1212,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     workflow_result.room_id = room_id
     workflow_result.new_thread = new_thread
     workflow_result.timezone = existing_task.workflow.timezone if existing_task else task_timezone
+    workflow_result.source_event_id = existing_task.workflow.source_event_id if existing_task else source_event_id
     if history_limit is not None:
         workflow_result.history_limit = history_limit
     if silent is not None:
@@ -1380,6 +1385,7 @@ async def schedule_approved_tool_call(
     arguments: dict[str, object],
     execute_at: str,
     description: str,
+    source_event_id: str | None = None,
 ) -> str:
     """Store one gated call of the agent's own, ask the requester to approve it now, and return the confirmation.
 
@@ -1428,6 +1434,7 @@ async def schedule_approved_tool_call(
         room_id=room_id,
         pre_approved_call=True,
         timezone=timezone,
+        source_event_id=source_event_id,
     )
     binding = ScheduledCallBinding(
         task_id=task_id,

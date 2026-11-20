@@ -163,7 +163,7 @@ MINDROOM_MCP_SCIM_TOKEN=<at least 32 random characters>
 | `MINDROOM_MCP_EXTERNAL_AUTHORIZATION_SERVER` | required | Issuer advertised in protected-resource metadata; its discovery document supplies the client's OAuth endpoints |
 | `MINDROOM_MCP_EXTERNAL_ISSUER` | required | Required `iss` value; may differ from the authorization server, and significant trailing slashes matter |
 | `MINDROOM_MCP_EXTERNAL_AUDIENCE` | required | Required `aud`; use an audience dedicated to this MCP resource, not a client ID or browser application audience |
-| `MINDROOM_MCP_EXTERNAL_JWKS_URL` | required | Signing keys |
+| `MINDROOM_MCP_EXTERNAL_JWKS_URL` | required | Signing keys, at a URL that answers directly, since MindRoom refuses JWKS redirects |
 | `MINDROOM_MCP_EXTERNAL_TOKEN_HEADER` | `Authorization` | Header carrying the token; `Authorization` expects `Bearer <JWT>`, other headers carry the raw JWT |
 | `MINDROOM_MCP_EXTERNAL_EMAIL_CLAIM` | `email` | Claim holding the user's email |
 | `MINDROOM_MCP_EXTERNAL_MATRIX_USER_ID_CLAIM` | unset | Claim holding the Matrix user ID |

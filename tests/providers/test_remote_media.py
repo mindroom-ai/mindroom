@@ -152,14 +152,14 @@ async def test_gemini_receives_downloaded_images_and_audio_and_fetches_files_and
 
     parts = wire.body()["contents"][0]["parts"]
     inline = [
-        (part["inlineData"]["mimeType"], base64.urlsafe_b64decode(part["inlineData"]["data"]))
+        (part["inlineData"]["mime_type"], base64.urlsafe_b64decode(part["inlineData"]["data"]))
         for part in parts
         if "inlineData" in part
     ]
     assert inline == [("image/png", _PNG), ("audio/wav", b"RIFF-speech")]
     assert [part["fileData"] for part in parts if "fileData" in part] == [
-        {"fileUri": "https://media.test/clip.mp4", "mimeType": "video/mp4"},
-        {"fileUri": "https://media.test/report.pdf", "mimeType": "application/pdf"},
+        {"file_uri": "https://media.test/clip.mp4", "mime_type": "video/mp4"},
+        {"file_uri": "https://media.test/report.pdf", "mime_type": "application/pdf"},
     ]
     assert downloaded == ["https://media.test/generated", "https://media.test/speech"]
 
@@ -452,7 +452,7 @@ async def test_downloaded_audio_without_a_format_keeps_the_type_its_server_or_ur
     chat_parts = chat_wire.body()["messages"][-1]["content"][1:]
     assert [part["input_audio"]["format"] for part in chat_parts] == ["mp3", "mp3", "mp3", "wav"]
     gemini_parts = gemini_wire.body()["contents"][0]["parts"][1:]
-    assert [part["inlineData"]["mimeType"] for part in gemini_parts] == [
+    assert [part["inlineData"]["mime_type"] for part in gemini_parts] == [
         "audio/mpeg",
         "audio/mp3",
         "audio/mp3",

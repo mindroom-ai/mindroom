@@ -69,6 +69,8 @@ def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
         "MATRIX_HOMESERVER": "http://localhost:8008",
         "TEST_OAUTH_CLIENT_ID": "test-client",
         "TEST_OAUTH_CLIENT_SECRET": "test-secret",
+        # Agent Keys starts off here; `_enable_egress_broker` turns it on.
+        "MINDROOM_EGRESS_BROKER_PORT": "off",
     }
     paths = _runtime_paths(tmp_path, env)
     payload = {
