@@ -159,17 +159,21 @@ def _links_path(runtime_paths: RuntimePaths) -> Path:
     return tracking_dir(runtime_paths) / "tailnet_ssh.json"
 
 
+def _error_location(loc: tuple[int | str, ...]) -> str:
+    """Spell a validation location with schema field names and list indexes only; other segments come from the input."""
+    fields = LinkBook.model_fields.keys() | Link.model_fields.keys()
+    return ".".join(str(part) if isinstance(part, int) or part in fields else "<key>" for part in loc) or "<file>"
+
+
 def _parse(path: Path, text: str) -> LinkBook:
     """Return the stored book, or raise ``ValueError`` naming only the failing fields.
 
-    Pydantic's own message and the chained error quote the input, which holds private host keys.
+    Pydantic's own message, the chained error, and unknown keys quote the input, which holds private host keys.
     """
     try:
         return LinkBook.model_validate_json(text)
     except ValidationError as exc:  # Invalid JSON is a ValidationError too.
-        problems = "; ".join(
-            f"{'.'.join(map(str, error['loc'])) or '<file>'}: {error['type']}" for error in exc.errors()
-        )
+        problems = "; ".join(f"{_error_location(error['loc'])}: {error['type']}" for error in exc.errors())
     msg = f"Tailnet SSH file {path} is invalid: {problems}"
     raise ValueError(msg)
 
