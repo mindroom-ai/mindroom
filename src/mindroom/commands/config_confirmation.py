@@ -411,10 +411,10 @@ async def _response_for_checkpointed_decision(
     context: ConfigConfirmationContext,
     preview_event_id: str,
     pending_change: _PendingConfigChange,
-) -> tuple[_PendingConfigChange, str]:
+) -> str:
     """Checkpoint one decision result without repeating an ambiguous config write."""
     if pending_change.decision_response_text is not None:
-        return pending_change, pending_change.decision_response_text
+        return pending_change.decision_response_text
     if pending_change.decision_key != "✅":
         msg = "Config confirmation decision checkpoint is incomplete"
         raise RuntimeError(msg)
@@ -437,7 +437,7 @@ async def _response_for_checkpointed_decision(
         )
     checkpoint = replace(pending_change, decision_response_text=response_text)
     _save_pending_change(context.runtime_paths, preview_event_id, checkpoint)
-    return checkpoint, response_text
+    return response_text
 
 
 async def resume_committed_confirmation(
@@ -473,11 +473,7 @@ async def handle_confirmation_reaction(
         pending_change = _ensure_decision_checkpoint(context, event, pending_change)
         if pending_change is None:
             return
-        pending_change, response_text = await _response_for_checkpointed_decision(
-            context,
-            preview_event_id,
-            pending_change,
-        )
+        response_text = await _response_for_checkpointed_decision(context, preview_event_id, pending_change)
 
         target = context.build_message_target(
             room_id=room.room_id,
