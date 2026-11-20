@@ -955,7 +955,7 @@ class RouterConfig(BaseModel):
     )
     # LEGACY_COMPAT: `router.accept_invites` in a config file.
     # Legacy format: `accept_invites: true|false|[patterns]` under `router:`, which chose the invites the router took.
-    # Last legacy release: every release before the router-free change ships, v2026.11.411 the newest when written,
+    # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
     #   honors it; replacement: unreleased, the owner account accepts no invites, so nothing replaces the field.
     # Handling: the field still validates so such configs load; a set value logs one deprecation warning at load
     #   and on reload (`orchestration/config_warnings.py`) and changes nothing.

@@ -31,7 +31,7 @@ class PersonalRoomAdoption(BaseModel):
     agent_user_id: str
     # LEGACY_COMPAT: personal-room adoption records that name the router account.
     # Legacy format: `adoption.router_user_id`, the router an operator attested as a member of an imported room.
-    # Last legacy release: every release before the router-free change ships, v2026.11.411 the newest when written,
+    # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
     #   writes it; replacement: unreleased, a personal room needs no owner account, so new records omit the field.
     # Handling: the field still loads; a named ID must be the persisted owner account, which then stays a
     #   permitted member and keeps the room at cleanup.

@@ -6,7 +6,7 @@ from mindroom.tool_system.authoring import Toolkit
 
 # LEGACY_COMPAT: the `invite_router` tool name in agent configs and prompts.
 # Legacy format: an agent's `tools` list, or a prompt, that names `invite_router`, which invited the router account.
-# Last legacy release: every release before the router-free change ships, v2026.11.411 the newest when written,
+# Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
 #   offers the working tool; replacement: unreleased, rooms need no router account, so nothing replaces the call.
 # Handling: the name stays registered so such configs load; the call invites nobody and says it is not needed.
 #   Remove the stub after the first router-free release.

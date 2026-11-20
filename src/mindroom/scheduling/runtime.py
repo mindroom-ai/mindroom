@@ -163,7 +163,7 @@ class ScheduledTaskRuntime:
                 # LEGACY_COMPAT: Scheduled tasks the router owned.
                 # Legacy format: Scheduled-task state whose "owner" is the router's Matrix ID, or that has no owner
                 #   and was last written by the router; the router ran every task in a room it could serve.
-                # Last legacy release: every release before the router-free change ships, v2026.11.411 the newest
+                # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest
                 #   when written; replacement: unreleased, the first release with this change stores the bot that
                 #   saves a task as its owner.
                 # Handling: The task runs under the first agent or team its message mentions that is joined and may

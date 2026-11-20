@@ -230,7 +230,7 @@ def should_persist_invited_rooms(config: Config, agent_name: str) -> bool:
     """Return whether one entity should keep accepted invited rooms across restarts."""
     # LEGACY_COMPAT: the owner account's saved invited rooms, written while the router accepted invites.
     # Legacy format: a JSON list of room IDs in the `router` entity's `invited_rooms.json`.
-    # Last legacy release: every release before the router-free change ships, v2026.11.411 the newest when written;
+    # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written;
     #   replacement: unreleased, the owner account accepts no invite, and only a hook's `matrix_admin` adds a room.
     # Handling: the owner keeps reading the list as rooms it keeps track of; it never joins a room because of it.
     # Coverage: tests/test_room_invites.py::test_owner_does_not_join_a_room_its_saved_invite_record_names

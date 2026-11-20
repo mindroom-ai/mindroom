@@ -404,9 +404,9 @@ def _from_rows(
         correlation_id=cast("str | None", stored["correlation_id"]),
         # LEGACY_COMPAT: Approval continuations stored without the event their reply answers.
         # Legacy format: the stored context of an approval continuation had no reply_to_event_id key.
-        # Last legacy release: every release before this change ships, v2026.11.411 the newest when written, stores
-        #   continuations without it; replacement: unreleased, the first release with this change stores the event
-        #   the paused turn's reply answers in every continuation.
+        # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
+        #   stores continuations without it; replacement: unreleased, the first release with this change stores
+        #   the event the paused turn's reply answers in every continuation.
         # Handling: absence reads as the turn's newest source, the event a resume answered before the upgrade, and as
         #   no event for a job follow-up, whose source is no Matrix event.
         # Coverage: tests/test_event_journal_store.py::TestApprovalContinuations::test_continuation_without_a_reply_target_loads_with_the_event_its_resume_answered.

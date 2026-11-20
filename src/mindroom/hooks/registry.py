@@ -83,8 +83,9 @@ class HookRegistry:
                 agents = metadata.agents
                 # LEGACY_COMPAT: the `agents=(ROUTER_AGENT_NAME,)` hook filter that meant once per room or process.
                 # Legacy format: a plugin hook whose `agents` filter is exactly the router's name.
-                # Last legacy release: v2026.11.385 ran such hooks on the router bot; replacement: the next release
-                # has no bot in every room, and hooks say `scope="room"` or `scope="service"`.
+                # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when
+                # written, runs such hooks on the router bot; replacement: unreleased, no bot is in every room, and
+                # hooks say `scope="room"` or `scope="service"`.
                 # Handling: registered with one warning as service scope on bot:ready and as room scope elsewhere, with
                 # the filter cleared; on config:reloaded the filter stays and, as before, never matches.
                 # Coverage: tests/test_hook_registry.py::test_router_alias_on_bot_ready_becomes_service_scope and the

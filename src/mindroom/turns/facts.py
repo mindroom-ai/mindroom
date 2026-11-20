@@ -104,8 +104,8 @@ class IngressFacts:
     # LEGACY_COMPAT: visible router relay messages ("@agent could you help with this?") already in room history.
     # Legacy format: an `m.room.message` the router account sent with the trusted-relay source kind and
     # `com.mindroom.original_sender`, which mentions the agent the router chose and replies to the person's message.
-    # Last legacy release: v2026.11.396, the newest release when visible relays stopped; the next, still unreleased,
-    # release sends a hidden `io.mindroom.route` event from the room's steward instead.
+    # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
+    # sends visible relays; replacement: unreleased, the room's steward sends a hidden `io.mindroom.route` event.
     # Handling: every message of the router account still counts as routed, so the mentioned agent answers such a
     # relay for its original sender, in reply to the relay, exactly as before.
     # Coverage: tests/test_turns_focused.py::test_old_router_relay_event_still_answers_from_relay_context
@@ -145,8 +145,9 @@ def is_voice_echo(facts: IngressFacts, content: object) -> bool:
     # Legacy format: an `m.room.message` of the router account with `com.mindroom.visible_router_voice_echo` true,
     # the trusted-relay source kind and `com.mindroom.original_sender`; first a "transcribing" placeholder, then
     # edited to the transcript or the fallback text.
-    # Last legacy release: v2026.11.396, the newest release when the router stopped posting echoes; the next, still
-    # unreleased, release has the answering agent post the transcript under the same content key.
+    # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
+    # has the router post echoes; replacement: unreleased, the answering agent posts the transcript under the same
+    # content key.
     # Handling: no router branch. Old and new echoes are read by this one rule, as display-only and never a turn.
     # Coverage: tests/test_turns_focused.py::test_old_router_echo_is_not_a_turn.
     return facts.original_sender is not None and is_visible_router_voice_echo_content(content)

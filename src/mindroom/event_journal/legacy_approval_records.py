@@ -70,7 +70,9 @@ def upgrade_approval_records(transaction: Transaction, inspector: SchemaInspecto
         # LEGACY_COMPAT: Approval cards the router sent, stored without a sender.
         # Legacy format: approval_cards and scheduled_call_approvals rows with no sender columns; the router sent and
         # edited every card.
-        # Last legacy release: v2026.11.385; replacement: the next release records the principal that sends each card.
+        # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
+        # stores cards without a sender; replacement: unreleased, the first release with this change records the
+        # principal that sends each card.
         # Handling: the column is added, NULL on every stored card; a NULL sender is the router account wherever a card
         # is sent, edited or verified, and the first startup expires each such pending card. The router's principal
         # becomes the ledger of every account's cards, so the rooms it had left take cards again at their old epoch.
