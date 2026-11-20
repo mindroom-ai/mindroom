@@ -109,8 +109,8 @@ def _image(framework: Any, content_filter: Any, deadline: float, *, window: bool
         deadline,
     )
     if (
-        int(Quartz.CGImageGetWidth(image)) != width  # ty: ignore[unresolved-attribute]
-        or int(Quartz.CGImageGetHeight(image)) != height  # ty: ignore[unresolved-attribute]
+        int(Quartz.CGImageGetWidth(image)) != width  # ty: ignore[missing-attribute]
+        or int(Quartz.CGImageGetHeight(image)) != height  # ty: ignore[missing-attribute]
     ):
         msg = "ScreenCaptureKit returned unexpected pixel dimensions; request fresh app state."
         raise MacOSCaptureError(msg)

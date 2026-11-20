@@ -158,10 +158,17 @@ def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) ->
 class _CommandEvent(Protocol):
     """Minimal canonical text-event shape required by command handling."""
 
-    sender: str
-    event_id: str
-    body: str
-    source: dict[str, Any]
+    @property
+    def sender(self) -> str: ...
+
+    @property
+    def event_id(self) -> str: ...
+
+    @property
+    def body(self) -> str: ...
+
+    @property
+    def source(self) -> dict[str, Any]: ...
 
 
 class _CommandResponseSender(Protocol):

@@ -19,8 +19,8 @@ dependencies = [
   "aiohttp>=3.13.3",
   "anthropic>=2.11,<3",
   "anyio>=4.10",
-  # Authlib 1.8 moves its HTTPX client to httpx2, which our token transports and error handling do not use yet.
-  "authlib>=1.6,<1.8",
+  # Authlib 1.8 moved its HTTPX client to httpx2, which oauth/providers.py now uses.
+  "authlib>=1.9.9",
   "certifi>=2026.4.22",
   # Click 8.5 drops `typer.Argument(help=...)` text from Typer 0.25's `--help`.
   "click<8.5",
@@ -31,9 +31,8 @@ dependencies = [
   "docstring-parser>=0.18",
   "fastapi>=0.136.3",
   "google-auth>=2.40.3",
-  # google-genai 3 moves the Gemini Developer API (not Vertex AI) to API v1, which lacks the -latest aliases, Live API,
-  # and caches, and makes httpx2 its default client; that transport change needs its own validation.
-  "google-genai>=2,<3",
+  # 3.x sends through httpx2 and defaults the Gemini Developer API to v1; our clients keep v1beta (providers/gemini).
+  "google-genai>=3.6",
   "h11>=0.16",
   "httpx>=0.27",
   # 2.15.1 stops a long-lived client's TLS handshakes from growing slower on Linux.
@@ -91,8 +90,7 @@ apify = [
 ]
 approved_egress = []
 arxiv = [
-  # Agno 3.2.1 ArxivTools calls Result.download_pdf, which arxiv 4 removed.
-  "arxiv<4",
+  "arxiv>=4.1",
 ]
 atlassian = []
 attachments = []
@@ -155,8 +153,8 @@ config_manager = [
   "pyyaml>=6",
 ]
 confluence = [
-  # Agno 3.2.1 ConfluenceTools calls create_page and get_page_by_title, which atlassian-python-api 5 removed.
-  "atlassian-python-api<5",
+  # tools/agno_compat_confluence.py builds on the v1 client in atlassian.confluence.server, new in 5.
+  "atlassian-python-api>=5.0.5",
 ]
 contacts = []
 crawl4ai = [
@@ -195,6 +193,7 @@ eleven_labs = [
   "elevenlabs",
 ]
 email = []
+email_invite = []
 exa = [
   "exa-py",
 ]
@@ -207,6 +206,7 @@ file_generation = [
   "python-docx>=1.2",
   "reportlab",
 ]
+filesystem = []
 financial_datasets_api = [
   "requests",
 ]
@@ -220,8 +220,8 @@ giphy = [
   "httpx>=0.27",
 ]
 github = [
-  # PyGithub 2.9 injects URL metadata into dictionary responses, breaking Agno's numeric language parser.
-  "pygithub>=2.5,<2.9",
+  # 2.10 adds GithubRetry.max_rate_limit_wait, which the provider-failure retry copy carries over.
+  "pygithub>=2.10",
 ]
 gmail = [
   "google-api-python-client>=2.178",
@@ -292,7 +292,7 @@ jira = [
   "jira>=3.10.5",
 ]
 knowledge_graph = [
-  "graphiti-core[falkordblite]==0.31.1",
+  "graphiti-core[falkordblite]==0.31.2",
   # C parser for FalkorDB replies; redis-py parses large ones in pure Python on the event loop otherwise.
   "hiredis",
   "psutil",
@@ -536,9 +536,8 @@ dev = [
   "requests>=2.32.4",
   "ruff>=0.12.5",
   "tach>=0.34.1",
-  # Freezes main's ty 0.0.32. The latest (0.0.107) renames rules this config ignores and reports about 1,700 new
-  # errors; upgrade ty on its own.
-  "ty>=0.0.17,<0.0.33",
+  # 0.0.107 renamed the rules the [tool.ty] overrides and ignore comments use.
+  "ty>=0.0.107",
   "vulture>=2.16",
   "zensical",
 ]
@@ -551,7 +550,7 @@ desktop-helper = [
   "mindroom-nio[e2e]",
   "pillow>=10.2",
   "pyautogui>=0.9.54",
-  "pyinstaller==6.16",
+  "pyinstaller==6.22.3",
   "pyobjc-framework-applicationservices>=12.2.1; sys_platform=='darwin'",
   "pyobjc-framework-cocoa>=12.2.1; sys_platform=='darwin'",
   "pyobjc-framework-screencapturekit>=12.2.1; sys_platform=='darwin'",
@@ -675,7 +674,7 @@ python-version = "3.13"
 # arguments).
 [[tool.ty.overrides]]
 include = [ "tests/" ]
-rules = { call-non-callable = "ignore", invalid-argument-type = "ignore", invalid-assignment = "ignore", invalid-return-type = "ignore", no-matching-overload = "ignore", not-iterable = "ignore", not-subscriptable = "ignore", too-many-positional-arguments = "ignore", unresolved-attribute = "ignore", unsupported-operator = "ignore" }
+rules = { invalid-argument-type = "ignore", invalid-assignment = "ignore", invalid-explicit-return = "ignore", invalid-implicit-return = "ignore", missing-attribute = "ignore", missing-union-attribute = "ignore", no-matching-overload = "ignore", not-callable = "ignore", not-iterable = "ignore", not-subscriptable = "ignore", too-many-positional-arguments = "ignore", unsupported-operator = "ignore" }
 
 # The macOS accessibility backend imports pyobjc, declared
 # `sys_platform=='darwin'` and so genuinely absent everywhere else. Checking on
@@ -690,7 +689,7 @@ rules = { call-non-callable = "ignore", invalid-argument-type = "ignore", invali
 # directives deleted.
 [[tool.ty.overrides]]
 include = [ "src/mindroom/desktop/" ]
-rules = { unresolved-import = "ignore", unused-ignore-comment = "ignore" }
+rules = { import-not-found = "ignore", unused-ignore-comment = "ignore" }
 [tool.ty.rules]
 deprecated = "ignore"  # FastAPI on_event deprecation; refactor to lifespan separately
 [tool.ty.src]

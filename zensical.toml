@@ -97,6 +97,7 @@ nav = [
   { "Security & Access" = [
     { "Access Control" = "authorization.md" },
     { "Tool Approval" = "tool-approval.md" },
+    { "Email Invites" = "email-invites.md" },
     { "Credentials & OAuth" = "oauth-framework.md" },
     { "Connections Portal" = "connections-portal.md" },
     { "Connect Google Accounts" = "deployment/google-services-user-oauth.md" },

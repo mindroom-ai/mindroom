@@ -10,7 +10,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 from zoneinfo import ZoneInfo
 
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
@@ -529,7 +529,7 @@ def _search_scope_memory_entries(scope: MemoryScope, query: str, *, limit: int) 
         scored_entries.append({**entry, "score": score})
         seen_scored_text.add(normalized_text)
 
-    scored_entries.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
+    scored_entries.sort(key=lambda item: item.get("score", 0.0), reverse=True)
     scored_entries = scored_entries[:limit]
 
     if limit <= len(scored_entries):
@@ -538,7 +538,7 @@ def _search_scope_memory_entries(scope: MemoryScope, query: str, *, limit: int) 
     remaining_limit = limit - len(scored_entries)
     snippet_results = _scan_scope_memory_snippets(scope, query_tokens, seen_scored_text)
 
-    snippet_results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
+    snippet_results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
     return scored_entries + snippet_results[:remaining_limit]
 
 
@@ -649,34 +649,6 @@ def _replace_scope_path_memory_entry(scope: MemoryScope, memory_id: str, content
     return True
 
 
-def _selected_lines(costs: list[int], first_entry: int, max_lines: int, budget: int) -> list[int]:
-    """Return the indexes of the whole lines within both caps, withholding the oldest structured entries first.
-
-    ``costs`` holds each line's tokens with its newline, and ``budget`` is the token cap.
-    `add_memory` appends entries, so a capped preload keeps the curated head before the first entry and fills the rest
-    with the newest lines; a file without entries, or whose head alone reaches a cap, keeps its leading lines. A long
-    line is withheld whole rather than cut, so the preload never shows a partial fact and the truncation marker
-    accounts for every withheld line.
-    """
-    leading = 0
-    kept = 0
-    for cost in costs[:max_lines]:
-        if kept + cost > budget:
-            break
-        kept += cost
-        leading += 1
-    if leading == len(costs) or leading < first_entry:
-        return list(range(leading))
-    kept = sum(costs[:first_entry])
-    newest: list[int] = []
-    for index in range(len(costs) - 1, first_entry - 1, -1):
-        if first_entry + len(newest) >= max_lines or kept + costs[index] > budget:
-            break
-        kept += costs[index]
-        newest.append(index)
-    return [*range(first_entry), *reversed(newest)]
-
-
 def _entrypoint_text(lines: Sequence[str]) -> str:
     """Return the text of ``lines`` as the preamble inlines it."""
     return "\n".join(lines).strip()
@@ -688,15 +660,18 @@ def _line_tokens(counter: TokenCounter, line: str) -> int:
 
 
 def _lines_within_caps(lines: Sequence[str], config: Config, counter: TokenCounter) -> list[str]:
-    """Keep the whole lines within both caps, as ``counter`` counts them, withholding the oldest entries first."""
+    """Keep the file's first whole lines within both caps, as ``counter`` counts each with its newline.
+
+    A line past a cap, and every line after it, is withheld whole, so lines appended to a capped file never change
+    the preload, it never shows a partial fact, and the truncation marker accounts for every withheld line.
+    """
     file_config = config.memory.file
-    first_entry = next(
-        (index for index, line in enumerate(lines) if FILE_MEMORY_ENTRY_PATTERN.match(line.strip())),
-        len(lines),
-    )
-    costs = [_line_tokens(counter, line) for line in lines]
-    kept = _selected_lines(costs, first_entry, file_config.max_entrypoint_lines, file_config.max_entrypoint_tokens)
-    return [lines[index] for index in kept]
+    kept = 0
+    for index, line in enumerate(lines[: file_config.max_entrypoint_lines]):
+        kept += _line_tokens(counter, line)
+        if kept > file_config.max_entrypoint_tokens:
+            return list(lines[:index])
+    return list(lines[: file_config.max_entrypoint_lines])
 
 
 def cap_entrypoint(
@@ -983,13 +958,13 @@ class FileMemoryBackend:
 
         team_results = await asyncio.to_thread(_team_keyword_results, teams, query, limit)
         if semantic and recall:
-            team_results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
+            team_results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
             return MemorySearchOutcome(
                 results=_add_within_recall_budget(results, team_results[:limit]),
                 degraded_reason=degraded_reason,
             )
         results.extend(team_results)
-        results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
+        results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
         return MemorySearchOutcome(results=results[:limit], degraded_reason=degraded_reason)
 
     async def list_all(

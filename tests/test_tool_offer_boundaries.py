@@ -60,7 +60,7 @@ _SHELL = {"shell": {"defer": True}}
 _CALC_TOOLS = ["shell", _CALC, {"file": {"defer": True, "initial": True}}]
 _MESSAGE_TOOLS = ["shell", _MESSAGE]
 _TRIO = "matrix_message attachments matrix_room"
-_OPENCLAW = "coding duckduckgo website browser scheduler"
+_OPENCLAW = "filesystem duckduckgo website browser scheduler"
 _OPENCLAW_ALL = _owned("openclaw_compat", f"{_OPENCLAW} {_TRIO}")
 _FILE_CALC = {"tools": ["file", _CALC]}
 _MESSAGES = {"tools": _MESSAGE_TOOLS}
@@ -113,7 +113,7 @@ def _offered(build: AgentBuild) -> str:
         pytest.param(_MESSAGES, ("matrix_message", "attachments"), "attachments matrix_message", id="implied"),
         pytest.param(_FILE_CALC, ("calculator.add",), "calculator", id="function-entry"),
         pytest.param(_DELEGATE, ("delegate",), "delegate", id="injected-delegate"),
-        pytest.param(_FILE_CALC, None, "calculator dynamic_tools file invite_router", id="no-tool-list"),
+        pytest.param(_FILE_CALC, None, "calculator dynamic_tools filesystem invite_router", id="no-tool-list"),
     ],
 )
 def test_a_persona_tool_list_builds_exactly_the_named_toolkits_eagerly(
@@ -132,9 +132,16 @@ def test_a_persona_tool_list_builds_exactly_the_named_toolkits_eagerly(
 @pytest.mark.parametrize(
     ("tools", "identity", "options", "attached", "deferred"),
     [
-        pytest.param(_CALC_TOOLS, "room", {}, "file invite_router shell", "calculator", id="initial"),
-        pytest.param(_CALC_TOOLS, "room", _REQUIRE_CALC, "calculator file invite_router shell", "", id="required"),
-        pytest.param(_CALC_TOOLS, "room", _EAGER, "calculator file invite_router shell", "", id="eager"),
+        pytest.param(_CALC_TOOLS, "room", {}, "filesystem invite_router shell", "calculator", id="initial"),
+        pytest.param(
+            _CALC_TOOLS,
+            "room",
+            _REQUIRE_CALC,
+            "calculator filesystem invite_router shell",
+            "",
+            id="required",
+        ),
+        pytest.param(_CALC_TOOLS, "room", _EAGER, "calculator filesystem invite_router shell", "", id="eager"),
         pytest.param(_MESSAGE_TOOLS, "room", {}, "invite_router shell", _TRIO, id="implied"),
         pytest.param(
             _MESSAGE_TOOLS,

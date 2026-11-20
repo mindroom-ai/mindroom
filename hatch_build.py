@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -14,6 +15,8 @@ _BUN_INSTALL_MAX_ATTEMPTS = 3
 _BUN_INSTALL_RETRY_DELAY_SECONDS = 2.0
 _BUILD_FRONTEND_ENV = "MINDROOM_BUILD_FRONTEND"
 _GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
+# frontend/bun.lock is a version 2 lockfile, which Bun 1.3 and older refuse under --frozen-lockfile.
+_MIN_BUN_VERSION = (1, 4)
 
 
 class FrontendBuildHook(BuildHookInterface):
@@ -34,6 +37,7 @@ class FrontendBuildHook(BuildHookInterface):
         if bun is None:
             msg = _missing_bun_message(version)
             raise RuntimeError(msg)
+        _require_supported_bun(bun)
 
         output_dir = _get_output_dir(frontend_dir, self.directory, version)
         _build_frontend(frontend_dir, output_dir, bun)
@@ -51,6 +55,21 @@ class FrontendBuildHook(BuildHookInterface):
 def _env_flag_enabled(name: str) -> bool:
     """Return whether an environment flag has a truthy value."""
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _installed_bun_version(bun: str) -> str:
+    """Return what `bun --version` prints."""
+    return subprocess.run([bun, "--version"], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _require_supported_bun(bun: str) -> None:
+    """Refuse a Bun too old to install from the dashboard's lockfile, naming the version it needs."""
+    version = _installed_bun_version(bun)
+    match = re.match(r"(\d+)\.(\d+)", version)
+    if match is not None and (int(match[1]), int(match[2])) < _MIN_BUN_VERSION:
+        minimum = ".".join(map(str, _MIN_BUN_VERSION))
+        msg = f"Building the bundled frontend needs Bun {minimum} or newer, but {bun} is Bun {version}. Upgrade Bun."
+        raise RuntimeError(msg)
 
 
 def _missing_bun_message(version: str) -> str:

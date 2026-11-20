@@ -192,7 +192,8 @@ class GoogleDriveTools(
     # Upstream PR: None identified.
     # Remove when: Agno's `DOWNLOAD_EXPORT_TYPES` no longer maps Google Vids to a `files.export` format.
     # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refusal_advises_download_only_for_files_the_download_saves.
-    DOWNLOAD_EXPORT_TYPES: ClassVar[dict[str, tuple[str, str]]] = {
+    # Agno leaves its class attribute unannotated, so ty reads it as an instance variable.
+    DOWNLOAD_EXPORT_TYPES: ClassVar[dict[str, tuple[str, str]]] = {  # ty: ignore[incompatible-attribute-override]
         mime_type: export
         for mime_type, export in AgnoGoogleDriveTools.DOWNLOAD_EXPORT_TYPES.items()
         if mime_type != WorkspaceType.VID

@@ -18,6 +18,7 @@ from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState, RunPhase
 from mindroom.config.resolution import entity_timezone
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
+from mindroom.email_invites.receiver import register_email_invite_receiver
 from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.legacy_turn_rows import legacy_responses_file_path
 from mindroom.hooks import (
@@ -1657,6 +1658,13 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 config_getter=lambda: self.config,
                 membership_index=self._runtime_view.agent_reply_memberships,
+                callback_wrapper=partial(_create_best_effort_task_wrapper, owner=self._runtime_view),
+            )
+            await register_email_invite_receiver(
+                client=client,
+                agent_name=self.agent_name,
+                runtime_paths=self.runtime_paths,
+                config_getter=lambda: self.config,
                 callback_wrapper=partial(_create_best_effort_task_wrapper, owner=self._runtime_view),
             )
             await self.refresh_presence()

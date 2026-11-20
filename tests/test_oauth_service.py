@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import httpx
+import httpx2
 import pytest
 from google.auth.exceptions import TransportError as GoogleTransportError
 from requests import exceptions as requests_exceptions
@@ -52,6 +53,7 @@ from mindroom.oauth.providers import (
     OAuthProvider,
     OAuthProviderError,
     OAuthRefreshRejectedError,
+    OAuthTokenResponseBodyError,
     OAuthTokenResult,
     oauth_connection_required_payload,
     oauth_consent_group_provider,
@@ -73,6 +75,7 @@ from tests.oauth_test_utils import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from multiprocessing.queues import Queue
+    from types import ModuleType
     from typing import Any
 
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -522,6 +525,25 @@ async def test_different_scopes_refresh_concurrently(tmp_path: Path) -> None:
     assert started == {"alice", "bob"}
 
 
+class _CallbackAccessTokenClient:
+    """Answer every code exchange with one access token, without a token endpoint."""
+
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+    async def __aenter__(self) -> _CallbackAccessTokenClient:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
+        return None
+
+    async def fetch_token(self, _url: str, **_kwargs: object) -> dict[str, str]:
+        return {"access_token": "callback-access"}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("blocked_callback", ["token_parser", "claim_validator"])
 async def test_blocked_sync_provider_callback_does_not_block_different_scope(
@@ -532,19 +554,6 @@ async def test_blocked_sync_provider_callback_does_not_block_different_scope(
     """Provider callbacks in one scope must not stall another scope's transaction."""
     callback_started = threading.Event()
     release_callback = threading.Event()
-
-    class TokenClient:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
-
-        async def __aenter__(self) -> TokenClient:
-            return self
-
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-        async def fetch_token(self, _url: str, **_kwargs: object) -> dict[str, str]:
-            return {"access_token": "callback-access"}
 
     def parse_token(
         _provider: OAuthProvider,
@@ -568,7 +577,7 @@ async def test_blocked_sync_provider_callback_does_not_block_different_scope(
             callback_started.set()
             release_callback.wait()
 
-    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", TokenClient)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", _CallbackAccessTokenClient)
     provider = OAuthProvider(
         id="demo_provider",
         display_name="Demo Provider",
@@ -1530,24 +1539,29 @@ async def test_nonterminal_refresh_failure_preserves_credentials_and_bounds_logs
     ("transport_error", "expected_diagnostics"),
     [
         pytest.param(
-            httpx.ConnectTimeout("secret-transport-detail"),
+            httpx2.ConnectTimeout("secret-transport-detail"),
             {"transport_error_category": "timeout", "transport_error_type": "ConnectTimeout"},
             id="connect-timeout",
         ),
         pytest.param(
-            httpx.ReadTimeout("secret-transport-detail"),
+            httpx2.ReadTimeout("secret-transport-detail"),
             {"transport_error_category": "timeout", "transport_error_type": "ReadTimeout"},
             id="read-timeout",
         ),
         pytest.param(
-            type("secret-provider-class", (httpx.ReadTimeout,), {})("secret-transport-detail"),
+            type("secret-provider-class", (httpx2.ReadTimeout,), {})("secret-transport-detail"),
             {"transport_error_category": "timeout", "transport_error_type": "ReadTimeout"},
             id="provider-subclass-name-is-not-logged",
         ),
         pytest.param(
-            httpx.ConnectError("secret-transport-detail"),
+            httpx2.ConnectError("secret-transport-detail"),
             {"transport_error_category": "network", "transport_error_type": "NetworkError"},
             id="connect-error",
+        ),
+        pytest.param(
+            httpx.ConnectError("secret-transport-detail"),
+            {"transport_error_category": "network", "transport_error_type": "NetworkError"},
+            id="discovery-httpx-connect-error",
         ),
         pytest.param(
             requests_exceptions.ReadTimeout("secret-transport-detail"),
@@ -1563,6 +1577,11 @@ async def test_nonterminal_refresh_failure_preserves_credentials_and_bounds_logs
             UnicodeDecodeError("utf-8", b"secret-response-body", 0, 1, "secret-transport-detail"),
             {"transport_error_category": "invalid_response", "transport_error_type": "UnicodeDecodeError"},
             id="non-utf8-response",
+        ),
+        pytest.param(
+            OAuthTokenResponseBodyError("secret-transport-detail"),
+            {"transport_error_category": "invalid_response", "transport_error_type": "OAuthTokenResponseBodyError"},
+            id="non-object-json-response",
         ),
         pytest.param(
             TimeoutError("secret-transport-detail"),
@@ -1633,7 +1652,7 @@ async def test_repeat_after_lost_refresh_response_releases_lock_before_waiting_c
     monkeypatch.setattr(providers, "_REFRESH_REPEAT_MIN_SECONDS", providers._REFRESH_REPEAT_MIN_SECONDS * scale)
     first_attempt = DelayedTokenEndpointOutcome(
         providers._DEFAULT_AUTHORIZE_TIMEOUT_SECONDS * scale,
-        lambda request: httpx.ReadTimeout("timed out", request=request),
+        lambda request: httpx2.ReadTimeout("timed out", request=request),
     )
     first_request = threading.Event()
     presented = serve_token_endpoint(
@@ -1688,19 +1707,21 @@ def test_refresh_failure_diagnostics_ignore_unrecognized_cyclic_causes() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("http_module", [httpx2, httpx], ids=["authlib-httpx2", "discovery-httpx"])
 @pytest.mark.parametrize(("status_code", "oauth_error"), [(429, None), (503, None), (400, "invalid_grant")])
 async def test_refresh_failure_logs_http_status_without_provider_response(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     status_code: int,
     oauth_error: str | None,
+    http_module: ModuleType,
 ) -> None:
     """HTTP status remains visible without request/response contents or changed invalidation."""
     logger = _CapturingLogger()
     monkeypatch.setattr(credential_lifecycle, "logger", logger)
-    request = httpx.Request("POST", "https://provider.example/token?secret=query", content=b"secret-request")
-    response = httpx.Response(status_code, request=request, content=b"secret-response")
-    transport_error = httpx.HTTPStatusError("secret-transport-detail", request=request, response=response)
+    request = http_module.Request("POST", "https://provider.example/token?secret=query", content=b"secret-request")
+    response = http_module.Response(status_code, request=request, content=b"secret-response")
+    transport_error = http_module.HTTPStatusError("secret-transport-detail", request=request, response=response)
 
     async def refresh(_credentials: Mapping[str, Any]) -> dict[str, Any]:
         message = "secret-provider-detail"
@@ -1736,9 +1757,9 @@ async def test_refresh_failure_preserves_oauth_error_when_status_metadata_raises
     """Broken diagnostic properties cannot replace the refresh error or change invalidation."""
     logger = _CapturingLogger()
     monkeypatch.setattr(credential_lifecycle, "logger", logger)
-    request = httpx.Request("POST", "https://provider.example/token?secret=query")
-    response = httpx.Response(503, request=request)
-    transport_error = httpx.HTTPStatusError("secret-transport-detail", request=request, response=response)
+    request = httpx2.Request("POST", "https://provider.example/token?secret=query")
+    response = httpx2.Response(503, request=request)
+    transport_error = httpx2.HTTPStatusError("secret-transport-detail", request=request, response=response)
 
     def unreadable_metadata(_self: object) -> None:
         message = "secret-metadata-detail"

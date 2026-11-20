@@ -21,6 +21,7 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
 from mindroom.config.models import split_model_reference
 from mindroom.config.resolution import authored_tool_entries
+from mindroom.config.tool_aliases import canonical_tool_names
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
@@ -208,7 +209,7 @@ class DynamicWorkflowTools(Toolkit):
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
-            parsed = parse_workflow_spec(spec)
+            parsed = parse_workflow_spec(_authored(spec))
             store, owner_id = dynamic_workflow_store_and_owner(context)
 
             def create() -> DynamicWorkflowSummary:
@@ -239,7 +240,7 @@ class DynamicWorkflowTools(Toolkit):
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
-            parsed = parse_workflow_spec(spec)
+            parsed = parse_workflow_spec(_authored(spec))
             _validate_workflow_policy_for_context(context, parsed)
         except WorkflowSpecError as exc:
             return self._spec_errors_payload(exc)
@@ -265,7 +266,7 @@ class DynamicWorkflowTools(Toolkit):
                     workflow_id=workflow_id,
                     scope=AGENT_SCOPE,
                     owner_id=owner_id,
-                    patch=patch,
+                    patch=_authored(patch),
                     updated_by=context.agent_name,
                     reason=reason,
                     spec_validator=lambda spec: _validate_workflow_policy_for_context(context, spec),
@@ -895,6 +896,26 @@ def _resolve_participant_model_name(
         return _canonical_model_ref(context, model_name)
     msg = f"Dynamic Workflow participant model '{model_ref}' is not allowlisted in config.models."
     raise DynamicWorkflowError(msg)
+
+
+def _authored(spec: dict[str, Any]) -> dict[str, Any]:
+    """Return a spec or patch a call just wrote with file and coding in its tool lists read as filesystem.
+
+    A saved revision never passes through here, so the names it holds stay as they were written.
+    """
+
+    def renamed(owner: object) -> object:
+        if not isinstance(owner, dict):
+            return owner
+        tools = owner.get("tools")
+        if not isinstance(tools, list) or not all(isinstance(name, str) for name in tools):
+            return owner
+        return {**owner, "tools": canonical_tool_names([name.strip() for name in tools])}
+
+    authored = {**spec, "permissions": renamed(spec.get("permissions"))} if "permissions" in spec else dict(spec)
+    if isinstance(participants := spec.get("participants"), list):
+        authored["participants"] = [renamed(participant) for participant in participants]
+    return authored
 
 
 def _validate_workflow_policy_for_context(

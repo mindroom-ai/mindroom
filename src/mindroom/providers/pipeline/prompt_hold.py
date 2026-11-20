@@ -38,7 +38,7 @@ from contextlib import suppress
 from dataclasses import asdict, replace
 from difflib import SequenceMatcher
 from functools import lru_cache, partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.constants import PROMPT_CACHE_IDLE_SECONDS
 from mindroom.file_locks import advisory_file_lock
@@ -195,11 +195,13 @@ def _continued(state: _State, route: object, system: Sequence[Message], rest: Se
         return None
     if fresh != current:
         # It is told after the newest user message, which no earlier update follows, or not at all.
-        text = _update_text(tuple(held), tuple(fresh))
+        # `_holds` admits only text system messages.
+        text = _update_text(tuple(held), cast("tuple[str, ...]", tuple(fresh)))
         anchor = _anchors(rest, [len(rest)])[0]
         if text is None or anchor is None or not _may_stand(rest, len(rest)) or len(rest) <= max(lengths, default=0):
             return None
-        updates = [*updates, [len(rest), anchor, text]]
+        new_update: list[Any] = [len(rest), anchor, text]
+        updates = [*updates, new_update]
         state = {**state, "current": fresh, "updates": updates}
     sent = [
         message if message.content == text else replace(message, content=text) for message, text in zip(system, held)

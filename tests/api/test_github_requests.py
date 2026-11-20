@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -533,7 +534,7 @@ def test_an_expiring_token_is_refreshed_first(
     refreshes = serve_token_endpoint(
         monkeypatch,
         [
-            httpx.Response(
+            httpx2.Response(
                 200,
                 json={
                     "access_token": "gho-rotated",
@@ -560,7 +561,7 @@ def test_a_rejected_refresh_is_not_connected(
 ) -> None:
     """A refresh GitHub rejects means the user must connect again."""
     connect(paths, ALICE, token="old-token", expires_at=1.0)  # noqa: S106
-    serve_token_endpoint(monkeypatch, [httpx.Response(400, json={"error": "invalid_grant"})])
+    serve_token_endpoint(monkeypatch, [httpx2.Response(400, json={"error": "invalid_grant"})])
 
     assert ask(client, session(app, ALICE)).json() == {"error": "github_not_connected"}
     assert github.requests == []
@@ -575,7 +576,7 @@ def test_a_failed_refresh_can_be_retried(
 ) -> None:
     """A refresh that fails for another reason answers 503, which a retry may fix."""
     connect(paths, ALICE, token="old-token", expires_at=1.0)  # noqa: S106
-    serve_token_endpoint(monkeypatch, [httpx.Response(503, text="unavailable")])
+    serve_token_endpoint(monkeypatch, [httpx2.Response(503, text="unavailable")])
 
     response = ask(client, session(app, ALICE))
 

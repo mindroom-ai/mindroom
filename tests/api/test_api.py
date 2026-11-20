@@ -436,6 +436,7 @@ def test_ensure_frontend_dist_dir_builds_repo_checkout(
     monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_DIST_DIR", frontend_dist_dir)
     monkeypatch.setattr(frontend_assets, "_FRONTEND_BUILD_ATTEMPTED", False)
     monkeypatch.setattr(frontend_assets.shutil, "which", lambda name: "/usr/bin/bun" if name == "bun" else None)
+    monkeypatch.setattr(frontend_assets, "_installed_bun_version", lambda _bun: "1.4.3")
     monkeypatch.setattr(frontend_assets.subprocess, "run", _fake_run)
 
     assert frontend_assets.ensure_frontend_dist_dir(_runtime_paths(tmp_path)) == frontend_dist_dir
@@ -443,6 +444,29 @@ def test_ensure_frontend_dist_dir_builds_repo_checkout(
         (["/usr/bin/bun", "install", "--frozen-lockfile"], frontend_source_dir),
         (["/usr/bin/bun", "run", "build"], frontend_source_dir),
     ]
+
+
+def test_ensure_frontend_dist_dir_names_the_bun_version_the_lockfile_needs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A Bun too old for the dashboard lockfile should fail with the version it needs, before installing anything."""
+    frontend_source_dir = tmp_path / "frontend"
+    frontend_source_dir.mkdir()
+    (frontend_source_dir / "package.json").write_text("{}")
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(frontend_assets, "_PACKAGE_FRONTEND_DIR", tmp_path / "package-assets")
+    monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_SOURCE_DIR", frontend_source_dir)
+    monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_DIST_DIR", frontend_source_dir / "dist")
+    monkeypatch.setattr(frontend_assets, "_FRONTEND_BUILD_ATTEMPTED", False)
+    monkeypatch.setattr(frontend_assets.shutil, "which", lambda name: "/usr/bin/bun" if name == "bun" else None)
+    monkeypatch.setattr(frontend_assets, "_installed_bun_version", lambda _bun: "1.3.14")
+    monkeypatch.setattr(frontend_assets.subprocess, "run", lambda command, **_kwargs: commands.append(command))
+
+    with pytest.raises(RuntimeError, match=r"needs Bun 1\.4 or newer, but /usr/bin/bun is Bun 1\.3\.14"):
+        frontend_assets.ensure_frontend_dist_dir(_runtime_paths(tmp_path))
+    assert commands == []
 
 
 def test_ensure_frontend_dist_dir_respects_disable_flag(
@@ -1356,7 +1380,7 @@ def test_get_tools(test_client: TestClient) -> None:
     # Check that some expected tools are present
     tool_names = {tool["name"] for tool in data["tools"]}
     assert "calculator" in tool_names
-    assert "file" in tool_names
+    assert "filesystem" in tool_names
     assert "shell" in tool_names
 
     # Check that tools have the expected structure

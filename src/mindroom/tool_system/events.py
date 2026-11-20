@@ -1173,7 +1173,7 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
             raise RuntimeError(_MALFORMED_TRACE)
         restored.append(
             ToolTraceEntry(
-                type=cast("Literal['tool_call_started', 'tool_call_completed']", event_type),
+                type=event_type,
                 tool_name=tool_name,
                 args_preview=args_preview,
                 result_preview=result_preview,

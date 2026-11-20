@@ -657,8 +657,8 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
                 runtime_paths,
                 config,
                 tool_name="file",
-                function_name="save_file",
-                kwargs={"contents": "hello forkserver", "file_name": "out.txt"},
+                function_name="write_file",
+                kwargs={"content": "hello forkserver", "path": "out.txt"},
                 base_dir=str(workdir),
             ),
         )

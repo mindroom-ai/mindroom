@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING, Never, cast
+from typing import TYPE_CHECKING, Literal, Never, cast
 
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.workers.backend import WorkerBackendError
@@ -84,7 +84,7 @@ class PrimaryWorkerManagerLease:
         """Enter the lease context and return the borrowed manager."""
         return self.manager
 
-    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> bool:
+    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> Literal[False]:
         """Release the borrowed manager when the context exits."""
         self.release()
         return False

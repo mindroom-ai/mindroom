@@ -160,13 +160,14 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     id: "access",
     title: "Access and identity",
     description:
-      "Administrators, permissions, and accounts MindRoom treats specially.",
+      "Administrators, permissions, email invites, and accounts MindRoom treats specially.",
     entries: [
       { root: "administrators" },
       { root: "authorization" },
       { root: "bot_accounts" },
       { root: "mindroom_user" },
       { root: "external_trigger_policy" },
+      { root: "email_invites" },
       { root: "slack" },
     ],
   },

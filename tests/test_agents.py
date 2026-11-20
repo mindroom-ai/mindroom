@@ -952,7 +952,7 @@ def test_openclaw_compat_expands_to_implied_tools() -> None:
     assert config.resolve_agent("summary").tools.tool_names == (
         "openclaw_compat",
         "shell",
-        "coding",
+        "filesystem",
         "duckduckgo",
         "website",
         "browser",
@@ -978,7 +978,7 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
         "browser",
         "openclaw_compat",
         "shell",
-        "coding",
+        "filesystem",
         "python",
         "scheduler",
         "duckduckgo",
@@ -1194,7 +1194,7 @@ def test_create_agent_skips_a_toolkit_whose_construction_raises_unexpectedly(
     build_agent_toolkit = agents_module.build_agent_toolkit
 
     def build(tool_name: str, **kwargs: object) -> Toolkit | None:
-        if tool_name == "file":
+        if tool_name == "filesystem":
             msg = "toolkit constructor bug"
             raise RuntimeError(msg)
         return build_agent_toolkit(tool_name, **kwargs)
@@ -1217,8 +1217,8 @@ def test_create_agent_skips_a_toolkit_whose_function_sets_an_agno_hook(tmp_path:
         return text
 
     def build(tool_name: str, **kwargs: object) -> Toolkit | None:
-        if tool_name == "file":
-            return Toolkit(name="file", tools=[Function(name="ping", entrypoint=ping, pre_hook=lambda: None)])
+        if tool_name == "filesystem":
+            return Toolkit(name="filesystem", tools=[Function(name="ping", entrypoint=ping, pre_hook=lambda: None)])
         return build_agent_toolkit(tool_name, **kwargs)
 
     with patch.object(agents_module, "build_agent_toolkit", side_effect=build), capture_logs() as logs:
@@ -1226,7 +1226,7 @@ def test_create_agent_skips_a_toolkit_whose_function_sets_an_agno_hook(tmp_path:
 
     assert [tool.name for tool in agent.spec.toolkits] == ["calculator"]
     [warning] = [log for log in logs if log["event"] == "Could not load tool for agent construction"]
-    assert warning["tool"] == "file"
+    assert warning["tool"] == "filesystem"
     assert "'ping' sets an Agno pre_hook" in warning["error"]
 
 
@@ -1274,7 +1274,7 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     overrides_by_tool = {
         call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
     }
-    assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
+    assert overrides_by_tool["filesystem"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["duckduckgo"] is None
 
@@ -2475,7 +2475,7 @@ def test_agent_workspace_file_tools_stay_inside_the_workspace(
     agent = _agent_offered("file", runtime_paths, file_memory=file_memory)
     file_tools = _tool_entrypoints(agent)
     coding = _tool_entrypoints(_agent_offered("coding", runtime_paths, file_memory=file_memory))
-    assert file_tools["read_file"]("notes.md") == "workspace notes\n"
+    assert file_tools["read_file"]("notes.md") == "1| workspace notes"
     assert "workspace notes" in coding["read_file"]("notes.md")
     assert coding["write_file"]("draft.md", "draft\n").startswith("Wrote")
     assert (workspace / "draft.md").read_text(encoding="utf-8") == "draft\n"
@@ -2543,7 +2543,7 @@ def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_
     overrides_by_tool = {
         call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
     }
-    assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
+    assert overrides_by_tool["filesystem"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
 
 

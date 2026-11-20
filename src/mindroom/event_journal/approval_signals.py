@@ -226,11 +226,13 @@ class ApprovalSignals:
             listeners = self._paused_listeners.get(signal.principal_id, ()) if reply else ()
             return [(listener, partial(listener.freed, reply.room_id)) for listener in listeners if reply]
         if isinstance(signal, _Ended):
-            ended = [] if signal.approval is None else self._ended_listeners
-            return [
-                *self._remove(signal.principal_id, signal.approval_id),
-                *((listener, partial(listener.ended, signal.approval)) for listener in ended),
-            ]
+            approval = signal.approval
+            ended = (
+                []
+                if approval is None
+                else [(listener, partial(listener.ended, approval)) for listener in self._ended_listeners]
+            )
+            return [*self._remove(signal.principal_id, signal.approval_id), *ended]
         if isinstance(signal, _Loaded):
             current = {reply.approval_id: reply for reply in signal.replies}
             known = [reply for replies in self._paused.values() for reply in replies.values()]

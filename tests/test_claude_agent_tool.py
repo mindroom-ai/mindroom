@@ -250,7 +250,7 @@ class _BufferedFakeClaudeSDKClient(_FakeClaudeSDKClient):
 class _SlowFakeClaudeSDKClient(_FakeClaudeSDKClient):
     """Slow fake client used to validate session locking behavior."""
 
-    instances: ClassVar[list[_SlowFakeClaudeSDKClient]] = []
+    instances: ClassVar[list[_SlowFakeClaudeSDKClient]] = []  # ty: ignore[incompatible-attribute-override]  # own list per fake
     active_queries: ClassVar[int] = 0
     max_concurrent_queries: ClassVar[int] = 0
 
@@ -270,7 +270,7 @@ class _SlowFakeClaudeSDKClient(_FakeClaudeSDKClient):
 class _InterruptibleFakeClaudeSDKClient(_FakeClaudeSDKClient):
     """Fake client whose query blocks until interrupt is called."""
 
-    instances: ClassVar[list[_InterruptibleFakeClaudeSDKClient]] = []
+    instances: ClassVar[list[_InterruptibleFakeClaudeSDKClient]] = []  # ty: ignore[incompatible-attribute-override]  # own list per fake
     created_event: ClassVar[asyncio.Event | None] = None
 
     def __post_init__(self) -> None:
@@ -295,7 +295,7 @@ class _InterruptibleFakeClaudeSDKClient(_FakeClaudeSDKClient):
 class _TimeJumpFakeClaudeSDKClient(_FakeClaudeSDKClient):
     """Fake client that advances a shared monotonic clock while querying."""
 
-    instances: ClassVar[list[_TimeJumpFakeClaudeSDKClient]] = []
+    instances: ClassVar[list[_TimeJumpFakeClaudeSDKClient]] = []  # ty: ignore[incompatible-attribute-override]  # own list per fake
     jump_seconds: ClassVar[float] = 0.0
     clock: ClassVar[dict[str, float] | None] = None
 
@@ -333,7 +333,7 @@ class _ReaderTaskFakeClaudeSDKClient(_FakeClaudeSDKClient):
     ``receiver`` is the task that reads its messages.
     """
 
-    instances: ClassVar[list[_ReaderTaskFakeClaudeSDKClient]] = []
+    instances: ClassVar[list[_ReaderTaskFakeClaudeSDKClient]] = []  # ty: ignore[incompatible-attribute-override]  # own list per fake
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -364,7 +364,7 @@ class _ReaderTaskFakeClaudeSDKClient(_FakeClaudeSDKClient):
 class _SlowCleanupFakeClaudeSDKClient(_FakeClaudeSDKClient):
     """Fake client whose connect blocks and, like the SDK, disconnects slowly when that connect is interrupted."""
 
-    instances: ClassVar[list[_SlowCleanupFakeClaudeSDKClient]] = []
+    instances: ClassVar[list[_SlowCleanupFakeClaudeSDKClient]] = []  # ty: ignore[incompatible-attribute-override]  # own list per fake
     connect_started: ClassVar[asyncio.Event | None] = None
 
     def __post_init__(self) -> None:
@@ -392,7 +392,7 @@ class _SlowCleanupFakeClaudeSDKClient(_FakeClaudeSDKClient):
 class _CancelledStartFakeClaudeSDKClient(_FakeClaudeSDKClient):
     """Fake client whose first start is cancelled as its connect succeeds, and whose cleanup then fails or sticks."""
 
-    instances: ClassVar[list[_CancelledStartFakeClaudeSDKClient]] = []
+    instances: ClassVar[list[_CancelledStartFakeClaudeSDKClient]] = []  # ty: ignore[incompatible-attribute-override]  # own list per fake
     on_connected: ClassVar[list[Callable[[], object]]] = []
     stuck_cleanup: ClassVar[asyncio.Event | None] = None
 
@@ -429,7 +429,7 @@ class _FailingClaudeSDKClient(_FakeClaudeSDKClient):
 class _GatewayProbeClaudeSDKClient(_FakeClaudeSDKClient):
     """Gateway probe client that sends Anthropic-compatible requests to a local stub server."""
 
-    instances: ClassVar[list[_GatewayProbeClaudeSDKClient]] = []
+    instances: ClassVar[list[_GatewayProbeClaudeSDKClient]] = []  # ty: ignore[incompatible-attribute-override]  # own list per fake
 
     def __post_init__(self) -> None:
         super().__post_init__()

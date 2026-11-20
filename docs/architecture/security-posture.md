@@ -106,7 +106,7 @@ A `user` worker mounts several agents' workspaces, so code working in one of the
 
 A shared directory lives at `shared_directories/<owner>/<name>/` and mounts read-write into its owner's dedicated workers and read-only into each member's.
 No dedicated worker mounts `shared_directories/` or an owner directory below it, so worker code cannot replace a directory another worker mounts; the primary creates and empties these directories through no-follow descriptors, reads and writes files there only through the path tools' no-follow confinement and atomic writes, and indexes a knowledge base configured inside one without following links.
-Primary-process `file` and `coding` reach shared directories only when no worker is configured, because worker code writes them and these tools list and search by path after checking it.
+Primary-process `filesystem` reaches shared directories only when no worker is configured, because worker code writes them and it lists and searches by path after checking it.
 For the same reason the primary never runs Git for a knowledge base inside a shared directory.
 A workspace or shared directory is mounted only when it is a real directory reached from the storage root without links.
 Because Docker resolves mount targets again on every container start, a worker whose mount target inside its writable root was replaced with a link by worker code is refused when it is created or restarted.
@@ -118,19 +118,19 @@ Kubernetes mounts such knowledge read-only, because kubelet follows links inside
 The primary treats everything inside a mounted workspace as worker-controlled.
 Files it reads or writes there, such as skills, subagent profiles, context files, workspace template copies, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, thread exports, the files `prompt_curation` measures, the memory files, staging copies, reports, verdicts, and thread-export `index.json` files `dreaming` reads, and the files chat clients list, read, and save through the [workspace file routes](../workspace-files.md), are reached from the workspace root without following links, never written through a file that has another hard link, opened non-blocking so a FIFO cannot stall the primary, and published by atomic replacement or exclusive creation.
 The primary never takes a file lock inside a workspace, because worker code could hold it forever.
-Primary `coding` edits and writes to the same resolved path serialize in memory within one primary process.
+Primary `filesystem` edits, writes, and deletes of the same resolved path serialize in memory within one primary process.
 `dreaming` writes each run's agenda, staging copy of `memory/`, and patch under `.mindroom/dreaming/runs/`, and deletes finished staging and old runs without following links.
 It writes an approved proposal into `memory/` from bytes worker code staged, which gives the agent nothing it could not write itself; it writes only Markdown under `memory/` other than today's daily note and context files, and keeps its progress below `tracking/`, outside the workspace.
 Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary never reads.
 Worker code that makes one of those exports or the caller's receipt unwritable only leaves the record's exports or the receipt stale; the delegation still records its events and settles.
 
-In the primary, `mindroom_output_path`, attachment saves, Google Drive, Microsoft Files, Outlook mail attachment, Slack, and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes refuse a workspace replaced by a link after runtime resolution.
+In the primary, `mindroom_output_path`, attachment saves, Google Drive, Microsoft Files, Outlook mail attachment, Slack, and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `filesystem` reads, writes, and deletes refuse a workspace replaced by a link after runtime resolution.
 That check covers only the workspace's final path component, so a replaced parent such as `agents/<name>` is not refused.
 With the default workspace names that is not exploitable in the hosted layout, because no primary-only directory there contains an entry named `workspace`; an authored `private.root` that matches a primary directory name, such as `credentials`, could be reached through a replaced parent.
 
 A background job's saved result keeps the bytes a tool returned with a media file instead of reopening its path, and reads a media file the tool returned only by path as a regular file, opened non-blocking without following a final link.
 
-Git commands the primary runs in a workspace, for knowledge checkouts and the `coding` tool's ignore check, use the hardened Git command and environment, so programs named in workspace Git config never run.
+Git commands the primary runs in a workspace, for knowledge checkouts and the `filesystem` tool's ignore check, use the hardened Git command and environment, so programs named in workspace Git config never run.
 
 ### Read limits on workspace files
 
@@ -147,12 +147,11 @@ Reads of worker-controlled files are capped per surface.
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
 | Vectors one search loads from a base whose path lies in, or holds, storage that workers write: private knowledge, semantic file memory, and shared bases inside a workspace or shared directory | 256 MiB per base | The search fails before loading them, so memory search falls back to keyword matching and `search_knowledge_base` leaves that base out of its results, or reports the error when no other base answers |
-| Scheduled-run receipts, `file` and `coding` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |
+| Scheduled-run receipts, `filesystem` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |
 | `e2b` uploads, sandbox files that `e2b` downloads or reads, and `e2b` command and code output | 64 MiB | Refused with a tool error; `stream_command()` returns its first 64 MiB |
 | `microsoft_files` uploads | 250 MB, Microsoft Graph's single-request limit | Refused with a tool error before any request |
 | `outlook_mail` attachments | 3 MB per file, Microsoft Graph's inline attachment limit | Refused with a tool error before any request |
 | `slack` uploads | 50 MB, the same as Slack downloads | Refused with a tool error before any request |
-| Files a `file` content search reads | 500 KiB each, Agno's search limit | Skipped |
 | `browser` upload snapshots, kept in the browser's temp directory until their tab closes | 256 MiB in total per browser | Refused with a tool error |
 | Media files a background job's result reads by path | 48 MiB in total per result, within its 64 MiB encoded limit | The job fails with a size-limit error |
 | `moviepy_video_tools` staged inputs | 1 GiB per video; 1 MiB per caption file | The call fails before staging more than the cap |
@@ -202,7 +201,7 @@ The instance chart refuses dedicated Kubernetes workers because RBAC cannot conf
 
 | Value | Path tools may use |
 |---|---|
-| `workspace` (default) | Files inside the agent workspace and attachments available in the conversation; for `file` and `coding`, also the agent's shared directories, read-only where it only joined; in a [headless run](../headless.md#files) with a `workdir`, `file`, `coding`, and `attachments`' `view_file` use that directory instead of the workspace, `file` and `coding` may also read the agent's saved tool outputs, and the other path tools keep the workspace; a `browser` in the primary process also uploads and opens files by absolute path from its own [artifact directory](../tools/web-scraping-and-browser.md#browser-configuration), `browser/` in the agent's state root unless `output_dir` names another |
+| `workspace` (default) | Files inside the agent workspace and attachments available in the conversation; for `filesystem`, also the agent's shared directories, read-only where it only joined; in a [headless run](../headless.md#files) with a `workdir`, `filesystem` and `attachments`' `view_file` use that directory instead of the workspace, `filesystem` may also read the agent's saved tool outputs, and the other path tools keep the workspace; a `browser` in the primary process also uploads and opens files by absolute path from its own [artifact directory](../tools/web-scraping-and-browser.md#browser-configuration), `browser/` in the agent's state root unless `output_dir` names another |
 | `unrestricted` | Any file the tool's process can reach; on a worker that is the worker container |
 
 Every tool, including plugin tools, must declare one of these file access classes when it registers, so no tool silently defaults to taking no paths.
@@ -210,7 +209,7 @@ Every tool, including plugin tools, must declare one of these file access classe
 | Tool class | Tools | Behavior |
 |---|---|---|
 | Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `microsoft_files`, `outlook_mail` attachments, `slack` uploads, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and refuse replaced workspace roots and swapped files; `airflow` and `moviepy_video_tools` writes do not follow links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
-| Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, edits, deletes, and every file a `file` content search reads refuse replaced workspace roots and swapped files, while listing and the other searches walk by path, as the known gap below describes |
+| Worker path tools | `filesystem` | Follow the agent's `file_access`; reads, writes, edits, and deletes refuse replaced workspace roots and swapped files, while listing and searches walk by path, as the known gap below describes |
 | Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
 
@@ -332,9 +331,9 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
 
 - The unconfined non-code tools `composio`, `postgres`, `redshift`, and `browserbase` do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
-- The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `grep`, `find_files`, and `ls`) refuse a workspace that no longer resolves to the pinned directory and paths that lead outside it, but then walk and read by path.
-  This matters only when an operator routes these tools to the primary process while worker code writes the same workspace, such as the Kubernetes `static_runner` sidecar with `worker_tools` that leave out `file` and `coding`.
-  Code that swaps the workspace, a checked directory, or a file for a link between that check and the walk can make that one call list or return any file the primary process can read, and a planted FIFO can stall a `coding` content search.
+- The listing and search functions of `filesystem` (`grep`, `find_files`, and `ls`) refuse a workspace that no longer resolves to the pinned directory and paths that lead outside it, but then walk and read by path.
+  This matters only when an operator routes these tools to the primary process while worker code writes the same workspace, such as the Kubernetes `static_runner` sidecar with `worker_tools` that leave out `filesystem`.
+  Code that swaps the workspace, a checked directory, or a file for a link between that check and the walk can make that one call list or return any file the primary process can read, and a planted FIFO can stall a `grep` search.
   By default these tools run in a worker, where they see only what the worker already mounts.
 - Knowledge Git commands refuse a worktree whose path goes through a link, but Git then reopens that worktree by path.
   For a Git-backed knowledge base inside a workspace a worker writes, swapping the knowledge folder for a link between that check and the Git command can make that one sync check out or update files at the link target with the primary's permissions; the next sync refuses the link.
@@ -358,7 +357,7 @@ Do not report or "fix" these; they are deliberate.
 - A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, or, with libraries or remote assets on, through the addresses it requests, so agents should only show pages they wrote; remote assets also show every host a page names the viewer's IP address; see [Privacy and safety](../canvases.md#privacy-and-safety).
 - The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation, and `agent_manager`'s `set_avatar` accepts only those IDs; Gmail, Google Drive, Microsoft Files, Outlook mail, and Slack take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
 - `mindroom_output_path`, attachment saves, Google Drive and Microsoft Files downloads, Outlook mail attachment downloads, Slack downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
-- Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
+- Writes into `.git` directories stay blocked for `filesystem` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - Live reply frames in an encrypted room use the room's current Megolm session without counting toward its 100-message rotation, so one session covers more ciphertexts, including live-only text, reasoning, and running tools' output that need not equal any stored event; age and membership rotation still apply.
   Counting them would rotate the session about every ten seconds while a reply streams, each rotation sharing a new key with every device.
 - A [temporary secret](../tools/execution-and-coding.md#temporary_secrets) reaches the shell commands of the conversation whose requester gave it, in a worker too, and MindRoom removes it from tool results only on a best-effort basis; the requester accepts with each card that the agent's commands hold the value.

@@ -55,17 +55,38 @@ _ROUTER_TARGET_UNAVAILABLE_TEXT = (
 class _RouterRelaySupport(Protocol):
     """Collaborators required by router relay execution."""
 
-    runtime: BotRuntimeView
-    runtime_paths: RuntimePaths
-    logger: BoundLogger
-    agent_name: str
-    turn_policy: TurnPolicy
-    ingress: IngressValidator
-    resolver: ConversationResolver
-    turn_store: TurnStore
-    visible_responses: VisibleResponseReconciler
-    delivery_gateway: DeliveryGateway
-    normalizer: InboundTurnNormalizer
+    @property
+    def runtime(self) -> BotRuntimeView: ...
+
+    @property
+    def runtime_paths(self) -> RuntimePaths: ...
+
+    @property
+    def logger(self) -> BoundLogger: ...
+
+    @property
+    def agent_name(self) -> str: ...
+
+    @property
+    def turn_policy(self) -> TurnPolicy: ...
+
+    @property
+    def ingress(self) -> IngressValidator: ...
+
+    @property
+    def resolver(self) -> ConversationResolver: ...
+
+    @property
+    def turn_store(self) -> TurnStore: ...
+
+    @property
+    def visible_responses(self) -> VisibleResponseReconciler: ...
+
+    @property
+    def delivery_gateway(self) -> DeliveryGateway: ...
+
+    @property
+    def normalizer(self) -> InboundTurnNormalizer: ...
 
 
 @dataclass(frozen=True)

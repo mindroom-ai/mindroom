@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
-import httpx
+import httpx2
 import nio
 import pytest
 from fastapi import FastAPI, Request
@@ -594,7 +594,7 @@ async def test_client_user_oauth_access_token_refresh_failure_is_retryable_and_n
     deployment = _deployment(tmp_path)
     alice = deployment.target("assistant", ALICE)
     deployment.connect(alice, _credentials("expiring-token", expires_in=10))
-    serve_token_endpoint(monkeypatch, [httpx.Response(503, json={"error": "temporarily_unavailable"})])
+    serve_token_endpoint(monkeypatch, [httpx2.Response(503, json={"error": "temporarily_unavailable"})])
 
     with capture_logs() as logs, pytest.raises(OAuthProviderError) as raised:
         await deployment.token(ALICE)
