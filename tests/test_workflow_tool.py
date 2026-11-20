@@ -804,8 +804,30 @@ def test_a_workflow_job_is_granted_while_the_agent_has_the_toolkit_and_the_reque
     assert coordinator._grant(job) == "denied"
 
 
-def test_description_lists_the_configured_models(stack: WorkflowStack) -> None:
-    """The description ends with the models this deployment has, as `run_subagent`'s does, and teaches the SDK."""
+_OFFERED_DESCRIPTION = """\
+Run a workflow: a Python script that runs your tools and shell commands in the background.
+
+Give exactly one of `source` (inline Python) or `path` (a file in your workspace).
+The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
+
+    from mindroom.workflow import shell, tool, phase, log
+
+- shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
+  shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
+- phase(title) groups the calls that follow; log(text) shows a progress line.
+
+Every tool and shell call is saved with its result.
+The call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.
+Where the call cannot be a background job, it waits and returns the report itself.
+
+Models: haiku, opus (add an effort as in opus@high)."""
+
+
+def test_description_teaches_what_this_release_runs_and_lists_the_configured_models(stack: WorkflowStack) -> None:
+    """The offered description names the four calls a script has now, how the report arrives, and the models.
+
+    It promises nothing a later release adds: no agents, no resume, no graph.
+    """
     config = stack.context.config
     levels = {"levels": ["low", "high"], "default": "low"}
     config.models = {
@@ -816,10 +838,7 @@ def test_description_lists_the_configured_models(stack: WorkflowStack) -> None:
     functions = {function.name: function for function in adapt_toolkit(toolkit, key="workflow").functions}
     description = functions["start_workflow"].description or ""
 
-    assert description.startswith("Run a workflow: a Python script")
-    assert "Models: haiku, opus (add an effort as in opus@high)." in description
-    assert "shell() returns at most the last 50 KiB of output; redirect to a file and read it for more." in description
-    assert "    from mindroom.workflow import shell, tool, phase, log" in description
+    assert description == _OFFERED_DESCRIPTION
     assert set(functions["start_workflow"].parameters["properties"]) == {
         "source",
         "path",

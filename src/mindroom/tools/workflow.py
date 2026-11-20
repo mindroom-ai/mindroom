@@ -33,7 +33,7 @@ def _limit(name: str, label: str, default: float | None, minimum: float = 1) -> 
 @register_tool_with_metadata(
     name="workflow",
     display_name="Workflows",
-    description="Run a Python script that puts many agents to work in the background, and read or cancel the run",
+    description="Run a Python script that calls your tools in the background, and read or cancel the run",
     docs_url="https://docs.mindroom.chat/tools/workflows/",
     category=ToolCategory.DEVELOPMENT,
     file_access=ToolFileAccess.NONE,

@@ -7168,7 +7168,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Run a Python script that puts many agents to work in the background, and read or cancel the run",
+      "description": "Run a Python script that calls your tools in the background, and read or cancel the run",
       "display_name": "Workflows",
       "docs_url": "https://docs.mindroom.chat/tools/workflows/",
       "executes_code": true,

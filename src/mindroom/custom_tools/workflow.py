@@ -38,9 +38,10 @@ if TYPE_CHECKING:
     from mindroom.workflow_runs.models import WorkflowNode
 
 _START = "start_workflow"
-# The spec's teaching text, with the lines for what this release runs; the list of models follows it.
+# The spec's teaching text, cut to what this release runs: each later release adds the lines for what it adds. The
+# list of models follows it.
 _START_DESCRIPTION = """\
-Run a workflow: a Python script that puts many agents to work in the background.
+Run a workflow: a Python script that runs your tools and shell commands in the background.
 
 Give exactly one of `source` (inline Python) or `path` (a file in your workspace).
 The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
@@ -49,10 +50,11 @@ The script defines `def main(args):` and returns the final report, a string or a
 
 - shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
   shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
-- phase(title) groups the calls that follow in the graph; log(text) shows a progress line.
+- phase(title) groups the calls that follow; log(text) shows a progress line.
 
-Every agent, tool and shell call is saved with its result. The Python between the calls runs again on every resume,
-so do writes (files, git, HTTP) through shell(), tool() or an agent, never with plain Python.
+Every tool and shell call is saved with its result.
+The call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.
+Where the call cannot be a background job, it waits and returns the report itself.
 """
 _ONE_SOURCE = "Give exactly one of source or path."
 _NEEDS_JOBS = "Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow."
