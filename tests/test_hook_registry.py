@@ -263,40 +263,35 @@ def test_service_scope_rejected_on_message_received() -> None:
         assert _registered(per_process, event_name).scope == "service"
 
 
-def test_router_alias_on_bot_ready_becomes_service_scope() -> None:
-    """The deprecated router filter on bot:ready is the service scope."""
+@pytest.mark.parametrize(
+    ("event_name", "agents", "rooms", "expected"),
+    [
+        # The deprecated router filter on bot:ready is the service scope.
+        (EVENT_BOT_READY, (ROUTER_AGENT_NAME,), None, ("service", None, None)),
+        # On config:reloaded it stays a filter, which never matched that event, so the hook still never runs.
+        (EVENT_CONFIG_RELOADED, (ROUTER_AGENT_NAME,), None, ("agent", (ROUTER_AGENT_NAME,), None)),
+        # On any other event it is the room scope.
+        (EVENT_MESSAGE_RECEIVED, (ROUTER_AGENT_NAME,), ["!room:localhost"], ("room", None, ("!room:localhost",))),
+        # Only the exact router filter is the alias; a longer filter stays an agent filter.
+        (EVENT_MESSAGE_RECEIVED, (ROUTER_AGENT_NAME, "code"), None, ("agent", (ROUTER_AGENT_NAME, "code"), None)),
+    ],
+    ids=["bot-ready-service", "config-reloaded-not-aliased", "message-received-room", "longer-filter-not-aliased"],
+)
+def test_router_alias_registration(
+    event_name: str,
+    agents: tuple[str, ...],
+    rooms: list[str] | None,
+    expected: tuple[object, ...],
+) -> None:
+    """The deprecated router filter is the service scope on bot:ready, the room scope elsewhere, a filter otherwise."""
 
-    @hook(EVENT_BOT_READY, agents=(ROUTER_AGENT_NAME,))
-    async def on_ready(ctx: object) -> None:
+    @hook(event_name, agents=agents, rooms=rooms)
+    async def aliased(ctx: object) -> None:
         del ctx
 
-    registered = _registered(on_ready, EVENT_BOT_READY)
+    registered = _registered(aliased, event_name)
 
-    assert (registered.scope, registered.agents) == ("service", None)
-
-
-def test_router_filter_on_config_reloaded_is_not_aliased() -> None:
-    """A router filter on config:reloaded stays a filter, which never matched that event, so the hook still never runs."""
-
-    @hook(EVENT_CONFIG_RELOADED, agents=(ROUTER_AGENT_NAME,))
-    async def on_reload(ctx: object) -> None:
-        del ctx
-
-    registered = _registered(on_reload, EVENT_CONFIG_RELOADED)
-
-    assert (registered.scope, registered.agents) == ("agent", (ROUTER_AGENT_NAME,))
-
-
-def test_router_alias_on_message_received_becomes_room_scope() -> None:
-    """The deprecated router filter on any other event is the room scope."""
-
-    @hook(EVENT_MESSAGE_RECEIVED, agents=(ROUTER_AGENT_NAME,), rooms=["!room:localhost"])
-    async def on_message(ctx: object) -> None:
-        del ctx
-
-    registered = _registered(on_message, EVENT_MESSAGE_RECEIVED)
-
-    assert (registered.scope, registered.agents, registered.rooms) == ("room", None, ("!room:localhost",))
+    assert (registered.scope, registered.agents, registered.rooms) == expected
 
 
 def test_router_alias_warns_once_with_plugin_and_hook_name(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -320,15 +315,3 @@ def test_router_alias_warns_once_with_plugin_and_hook_name(monkeypatch: pytest.M
     ((message, fields),) = warnings
     assert "deprecated" in message
     assert fields == {"plugin_name": "demo", "hook_name": "once-per-message", "scope": "room"}
-
-
-def test_agents_filter_with_router_and_another_name_is_not_aliased() -> None:
-    """Only the exact router filter is the alias; a longer filter stays an agent filter."""
-
-    @hook(EVENT_MESSAGE_RECEIVED, agents=(ROUTER_AGENT_NAME, "code"))
-    async def filtered(ctx: object) -> None:
-        del ctx
-
-    registered = _registered(filtered, EVENT_MESSAGE_RECEIVED)
-
-    assert (registered.scope, registered.agents) == ("agent", (ROUTER_AGENT_NAME, "code"))
