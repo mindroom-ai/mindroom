@@ -30,6 +30,7 @@ _SCHEMA = (
         started_at REAL NOT NULL,
         ended_at REAL,
         row_event_id TEXT,
+        row_sender TEXT,
         retry_at REAL,
         notes_failures INTEGER NOT NULL DEFAULT 0,
         transcript_done_at REAL,
@@ -80,6 +81,8 @@ class StoredCall:
     """None while the call is live."""
     row_event_id: str | None
     """The event ID of the notice the room's poster posts for the call; None until it is up."""
+    row_sender: str | None
+    """The account that posted the row, which alone can edit it; None for a row posted before its sender was kept."""
     retry_at: float | None
     """When the call's Matrix writes may be tried again after one failed; None until one fails."""
     notes_failures: int
@@ -130,6 +133,9 @@ class CallTranscriptStore:
         with self._transaction() as connection:
             for statement in _SCHEMA:
                 connection.execute(statement)
+            if "row_sender" not in {column["name"] for column in connection.execute("PRAGMA table_info(calls)")}:
+                # A database made before a row's sender was kept.
+                connection.execute("ALTER TABLE calls ADD COLUMN row_sender TEXT")
         self.path.chmod(0o600)
 
     def ensure_live_call(self, room_id: str, *, at: float) -> tuple[StoredCall, bool]:
@@ -144,6 +150,7 @@ class CallTranscriptStore:
                 started_at=at,
                 ended_at=None,
                 row_event_id=None,
+                row_sender=None,
                 retry_at=None,
                 notes_failures=0,
                 transcript_done_at=None,
@@ -184,9 +191,9 @@ class CallTranscriptStore:
                 == 1
             )
 
-    def set_row_event_id(self, call_id: str, event_id: str) -> None:
-        """Record the event ID of the call's posted row."""
-        self._write("UPDATE calls SET row_event_id = ? WHERE id = ?", (event_id, call_id))
+    def set_row_event_id(self, call_id: str, event_id: str, sender: str) -> None:
+        """Record the event ID of the call's posted row and the account that sent it."""
+        self._write("UPDATE calls SET row_event_id = ?, row_sender = ? WHERE id = ?", (event_id, sender, call_id))
 
     def postpone(self, call_id: str, *, until: float) -> None:
         """Hold the call's Matrix writes until ``until``."""
@@ -434,6 +441,7 @@ def _call(row: sqlite3.Row) -> StoredCall:
         started_at=row["started_at"],
         ended_at=row["ended_at"],
         row_event_id=row["row_event_id"],
+        row_sender=row["row_sender"],
         retry_at=row["retry_at"],
         notes_failures=row["notes_failures"],
         transcript_done_at=row["transcript_done_at"],

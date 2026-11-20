@@ -85,8 +85,11 @@ class CallRoom:
     """Whether the runtime's accounts can read and post in a room now."""
     reader: Callable[[str], nio.AsyncClient | None]
     """The client that reads a room, its steward's; None for a room no account is in."""
-    poster: Callable[[str], nio.AsyncClient | None]
-    """The client that posts a room's call messages, its poster's; None for a room no account is in."""
+    poster: Callable[[str, str | None], nio.AsyncClient | None]
+    """The client that posts a room's call messages: its poster's, or the named account's, which posted the call's row.
+
+    None for a room no account is in, or when the named account is not running in the room.
+    """
     retitle: Callable[[str, str, str, str], None]
     """Have the room's poster title a thread again now.
 
@@ -98,7 +101,7 @@ class CallRoom:
 
     def poster_joined(self, room_id: str) -> bool | None:
         """Return whether an account that posts call messages is joined to the room; None while not ready."""
-        return self.poster(room_id) is not None if self.ready(room_id) else None
+        return self.poster(room_id, None) is not None if self.ready(room_id) else None
 
     async def is_member(self, room_id: str, user_id: str) -> bool | None:
         """Return whether the person is joined to the room; nobody is a member of a room no account is in."""
@@ -129,7 +132,7 @@ class CallRoom:
         """Return whether the room's power levels let its poster send messages; no poster may not."""
         if not self.ready(room_id):
             return None
-        client = self.poster(room_id)
+        client = self.poster(room_id, None)
         return False if client is None else await self.may_post(room_id, client.user_id)
 
     async def display_names(self, room_id: str, user_ids: Collection[str]) -> Mapping[str, str | None] | None:
@@ -145,15 +148,16 @@ class CallRoom:
             return None
         return {user_id: _display_name(state.content("m.room.member", user_id)) for user_id in user_ids}
 
-    async def post_row(self, room_id: str, call_id: str) -> str | None:
-        """Post the call's row."""
+    async def post_row(self, room_id: str, call_id: str) -> tuple[str, str] | None:
+        """Post the call's row; return its event ID and the account that sent it, which alone can edit it."""
         content = _row_content(_ROW_BODY, {"call_id": call_id})
         return await self._post(room_id, content, transaction_id=f"mindroom-call-{call_id}-row", operation="call_row")
 
     async def edit_row(self, row: EndedRow) -> str | None:
         """Edit the row to give the call's end and length, and in its second edit where the transcript message is.
 
-        Each edit has its own transaction.
+        Each edit has its own transaction, and goes out through the account that posted the row or not at all:
+        Matrix ignores an edit from any other sender.
         """
         call: dict[str, object] = {
             "call_id": row.call_id,
@@ -163,19 +167,22 @@ class CallRoom:
         if row.transcript_event_id is not None:
             call["transcript_event_id"] = row.transcript_event_id
         content = _row_content(row.body, call)
-        return await self._post(
+        sent = await self._post(
             row.room_id,
             build_edit_event_content(event_id=row.row_event_id, new_content=content, new_text=row.body),
             transaction_id=f"mindroom-call-{row.call_id}-row-{row.edit}",
             operation="call_row_edit",
+            sender=row.row_sender,
         )
+        return None if sent is None else sent[0]
 
     async def post_transcript(self, message: TranscriptMessage) -> str | None:
         """Post the call's message in its row's thread, holding the notes, the transcript and the call's ID.
 
         A transcript too big for one event is uploaded as a sidecar first, and the message waits while that upload
         fails: sent cut short under the call's transaction, the message could never be replaced by the full one.
-        Mentions in the notes ping nobody.
+        Mentions in the notes ping nobody. It goes out through the account that posted the row or not at all, so
+        sending it again stays one transaction of one account.
         """
         transcript = message.transcript
         content = build_message_content(
@@ -193,13 +200,15 @@ class CallRoom:
                 _CALL_NOTES_CONTENT_KEY: {"call_id": message.call_id},
             },
         )
-        return await self._post(
+        sent = await self._post(
             message.room_id,
             content,
             transaction_id=f"mindroom-call-{message.call_id}-transcript",
             operation="call_transcript",
             sidecar_required=True,
+            sender=message.row_sender,
         )
+        return None if sent is None else sent[0]
 
     def title_thread(self, message: TranscriptMessage, event_id: str) -> None:
         """Have the poster retitle the row's thread from the message ``event_id`` it just posted there.
@@ -233,14 +242,16 @@ class CallRoom:
         transaction_id: str,
         operation: str,
         sidecar_required: bool = False,
-    ) -> str | None:
-        """Send one message through the room poster's client while ready; return its event ID, None if not sent.
+        sender: str | None = None,
+    ) -> tuple[str, str] | None:
+        """Send one message while ready; return its event ID and the account that sent it, None if not sent.
 
+        It goes through the room poster's client, or through ``sender``'s when one is named.
         It is a transaction derived from its call, so the same poster sending it again never posts a second one.
-        It goes out only if that client is still the room's poster's, checked last before the send, after any upload:
+        It goes out only if that client is still the one to send it, checked last before the send, after any upload:
         once call transcripts are off or the poster stopped, a message being prepared is not sent.
         """
-        client = self.poster(room_id) if self.ready(room_id) else None
+        client = self.poster(room_id, sender) if self.ready(room_id) else None
         if client is None:
             return None
         try:
@@ -250,13 +261,13 @@ class CallRoom:
                 content,
                 operation=operation,
                 transaction_id=transaction_id,
-                write_allowed=lambda: self.ready(room_id) and self.poster(room_id) is client,
+                write_allowed=lambda: self.ready(room_id) and self.poster(room_id, sender) is client,
                 sidecar_required=sidecar_required,
             )
         except _MATRIX_ERRORS as error:
             logger.warning("call_transcript_post_failed", room_id=room_id, operation=operation, error=str(error))
             return None
-        return None if delivered is None else delivered.event_id
+        return None if delivered is None else (delivered.event_id, client.user_id)
 
 
 def _row_content(body: str, call: dict[str, object]) -> dict[str, Any]:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +16,7 @@ from mindroom.call_transcripts.service import (
     CallTranscript,
     CallTranscriptService,
     TranscriptMessage,
+    _owed_row_edit,
 )
 from mindroom.call_transcripts.store import CallTranscriptStore
 from mindroom.config.calls import CallsConfig, CallTranscriptsConfig
@@ -206,6 +207,7 @@ async def test_a_calls_thread_is_titled_again_by_the_bound_router_only(tmp_path:
         room_id=ROOM,
         call_id="call1",
         row_event_id="$row",
+        row_sender=None,
         body="We planned the launch.",
         transcript=transcript,
     )
@@ -240,7 +242,7 @@ async def test_a_room_without_the_owner_account_is_read_and_posted_to_by_its_age
 
     assert service._room.poster_joined(ROOM) is True
     assert (await service.live(ROOM, ANN)).call is None
-    assert await service._room.post_row(ROOM, "call1") == "$row"
+    assert await service._room.post_row(ROOM, "call1") == ("$row", "@mindroom_code:example.org")
     service._room.retitle(ROOM, "$row", "$notes", "We planned the launch.")
     assert service._room.poster_joined("!nobody:example.org") is False
     await coordinator.stop()
@@ -249,6 +251,55 @@ async def test_a_room_without_the_owner_account_is_read_and_posted_to_by_its_age
     agent.post_response_effects.retitle_thread.assert_called_once()
     elsewhere.client.room_send.assert_not_awaited()
     elsewhere.client.room_get_state.assert_not_awaited()
+
+
+async def _writes_made(service: CallTranscriptService) -> None:
+    """Wait until the service has made every Matrix write it started."""
+    async with asyncio.timeout(5):
+        while service._settling:
+            await asyncio.gather(*service._settling.values())
+
+
+def _replaced_event_ids(bot: MagicMock) -> list[str]:
+    """Return the event each edit the bot sent replaces."""
+    contents = [call.kwargs["content"] for call in bot.client.room_send.await_args_list]
+    return [content["m.relates_to"]["event_id"] for content in contents if "m.new_content" in content]
+
+
+@pytest.mark.asyncio
+async def test_a_calls_row_is_edited_by_the_account_that_posted_it_or_by_none(tmp_path: Path) -> None:
+    """Matrix ignores an edit from another account, so a row's edits never go out through the room's next poster."""
+    config = _config(enabled=True)
+    coordinator = _coordinator(test_runtime_paths(tmp_path), lambda: config, _Sleeps())
+    service = coordinator.service()
+    assert service is not None
+    code = _router(user_id="@mindroom_code:example.org")
+    code.client.room_send.return_value = nio.RoomSendResponse("$row", ROOM)
+    bots: dict[str, AgentBot] = {"code": code}
+    _bind(coordinator, config, bots)
+    call = await service.join(ROOM, ANN)
+    await _writes_made(service)
+    assert code.client.room_send.await_count == 1
+
+    # An agent with a lower Matrix ID joins, and posts for the room from now on.
+    newcomer = _router(user_id="@mindroom_alpha:example.org")
+    newcomer.client.room_send.return_value = nio.RoomSendResponse("$other", ROOM)
+    bots["alpha"] = newcomer
+    await service.leave(call.id, ANN)
+    await _writes_made(service)
+
+    assert _replaced_event_ids(newcomer) == []
+    assert _replaced_event_ids(code) == ["$row"]
+
+    # With the row's account stopped, its next edit waits rather than going out through the newcomer.
+    code.running = False
+    stored = await asyncio.to_thread(service._store.call, call.id)
+    assert stored is not None
+    assert stored.row_sender == "@mindroom_code:example.org"
+    linked = replace(_owed_row_edit(replace(stored, row_edit=None)), transcript_event_id="$transcript")
+    assert await service._room.edit_row(linked) is None
+    assert _replaced_event_ids(newcomer) == []
+    await coordinator.stop()
 
 
 @pytest.mark.asyncio
@@ -266,7 +317,7 @@ async def test_a_bot_that_never_syncs_holds_back_only_the_rooms_no_synced_bot_is
 
     assert service._room.poster_joined(ROOM) is True
     assert (await service.live(ROOM, ANN)).call is None
-    assert await service._room.post_row(ROOM, "call1") == "$row"
+    assert await service._room.post_row(ROOM, "call1") == ("$row", "@mindroom_code:example.org")
     assert service._room.poster_joined("!nobody:example.org") is None
     stuck.first_sync_complete = True
     assert service._room.poster_joined("!nobody:example.org") is False

@@ -201,16 +201,21 @@ def _room(
     )
 
 
-def _in_room(client: FakeRouterClient | None, room_id: str) -> nio.AsyncClient | None:
-    """Return the client for a room it is in, as the runtime picks a room's steward and poster among the joined bots."""
-    return cast("nio.AsyncClient", client) if client is not None and room_id in client.rooms else None
+def _in_room(client: FakeRouterClient | None, room_id: str, user_id: str | None = None) -> nio.AsyncClient | None:
+    """Return the client for a room it is in, as the runtime picks a room's steward and poster among the joined bots.
+
+    Asked for one account's client, as for a row's edits, it is the client only when it is that account's.
+    """
+    joined = client is not None and room_id in client.rooms and user_id in {None, client.user_id}
+    return cast("nio.AsyncClient", client) if joined else None
 
 
-def _ended_row(*, transcript_event_id: str | None = None) -> EndedRow:
+def _ended_row(*, transcript_event_id: str | None = None, row_sender: str | None = None) -> EndedRow:
     return EndedRow(
         room_id=ROOM,
         call_id="call1",
         row_event_id="$row",
+        row_sender=row_sender,
         body="Call ended · 2 min",
         ended_at=NOW_MS / 1000,
         duration_seconds=125,
@@ -218,13 +223,19 @@ def _ended_row(*, transcript_event_id: str | None = None) -> EndedRow:
     )
 
 
-def _message(*, body: str = "Call · 2 min", turns: tuple[_Turn, ...] | None = None) -> TranscriptMessage:
+def _message(
+    *,
+    body: str = "Call · 2 min",
+    turns: tuple[_Turn, ...] | None = None,
+    row_sender: str | None = None,
+) -> TranscriptMessage:
     if turns is None:
         turns = (_Turn(sender=ANN, text="We ship on Friday."), _Turn(sender=BOB, text="I will write the notes."))
     return TranscriptMessage(
         room_id=ROOM,
         call_id="call1",
         row_event_id="$row",
+        row_sender=row_sender,
         body=body,
         transcript=CallTranscript(
             call_id="call1",
@@ -500,9 +511,9 @@ async def test_the_row_is_a_notice_that_wakes_no_agent_and_mentions_nobody() -> 
     """The row says the call started, names the call, mentions nobody, and is sent as a transaction of that call."""
     client = FakeRouterClient(state={ROOM: [_member(ANN)]})
 
-    event_id = await _room(client).post_row(ROOM, "call1")
+    posted = await _room(client).post_row(ROOM, "call1")
 
-    assert event_id == "$event-0"
+    assert posted == ("$event-0", ROUTER)
     [sent] = client.sent
     assert sent["room_id"] == ROOM
     assert sent["type"] == "m.room.message"
@@ -720,11 +731,41 @@ async def test_call_rows_posted_by_room_poster() -> None:
     assert room.poster_joined(ROOM) is True
     assert await room.is_member(ROOM, ANN) is True
     assert await room.poster_may_post(ROOM) is True
-    assert await room.post_row(ROOM, "call1") == "$event-0"
+    assert await room.post_row(ROOM, "call1") == ("$event-0", agent.user_id)
     assert await room.edit_row(_ended_row()) == "$event-1"
     assert await room.post_transcript(_message()) == "$event-2"
     assert len(agent.sent) == 3
     assert (steward.sent, steward.state_reads, agent.state_reads) == ([], 1, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_calls_edits_and_message_go_out_through_the_account_that_posted_its_row_or_not_at_all() -> None:
+    """Matrix ignores an edit from another sender, and a transaction is one account's: the room's next poster sends none."""
+    first = FakeRouterClient(state={ROOM: [_member(ANN)]}, user_id="@mindroom_code:example.org")
+    newcomer = FakeRouterClient(state={ROOM: [_member(ANN)]}, user_id="@mindroom_alpha:example.org")
+    running = [first]  # The room's poster, then the other accounts running in it.
+    room = CallRoom(
+        ready=lambda _room_id: True,
+        reader=partial(_in_room, first),
+        poster=lambda room_id, user_id: next(
+            (client for account in running if (client := _in_room(account, room_id, user_id)) is not None),
+            None,
+        ),
+        retitle=lambda *_: None,
+    )
+    assert await room.post_row(ROOM, "call1") == ("$event-0", first.user_id)
+    row = _ended_row(row_sender=first.user_id)
+    message = _message(row_sender=first.user_id)
+
+    running.insert(0, newcomer)
+    assert await room.edit_row(row) == "$event-1"
+    assert await room.post_transcript(message) == "$event-2"
+    running.remove(first)
+    assert await room.edit_row(replace(row, transcript_event_id="$event-2")) is None
+    assert await room.post_transcript(message) is None
+
+    assert len(first.sent) == 3
+    assert newcomer.sent == []
 
 
 @pytest.mark.asyncio
