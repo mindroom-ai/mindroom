@@ -222,7 +222,7 @@ class WorkflowTools(Toolkit):
             if (declined := await hooks(before=True, registered_toolkit="workflow")) is not None:
                 await hooks(before=False, result=declined, blocked=True)
                 return declined
-            run, created = await self._reserve(engine, context, job_id, arguments)
+            run, _ = await self._reserve(engine, context, job_id, arguments)
         except ValueError as exc:
             return str(exc)
         store, run_id, limits = engine.store, run.run_id, self.limits
@@ -254,7 +254,7 @@ class WorkflowTools(Toolkit):
             adapter={"workflow_job": job_id, "workflow": run_id},
             operation=operation,
             cancel=cancel,
-            refused=partial(asyncio.to_thread, store.delete_intent, run_id) if created else None,
+            refused=partial(asyncio.to_thread, store.delete_intent, run_id),
             handle=handle,
         )
 
@@ -298,8 +298,7 @@ class WorkflowTools(Toolkit):
             runtime_seconds_left=hours * 3600 if hours else None,
             origin_job_id=origin,
         )
-        # On a thread, where it waits for the store's writer. A call cancelled meanwhile deletes nothing: its
-        # redelivery finds the intent, or recovery removes it.
+        # On a thread, where it waits for the store's writer.
         return await asyncio.to_thread(engine.store.reserve_run, intent, max_active=self.limits.max_concurrent_runs)
 
 

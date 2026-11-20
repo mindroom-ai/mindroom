@@ -102,8 +102,9 @@ class JobSpec:
     ``tool_name`` and ``kind`` are what people and models see: a tool's job is named by its function, a subagent's
     (``kind="delegation"``) by the agent it runs. ``adapter`` is the exact mapping the runtime admits, saves, and hands
     to cleanup. ``cancel`` settles the job's own work after a cancellation or shutdown in this process, before the
-    runtime's cleanup for its kind. ``refused`` undoes what preparing the job wrote when the runtime refuses the job,
-    and ``handle`` words what a call that stops waiting for the job returns, the job's summary when None.
+    runtime's cleanup for its kind. ``refused`` undoes what preparing the job wrote when the runtime refuses the job
+    and holds none with its ID, and ``handle`` words what a call that stops waiting for the job returns, the job's
+    summary when None.
     """
 
     tool_name: str
