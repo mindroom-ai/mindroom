@@ -406,6 +406,7 @@ Refusals answer `{"error": "<sentence>", "code": "<code>"}` with 400 `invalid`, 
 A missing, unknown, or expired session answers 401 with `{"detail": "<sentence>"}` instead, as other errors from outside these rules do.
 Clients poll `GET /rooms/{room_id}/call` for new lines and the paused state: `lines` come in the order they were added, so the last one's ID is the next `after`, and an `after` that is not one of the live call's lines answers all of them.
 The row's content is `io.mindroom.call: {"call_id"}`; its edits add `ended_at`, `duration_seconds`, and, once the message is posted, `transcript_event_id`.
+The account that posted the row also sends its edits and the message; while that account is not running in the room, they wait.
 The message carries `io.mindroom.call_transcript` (see [Calling an agent about a thread](#calling-an-agent-about-a-thread)) and `io.mindroom.call_notes: {"call_id"}`.
 
 ## Server requirements
