@@ -23,7 +23,13 @@ from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.custom_tools.workflow import WorkflowTools
 from mindroom.delegation import lifecycle
 from mindroom.delegation.state import SubagentPersona
-from mindroom.hooks import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL, HookRegistry, hook
+from mindroom.hooks import (
+    EVENT_TOOL_AFTER_CALL,
+    EVENT_TOOL_BEFORE_CALL,
+    EVENT_TOOL_ENVIRONMENT,
+    HookRegistry,
+    hook,
+)
 from mindroom.llm.runs import RunStatus
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.script_runs import manager as manager_module
@@ -56,7 +62,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext
+    from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, ToolEnvironmentContext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 SCRIPT = "def main(args):\n    return 'counted'\n"
@@ -299,6 +305,31 @@ async def test_a_plugin_hook_that_declines_the_start_leaves_no_intent_job_or_pro
 
     assert "Reason: workflows are paused" in refusal
     assert seen == [("start_workflow", SCRIPT)]
+    assert stack.store.list_runs() == []
+    assert await stack.jobs.list_jobs(owner=stack.context.execution_identity, depth=0) == []
+    assert stack.scripts.launched == []
+
+
+@pytest.mark.asyncio
+async def test_an_environment_hook_that_declines_the_start_leaves_no_intent_job_or_process(
+    stack: WorkflowStack,
+) -> None:
+    """A `tool:environment` hook may decline any call, a start that becomes a job too; after-call hooks see the decline."""
+    seen: list[object] = []
+
+    @hook(EVENT_TOOL_ENVIRONMENT)
+    async def decline(ctx: ToolEnvironmentContext) -> None:
+        seen.append((ctx.function_name, ctx.registered_toolkit))
+        ctx.decline("no token for workflows")
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        seen.append(ctx.blocked)
+
+    refusal = await _refused(stack, "start_workflow", context=_with_hooks(stack, decline, after), source=SCRIPT)
+
+    assert "Reason: no token for workflows" in refusal
+    assert seen == [("start_workflow", "workflow"), True]
     assert stack.store.list_runs() == []
     assert await stack.jobs.list_jobs(owner=stack.context.execution_identity, depth=0) == []
     assert stack.scripts.launched == []

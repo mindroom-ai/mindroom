@@ -219,7 +219,7 @@ class WorkflowTools(Toolkit):
                 tool_name=_START,
                 arguments=arguments,
             )
-            if (declined := await hooks(before=True)) is not None:
+            if (declined := await hooks(before=True, registered_toolkit="workflow")) is not None:
                 await hooks(before=False, result=declined, blocked=True)
                 return declined
             run, created = await self._reserve(engine, context, job_id, arguments)

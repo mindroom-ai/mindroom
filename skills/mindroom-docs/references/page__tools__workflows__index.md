@@ -45,7 +45,7 @@ background_tool_jobs:
 A run is a background job, so `start_workflow` needs `background_tool_jobs.enabled: true` and `workflow` must not be in `background_tool_jobs.exclude_toolkits`.
 Otherwise a call from the agent's own reply fails with `Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow.`
 An operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rule for `start_workflow` asks before anything starts, as for any other call.
-A plugin's `tool:before_call` hook that declines `start_workflow` also starts nothing, and `tool:after_call` hooks receive the run's report when it ends.
+A plugin's `tool:before_call` or `tool:environment` hook that declines `start_workflow` also starts nothing, and `tool:after_call` hooks receive the run's report when it ends.
 
 ## Functions
 
