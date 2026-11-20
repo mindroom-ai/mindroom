@@ -107,7 +107,7 @@ async def test_answering_agent_posts_transcript_before_reply(tmp_path: Path, mon
     assert transcript.extra_content[VOICE_SOURCE_EVENT_ID_KEY] == event.event_id
     assert transcript.extra_content[ORIGINAL_SENDER_KEY] == _SENDER
     assert [request.prompt for request in harness.runner.requests] == [_TRANSCRIPT]
-    assert (await harness.turn_store.visible_echo(event.event_id)).event_id == "$sent-1:localhost"
+    assert await harness.turn_store.visible_echo(event.event_id) == "$sent-1:localhost"
     assert harness.gateway.edited == []  # No placeholder was sent and replaced.
 
 
