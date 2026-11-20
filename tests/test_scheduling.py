@@ -3300,3 +3300,71 @@ async def test_recurring_task_listing_names_each_tasks_timezone(tmp_path: Path) 
 
     assert "• `kolkata` - At 09:00 (Asia/Kolkata)\n" in listed
     assert "• `global` - At 09:00 (Asia/Tokyo)\n" in listed
+
+
+@pytest.mark.asyncio
+async def test_a_task_keeps_the_message_its_scheduling_reply_answered(tmp_path: Path) -> None:
+    """The answered message is stored on the task, kept out of the parser's schema, and kept when the task is edited."""
+    assert "source_event_id" not in ScheduledWorkflow.model_json_schema()["properties"]
+    client = AsyncMock()
+    serve_task_state_events(client)
+    client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
+    room_state: dict[str, dict[str, Any]] = {}
+    client.room_get_state = AsyncMock(side_effect=lambda room_id: _room_state_response(room_id, room_state))
+    _serve_task_reads(client, room_state)
+    runtime_paths = schedule_runtime_paths(tmp_path)
+    config = _timezone_test_config(runtime_paths)
+    ids = entity_ids(config, runtime_paths)
+    parsed = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2027, 1, 15, 8, 0, tzinfo=UTC),
+        message="@atlas check the deploy",
+        description="Deploy check",
+        source_event_id="$made-up-by-the-parser",
+    )
+
+    def runtime() -> SchedulingRuntime:
+        return _scheduling_runtime(
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            room=_matrix_room("!test:server"),
+            task_runtime=_recording_state_writer(room_state)[0],
+            agent_name="atlas",
+        )
+
+    with (
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["atlas"]],
+        ),
+        patch("mindroom.scheduling.tasks._extract_mentioned_agents_from_text", return_value=[]),
+        patch(
+            "mindroom.scheduling.tasks._parse_workflow_schedule",
+            new=AsyncMock(side_effect=lambda *_args, **_kwargs: parsed.model_copy()),
+        ),
+        patch.object(ScheduledTaskRuntime, "start_new_task"),
+        patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
+    ):
+        await schedule_task(
+            runtime=runtime(),
+            room_id="!test:server",
+            thread_id="$thread",
+            scheduled_by="@alice:server",
+            full_text="tomorrow at 9 check the deploy",
+            source_event_id="$answered",
+        )
+        [task] = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", runtime_paths=runtime_paths)
+        assert task.workflow.source_event_id == "$answered"
+        parsed.description = "Deploy check at 10"
+        await edit_scheduled_task(
+            runtime=runtime(),
+            room_id="!test:server",
+            task_id="task1234",
+            full_text="check the deploy at 10 instead",
+            scheduled_by="@alice:server",
+        )
+
+    [edited] = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", runtime_paths=runtime_paths)
+    assert edited.workflow.description == "Deploy check at 10"
+    assert edited.workflow.source_event_id == "$answered"
