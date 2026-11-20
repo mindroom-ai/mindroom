@@ -8,6 +8,7 @@ import threading
 from functools import wraps
 from html import unescape
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from urllib.parse import urlsplit
 
 from agno.tools.github import GithubTools as AgnoGithubTools
 from github import Auth, Github, GithubException
@@ -118,8 +119,47 @@ def _record_github_provider_failure(exc: GithubException) -> None:
     record_provider_failure(_github_exception_status_code(exc), _github_exception_detail(exc))
 
 
-class _GithubProviderFailureRequester(Requester):
-    """Capture typed provider failures before Agno serializes them."""
+def _without_injected_language_url(verb: str, url: str, data: object) -> object:
+    if verb != "GET" or not isinstance(data, dict) or not urlsplit(url).path.endswith("/languages"):
+        return data
+    languages = cast("dict[str, object]", data)
+    if languages.get("url") != url:
+        return data
+    return {language: count for language, count in languages.items() if language != "url"}
+
+
+class _MindRoomGithubRequester(Requester):
+    """Capture typed provider failures and keep raw payloads in the shapes Agno parses."""
+
+    # AGNO_COMPAT: GithubTools treats every get_languages() value as a byte count.
+    # Reason: PyGithub 2.9 adds the request URL as a "url" key to every GET dictionary
+    # response (PyGithub PR https://github.com/PyGithub/PyGithub/pull/3421), so
+    # get_repository_languages returns a non-language entry and get_repository_with_stats
+    # raises ValueError from int() on the URL, which its GithubException handler misses.
+    # Upstream issue: Tracking gap; upstream tracking has not been verified.
+    # Upstream PR: None identified.
+    # Remove when: Agno reads only numeric language entries or PyGithub's get_languages()
+    # stops returning the injected "url" key; both language tools must keep returning
+    # only language byte counts.
+    # Coverage: tests/test_github_oauth_tool.py::test_language_tools_drop_pygithub_injected_url_over_http.
+    def requestJsonAndCheck(  # noqa: N802
+        self,
+        verb: str,
+        url: str,
+        parameters: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        input: Any | None = None,  # noqa: A002, ANN401
+        follow_302_redirect: bool = False,
+    ) -> tuple[dict[str, Any], Any]:
+        response_headers, data = super().requestJsonAndCheck(
+            verb,
+            url,
+            parameters,
+            headers,
+            input,
+            follow_302_redirect,
+        )
+        return response_headers, _without_injected_language_url(verb, url, data)
 
     @classmethod
     def createException(  # noqa: N802
@@ -155,6 +195,7 @@ class _GithubProviderFailureRetry(GithubRetry):
 def _github_provider_failure_retry(retry: GithubRetry) -> _GithubProviderFailureRetry:
     return _GithubProviderFailureRetry(
         secondary_rate_wait=retry.secondary_rate_wait,
+        max_rate_limit_wait=retry.max_rate_limit_wait,
         total=retry.total,
         connect=retry.connect,
         read=retry.read,
@@ -186,7 +227,7 @@ def _install_github_provider_failure_capture(client: Github) -> Github:
     retry = requester_kwargs["retry"]
     if isinstance(retry, GithubRetry):
         requester_kwargs["retry"] = _github_provider_failure_retry(retry)
-    requester_owner._Github__requester = _GithubProviderFailureRequester(**requester_kwargs)
+    requester_owner._Github__requester = _MindRoomGithubRequester(**requester_kwargs)
     original_requester.close()
     return client
 
