@@ -9158,6 +9158,99 @@
       }
     ]
   },
+  "email_invite": {
+    "instructions": null,
+    "guidance": null,
+    "functions": [
+      {
+        "name": "invite_by_email",
+        "description": "Invite one email address to this room.\nIf the person asking may invite, a single-use link is mailed (or returned to forward by hand when no mail\nserver is configured). Otherwise the request waits until someone who may invite asks for the same address.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "email": {
+              "type": "string",
+              "description": "One plain email address, such as alice@example.com."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with filesystem, python, or shell tools."
+            }
+          },
+          "required": [
+            "email"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "list_email_invites",
+        "description": "List the open email invites of this room with their state, asker, approver and expiry.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with filesystem, python, or shell tools."
+            }
+          },
+          "required": []
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "revoke_email_invite",
+        "description": "Revoke the open email invite for one address in this room.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "email": {
+              "type": "string",
+              "description": "The invited email address."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with filesystem, python, or shell tools."
+            }
+          },
+          "required": [
+            "email"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      }
+    ]
+  },
   "exa": {
     "instructions": null,
     "guidance": null,
