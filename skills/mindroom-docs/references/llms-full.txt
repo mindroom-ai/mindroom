@@ -18345,6 +18345,15 @@ The links, each person's SSH public keys, and every link's host private key live
 A removed key, portal or operator, and a disconnected or removed link move the link's `closed_before`, which tells the gateway to close the sessions opened before it.
 A disconnected or removed link's worker, while it runs, gets an empty `authorized_keys`, written under the same lock as every key change and connect and retried at every reconcile until it is written, and then the primary asks its runner, apart from any response, to stop sshd, which the runner does only while that file admits nobody, and a connect whose keys admit nobody is refused before sshd starts, so a stop that arrives after a newer connect leaves that connect's sshd; a worker that does not run is left alone, as only a connect of a link that is on starts its sshd again, and that connect writes the keys first.
 
+The gateway is the `mindroom-tailnet-gateway` image, a process of its own that holds one machine in a person's tailnet per link and listens on that machine's port 22 only: it dials no tailnet address, runs no command, and talks to neither Docker nor Kubernetes.
+Of MindRoom's secrets it holds the token alone, which the chart keeps in a Secret only the primary and the gateway read; it asks the primary through the three routes only, and connects to a worker only at the host and port the primary answers for a connection.
+The chart's policies let it reach the listener's port, port 2222 of marked workers, DNS, and public TCP 443 or the operator's proxy, and let nothing reach it.
+A connection is admitted three times, by three owners: the person's tailnet policy decides which devices reach the machine, the gateway closes a connection unless its peer's Tailscale login is the link's one login, and the worker's sshd takes only public keys, those of the link's person.
+A tailnet's default policy lets every member reach every machine, so the gateway checks every connection, before it asks the primary and so before a worker wakes, and the primary checks the login again; a tagged device has no login and is refused.
+sshd forwards nothing, by `sshd_config` and by `restrict` on every key line: no TCP, socket, agent, X11, or tunnel forwarding, so worker code gets no way through a session to the person's device, tailnet, or SSH agent.
+Each machine's node keys, which are that machine to its tailnet, live in the gateway's state volume under the link's id; no worker mounts it, and removing a link signs the machine out and deletes them.
+A node's login URL signs the machine in to the tailnet of whoever opens it, so only `GET /api/connections/tailnet-ssh` returns it, to the link's owner, and the gateway writes it to neither its log nor that volume.
+
 ## Known gaps
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
