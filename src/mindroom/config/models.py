@@ -179,7 +179,7 @@ def _normalize_tool_entry_overrides(
         return {}
     if not isinstance(overrides, dict):
         raise ValueError(error_message)  # noqa: TRY004 - keep Pydantic validation errors structured
-    return cast("dict[str, object]", dict(overrides))
+    return dict(overrides)
 
 
 def _coerce_named_tool_entry(data: dict[object, object]) -> dict[str, object]:
@@ -1015,7 +1015,7 @@ class ModelTable(dict[str, ModelConfig]):
         model = super().get(name)
         if level is None or model is None or model.reasoning is None or level not in model.reasoning.levels:
             return None
-        return model if level == model.reasoning.default else model.at_level(cast("_ReasoningLevel", level))
+        return model if level == model.reasoning.default else model.at_level(level)
 
     def __contains__(self, reference: object) -> bool:
         """Return whether ``reference`` names a configured model or one of its levels."""

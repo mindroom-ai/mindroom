@@ -183,7 +183,7 @@ def _resolve_host_addresses(host: str, *, port: int | None, scheme: str) -> list
     addresses: list[_IPAddress] = []
     for result in results:
         sockaddr = result[4]
-        if not sockaddr:
+        if not sockaddr:  # ty: ignore[redundant-condition]  # defensive against malformed resolver output
             continue
         raw_address = str(sockaddr[0]).split("%", maxsplit=1)[0]
         address = _ip_address_from_host(raw_address)

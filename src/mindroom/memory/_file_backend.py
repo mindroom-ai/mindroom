@@ -10,7 +10,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 from zoneinfo import ZoneInfo
 
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
@@ -529,7 +529,7 @@ def _search_scope_memory_entries(scope: MemoryScope, query: str, *, limit: int) 
         scored_entries.append({**entry, "score": score})
         seen_scored_text.add(normalized_text)
 
-    scored_entries.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
+    scored_entries.sort(key=lambda item: item.get("score", 0.0), reverse=True)
     scored_entries = scored_entries[:limit]
 
     if limit <= len(scored_entries):
@@ -538,7 +538,7 @@ def _search_scope_memory_entries(scope: MemoryScope, query: str, *, limit: int) 
     remaining_limit = limit - len(scored_entries)
     snippet_results = _scan_scope_memory_snippets(scope, query_tokens, seen_scored_text)
 
-    snippet_results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
+    snippet_results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
     return scored_entries + snippet_results[:remaining_limit]
 
 
@@ -983,13 +983,13 @@ class FileMemoryBackend:
 
         team_results = await asyncio.to_thread(_team_keyword_results, teams, query, limit)
         if semantic and recall:
-            team_results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
+            team_results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
             return MemorySearchOutcome(
                 results=_add_within_recall_budget(results, team_results[:limit]),
                 degraded_reason=degraded_reason,
             )
         results.extend(team_results)
-        results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
+        results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
         return MemorySearchOutcome(results=results[:limit], degraded_reason=degraded_reason)
 
     async def list_all(

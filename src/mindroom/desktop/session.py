@@ -340,7 +340,11 @@ def _transport_binding(path: Path, session: DesktopMatrixSession) -> dict[str, o
 
 
 def _load_or_create_transport_binding(path: Path, session: DesktopMatrixSession) -> dict[str, object]:
-    identity = {"homeserver": session.homeserver, "user_id": session.user_id, "device_id": session.device_id}
+    identity: dict[str, str] = {
+        "homeserver": session.homeserver,
+        "user_id": session.user_id,
+        "device_id": session.device_id,
+    }
     if path.exists():
         if os.name != "nt" and stat.S_IMODE(path.stat().st_mode) & 0o077:
             msg = "Desktop transport binding must be owner-only."

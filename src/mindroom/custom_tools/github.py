@@ -239,7 +239,7 @@ class _SanitizeGithubProviderLogFilter(logging.Filter):
         if record.name == "github.GithubRetry":
             record.msg = "GitHub provider retry detail suppressed"
             record.args = ()
-        elif record.exc_info is not None:
+        elif record.exc_info:
             _exception_type, exception, _traceback = record.exc_info
             if isinstance(exception, GithubException):
                 status_code = _github_exception_status_code(exception)

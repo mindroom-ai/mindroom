@@ -46,9 +46,14 @@ def _approval_delivery_content(claimed: MatrixDelivery) -> dict[str, object]:
 class _ApprovalTransportBot(Protocol):
     """The live bot surface needed for card transport and source wakeups."""
 
-    agent_name: str
-    running: bool
-    client: nio.AsyncClient | None
+    @property
+    def agent_name(self) -> str: ...
+
+    @property
+    def running(self) -> bool: ...
+
+    @property
+    def client(self) -> nio.AsyncClient | None: ...
 
     @property
     def approval_room_ids(self) -> frozenset[str]: ...

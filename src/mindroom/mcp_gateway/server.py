@@ -284,8 +284,8 @@ def _validate_early_response_headers(request: Request) -> None:
         raise HTTPException(400, "Unsupported MCP protocol version")
 
 
-def _input_schema(name: str) -> dict[str, Any] | None:
-    return next((tool.input_schema for tool in _meta_tools() if tool.name == name), None)
+def _input_schema(name: str) -> dict[str, Any]:
+    return next(tool.input_schema for tool in _meta_tools() if tool.name == name)
 
 
 def _request_identity(ctx: ServerRequestContext) -> tuple[Request, tuple[GatewayPrincipal, type, int | str]] | None:
@@ -332,7 +332,7 @@ def replay_gateway_body(body: bytes, receive: Receive) -> Receive:
     """Replay consumed input once, retaining the original disconnect channel."""
     sent = False
 
-    async def replay() -> dict[str, Any]:
+    async def replay() -> Message:
         nonlocal sent
         if not sent:
             sent = True

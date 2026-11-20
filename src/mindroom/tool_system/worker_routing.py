@@ -590,7 +590,7 @@ def resolved_worker_key_scope(worker_key: str) -> ResolvedWorkerKeyScope | None:
     scope = parts[2]
     if scope not in {"shared", "user", "user_agent", "unscoped"}:
         return None
-    return cast("ResolvedWorkerKeyScope", scope)
+    return scope
 
 
 def requires_explicit_private_agent_visibility(worker_key: str) -> bool:

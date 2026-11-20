@@ -211,7 +211,7 @@ class PyAutoGuiDesktopProvider:
             msg = "Desktop bridge support is missing. Install MindRoom with the 'desktop' extra."
             raise DesktopProviderError(msg) from exc
 
-        pyautogui.FAILSAFE = False
+        pyautogui.FAILSAFE = False  # ty: ignore[invalid-assignment]  # pyautogui leaves the flag unannotated
         pyautogui.PAUSE = 0.05
         self._pyautogui: Any = pyautogui
         self._capture_screen: Callable[[], PillowImage] = (
