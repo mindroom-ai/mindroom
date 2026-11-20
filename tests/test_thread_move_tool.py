@@ -782,22 +782,25 @@ async def test_move_thread_accepts_a_long_message_sent_with_its_full_text_attach
     """A preview that carries the full text as an attachment is a complete copy."""
     move = _move(tmp_path)
     sends = _delivered_sends()
+    previews: list[str] = []
 
     async def send(client: object, room_id: str, content: dict[str, Any], **kwargs: object) -> DeliveredMatrixEvent:
         delivered = await sends(client, room_id, content, **kwargs)
-        if content.get("body") == "@research found it?":
+        if content["body"].endswith("@research found it?"):
             preview = {
                 **content,
                 "body": "@research fo…",
                 "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
                 "url": "mxc://localhost/full",
             }
+            previews.append(delivered.event_id)
             return DeliveredMatrixEvent(event_id=delivered.event_id, content_sent=preview)
         return delivered
 
     with _matrix(move, _thread(move), send=AsyncMock(side_effect=send)):
         payload = await _run()
 
+    assert previews == ["$copy1:localhost"]
     assert payload["status"] == "ok"
     assert payload["copied"] == 3
 
