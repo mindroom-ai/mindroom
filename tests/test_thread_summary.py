@@ -2913,6 +2913,7 @@ class TestGenerateSummary:
                 pytest.param({"provider": "google", "id": model_id}, False, id=f"google-{model_id}")
                 for model_id in (
                     "gemini-4-carbon",
+                    "gemini-4-neon",
                     "gemini-4-argon",
                     "gemini-4-hydrogen",
                     "gemini-3.8-flash",
