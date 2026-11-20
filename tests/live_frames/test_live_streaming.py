@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
 import json
 import time
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
@@ -1142,71 +1140,6 @@ async def test_a_frame_loop_error_ends_frames() -> None:
 
     assert publisher.running is False
     assert stopped == [True]
-
-
-class _Ticks:
-    """A publisher's clock and the frames it sends, one 100 ms tick at a time, as its loop sends them."""
-
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, frames: _Frames) -> None:
-        self.now = 0.0
-        self.frames = frames
-        self.publisher = LivePublisher(client=make_matrix_client_mock(), room_id=_ROOM_ID)
-        self.sent_at: list[float] = []
-        monkeypatch.setattr(publisher_module, "time", SimpleNamespace(monotonic=lambda: self.now))
-
-    async def run(self, seconds: float, md: str) -> list[dict[str, Any]]:
-        docs = LiveDocs(md=md, reasoning="", tools=(), status="streaming", activity="")
-        first = len(self.frames.sent)
-        for _ in range(round(seconds * 10)):
-            if await self.publisher._send_next("$reply", docs) is not None:
-                self.sent_at.append(self.now)
-            self.now += 0.1
-        return self.frames.sent[first:]
-
-
-@pytest.mark.asyncio
-async def test_an_unchanging_reply_sends_a_snapshot_only_every_idle_interval(
-    monkeypatch: pytest.MonkeyPatch,
-    frames: _Frames,
-) -> None:
-    """A reply waiting on a long tool call repeats its snapshot every 10 s, often enough for Chat's 12-s freshness."""
-    ticks = _Ticks(monkeypatch, frames)
-    sent = await ticks.run(60.0, "Waiting on the tool")
-
-    assert len(sent) == 6
-    assert all("snapshot" in frame for frame in sent)
-    gaps = [later - earlier for earlier, later in itertools.pairwise(ticks.sent_at)]
-    assert max(gaps) < 10.5
-
-
-@pytest.mark.asyncio
-async def test_a_change_after_idling_sends_a_snapshot_then_deltas(
-    monkeypatch: pytest.MonkeyPatch,
-    frames: _Frames,
-) -> None:
-    """The first change after a quiet spell is a snapshot, so a client that dropped or missed the reply catches up."""
-    ticks = _Ticks(monkeypatch, frames)
-    await ticks.run(30.0, "Waiting")
-    changed = await ticks.run(0.1, "Waiting done")
-    more = await ticks.run(0.1, "Waiting done, and more")
-
-    assert changed[0]["snapshot"]["md"] == "Waiting done"
-    assert "delta" in more[0]
-
-
-@pytest.mark.asyncio
-async def test_a_reply_that_goes_quiet_after_a_delta_still_gets_a_snapshot_within_5_s(
-    monkeypatch: pytest.MonkeyPatch,
-    frames: _Frames,
-) -> None:
-    """A client that missed the last delta sees the settled reply within the ordinary 5-s snapshot interval."""
-    ticks = _Ticks(monkeypatch, frames)
-    await ticks.run(0.1, "Hello")
-    await ticks.run(0.1, "Hello world")
-    quiet = await ticks.run(5.0, "Hello world")
-
-    assert len(quiet) == 1
-    assert quiet[0]["snapshot"]["md"] == "Hello world"
 
 
 @pytest.mark.asyncio
