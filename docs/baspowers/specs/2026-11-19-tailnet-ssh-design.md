@@ -179,7 +179,8 @@ The portal shows the failing condition as one of: `backend`, `not_enabled`, `sco
 - **`sshd_config`**, the spike's working one: port 2222, the projected host key and key file, `PidFile none`, `UsePAM no`, `StrictModes yes`, public key only, `AllowUsers mindroom`, `PermitUserEnvironment no`, `PermitUserRC no`, `LoginGraceTime 60`, `Subsystem sftp internal-sftp`, and no TCP, stream-local, agent, X11, or tunnel forwarding.
 - **Session.** `/ssh/start` carries a shell call's request for P and A, built outside any conversation (`build_requester_execution_identity`) as a terminal's is built inside one.
   The runner turns it into a `TerminalLaunch` with `prepare_terminal_launch` (`api/sandbox_runner.py`) and keeps that environment and directory in a 0600 file under `/tmp`.
-  `ForceCommand` runs `python -m mindroom.tailnet_ssh.session`, which loads the file and runs the requested command, the SFTP server, or `bash -l`.
+  `ForceCommand` runs `python -m mindroom.tailnet_ssh.session`, which loads the file and runs the requested command, the SFTP server, or plain `bash`.
+  Not `bash -l`: a login shell reads `/etc/profile`, which on the Debian image resets `PATH` and drops the agent CLI and the worker's virtualenv, so the session would lose the agent's shell environment; plain `bash` keeps the launch `PATH` and still reads the workspace's `.bashrc`.
   It is needed, not cosmetic: sshd refuses a uid without a passwd entry, the image's entry (`mindroom:x:1000:1000::/home/mindroom:/bin/sh`) gives `/bin/sh` and a home on the read-only root, so the module sets `HOME` and the start directory to the workspace (spike Q4).
   A custom worker image must keep a passwd entry for uid 1000.
   So `~` is the agent workspace, `scp notes.md mind-bas:` lands where the agent looks, and the shell's egress goes through the same proxy and Agent Keys as the agent's (open question 5).
