@@ -859,7 +859,8 @@ async def test_ended_run_admits_no_new_call(stack: WorkflowStack) -> None:
     """A request authenticated just before its run ended adds no node, and one sent again still gets its receipt."""
     attempt = stack.attempt
     first = await stack.engine.submit_node(attempt, NodeRequest("@0", "tool", _APPEND, {}))
-    await stack.until(lambda: stack.counting_tool.lines == ["a"])
+    # Until the node has settled, not only until its effect shows: a cancel in between ends it indeterminate.
+    await stack.until(lambda: stack.engine.status(stack.run_id)[1][0].state is WorkflowNodeState.COMPLETED)
     await stack.engine.cancel(stack.run_id, reason="Stopped by the user.")
 
     again = await stack.engine.submit_node(attempt, NodeRequest("@0", "tool", _APPEND, {}))
