@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from aiohttp import ClientError
 
+from mindroom.matrix.client_delivery import says_encryption_is_disabled
 from mindroom.matrix.client_room_admin import (
     room_admin_power_user,
     room_encryption_enable_failure,
@@ -45,9 +46,11 @@ async def _confirm_encrypt(
         return "❌ Failed to enable encryption. Run the command again to retry."
     if failure is None:
         return "🔐 End-to-end encryption is now enabled for this room. This cannot be undone."
-    # A server without encryption answers M_FORBIDDEN too, so the steward's own power tells the two refusals apart.
+    # A server without encryption answers M_FORBIDDEN too: its own reason says so, and rights would not help.
+    # The steward's own power tells any other refusal apart.
     lacks_power = (
         failure.startswith("M_FORBIDDEN")
+        and not says_encryption_is_disabled(failure)
         and steward_may_write_state is not None
         and not steward_may_write_state(room_id, "m.room.encryption")
     )

@@ -382,6 +382,11 @@ class TestEncryptCommand:
             ("M_FORBIDDEN", "Encryption is disabled on this homeserver.", True, False),
             # Tuwunel's form: the errcode is already in the message and is shown once.
             ("M_FORBIDDEN", "M_FORBIDDEN: Encryption is disabled on this homeserver.", True, False),
+            # The server says encryption is disabled: no rights would help, whatever power the steward holds.
+            ("M_FORBIDDEN", "Encryption is disabled on this homeserver.", False, False),
+            ("M_FORBIDDEN", "M_FORBIDDEN: Encryption has been disabled", False, False),
+            # A refusal without a reason is the steward's lack of power when it lacks the power.
+            ("M_FORBIDDEN", "", False, True),
             ("M_UNKNOWN", "Internal server error.", False, False),
         ],
     )
@@ -417,8 +422,11 @@ class TestEncryptCommand:
             if moderator_rights
             else f"❌ Failed to enable encryption: {errcode}: {shown}"
         )
-        if errcode == "M_FORBIDDEN":
+        # The steward's cached power decides only a refusal whose reason does not say encryption is disabled.
+        if errcode == "M_FORBIDDEN" and "disabled" not in reason:
             may_write.assert_called_once_with("!room:localhost", "m.room.encryption")
+        else:
+            may_write.assert_not_called()
         client.room_put_state.assert_not_awaited()
 
 

@@ -4173,6 +4173,7 @@ depends_on = [
 path = "mindroom.matrix.client_delivery"
 depends_on = ["mindroom.llm", "mindroom.matrix.guarded_rooms"]
 visibility = [
+    "mindroom.commands.encryption_commands",
     "mindroom.bot_room_lifecycle",
     "mindroom.call_transcripts.call_room",
     "mindroom.custom_tools.thread_move",
@@ -5473,6 +5474,7 @@ visibility = ["mindroom.commands.handler"]
 [[modules]]
 path = "mindroom.commands.encryption_commands"
 depends_on = [
+    "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.cross_signing",
     "mindroom.matrix.decrypt_failure",
@@ -7123,6 +7125,7 @@ expose = [
     "edit_message_result",
     "prepare_message_content",
     "resolve_room_encryption_outcome",
+    "says_encryption_is_disabled",
     "send_audio_message",
     "send_file_message",
     "send_file_message_outcome",
