@@ -196,6 +196,7 @@
       "id": "overleaf",
       "oauth_provider": null,
       "placeholder_env": {},
+      "read_only_supported": false,
       "rules": [
         {
           "host": "git.overleaf.com",
