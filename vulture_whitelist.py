@@ -489,3 +489,5 @@ remove_links  # Store helper the link service calls (src/mindroom/tailnet_ssh/st
 finish_removal  # Store helper the link service calls (src/mindroom/tailnet_ssh/store.py)
 read_links  # Store reader the link service and user API call (src/mindroom/tailnet_ssh/store.py)
 update_links  # Store writer the link service and user API call (src/mindroom/tailnet_ssh/store.py)
+_.data_received  # asyncio.Protocol callback of the reader of sshd's stderr (src/mindroom/api/worker_ssh.py)
+_.connection_lost  # asyncio.Protocol callback of the reader of sshd's stderr (src/mindroom/api/worker_ssh.py)

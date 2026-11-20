@@ -32,9 +32,10 @@ from mindroom.workers.protocol import ExecuteRequest  # noqa: TC001 - pydantic r
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import BinaryIO
 
 router = APIRouter(prefix="/api/sandbox-runner/ssh", tags=["worker-ssh"])
-# How long a start waits for sshd to accept on its port, and an sshd that ended is given to close its stderr.
+# How long a start waits for sshd to accept on its port, and for the last of what an sshd that failed to start wrote.
 _START_SECONDS = 15.0
 _STDERR_SECONDS = 1.0
 _STDERR_TAIL_BYTES = 4096
@@ -44,13 +45,30 @@ class _Start(BaseModel):
     request: ExecuteRequest
 
 
+class _StderrTail(asyncio.Protocol):
+    """The end of what sshd wrote to stderr, where ``-e`` sends its log, and whether this runner's end has closed."""
+
+    def __init__(self) -> None:
+        self.data = bytearray()
+        self.closed = asyncio.Event()
+
+    def data_received(self, data: bytes) -> None:
+        """Keep the last ``_STDERR_TAIL_BYTES``."""
+        self.data += data
+        del self.data[:-_STDERR_TAIL_BYTES]
+
+    def connection_lost(self, exc: Exception | None) -> None:  # noqa: ARG002
+        """Note the end: sshd and its sessions closed the pipe, or this runner did."""
+        self.closed.set()
+
+
 @dataclass(eq=False)
 class _Sshd:
-    """A started sshd, with the end of what it wrote to stderr so far."""
+    """A started sshd, and this runner's end of the pipe its stderr is."""
 
     process: asyncio.subprocess.Process
-    stderr_tail: bytearray
-    stderr_reader: asyncio.Task[None]
+    stderr: asyncio.ReadTransport
+    log: _StderrTail
 
 
 class _WorkerSsh:
@@ -107,34 +125,48 @@ def _store_launch(app: FastAPI, payload: ExecuteRequest) -> None:
         os.close(directory_fd)
 
 
-async def _spawn(argv: list[str]) -> asyncio.subprocess.Process:
+async def _spawn(argv: list[str], stderr: BinaryIO) -> asyncio.subprocess.Process:
     return await asyncio.create_subprocess_exec(
         *argv,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
+        stderr=stderr,
     )
 
 
-async def _keep_stderr_tail(stderr: asyncio.StreamReader, tail: bytearray) -> None:
-    """Read sshd's log, which ``-e`` sends to stderr, so that sshd never blocks writing it, and keep its end."""
-    while chunk := await stderr.read(_STDERR_TAIL_BYTES):
-        tail += chunk
-        del tail[:-_STDERR_TAIL_BYTES]
+async def _run(argv: list[str]) -> _Sshd:
+    """Run sshd with its stderr on a pipe that this runner reads, so that sshd never blocks writing its log.
+
+    The pipe is this module's, not the subprocess transport's: the sessions sshd starts hold it open after sshd, and
+    this runner must be able to close its end without waiting for them, as it could not close the transport's.
+    """
+    read_fd, write_fd = os.pipe()
+    ours, theirs = os.fdopen(read_fd, "rb", buffering=0), os.fdopen(write_fd, "wb", buffering=0)
+    try:
+        with theirs:
+            process = await _spawn(argv, theirs)
+        log = _StderrTail()
+        transport, _ = await asyncio.get_running_loop().connect_read_pipe(lambda: log, ours)
+    except BaseException:
+        ours.close()
+        raise
+    return _Sshd(process, transport, log)
 
 
-async def _end(sshd: _Sshd) -> None:
-    """Kill sshd if it runs, and read what it still wrote to stderr.
+async def _end(sshd: _Sshd, *, read_seconds: float = 0) -> None:
+    """Kill sshd if it runs and close its stderr, after ``read_seconds`` at most for the last of what it wrote.
 
-    The sessions it started run on, as they do when sshd ends by itself, and hold its stderr open: the reader then
-    reads on for them.
+    The sessions it started run on, as they do when sshd ends by itself. They hold its stderr, so this does not
+    wait for it to close; sshd ignores a log line it cannot write. Ending an sshd again does nothing.
     """
     with suppress(ProcessLookupError):
         sshd.process.kill()
-    # Not wait(), which also waits for stderr to close.
-    while sshd.process.returncode is None:  # noqa: ASYNC110
-        await asyncio.sleep(0.01)
-    await asyncio.wait({sshd.stderr_reader}, timeout=_STDERR_SECONDS)
+    await sshd.process.wait()
+    with suppress(TimeoutError):
+        async with asyncio.timeout(read_seconds):
+            await sshd.log.closed.wait()
+    sshd.stderr.close()
+    await sshd.log.closed.wait()
 
 
 async def _accepts(sshd: _Sshd) -> bool:
@@ -156,20 +188,19 @@ async def _ensure_sshd(app: FastAPI, state: _WorkerSsh) -> None:
     """Start sshd unless it runs, and return once its port accepts. The caller holds the lock."""
     sshd = state.sshd
     if sshd is None or sshd.process.returncode is not None:
+        if sshd is not None:
+            # An sshd that died: its sessions may run on, and nothing reads its stderr once it is replaced.
+            await _end(sshd)
         root = runner_dedicated_worker_root(app_runtime_paths(app))
         try:
-            process = await _spawn(sshd_argv(sandbox_startup_manifest_path(root).parent / "ssh"))
+            sshd = state.sshd = await _run(sshd_argv(sandbox_startup_manifest_path(root).parent / "ssh"))
         except FileNotFoundError:
             raise HTTPException(503, "The worker image has no SSH server.") from None
-        assert process.stderr is not None
-        tail = bytearray()
-        reader = asyncio.create_task(_keep_stderr_tail(process.stderr, tail), name="sshd-log")
-        sshd = state.sshd = _Sshd(process, tail, reader)
     if await _accepts(sshd):
         return
+    await _end(sshd, read_seconds=_STDERR_SECONDS)
     state.sshd = None
-    await _end(sshd)
-    lines = sshd.stderr_tail.decode(errors="replace").split("\n")
+    lines = sshd.log.data.decode(errors="replace").split("\n")
     reason = next((line.strip() for line in reversed(lines) if line.strip()), "")
     detail = "The worker's SSH server did not start"
     raise HTTPException(503, f"{detail}: {reason}" if reason else f"{detail}.")
@@ -179,11 +210,9 @@ async def stop_worker_ssh(app: FastAPI) -> None:
     """End this runner's sshd as the runner stops."""
     state = _worker_ssh(app)
     async with state.lock:
-        sshd, state.sshd = state.sshd, None
-        if sshd is not None:
-            await _end(sshd)
-            sshd.stderr_reader.cancel()
-            await asyncio.gather(sshd.stderr_reader, return_exceptions=True)
+        if state.sshd is not None:
+            await _end(state.sshd)
+            state.sshd = None
 
 
 @router.post("/start", dependencies=[Depends(validate_runner_token)])

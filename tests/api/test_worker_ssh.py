@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
-import os
 import signal
 import socket
 import stat
@@ -24,7 +23,8 @@ from mindroom.terminal.session import TerminalLaunch
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+    from typing import BinaryIO
 
 _TOKEN = "runner-token"  # noqa: S105
 _SHELL_REQUEST = {"protocol": WORKER_PROTOCOL_VERSION, "tool_name": "shell", "function_name": "run_shell_command"}
@@ -41,17 +41,31 @@ _LAUNCH = {
     },
     "cwd": "/data/ws",
 }
+# Stand-ins for sshd get the descriptor of the socket bound to the port the runner probes. This one listens on it.
 _LISTENS = """
 import socket, sys
-server = socket.create_server(("127.0.0.1", int(sys.argv[1])))
+server = socket.socket(fileno=int(sys.argv[1]))
+server.listen()
 while True:
     server.accept()[0].close()
 """
-# Listens as sshd does, beside a child that holds its stderr open as an SSH session's process does.
+# Holds sshd's stderr and logs to it, as an SSH session's process does, until the stderr is closed. It says that it
+# started, and that it found the stderr closed, in files named after its first argument.
+_SESSION = """
+import os, pathlib, sys, time
+pathlib.Path(sys.argv[1] + ".started").touch()
+for _ in range(600):
+    try:
+        os.write(2, b"session\\n")
+    except BrokenPipeError:
+        pathlib.Path(sys.argv[1] + ".closed").touch()
+        break
+    time.sleep(0.02)
+"""
+# Listens beside such a session, whose files are named after the listener's process ID, in the given folder.
 _LISTENS_WITH_A_SESSION = f"""
-import pathlib, subprocess, sys
-child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-pathlib.Path(sys.argv[2]).write_text(str(child.pid))
+import os, subprocess, sys
+subprocess.Popen([sys.executable, "-c", {_SESSION!r}, os.path.join(sys.argv[2], str(os.getpid()))])
 {_LISTENS}
 """
 
@@ -133,46 +147,73 @@ def test_session_main_runs_the_stored_launch(tmp_path: Path, monkeypatch: pytest
 
 
 class _FakeSshd:
-    """Stands in for sshd: each spawn records its command and starts a process that listens on ``port``."""
+    """Stands in for sshd: each spawn records its command and runs ``program`` with the socket reserved for it.
 
-    def __init__(self, port: int, program: Sequence[str]) -> None:
-        self.port = port
+    The socket is bound to ``port`` and does not listen, so the port refuses connections until a program listens on
+    it, and nothing else can take the port meanwhile.
+    """
+
+    def __init__(self, reserved: socket.socket, program: Sequence[str]) -> None:
+        self.reserved = reserved
+        self.port: int = reserved.getsockname()[1]
         self.program = program
         self.argvs: list[list[str]] = []
         self.processes: list[asyncio.subprocess.Process] = []
 
-    async def spawn(self, argv: list[str]) -> asyncio.subprocess.Process:
+    async def spawn(
+        self,
+        argv: list[str],
+        stderr: BinaryIO,
+    ) -> asyncio.subprocess.Process:
         self.argvs.append(argv)
+        descriptor = self.reserved.fileno()
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-c",
-            *self.program,
+            self.program[0],
+            str(descriptor),
+            *self.program[1:],
             stdin=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=stderr,
+            pass_fds=(descriptor,),
         )
         self.processes.append(process)
         return process
 
 
-def _free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+async def _exited(process: asyncio.subprocess.Process) -> None:
+    """Wait until ``process`` has exited, though a session it started may still hold its stderr."""
+    async with asyncio.timeout(10):
+        while process.returncode is None:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
 
 
-def _fake_sshd(monkeypatch: pytest.MonkeyPatch, *program: str) -> _FakeSshd:
-    """Make the runner spawn ``program``, which gets the port the runner then probes as its first argument."""
-    port = _free_port()
-    fake = _FakeSshd(port, [program[0], str(port), *program[1:]])
-    monkeypatch.setattr(worker_ssh, "_spawn", fake.spawn)
-    monkeypatch.setattr(worker_ssh, "WORKER_SSH_PORT", port)
-    return fake
+async def _session_says(sshd: asyncio.subprocess.Process, sessions: Path, what: str) -> None:
+    """Wait until the session the stand-in ``sshd`` started says it ``started``, or found sshd's stderr ``closed``."""
+    async with asyncio.timeout(10):
+        while not (sessions / f"{sshd.pid}.{what}").exists():  # noqa: ASYNC110
+            await asyncio.sleep(0.02)
 
 
 @pytest.fixture
-def fake_sshd(monkeypatch: pytest.MonkeyPatch) -> _FakeSshd:
+def install_fake_sshd(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., _FakeSshd]]:
+    """Make the runner spawn a stand-in program instead of sshd, and probe the port reserved for it."""
+    with socket.socket() as reserved:
+        reserved.bind(("127.0.0.1", 0))
+
+        def install(*program: str) -> _FakeSshd:
+            fake = _FakeSshd(reserved, program)
+            monkeypatch.setattr(worker_ssh, "_spawn", fake.spawn)
+            monkeypatch.setattr(worker_ssh, "WORKER_SSH_PORT", fake.port)
+            return fake
+
+        yield install
+
+
+@pytest.fixture
+def fake_sshd(install_fake_sshd: Callable[..., _FakeSshd]) -> _FakeSshd:
     """A stand-in sshd that listens."""
-    return _fake_sshd(monkeypatch, _LISTENS)
+    return install_fake_sshd(_LISTENS)
 
 
 @pytest_asyncio.fixture
@@ -291,7 +332,7 @@ async def test_start_restarts_sshd_that_exited(client: httpx.AsyncClient, fake_s
     """A start after sshd died runs a new one."""
     await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
     fake_sshd.processes[0].kill()
-    await fake_sshd.processes[0].wait()
+    await _exited(fake_sshd.processes[0])
 
     response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
 
@@ -303,13 +344,13 @@ async def test_start_restarts_sshd_that_exited(client: httpx.AsyncClient, fake_s
 @pytest.mark.asyncio
 async def test_start_reports_sshd_stderr_when_it_exits_at_once(
     client: httpx.AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
+    install_fake_sshd: Callable[..., _FakeSshd],
 ) -> None:
     """When sshd refuses its files, the start answers with the reason sshd gave last, without waiting for the port."""
     exits = (
         "import sys; print('reading the key', file=sys.stderr); print('bad ownership\\n', file=sys.stderr); sys.exit(1)"
     )
-    fake = _fake_sshd(monkeypatch, exits)
+    fake = install_fake_sshd(exits)
 
     async with asyncio.timeout(10):
         response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
@@ -322,9 +363,13 @@ async def test_start_reports_sshd_stderr_when_it_exits_at_once(
 
 
 @pytest.mark.asyncio
-async def test_start_stops_sshd_that_never_listens(client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_start_stops_sshd_that_never_listens(
+    client: httpx.AsyncClient,
+    install_fake_sshd: Callable[..., _FakeSshd],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """When sshd does not take its port in time it is stopped, so that the next connect starts a new one."""
-    fake = _fake_sshd(monkeypatch, "import time; time.sleep(60)")
+    fake = install_fake_sshd("import time; time.sleep(60)")
     monkeypatch.setattr(worker_ssh, "_START_SECONDS", 0.3)
 
     response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
@@ -374,22 +419,47 @@ async def test_start_refuses_a_shell_without_a_workspace(
 async def test_runner_shutdown_stops_sshd_while_a_session_holds_its_stderr(
     client: httpx.AsyncClient,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    install_fake_sshd: Callable[..., _FakeSshd],
 ) -> None:
-    """The runner's shutdown ends sshd at once, though an open session's process still holds sshd's stderr."""
-    session_pid = tmp_path / "session.pid"
-    fake = _fake_sshd(monkeypatch, _LISTENS_WITH_A_SESSION, str(session_pid))
-    try:
-        async with asyncio.timeout(10):
-            async with sandbox_runner_app.app.router.lifespan_context(sandbox_runner_app.app):
-                response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
-                assert response.status_code == 200
-        assert fake.processes[0].returncode == -signal.SIGKILL
-        # The session is not sshd's to end: it runs on.
-        os.kill(int(session_pid.read_text()), 0)
-    finally:
-        os.kill(int(session_pid.read_text()), signal.SIGKILL)
-        # Until sshd's stderr, which the shutdown stopped reading, has closed.
-        stderr = fake.processes[0].stderr
-        assert stderr is not None
-        await stderr.read()
+    """The runner's shutdown ends sshd and closes its stderr at once, though an open session's process holds it."""
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    fake = install_fake_sshd(_LISTENS_WITH_A_SESSION, str(sessions))
+
+    async with asyncio.timeout(10):
+        async with sandbox_runner_app.app.router.lifespan_context(sandbox_runner_app.app):
+            response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
+            assert response.status_code == 200
+
+    assert fake.processes[0].returncode == -signal.SIGKILL
+    # The session is not sshd's to end.
+    await _session_says(fake.processes[0], sessions, "closed")
+
+
+@pytest.mark.asyncio
+async def test_restart_closes_the_stderr_of_the_sshd_it_replaces_while_a_session_holds_it(
+    client: httpx.AsyncClient,
+    tmp_path: Path,
+    install_fake_sshd: Callable[..., _FakeSshd],
+) -> None:
+    """A start that replaces a dead sshd lets go of its stderr, and the shutdown of the new one's, session or not."""
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    fake = install_fake_sshd(_LISTENS_WITH_A_SESSION, str(sessions))
+
+    async with asyncio.timeout(20):
+        async with sandbox_runner_app.app.router.lifespan_context(sandbox_runner_app.app):
+            await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
+            fake.processes[0].kill()
+            await _exited(fake.processes[0])
+
+            response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
+
+            assert response.status_code == 200
+            assert len(fake.argvs) == 2
+            await _session_says(fake.processes[0], sessions, "closed")
+            # The port has listened since the first stand-in, so the start does not wait for the second one's session.
+            await _session_says(fake.processes[1], sessions, "started")
+            # The running sshd's stderr stays open.
+            assert not (sessions / f"{fake.processes[1].pid}.closed").exists()
+        await _session_says(fake.processes[1], sessions, "closed")
