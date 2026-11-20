@@ -13,7 +13,6 @@ import tempfile
 import threading
 import uuid
 from contextlib import contextmanager
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import cached_property, partial
 from pathlib import Path
@@ -292,20 +291,19 @@ class FileIndexer:
 
     def _build_reader(self, file_path: Path) -> Reader:
         """Build a per-file reader with conservative chunking for text-like content."""
+        # ReaderFactory builds a new reader for each call, so configuring it changes no other caller's reader.
         reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
 
-        # ReaderFactory hands out cached shared instances, so any branch that
-        # configures a reader copies it first instead of mutating the cache.
         if isinstance(reader, JSONReader):
             # Carry the factory reader's configuration (encoding, chunking) onto
             # the subclass that tags its own decode failures for the text fallback.
-            return _FallbackAwareJSONReader(**deepcopy(vars(reader)))
+            return _FallbackAwareJSONReader(**vars(reader))
 
         # Large markdown/plain-text files are the common source of oversized embed requests.
         if not isinstance(reader, (TextReader, MarkdownReader)):
             return reader
 
-        return self._configure_text_reader(deepcopy(reader))
+        return self._configure_text_reader(reader)
 
     def _read_file(self, file_path: Path) -> _PreparedFile | None:
         """Read and chunk one listed file through a private snapshot; None when its reader dependency is missing.

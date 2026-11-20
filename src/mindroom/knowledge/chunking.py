@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from mindroom.knowledge.readers import Document, FixedSizeChunking
 
 
@@ -20,6 +22,13 @@ class SafeFixedSizeChunking(FixedSizeChunking):
             msg = "min_chunk_fill_ratio must be in the range (0, 1]"
             raise ValueError(msg)
         self.min_chunk_fill_ratio = min_chunk_fill_ratio
+
+    def clean_text(self, text: str) -> str:
+        """Collapse each whitespace run, line breaks included, to one space, as every indexed chunk has so far.
+
+        Agno 3.2 keeps line breaks, which would change the text and id of every chunk a refresh rewrites.
+        """
+        return re.sub(r"\s+", " ", text)
 
     def _min_chunk_size(self) -> int:
         """Return the shortest chunk a whitespace-aligned split may produce."""
