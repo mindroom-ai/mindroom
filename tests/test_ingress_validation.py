@@ -417,7 +417,7 @@ def test_a_message_that_carries_route_content_is_not_a_route(tmp_path: Path) -> 
 
     facts = validator.classify(_text(ids["research"].full_id, "hello", **content), room_id="!room:localhost")
 
-    assert (facts.routed_event_id, facts.discovery_event_id, facts.routed, facts.router_relay) == (
+    assert (facts.routed_event_id, facts.discovery_event_id, facts._routed, facts.router_relay) == (
         None,
         None,
         False,

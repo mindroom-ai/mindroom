@@ -24,7 +24,7 @@ from mindroom.event_journal import (
     IngestionRecordDisposition,
 )
 from mindroom.matrix.state import MatrixState
-from mindroom.room_steward import membership_observers, pick_steward
+from mindroom.room_steward import _pick_steward, membership_observers
 from tests.access_schema_support import joined_members_response
 from tests.matrix_state_helpers import save_matrix_state
 from tests.test_agent_reply_membership_sync import _fleet, _ingestion_admission
@@ -105,7 +105,7 @@ def _config(tmp_path: Path, *, grant_room: bool = False, second_key: bool = Fals
 
 def _by_power(power: Mapping[str, float]) -> Callable[[str, Sequence[str]], str | None]:
     """Return the steward rule over fixed power levels, 0 for an account ``power`` leaves out."""
-    return lambda _room_id, user_ids: pick_steward((user_id, power.get(user_id, 0)) for user_id in user_ids)
+    return lambda _room_id, user_ids: _pick_steward((user_id, power.get(user_id, 0)) for user_id in user_ids)
 
 
 async def _refresh(
@@ -434,7 +434,7 @@ async def test_observer_sync_restart_unreadies_only_its_rooms(tmp_path: Path) ->
     """A restarted sync loop may have missed membership changes, in the rooms its account observes only."""
     index, membership_sync, config, runtime_paths = await _two_observed_rooms(tmp_path)
 
-    membership_sync.invalidate_observer(config, _A, reason="sync_loop_started")
+    membership_sync._invalidate_observer(config, _A, reason="sync_loop_started")
 
     assert not index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
     assert index.is_current_room_member(_ALICE, _OTHER, config, runtime_paths)
@@ -456,7 +456,7 @@ async def test_observer_stop_during_refresh_voids_its_rows(tmp_path: Path) -> No
     await _reached(a.reading)
 
     # No published row names A yet, so the invalidation must void the refresh that holds A's answers.
-    membership_sync.invalidate_observer(config, _A, reason="observer_stopping")
+    membership_sync._invalidate_observer(config, _A, reason="observer_stopping")
     assert a.hold is not None
     a.hold.set()
     await asyncio.wait_for(refresh, 5)
@@ -495,7 +495,7 @@ async def test_refresh_queued_behind_another_reads_only_through_the_accounts_obs
     await asyncio.sleep(0)
 
     observing.remove(a)
-    membership_sync.invalidate_observer(config, _A, reason="observer_stopping")
+    membership_sync._invalidate_observer(config, _A, reason="observer_stopping")
     assert a.hold is not None
     a.hold.set()
     await asyncio.wait_for(asyncio.gather(blocked, queued), 5)
@@ -519,7 +519,7 @@ async def test_account_reporting_its_departure_during_the_refresh_that_pins_a_ro
     index = AgentReplyMembershipIndex()
     membership_sync = _sync(index)
     await _refresh(index, config, runtime_paths, a, b, power={_B: 50})
-    membership_sync.invalidate_observer(config, _B, reason="observer_stopping")
+    membership_sync._invalidate_observer(config, _B, reason="observer_stopping")
     a.hold = asyncio.Event()
     refresh = asyncio.create_task(_refresh(index, config, runtime_paths, a))
     await _reached(a.reading)
@@ -863,7 +863,7 @@ async def test_own_join_during_the_prospective_observers_read_is_discovery_evide
     membership_sync = _sync(index)
     if published == "row_of_another_account":
         await _refresh(index, config, runtime_paths, a, b, power={_B: 50})
-        membership_sync.invalidate_observer(config, _B, reason="observer_stopping")
+        membership_sync._invalidate_observer(config, _B, reason="observer_stopping")
     else:
         index.invalidate(config, reason="initial_config")
     a.hold = asyncio.Event()

@@ -168,7 +168,7 @@ def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
     bot.logger = MagicMock()
     _sync_turn_policy_runtime(bot)
     install_send_response_mock(bot, send_response_mock)
-    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+    bot._turn_ingress.deps.resolver._dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
     return bot
@@ -568,7 +568,7 @@ class TestCommandHandling:
         _sync_turn_policy_runtime(bot)
         unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value="$thread-root")
-        bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+        bot._turn_ingress.deps.resolver._dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
 

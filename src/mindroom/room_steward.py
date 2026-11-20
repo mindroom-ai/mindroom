@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
 
 
-def pick_steward(candidates: Iterable[tuple[str, float]]) -> str | None:
+def _pick_steward(candidates: Iterable[tuple[str, float]]) -> str | None:
     """Return the Matrix ID with the highest power among ``(matrix_user_id, power)`` pairs, ties to the lowest ID."""
     steward = min(candidates, key=lambda candidate: (-candidate[1], candidate[0]), default=None)
     return None if steward is None else steward[0]
@@ -45,7 +45,7 @@ def room_steward(bots: Mapping[str, AgentBot], room_id: str) -> AgentBot | None:
     which is above every power level for a creator of a room whose version gives creators unlimited power.
     """
     joined = list(_joined(bots, room_id))
-    steward_id = pick_steward((user_id, room.power_levels.get_user_level(user_id)) for user_id, _bot, room in joined)
+    steward_id = _pick_steward((user_id, room.power_levels.get_user_level(user_id)) for user_id, _bot, room in joined)
     return next((bot for user_id, bot, _room in joined if user_id == steward_id), None)
 
 
@@ -64,7 +64,7 @@ def membership_observers(
     }
 
     def pick_observer(room_id: str, user_ids: Sequence[str]) -> str | None:
-        return pick_steward((user_id, _own_power(clients[user_id], room_id)) for user_id in user_ids)
+        return _pick_steward((user_id, _own_power(clients[user_id], room_id)) for user_id in user_ids)
 
     return list(clients.values()), pick_observer, all(bot.observes_room_members for bot in bots.values() if bot.running)
 

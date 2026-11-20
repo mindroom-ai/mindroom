@@ -167,7 +167,7 @@ async def test_history_loss_refreshes_only_room_backed_grants(
         nonlocal refreshes
         refreshes += 1
 
-    membership_sync.invalidate_observer(config, _OBSERVER, reason="uncertain_sync_response")
+    membership_sync._invalidate_observer(config, _OBSERVER, reason="uncertain_sync_response")
     await membership_sync.refresh_if_needed(config, refresh)
 
     assert refreshes == expected_refreshes
@@ -300,7 +300,7 @@ def test_every_invalidation_revokes_and_none_starts_calls() -> None:
     membership_sync = AgentReplyMembershipSync(AgentReplyMembershipIndex(), lambda: bots)
 
     membership_sync.invalidate(Config(), reason="config_reload")
-    membership_sync.invalidate_observer(Config(), _OBSERVER, reason="sync_loop_started")
+    membership_sync._invalidate_observer(Config(), _OBSERVER, reason="sync_loop_started")
 
     assert calls.ops("scheduled_revoke") == ["router", "router", "voice", "voice"]
     assert calls.ops("reconcile") == []
@@ -414,7 +414,7 @@ async def test_new_loss_of_grant_authority_refreshes_without_an_earlier_backoff(
     if loss == "invalidation":
         membership_sync.invalidate(config, reason="uncertain_sync_response")
     elif loss == "observer_invalidation":
-        membership_sync.invalidate_observer(config, _OBSERVER, reason="uncertain_sync_response")
+        membership_sync._invalidate_observer(config, _OBSERVER, reason="uncertain_sync_response")
     else:
         membership_sync.pre_admit_ingestion(
             config,
@@ -601,7 +601,7 @@ async def test_a_stopping_observer_does_not_cancel_the_refresh() -> None:
 
     frame = asyncio.create_task(membership_sync.refresh_if_needed(config, slow_refresh))
     await asyncio.wait_for(started.wait(), 5)
-    membership_sync.invalidate_observer(config, _OBSERVER, reason="observer_stopping")
+    membership_sync._invalidate_observer(config, _OBSERVER, reason="observer_stopping")
     release.set()
     await asyncio.wait_for(frame, 5)
 

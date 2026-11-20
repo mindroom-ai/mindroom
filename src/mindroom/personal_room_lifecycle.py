@@ -136,7 +136,7 @@ class PersonalRoomLifecycle:
     _rerun_after_pass: bool = field(default=False, init=False)
 
     @property
-    def observes_onboarding_joins(self) -> bool:
+    def _observes_onboarding_joins(self) -> bool:
         """Whether this bot stewards an onboarding room, whose recorded intent and backfill its passes settle."""
         settings = self.runtime.config.personal_rooms
         return settings is not None and any(
@@ -215,7 +215,7 @@ class PersonalRoomLifecycle:
             return
         if (
             self._reconciled
-            or not (self.observes_onboarding_joins or self._retry_candidates)
+            or not (self._observes_onboarding_joins or self._retry_candidates)
             or self._reconciliation_task is not None
             or monotonic() < self._next_reconciliation_at
         ):
@@ -557,7 +557,7 @@ class PersonalRoomLifecycle:
         """
         revision = self._config_revision
         settings = self.runtime.config.personal_rooms
-        observes = self.observes_onboarding_joins
+        observes = self._observes_onboarding_joins
         if self._reconciled or not (observes or self._retry_candidates) or settings is None:
             return
         if not self._reconciliation_ready(settings):

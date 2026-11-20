@@ -284,12 +284,12 @@ async def test_onboarding_join_observed_by_room_steward(coordination: Coordinati
     lifecycle = coordination.lifecycle
     lifecycle.agent_name = "helper"
     lifecycle.is_steward = lambda room_id: room_id == "!other:localhost"
-    assert not lifecycle.observes_onboarding_joins
+    assert not lifecycle._observes_onboarding_joins
     # Every bot in a configured onboarding room enters its joins into their claim, whoever stewards it.
     assert lifecycle.onboards_from("!lobby:localhost")
     assert not lifecycle.onboards_from("!other:localhost")
     lifecycle.is_steward = lambda room_id: room_id == "!lobby:localhost"
-    assert lifecycle.observes_onboarding_joins
+    assert lifecycle._observes_onboarding_joins
     join = RoomMemberJoin("!lobby:localhost", "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
     await lifecycle.baseline_join(join)
     coordination.owner.ensure.assert_awaited_once()
@@ -403,7 +403,7 @@ async def test_non_steward_never_routes_onboarding(coordination: Coordination) -
     lifecycle = coordination.lifecycle
     lifecycle.is_steward = lambda _room_id: False
     lifecycle.runtime.config.personal_rooms.backfill = True
-    assert not lifecycle.observes_onboarding_joins
+    assert not lifecycle._observes_onboarding_joins
     assert not await lifecycle.handle_command(
         nio.MatrixRoom("!lobby:localhost", "@helper:localhost"),
         command(),

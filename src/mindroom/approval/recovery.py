@@ -161,7 +161,7 @@ class ApprovalRecovery:
         effects = await store.approvals.discard_unavailable_approval_continuation(current.approval_id)
         return effects is not None
 
-    async def end_cards_without_sender(self) -> int:
+    async def _end_cards_without_sender(self) -> int:
         """Expire every pending card the router sent before cards recorded their sender; return how many it found.
 
         Each paused turn resumes as after a timeout; a later call finds only a card whose edit waits for a router bot.
@@ -231,7 +231,7 @@ class ApprovalRecovery:
             manager = self.manager
             if manager is None:
                 return False
-            await self.end_cards_without_sender()
+            await self._end_cards_without_sender()
             sweep = await manager.recover_cards_on_startup()
         except Exception as exc:
             logger.warning(

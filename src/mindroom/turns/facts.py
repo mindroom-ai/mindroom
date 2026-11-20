@@ -110,7 +110,7 @@ class IngressFacts:
     # relay for its original sender, in reply to the relay, exactly as before.
     # Coverage: tests/test_turns_focused.py::test_old_router_relay_event_still_answers_from_relay_context
     @property
-    def routed(self) -> bool:
+    def _routed(self) -> bool:
         """Return whether the room's steward routed this event to its responder."""
         return bool(self.routed_event_ids) or self.sender_entity_name == ROUTER_AGENT_NAME
 
@@ -118,7 +118,7 @@ class IngressFacts:
     def router_relay(self) -> bool:
         """Return whether a route relays a human's or a configured bot account's message."""
         return (
-            self.routed
+            self._routed
             and self.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
             and (self.original_sender is not None)
         )
@@ -135,7 +135,7 @@ class IngressFacts:
             original_sender=self.original_sender,
             trusted_user_relay=self.trusted_user_relay,
             acts_for_requester=self.acts_for_requester,
-            routed=self.routed,
+            routed=self._routed,
         )
 
 

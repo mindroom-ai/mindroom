@@ -239,4 +239,4 @@ def handle_desktop_command(args_text: str, *, scope: DesktopCommandScope) -> str
     return response
 
 
-__all__ = ["DesktopCommandScope", "chat_pairing_desktop_error", "handle_desktop_command"]
+__all__ = ["DesktopCommandScope", "chat_pairing_desktop_error", "desktop_room_agent", "handle_desktop_command"]

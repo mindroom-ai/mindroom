@@ -509,7 +509,7 @@ def _reading_general_thread(paths: RuntimePaths) -> Iterator[None]:
         is_full_history=True,
     )
     with (
-        patch.object(ConversationResolver, "dispatch_thread_snapshot", new=AsyncMock(return_value=history)),
+        patch.object(ConversationResolver, "_dispatch_thread_snapshot", new=AsyncMock(return_value=history)),
         patch.object(ConversationResolver, "fetch_thread_history", new=AsyncMock(return_value=history)),
     ):
         yield

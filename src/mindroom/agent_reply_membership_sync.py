@@ -71,7 +71,7 @@ class AgentReplyMembershipSync:
         self._memberships.invalidate(config, reason=reason)
         self._grants_lost()
 
-    def invalidate_observer(self, config: Config, observer_user_id: str, *, reason: str) -> None:
+    def _invalidate_observer(self, config: Config, observer_user_id: str, *, reason: str) -> None:
         """Fail closed the rooms one account observes, request a refresh, and end the calls that lost reply access."""
         self._memberships.invalidate_observer(config, observer_user_id, reason=reason)
         self._grants_lost()
@@ -95,7 +95,7 @@ class AgentReplyMembershipSync:
     def observer_closed(self, config: Config, observer_user_id: str, *, reason: str) -> None:
         """End one account's observation; only an account that was open loses its rooms' grants."""
         if self._observer_open.pop(observer_user_id, False):
-            self.invalidate_observer(config, observer_user_id, reason=reason)
+            self._invalidate_observer(config, observer_user_id, reason=reason)
 
     def observer_is_open(self, observer_user_id: str) -> bool:
         """Return whether the account's receive loop has caught up and still runs."""
@@ -120,7 +120,7 @@ class AgentReplyMembershipSync:
         observing = self.observer_is_open(observer_user_id)
         if admission.disposition is IngestionRecordDisposition.HISTORY_LOSS:
             if observing:
-                self.invalidate_observer(config, observer_user_id, reason="uncertain_sync_response")
+                self._invalidate_observer(config, observer_user_id, reason="uncertain_sync_response")
             return
         if (
             observing

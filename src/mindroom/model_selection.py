@@ -15,6 +15,7 @@ __all__ = [
     "ModelSelectionResult",
     "command_result_content_to_dict",
     "freeze_command_result_content",
+    "model_selection_names_runtime",
     "model_selection_result",
     "model_selection_targets_other_runtime",
     "parse_model_selection",

@@ -187,7 +187,7 @@ class IngressValidator:
         # that only carries route content is no route.
         routed = source_dict.get(ROUTE_EVENT_TYPE) if sender_entity_name is not None else None
         routed_event_ids = tuple(routed) if isinstance(routed, list) else ()
-        # An old visible relay names the human message it relays by replying to it; see `IngressFacts.routed`.
+        # An old visible relay names the human message it relays by replying to it; see `IngressFacts._routed`.
         visible_relay_original_event_id = (
             reply_to_event_id_from_content(content)
             if sender_entity_name == ROUTER_AGENT_NAME

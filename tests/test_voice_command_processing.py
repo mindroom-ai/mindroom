@@ -127,7 +127,7 @@ def _install_voice_thread_dispatch_mocks(
     bot: AgentBot,
 ) -> None:
     """Provide minimal explicit-thread cache reads for normalized voice dispatch."""
-    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+    bot._turn_ingress.deps.resolver._dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
 

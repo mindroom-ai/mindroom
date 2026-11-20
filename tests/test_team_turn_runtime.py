@@ -3350,7 +3350,10 @@ async def _approving_team_bot(
     cards: list[MatrixDelivery] = []
 
     async def prepare_event(
-        _room_id: str, _thread_id: str | None, content: dict[str, Any], _sender_entity: str
+        _room_id: str,
+        _thread_id: str | None,
+        content: dict[str, Any],
+        _sender_entity: str,
     ) -> dict[str, Any]:
         return content
 

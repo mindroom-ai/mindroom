@@ -2976,7 +2976,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
         # Setup mocks
-        bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+        bot._turn_ingress.deps.resolver._dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
@@ -3084,7 +3084,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
         # Setup mocks
-        bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+        bot._turn_ingress.deps.resolver._dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")

@@ -666,7 +666,7 @@ def _router_duties(state: RoomState) -> StewardDuties:
         personal_rooms=MagicMock(),
     )
     deps.hook_context.registry.has_hooks.return_value = False
-    deps.personal_rooms.observes_onboarding_joins = False
+    deps.personal_rooms._observes_onboarding_joins = False
     deps.runtime.orchestrator.room_steward.return_value = MagicMock(agent_name=ROUTER_AGENT_NAME)
     return StewardDuties(deps)
 

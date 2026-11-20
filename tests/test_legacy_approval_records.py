@@ -824,14 +824,14 @@ async def test_pending_router_card_is_ended_once_at_upgrade(
         assert isinstance(pending, ApprovalCardView)
         assert await approvals.approval_card_sender(delivery_id=pending.delivery_id) == (None, _ROOM)
 
-        assert await recovery.end_cards_without_sender() == 1
+        assert await recovery._end_cards_without_sender() == 1
 
         card = await approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
         assert isinstance(card, ApprovalCardView)
         assert (card.decided, card.retired) == (True, retired)
         assert [delivery.stage for delivery in sent] == ([DeliveryStage.FINAL] if router_in_room else [])
         # A later startup finds the card again only while its edit still waits for a router bot.
-        assert await recovery.end_cards_without_sender() == (0 if retired else 1)
+        assert await recovery._end_cards_without_sender() == (0 if retired else 1)
     finally:
         await manager.shutdown()
         await store.close()
@@ -849,7 +849,7 @@ async def test_grants_survive_upgrade(recorded_journal: Callable[[str], _Journal
         grants = sorted(journal.query("SELECT grant_id, revoked_at_ns FROM approval_grants"))
         assert grants
 
-        await recovery.end_cards_without_sender()
+        await recovery._end_cards_without_sender()
 
         assert sorted(journal.query("SELECT grant_id, revoked_at_ns FROM approval_grants")) == grants
         grant = await store.principal(_ROUTER).approvals.approval_grant_for_card(

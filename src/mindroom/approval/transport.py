@@ -327,8 +327,9 @@ class ApprovalMatrixTransport:
                 continue
             content = source.get("content")
             approval_id = content.get("approval_id") if isinstance(content, dict) else None
-            known = cards is not None and isinstance(approval_id, str)
-            card = await cards.approvals.approval_card_sender(delivery_id=approval_id) if known else None
+            if cards is None or event is None or not isinstance(approval_id, str):
+                return None
+            card = await cards.approvals.approval_card_sender(delivery_id=approval_id)
             if (
                 card is None
                 or event.event_id != card_event_id

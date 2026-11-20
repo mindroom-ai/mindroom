@@ -513,7 +513,7 @@ def _route_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFormatted:
     """Validate one route and return it as the mention its responder answers, in reply to the last event it names."""
     content = event.source.get("content")
     route = content.get(ROUTE_EVENT_TYPE) if isinstance(content, dict) else None
-    if event.type != ROUTE_EVENT_TYPE or not isinstance(route, dict):
+    if event.type != ROUTE_EVENT_TYPE or not isinstance(content, dict) or not isinstance(route, dict):
         msg = "Route has the wrong event type or names nothing"
         raise ValueError(msg)
     entity, event_ids, thread_id = route.get("entity"), route.get("event_ids"), route.get("thread_id")

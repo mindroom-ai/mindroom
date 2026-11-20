@@ -101,7 +101,7 @@ async def reconcile_held_room_states(runtime: OrchestratorRuntime) -> None:
     room_ids = {room_id for bot in bots if bot.client is not None for room_id in bot.client.rooms}
     stewards = ((runtime.room_steward(room_id), room_id) for room_id in room_ids)
     await asyncio.gather(
-        *(bot.steward_duties.reconcile_room_state(room_id) for bot, room_id in stewards if bot is not None),
+        *(bot.steward_duties._reconcile_room_state(room_id) for bot, room_id in stewards if bot is not None),
     )
 
 
@@ -198,7 +198,7 @@ class StewardDuties:
             # The election names another bot, as after a power or membership change: it publishes after its next frame.
             steward.steward_duties.mark_joined_for_room_state(room_id)
             return
-        if await self.reconcile_room_state(room_id):
+        if await self._reconcile_room_state(room_id):
             return
         pending = self._room_state_retries.get(room_id)
         if pending is None or pending.done():
@@ -215,11 +215,11 @@ class StewardDuties:
         """Reconcile once, and once more if any trigger failed meanwhile; the retry's own failure ends it."""
         while True:
             self._room_state_reruns.discard(room_id)
-            await self.reconcile_room_state(room_id)
+            await self._reconcile_room_state(room_id)
             if room_id not in self._room_state_reruns:
                 return
 
-    async def reconcile_room_state(self, room_id: str) -> bool:
+    async def _reconcile_room_state(self, room_id: str) -> bool:
         """Reconcile one stewarded room's thread mode and MindRoom accounts and return whether both are current."""
         runtime = self.deps.runtime
         client = runtime.client

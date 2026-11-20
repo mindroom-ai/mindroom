@@ -148,8 +148,8 @@ async def test_an_upgraded_deployment_reaches_the_router_free_end_state(
     recovery.bind(manager)
     try:
         # The router's pending card is ended once, through the owner account that sent it.
-        assert await recovery.end_cards_without_sender() == 1
-        assert await recovery.end_cards_without_sender() == 0
+        assert await recovery._end_cards_without_sender() == 1
+        assert await recovery._end_cards_without_sender() == 0
         card = await store.principal(_ROUTER).approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
         assert isinstance(card, ApprovalCardView)
         assert (card.decided, card.retired) == (True, True)

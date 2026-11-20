@@ -12,7 +12,7 @@ import nio
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.room_steward import pick_steward, room_poster, room_steward
+from mindroom.room_steward import _pick_steward, room_poster, room_steward
 from tests.conftest import install_bots, orchestrator_runtime_paths
 
 if TYPE_CHECKING:
@@ -61,8 +61,8 @@ def _bot(
 
 def test_highest_power_wins() -> None:
     """Power 100 beats 50 beats 0, whatever the Matrix IDs and the order the bots are listed in."""
-    assert pick_steward([(CODE, 0), (HELPER, 100), (CREW, 50)]) == HELPER
-    assert pick_steward([(CODE, 0), (CREW, 50)]) == CREW
+    assert _pick_steward([(CODE, 0), (HELPER, 100), (CREW, 50)]) == HELPER
+    assert _pick_steward([(CODE, 0), (CREW, 50)]) == CREW
 
     bots = {"code": _bot(CODE, 0), "helper": _bot(HELPER, 100), "crew": _bot(CREW, 50)}
     assert room_steward(bots, ROOM) is bots["helper"]
@@ -72,7 +72,7 @@ def test_highest_power_wins() -> None:
 
 def test_tie_goes_to_lowest_matrix_id() -> None:
     """Among equal powers the lowest Matrix ID wins, not the first listed and not the entity name."""
-    assert pick_steward([(HELPER, 50), (CODE, 50), (CREW, 50)]) == CODE
+    assert _pick_steward([(HELPER, 50), (CODE, 50), (CREW, 50)]) == CODE
 
     bots = {"a_first_by_name": _bot(HELPER, 50), "z_last_by_name": _bot(CODE, 50)}
     assert room_steward(bots, ROOM) is bots["z_last_by_name"]
@@ -80,7 +80,7 @@ def test_tie_goes_to_lowest_matrix_id() -> None:
 
 def test_privileged_creator_outranks_power_100() -> None:
     """In a room whose version gives creators unlimited power, the creator beats an account at power 100."""
-    assert pick_steward([(CODE, 100), (HELPER, math.inf)]) == HELPER
+    assert _pick_steward([(CODE, 100), (HELPER, math.inf)]) == HELPER
 
     bots = {
         "code": _bot(CODE, 100, room_version="12", creator=HELPER),
@@ -107,7 +107,7 @@ def test_stopped_or_unjoined_bot_is_not_a_candidate() -> None:
 
 def test_no_candidate_returns_none() -> None:
     """With no bot running and joined there is no steward and no poster."""
-    assert pick_steward([]) is None
+    assert _pick_steward([]) is None
     bots = {ROUTER_AGENT_NAME: _bot(OWNER, 100, running=False), "elsewhere": _bot(CODE, 100, room_id=OTHER_ROOM)}
     assert room_steward(bots, ROOM) is None
     assert room_poster(bots, ROOM) is None

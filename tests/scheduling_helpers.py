@@ -165,7 +165,7 @@ def serve_task_state_events(
         response = await client.room_get_state_event(room_id=room_id, event_type=event_type, state_key=state_key)
         if not isinstance(response, nio.RoomGetStateEventResponse):
             return response
-        writer = sender(state_key) if callable(sender) else sender
+        writer = sender if isinstance(sender, str) else sender(state_key)
         event = scheduled_task_state_event(state_key, response.content, room_id=room_id, sender=writer)
         return nio.RoomGetStateEventResponse(event, event_type, state_key, room_id)
 
