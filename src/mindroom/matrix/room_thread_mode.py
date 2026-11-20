@@ -1,4 +1,4 @@
-"""Reconcile the router-owned thread-mode state clients use to choose a room view."""
+"""Reconcile the thread-mode state clients use to choose a room view."""
 
 from __future__ import annotations
 

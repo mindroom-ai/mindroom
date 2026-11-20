@@ -205,7 +205,7 @@ def get_agents_in_thread(
 ) -> list[MatrixID]:
     """Get list of unique agents that have participated in thread.
 
-    Note: Router agent is excluded from the participant list as it's not
+    Note: The owner account is excluded from the participant list as it's not
     a conversation participant.
 
     Preserves the order of first participation while preventing duplicates.
@@ -218,7 +218,7 @@ def get_agents_in_thread(
         sender = msg.sender
         agent_name = registry.current_entity_name_for_user_id(sender, include_router=False)
 
-        # Skip router agent and invalid senders
+        # Skip the owner account and invalid senders
         if agent_name is None:
             continue
 

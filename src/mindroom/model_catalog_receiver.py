@@ -1,4 +1,4 @@
-"""Router-owned authenticated, bounded Matrix model discovery lifecycle."""
+"""Owner-account authenticated, bounded Matrix model discovery lifecycle."""
 
 from __future__ import annotations
 

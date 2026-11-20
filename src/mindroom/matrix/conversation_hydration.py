@@ -861,7 +861,7 @@ class ConversationHydrator:
         missing key may never arrive, so refusing there would fail every read
         in the room for as long as the key stays missing -- an export of every
         thread included, not only the thread the event belongs to. A new
-        encrypted room routinely holds such an event: the router encrypts its
+        encrypted room routinely holds such an event: the owner account encrypts its
         welcome before it has seen the agent's device. Live sync admits an
         undecryptable event without failing any read either.
 

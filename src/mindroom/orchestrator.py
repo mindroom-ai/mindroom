@@ -1325,7 +1325,7 @@ class _MultiAgentOrchestrator:
                 staged = self._stage_plugins(plan)
                 try:
                     # Removal first, while the removed entities' bots still edit their approval cards
-                    # and before a replacement router's orphan cleanup could kick the removed accounts.
+                    # and before the owner account's orphan cleanup could kick the removed accounts.
                     unsettled_removals = await self.fleet.remove(plan.remove)
                     await self.fleet.stop(plan.restart | plan.stop)
                 except BaseException:

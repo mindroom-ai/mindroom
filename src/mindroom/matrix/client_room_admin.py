@@ -48,8 +48,7 @@ _MANAGED_ROOM_EVENT_POWER_LEVELS = {
     # Matrix lets a user write a state key that starts with @ only when it is that user's own ID.
     BACKGROUND_JOBS_EVENT_TYPE: 0,
     MINDROOM_SERVER_EVENT_TYPE: 0,
-    # The router publishes the room's !auto_approve windows and MindRoom accounts; in a personal room an agent created
-    # it has no power.
+    # The room's steward publishes the room's !auto_approve windows and MindRoom accounts, with whatever power it has.
     AUTO_APPROVE_WINDOWS_EVENT_TYPE: 0,
     MINDROOM_ACCOUNTS_EVENT_TYPE: 0,
 }

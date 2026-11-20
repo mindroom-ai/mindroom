@@ -58,7 +58,7 @@ logger = get_logger(__name__)
 # Every bot syncs on its own, so this bot can deliver a newcomer's first message just before the room
 # observer's sync applies their join. The first gate re-decides on each membership publication for this long; a
 # decision still unresolved then fails into the journal's retry, which also re-reads this bot's roster.
-_ROUTER_CATCH_UP_SECONDS = 1.0
+_MEMBERSHIP_CATCH_UP_SECONDS = 1.0
 
 
 class _SenderReplyPolicy(Protocol):
@@ -323,7 +323,7 @@ class IngressValidator:
         # The first gate is where a newcomer's first message meets an observer that has not seen the join yet.
         # A steward takes a message it may not answer itself, to route it.
         if not (
-            await self._can_reply_once_router_catches_up(facts.run_requester_id, room)
+            await self._can_reply_once_membership_resolves(facts.run_requester_id, room)
             or self.deps.turn_policy.routes_for_sender_in_room(facts.run_requester_id, room.room_id)
         ):
             await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]), room_id=room.room_id)
@@ -364,7 +364,7 @@ class IngressValidator:
             await self.deps.settle_ignored_sources(unanswered)
             yield False
 
-    async def _can_reply_once_router_catches_up(self, sender_id: str, room: nio.MatrixRoom) -> bool:
+    async def _can_reply_once_membership_resolves(self, sender_id: str, room: nio.MatrixRoom) -> bool:
         """Decide reply access, deciding again on each membership publication while it stays unresolved.
 
         Only the room observer's published membership grants. The message itself proves only that its sender was joined
@@ -372,7 +372,7 @@ class IngressValidator:
         """
         memberships = self.deps.runtime.agent_reply_memberships
         try:
-            async with asyncio.timeout(_ROUTER_CATCH_UP_SECONDS):
+            async with asyncio.timeout(_MEMBERSHIP_CATCH_UP_SECONDS):
                 while True:
                     try:
                         return self.deps.turn_policy.can_reply_to_sender_in_room(

@@ -1,4 +1,4 @@
-"""Matrix runtime shell for agents, teams, and the router."""
+"""Matrix runtime shell for agents, teams, and the owner account."""
 
 from __future__ import annotations
 
@@ -213,7 +213,7 @@ def create_bot_for_entity(
     agent_user: AgentMatrixUser,
     orchestrator: OrchestratorRuntime,
 ) -> AgentBot:
-    """Create the bot for one configured entity, the router, a team, or an agent, in its configured rooms.
+    """Create the bot for one configured entity, the owner account, a team, or an agent, in its configured rooms.
 
     Raises:
         ValueError: The published config does not configure the entity.
@@ -228,7 +228,7 @@ def create_bot_for_entity(
 
 
 class AgentBot:
-    """Matrix lifecycle shell for one configured agent or router entity."""
+    """Matrix lifecycle shell for one configured agent, team, or the owner account."""
 
     # Construction inputs
     agent_user: AgentMatrixUser

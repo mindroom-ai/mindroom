@@ -129,7 +129,7 @@ class _ClaimRegistry:
     ) -> TurnClaim | None:
         """Return a live claim sharing a source with these sources or an alias with these aliases.
 
-        Roles are compared separately: a human message and the router's relay of
+        Roles are compared separately: a human message and the route of
         it, which indexes that message as its alias, are different turns.
         """
         return next(

@@ -67,7 +67,7 @@ _ResolutionStatus = Literal["approved", "denied"]
 _STARTUP_RECOVERY_SCAN_PAGE = 256
 _DEADLINE_SWEEP_SECONDS = 60.0
 _EVENT_TYPE = "io.mindroom.tool_approval"
-# What an approval request or settlement meets before the approval runtime and the router's card store are bound.
+# What an approval request or settlement meets before the approval runtime and the card store are bound.
 RUNTIME_NOT_READY_REASON = "Tool approval runtime is not ready."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the tool arguments cannot be shown in full, so a human cannot review "
@@ -1241,7 +1241,7 @@ class ApprovalManager:
 
 
 def approval_card_store(journal: Callable[[], EventJournalStore], runtime_paths: RuntimePaths) -> ApprovalDeliveryView:
-    """Return the principal that keeps every approval's books: the router account's, which needs no prepared account."""
+    """Return the principal that keeps every approval's books: the owner account's, which needs no prepared account."""
     return journal().principal(journal_principal_id(ROUTER_AGENT_NAME, owner_matrix_id(runtime_paths)))
 
 

@@ -1179,7 +1179,7 @@
             "notes_model": null,
             "languages": []
           },
-          "description": "Transcripts of calls between people in rooms with the router"
+          "description": "Transcripts of calls between people in rooms with a MindRoom account"
         }
       },
       "title": "CallsConfig",
