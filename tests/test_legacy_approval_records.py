@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import time
 from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -874,8 +875,11 @@ async def test_grants_survive_upgrade(recorded_journal: Callable[[str], _Journal
 async def test_a_grant_given_before_upgrade_approves_the_agents_next_call(
     recorded_journal: Callable[[str], _Journal],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A timed grant given while the router and the agent were in different memberships still covers a new call."""
+    # The call comes while the recorded grant, given at 08:00:07 UTC on 2027-01-15 for ten minutes, is still live.
+    monkeypatch.setattr(time, "time_ns", lambda: 1_800_000_300_000_000_000)
     store = recorded_journal("13_timed_grants.sql").open()
 
     async def prepare(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:
