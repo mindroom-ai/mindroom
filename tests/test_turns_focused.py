@@ -8458,6 +8458,27 @@ async def test_a_routed_responders_current_message_is_the_prompt_its_route_carri
 
 
 @pytest.mark.asyncio
+async def test_a_route_is_answered_with_the_text_it_carries_whatever_the_person_wrote(tmp_path: Path) -> None:
+    """Only a route with no text has its messages read: no wording of the person's stands for a missing one."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research")
+    harness.runtime.client.room_get_event = AsyncMock(return_value=nio.RoomGetEventError("unreadable"))
+    route = _route_message(
+        config,
+        steward="research",
+        thread_id="$question:localhost",
+        body="could you help with this?",
+    )
+
+    await harness.deliver(room, route)
+
+    [request] = harness.runner.requests
+    assert request.prompt == "could you help with this?"
+    harness.runtime.client.room_get_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_a_route_without_a_prompt_whose_message_cannot_be_read_starts_no_turn(tmp_path: Path) -> None:
     """A responder that can read neither a prompt on its route nor the message it names answers nothing yet."""
     config = _two_agent_config(tmp_path)

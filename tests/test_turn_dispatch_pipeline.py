@@ -924,7 +924,13 @@ class TestAgentBot(AgentBotTestBase):
             assert scheduled_prompt is None
             assert handled_turn is not None
             assert handled_turn.source_event_prompts == {"$voice": "voice prompt", "$text": "hello"}
-            await bot._turn_store.record_responded_turn(replace(handled_turn, response_event_id="$route"))
+            # The relay attaches the conversation and its owner to the turn it is handed, before its first write.
+            routed_turn = bot._turn_store.attach_response_context(
+                handled_turn,
+                history_scope=None,
+                conversation_target=dispatch.target,
+            )
+            await bot._turn_store.record_responded_turn(replace(routed_turn, response_event_id="$route"))
 
         with (
             patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),

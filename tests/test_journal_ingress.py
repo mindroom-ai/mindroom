@@ -5550,9 +5550,10 @@ class TestRouteDispatch:
         assert delivered.source["type"] == "m.room.message"
         assert delivered.source["content"] == {
             "msgtype": "m.text",
-            "body": "could you help with this?",
+            # This route carries no prompt, so it has no text until its responder reads the message it names.
+            "body": "",
             "format": "org.matrix.custom.html",
-            "formatted_body": "<p>could you help with this?</p>\n",
+            "formatted_body": "",
             "m.mentions": {"user_ids": [BOT]},
             "m.relates_to": {
                 "rel_type": "m.thread",

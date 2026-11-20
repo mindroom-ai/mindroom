@@ -17,9 +17,9 @@ from mindroom.bot_runtime_view import RunPhase
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTE_EVENT_TYPE,
     ROUTE_PROMPT_STRUCTURED_KEY,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
-    ROUTED_PROMPT_PLACEHOLDER,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SCHEDULED_MODEL_KEY,
     VOICE_PREFIX,
@@ -333,14 +333,13 @@ class TurnDispatcher:
 
         timing_scope_token = None
         try:
+            routed = await self._with_routed_text(turn)
             dispatch_timing = get_dispatch_pipeline_timing(turn.event.source)
-            prepared = await self._prepare_text_dispatch(
-                turn,
-                dispatch_timing=dispatch_timing,
+            prepared = (
+                None if routed is None else await self._prepare_text_dispatch(routed, dispatch_timing=dispatch_timing)
             )
             if prepared is None:
                 return
-            # A routed turn's text is what the person wrote from here on.
             turn = prepared.turn
             timing_scope_token = timing_scope_context.set(event_timing_scope(turn.event.event_id))
             async with self.deps.ingress.admitted_reply_decision(
@@ -462,7 +461,7 @@ class TurnDispatcher:
         content = turn.event.source["content"]
         if not turn.facts.routed_event_ids:
             return turn
-        if turn.event.body != ROUTED_PROMPT_PLACEHOLDER:
+        if turn.event.body:
             return replace(turn, current_prompt_is_structured=content.get(ROUTE_PROMPT_STRUCTURED_KEY) is True)
         bodies: list[str] = []
         for event_id in turn.facts.routed_event_ids:
@@ -487,10 +486,6 @@ class TurnDispatcher:
         if dispatch_timing is not None:
             dispatch_timing.mark("dispatch_start")
         dispatch_started_at = time.monotonic()
-        routed_turn = await self._with_routed_text(turn)
-        if routed_turn is None:
-            return None
-        turn = routed_turn
         if dispatch_timing is not None:
             dispatch_timing.mark("dispatch_prepare_start")
         prepared = await self._prepare_dispatch(turn)
@@ -665,7 +660,6 @@ class TurnDispatcher:
                 on_lifecycle_lock_acquired=response_started.set,
                 on_participation_approved=publish_voice,
                 reconcile_visible_response=pending_turn.resumes_response,
-                prompt_source_event_ids=prepared.turn.facts.routed_event_ids,
             ),
             name=f"inbox_response:{prepared.turn.event.event_id}",
             room_id=room.room_id,
@@ -731,15 +725,6 @@ class TurnDispatcher:
             route_event=route_event,
             single_direct_media_route=single_direct_media_route,
         )
-        handled_turn = (
-            self.deps.turn_store.attach_response_context(
-                tracked_turn,
-                history_scope=None,
-                conversation_target=prepared.dispatch.target,
-            )
-            if tracked_turn is not None
-            else None
-        )
         # Config application waits until the selection and its relay delivery finish.
         async with self.deps.runtime.admission_fence():
             return await execute_router_relay(
@@ -752,7 +737,7 @@ class TurnDispatcher:
                 requester_user_id=prepared.dispatch.requester_user_id,
                 extra_content=plan.extra_content,
                 media_events=None if single_direct_media_route else plan.media_events,
-                handled_turn=handled_turn,
+                handled_turn=tracked_turn,
                 scheduled_prompt=turn.event.body if prepared.dispatch.scheduled_history_budget is not None else None,
                 prompt_is_structured=turn.current_prompt_is_structured,
             )
@@ -1034,7 +1019,6 @@ class TurnDispatcher:
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
         on_participation_approved: Callable[[], Awaitable[None]] | None = None,
         reconcile_visible_response: bool = False,
-        prompt_source_event_ids: tuple[str, ...] = (),
     ) -> None:
         """Execute one final response path for a prepared dispatch action."""
         action = self.deps.turn_policy.effective_response_action(action)
@@ -1122,7 +1106,7 @@ class TurnDispatcher:
                     logical_source_event_ids=handled_turn.source_event_ids,
                     discovery_event_ids=handled_turn.discovery_event_ids,
                 ),
-                prompt_source_event_ids=prompt_source_event_ids,
+                prompt_source_event_ids=tuple(event.source.get(ROUTE_EVENT_TYPE, ())),
                 user_id=dispatch.requester_user_id,
                 # A replay finds the reply its earlier attempt left through the reply's records.
                 response_envelope=dispatch.envelope,
