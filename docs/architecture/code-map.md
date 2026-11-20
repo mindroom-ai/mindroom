@@ -242,7 +242,7 @@ Matrix sync callback
 | `orchestration/call_transcripts_runtime.py` | The call transcript service in the runtime: the router it reads and posts through, the loop that checks calls every 15 seconds (while call transcripts are off, only holding calls to the one-day limit), the service the API routes reach, and the agent call in a room, read through the agent answering calls there |
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, follow-ups, and retention |
 | `orchestration/script_runtime.py` | Background script lifecycle: startup recovery of preserved runs, reload revocation, maintenance passes, the published worker lease, and when script tools are served |
-| `orchestration/workflow_runtime.py` | Builds the workflow store and engine on the script runtime and ties the engine's life to the orchestrator's |
+| `orchestration/workflow_runtime.py` | Builds the workflow store and engine on the script runtime, ties the engine's life to the orchestrator's, and follows each script-runtime pass by ending runs whose attempts ended and pruning runs past the script retention |
 | `custom_tools/script.py` | `script` agent tool: start, inspect, cancel, and list the requester's background scripts |
 | `script_runs/manager.py` | Starts, polls, and cancels script runs in a worker or unsafe-local, and finalizes their cleanup |
 | `script_runs/store.py` | The primary-only SQLite store of script runs and their tool-call receipts, with atomic state transitions |
