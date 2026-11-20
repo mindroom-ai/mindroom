@@ -1115,10 +1115,11 @@ def _confined_rg_events(
         for candidate in candidates:
             try:
                 payload = read_resolved_file(base_dir, resolve_base_dir_path(base_dir, str(candidate)))
-                remaining = deadline - time.monotonic()
-                found = subprocess.run(match, check=False, input=payload, capture_output=True, timeout=remaining)
             except (OSError, ValueError):
                 continue
+            remaining = deadline - time.monotonic()
+            try:
+                found = subprocess.run(match, check=False, input=payload, capture_output=True, timeout=remaining)
             except subprocess.TimeoutExpired:
                 expired.set()
                 return
@@ -1137,10 +1138,7 @@ def _run_confined_ripgrep(nominate: list[str], match: list[str], base_dir: Path,
         return f"Error running grep: {error.stderr}" if error.stderr else "Error running grep."
     if not expired.is_set():
         return output
-    timed_out = f"grep timed out after {_GREP_TIMEOUT_SECONDS:g} seconds"
-    if output == "No matches found.":
-        return f"Error: {timed_out}."
-    return f"{output}\n\n[{timed_out}; results are incomplete.]"
+    return f"{output}\n\n[grep timed out after {_GREP_TIMEOUT_SECONDS:g} seconds; results are incomplete.]"
 
 
 def _run_ripgrep(
