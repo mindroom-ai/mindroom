@@ -139,9 +139,9 @@ def read_conversation(
         limit=limit,
         before=before,
     )
-    kept = _rows_within_content_budget(sizes)
+    kept, stored = _rows_within_content_budget(sizes)
     rows = _load_rows(transaction, principal_id, room_id=room_id, sized=sizes[:kept])
-    decoded = _rows_within_decoded_budget(rows)
+    decoded, estimated = _rows_within_decoded_budget(rows)
     trimmed = decoded < len(rows)
     rows = rows[:decoded]
     messages: list[VisibleMessage] = []
@@ -163,6 +163,7 @@ def read_conversation(
         messages=tuple(reversed(messages)),
         refresh_pending=tuple(refresh_pending),
         next_cursor=next_cursor,
+        budget_used=(stored / PAGE_CONTENT_BUDGET_BYTES, estimated / _PAGE_DECODED_BUDGET_BYTES),
     )
 
 
@@ -214,9 +215,9 @@ def read_room_after(
             (principal_id, room_id, *cursor_params, limit + 1),
         ),
     )
-    kept = _rows_within_content_budget(sizes[:limit])
+    kept = _rows_within_content_budget(sizes[:limit])[0]
     rows = _load_rows(transaction, principal_id, room_id=room_id, sized=sizes[:kept])
-    rows = rows[: _rows_within_decoded_budget(rows)]
+    rows = rows[: _rows_within_decoded_budget(rows)[0]]
     pending = tuple(_refresh_request(row) for row in rows if row["content_json"] is None)
     first_pending = next((index for index, row in enumerate(rows) if row["content_json"] is None), len(rows))
     messages = tuple(_visible_message(row) for row in rows[:first_pending])
@@ -498,8 +499,8 @@ def _load_rows(
     return tuple(loaded[row["logical_event_id"]] for row in sized)
 
 
-def _rows_within_content_budget(rows: tuple[Row, ...]) -> int:
-    """Return how many of one page's newest rows fit its content budget, never fewer than one.
+def _rows_within_content_budget(rows: tuple[Row, ...]) -> tuple[int, int]:
+    """Return how many of one page's newest rows fit its content budget, never fewer than one, and the bytes counted.
 
     A row owing a refetch holds no content and costs nothing, so resolving it
     can only shorten the next read of the same page, never lengthen it.
@@ -508,12 +509,12 @@ def _rows_within_content_budget(rows: tuple[Row, ...]) -> int:
     for index, row in enumerate(rows):
         total += int(row["content_bytes"] or 0)
         if total > PAGE_CONTENT_BUDGET_BYTES:
-            return max(index, 1)
-    return len(rows)
+            return max(index, 1), total
+    return len(rows), total
 
 
-def _rows_within_decoded_budget(rows: tuple[Row, ...]) -> int:
-    """Return how many of one page's loaded rows fit what it may decode to, never fewer than one."""
+def _rows_within_decoded_budget(rows: tuple[Row, ...]) -> tuple[int, int]:
+    """Return how many of one page's loaded rows fit what it may decode to, never fewer than one, and that estimate."""
     total = 0
     for index, row in enumerate(rows):
         content_json = row["content_json"] or ""
@@ -527,8 +528,8 @@ def _rows_within_decoded_budget(rows: tuple[Row, ...]) -> int:
             * (content_json.count(",") - content_json.count(", ") + content_json.count(":") - content_json.count(": "))
         )
         if total > _PAGE_DECODED_BUDGET_BYTES:
-            return max(index, 1)
-    return len(rows)
+            return max(index, 1), total
+    return len(rows), total
 
 
 def later_message_exists(

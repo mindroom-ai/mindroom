@@ -12,6 +12,7 @@ to ask the homeserver for its new body rather than popping a local content stack
 
 from __future__ import annotations
 
+import itertools
 import json
 import time
 from dataclasses import dataclass
@@ -29,6 +30,10 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from .backend import Row, Transaction
+
+# A stored row's first generation: the clock when this runtime started, then one more for each row, so a message
+# deleted and stored again never repeats a number. One runtime holds a journal, and the next starts at a later clock.
+_GENERATIONS = itertools.count(time.time_ns())
 
 _RELATES_TO = "m.relates_to"
 _REL_TYPE = "rel_type"
@@ -229,8 +234,7 @@ def _project_original(
             content_json,
             refresh_token,
             membership_epoch,
-            # The clock, so a message deleted and stored again does not repeat a number its earlier bodies had.
-            time.time_ns(),
+            next(_GENERATIONS),
         ),
     )
     record_projected_prompt(

@@ -121,7 +121,7 @@ def projected_thread_history(
         # A withheld revision is repairable. Dispatch must resolve it before
         # counting participants, even when the rest of the source is current.
         diagnostics = {**(diagnostics or {}), THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True}
-    return thread_history_result(
+    history = thread_history_result(
         messages,
         # A page with more behind it is not the whole conversation, however
         # hard the caller worked for it. Consumers that count what they got and
@@ -130,6 +130,8 @@ def projected_thread_history(
         is_full_history=complete and not page.refresh_pending and page.next_cursor is None,
         diagnostics=diagnostics,
     )
+    history.budget_used = page.budget_used
+    return history
 
 
 @dataclass(frozen=True, slots=True)
@@ -490,6 +492,17 @@ async def thread_is_unchanged(
         return False
     (_, complete, _, recovery_state), rows = fingerprint
     held = {(m.event_id, m.latest_event_id, None, m.content_generation) for m in history}
+    if any(row[0] == ignoring_event_id for row in rows):
+        # A read counts the ignored message against its page's limit and budgets before its caller drops it, so the
+        # page is whole only if that message, read here as the thread's newest, still fits beside ``history``.
+        newest = await reader.read(room_id=room_id, thread_id=thread_id, limit=1)
+        echo = [(ignoring_event_id, m.revision_event_id, None, m.content_generation) for m in newest.messages]
+        if (
+            not rows.issuperset(echo or [()])
+            or len(rows) >= HYDRATED_PROMPT_WINDOW_MESSAGES
+            or any(used + more > 1 for used, more in zip(history.budget_used, newest.budget_used, strict=True))
+        ):
+            return False
     return bool(complete) and recovery_state is None and {row for row in rows if row[0] != ignoring_event_id} == held
 
 

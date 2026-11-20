@@ -8,7 +8,8 @@ The summary pass after the answer always loads the thread, and is left out here.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
@@ -17,8 +18,9 @@ import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.constants import FORK_CONTENT_KEY
-from mindroom.event_journal import EventClass, EventKind, InboundEvent, ProjectedEvent
+from mindroom.event_journal import EventClass, EventKind, InboundEvent, ProjectedEvent, projection, reads
 from mindroom.event_journal.views import ConversationReadView
+from mindroom.matrix import conversation_reads
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import complete_thread_history, thread_is_unchanged
@@ -267,12 +269,12 @@ class TestAThreadIsUnchangedOnlyWhenAStrictReadWouldRepeat(ThreadingBehaviorTest
             held = await complete_thread_history(bot.conversation_reader, _ROOM, _ROOT)
             assert await thread_is_unchanged(bot.conversation_reader, _ROOM, _ROOT, held)
 
+            await _admit(bot, "$other:localhost", "other", ts=100)
             await _admit(bot, _REPLY, "Thinking...", ts=101, sender=_BOT)
-            await _admit(bot, "$other:localhost", "other", ts=102)
 
             assert not await thread_is_unchanged(bot.conversation_reader, _ROOM, _ROOT, held, ignoring_event_id=_REPLY)
             held = await complete_thread_history(bot.conversation_reader, _ROOM, _ROOT)
-            without_reply = thread_history_result([m for m in held if m.event_id != _REPLY], is_full_history=True)
+            without_reply = replace(held, messages=[m for m in held if m.event_id != _REPLY])
             assert await thread_is_unchanged(
                 bot.conversation_reader,
                 _ROOM,
@@ -281,6 +283,59 @@ class TestAThreadIsUnchangedOnlyWhenAStrictReadWouldRepeat(ThreadingBehaviorTest
                 ignoring_event_id=_REPLY,
             )
             assert not await thread_is_unchanged(bot.conversation_reader, _ROOM, _ROOT, without_reply)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("module", "bound"),
+        [
+            (conversation_reads, "HYDRATED_PROMPT_WINDOW_MESSAGES"),
+            (reads, "PAGE_CONTENT_BUDGET_BYTES"),
+            (reads, "_PAGE_DECODED_BUDGET_BYTES"),
+        ],
+    )
+    async def test_an_ignored_echo_that_fills_a_page_bound_makes_the_thread_read_again(
+        self,
+        bot: AgentBot,
+        monkeypatch: pytest.MonkeyPatch,
+        module: object,
+        bound: str,
+    ) -> None:
+        """A read counts the echo against its message limit and content budgets before the caller drops it.
+
+        With the bound set to the smallest one the thread alone still fits, the echo makes a read's page a part of
+        the thread, so the read the caller holds is not what a read now would return.
+        """
+        reader = bot.conversation_reader
+        async with _thread(bot):
+            low, high = 1, 1 << 20
+            while low < high:
+                monkeypatch.setattr(module, bound, (low + high) // 2)
+                if (await complete_thread_history(reader, _ROOM, _ROOT)).is_full_history:
+                    high = (low + high) // 2
+                else:
+                    low = (low + high) // 2 + 1
+            monkeypatch.setattr(module, bound, low)
+            held = await complete_thread_history(reader, _ROOM, _ROOT)
+            assert held.is_full_history
+            assert await thread_is_unchanged(reader, _ROOM, _ROOT, held, ignoring_event_id=_REPLY)
+
+            await _admit(bot, _REPLY, "Thinking...", ts=101, sender=_BOT)
+
+            assert not (await complete_thread_history(reader, _ROOM, _ROOT)).is_full_history
+            assert not await thread_is_unchanged(reader, _ROOM, _ROOT, held, ignoring_event_id=_REPLY)
+
+    @pytest.mark.asyncio
+    async def test_two_bodies_stored_at_one_clock_reading_get_different_generations(self, bot: AgentBot) -> None:
+        """A message deleted and stored again within one clock reading must not repeat its generation."""
+        store = bot._journal_store.principal(bot._journal_principal_id)
+        await seed_thread_history(bot, room_id=_ROOM, thread_id=_ROOT, messages=[])
+        with patch.object(projection, "time", SimpleNamespace(time_ns=lambda: 5)):
+            await _admit(bot, _ROOT, "Root", ts=1)
+            await _admit(bot, "$one:localhost", "one", ts=2)
+
+        fingerprint = await store.thread_fingerprint(room_id=_ROOM, thread_id=_ROOT)
+        assert fingerprint is not None
+        assert len({generation for *_, generation in fingerprint[1]}) == 2
 
     @pytest.mark.asyncio
     async def test_a_history_that_is_not_the_whole_thread_never_stands(self, bot: AgentBot) -> None:

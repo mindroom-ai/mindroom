@@ -93,7 +93,7 @@ def upgrade_hydration_walk_version(transaction: Transaction, inspector: SchemaIn
 
 # LEGACY_COMPAT: Visible messages stored before a message's bodies were numbered.
 # Legacy format: visible_messages without a content_generation column, and the visible_messages_fingerprint index.
-# Last legacy release: v2026.11.472; replacement: the next release numbers every body a message stores, because a
+# Last legacy release: v2026.11.474; replacement: the next release numbers every body a message stores, because a
 # refetch can store a different body under the revision, time and refresh state the message had before.
 # Handling: adds content_generation as 0 to every message; `build_staged_indexes` then builds the index that holds
 # it and drops the old one. A body stored later takes a later number, so none is taken for one read before it.

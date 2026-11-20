@@ -180,7 +180,8 @@ async def _measure(
         await read()  # summary gate after the reply
     turn_reads = loaded[reads_before:]
     return (
-        sum(1 for rows in turn_reads if rows) / TURNS,
+        # A check that finds the reply's echo loads that one message, to weigh it against the page's bounds.
+        sum(1 for rows in turn_reads if rows > 1) / TURNS,
         sum(turn_reads) / TURNS,
         (sum(load_ms) + sum(check_ms)) / TURNS,
         statistics.median(load_ms),

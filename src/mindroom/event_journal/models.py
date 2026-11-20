@@ -384,6 +384,8 @@ class ConversationPage:
     messages: tuple[VisibleMessage, ...]
     refresh_pending: tuple[RefreshRequest, ...]
     next_cursor: ConversationCursor | None
+    # The fractions of its stored and decoded content budgets the page's rows take; unknown counts as all of both.
+    budget_used: tuple[float, float] = (1.0, 1.0)
 
 
 @dataclass(frozen=True, slots=True)

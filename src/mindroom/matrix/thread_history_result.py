@@ -21,6 +21,8 @@ class ThreadHistoryResult(Sequence["ResolvedVisibleMessage"]):  # noqa: PLW1641
     messages: list[ResolvedVisibleMessage]
     is_full_history: bool
     diagnostics: dict[str, _ThreadHistoryDiagnosticValue] = field(default_factory=dict)
+    # The `ConversationPage.budget_used` of the page this history was read as.
+    budget_used: tuple[float, float] = (1.0, 1.0)
 
     def __iter__(self) -> Iterator[ResolvedVisibleMessage]:
         """Iterate over wrapped visible messages."""
