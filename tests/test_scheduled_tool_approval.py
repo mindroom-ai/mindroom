@@ -680,7 +680,6 @@ async def test_approval_asked_for_after_the_agent_rejoined_is_spent_in_that_memb
     """An agent that left and rejoined before it asked spends the approval in the membership it asked in."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
-    manager.transport.responder_principal_id = lambda entity_name: entity_name + "@shared"
     asker = journal.principal(_AGENT + "@shared")
     for membership in ("join", "leave", "join"):
         await admit_room_membership(asker, _ROOM, membership)

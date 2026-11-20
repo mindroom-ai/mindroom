@@ -1811,7 +1811,7 @@ async def _stop(tasks: list[asyncio.Task[BackgroundApprovalDecision]]) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "ineligible",
-    [None, "room-level conversation", "tool's own confirmation", "another approver", "unknown responder"],
+    [None, "room-level conversation", "tool's own confirmation", "another approver"],
 )
 async def test_job_card_offers_timed_approval_when_a_paused_reply_card_would(
     journal_database: Callable[[], EventJournalStore],
@@ -1821,8 +1821,6 @@ async def test_job_card_offers_timed_approval_when_a_paused_reply_card_would(
     """A job's card offers the same options under the same conditions, scoped to the same conversation."""
     journal = journal_database()
     manager = _manager(journal, tmp_path)
-    if ineligible == "unknown responder":
-        manager.transport.responder_principal_id = lambda _entity_name: None
     call = {
         "room-level conversation": {"thread": None},
         "tool's own confirmation": {"operation": None},

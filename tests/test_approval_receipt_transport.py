@@ -303,6 +303,41 @@ def _manager(tmp_path: Path, bots: dict[str, MagicMock], cards: ApprovalDelivery
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sending_clients")
+async def test_a_sender_removed_while_its_card_is_prepared_leaves_no_card(
+    tmp_path: Path,
+    journal: EventJournalStore,
+) -> None:
+    """A reload that removes the asking agent's bot while its card is prepared leaves no card, not one without a sender."""
+    bots = {"code": _bot("code")}
+    # The reload lands while the card's thread relation is resolved.
+    bots["code"].latest_thread_event_id_if_needed = AsyncMock(side_effect=lambda *_args: bots.clear())
+    manager = _manager(tmp_path, bots, journal.principal(_BOOKS))
+    try:
+        card = await manager.prepare_reply_card(
+            approval_id="card-1",
+            continuation_id="paused",
+            continuation_generation=0,
+            entity_name="code",
+            response_event_id="$waiting",
+            tool_call_id="call-1",
+            tool_name="run_shell_command",
+            arguments={"command": "ls"},
+            room_id=_ROOM,
+            requester_id="@alice:example.org",
+            approver_user_id="@alice:example.org",
+            expires_at_ns=time.time_ns() + 60_000_000_000,
+            agent_name="code",
+            thread_id="$thread",
+            grant_operation=None,
+        )
+
+        assert card is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_restart_edits_card_through_its_recorded_sender(
     tmp_path: Path,
     journal: EventJournalStore,

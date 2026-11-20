@@ -713,8 +713,8 @@ async def _no_sources_to_wake(_entity_name: str, _room_id: str, _source_event_id
 class FakeApprovalTransport:
     """The approval transport an approval manager uses, with the methods a test sets.
 
-    The others prepare and send nothing, find no earlier delivery, find no card's sender in its room, know no device
-    or responder principal, and wake nothing.
+    The others prepare and send nothing, find no earlier delivery, find no card's sender in its room, know no device,
+    name each entity's principal on one shared account, and wake nothing.
     """
 
     prepare_approval_event: Callable[[str, str | None, dict[str, Any], str], Awaitable[dict[str, Any] | None]] = (
@@ -726,7 +726,7 @@ class FakeApprovalTransport:
     sender_bot: Callable[[str | None, str], object | None] = lambda _sender, _room_id: None
     sender_device_id: Callable[[str | None], Awaitable[str | None]] = _no_device
     wake_continuation_sources: Callable[[str, str, tuple[str, ...]], Awaitable[None]] = _no_sources_to_wake
-    responder_principal_id: Callable[[str], str | None] = lambda _entity_name: None
+    responder_principal_id: Callable[[str], str | None] = lambda entity_name: entity_name + "@shared"
 
     async def pinned_delivery(self, delivery_id: str | None) -> tuple[Any, Any, str | None]:
         """Return the send and adoption methods a test set, with the device it named."""

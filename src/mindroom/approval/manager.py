@@ -580,7 +580,9 @@ class ApprovalManager:
         if grant_operation is None:
             content.pop("approval_scope", None)
         prepared = await self.transport.prepare_approval_event(room_id, thread_id, content, sender_entity)
-        if prepared is None:
+        # A reload can remove the sender's bot while the card is prepared; a card without a sender is a legacy router's.
+        sender_principal_id = self.transport.responder_principal_id(sender_entity)
+        if prepared is None or sender_principal_id is None:
             return None
         if prepared.get("approvable", True) is not True:
             grant_operation = None
@@ -594,7 +596,7 @@ class ApprovalManager:
             approver_user_id=approver_user_id,
             approvable=card_approvable(prepared),
             grant_operation=grant_operation,
-            sender_principal_id=self.transport.responder_principal_id(sender_entity),
+            sender_principal_id=sender_principal_id,
         )
 
     async def settle_background_approval(
