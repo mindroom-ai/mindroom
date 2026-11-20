@@ -18,6 +18,8 @@ import pytest
 
 from mindroom.shell.execution import (
     ProcessRecord,
+    _idle_launch_argv,
+    _idle_launcher,
     _schedule_process_tree_idle,
     check_command,
     kill_all_records,
@@ -412,6 +414,9 @@ async def test_a_process_the_command_leaves_behind_before_its_policy_could_be_se
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A busy event loop can let a shell background a build and exit before MindRoom gets to the command."""
+    _idle_launcher.cache_clear()  # another test may have run the first command with a PATH that has no chrt
+    if _idle_launcher() is None:
+        pytest.skip("needs a chrt that can set SCHED_IDLE; without one only the walk after spawn runs")
     original_spawn = asyncio.create_subprocess_exec
 
     async def spawn_then_let_the_shell_exit(*args: str, **kwargs: object) -> asyncio.subprocess.Process:
@@ -441,6 +446,26 @@ async def test_a_missing_program_reports_the_same_error_as_a_direct_spawn(
         await asyncio.create_subprocess_exec("./no-such-program", cwd=tmp_path)
 
     assert await _run(registry, ["./no-such-program"], tmp_path) == f"Error: {direct.value}"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="SCHED_IDLE is Linux-only")
+def test_a_relative_path_entry_is_searched_from_the_command_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Popen finds a program on a relative PATH entry from the command's directory, so the lookup must too."""
+    for directory in ("workspace/scripts/only-in-workspace", "mindroom/scripts/only-in-mindroom"):
+        program = tmp_path / directory
+        program.parent.mkdir(parents=True)
+        program.write_text("#!/bin/sh\n")
+        program.chmod(0o755)
+    monkeypatch.chdir(tmp_path / "mindroom")
+    monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: "/chrt")
+    env = {"PATH": "scripts"}
+    workspace = str(tmp_path / "workspace")
+
+    assert _idle_launch_argv(["only-in-workspace"], env, workspace) == ["/chrt", "-i", "0", "only-in-workspace"]
+    assert _idle_launch_argv(["only-in-mindroom"], env, workspace) == ["only-in-mindroom"]
 
 
 def _process_group_threads(pgid: int) -> list[int]:

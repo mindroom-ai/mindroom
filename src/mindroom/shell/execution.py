@@ -774,6 +774,7 @@ def _idle_launcher() -> str | None:
     chrt = shutil.which("chrt")
     if chrt is None:
         return None
+    chrt = str(Path(chrt).absolute())  # commands run in other directories
     # A sandbox that refuses the policy makes chrt exit without running the program; then commands start directly.
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         if subprocess.run([chrt, "-i", "0", chrt, "-m"], capture_output=True, timeout=5, check=False).returncode == 0:
@@ -792,9 +793,10 @@ def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> 
     """
     if sys.platform != "linux" or not argv or (chrt := _idle_launcher()) is None:
         return argv
-    # Like Popen, look a bare name up on the command's PATH and a path with a slash up in the command's directory.
+    # Like Popen, look a bare name up on the command's PATH and a path with a slash up, both from the command's directory.
     program = str(Path(cwd, argv[0])) if cwd and os.sep in argv[0] else argv[0]
-    if shutil.which(program, path=os.pathsep.join(os.get_exec_path(env))) is None:
+    search = [str(Path(cwd, entry)) if cwd else entry for entry in os.get_exec_path(env)]
+    if shutil.which(program, path=os.pathsep.join(search)) is None:
         return argv
     return [chrt, "-i", "0", *argv]
 
