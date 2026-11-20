@@ -3801,9 +3801,9 @@ An ongoing conversation's inlined copy can miss lines added to `MEMORY.md` since
 On a route that keeps the system prompt unchanged while its cache is warm and sends changes as a system prompt update, such as Claude Opus through OpenRouter with the hour-long prompt cache, an edited or deleted line that an update can state exactly reaches the conversation as such an update, and the old line can stay quoted in that conversation's later requests until its held prompt starts over: when it idles past the cache lifetime, its history is compacted or its updates alone would need that, the route or model changes, or a change comes that an update cannot state, such as one too long or one whose lines appear more than once in the prompt.
 Such a change, and the first request after the hold starts over, sends the current prompt without the old line.
 `memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their size in the turn model's tokens ([how tokens are counted](https://docs.mindroom.chat/configuration/history/#how-tokens-are-counted)).
-Because `add_memory` appends, a file over either cap keeps the lines before its first `- [id=...]` entry and as many of the newest entries as fit, and withholds the older ones; a file without entries, or whose lines before the first entry already reach a cap, keeps its first lines.
+A file over either cap inlines its first lines that fit both caps and withholds the rest, so lines `add_memory` appends past a cap never reach the prompt until the file is condensed, and they leave the inlined copy unchanged.
 Only whole lines are inlined, never part of a line.
-When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
+When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest, and asks the agent to condense the file (moving detail into `memory/` files) so its newest lines fit again.
 
 ### File layout
 
