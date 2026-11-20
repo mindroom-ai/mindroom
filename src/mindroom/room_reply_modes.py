@@ -188,9 +188,8 @@ async def write_room_reply_mode(
             isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
         )
         # A refusal is the room's rule, which a command's answer names; any other failure is worth a warning.
-        (logger.debug if refused else logger.warning)(
-            "room_reply_mode_write_failed", room_id=room_id, error=str(response)
-        )
+        log = logger.debug if refused else logger.warning
+        log("room_reply_mode_write_failed", room_id=room_id, error=str(response))
         return None if refused else False
     known = _known.get(key)
     if known is None or known.order < started:

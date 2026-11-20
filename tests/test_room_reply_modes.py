@@ -526,7 +526,8 @@ async def test_a_sync_reread_moves_an_older_override_through_the_steward(tmp_pat
     reader = homeserver.client()
     steward = SimpleNamespace(client=homeserver.client())
     bot = SimpleNamespace(
-        runtime_paths=runtime_paths, orchestrator=SimpleNamespace(room_steward=lambda _room_id: steward)
+        runtime_paths=runtime_paths,
+        orchestrator=SimpleNamespace(room_steward=lambda _room_id: steward),
     )
 
     await AgentBot._reread_reply_mode(bot, reader, ROOM_ID)
