@@ -2081,7 +2081,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
 
-        assert heartbeat_paths == [runtime_paths]
+        # Without the API the default broker is off, so the runtime carries that setting from then on.
+        assert heartbeat_paths == [
+            replace(runtime_paths, process_env={**runtime_paths.process_env, "MINDROOM_EGRESS_BROKER_PORT": "off"}),
+        ]
         assert heartbeat_cancelled.is_set()
 
     @pytest.mark.asyncio

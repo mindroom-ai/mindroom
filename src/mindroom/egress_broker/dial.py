@@ -53,6 +53,8 @@ class DialPolicy:
     allow_private_networks: bool = False
     private_networks: tuple[_IPNetwork, ...] = ()
     allow_loopback: bool = False
+    # Resolve `*.local` names, then check their addresses: a primary shell reaches them directly anyway.
+    resolve_lan_names: bool = False
     connect_timeout: float = 10.0
     egress: BrowserEgress | None = None
 
@@ -141,6 +143,7 @@ async def open_upstream(
                     allow_private_networks=policy.allow_private_networks,
                     allow_loopback=policy.allow_loopback,
                     private_networks=policy.private_networks,
+                    resolve_lan_names=policy.resolve_lan_names,
                 ),
             )
     except ServerFetchUrlError as exc:

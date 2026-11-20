@@ -674,6 +674,7 @@ class TestConfigInit:
             "matrix_message",
             {"name": "todo", "defer": True},
             {"name": "temporary_secrets", "defer": True},
+            {"name": "egress_credentials", "defer": True},
             {"name": "config_manager", "defer": True},
             {"name": "duckduckgo", "defer": True},
             {"name": "website", "defer": True},
