@@ -1201,7 +1201,10 @@ async def _schedule_from_tool(
 async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of_matrix() -> None:
     """The card binds the stored call, while the saved task and trigger name only the task to run."""
     config = _gated_config()
-    context = _tool_context(config)
+    context = replace(
+        _tool_context(config),
+        target=MessageTarget.resolve(room_id="!room:localhost", thread_id="$thread", reply_to_event_id="$answered"),
+    )
     request = AsyncMock(return_value=True)
     task_runtime = scheduled_task_runtime(runtime_paths_for(config), config=config)
 
@@ -1225,6 +1228,7 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
     assert workflow.created_by == "@user:localhost"
     assert workflow.description == "Morning DM"
     assert workflow.pre_approved_call is True
+    assert workflow.source_event_id == "$answered"
     assert workflow.message.startswith("@general ")
     assert f'run_scheduled_call` with task_id "{record.task_id}"' in workflow.message
     assert "`post_slack_message`" in workflow.message

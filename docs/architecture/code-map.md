@@ -628,6 +628,7 @@ Matrix sync callback
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
 | `room_agent_access.py` | The room access check the worker Computer and plugin routes share, and each admitted agent's workspace root and file and terminal access for one caller in one room |
+| `api/agent_profiles.py` | `GET /api/rooms/{room_id}/agents/{agent_user_id}/profile`: an agent's role, the model it runs in the room, and a catalog of the toolkits its config gives its Matrix turns there (registry names, descriptions, categories; no toolkit is built), for Chat's agent card |
 | `api/workspace_files.py` | Chat clients' `/api/rooms/{room_id}` routes to the workspaces of a room's agents: list them, read and change their files, follow changes |
 | `workspace_files/operations.py` | The file operations behind those routes, confined to the workspace without following links out, and the credentials they hide (`is_hidden`) |
 | `workspace_files/watch.py` | One scanner per workspace that feeds its change streams the changed paths, scanning without following links |
