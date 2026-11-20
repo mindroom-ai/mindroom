@@ -1551,6 +1551,30 @@ class TestGrep:
         assert unrestricted.grep("needle", path="sub") == by_directory
         assert unrestricted.grep("needle", path="sub/notes.dat") == by_name
 
+    def test_workspace_grep_keeps_the_files_a_configured_ripgrep_glob_selects(
+        self,
+        tools: FilesystemTools,
+        tmp_base: Path,
+        tmp_path_factory: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A glob in ripgrep's own config file selects files by their names in the workspace, in both modes."""
+        _use_ripgrep(monkeypatch, ripgrep=True)
+        ripgrep_config = tmp_path_factory.mktemp("ripgrep") / "config"
+        ripgrep_config.write_text("--glob=*.py\n")
+        monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(ripgrep_config))
+        (tmp_base / "sub" / "task.py").write_text("needle in python\n")
+        (tmp_base / "sub" / "task.txt").write_text("needle in text\n")
+        unrestricted = FilesystemTools(base_dir=str(tmp_base), file_access="unrestricted")
+
+        by_directory = tools.grep("needle", path="sub")
+        by_name = tools.grep("needle", path="sub/task.py")
+
+        assert by_directory == "sub/task.py:1:needle in python"
+        assert by_name == by_directory
+        assert unrestricted.grep("needle", path="sub") == by_directory
+        assert unrestricted.grep("needle", path="sub/task.py") == by_name
+
     @pytest.mark.parametrize("slow", ["nominating", "matching"])
     def test_workspace_grep_stops_a_slow_ripgrep_at_the_deadline(
         self,

@@ -1168,7 +1168,9 @@ def _run_ripgrep(
         # Searched as the path is, in a directory or by name, so binary data is treated as it is in the file itself;
         # no file's events are held past the match that shows the limit was reached.
         copy = "." if search_path.is_dir() else _CONFINED_COPY
-        match = [*report, "--no-ignore", "--threads=1", "--max-count", str(limit + 1), "--", pattern, copy]
+        # The copy's own name is selected so a glob in ripgrep's config file, already applied in nominating, keeps it.
+        mine = ["--no-ignore", f"--glob={_CONFINED_COPY}", "--threads=1", "--max-count", str(limit + 1)]
+        match = [*report, *mine, "--", pattern, copy]
         return _run_confined_ripgrep(nominate, match, base_dir, limit, context)
 
     args = [*report, *target]
