@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
+import pydantic
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths, config_relative_path, runtime_paths_with_storage_root
@@ -263,32 +264,7 @@ class _AppsApiProtocol(Protocol):
     def list_namespaced_replica_set(self, namespace: str, **kwargs: object) -> _KubernetesRawResponse: ...
 
 
-class _KubernetesApiClientProtocol(Protocol):
-    def select_header_accept(self, content_types: list[str]) -> str: ...
-
-    def call_api(
-        self,
-        resource_path: str,
-        method: str,
-        path_params: dict[str, str],
-        query_params: list[object],
-        header_params: dict[str, str],
-        *,
-        body: object,
-        post_params: list[object],
-        files: dict[str, object],
-        response_type: str,
-        auth_settings: list[str],
-        _return_http_data_only: bool,
-        _preload_content: bool,
-        _request_timeout: object | None,
-        collection_formats: dict[str, str],
-    ) -> object: ...
-
-
 class _CoreApiProtocol(Protocol):
-    api_client: _KubernetesApiClientProtocol
-
     def read_namespaced_service(self, name: str, namespace: str) -> object: ...
 
     def create_namespaced_service(self, namespace: str, body: dict[str, object]) -> object: ...
@@ -300,6 +276,15 @@ class _CoreApiProtocol(Protocol):
     def read_namespaced_secret(self, name: str, namespace: str) -> object: ...
 
     def create_namespaced_secret(self, namespace: str, body: dict[str, object]) -> object: ...
+
+    def patch_namespaced_secret(
+        self,
+        name: str,
+        namespace: str,
+        body: dict[str, object],
+        *,
+        _content_type: str,
+    ) -> object: ...
 
     def delete_namespaced_secret(self, name: str, namespace: str) -> None: ...
 
@@ -730,7 +715,7 @@ class KubernetesResourceManager:
             if exc.status != 404:
                 raise
             try:
-                self._core.create_namespaced_secret(self.config.namespace, manifest)
+                self._create(self._core.create_namespaced_secret, manifest)
             except self.api_exception as create_exc:
                 if create_exc.status != 409:
                     raise
@@ -913,27 +898,13 @@ class KubernetesResourceManager:
         self._delete_object(self._core.delete_namespaced_secret, secret_name)
 
     def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:
-        api_client = self._core.api_client
-        api_client.call_api(
-            "/api/v1/namespaces/{namespace}/secrets/{name}",
-            "PATCH",
-            {"name": secret_name, "namespace": self.config.namespace},
-            [],
-            {
-                "Accept": api_client.select_header_accept(
-                    ["application/json", "application/yaml", "application/vnd.kubernetes.protobuf", "application/cbor"],
-                ),
-                "Content-Type": "application/merge-patch+json",
-            },
-            body=body,
-            post_params=[],
-            files={},
-            response_type="V1Secret",
-            auth_settings=["BearerToken"],
-            _return_http_data_only=True,
-            _preload_content=True,
-            _request_timeout=None,
-            collection_formats={},
+        # A merge patch replaces the ownerReferences list and its nulls delete data keys;
+        # the client's default strategic merge patch would merge ownerReferences by uid instead.
+        self._core.patch_namespaced_secret(
+            secret_name,
+            self.config.namespace,
+            body,
+            _content_type="application/merge-patch+json",
         )
 
     def _recreate_deployment(
@@ -948,7 +919,7 @@ class KubernetesResourceManager:
         deadline = time.time() + timeout_seconds
         while True:
             try:
-                self._apps.create_namespaced_deployment(self.config.namespace, manifest)
+                self._create(self._apps.create_namespaced_deployment, manifest)
             except self.api_exception as exc:
                 if exc.status != 409:
                     raise
@@ -1033,13 +1004,21 @@ class KubernetesResourceManager:
             if exc.status != 404:
                 raise
             try:
-                create_fn(self.config.namespace, manifest)
+                self._create(create_fn, manifest)
             except self.api_exception as create_exc:
                 if create_exc.status != 409:
                     raise
                 patch_fn(resource_name, self.config.namespace, manifest)
             return
         patch_fn(resource_name, self.config.namespace, manifest)
+
+    def _create(self, create_fn: Callable[[str, dict[str, object]], object], manifest: dict[str, object]) -> None:
+        # The client validates create bodies against its models before sending them.
+        try:
+            create_fn(self.config.namespace, manifest)
+        except pydantic.ValidationError as exc:
+            msg = f"The Kubernetes client rejected the worker {manifest['kind']} manifest: {exc}"
+            raise WorkerBackendError(msg) from exc
 
     def _delete_object(self, delete_fn: Callable[[str, str], None], resource_name: str) -> None:
         try:

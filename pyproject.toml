@@ -298,8 +298,7 @@ knowledge_graph = [
   "psutil",
 ]
 kubernetes = [
-  # 36 changed ApiClient.call_api, which patches the worker auth Secret, and 37 also rejects numeric quantities.
-  "kubernetes>=28.1,<36",
+  "kubernetes>=37",
 ]
 linear = [
   "requests",

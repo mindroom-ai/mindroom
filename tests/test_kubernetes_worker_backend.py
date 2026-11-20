@@ -11,13 +11,13 @@ import tempfile
 import threading
 import time
 import weakref
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import asdict, replace
 from functools import cache
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Self, cast
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -52,6 +52,7 @@ from mindroom.workers import progress as progress_module
 from mindroom.workers.backend import WorkerBackendError, WorkerStartTimeoutError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
+from mindroom.workers.backends import kubernetes_config as kubernetes_config_module
 from mindroom.workers.backends import kubernetes_resources as kubernetes_resources_module
 from mindroom.workers.backends import legacy_state_root_mounts
 from mindroom.workers.backends.kubernetes import (
@@ -73,7 +74,7 @@ from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 from mindroom.workers.runtime import build_worker_launch_config, configured_primary_worker_manager_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from mindroom.workers.backends.kubernetes_config import _WorkerSeccompProfile
     from mindroom.workers.models import ScriptResourceProfileName
@@ -357,7 +358,6 @@ class _FakeCoreApi:
         self.created_secret_bodies: list[dict[str, object]] = []
         self.patched_secret_bodies: list[tuple[str, object]] = []
         self.deleted_secret_names: list[str] = []
-        self.api_client = _FakeApiClient(self)
 
     def list_namespaced_pod(self, namespace: str, **kwargs: object) -> _FakeRawResponse:
         return _absence_inventory(self.pods, namespace, **kwargs)
@@ -409,7 +409,9 @@ class _FakeCoreApi:
         return secret
 
     def patch_namespaced_secret(self, name: str, namespace: str, body: dict[str, object], **kwargs: object) -> object:
-        del namespace, kwargs
+        del namespace
+        # A strategic merge patch would merge ownerReferences by uid instead of replacing them.
+        assert kwargs == {"_content_type": "application/merge-patch+json"}
         self.patched_secret_bodies.append((name, body))
         secret = self.secrets.get(name)
         if secret is None:
@@ -442,30 +444,6 @@ class _FakeCoreApi:
         if pod is None:
             raise _FakeApiError(404)
         return pod
-
-
-class _FakeApiClient:
-    def __init__(self, core_api: _FakeCoreApi) -> None:
-        self._core_api = core_api
-
-    def select_header_accept(self, _content_types: list[str]) -> str:
-        return "application/json"
-
-    def call_api(
-        self,
-        _resource_path: str,
-        _method: str,
-        path_params: dict[str, str],
-        _query_params: list[object],
-        header_params: dict[str, str],
-        *,
-        body: object,
-        **_kwargs: object,
-    ) -> object:
-        assert header_params["Content-Type"] == "application/merge-patch+json"
-        name = path_params["name"]
-        namespace = path_params["namespace"]
-        return self._core_api.patch_namespaced_secret(name, namespace, body)
 
 
 def test_kubernetes_deployment_snapshot_tolerates_missing_status() -> None:
@@ -707,6 +685,8 @@ def _backend(
     user_resources: dict[str, dict[str, dict[str, str]]] | None = None,
     image_pull_secrets: tuple[str, ...] = (),
     image_pull_policy: str = "IfNotPresent",
+    extra_containers: tuple[dict[str, object], ...] = (),
+    extra_volumes: tuple[dict[str, object], ...] = (),
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     profile_config: dict[str, object] = {}
     if script_resource_profiles is not None:
@@ -743,6 +723,8 @@ def _backend(
         tmp_size_limit=tmp_size_limit,
         user_resources=user_resources or {},
         image_pull_secrets=image_pull_secrets,
+        extra_containers=extra_containers,
+        extra_volumes=extra_volumes,
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
@@ -1283,27 +1265,329 @@ def test_kubernetes_backend_can_use_one_precreated_auth_secret(tmp_path: Path) -
     assert core_api.secrets[auth_secret_name].data == expected_secret_data
 
 
-def test_kubernetes_auth_secret_patch_goes_through_the_installed_client() -> None:
-    """The Secret patch must match the installed client's API and send a merge patch whose nulls delete keys."""
-    from kubernetes import client as kubernetes_client  # noqa: PLC0415
+_INSTALLED_CLIENT_HOST = "https://kubernetes.invalid"
 
-    backend, _apps_api, _core_api = _backend(auth_secret_name="auth")  # noqa: S106
-    api_client = kubernetes_client.ApiClient(kubernetes_client.Configuration(host="https://kubernetes.invalid"))
+
+@contextmanager
+def _installed_kubernetes_client(
+    backend: KubernetesWorkerBackend,
+    objects: dict[str, dict[str, object]] | None = None,
+) -> Iterator[SimpleNamespace]:
+    """Point ``backend`` at the installed client, answered at urllib3 by a tiny API server over ``objects``.
+
+    ``objects`` maps API paths to object JSON. The yielded ``sent`` records every request with its decoded body.
+    """
+    import urllib3  # noqa: PLC0415
+    from kubernetes import client as kubernetes_client  # noqa: PLC0415
+    from kubernetes.client.exceptions import ApiException  # noqa: PLC0415
+
+    server = SimpleNamespace(objects=dict(objects or {}), sent=[])
+
+    def answer(method: str, url: str, **kwargs: object) -> urllib3.HTTPResponse:
+        path, _, query = url.removeprefix(_INSTALLED_CLIENT_HOST).partition("?")
+        body = json.loads(cast("str", kwargs["body"])) if kwargs.get("body") else None
+        content_type = cast("dict[str, str]", kwargs["headers"]).get("Content-Type")
+        server.sent.append(SimpleNamespace(method=method, path=path, query=query, content_type=content_type, body=body))
+        store = server.objects
+        status, payload = 200, body
+        if method == "GET" and "labelSelector" in query:
+            payload = {"metadata": {}, "items": [item for key, item in store.items() if key.rpartition("/")[0] == path]}
+        elif method == "POST":
+            status, stored = 201, deepcopy(body)
+            if stored["kind"] == "Deployment":
+                stored["status"] = {"readyReplicas": stored["spec"]["replicas"], "observedGeneration": 1}
+            store[f"{path}/{stored['metadata']['name']}"] = stored
+        elif path not in store:
+            status, payload = 404, {"kind": "Status", "code": 404}
+        elif method in {"GET", "PATCH"}:
+            payload = store[path]
+        else:
+            payload = store.pop(path)
+        return urllib3.HTTPResponse(
+            body=json.dumps(payload).encode(),
+            status=status,
+            headers={"Content-Type": "application/json"},
+            preload_content=False,
+        )
+
+    api_client = kubernetes_client.ApiClient(kubernetes_client.Configuration(host=_INSTALLED_CLIENT_HOST))
+    backend._resources.apps_api = kubernetes_client.AppsV1Api(api_client)
     backend._resources.core_api = kubernetes_client.CoreV1Api(api_client)
-    sent = RuntimeError("request captured")
+    backend._resources.api_exception_cls = ApiException
+    with patch.object(api_client.rest_client.pool_manager, "request", side_effect=answer):
+        yield server
+
+
+def _writes(sent: list[SimpleNamespace]) -> list[tuple[str, str, str | None]]:
+    return [(request.method, request.path, request.content_type) for request in sent if request.method != "GET"]
+
+
+_NUMERIC_QUANTITY_EXTRA_CONTAINERS = [
+    {
+        "name": "trigger-listener",
+        "image": "busybox",
+        "env": [
+            {"name": "CPU_LIMIT", "valueFrom": {"resourceFieldRef": {"resource": "limits.cpu", "divisor": 1}}},
+            {"name": "MODE", "value": "listen"},
+        ],
+        "volumeMounts": [{"name": "trigger-state", "mountPath": "/state"}],
+        "resources": {"requests": {"cpu": 0.5, "memory": "64Mi"}, "limits": {"cpu": 1}},
+        "securityContext": {"runAsUser": 1000, "allowPrivilegeEscalation": False},
+    },
+]
+_NUMERIC_QUANTITY_EXTRA_VOLUMES = [
+    {"name": "trigger-state", "emptyDir": {"sizeLimit": 1024}},
+    {"name": "trigger-config", "configMap": {"name": "trigger-config", "defaultMode": 0o444}},
+    {
+        "name": "pod-info",
+        "projected": {
+            "sources": [
+                {
+                    "downwardAPI": {
+                        "items": [
+                            {
+                                "path": "cpu",
+                                "resourceFieldRef": {
+                                    "containerName": "trigger-listener",
+                                    "resource": "limits.cpu",
+                                    "divisor": 1,
+                                },
+                            },
+                        ],
+                    },
+                },
+            ],
+        },
+    },
+]
+
+
+def _sidecars_from_config(
+    extra_containers: list[dict[str, object]],
+    extra_volumes: list[dict[str, object]],
+) -> dict[str, tuple[dict[str, object], ...]]:
+    """Read extra containers and volumes the way the backend reads them from its config JSON."""
+    env = {
+        "MINDROOM_KUBERNETES_WORKER_EXTRA_CONTAINERS_JSON": json.dumps(extra_containers),
+        "MINDROOM_KUBERNETES_WORKER_EXTRA_VOLUMES_JSON": json.dumps(extra_volumes),
+    }
+    return {
+        "extra_containers": kubernetes_config_module._read_extra_containers_env(env),
+        "extra_volumes": kubernetes_config_module._read_extra_volumes_env(env),
+    }
+
+
+_ALICE_USER_WORKER_KEY = "v1:tenant-123:user:~@alice:example.org"
+_DEPLOYMENTS_PATH = "/apis/apps/v1/namespaces/chat/deployments"
+_SERVICES_PATH = "/api/v1/namespaces/chat/services"
+_SECRETS_PATH = "/api/v1/namespaces/chat/secrets"
+
+
+def _full_featured_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    **sidecars: tuple[dict[str, object], ...],
+) -> tuple[KubernetesWorkerBackend, dict[str, dict[str, object]]]:
+    """Return a backend using every optional manifest feature, with the cluster objects it reads."""
+    backend, _apps_api, _core_api = _backend(
+        owner_deployment_name="mindroom-demo",
+        colocate_with_control_plane_node=True,
+        seccomp_profile={"type": "Localhost", "localhostProfile": "profiles/worker.json"},
+        runtime_class_name="gvisor",
+        image_pull_secrets=("registry-credentials",),
+        tmp_size_limit="2Gi",
+        user_resources={"@alice:example.org": {"requests": {"memory": "1Gi"}, "limits": {"memory": "4Gi"}}},
+        extra_env={"EXAMPLE_FLAG": "1"},
+        extra_annotations={"example.org/team": "research"},
+        **(sidecars or _sidecars_from_config(_NUMERIC_QUANTITY_EXTRA_CONTAINERS, _NUMERIC_QUANTITY_EXTRA_VOLUMES)),
+    )
+    monkeypatch.setenv("HOSTNAME", "mindroom-control-plane")
+    objects = {
+        f"{_DEPLOYMENTS_PATH}/mindroom-demo": {
+            "metadata": {"name": "mindroom-demo", "uid": "mindroom-demo-uid"},
+            "spec": {"replicas": 1, "selector": {}, "template": {}},
+        },
+        "/api/v1/namespaces/chat/pods/mindroom-control-plane": {
+            "metadata": {"name": "mindroom-control-plane"},
+            "spec": {"nodeName": "node-a", "containers": []},
+        },
+    }
+    return backend, objects
+
+
+def test_kubernetes_worker_creates_go_through_the_installed_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The installed client must accept and send unchanged every manifest a full-featured worker start creates."""
+    backend, objects = _full_featured_backend(monkeypatch)
+    resources = backend._resources
     with (
-        patch.object(api_client.rest_client.pool_manager, "request", side_effect=sent) as request,
-        pytest.raises(RuntimeError) as raised,
+        _installed_kubernetes_client(backend, objects) as server,
+        patch.object(resources, "_create", wraps=resources._create) as create,
     ):
+        handle = backend.ensure_worker(_spec(_ALICE_USER_WORKER_KEY), now=10.0)
+
+    worker_id = handle.worker_id
+    # The client sends creates without a Content-Type, which the API server reads as JSON.
+    assert _writes(server.sent) == [
+        ("POST", _SECRETS_PATH, None),
+        ("POST", _DEPLOYMENTS_PATH, None),
+        ("POST", _SERVICES_PATH, None),
+        ("PATCH", f"{_DEPLOYMENTS_PATH}/{worker_id}", "application/strategic-merge-patch+json"),
+    ]
+    created = {request.path: request.body for request in server.sent if request.method == "POST"}
+    assert list(created.values()) == [call.args[1] for call in create.call_args_list]
+    deployment = created[_DEPLOYMENTS_PATH]
+    owner_reference = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "name": "mindroom-demo",
+        "uid": "mindroom-demo-uid",
+        "controller": False,
+        "blockOwnerDeletion": False,
+    }
+    assert [body["metadata"]["ownerReferences"] for body in created.values()] == [[owner_reference]] * 3
+    pod_spec = deployment["spec"]["template"]["spec"]
+    assert pod_spec["nodeName"] == "node-a"
+    assert pod_spec["runtimeClassName"] == "gvisor"
+    assert pod_spec["imagePullSecrets"] == [{"name": "registry-credentials"}]
+    main_container, sidecar = pod_spec["containers"]
+    assert main_container["resources"] == {
+        "requests": {"memory": "1Gi", "cpu": "100m", "ephemeral-storage": "2Gi"},
+        "limits": {"memory": "4Gi", "cpu": "500m", "ephemeral-storage": "2Gi"},
+    }
+    assert main_container["securityContext"]["seccompProfile"] == {
+        "type": "Localhost",
+        "localhostProfile": "profiles/worker.json",
+    }
+    assert sidecar["resources"] == {"requests": {"cpu": "0.5", "memory": "64Mi"}, "limits": {"cpu": "1"}}
+    assert sidecar["env"][0]["valueFrom"]["resourceFieldRef"]["divisor"] == "1"
+    volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
+    assert volumes["trigger-state"]["emptyDir"] == {"sizeLimit": "1024"}
+    projected_item = volumes["pod-info"]["projected"]["sources"][0]["downwardAPI"]["items"][0]
+    assert projected_item["resourceFieldRef"]["divisor"] == "1"
+    assert deployment["spec"]["template"]["metadata"]["annotations"]["example.org/team"] == "research"
+
+
+def test_kubernetes_worker_patches_and_deletes_go_through_the_installed_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every patch and delete of a worker's objects must reach the API server with its content type and body."""
+    backend, objects = _full_featured_backend(monkeypatch)
+    resources = backend._resources
+    with _installed_kubernetes_client(backend, objects) as server:
+        handle = backend.ensure_worker(_spec(_ALICE_USER_WORKER_KEY), now=10.0)
+        worker_id = handle.worker_id
+        server.sent.clear()
+        resources.apply_service(worker_id)
+        resources.apply_auth_secret(worker_key=_ALICE_USER_WORKER_KEY, worker_id=worker_id)
+        resources.apply_deployment(
+            worker_key=_ALICE_USER_WORKER_KEY,
+            worker_id=worker_id,
+            state_subpath=handle.debug_metadata["state_subpath"],
+            annotations={},
+            replicas=1,
+            launch=_launch_of(backend),
+        )
+        resources.patch_deployment(worker_id, replicas=0, annotations={"example.org/stopped": "yes"})
+        assert resources.patch_deployment_annotations(worker_id, annotations={"example.org/used": "now"})
+        resources.delete_service(worker_id)
+        resources.delete_secret(worker_id)
+        resources.delete_deployment(worker_id, timeout_seconds=1.0)
+        assert not resources.patch_deployment_annotations(worker_id, annotations={"example.org/used": "later"})
+
+    deployment_path = f"{_DEPLOYMENTS_PATH}/{worker_id}"
+    strategic = "application/strategic-merge-patch+json"
+    assert _writes(server.sent) == [
+        ("PATCH", f"{_SERVICES_PATH}/{worker_id}", strategic),
+        ("PATCH", f"{_SECRETS_PATH}/{worker_id}", "application/merge-patch+json"),
+        ("PATCH", deployment_path, strategic),
+        ("PATCH", deployment_path, strategic),
+        ("PATCH", deployment_path, strategic),
+        ("DELETE", f"{_SERVICES_PATH}/{worker_id}", None),
+        ("DELETE", f"{_SECRETS_PATH}/{worker_id}", None),
+        ("DELETE", deployment_path, None),
+        ("PATCH", deployment_path, strategic),
+    ]
+    patches = [request.body for request in server.sent if request.method == "PATCH"]
+    assert patches[0] == resources._service_manifest(worker_id)
+    assert patches[1] == resources._auth_secret_patch(worker_key=_ALICE_USER_WORKER_KEY, worker_id=worker_id)
+    assert patches[1]["data"]["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] is None
+    assert patches[2]["kind"] == "Deployment"
+    assert patches[2]["spec"]["template"]["spec"]["containers"][1]["resources"]["limits"] == {"cpu": "1"}
+    assert patches[3]["spec"] == {"replicas": 0}
+    assert patches[3]["metadata"]["annotations"]["example.org/stopped"] == "yes"
+    assert patches[4] == {"metadata": {"annotations": {"example.org/used": "now"}}}
+    deletes = [request for request in server.sent if request.method == "DELETE"]
+    assert "propagationPolicy=Foreground" in deletes[2].query
+
+
+def test_kubernetes_worker_manifest_the_installed_client_rejects_fails_the_start_readably(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config-fed sidecar field the client's models forbid fails the start as a backend error naming the field."""
+    sidecar = {"name": "trigger-listener", "image": "busybox", "securityContext": {"runAsUsr": 1000}}
+    backend, objects = _full_featured_backend(monkeypatch, **_sidecars_from_config([sidecar], []))
+    with (
+        _installed_kubernetes_client(backend, objects) as server,
+        pytest.raises(WorkerBackendError, match=r"rejected the worker Deployment manifest(.|\n)*runAsUsr"),
+    ):
+        backend.ensure_worker(_spec(_ALICE_USER_WORKER_KEY), now=10.0)
+
+    assert ("POST", _DEPLOYMENTS_PATH, None) not in _writes(server.sent)
+
+
+def test_kubernetes_state_root_retirement_goes_through_the_installed_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retiring an older release's worker lists raw Deployments and Pods and scales it down with a strategic patch."""
+    monkeypatch.setattr(legacy_state_root_mounts, "_warn_to_check_for_links", lambda *_args: None)
+    backend, _apps_api, _core_api = _backend()
+    old_worker = {
+        "metadata": {"name": "mindroom-worker-old", "labels": {"mindroom.ai/worker-id": "mindroom-worker-old"}},
+        "spec": {"replicas": 1, "selector": {}, "template": {}},
+    }
+    with _installed_kubernetes_client(backend, {f"{_DEPLOYMENTS_PATH}/mindroom-worker-old": old_worker}) as server:
+        legacy_state_root_mounts._stop_kubernetes_workers_mounting_state_roots(backend._resources)
+
+    assert [(request.method, request.path) for request in server.sent] == [
+        ("GET", _DEPLOYMENTS_PATH),
+        ("PATCH", f"{_DEPLOYMENTS_PATH}/mindroom-worker-old"),
+        ("GET", "/api/v1/namespaces/chat/pods"),
+    ]
+    scale_down = server.sent[1]
+    assert scale_down.content_type == "application/strategic-merge-patch+json"
+    assert scale_down.body["spec"] == {"replicas": 0}
+    assert scale_down.body["metadata"]["annotations"]["mindroom.ai/worker-status"] == "idle"
+
+
+def test_kubernetes_raw_lists_through_the_installed_client_release_their_connections() -> None:
+    """The unparsed list calls read ``.data`` and release the connection of the installed client's raw response."""
+    import urllib3  # noqa: PLC0415
+
+    backend, _apps_api, _core_api = _backend()
+    worker = {
+        "metadata": {"name": "mindroom-worker-a", "labels": {}, "generation": 2},
+        "spec": {"replicas": 1},
+        "status": {"readyReplicas": 1, "observedGeneration": 2},
+    }
+    with (
+        _installed_kubernetes_client(backend, {f"{_DEPLOYMENTS_PATH}/mindroom-worker-a": worker}),
+        patch.object(urllib3.HTTPResponse, "release_conn", autospec=True) as release_conn,
+    ):
+        deployments = backend._resources.list_deployments()
+        assert release_conn.call_count == 1
+        with pytest.raises(WorkerBackendError, match="Remove all Kubernetes worker Deployments"):
+            backend._resources.check_workers_absent_for_storage_upgrade(timeout_seconds=5.0)
+
+    assert [deployment.metadata.name for deployment in deployments] == ["mindroom-worker-a"]
+    assert deployments[0].status.ready_replicas == 1
+    assert release_conn.call_count == 2
+
+
+def test_kubernetes_auth_secret_patch_goes_through_the_installed_client() -> None:
+    """The shared Secret patch must be a merge patch whose nulls delete keys, never a strategic merge patch."""
+    backend, _apps_api, _core_api = _backend(auth_secret_name="auth")  # noqa: S106
+    with _installed_kubernetes_client(backend, {f"{_SECRETS_PATH}/auth": {"metadata": {"name": "auth"}}}) as server:
         backend._resources.delete_secret("worker-a")
 
-    assert raised.value is sent
-    method, url = request.call_args.args
-    assert method == "PATCH"
-    assert url == f"https://kubernetes.invalid/api/v1/namespaces/{backend._resources.config.namespace}/secrets/auth"
-    assert request.call_args.kwargs["headers"]["Content-Type"] == "application/merge-patch+json"
-    data = json.loads(request.call_args.kwargs["body"])["data"]
-    assert data == {"worker-a": None, "worker-a.credentials-encryption-key": None}
+    assert _writes(server.sent) == [("PATCH", f"{_SECRETS_PATH}/auth", "application/merge-patch+json")]
+    assert server.sent[0].body == {"data": {"worker-a": None, "worker-a.credentials-encryption-key": None}}
 
 
 def test_kubernetes_backend_cleanup_removes_only_own_key_from_tenant_auth_secret(tmp_path: Path) -> None:
