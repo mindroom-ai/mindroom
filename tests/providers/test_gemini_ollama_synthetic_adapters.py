@@ -417,8 +417,19 @@ def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -
         ({"api_version": None}, "v1beta"),
         ({"apiVersion": None}, "v1beta"),
         ({"retryOptions": {"attempts": 3}}, "v1beta"),
+        ({"api_version": ""}, ""),
+        ({"apiVersion": ""}, ""),
     ],
-    ids=["unset", "snake-case", "camel-case-alias", "snake-case-null", "alias-null", "retry-alias"],
+    ids=[
+        "unset",
+        "snake-case",
+        "camel-case-alias",
+        "snake-case-null",
+        "alias-null",
+        "retry-alias",
+        "snake-case-empty",
+        "alias-empty",
+    ],
 )
 def test_gemini_api_keeps_v1beta_unless_the_config_authors_a_version(
     tmp_path: Path,
@@ -427,7 +438,7 @@ def test_gemini_api_keeps_v1beta_unless_the_config_authors_a_version(
 ) -> None:
     """google-genai 3 defaults the Gemini API to v1; the client stays on v1beta unless ``http_options`` names one.
 
-    Either spelling of an option builds a client, and a null version counts as unset.
+    Either spelling of an option builds a client, a null version counts as unset, and an empty one is kept.
     """
     client_params = {} if http_options is None else {"http_options": http_options}
     adapter = gemini_adapter.build_provider(

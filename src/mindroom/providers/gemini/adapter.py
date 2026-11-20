@@ -302,11 +302,13 @@ class GeminiProvider:
         # google-genai 3 sends the Gemini API to v1, which lacks the -latest aliases, preview models, and caches, so the
         # Gemini API keeps v1beta unless ``client_params`` authors another version. Vertex AI keeps its own default.
         # The SDK takes each option under its snake_case name or its camelCase alias, but refuses both at once, and a
-        # null version counts as unset.
+        # null version counts as unset; an empty one stays, as on main, for a base URL that already names the version.
         http_options = dict(params.get("http_options") or {})
         http_options.pop("retryOptions", None)
         aliased_version = http_options.pop("apiVersion", None)
-        api_version = http_options.pop("api_version", None) or aliased_version
+        api_version = http_options.pop("api_version", None)
+        if api_version is None:
+            api_version = aliased_version
         if api_version is None and not settings.vertexai:
             api_version = _GEMINI_API_VERSION
         if api_version is not None:
