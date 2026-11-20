@@ -6198,6 +6198,10 @@ async def test_service_ready_hook_sees_the_runtime_startup_published_not_a_reloa
         seen.append((ctx.config, ctx.joined_room_ids))
         ran.set()
 
+    @hook(EVENT_BOT_READY, scope="service")
+    async def on_ready_after_reload(ctx: AgentLifecycleContext) -> None:
+        seen.append((ctx.config, ("the reload's hooks",)))
+
     orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_hook_plugin("test-plugin", [on_ready])])
 
     async def hold_room_state() -> None:
@@ -6205,8 +6209,11 @@ async def test_service_ready_hook_sees_the_runtime_startup_published_not_a_reloa
         await publish_room_state.wait()
 
     async def reload_mid_apply() -> None:
-        # The reload published its config and stopped the bot it replaces, whose successor has not started.
+        # The reload published its config and hooks and stopped the bot it replaces, whose successor has not started.
         orchestrator.config = reload_config
+        orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("test-plugin", [on_ready_after_reload])],
+        )
         general.client.rooms = {}
         mid_apply.set()
         await ran.wait()
