@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
@@ -43,6 +43,7 @@ from mindroom.mid_turn import MID_TURN_MODE_KEY, MidTurnGate, MidTurnMode
 from mindroom.response_runner import ResponseRunner
 from mindroom.room_reply_modes import (
     ReplyModeRead,
+    _drop_legacy_override,
     observe_room_settings_event,
     refresh_room_reply_mode,
     resolve_room_reply_mode_override,
@@ -566,6 +567,66 @@ async def test_a_stalled_move_keeps_the_older_override_and_the_turn_moving(tmp_p
 
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
     assert ROOM_ID in json.loads(legacy.read_text())
+
+
+async def _released_until_done(homeserver: _GatedHomeserver, *tasks: asyncio.Task[object]) -> None:
+    """Release every answer the homeserver holds, and each one it holds later, until the tasks end."""
+    for _ in range(100):
+        if all(task.done() for task in tasks):
+            return
+        for gate in homeserver.gates:
+            gate.set()
+        await asyncio.sleep(0)
+    raise AssertionError(tasks)
+
+
+@pytest.mark.asyncio
+async def test_two_reads_at_once_move_an_older_override_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two bots that read a room without the setting in the same moment move the older override with one write."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    legacy = _write_legacy_overrides(runtime_paths, {ROOM_ID: "mentions"})
+    homeserver = _GatedHomeserver()
+    steward = homeserver.client()
+    drops = Mock(wraps=_drop_legacy_override)
+    monkeypatch.setattr("mindroom.room_reply_modes._drop_legacy_override", drops)
+
+    reads = [
+        await _started(
+            refresh_room_reply_mode(homeserver.client(), runtime_paths, ROOM_ID, put_state=steward.room_put_state),
+        )
+        for _ in range(2)
+    ]
+    # Both reads found no setting before either wrote.
+    assert len(homeserver.gates) == 2
+    await _released_until_done(homeserver, *reads)
+
+    assert [read.result() for read in reads] == [ReplyModeRead(ok=True, mode="mentions")] * 2
+    assert steward.room_put_state.await_count == 1
+    assert drops.call_count == 1
+    assert ROOM_ID not in json.loads(legacy.read_text())
+
+
+@pytest.mark.asyncio
+async def test_a_write_acknowledged_before_an_older_override_moves_stays_the_rooms_setting(tmp_path: Path) -> None:
+    """A read that found no setting moves nothing once a write the room acknowledged meanwhile has set it."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    _write_legacy_overrides(runtime_paths, {ROOM_ID: "mentions"})
+    homeserver = _GatedHomeserver()
+    steward = homeserver.client()
+
+    read = await _started(
+        refresh_room_reply_mode(homeserver.client(), runtime_paths, ROOM_ID, put_state=steward.room_put_state),
+    )
+    write = await _started(write_room_reply_mode(steward, runtime_paths, ROOM_ID, "auto"))
+    homeserver.gates[1].set()
+    assert await write
+    # The read's answer, from before the write, arrives after the write's acknowledgement.
+    await _released_until_done(homeserver, read)
+
+    assert read.result() == ReplyModeRead(ok=True, mode="auto")
+    assert homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] == {"value": "auto"}
+    assert steward.room_put_state.await_count == 1
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "auto"
 
 
 @pytest.mark.asyncio
