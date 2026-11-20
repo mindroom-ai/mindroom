@@ -63,7 +63,7 @@ from mindroom.workers.backends.dedicated_launch import (
     dedicated_worker_startup_runtime_paths,
     write_dedicated_worker_startup_manifest,
 )
-from mindroom.workers.backends.kubernetes_config import resolve_kubeconfig_paths
+from mindroom.workers.backends.kubernetes_config import resolve_kubeconfig_paths, validated_kubernetes_object
 from mindroom.workers.backends.kubernetes_pod_names import (
     SANDBOX_RUNNER_CONTAINER_NAME,
     WORKER_STORAGE_VOLUME_NAME,
@@ -186,7 +186,7 @@ class KubernetesDeployment(Protocol):
     def spec(self) -> _KubernetesDeploymentSpec: ...  # noqa: D102
 
     @property
-    def status(self) -> _KubernetesDeploymentStatus: ...  # noqa: D102
+    def status(self) -> _KubernetesDeploymentStatus | None: ...  # noqa: D102
 
 
 @dataclass(slots=True)
@@ -263,32 +263,7 @@ class _AppsApiProtocol(Protocol):
     def list_namespaced_replica_set(self, namespace: str, **kwargs: object) -> _KubernetesRawResponse: ...
 
 
-class _KubernetesApiClientProtocol(Protocol):
-    def select_header_accept(self, content_types: list[str]) -> str: ...
-
-    def call_api(
-        self,
-        resource_path: str,
-        method: str,
-        path_params: dict[str, str],
-        query_params: list[object],
-        header_params: dict[str, str],
-        *,
-        body: object,
-        post_params: list[object],
-        files: dict[str, object],
-        response_type: str,
-        auth_settings: list[str],
-        _return_http_data_only: bool,
-        _preload_content: bool,
-        _request_timeout: object | None,
-        collection_formats: dict[str, str],
-    ) -> object: ...
-
-
 class _CoreApiProtocol(Protocol):
-    api_client: _KubernetesApiClientProtocol
-
     def read_namespaced_service(self, name: str, namespace: str) -> object: ...
 
     def create_namespaced_service(self, namespace: str, body: dict[str, object]) -> object: ...
@@ -301,11 +276,26 @@ class _CoreApiProtocol(Protocol):
 
     def create_namespaced_secret(self, namespace: str, body: dict[str, object]) -> object: ...
 
+    def patch_namespaced_secret(
+        self,
+        name: str,
+        namespace: str,
+        body: dict[str, object],
+        *,
+        _content_type: str,
+    ) -> object: ...
+
     def delete_namespaced_secret(self, name: str, namespace: str) -> None: ...
 
     def list_namespaced_pod(self, namespace: str, **kwargs: object) -> _KubernetesRawResponse: ...
 
     def read_namespaced_pod(self, name: str, namespace: str) -> _KubernetesPod: ...
+
+
+def _validate_manifest(manifest: dict[str, object]) -> None:
+    """Fail before any request when the installed client's models reject one worker manifest."""
+    kind = cast("str", manifest["kind"])
+    validated_kubernetes_object(f"V1{kind}", manifest, what=f"The worker {kind} manifest")
 
 
 def service_host(service_name: str, namespace: str, port: int) -> str:
@@ -724,6 +714,7 @@ class KubernetesResourceManager:
             )
             return
         manifest = self._auth_secret_manifest(worker_key=worker_key, worker_id=worker_id)
+        _validate_manifest(manifest)
         try:
             self._core.read_namespaced_secret(worker_id, self.config.namespace)
         except self.api_exception as exc:
@@ -913,27 +904,13 @@ class KubernetesResourceManager:
         self._delete_object(self._core.delete_namespaced_secret, secret_name)
 
     def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:
-        api_client = self._core.api_client
-        api_client.call_api(
-            "/api/v1/namespaces/{namespace}/secrets/{name}",
-            "PATCH",
-            {"name": secret_name, "namespace": self.config.namespace},
-            [],
-            {
-                "Accept": api_client.select_header_accept(
-                    ["application/json", "application/yaml", "application/vnd.kubernetes.protobuf", "application/cbor"],
-                ),
-                "Content-Type": "application/merge-patch+json",
-            },
-            body=body,
-            post_params=[],
-            files={},
-            response_type="V1Secret",
-            auth_settings=["BearerToken"],
-            _return_http_data_only=True,
-            _preload_content=True,
-            _request_timeout=None,
-            collection_formats={},
+        # A merge patch replaces the ownerReferences list and its nulls delete data keys;
+        # the client's default strategic merge patch would merge ownerReferences by uid instead.
+        self._core.patch_namespaced_secret(
+            secret_name,
+            self.config.namespace,
+            body,
+            _content_type="application/merge-patch+json",
         )
 
     def _recreate_deployment(
@@ -944,6 +921,8 @@ class KubernetesResourceManager:
         timeout_seconds: float,
     ) -> None:
         """Delete one Deployment, wait until it and its pods are gone, and create it again from the manifest."""
+        # Checked first: a manifest the client rejects must not cost the worker its running Deployment.
+        _validate_manifest(manifest)
         self.delete_deployment(deployment_name, timeout_seconds=timeout_seconds)
         deadline = time.time() + timeout_seconds
         while True:
@@ -1027,6 +1006,7 @@ class KubernetesResourceManager:
         resource_name: str,
         manifest: dict[str, object],
     ) -> None:
+        _validate_manifest(manifest)
         try:
             read_fn(resource_name, self.config.namespace)
         except self.api_exception as exc:

@@ -920,8 +920,12 @@ class KubernetesWorkerBackend:
         desired = int(deployment.spec.replicas or 0)
         if desired == 0:
             return True
-        ready = int(deployment.status.ready_replicas or 0)
-        observed_generation = deployment.status.observed_generation
+        status = deployment.status
+        if status is None:
+            # A Deployment read before its controller writes status is not ready yet.
+            return False
+        ready = int(status.ready_replicas or 0)
+        observed_generation = status.observed_generation
         generation = deployment.metadata.generation
         generation_ready = observed_generation is None or generation is None or observed_generation >= generation
         return generation_ready and ready >= desired
