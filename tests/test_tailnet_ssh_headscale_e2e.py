@@ -11,12 +11,13 @@ import hashlib
 import json
 import os
 import secrets
+import select
 import shlex
 import socket
 import subprocess
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -32,7 +33,7 @@ from mindroom.workers.backends.worker_security import docker_worker_security_opt
 from mindroom.workers.models import WORKER_SSH_PORT
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
 
 pytestmark = [
@@ -49,7 +50,6 @@ _WORKER_IMAGE = os.environ.get("MINDROOM_TAILNET_SSH_E2E_WORKER_IMAGE", "")
 _HEADSCALE_IMAGE = "headscale/headscale:0.29.7"
 # The release the gateway's tsnet is of (tailnet-gateway/go.mod).
 _TAILSCALE_IMAGE = "tailscale/tailscale:v1.104.7"
-_BASE_DOMAIN = "tailnet.test"
 _HEADSCALE_CONFIG = """\
 server_url: http://127.0.0.1:{port}
 listen_addr: 127.0.0.1:{port}
@@ -58,8 +58,8 @@ grpc_listen_addr: 127.0.0.1:{grpc_port}
 noise:
   private_key_path: /var/lib/headscale/noise_private.key
 prefixes:
-  v4: 100.64.0.0/10
-  v6: fd7a:115c:a1e0::/48
+  v4: {v4}
+  v6: {v6}
 derp:
   urls:
     - https://controlplane.tailscale.com/derpmap/default
@@ -76,9 +76,10 @@ unix_socket: /var/run/headscale/headscale.sock
 
 # How the chart runs the gateway and the Docker backend a worker: nothing but the mounts is writable.
 _READ_ONLY_ROOT = ("--read-only", "--tmpfs", "/tmp")  # noqa: S108
-# Where a worker mounts the files the primary writes for its sshd, and the agent's workspace.
-_PROJECTION = "/app/worker/.runtime/ssh"
-_WORKSPACE = "/app/worker/workspace"
+# Where the Docker backend mounts a worker's root, and in it the files the primary writes for sshd and a workspace.
+_WORKER_ROOT = "/app/worker"
+_PROJECTION = f"{_WORKER_ROOT}/.runtime/ssh"
+_WORKSPACE = f"{_WORKER_ROOT}/workspace"
 # Run in the worker image as uid 1000, the primary's uid and the worker's: write sshd's files for the link on stdin,
 # as the primary does for a connect it passed.
 _WRITE_PROJECTION = """
@@ -160,8 +161,9 @@ class _Primary:
 
     token: str = field(default_factory=lambda: secrets.token_urlsafe(24))
     port: int = field(default_factory=_free_port)
-    # What GET /links answers.
+    # What GET /links answers, and how often it was asked.
     rows: list[dict[str, Any]] = field(default_factory=list)
+    listed: int = 0
     # The host port each link's worker publishes its sshd on, and how long each link's connect takes.
     workers: dict[str, int] = field(default_factory=dict)
     delays: dict[str, float] = field(default_factory=dict)
@@ -182,6 +184,7 @@ class _Primary:
 
         @app.get("/links")
         def links() -> list[dict[str, Any]]:
+            self.listed += 1
             return self.rows
 
         @app.post("/status", status_code=204)
@@ -215,25 +218,26 @@ class _Person:
 
 @dataclass(frozen=True)
 class _Tailnet:
-    """Headscale and the people in it."""
+    """One Headscale, which is one tailnet, and the people in it."""
 
-    # What the name of every container and volume of this run starts with.
+    # What the name of every container and volume of this tailnet starts with.
     prefix: str
-    # On the test host: the SSH keys, ``known_hosts``, Headscale's config, and the workers' seccomp profile.
+    # On the test host: the SSH keys, ``known_hosts``, Headscale's config, and the workers' roots.
     folder: Path
     headscale: str
     login_server: str
+    base_domain: str
     people: dict[str, _Person]
 
 
 @dataclass
 class _Node:
-    """A link under test: the stored link, its row for the gateway, and its worker's volume of sshd's files."""
+    """A link under test: the stored link, its row for the gateway, and its worker's root on the test host."""
 
     link: Link
     owner: _Person
     row: dict[str, Any]
-    files: str | None = None
+    root: Path | None = None
     # What the gateway reported while the node waited for its login.
     pending: dict[str, Any] | None = None
 
@@ -333,10 +337,31 @@ def _run_ssh(
     )
 
 
-def _open_ssh(stack: _Stack, node: _Node, argv: list[str]) -> subprocess.Popen[str]:
-    """Start a client command that opens one connection to the node as its link's login."""
+@contextmanager
+def _ssh_session(stack: _Stack, node: _Node, argv: list[str]) -> Iterator[subprocess.Popen[str]]:
+    """Start a client command that opens one connection to the node as its link's login, and end it on the way out."""
     _await_connect_slot(stack, node)
-    return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    client = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        yield client
+    finally:
+        client.kill()
+        client.communicate()
+
+
+def _await_up(client: subprocess.Popen[str]) -> None:
+    """Wait a minute at most for ``up``, the line the session's command prints first."""
+    assert client.stdout is not None
+    ready, _, _ = select.select([client.stdout], [], [], 60)
+    if not ready or client.stdout.readline().strip() != "up":
+        client.kill()
+        pytest.fail(f"The session did not start: {client.communicate()}")
+
+
+def _peers(person: _Person) -> set[str]:
+    """Return the names of the machines the person's device sees in its tailnet."""
+    status = json.loads(_docker("exec", person.device, "tailscale", "status", "--json"))
+    return {peer["HostName"] for peer in (status["Peer"] or {}).values()}
 
 
 def _assert_turned_away(stack: _Stack, person: _Person, node: _Node) -> None:
@@ -387,33 +412,42 @@ def _answers_ssh(port: int) -> bool:
         return False
 
 
+def _own(folder: Path, owner: str) -> None:
+    """Give the folder and what it holds to ``owner``, a ``uid:gid``, as root."""
+    _docker(
+        *("run", "--rm", "--user", "0:0", "--entrypoint", "chown", "--volume", f"{folder}:/owned"),
+        *(_WORKER_IMAGE, "--recursive", owner, "/owned"),
+    )
+
+
 def _project(stack: _Stack, node: _Node) -> None:
-    """Write sshd's files for the link with its owner's keys, as the primary, into the volume the worker mounts."""
-    assert node.files is not None
+    """Write sshd's files for the link with its owner's keys into its worker's root, as the primary and its uid."""
     key_lines = authorized_key_lines(stack.config, stack.book, node.owner.requester_id)
     _docker(
-        *("run", "--rm", "--interactive", "--user", "1000:1000", "--volume", f"{node.files}:{_PROJECTION}"),
+        *("run", "--rm", "--interactive", "--user", "1000:1000", "--volume", f"{node.root}:{_WORKER_ROOT}"),
         *(_WORKER_IMAGE, "python", "-c", _WRITE_PROJECTION, _PROJECTION),
         stdin=json.dumps({"link": node.link.model_dump(mode="json"), "key_lines": key_lines}),
     )
 
 
 def _start_worker(stack: _Stack, node: _Node) -> None:
-    """Run the link's worker as the Docker backend runs one, with sshd up, as after a connect the primary passed."""
+    """Run the link's worker as the Docker backend runs one, with sshd up, as after a connect the primary passed.
+
+    Its root is a folder of the test host, mounted as the backend mounts one: writable, with ``.runtime``, which the
+    primary writes, read-only over it. The primary and the worker are uid 1000, whoever runs the test.
+    """
     name = f"{stack.prefix}-{node.link.hostname}"
-    node.files, workspace = f"{name}-ssh", f"{name}-workspace"
-    # A new volume is root's, and the primary and the worker are uid 1000.
-    _docker(
-        *("run", "--rm", "--user", "0:0", "--entrypoint", "chown"),
-        *("--volume", f"{node.files}:{_PROJECTION}", "--volume", f"{workspace}:{_WORKSPACE}"),
-        *(_WORKER_IMAGE, "1000:1000", _PROJECTION, _WORKSPACE),
-    )
+    node.root = stack.tailnet.folder / name
+    (node.root / "workspace").mkdir(parents=True)
+    for folder in (node.root, node.root / "workspace"):
+        folder.chmod(0o755)
+    _own(node.root, "1000:1000")
     _project(stack, node)
     port = _free_port()
     _docker(
         *("run", "--detach", "--name", name, "--user", "1000:1000", *_READ_ONLY_ROOT),
         *("--cap-drop", "ALL", *_security_options(stack.tailnet.folder)),
-        *("--volume", f"{node.files}:{_PROJECTION}:ro", "--volume", f"{workspace}:{_WORKSPACE}"),
+        *("--volume", f"{node.root}:{_WORKER_ROOT}", "--volume", f"{node.root}/.runtime:{_WORKER_ROOT}/.runtime:ro"),
         *("--publish", f"127.0.0.1:{port}:{WORKER_SSH_PORT}"),
         *(_WORKER_IMAGE, "python", "-c", _SERVE, _PROJECTION, str(session.LAUNCH_PATH), json.dumps(_LAUNCH)),
     )
@@ -450,7 +484,10 @@ def _add_link(
 
 
 def _enrol(stack: _Stack, node: _Node) -> None:
-    """Sign the link's node in as its owner, by the login URL the gateway reports, and admit that login from then on."""
+    """Sign the link's node in as its owner, by the login URL the gateway reports, and admit that login from then on.
+
+    The gateway admits the login once it has read the row that names it, so this returns after a pass that did.
+    """
     link_id = node.link.id
 
     def reported(state: str, told: str) -> dict[str, Any] | None:
@@ -465,6 +502,10 @@ def _enrol(stack: _Stack, node: _Node) -> None:
     )
     running = _eventually(f"{node.link.hostname} to run", lambda: reported("running", "login_name"))
     node.row["allowed_login"] = running["login_name"]
+    # The gateway's passes follow each other: the first it starts from here on reads the row, and is over when the
+    # second starts.
+    listed = stack.primary.listed
+    _eventually("the gateway to read the link's login", lambda: stack.primary.listed >= listed + 2)
 
 
 def _set_keys(stack: _Stack, person: _Person, lines: list[str]) -> None:
@@ -472,7 +513,7 @@ def _set_keys(stack: _Stack, person: _Person, lines: list[str]) -> None:
     set_keys(stack.book, person.requester_id, lines, now=time.time())
     for node in stack.nodes.values():
         if node.owner == person:
-            if node.files is not None:
+            if node.root is not None:
                 _project(stack, node)
             node.row["closed_before"] = node.link.closed_before
 
@@ -507,15 +548,18 @@ def _gateway(tailnet: _Tailnet, name: str, config: Config, *, auth_key: str | No
         for container in _docker("ps", "--all", "--filter", f"name=^{prefix}", "--format", "{{.Names}}").split():
             print(f"--- {container}\n{_logs(container)}")
         _remove(prefix)
+        # The test host removes its temp folders as its own user.
+        for node in stack.nodes.values():
+            if node.root is not None:
+                _own(node.root, f"{os.getuid()}:{os.getgid()}")
         served.should_exit = True
         serving.join(timeout=10)
 
 
-@pytest.fixture(scope="module")
-def tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
-    """Headscale with the users ``alice`` and ``bob``, each with a Tailscale client joined by pre-auth key."""
+@contextmanager
+def _headscale(folder: Path, logins: Sequence[str], *, base_domain: str, v4: str, v6: str) -> Iterator[_Tailnet]:
+    """Run a Headscale of its own with a user and a Tailscale client, joined by pre-auth key, for each login."""
     prefix = f"mindroom-e2e-{secrets.token_hex(4)}"
-    folder = tmp_path_factory.mktemp("tailnet")
     port = _free_port()
     config = folder / "headscale.yaml"
     config.write_text(
@@ -523,7 +567,9 @@ def tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
             port=port,
             metrics_port=_free_port(),
             grpc_port=_free_port(),
-            base_domain=_BASE_DOMAIN,
+            base_domain=base_domain,
+            v4=v4,
+            v6=v6,
         ),
         encoding="utf-8",
     )
@@ -538,7 +584,7 @@ def tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
             lambda: _docker_result("exec", headscale, "headscale", "users", "list").returncode == 0,
         )
         people = {}
-        for login in ("alice", "bob"):
+        for login in logins:
             key = folder / login
             subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", login, "-f", key], check=True)
             people[login] = _Person(login, f"@{login}:example.org", f"{prefix}-{login}", key)
@@ -550,20 +596,50 @@ def tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
             )
         for person in people.values():
             _eventually(f"the device of {person.login} to join", lambda device=person.device: _joined(device))
-        yield _Tailnet(prefix, folder, headscale, login_server, people)
+        yield _Tailnet(prefix, folder, headscale, login_server, base_domain, people)
     finally:
         _remove(prefix)
 
 
+@contextmanager
+def _login_stack(tailnet: _Tailnet, login: str) -> Iterator[_Stack]:
+    """Run a gateway that enrols by login URL, with a link and a worker for the person, who signed its node in."""
+    person = tailnet.people[login]
+    with _gateway(tailnet, "login", Config()) as stack:
+        set_keys(stack.book, person.requester_id, [person.public_key], now=time.time())
+        _enrol(stack, _add_link(stack, person, f"mind-{login}"))
+        yield stack
+
+
+@pytest.fixture(scope="module")
+def tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
+    """A tailnet with a device each of alice and bob."""
+    folder = tmp_path_factory.mktemp("tailnet")
+    domain, v4, v6 = "tailnet.test", "100.64.0.0/16", "fd7a:115c:a1e0:a::/64"
+    with _headscale(folder, ("alice", "bob"), base_domain=domain, v4=v4, v6=v6) as tailnet:
+        yield tailnet
+
+
+@pytest.fixture(scope="module")
+def other_tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
+    """A second tailnet, of a Headscale that shares nothing with the first, with another device of bob."""
+    folder = tmp_path_factory.mktemp("other-tailnet")
+    domain, v4, v6 = "other.test", "100.96.0.0/16", "fd7a:115c:a1e0:b::/64"
+    with _headscale(folder, ("bob",), base_domain=domain, v4=v4, v6=v6) as tailnet:
+        yield tailnet
+
+
 @pytest.fixture(scope="module")
 def stack(tailnet: _Tailnet) -> Iterator[_Stack]:
-    """A gateway that enrols by login URL, with a link and a worker each for alice and bob, each signed in."""
-    with _gateway(tailnet, "login", Config()) as stack:
-        for person in tailnet.people.values():
-            set_keys(stack.book, person.requester_id, [person.public_key], now=time.time())
-            _add_link(stack, person, f"mind-{person.login}")
-        for node in stack.nodes.values():
-            _enrol(stack, node)
+    """A gateway that enrols by login URL, with a link and a worker for alice, who signed its node in."""
+    with _login_stack(tailnet, "alice") as stack:
+        yield stack
+
+
+@pytest.fixture(scope="module")
+def stack_other_tailnet(other_tailnet: _Tailnet) -> Iterator[_Stack]:
+    """A gateway in the second tailnet, with a link and a worker for bob, who signed its node in there."""
+    with _login_stack(other_tailnet, "bob") as stack:
         yield stack
 
 
@@ -597,7 +673,8 @@ def test_enrol_by_login_url_then_exec(stack: _Stack) -> None:
     status = stack.primary.status(node.link.id)
     assert status is not None
     assert (status["state"], status["login_url"], status["login_name"]) == ("running", None, "alice")
-    assert (status["dns_name"], status["tailnet"]) == (f"mind-alice.{_BASE_DOMAIN}", _BASE_DOMAIN)
+    domain = stack.tailnet.base_domain
+    assert (status["dns_name"], status["tailnet"]) == (f"mind-alice.{domain}", domain)
     assert stack.primary.reports[-1]["enrollment"] == "login"
 
     # The login URL signs a machine in to the tailnet of whoever opens it, so it is kept nowhere: not in the gateway's
@@ -608,8 +685,11 @@ def test_enrol_by_login_url_then_exec(stack: _Stack) -> None:
     naming = _in_state_volume(stack, "grep", "-rlF", "--", auth_id, "/state")
     assert (naming.returncode, naming.stdout) == (1, ""), naming.stderr
 
-    done = _run_ssh(stack, node, [*_client(stack.tailnet, alice), "mind-alice", "id -u && pwd"])
-    assert (done.returncode, done.stdout.split()) == (0, ["1000", _WORKSPACE]), done.stderr
+    # The session is the worker's user in the launch's folder, and sshd's files are that user's, who cannot write them.
+    seen = f"stat --format %u:%a {_PROJECTION} {_PROJECTION}/ssh_host_ed25519_key; touch {_PROJECTION}/planted"
+    done = _run_ssh(stack, node, [*_client(stack.tailnet, alice), "mind-alice", f"id -u; pwd; {seen}"])
+    assert done.stdout.split() == ["1000", _WORKSPACE, "1000:755", "1000:600"], done.stderr
+    assert (done.returncode, "Read-only file system" in done.stderr) == (1, True), done.stderr
     asked = stack.primary.connects[-1]
     assert (asked.link_id, asked.peer) == (node.link.id, {"peer_login": "alice", "peer_node": "alice-laptop"})
 
@@ -644,8 +724,9 @@ def test_pty_scp_sftp_rsync(stack: _Stack, tmp_path: Path) -> None:
     assert terminal.stdout.strip().startswith("/dev/pts/")
 
     sent = tmp_path / "sent" / "notes.bin"
-    sent.parent.mkdir()
+    sent.parent.mkdir(mode=0o755)
     sent.write_bytes(secrets.token_bytes(1 << 20))
+    sent.chmod(0o644)
     scp = _client(stack.tailnet, alice, "scp")
     rsync = ["rsync", "--archive", "--rsh", shlex.join(ssh)]
     transfers = [
@@ -663,6 +744,10 @@ def test_pty_scp_sftp_rsync(stack: _Stack, tmp_path: Path) -> None:
         assert done.returncode == 0, done.stderr
     returned = [tmp_path / "scp.bin", tmp_path / "sftp.bin", tmp_path / "rsync" / "notes.bin"]
     assert [_sha256(path) for path in returned] == [_sha256(sent)] * 3
+    # What was sent is in the workspace, which is the session's home.
+    assert node.root is not None
+    landed = [node.root / "workspace" / name for name in ("scp.bin", "sftp.bin", "rsync/notes.bin")]
+    assert [_sha256(path) for path in landed] == [_sha256(sent)] * 3
 
 
 def test_forwarding_is_refused(stack: _Stack, tmp_path: Path) -> None:
@@ -674,16 +759,12 @@ def test_forwarding_is_refused(stack: _Stack, tmp_path: Path) -> None:
 
     # A local forward's listener is the client's own, so the worker refuses when something connects to it.
     port = _free_port()
-    local = _open_ssh(stack, node, [*ssh, "-L", f"{port}:{sshd}", "mind-alice", "echo up; sleep 60"])
-    try:
-        assert local.stdout is not None
-        assert local.stdout.readline().strip() == "up"
+    with _ssh_session(stack, node, [*ssh, "-L", f"{port}:{sshd}", "mind-alice", "echo up; sleep 60"]) as local:
+        _await_up(local)
         with socket.create_connection(("127.0.0.1", port), timeout=30) as through:
             assert through.recv(8) == b""
-    finally:
         local.kill()
-        _, refusal = local.communicate()
-    assert "open failed" in refusal
+        assert "open failed" in local.communicate()[1]
 
     remote = _run_ssh(stack, node, [*ssh, "-o", "ExitOnForwardFailure=yes", "-R", f"0:{sshd}", "mind-alice", "true"])
     assert remote.returncode == 255
@@ -692,6 +773,8 @@ def test_forwarding_is_refused(stack: _Stack, tmp_path: Path) -> None:
     assert stdio.returncode == 255
     assert "stdio forwarding failed" in stdio.stderr
 
+    # The session's program drops what sshd says of an agent, so the session looks for the socket sshd makes for a
+    # forwarded one, in the folders the worker's user can write.
     socket_path = tmp_path / "agent"
     agent = subprocess.Popen(["ssh-agent", "-D", "-a", socket_path], stdout=subprocess.DEVNULL)
     try:
@@ -699,13 +782,13 @@ def test_forwarding_is_refused(stack: _Stack, tmp_path: Path) -> None:
         forwarded = _run_ssh(
             stack,
             node,
-            [*ssh, "-A", "mind-alice", "echo agent=$SSH_AUTH_SOCK"],
+            [*ssh, "-A", "mind-alice", f"find /tmp {_WORKER_ROOT} -type s; echo end"],
             env={**os.environ, "SSH_AUTH_SOCK": str(socket_path)},
         )
     finally:
         agent.terminate()
         agent.wait()
-    assert (forwarded.returncode, forwarded.stdout.strip()) == (0, "agent="), forwarded.stderr
+    assert (forwarded.returncode, forwarded.stdout.split()) == (0, ["end"]), forwarded.stderr
 
 
 def test_wrong_key_and_password_are_refused(stack: _Stack, tmp_path: Path) -> None:
@@ -732,15 +815,33 @@ def test_second_user_in_same_tailnet_is_refused_before_connect(stack: _Stack) ->
     _assert_turned_away(stack, stack.tailnet.people["bob"], stack.nodes["mind-alice"])
 
 
-def test_two_links_two_users_cannot_cross(stack: _Stack) -> None:
-    """Each of two people reaches the node they signed in, and neither the other's."""
-    people = stack.tailnet.people
-    for login, other in (("alice", "bob"), ("bob", "alice")):
-        own = stack.nodes[f"mind-{login}"]
-        done = _run_ssh(stack, own, [*_client(stack.tailnet, people[login]), own.link.hostname, "id -u"])
+def test_two_links_two_users_cannot_cross(stack: _Stack, stack_other_tailnet: _Stack) -> None:
+    """Each of two people, in a tailnet of their own, reaches the node they signed in, and neither the other's."""
+    alice, bob = stack.tailnet.people["alice"], stack_other_tailnet.tailnet.people["bob"]
+    for own, person, other, theirs in (
+        (stack, alice, stack_other_tailnet, bob),
+        (stack_other_tailnet, bob, stack, alice),
+    ):
+        node, elsewhere = own.nodes[f"mind-{person.login}"], other.nodes[f"mind-{theirs.login}"]
+        done = _run_ssh(own, node, [*_client(own.tailnet, person), node.link.hostname, "id -u"])
         assert (done.returncode, done.stdout.strip()) == (0, "1000"), done.stderr
-        assert stack.primary.connects[-1].peer["peer_login"] == login
-        _assert_turned_away(stack, people[login], stack.nodes[f"mind-{other}"])
+        assert own.primary.connects[-1].peer["peer_login"] == person.login
+
+        # The other tailnet's node is no machine of this one, so its name leads nowhere and its gateway sees nobody.
+        peers = _peers(person)
+        assert node.link.hostname in peers
+        assert elsewhere.link.hostname not in peers
+        seen = _logs(other.gateway), len(other.primary.connects)
+        missed = subprocess.run(
+            [*_client(own.tailnet, person), "-o", "ConnectTimeout=30", elsewhere.link.hostname, "true"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert missed.returncode == 255
+        assert (_logs(other.gateway), len(other.primary.connects)) == seen
 
 
 def test_key_removal_cuts_an_open_session(stack: _Stack) -> None:
@@ -748,19 +849,16 @@ def test_key_removal_cuts_an_open_session(stack: _Stack) -> None:
     alice = stack.tailnet.people["alice"]
     node = stack.nodes["mind-alice"]
     ssh = _client(stack.tailnet, alice)
-    held = _open_ssh(stack, node, [*ssh, "mind-alice", "echo up; sleep 300"])
-    try:
-        assert held.stdout is not None
-        assert held.stdout.readline().strip() == "up"
-        _set_keys(stack, alice, [])
-        assert held.wait(timeout=15) == 255
-        refused = _run_ssh(stack, node, [*ssh, "mind-alice", "true"])
-        assert refused.returncode == 255
-        assert "Permission denied (publickey)." in refused.stderr
-    finally:
-        held.kill()
-        held.communicate()
-        _set_keys(stack, alice, [alice.public_key])
+    with _ssh_session(stack, node, [*ssh, "mind-alice", "echo up; sleep 300"]) as held:
+        _await_up(held)
+        try:
+            _set_keys(stack, alice, [])
+            assert held.wait(timeout=15) == 255
+            refused = _run_ssh(stack, node, [*ssh, "mind-alice", "true"])
+            assert refused.returncode == 255
+            assert "Permission denied (publickey)." in refused.stderr
+        finally:
+            _set_keys(stack, alice, [alice.public_key])
 
 
 def test_connection_held_through_a_120s_start(stack: _Stack) -> None:
@@ -769,13 +867,15 @@ def test_connection_held_through_a_120s_start(stack: _Stack) -> None:
     node = stack.nodes["mind-alice"]
     ssh = _client(stack.tailnet, alice)
     stack.primary.delays[node.link.id] = 120
-    clients = [_open_ssh(stack, node, [*ssh, *verbose, "mind-alice", "true"]) for verbose in ([], ["-v"])]
     try:
-        outputs = [client.communicate(timeout=300) for client in clients]
+        with ExitStack() as held:
+            clients = [
+                held.enter_context(_ssh_session(stack, node, [*ssh, *verbose, "mind-alice", "true"]))
+                for verbose in ([], ["-v"])
+            ]
+            outputs = [client.communicate(timeout=300) for client in clients]
     finally:
         del stack.primary.delays[node.link.id]
-        for client in clients:
-            client.kill()
     assert [client.returncode for client in clients] == [0, 0], outputs
     # Both were held: the first one's connect call came this long ago.
     assert time.monotonic() - stack.primary.connects[-2].at >= 120
