@@ -443,6 +443,18 @@ async def test_receipt_that_could_not_be_stored_after_the_effect_is_never_safe_t
 
 
 @pytest.mark.asyncio
+async def test_shell_refusal_before_any_command_fails_with_its_reason(stack: WorkflowStack) -> None:
+    """The shell tool says that it started nothing, so the call fails as safe to run again and keeps the reason."""
+    refused = tool_args("shell", "run_shell_command", args="echo never", timeout=0)
+
+    with pytest.raises(NodeFailed) as ended:
+        await stack.result("@0", "tool", refused)
+
+    assert ended.value.kind == "failed"
+    assert str(ended.value) == "Error: timeout must be a positive number of seconds; omit it for the default limit."
+
+
+@pytest.mark.asyncio
 async def test_shell_answer_without_an_exit_status_may_have_run(stack: WorkflowStack) -> None:
     """No status says the command ended: its answer was lost on the way, so nothing proves it did not run."""
     node = _dispatched_node(stack)

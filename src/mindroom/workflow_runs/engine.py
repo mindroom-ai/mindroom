@@ -394,16 +394,24 @@ def _indeterminate(node: WorkflowNode) -> _Outcome:
     return WorkflowNodeState.INDETERMINATE, None, {"kind": "indeterminate", "message": message}
 
 
+def _completed_outcome(node: WorkflowNode, call: ScriptCallRecord) -> _Outcome:
+    """Return how the node of a call that answered ends; a shell command ended only if its exit status says so."""
+    facts = call.metadata or {}
+    if call.grant != _SHELL_COMMAND:
+        return WorkflowNodeState.COMPLETED, call.result, None
+    if facts.get("not_started"):
+        # The shell tool refused before any command ran, and its text says why.
+        return WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(call.result)}
+    if facts.get("exit_code") is None:
+        # No status says the command ended: its answer was lost on the way, so it may have run.
+        return _indeterminate(node)
+    return WorkflowNodeState.COMPLETED, {"output": call.result, "exit_code": facts["exit_code"]}, None
+
+
 def _call_outcome(node: WorkflowNode, call: ScriptCallRecord) -> _Outcome:
     """Map a broker receipt to how its node ends; the effect stamp says what is safe to run again."""
     if call.state is ScriptCallState.COMPLETED:
-        exit_code = (call.metadata or {}).get("exit_code")
-        if call.grant != _SHELL_COMMAND:
-            return WorkflowNodeState.COMPLETED, call.result, None
-        if exit_code is None:
-            # No status says the command ended: its answer was lost on the way, so it may have run.
-            return _indeterminate(node)
-        return WorkflowNodeState.COMPLETED, {"output": call.result, "exit_code": exit_code}, None
+        return _completed_outcome(node, call)
     details = cast("dict[str, object]", call.error if isinstance(call.error, dict) else {})
     kind = details.get("kind")
     if call.effect_started_at is None and call.state is not ScriptCallState.FAILED:

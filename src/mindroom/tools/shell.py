@@ -139,6 +139,12 @@ def _looks_like_shell_command_line(command: str) -> bool:
     return any(char in _SHELL_COMMAND_LINE_CHARS for char in command)
 
 
+def _not_started(refusal: str) -> str:
+    """Answer a call refused before any command ran, and report that, so a caller that stores results can tell."""
+    report_tool_metadata(not_started=True)
+    return refusal
+
+
 def _normalize_shell_args(args: object) -> list[str]:
     """Normalize natural shell command strings and explicit argv lists."""
     if isinstance(args, str):
@@ -518,14 +524,16 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
 
             """
             if self._refuse_commands:
-                return _NO_WORKER_ERROR
+                return _not_started(_NO_WORKER_ERROR)
             try:
                 command_args = _normalize_shell_args(args)
             except ValueError as exc:
-                return f"Error: {exc}"
+                return _not_started(f"Error: {exc}")
             if timeout is not None and timeout <= 0:
                 # A model may mean "no limit" or "run in the background"; either way, stopping at once helps nobody.
-                return "Error: timeout must be a positive number of seconds; omit it for the default limit."
+                return _not_started(
+                    "Error: timeout must be a positive number of seconds; omit it for the default limit.",
+                )
             subprocess_env = self._command_env()
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None

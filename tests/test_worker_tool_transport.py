@@ -226,6 +226,23 @@ async def test_workflow_shell_node_on_a_worker_carries_the_real_exit_status(
     assert "Exit code 7" in str(result["output"])
 
 
+@pytest.mark.asyncio
+async def test_workflow_shell_refusal_on_a_worker_fails_with_its_reason(
+    tmp_path: Path,
+    worker_requests: list[dict[str, object]],
+) -> None:
+    """The worker's shell tool refused before any command ran, and says so beside its answer."""
+    with workflow_stack(tmp_path, process_env=_PROXY_ENV) as stack:
+        await stack.start()
+
+        with pytest.raises(NodeFailed) as ended:
+            await stack.result("@0", "tool", tool_args("shell", "run_shell_command", args="echo never", timeout=0))
+
+        await stack.engine.close()
+    assert (ended.value.kind, len(worker_requests)) == ("failed", 1)
+    assert str(ended.value) == "Error: timeout must be a positive number of seconds; omit it for the default limit."
+
+
 def _lost(_answer: httpx.Response) -> httpx.Response:
     msg = "The connection dropped before the answer."
     raise ConnectionError(msg)
