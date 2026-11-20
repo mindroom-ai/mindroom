@@ -21,8 +21,6 @@ from pydantic import (
 )
 from pydantic_core import ErrorDetails, PydanticCustomError, PydanticKnownError
 
-from mindroom.config.tool_aliases import canonical_tool_names
-
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 
@@ -85,7 +83,6 @@ _Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 # A field that may be absent, but that holds text when present.
 _TextIfPresent = Annotated[_Text | None, BeforeValidator(_not_null)]
 _Names = Annotated[list[_Text], AfterValidator(_unique)]
-_ToolNames = Annotated[_Names, AfterValidator(canonical_tool_names)]
 
 
 class _SpecModel(BaseModel):
@@ -229,7 +226,7 @@ class SubagentParticipant(_SpecModel):
     description: Annotated[str | None, BeforeValidator(_not_null)] = None
     profile: _TextIfPresent = None
     system_prompt: str | None = None
-    tools: _ToolNames | None = None
+    tools: _Names | None = None
     skills: _Names | None = None
     model: _Text | None = None
     mode: Literal["standard", "minimal"] | None = None
@@ -414,7 +411,7 @@ class Permissions(_SpecModel):
     max_concurrent_agents: Annotated[int, Field(ge=1, le=8)] | None = None
     max_total_agents: Annotated[int, Field(ge=1, le=16), _null_as(lambda: 16)] = 16
     models: list[_Text] | None = None
-    tools: Annotated[_ToolNames, _null_as(list)] = Field(default_factory=list)
+    tools: Annotated[_Names, _null_as(list)] = Field(default_factory=list)
     data: Annotated[DataPermissions, _null_as(DataPermissions)] = Field(default_factory=DataPermissions)
 
     @property

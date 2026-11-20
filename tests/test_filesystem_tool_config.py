@@ -182,7 +182,7 @@ def test_current_filesystem_settings_load_under_every_spelling(tmp_path: Path) -
 
 
 def test_tool_name_lists_take_every_spelling() -> None:
-    """worker_tools, listening, background-job exclusions, and personal agent edits read file and coding."""
+    """worker_tools, listening, and background-job exclusions in the config read file and coding."""
     config = _config(["filesystem", "shell"], worker_tools=["shell", "file", "python", "coding"])
     assert config.agents["a"].worker_tools == ["shell", "filesystem", "python"]
     assert DefaultsConfig(worker_tools=["file", "coding"]).worker_tools == ["filesystem"]
@@ -191,29 +191,21 @@ def test_tool_name_lists_take_every_spelling() -> None:
         "filesystem.read_file",
     ]
     assert BackgroundToolJobsConfig(exclude_toolkits=["file"]).exclude_toolkits == ["filesystem"]
-    assert GeneratedAgentEdits(tools=["file", "shell"]).tools == ["filesystem", "shell"]
 
 
-def test_stored_and_configured_grants_under_an_old_name_are_kept_as_written() -> None:
-    """A stored contact grant and a configured contact default keep their spelling, so they match no toolkit."""
+def test_stored_selectors_and_grants_under_an_old_name_are_kept_as_written() -> None:
+    """What re-reads a saved choice keeps its spelling, so an old name matches no toolkit until it is written anew."""
     assert ContactSide.model_validate({"tools": ["coding", "file"]}).tools == ["coding", "file"]
     assert ContactsConfig(tools=["coding"]).tools == ["coding"]
-
-
-def test_subagent_tools_take_every_spelling() -> None:
-    """run_subagent's and a profile's tools name the caller's filesystem toolkit by any spelling."""
-    persona = inline_persona("You review.", ["coding", "file.read_file", "shell"], None, None)
-    assert persona.tools == ("filesystem", "filesystem.read_file", "shell")
-
-
-def test_workflow_script_and_worker_tool_names_take_every_spelling() -> None:
-    """A workflow participant, the script toolkit's grants, and a worker call name filesystem by any spelling."""
+    assert GeneratedAgentEdits(tools=["file", "shell"]).tools == ["file", "shell"]
     participant = SubagentParticipant.model_validate({"id": "p", "system_prompt": "P", "tools": ["coding", "file"]})
-    assert participant.tools == ["filesystem"]
-    assert ScriptTools(allowed_tools=["file", " coding.read_file "]).limits.allowed_tools == (
-        "filesystem",
-        "filesystem.read_file",
-    )
+    assert participant.tools == ["coding", "file"]
+    assert inline_persona("You review.", ["coding", "file.read_file"], None, None).tools == ("coding", "file.read_file")
+    assert ScriptTools(allowed_tools=["file", " coding "]).limits.allowed_tools == ("file", "coding")
+
+
+def test_worker_calls_and_leases_take_every_spelling() -> None:
+    """A worker call and its credential lease name filesystem by any spelling."""
     request = ExecuteRequest(protocol=1, tool_name="coding", function_name="read_file")
     lease = LeaseRequest(protocol=1, tool_name="file", function_name="read_file", ttl_seconds=30)
     # A lease is consumed under the name of the call it serves, so both read an old primary's name alike.
@@ -262,7 +254,8 @@ def test_an_approval_rule_that_stops_deciding_a_renamed_function_fails(
 def test_an_earlier_approval_rule_that_takes_the_replacement_from_its_gate_fails(tmp_path: Path) -> None:
     """The first matching rule decides: write_* auto-approving write_file ahead of the *_file gate fails."""
     with pytest.raises(
-        ConfigRuntimeValidationError, match=r"rules\[1\]\.match '\*_file' .*save_file is now write_file"
+        ConfigRuntimeValidationError,
+        match=r"rules\[1\]\.match '\*_file' .*save_file is now write_file",
     ):
         _load_rules(tmp_path, ("write_*", "auto_approve"), ("*_file", "require_approval"))
     with pytest.raises(ConfigRuntimeValidationError, match=r"rules\[0\]\.match 'save_file'"):

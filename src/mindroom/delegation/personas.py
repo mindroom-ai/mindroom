@@ -111,7 +111,7 @@ def inline_persona(
         source_kind=source_kind,
         source_name=source_name,
         system_prompt=_system_prompt(system_prompt),
-        tools=None if (names := _name_entries(tools, "tools", "tool")) is None else canonical_tool_names(names),
+        tools=_name_entries(tools, "tools", "tool"),
         skills=_name_entries(skills, "skills", "skill"),
         knowledge=_name_entries(knowledge, "knowledge", "knowledge base"),
     )
@@ -463,6 +463,9 @@ def resolve_persona_request(  # noqa: PLR0911
     try:
         if profile is None:
             persona = inline_persona(system_prompt, tools, skills, knowledge)
+            if persona.tools is not None:
+                # Only tools this call names may say file or coding; a saved profile or snapshot is read as written.
+                persona = replace(persona, tools=canonical_tool_names(persona.tools))
         elif not isinstance(profile, str):
             return "Cannot delegate: profile must be a profile name."
         else:

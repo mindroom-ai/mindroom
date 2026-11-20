@@ -804,7 +804,7 @@ def test_persona_selects_preset_member_toolkits_by_name(tmp_path: Path) -> None:
     """A preset's member toolkit keeps its functions when a persona names it."""
     runtime = _runtime(tmp_path, tools=["openclaw_compat"])
     names = caller_toolkit_names("helper", runtime.config, builtin_tool_registry(), delegation_depth=0)
-    build = _child(runtime, ["shell", "coding.read_file"])
+    build = _child(runtime, ["shell", "filesystem.read_file"])
 
     functions = _function_names(build)
 

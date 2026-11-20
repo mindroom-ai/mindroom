@@ -221,7 +221,7 @@ _RETIRED_FILE_SETTINGS = {
         f"enable_{old}": f"use `filesystem: {{exclude_tools: [{new}]}}` to switch {new} off"
         for old, new in {"read_file": "read_file", **RETIRED_FILE_FUNCTIONS}.items()
     },
-    "all": "use `filesystem: {enable_delete_file: true}` to offer delete_file",
+    "all": "remove it; set `filesystem: {enable_delete_file: true}` only if it enabled deletion and you still want that",
     **dict.fromkeys(
         ("max_file_length", "max_file_lines", "line_separator", "exclude_patterns", "expose_base_directory"),
         "filesystem has no such setting, so remove it",

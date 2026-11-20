@@ -296,9 +296,23 @@ def test_a_stored_selector_under_an_old_toolkit_name_is_refused_on_follow_up() -
         persona = SubagentPersona.from_dict({**snapshot, "tools": stored})
         refusal = follow_up_refusal(persona, "leader", config, registry, delegation_depth=0)
         assert refusal == f"Subagent tool '{missing}' is no longer available to you; start a new subagent."
-    fresh = inline_persona("P", ["shell", "coding.read_file"], None, None)
-    assert fresh.tools == ("shell", "filesystem.read_file")
-    assert follow_up_refusal(fresh, "leader", config, registry, delegation_depth=0) is None
+
+
+@pytest.mark.asyncio
+async def test_a_new_subagent_takes_filesystem_by_an_old_name_and_a_saved_profile_does_not(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run_subagent's own tools may say coding or file; a profile saved with them is read as written and refused."""
+    _write_profile(tmp_path, "reader", _CRITIC.replace("[filesystem]", "[coding]"))
+    harness = _Harness(tmp_path, monkeypatch, _config())
+
+    refused = await harness.run(harness.toolkit.run_subagent(task="Read", profile="reader"))
+    tools = ["coding", "file.read_file"]
+    await harness.run(harness.toolkit.run_subagent(task="Read", system_prompt="P", tools=tools))
+
+    assert "unknown tool 'coding'" in refused
+    assert harness.session_child()["persona"]["tools"] == ["filesystem", "filesystem.read_file"]
 
 
 @pytest.mark.asyncio

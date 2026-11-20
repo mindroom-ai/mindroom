@@ -570,6 +570,33 @@ async def test_legacy_revision_runs_as_subagent(tmp_path: Path, monkeypatch: pyt
     assert workflow.models_loaded == ["haiku"]
 
 
+@pytest.mark.asyncio
+async def test_a_saved_workflow_naming_filesystem_by_an_old_name_stays_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new spec may say coding; a saved revision that says it is read as written, through an unrelated patch too."""
+    tools = [{"dynamic_workflow": {"allowed_tools": ["*"]}}, "filesystem"]
+    workflow = _Workflow(tmp_path, monkeypatch, _config(tools=tools))
+    spec = _spec([{"id": "reader", "system_prompt": "Read.", "tools": ["coding"]}], tools=["file"])
+    created = await workflow.create(spec)
+    assert created["status"] == "ok", created
+    [revision] = workflow.paths.storage_root.glob("**/review/revisions/000001.yaml")
+    saved = revision.read_text()
+    assert saved.count("- filesystem") == 2, saved
+    assert "coding" not in saved
+    revision.write_text(saved.replace("- filesystem", "- coding"))
+
+    with workflow.context():
+        run = json.loads(await workflow.tools.run_workflow(workflow_id="review", input={}))
+        patch = {"description": "Updated."}
+        updated = json.loads(await workflow.tools.update_workflow(workflow_id="review", patch=patch, reason="edit"))
+
+    assert "tool 'coding'" in run["error"], run
+    assert updated["status"] == "error", updated
+    assert "tool 'coding'" in updated["message"], updated
+
+
 def test_update_of_legacy_revision_writes_current_format(tmp_path: Path) -> None:
     """Updating a legacy workflow publishes a revision without the retired participant fields."""
     store = _write_legacy_revision(tmp_path)
