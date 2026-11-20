@@ -8377,6 +8377,34 @@ async def test_a_routed_responders_model_input_holds_the_persons_text_and_the_th
 
 
 @pytest.mark.asyncio
+async def test_a_route_runs_nothing_in_an_agent_it_does_not_name(tmp_path: Path) -> None:
+    """Every agent ran its hooks for the person's message, so only the responder a route names runs any for it."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path, agent_name="research")
+    room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
+    observed: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def observe(context: MessageReceivedContext) -> None:
+        observed.append(context.envelope.body)
+
+    plugin = SimpleNamespace(
+        name="observer",
+        discovered_hooks=(observe,),
+        discovered_automations=(),
+        entry_config=PluginEntryConfig(path="./plugins/observer"),
+        plugin_order=0,
+    )
+    hooks = HookRegistryState(HookRegistry.from_plugins([cast("Any", plugin)]))
+    harness.dispatcher.deps.ingress_hook_runner.hook_context.hook_registry_state = hooks.lifetime("research")
+
+    await harness.deliver(room, _route_message(config, steward=ROUTER_AGENT_NAME, entity="general"))
+
+    assert observed == []
+    assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
 async def test_a_routed_responder_reads_a_voice_message_as_its_steward_transcribed_it(tmp_path: Path) -> None:
     """The thread shows a voice message as its audio file, so its routed responder answers the route's transcript."""
     config = _two_agent_config(tmp_path)

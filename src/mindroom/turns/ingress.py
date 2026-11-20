@@ -665,6 +665,9 @@ class TurnIngress:
         )
         if await self.deps.personal_room_command(room, event, facts.lane_requester_id):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+        if facts.routed_event_ids and not self.deps.resolver.pre_hydration_mentions(room=room, event=event)[1]:
+            # Every bot ran its hooks for the person's message: only the responder a route names runs any for it.
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         self._log_callback_started(room, event, callback_name="message")
         ticket = None
         approval_card_event_id = event_info.reply_to_event_id
