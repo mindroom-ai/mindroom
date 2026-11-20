@@ -139,17 +139,23 @@ async def _run(argv: list[str]) -> _Sshd:
 
     The pipe is this module's, not the subprocess transport's: the sessions sshd starts hold it open after sshd, and
     this runner must be able to close its end without waiting for them, as it could not close the transport's.
+
+    Nothing is awaited between sshd's start and this function's return, so a cancelled caller either has no sshd,
+    which a cancelled spawn kills itself, or gets the one it then keeps track of.
     """
     read_fd, write_fd = os.pipe()
-    ours, theirs = os.fdopen(read_fd, "rb", buffering=0), os.fdopen(write_fd, "wb", buffering=0)
-    try:
-        with theirs:
-            process = await _spawn(argv, theirs)
+    with os.fdopen(write_fd, "wb", buffering=0) as theirs:
         log = _StderrTail()
-        transport, _ = await asyncio.get_running_loop().connect_read_pipe(lambda: log, ours)
-    except BaseException:
-        ours.close()
-        raise
+        # Closes the read end itself when it fails.
+        transport, _ = await asyncio.get_running_loop().connect_read_pipe(
+            lambda: log,
+            os.fdopen(read_fd, "rb", buffering=0),
+        )
+        try:
+            process = await _spawn(argv, theirs)
+        except BaseException:
+            transport.close()
+            raise
     return _Sshd(process, transport, log)
 
 
