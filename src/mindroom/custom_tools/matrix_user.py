@@ -26,7 +26,7 @@ from mindroom.custom_tools.matrix_user_reads import (
     search_messages,
 )
 from mindroom.custom_tools.matrix_user_writes import MatrixUserWrite, write_as_person
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.matrix.user_masquerade import create_user_masquerade_client, user_appservice_token
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import (
@@ -191,8 +191,13 @@ class MatrixUserTools(Toolkit):
             room_id = await room_named(client, room_id, self._runtime_paths)
         if action == "room":
             return await read_room(client, str(room_id), limit=limit)
-        # The router, the agents and the teams: their replies are read with their tool markers in their text.
-        agents = entity_identity_registry(self._config(), self._runtime_paths).managed_user_ids
+        if action == "mark_read":
+            return await mark_read(client, str(room_id), event_id=event_id)
+        if action == "download":
+            return await self._download(client, require_tool_runtime_context(), str(room_id), str(event_id))
+        # The router, the agents and the teams that have a Matrix account, which a new one gets after it is configured:
+        # their replies are read with their tool markers in their text.
+        agents = prepared_entity_names_by_user_id(self._config(), self._runtime_paths)
         if action == "messages":
             return await read_messages(
                 client,
@@ -203,10 +208,6 @@ class MatrixUserTools(Toolkit):
                 page_token=page_token,
                 limit=limit,
             )
-        if action == "mark_read":
-            return await mark_read(client, str(room_id), event_id=event_id)
-        if action == "download":
-            return await self._download(client, require_tool_runtime_context(), str(room_id), str(event_id))
         # The only action left: search.
         return await search_messages(client, str(query), agents, room_id=room_id, page_token=page_token, limit=limit)
 

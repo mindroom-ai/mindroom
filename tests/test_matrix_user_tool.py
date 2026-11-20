@@ -15,7 +15,8 @@ from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.connection_agents import AgentToolContext, resolve_connection_agent, resolve_connection_user
 from mindroom.attachments.storage import load_attachment
 from mindroom.config.approval import ToolApprovalConfig
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.config.main import Config
+from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.requester_identity import mindroom_user_id
 from mindroom.teams.members import resolve_exact_team_members
@@ -54,7 +55,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.custom_tools.matrix_user import MatrixUserTools
 
@@ -707,6 +707,16 @@ async def test_the_owners_mcp_gateway_call_reads_as_the_owner(
     assert request.query["user_id"] == [OWNER]
 
 
+# An agent's reply as it built it; Matrix holds it without the marker line.
+_REPLY_WITH_A_CALL: dict[str, object] = {
+    "msgtype": "m.text",
+    "body": "Needle.\n\n🔧 `shell` [1]",
+    "format": "org.matrix.custom.html",
+    "formatted_body": "<p>Needle.</p>\n<p>🔧 <code>shell</code> [1]</p>\n",
+    "io.mindroom.tool_trace": {"version": 2, "events": [{"type": "tool_call_completed", "tool_name": "shell"}]},
+}
+
+
 @pytest.mark.asyncio
 async def test_the_owners_mcp_gateway_call_reads_an_agents_reply_with_its_tool_calls(
     paths: RuntimePaths,
@@ -723,13 +733,7 @@ async def test_the_owners_mcp_gateway_call_reads_an_agents_reply_with_its_tool_c
     agent = entity_identity_registry(config, paths).current_ids[AGENT].full_id
     internal_user = mindroom_user_id(config, paths)
     assert internal_user is not None
-    built: dict[str, object] = {
-        "msgtype": "m.text",
-        "body": "Needle.\n\n🔧 `shell` [1]",
-        "format": "org.matrix.custom.html",
-        "formatted_body": "<p>Needle.</p>\n<p>🔧 <code>shell</code> [1]</p>\n",
-        "io.mindroom.tool_trace": {"version": 2, "events": [{"type": "tool_call_completed", "tool_name": "shell"}]},
-    }
+    built = _REPLY_WITH_A_CALL
     held = tool_markers_out_of_text(built)
     assert held["body"] == "Needle."
     reads = [
@@ -768,6 +772,53 @@ async def test_the_owners_mcp_gateway_call_reads_an_agents_reply_with_its_tool_c
     assert await texts(held, agent) == with_calls
     for sender in (internal_user, STRANGER):
         assert await texts(held, sender) == ["Needle."] * len(reads)
+
+
+@pytest.mark.asyncio
+async def test_the_owners_reads_do_not_wait_for_another_agents_matrix_account(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A new agent is in the published config before it has a Matrix account, and the owner's reads go on meanwhile.
+
+    The agents that have their accounts still have their replies read with their tool calls.
+    """
+    newcomer = {"newcomer": {"display_name": "Newcomer", "model": "default"}}
+    waiting = Config.validate_with_runtime({**config.authored_model_dump(), "agents": newcomer}, paths)
+    with pytest.raises(MissingManagedEntityAccountError, match="newcomer"):
+        entity_identity_registry(waiting, paths)
+    owner = resolve_connection_user(ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=waiting), OWNER)
+    gateway_agent = resolve_connection_agent(owner, AGENT)
+    agent = entity_identity_registry(config, paths).current_ids[AGENT].full_id
+    reply = room_event("$reply", "m.room.message", tool_markers_out_of_text(_REPLY_WITH_A_CALL), sender=agent)
+    said = room_event("$said", "m.room.message", {"msgtype": "m.text", "body": "A needle."}, sender=STRANGER)
+    room = f"/_matrix/client/v3/rooms/{ROOM}"
+    homeserver.answers = {
+        "/_matrix/client/v3/search": search_answer({**said, "room_id": ROOM}, {**reply, "room_id": ROOM}),
+        f"{room}/messages": {"chunk": [said, reply]},
+        f"{room}/read_markers": {},
+        f"/_matrix/client/v3/user/{OWNER}/rooms/{ROOM}/account_data/m.marked_unread": {},
+    }
+
+    async def read(**arguments: str) -> dict[str, list[str]]:
+        result = await gateway.invoke_tool(
+            gateway_agent,
+            toolkit="matrix_user",
+            function="matrix_user_read",
+            arguments=arguments,
+        )
+        assert "error" not in result
+        return json.loads(result["result"])
+
+    with homeserver.serving_the_toolkit():
+        found = await read(action="search", query="needle")
+        page = await read(action="messages", room_id=ROOM)
+        marked = await read(action="mark_read", room_id=ROOM)
+
+    assert [line.rsplit(" | ", 1)[1] for line in found["messages"]] == ["A needle.", "Needle. 🔧 `shell` [1]"]
+    assert [line.rsplit(" | ", 1)[1] for line in page["messages"]] == ["Needle. 🔧 `shell` [1]", "A needle."]
+    assert marked["status"] == "ok"
 
 
 @pytest.mark.asyncio
