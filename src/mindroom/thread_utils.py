@@ -20,7 +20,7 @@ from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     import nio
 
@@ -165,6 +165,13 @@ def check_agent_mentioned(
     )
 
     return mentioned_agents, am_i_mentioned, has_non_agent_mentions
+
+
+def mentions_owner_alone(content: Mapping[str, Any], config: Config, runtime_paths: RuntimePaths) -> bool:
+    """Return whether a message's mentions, listed or found in its text, name the owner account and no agent or team."""
+    user_ids = _extract_mentioned_user_ids(visible_content_from_content(dict(content)), config, runtime_paths)
+    registry = entity_identity_registry(config, runtime_paths)
+    return persisted_owner_matrix_id(runtime_paths) in user_ids and not _agents_from_user_ids(user_ids, registry)
 
 
 def mentions_another_participant(

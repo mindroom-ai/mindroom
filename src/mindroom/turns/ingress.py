@@ -306,7 +306,12 @@ class TurnIngress:
             )
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         message_text = prepared_event.body.strip()
-        if envelope.origin.may_answer_interactive_prompt and message_text.isdigit() and len(message_text) == 1:
+        if (
+            envelope.origin.may_answer_interactive_prompt
+            and not facts.aimed_at_owner
+            and message_text.isdigit()
+            and len(message_text) == 1
+        ):
             selection = await self.deps.interactive_questions.claim_interactive_text(
                 source_event_id=prepared_event.event_id,
             )

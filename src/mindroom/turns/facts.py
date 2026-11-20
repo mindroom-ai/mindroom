@@ -56,7 +56,7 @@ class IngressFacts:
     requester_entity_name: str | None = None
     # The names the agents and teams this event's pills mention can read as in its text.
     mention_names: tuple[str, ...] = ()
-    # Whether this event's pills name the owner account and no agent or team: it is aimed at nobody who answers.
+    # Whether this event's mentions name the owner account and no agent or team: it is aimed at nobody who answers.
     aimed_at_owner: bool = False
     # Whether this is a contact room of the responder that refuses the sender: only the counterparty and the
     # responder's owner start an active contact's turns, and a removed contact's room starts none.

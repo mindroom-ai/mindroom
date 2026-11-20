@@ -2275,21 +2275,35 @@ async def test_owner_device_runs_the_selection_chat_sends_in_an_agents_thread(co
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner_joined", [True, False])
-@pytest.mark.parametrize("body", ["hello there", "!help"])
-async def test_a_message_aimed_only_at_the_owner_gets_silence(tmp_path: Path, *, owner_joined: bool, body: str) -> None:
-    """A pill of the owner account targets no agent: the only agent neither answers nor runs the command."""
+@pytest.mark.parametrize("body", ["hello there", "!help", "1"])
+@pytest.mark.parametrize("html_pill", [False, True])
+async def test_a_message_aimed_only_at_the_owner_gets_silence(
+    tmp_path: Path,
+    *,
+    owner_joined: bool,
+    body: str,
+    html_pill: bool,
+) -> None:
+    """A pill of the owner account targets no agent: the only agent neither answers, runs the command nor picks."""
     agents = {"general": AgentConfig(display_name="General")}
     config = bind_runtime_paths(Config(agents=agents), test_runtime_paths(tmp_path))
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", *([ROUTER_AGENT_NAME] if owner_joined else []))
     room.members_synced = True
-    event = _text_event(f"@MindRoom {body}")
-    event.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, ROUTER_AGENT_NAME)]}
+    owner_id = _entity_user_id(config, ROUTER_AGENT_NAME)
+    event = _text_event(body)
+    if html_pill:
+        pill = f'<a href="https://matrix.to/#/{owner_id}">MindRoom</a>'
+        event.source["content"] |= {"format": "org.matrix.custom.html", "formatted_body": f"{pill} {body}"}
+    else:
+        event.source["content"]["m.mentions"] = {"user_ids": [owner_id]}
+    claim = harness.ingress.deps.interactive_questions.claim_interactive_text = AsyncMock(return_value=None)
 
     with patch.object(harness.dispatcher.deps.command_executor, "execute", new=AsyncMock()) as execute:
         await harness.deliver(room, event)
 
     execute.assert_not_awaited()
+    claim.assert_not_awaited()
     assert harness.runner.requests == []
     assert harness.gateway.sent == []
 
