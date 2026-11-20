@@ -152,3 +152,27 @@ def unresolved_membership_index(config: Config) -> AgentReplyMembershipIndex:
     index = AgentReplyMembershipIndex()
     index.invalidate(config, reason="test_unresolved_room")
     return index
+
+
+def member_event(
+    user_id: str,
+    membership: str,
+    previous: str | None = None,
+    *,
+    sender: str | None = None,
+    event_id: str | None = None,
+) -> nio.RoomMemberEvent:
+    """Build one membership event, with the earlier membership in ``unsigned`` when given."""
+    source: dict[str, object] = {
+        "type": "m.room.member",
+        "event_id": event_id or f"${membership}-{user_id}",
+        "origin_server_ts": 1,
+        "sender": sender or user_id,
+        "state_key": user_id,
+        "content": {"membership": membership},
+    }
+    if previous is not None:
+        source["unsigned"] = {"prev_content": {"membership": previous}}
+    event = nio.RoomMemberEvent.from_dict(source)
+    assert isinstance(event, nio.RoomMemberEvent)
+    return event

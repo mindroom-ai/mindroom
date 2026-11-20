@@ -33,6 +33,7 @@ from mindroom.room_thread_modes import (
 )
 from mindroom.runtime_shutdown import ShutdownBudget
 from mindroom.steward_duties import StewardDuties, StewardDutiesDeps, reconcile_held_room_states
+from tests.access_schema_support import member_event
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -789,19 +790,7 @@ def _publish_joined_rooms(duties: StewardDuties) -> asyncio.Task[None]:
 
 
 def _membership_event(user_id: str, membership: str, previous: str) -> nio.RoomMemberEvent:
-    event = nio.RoomMemberEvent.from_dict(
-        {
-            "type": "m.room.member",
-            "event_id": f"${membership}",
-            "origin_server_ts": 1,
-            "sender": user_id,
-            "state_key": user_id,
-            "content": {"membership": membership},
-            "unsigned": {"prev_content": {"membership": previous}},
-        },
-    )
-    assert isinstance(event, nio.RoomMemberEvent)
-    return event
+    return member_event(user_id, membership, previous, event_id=f"${membership}")
 
 
 @pytest.mark.asyncio

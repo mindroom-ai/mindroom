@@ -26,6 +26,7 @@ from mindroom.event_journal import (
 from mindroom.matrix.state import MatrixState
 from mindroom.room_steward import _pick_steward, membership_observers
 from tests.access_schema_support import joined_members_response
+from tests.access_schema_support import member_event as _member_event
 from tests.matrix_state_helpers import save_matrix_state
 from tests.test_agent_reply_membership_sync import _fleet, _ingestion_admission
 
@@ -132,21 +133,6 @@ def _observers(index: AgentReplyMembershipIndex) -> dict[str | None, str | None]
     return {room.room_id: room.observer_user_id for room in index.snapshot.rooms if room.ready}
 
 
-def _member_event(user_id: str, membership: str, *, sender: str | None = None) -> nio.RoomMemberEvent:
-    event = nio.RoomMemberEvent.from_dict(
-        {
-            "type": "m.room.member",
-            "event_id": f"${membership}-{user_id}",
-            "sender": sender or user_id,
-            "state_key": user_id,
-            "origin_server_ts": 1,
-            "content": {"membership": membership},
-        },
-    )
-    assert isinstance(event, nio.RoomMemberEvent)
-    return event
-
-
 def _sync(index: AgentReplyMembershipIndex) -> AgentReplyMembershipSync:
     return AgentReplyMembershipSync(index, lambda: ())
 
@@ -234,7 +220,8 @@ async def test_observer_eligibility_moves_only_by_its_table(
         if step == "loop_started":
             membership_sync.observer_loop_started(config, _A)
         elif step == "frame_settled":
-            membership_sync.observer_frame_settled(_A)
+            # The frame that opens an observer says so, which is when its bot publishes every room it stewards.
+            assert membership_sync.observer_frame_settled(_A) is ((state, next_state) == ("armed", "open"))
         elif step == "closed":
             membership_sync.observer_closed(config, _A, reason="sync_failure")
         else:
@@ -601,11 +588,13 @@ async def test_grant_room_no_account_joined_stays_unready(tmp_path: Path) -> Non
     """A configured grant room no observing account has joined denies and is reported with its reason."""
     config, runtime_paths = _config(tmp_path, grant_room=True)
     index = AgentReplyMembershipIndex()
+    account = _Account(_A, {_OTHER: (_A, _ALICE)})
 
     with capture_logs() as logs:
-        await _refresh(index, config, runtime_paths, _Account(_A, {_OTHER: (_A, _ALICE)}))
+        await _refresh(index, config, runtime_paths, account)
 
     assert not index.is_allowed(_ALICE, ["project"], config, runtime_paths)
+    assert _ROOM not in account.reads
     assert index.grants_pending(config, joined_rooms=["project"], current_room_id=None)
     assert index.needs_refresh(config)
     assert [

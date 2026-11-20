@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -16,7 +17,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.state import MatrixState
-from tests.access_schema_support import joined_members_response, refresh_memberships
+from tests.access_schema_support import joined_members_response, member_event, refresh_memberships
 from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
@@ -107,20 +108,7 @@ def _persist_room(runtime_paths: RuntimePaths, room_key: str, room_id: str) -> N
     save_matrix_state(state, runtime_paths)
 
 
-def _member_event(user_id: str, membership: str, *, sender: str | None = None) -> nio.RoomMemberEvent:
-    event = nio.RoomMemberEvent.from_dict(
-        {
-            "type": "m.room.member",
-            "event_id": f"${membership}-{user_id}",
-            "sender": sender or user_id,
-            "state_key": user_id,
-            "origin_server_ts": 1,
-            "content": {"membership": membership},
-            "unsigned": {"prev_content": {"membership": "join"}},
-        },
-    )
-    assert isinstance(event, nio.RoomMemberEvent)
-    return event
+_member_event = partial(member_event, previous="join")
 
 
 async def _refresh_while_router_applies(
@@ -268,22 +256,6 @@ async def test_unresolved_grant_room_fails_closed(tmp_path: Path) -> None:
     config, runtime_paths = _runtime_config(tmp_path, member_rooms=["project"])
     client = AsyncMock()
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!project:example.com"])
-    index = AgentReplyMembershipIndex()
-
-    await refresh_memberships(index, config, runtime_paths, client)
-
-    assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
-    client.joined_members.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_router_not_joined_to_grant_room_fails_closed(tmp_path: Path) -> None:
-    """A persisted room ID must not grant when the control-plane client has departed."""
-    room_id = "!project:example.com"
-    config, runtime_paths = _runtime_config(tmp_path, member_rooms=["project"])
-    _persist_room(runtime_paths, "project", room_id)
-    client = AsyncMock()
-    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[])
     index = AgentReplyMembershipIndex()
 
     await refresh_memberships(index, config, runtime_paths, client)
