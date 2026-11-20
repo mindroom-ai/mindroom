@@ -4347,6 +4347,38 @@ async def test_an_unreadable_event_of_its_own_may_be_the_route_a_steward_sent(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("newest_first", "routed"),
+    [
+        # The steward's own encrypted schedule trigger is the message it routes.
+        (["$fire"], ["$fire"]),
+        # Its ciphertext stands between the messages of a batch, so it predates the complete batch.
+        (["$second", "$opaque", "$first"], ["$first", "$second"]),
+    ],
+    ids=["own-trigger", "inside-batch"],
+)
+async def test_own_ciphertext_no_newer_than_the_routed_messages_is_no_route(
+    tmp_path: Path,
+    newest_first: list[str],
+    routed: list[str],
+) -> None:
+    """A route follows every message it names, so the lookup ends at the newest of them with no route sent."""
+    gateway = _gateway(tmp_path)
+    own = {"$fire", "$opaque"}
+    page = [
+        _history_event(event_id, "m.room.encrypted", sender=_AGENT_USER_ID, ciphertext="opaque")
+        if event_id in own
+        else _history_event(event_id, "m.room.message", body="who can help?")
+        for event_id in newest_first
+    ]
+    older = [_history_event("$older", "m.room.message", body="earlier")]
+    requests = _history(gateway, page, older)
+
+    assert await gateway.sent_route(_ROOM_ID, routed) is None
+    assert requests.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_a_route_lookup_ends_at_its_route_or_at_the_message_it_routes(tmp_path: Path) -> None:
     """The lookup reads no page past the route it finds, nor past the routed message, a silent trigger included."""
     gateway = _gateway(tmp_path)

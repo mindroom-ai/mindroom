@@ -170,13 +170,12 @@ async def find_route_event_id_via_room_messages(
 ) -> str | None:
     """Return the hidden route this client's account sent for exactly these messages, None when history holds none.
 
-    The walk starts at the room's newest event and ends at the route, at the oldest of the messages, which every route
+    The walk starts at the room's newest event and ends at the route, at the newest of the messages, which every route
     of them follows, or at the scan's page bound: a route older than that was lost long ago.
-    Raises ``UnresolvedOpaqueRoomHistoryError`` when it finds no route and passed an event of the account that this
-    device cannot read, which may be that route.
+    Raises ``UnresolvedOpaqueRoomHistoryError`` when it finds no route and passed an event of the account, newer than
+    those messages, that this device cannot read: it may be that route.
     """
     sources = sorted(source_event_ids)
-    remaining = set(sources)
     opaque = False
     from_token: str | None = None
     for _page in range(_MAX_EXACT_DELIVERY_SCAN_PAGES):
@@ -198,13 +197,14 @@ async def find_route_event_id_via_room_messages(
             own_type = event_source.get("type") if event_source.get("sender") == client.user_id else None
             if own_type == ROUTE_EVENT_TYPE and isinstance(routed, list) and sorted(map(str, routed)) == sources:
                 return event.event_id
-            opaque = opaque or own_type == "m.room.encrypted"
-            remaining.discard(event_source.get("event_id"))
-            if not remaining:
+            if event_source.get("event_id") in sources:
                 break
-        if not remaining or not response.end:
-            break
-        from_token = response.end
+            opaque = opaque or own_type == "m.room.encrypted"
+        else:
+            from_token = response.end
+            if from_token:
+                continue
+        break
     if opaque:
         msg = f"route recovery room scan for {room_id} passed events of its sender that this device cannot read"
         raise UnresolvedOpaqueRoomHistoryError(msg)
