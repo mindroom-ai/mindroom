@@ -144,7 +144,7 @@ def _time_limit() -> Iterator[None]:
 
 
 # AGNO_COMPAT: TrafilaturaTools and Trafilatura's spider offer no way to bound one call's total time.
-# Reason: Agno 3.0.9 extract_batch downloads any number of URLs one after another, and crawl_website makes about
+# Reason: Agno 3.2.1 extract_batch downloads any number of URLs one after another, and crawl_website makes about
 # 21 downloads while Trafilatura's focused_crawler, through its module-level crawl_page and sleep, visits pages and
 # pauses after each one for as long as the site's robots.txt crawl delay asks; each download is bounded, but one call
 # could hold its thread for many minutes. MindRoom's limit therefore overrides both methods and replaces crawl_page
@@ -175,7 +175,7 @@ class TimeLimitedTrafilaturaTools(TrafilaturaTools):
 def install_server_fetch_guard() -> None:
     """Replace every downloader TrafilaturaTools reaches with the guarded fetchers, and the crawler's visits, pauses, and store."""
     # AGNO_COMPAT: TrafilaturaTools extraction downloads through a fixed module-level fetcher.
-    # Reason: Agno 3.0.9 extract_text, extract_metadata_only, extract_batch, and the
+    # Reason: Agno 3.2.1 extract_text, extract_metadata_only, extract_batch, and the
     # crawl_website content loop call the module-level trafilatura.fetch_url binding,
     # which follows redirects and dials any address, so model-chosen URLs reached
     # loopback, private, and metadata targets from the MindRoom process.
@@ -193,7 +193,7 @@ def install_server_fetch_guard() -> None:
     # tests/test_tools_metadata.py::test_local_url_fetch_tools_do_not_contact_loopback_targets.
     agno_trafilatura.fetch_url = _fetch_url  # ty: ignore[invalid-assignment]
     # AGNO_COMPAT: TrafilaturaTools crawling delegates to Trafilatura's spider without a fetch hook.
-    # Reason: Agno 3.0.9 crawl_website calls trafilatura.spider.focused_crawler, whose
+    # Reason: Agno 3.2.1 crawl_website calls trafilatura.spider.focused_crawler, whose
     # module-level fetch_url and fetch_response bindings download robots.txt, redirects,
     # meta-refresh targets, and discovered links without a destination policy.
     # Upstream issue: Tracking gap; no matching issue identified on September 24, 2026.

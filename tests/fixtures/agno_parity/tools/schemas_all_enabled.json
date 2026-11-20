@@ -6067,7 +6067,7 @@
             },
             "limit": {
               "type": "integer",
-              "description": "(int) The number of rows to return. Defaults to 10. Use `None` to show all results."
+              "description": "(int) The number of rows to return. Defaults to 10. Use `None` to show all results.\nNon-positive values return no rows."
             },
             "mindroom_output_path": {
               "anyOf": [

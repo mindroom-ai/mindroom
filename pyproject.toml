@@ -15,7 +15,7 @@ classifiers = [
 ]
 dynamic = [ "version" ]
 dependencies = [
-  "agno==3.0.9",
+  "agno==3.2.1",
   "aiohttp>=3.13.3",
   # Claude SDK 2 moves requests to API version 2026-10-21, a migration of its own.
   "anthropic>=1.17,<2",
@@ -88,12 +88,11 @@ agentql = [
 ]
 airflow = []
 apify = [
-  # Agno 3.0.9 ApifyTools reads the run as a dict; apify-client 3 returns a model.
-  "apify-client>=1.12.2,<3; platform_machine!='aarch64'",
+  "apify-client>=1.12.2",
 ]
 approved_egress = []
 arxiv = [
-  # Agno 3.0.9 ArxivTools calls Result.download_pdf, which arxiv 4 removed.
+  # Agno 3.2.1 ArxivTools calls Result.download_pdf, which arxiv 4 removed.
   "arxiv<4",
 ]
 atlassian = []
@@ -157,7 +156,7 @@ config_manager = [
   "pyyaml>=6",
 ]
 confluence = [
-  # Agno 3.0.9 ConfluenceTools calls create_page and get_page_by_title, which atlassian-python-api 5 removed.
+  # Agno 3.2.1 ConfluenceTools calls create_page and get_page_by_title, which atlassian-python-api 5 removed.
   "atlassian-python-api<5",
 ]
 contacts = []
@@ -497,7 +496,7 @@ zendesk = [
   "requests",
 ]
 zep = [
-  # Agno 3.0.9 ZepTools calls user.add, which zep-cloud 4 removed.
+  # Agno 3.2.1 ZepTools calls user.add, which zep-cloud 4 removed.
   "zep-cloud>=3.3,<4",
 ]
 zoom = [
