@@ -406,11 +406,16 @@ async def _run_call(
     emit((call, tool_result_message(execution, media=outcome)))
 
 
+def tool_result_content(result: str | None, *, is_error: bool | None) -> str | None:
+    """Return the content a tool message stores for a call's result: a success without text says so."""
+    return result if result or is_error else NO_OUTPUT_TEXT
+
+
 def tool_result_message(execution: ToolExecution, media: ToolValue | None = None) -> Message:
     """Return the tool message that answers ``execution`` with its recorded result.
 
     ``media`` is the tool value whose media the message carries when the call succeeded; a failed call carries none.
-    A success without text says so (``NO_OUTPUT_TEXT``).
+    A success without text says so (``tool_result_content``).
     """
     images = audio = videos = files = None
     if media is not None and not execution.is_error:
@@ -419,7 +424,7 @@ def tool_result_message(execution: ToolExecution, media: ToolValue | None = None
         )
     return Message(
         role="tool",
-        content=execution.result if execution.result or execution.is_error else NO_OUTPUT_TEXT,
+        content=tool_result_content(execution.result, is_error=execution.is_error),
         tool_call_id=execution.tool_call_id,
         tool_name=execution.tool_name,
         tool_args=execution.tool_args,
@@ -477,6 +482,7 @@ __all__ = [
     "offered_toolkits",
     "plan_tool_batch",
     "sorted_specs",
+    "tool_result_content",
     "tool_result_message",
     "toolkit_instructions",
 ]

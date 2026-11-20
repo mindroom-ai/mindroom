@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.tools import tool_result_message
@@ -35,6 +35,8 @@ class _Batch:
 
     messages: list[Message]
     calls: Mapping[str, PlannedCall]
+    # Each finished call's raw outcome, which its result message may word differently (``tool_result_message``).
+    executions: dict[str, ToolExecution] = field(default_factory=dict)
     persisted: bool = False
 
 
@@ -88,6 +90,7 @@ class BatchCheckpoint:
             is_error=outcome.is_error,
             result=outcome.content,
         )
+        batch.executions[call_id] = execution
         batch.messages.append(tool_result_message(execution, media=outcome))
 
     async def persist_approval(self, parent_call_id: str) -> None:
@@ -114,6 +117,9 @@ class BatchCheckpoint:
             results = {message.tool_call_id: message for message in batch.messages if message.role == "tool"}
             observed: dict[str, ToolExecution] = {}
             for observed_id, call in batch.calls.items():
+                if observed_id in batch.executions:
+                    observed[observed_id] = deepcopy(batch.executions[observed_id])
+                    continue
                 result = results.get(observed_id)
                 observed[observed_id] = ToolExecution(
                     tool_call_id=observed_id,
