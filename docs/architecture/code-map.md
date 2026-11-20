@@ -262,6 +262,7 @@ Matrix sync callback
 | `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
 | `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through, and the listener helper the second listeners beside the API share |
 | `script_sdk.py` | The standard-library `MindRoomTools` client a script calls tools with |
+| `workflow.py` | The standard-library SDK a workflow script imports: lanes and call keys, the gateway client, `tool`, `shell`, `phase`, `log`, and the loader that calls `main(args)` |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, and surface into an `AgentBuild` |

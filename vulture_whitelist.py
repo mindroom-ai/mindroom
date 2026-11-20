@@ -500,3 +500,4 @@ DirtyLanes  # Workflow replay API the workflow engine calls from B2b on (src/min
 _.mark_after  # Workflow replay API the workflow engine calls from B2b on (src/mindroom/workflow_runs/replay.py)
 _.is_dirty  # Workflow replay API the workflow engine calls from B2b on (src/mindroom/workflow_runs/replay.py)
 _.update_node  # Workflow run API the workflow engine calls from B2b on (src/mindroom/workflow_runs/store.py)
+_check_options  # Workflow SDK check that agent() and spawn() call from B4 on (src/mindroom/workflow.py)
