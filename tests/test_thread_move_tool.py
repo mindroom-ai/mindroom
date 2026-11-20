@@ -28,7 +28,7 @@ from mindroom.constants import (
     TOOL_TRACE_CONTENT_KEY,
     WAKE_MENTIONED_KEY,
 )
-from mindroom.custom_tools.thread_move import ThreadMoveTools, _plan_thread_copy, _PlannedCopy
+from mindroom.custom_tools.thread_move import ThreadMoveTools, _plan_thread_copy
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -77,7 +77,7 @@ def _plan(
     *messages: ResolvedVisibleMessage,
     display_names: dict[str, str] | None = None,
     mentioned_user_ids: list[str] | None = None,
-) -> list[_PlannedCopy]:
+) -> list[dict[str, Any]]:
     return _plan_thread_copy(
         messages,
         entity_name_for_sender=ENTITY_IDS.get,
@@ -91,8 +91,8 @@ def test_plan_posts_the_movers_messages_as_they_appeared() -> None:
     """The moving agent re-posts its own message unchanged."""
     [copy] = _plan(_message(CODE_ID, {"msgtype": "m.text", "body": "done"}, "$reply:example.org"))
 
-    assert copy.content["body"] == "done"
-    assert ORIGINAL_SENDER_KEY not in copy.content
+    assert copy["body"] == "done"
+    assert ORIGINAL_SENDER_KEY not in copy
 
 
 @pytest.mark.parametrize(
@@ -103,8 +103,8 @@ def test_plan_reposts_the_movers_own_relays_as_they_appeared(body: str) -> None:
     """Voice transcripts, handoffs, and earlier move copies keep who they speak for, without a second name."""
     [copy] = _plan(_message(CODE_ID, {"msgtype": "m.text", "body": body, ORIGINAL_SENDER_KEY: HUMAN_ID}))
 
-    assert copy.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
-    assert copy.content["body"] == body
+    assert copy[ORIGINAL_SENDER_KEY] == HUMAN_ID
+    assert copy["body"] == body
 
 
 def test_plan_reposts_another_movers_copy_without_a_second_name() -> None:
@@ -112,8 +112,8 @@ def test_plan_reposts_another_movers_copy_without_a_second_name() -> None:
     earlier = {"msgtype": "m.text", "body": "Dominic: hi", ORIGINAL_SENDER_KEY: HUMAN_ID, SKIP_MENTIONS_KEY: True}
     [copy] = _plan(_message(ABSENT_ID, earlier), display_names={ABSENT_ID: "Research"})
 
-    assert copy.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
-    assert copy.content["body"] == "Dominic: hi"
+    assert copy[ORIGINAL_SENDER_KEY] == HUMAN_ID
+    assert copy["body"] == "Dominic: hi"
 
 
 def test_plan_names_the_poster_of_a_relayed_delegation() -> None:
@@ -126,16 +126,16 @@ def test_plan_names_the_poster_of_a_relayed_delegation() -> None:
         display_names={HUMAN_ID: "Dominic", ABSENT_ID: "Research"},
     )
 
-    assert copy.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
-    assert copy.content["body"] == "Research: @code please check the logs"
+    assert copy[ORIGINAL_SENDER_KEY] == HUMAN_ID
+    assert copy["body"] == "Research: @code please check the logs"
 
 
 def test_plan_ignores_relay_attribution_claimed_by_a_human() -> None:
     """Only managed senders can attribute a message to someone else."""
     [copy] = _plan(_message(HUMAN_ID, {"msgtype": "m.text", "body": "hi", ORIGINAL_SENDER_KEY: CODE_ID}))
 
-    assert copy.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
-    assert copy.content["body"] == "Dominic: hi"
+    assert copy[ORIGINAL_SENDER_KEY] == HUMAN_ID
+    assert copy["body"] == "Dominic: hi"
 
 
 def test_plan_attributes_human_and_other_entity_messages_to_their_authors() -> None:
@@ -145,8 +145,8 @@ def test_plan_attributes_human_and_other_entity_messages_to_their_authors() -> N
         _message(ABSENT_ID, {"msgtype": "m.text", "body": "found it"}),
     )
 
-    assert human.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
-    assert absent.content[ORIGINAL_SENDER_KEY] == ABSENT_ID
+    assert human[ORIGINAL_SENDER_KEY] == HUMAN_ID
+    assert absent[ORIGINAL_SENDER_KEY] == ABSENT_ID
 
 
 @pytest.mark.parametrize(
@@ -169,7 +169,7 @@ def test_plan_keeps_completed_replies() -> None:
         _message(CODE_ID, {"msgtype": "m.text", "body": "all done", STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}),
     )
 
-    assert copy.content["body"] == "all done"
+    assert copy["body"] == "all done"
 
 
 def test_plan_copies_only_allowlisted_keys() -> None:
@@ -190,11 +190,11 @@ def test_plan_copies_only_allowlisted_keys() -> None:
     own, relayed = _plan(_message(CODE_ID, content), _message(HUMAN_ID, content), mentioned_user_ids=[CODE_ID])
 
     for copy in (own, relayed):
-        assert copy.content[SKIP_MENTIONS_KEY] is True
-        assert copy.content["m.mentions"] == {}
-        assert copy.content[COPIED_MENTIONS_KEY] == [CODE_ID]
-    assert set(own.content) == {*TEXT_KEYS, SKIP_MENTIONS_KEY, "m.mentions", COPIED_MENTIONS_KEY}
-    assert set(relayed.content) == {
+        assert copy[SKIP_MENTIONS_KEY] is True
+        assert copy["m.mentions"] == {}
+        assert copy[COPIED_MENTIONS_KEY] == [CODE_ID]
+    assert set(own) == {*TEXT_KEYS, SKIP_MENTIONS_KEY, "m.mentions", COPIED_MENTIONS_KEY}
+    assert set(relayed) == {
         *TEXT_KEYS,
         SKIP_MENTIONS_KEY,
         "m.mentions",
@@ -225,7 +225,7 @@ def test_plan_keeps_fields_clients_need_to_render_the_copy(content: dict[str, An
     """Locations keep their map, collapsible sections stay, and voice notes still play as voice notes."""
     [copy] = _plan(_message(CODE_ID, content))
 
-    assert {key: copy.content[key] for key in content} == content
+    assert {key: copy[key] for key in content} == content
 
 
 def test_plan_prefixes_relayed_text() -> None:
@@ -237,8 +237,8 @@ def test_plan_prefixes_relayed_text() -> None:
         ),
     )
 
-    assert copy.content["body"] == "Dominic: hi"
-    assert copy.content["formatted_body"] == "<strong>Dominic</strong>: <p>hi</p>"
+    assert copy["body"] == "Dominic: hi"
+    assert copy["formatted_body"] == "<strong>Dominic</strong>: <p>hi</p>"
 
 
 def test_plan_prefix_keeps_a_leading_tool_marker_on_its_own_line() -> None:
@@ -246,9 +246,9 @@ def test_plan_prefix_keeps_a_leading_tool_marker_on_its_own_line() -> None:
     trace = build_tool_trace_content([ToolTraceEntry(type="tool_call_completed", tool_name="shell")]) or {}
     [copy] = _plan(_message(ABSENT_ID, {"msgtype": "m.text", "body": "🔧 `shell` [1]\n\nfound it", **trace}))
 
-    assert copy.content["body"].splitlines()[0].endswith(":")
-    assert body_without_tool_markers(copy.content["body"], copy.content).splitlines()[-1] == "found it"
-    assert "🔧" not in body_without_tool_markers(copy.content["body"], copy.content)
+    assert copy["body"].splitlines()[0].endswith(":")
+    assert body_without_tool_markers(copy["body"], copy).splitlines()[-1] == "found it"
+    assert "🔧" not in body_without_tool_markers(copy["body"], copy)
 
 
 def test_plan_escapes_display_name_in_formatted_prefix() -> None:
@@ -261,7 +261,7 @@ def test_plan_escapes_display_name_in_formatted_prefix() -> None:
         display_names={HUMAN_ID: "<b>Dom</b>"},
     )
 
-    assert copy.content["formatted_body"] == "<strong>&lt;b&gt;Dom&lt;/b&gt;</strong>: hi"
+    assert copy["formatted_body"] == "<strong>&lt;b&gt;Dom&lt;/b&gt;</strong>: hi"
 
 
 def test_plan_prefixes_relayed_media_caption() -> None:
@@ -274,11 +274,11 @@ def test_plan_prefixes_relayed_media_caption() -> None:
         ),
     )
 
-    assert plain.content["filename"] == "photo.png"
-    assert plain.content["body"] == "Dominic: photo.png"
-    assert plain.content["url"] == "mxc://example.org/abc"
-    assert captioned.content["filename"] == "photo.png"
-    assert captioned.content["body"] == "Dominic: look"
+    assert plain["filename"] == "photo.png"
+    assert plain["body"] == "Dominic: photo.png"
+    assert plain["url"] == "mxc://example.org/abc"
+    assert captioned["filename"] == "photo.png"
+    assert captioned["body"] == "Dominic: look"
 
 
 @pytest.mark.parametrize("msgtype", [[], {}], ids=["list", "dict"])
@@ -286,15 +286,15 @@ def test_plan_relays_a_msgtype_that_is_not_text_as_plain_content(msgtype: object
     """An edit can install any msgtype its sender writes, so one that is not text is not media."""
     [copy] = _plan(_message(HUMAN_ID, {"msgtype": msgtype, "body": "photo.png"}))
 
-    assert copy.content["body"] == "Dominic: photo.png"
-    assert "filename" not in copy.content
+    assert copy["body"] == "Dominic: photo.png"
+    assert "filename" not in copy
 
 
 def test_plan_name_falls_back_to_user_id() -> None:
     """A sender without a display name is named by Matrix user ID."""
     [copy] = _plan(_message(HUMAN_ID, {"msgtype": "m.text", "body": "hi"}), display_names={})
 
-    assert copy.content["body"] == f"{HUMAN_ID}: hi"
+    assert copy["body"] == f"{HUMAN_ID}: hi"
 
 
 SOURCE_ROOM_ID = "!source:localhost"
@@ -308,7 +308,6 @@ MODULE = "mindroom.custom_tools.thread_move"
 class _Move:
     context: ToolRuntimeContext
     ids: dict[str, str]
-    clients: dict[str, AsyncMock]
 
 
 @dataclass
@@ -329,21 +328,21 @@ def _move(
     )
     runtime_paths = runtime_paths_for(config)
     ids = {name: matrix_id.full_id for name, matrix_id in entity_ids(config, runtime_paths).items()}
-    clients = {"general": make_matrix_client_mock(user_id=ids["general"])}
+    client = make_matrix_client_mock(user_id=ids["general"])
     room = nio.MatrixRoom(SOURCE_ROOM_ID, ids["general"])
     room.add_member(REQUESTER_ID, "Dominic", None)
     context = make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(room_id=SOURCE_ROOM_ID, thread_id=thread_id, reply_to_event_id=None),
         requester_id=REQUESTER_ID,
-        client=clients["general"],
+        client=client,
         config=config,
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         room=room,
     )
-    return _Move(context=context, ids=ids, clients=clients)
+    return _Move(context=context, ids=ids)
 
 
 def _thread(move: _Move) -> list[ResolvedVisibleMessage]:
@@ -507,7 +506,11 @@ async def test_move_thread_requires_the_moving_agent_in_target(tmp_path: Path, *
     """The moving agent posts the copies and writes the tags, so it must be in the target room."""
     move = _move(tmp_path)
     members = {REQUESTER_ID, *move.ids.values()} - {move.ids["general"]}
-    with _matrix(move, _thread(move), members=members) as mocks:
+    with (
+        _matrix(move, _thread(move), members=members) as mocks,
+        # That cause is reported before the requester's access is checked.
+        patch(f"{MODULE}.room_access_allowed", new=AsyncMock(return_value=False)) as access,
+    ):
         if unreadable:
             # An account outside the room cannot read its members.
             mocks.members.return_value = None
@@ -516,21 +519,7 @@ async def test_move_thread_requires_the_moving_agent_in_target(tmp_path: Path, *
     assert payload["status"] == "error"
     assert payload["message"] == "Invite general to the target room before moving a thread there."
     mocks.send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_move_thread_names_a_missing_agent_before_checking_access(tmp_path: Path) -> None:
-    """An agent missing from the target room cannot read its members, so that cause is reported first."""
-    move = _move(tmp_path)
-    members = {REQUESTER_ID, move.ids["code"]}
-    with (
-        _matrix(move, _thread(move), members=members) as mocks,
-        patch(f"{MODULE}.room_access_allowed", new=AsyncMock(return_value=False)),
-    ):
-        payload = await _run()
-
-    assert payload["message"] == "Invite general to the target room before moving a thread there."
-    mocks.send.assert_not_awaited()
+    access.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -589,7 +578,7 @@ async def test_mover_reposts_other_authors_with_their_names(tmp_path: Path) -> N
         payload = await _run()
 
     copies = mocks.send.await_args_list[:4]
-    assert [call.args[0] for call in copies] == [move.clients["general"]] * 4
+    assert [call.args[0] for call in copies] == [move.context.client] * 4
     assert {call.args[1] for call in copies} == {TARGET_ROOM_ID}
     root, code_reply, research_reply, own = (call.args[2] for call in copies)
     assert "m.relates_to" not in root
@@ -674,7 +663,7 @@ async def test_move_thread_copies_tags_posts_notice_and_resolves_source(tmp_path
     with _matrix(move, _thread(move), tags=tags) as mocks:
         payload = await _run()
 
-    general = move.clients["general"]
+    general = move.context.client
     assert [call.args for call in mocks.set_tag.await_args_list] == [
         (general, TARGET_ROOM_ID, "$copy0:localhost", "ideas"),
         (general, TARGET_ROOM_ID, "$copy0:localhost", "priority"),
@@ -793,22 +782,25 @@ async def test_move_thread_accepts_a_long_message_sent_with_its_full_text_attach
     """A preview that carries the full text as an attachment is a complete copy."""
     move = _move(tmp_path)
     sends = _delivered_sends()
+    previews: list[str] = []
 
     async def send(client: object, room_id: str, content: dict[str, Any], **kwargs: object) -> DeliveredMatrixEvent:
         delivered = await sends(client, room_id, content, **kwargs)
-        if content.get("body") == "@research found it?":
+        if content["body"].endswith("@research found it?"):
             preview = {
                 **content,
                 "body": "@research fo…",
                 "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
                 "url": "mxc://localhost/full",
             }
+            previews.append(delivered.event_id)
             return DeliveredMatrixEvent(event_id=delivered.event_id, content_sent=preview)
         return delivered
 
     with _matrix(move, _thread(move), send=AsyncMock(side_effect=send)):
         payload = await _run()
 
+    assert previews == ["$copy1:localhost"]
     assert payload["status"] == "ok"
     assert payload["copied"] == 3
 

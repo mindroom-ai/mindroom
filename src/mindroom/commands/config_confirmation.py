@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
-    from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.message_target import MessageTarget
@@ -58,11 +57,6 @@ class ConfigConfirmationContext:
             msg = "Matrix client is not ready for config confirmation"
             raise RuntimeError(msg)
         return client
-
-    @property
-    def authorization(self) -> AuthorizationConfig:
-        """Return authorization from the current runtime config."""
-        return self.runtime.config.authorization
 
 
 @dataclass
@@ -190,11 +184,13 @@ def _save_pending_change(
         del records[stale]
     if checkpoint is None:
         records.pop(preview_event_id, None)
-        _pending_changes.pop(preview_event_id, None)
     else:
         records[preview_event_id] = checkpoint.to_dict()
     write_override_records(path, records)
-    if checkpoint is not None:
+    # Memory follows the store: a write that fails leaves the change, and a value only memory holds, in place.
+    if checkpoint is None:
+        _pending_changes.pop(preview_event_id, None)
+    else:
         _pending_changes[preview_event_id] = checkpoint
 
 
@@ -313,6 +309,19 @@ async def _has_visible_confirmation_response(
     )
 
 
+async def _already_set_up(client: nio.AsyncClient, runtime_paths: RuntimePaths, room_id: str, event_id: str) -> bool:
+    """Whether the preview has a pending change, whose buttons are added again, or a visible decision.
+
+    Call it while holding the preview's lock.
+    """
+    pending_change = _resolve_pending_change(client, runtime_paths, event_id, room_id)
+    if pending_change is not None:
+        if pending_change.decision_event_id is None:
+            await _add_confirmation_reactions(client, room_id, event_id)
+        return True
+    return bool(await _confirmation_response_ids(client, room_id, event_id))
+
+
 async def recover_confirmation_setup(
     client: nio.AsyncClient,
     runtime_paths: RuntimePaths,
@@ -321,12 +330,7 @@ async def recover_confirmation_setup(
 ) -> bool:
     """Recover a preview whose pending change or completed decision already exists."""
     async with _pending_change_lock(preview_event_id):
-        pending_change = _resolve_pending_change(client, runtime_paths, preview_event_id, room_id)
-        if pending_change is not None:
-            if pending_change.decision_event_id is None:
-                await _add_confirmation_reactions(client, room_id, preview_event_id)
-            return True
-        return bool(await _confirmation_response_ids(client, room_id, preview_event_id))
+        return await _already_set_up(client, runtime_paths, room_id, preview_event_id)
 
 
 async def ensure_pending_change(
@@ -343,12 +347,7 @@ async def ensure_pending_change(
 ) -> None:
     """Persist one preview exactly once before exposing its reaction buttons."""
     async with _pending_change_lock(event_id):
-        pending_change = _resolve_pending_change(client, runtime_paths, event_id, room_id)
-        if pending_change is not None:
-            if pending_change.decision_event_id is None:
-                await _add_confirmation_reactions(client, room_id, event_id)
-            return
-        if await _confirmation_response_ids(client, room_id, event_id):
+        if await _already_set_up(client, runtime_paths, room_id, event_id):
             return
 
         pending_change = _PendingConfigChange(
@@ -370,16 +369,15 @@ async def ensure_pending_change(
         )
 
 
-async def _ensure_decision_checkpoint(
+def _ensure_decision_checkpoint(
     context: ConfigConfirmationContext,
     event: nio.ReactionEvent,
     pending_change: _PendingConfigChange,
 ) -> _PendingConfigChange | None:
     """Freeze the winning reaction and its authorization before mutation."""
     if pending_change.decision_event_id is not None:
-        return pending_change if pending_change.decision_event_id == event.event_id else None
+        return pending_change  # The caller ignored every other reaction.
 
-    authorization = context.authorization
     resolved_sender = resolve_human_requester_alias(
         event.sender,
         context.runtime.config,
@@ -399,7 +397,7 @@ async def _ensure_decision_checkpoint(
     response_text = None
     if event.key == "❌":
         response_text = "❌ Configuration change cancelled."
-    elif not authorization.config_command_enabled:
+    elif not context.runtime.config.authorization.config_command_enabled:
         response_text = "❌ Config command disabled."
     elif not is_platform_administrator(resolved_sender, context.runtime.config, context.runtime_paths):
         response_text = "❌ Admin only."
@@ -418,10 +416,10 @@ async def _response_for_checkpointed_decision(
     context: ConfigConfirmationContext,
     preview_event_id: str,
     pending_change: _PendingConfigChange,
-) -> tuple[_PendingConfigChange, str]:
+) -> str:
     """Checkpoint one decision result without repeating an ambiguous config write."""
     if pending_change.decision_response_text is not None:
-        return pending_change, pending_change.decision_response_text
+        return pending_change.decision_response_text
     if pending_change.decision_key != "✅":
         msg = "Config confirmation decision checkpoint is incomplete"
         raise RuntimeError(msg)
@@ -444,7 +442,7 @@ async def _response_for_checkpointed_decision(
         )
     checkpoint = replace(pending_change, decision_response_text=response_text)
     _save_pending_change(context.runtime_paths, preview_event_id, checkpoint)
-    return checkpoint, response_text
+    return response_text
 
 
 async def resume_committed_confirmation(
@@ -477,14 +475,10 @@ async def handle_confirmation_reaction(
             _save_pending_change(context.runtime_paths, preview_event_id, None)
             return
 
-        pending_change = await _ensure_decision_checkpoint(context, event, pending_change)
+        pending_change = _ensure_decision_checkpoint(context, event, pending_change)
         if pending_change is None:
             return
-        pending_change, response_text = await _response_for_checkpointed_decision(
-            context,
-            preview_event_id,
-            pending_change,
-        )
+        response_text = await _response_for_checkpointed_decision(context, preview_event_id, pending_change)
 
         target = context.build_message_target(
             room_id=room.room_id,

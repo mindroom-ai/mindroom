@@ -6,6 +6,7 @@ import asyncio
 import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
+from weakref import WeakValueDictionary
 from zoneinfo import ZoneInfo
 
 from mindroom.approval.auto_approve_windows import (
@@ -31,7 +32,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-_CHANGES: dict[tuple[str, str], asyncio.Lock] = {}
+# Each room's lock lives only while a command holds or waits for it.
+_CHANGES: WeakValueDictionary[tuple[str, str], asyncio.Lock] = WeakValueDictionary()
 _USAGE = "Usage: `/auto_approve <minutes>`, `/auto_approve <hours>h`, `/auto_approve off`, or `/auto_approve` to show the current window"
 # A bare number counts minutes; five digits already exceed the longest window.
 _DURATION = re.compile(r"^(\d{1,5})\s*(m|min|mins|minutes?|h|hr|hrs|hours?)?$")

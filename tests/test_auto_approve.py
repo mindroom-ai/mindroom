@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -363,6 +364,16 @@ async def test_windows_opened_at_once_are_both_published(tmp_path: Path) -> None
     )
 
     assert {window["requester_id"] for window in published[-1]["windows"]} == {HUMAN, "@other:localhost"}
+
+
+@pytest.mark.asyncio
+async def test_a_rooms_change_lock_lives_only_while_a_command_changes_its_windows(tmp_path: Path) -> None:
+    """The lock ordering one room's changes is dropped once no command holds or waits for it."""
+    await _send(tmp_path, "!auto_approve 30")
+    await _send(tmp_path, "!auto_approve off")
+    gc.collect()
+
+    assert not auto_approve_commands._CHANGES
 
 
 @pytest.mark.asyncio

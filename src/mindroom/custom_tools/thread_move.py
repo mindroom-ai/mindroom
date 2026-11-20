@@ -67,13 +67,6 @@ _COPIED_CONTENT_KEYS = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class _PlannedCopy:
-    """One message to re-post in the target thread, without its thread relation."""
-
-    content: dict[str, Any]
-
-
 def _plan_thread_copy(
     messages: Sequence[ResolvedVisibleMessage],
     *,
@@ -81,14 +74,14 @@ def _plan_thread_copy(
     mover_id: str,
     display_names: Mapping[str, str],
     mentioned_user_ids: Callable[[dict[str, Any]], list[str]],
-) -> list[_PlannedCopy]:
-    """Return the posts that recreate one thread's conversation in another room.
+) -> list[dict[str, Any]]:
+    """Return the message contents, without thread relations, that recreate one thread in another room.
 
     The moving agent, ``mover_id``, re-posts its own messages as they appeared,
     so it still sees its earlier replies as its own turns. It re-posts
     everyone else's with their name visible.
     """
-    plan: list[_PlannedCopy] = []
+    plan: list[dict[str, Any]] = []
     for message in messages:
         if message.content.get("msgtype") == "m.notice" or message.stream_status in UNFINISHED_REPLY_STATUSES:
             continue
@@ -111,7 +104,7 @@ def _plan_thread_copy(
             named = named or message.content.get(SKIP_MENTIONS_KEY) is True
         if not named:
             _attribute_relay(content, message.sender, display_names.get(message.sender, message.sender))
-        plan.append(_PlannedCopy(content=content))
+        plan.append(content)
     return plan
 
 
@@ -137,7 +130,7 @@ class _PreparedMove:
     target_room_id: str
     root_id: str
     last_event_id: str
-    plan: list[_PlannedCopy]
+    plan: list[dict[str, Any]]
     skipped: int
 
 
@@ -173,10 +166,10 @@ class ThreadMoveTools(Toolkit):
         new_root_id: str | None = None
         previous_event_id: str | None = None
         for copied, planned in enumerate(prepared.plan):
-            content = planned.content
+            content = planned
             if new_root_id is not None:
                 relation = build_thread_relation(new_root_id, latest_thread_event_id=previous_event_id)
-                content = {**content, "m.relates_to": relation}
+                content = {**planned, "m.relates_to": relation}
             delivered = await send_message_result(
                 context.client,
                 prepared.target_room_id,
