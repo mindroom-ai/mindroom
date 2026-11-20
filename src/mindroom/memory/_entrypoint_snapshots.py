@@ -92,10 +92,11 @@ def _kept_preamble(
         idle < PROMPT_CACHE_IDLE_SECONDS
         and source == str(source_path)
         and (summary, checkpoint) == conversation.compaction
+        and kept_frame == frame
         and (
             _only_added_lines(str(body), fresh_body)
             # An empty copy sends no header that points at the file, so the file loads once it gains lines.
-            or (bool(body) and kept_frame == frame and _only_inserted_lines(kept_lines, lines))
+            or (bool(body) and _only_inserted_lines(kept_lines, lines))
         )
     )
     return str(preamble) if reusable else None
@@ -113,12 +114,13 @@ def stable_entrypoint_preamble(
 ) -> str:
     """Return the preamble this conversation last sent for the file, or ``fresh_preamble`` when reuse would mislead.
 
-    ``fresh_body`` is this turn's preamble without the cut marker; its header is compared too, so an edited prompt
-    override loads again. A kept copy keeps its own marker, so it shows none after the file grows past the limit
+    ``fresh_body`` is this turn's preamble without the cut marker. Every prompt and setting in ``frame`` (its header,
+    kept-copy notice, cut marker, and limit) must be unchanged, so an edited override or limit loads again even when
+    the kept text is the same. A kept copy keeps its own marker, so it shows none after the file grows past the limit
     until it loads again.
     ``lines`` holds the file's lines when the preload cuts none, else None. A copy that cut none is also kept
-    while ``lines`` holds its every line in order and each prompt in ``frame`` (its header) is unchanged, so lines
-    inserted anywhere keep it; ``lines`` fit the limit this turn, so the copy's, which they hold, still fit it.
+    while ``lines`` holds its every line in order, so lines inserted anywhere keep it; ``lines`` fit the limit this
+    turn, so the copy's, which they hold, still fit it.
     A changed compaction loads the file again: the request that carries a compaction misses after the system prompt
     anyway, and the turn after one costs only its compacted history.
     An edited or deleted line loads at once. A route that holds the system prompt tells that as a system prompt

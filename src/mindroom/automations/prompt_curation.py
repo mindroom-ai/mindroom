@@ -24,7 +24,7 @@ from mindroom.config.resolution import entity_model_name
 from mindroom.logging_config import get_logger
 from mindroom.memory import read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
-from mindroom.preload_cap import cap_preload_text
+from mindroom.preload_cap import cap_preload_text, preload_text
 from mindroom.providers.registry import model_token_counter
 from mindroom.token_counting.counts import count
 from mindroom.token_counting.families import finish_loading
@@ -104,7 +104,7 @@ def _memory_dir_tokens(root: Path, exclude: Iterable[str], counter: TokenCounter
 
 def _over_limit(payload: bytes, max_chars: int) -> bool:
     """Return whether the preload leaves out part of the file ``payload``, judged as a reply's preload judges it."""
-    return cap_preload_text(payload.decode("utf-8").strip(), max_chars)[1]
+    return cap_preload_text(preload_text(payload, read_cut=False), max_chars)[1]
 
 
 def _curated_paths(config: Config, agent_name: str) -> list[str]:
@@ -203,8 +203,8 @@ def _findings(
     # A file over the limit left as long as it was keeps the same text out of the prompt; one pass may not fit it.
     for path in plan.over_limit:
         payload = after_run[path]
-        chars_after = len(payload.decode("utf-8").strip()) if isinstance(payload, bytes) else 0
-        if chars_after >= len(plan.snapshot[path].decode("utf-8").strip()):
+        chars_after = len(preload_text(payload, read_cut=False)) if isinstance(payload, bytes) else 0
+        if chars_after >= len(preload_text(plan.snapshot[path], read_cut=False)):
             findings.append(f"{path} is over the {plan.max_file_chars}-character prompt limit and did not get shorter")
     if loss := _content_loss(plan, total):
         findings.append(loss)

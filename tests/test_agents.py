@@ -4489,7 +4489,7 @@ def test_config_ignores_overrides_of_the_retired_cut_markers() -> None:
 
 def test_a_curation_prompt_override_with_retired_placeholders_names_them() -> None:
     """The curation prompt lost its MEMORY.md line and token placeholders; an override still using them says which."""
-    with pytest.raises(ValidationError, match="Unsupported prompt placeholder.*: max_entrypoint_lines, memory_lines"):
+    with pytest.raises(ValidationError, match=r"Unsupported prompt placeholder.*: max_entrypoint_lines, memory_lines"):
         Config(prompts={"PROMPT_CURATION_PROMPT_TEMPLATE": "{memory_lines} lines, cap {max_entrypoint_lines}"})
 
 

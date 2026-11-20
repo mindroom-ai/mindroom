@@ -169,6 +169,24 @@ RETIRED_MEMORY_FIELDS = frozenset({"team_reads_member_memory", "file"})
 RETIRED_DEFAULTS_FIELDS = frozenset({"max_preload_chars"})
 
 
+# LEGACY_COMPAT: Retired preload truncation marker prompts.
+# Legacy format: prompts.CONTEXT_TRUNCATION_MARKER_TEMPLATE, prompts.CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE, and
+#   prompts.FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE overrode the markers of the shared context budget and the
+#   MEMORY.md line and token caps.
+# Last legacy release: v2026.11.480; replacement: unreleased; prompts.PRELOAD_FILE_CUT_MARKER_TEMPLATE marks every
+#   cut file, and its placeholders differ, so an old override is not carried over.
+# Handling: Drop them before validation, so a config that still overrides them loads and the next dashboard save
+#   removes them.
+# Coverage: tests/test_agents.py::test_config_ignores_overrides_of_the_retired_cut_markers.
+RETIRED_PROMPT_NAMES = frozenset(
+    {
+        "CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE",
+        "CONTEXT_TRUNCATION_MARKER_TEMPLATE",
+        "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE",
+    },
+)
+
+
 def drop_retired_fields(value: object, fields: frozenset[str]) -> object:
     """Return a settings mapping without the retired ``fields``; any other value as it is."""
     if isinstance(value, dict):
