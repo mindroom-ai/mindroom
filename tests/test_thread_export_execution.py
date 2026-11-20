@@ -1537,7 +1537,7 @@ _MARKER = (1, 1, 1, None)
 
 def _journal_answer(*event_ids: str) -> AsyncMock:
     """Return the journal's fingerprint of the remembered thread: a standing marker and these unedited rows."""
-    rows = frozenset((event_id, event_id, None) for event_id in (_REMEMBERED_THREAD, *event_ids))
+    rows = frozenset((event_id, event_id, None, 0) for event_id in (_REMEMBERED_THREAD, *event_ids))
     return AsyncMock(return_value=(_MARKER, rows))
 
 

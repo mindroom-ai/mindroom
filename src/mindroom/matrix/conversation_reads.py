@@ -89,6 +89,7 @@ def projected_visible_message(projected: VisibleMessage) -> ResolvedVisibleMessa
         thread_id=projected.thread_id,
         latest_event_id=projected.revision_event_id,
     )
+    message.content_generation = projected.content_generation
     if projected.revision_event_id != projected.logical_event_id:
         message.edited_timestamp = projected.revision_ts
     return message
@@ -488,7 +489,7 @@ async def thread_is_unchanged(
     if fingerprint is None:
         return False
     (_, complete, _, recovery_state), rows = fingerprint
-    held = {(message.event_id, message.latest_event_id, None) for message in history}
+    held = {(m.event_id, m.latest_event_id, None, m.content_generation) for m in history}
     return bool(complete) and recovery_state is None and {row for row in rows if row[0] != ignoring_event_id} == held
 
 

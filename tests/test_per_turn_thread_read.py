@@ -87,6 +87,30 @@ async def _admit(
     )
 
 
+async def _refetch_restores_two(bot: AgentBot, body: str) -> None:
+    """Edit ``$two``, delete the edit, and settle the refetch it owes with ``body`` under the original revision.
+
+    The row ends as it began in everything but its text: the same revision and time, and no refetch owed.
+    """
+    two = "$two:localhost"
+    await _admit(bot, "$edit:localhost", "edited", ts=101, replaces=two)
+    await _admit(bot, "$redact:localhost", "", ts=102, redacts="$edit:localhost")
+    store = bot._journal_store.principal(bot._journal_principal_id)
+    page = await store.read_conversation(room_id=_ROOM, thread_id=_ROOT, limit=50)
+    (request,) = page.refresh_pending
+    assert await store.install_refetched_revision(
+        request,
+        revision_event_id=two,
+        revision_ts=2,
+        revision_sender=_USER,
+        content={"body": body},
+    )
+    page = await store.read_conversation(room_id=_ROOM, thread_id=_ROOT, limit=50)
+    assert not page.refresh_pending
+    (restored,) = [m for m in page.messages if m.logical_event_id == two]
+    assert (restored.revision_event_id, restored.revision_ts, restored.content["body"]) == (two, 2, body)
+
+
 @dataclass
 class _Turn:
     """What one turn loaded and what its model and its summary pass were given."""
@@ -188,17 +212,54 @@ class TestOneTurnLoadsItsThreadOnce(ThreadingBehaviorTestBase):
         assert turn.summary_history == [*_SEEDED, _FOLLOW_UP, "the answer"]
 
     @pytest.mark.asyncio
-    async def test_the_echo_of_the_turns_own_reply_is_no_change(self, bot: AgentBot) -> None:
-        """The placeholder's echo lands before the lock refresh; the model never reads it, so nothing is loaded again."""
+    async def test_the_echo_of_the_turns_own_reply_is_no_change_for_the_model(self, bot: AgentBot) -> None:
+        """The placeholder's echo lands before the lock refresh; the model never reads it, so that read is kept.
+
+        The summary pass does read it, at the place the projection gives it, so that pass loads the thread.
+        """
         async with _thread(bot):
             turn = await _run_turn(
                 bot,
                 after_placeholder=lambda: _admit(bot, _REPLY, "Thinking...", ts=101, sender=_BOT),
             )
 
-        assert turn.loads == 1
         assert turn.model_history == [*_SEEDED, _FOLLOW_UP]
         assert turn.summary_history == [*_SEEDED, _FOLLOW_UP, "the answer"]
+        assert turn.loads == 2
+
+    @pytest.mark.asyncio
+    async def test_an_echoed_reply_keeps_its_place_before_a_later_stamped_message(self, bot: AgentBot) -> None:
+        """A message the reply read can carry a later timestamp than the reply's echo, and then sorts after it."""
+
+        async def land() -> None:
+            await _admit(bot, "$skewed:localhost", "skewed", ts=500)
+            await _admit(bot, _REPLY, "Thinking...", ts=101, sender=_BOT)
+
+        async with _thread(bot):
+            turn = await _run_turn(bot, after_placeholder=land)
+
+        assert turn.model_history == [*_SEEDED, _FOLLOW_UP, "skewed"]
+        assert turn.summary_history == [*_SEEDED, _FOLLOW_UP, "the answer", "skewed"]
+
+    @pytest.mark.asyncio
+    async def test_a_settled_refetch_before_the_lock_refresh_reaches_the_model(self, bot: AgentBot) -> None:
+        """A refetch can store other text of the same length under the revision the dispatch read saw."""
+        async with _thread(bot):
+            turn = await _run_turn(bot, after_placeholder=lambda: _refetch_restores_two(bot, "owt"))
+
+        assert turn.model_history == ["Root", "one", "owt", "three", _FOLLOW_UP]
+        assert turn.summary_history == ["Root", "one", "owt", "three", _FOLLOW_UP, "the answer"]
+        assert turn.loads == 2
+
+    @pytest.mark.asyncio
+    async def test_a_settled_refetch_while_the_model_answers_reaches_the_summary_pass(self, bot: AgentBot) -> None:
+        """The summary pass reads the refetched text, not the text the reply read under the same revision."""
+        async with _thread(bot):
+            turn = await _run_turn(bot, while_answering=lambda: _refetch_restores_two(bot, "owt"))
+
+        assert turn.model_history == [*_SEEDED, _FOLLOW_UP]
+        assert turn.summary_history == ["Root", "one", "owt", "three", _FOLLOW_UP, "the answer"]
+        assert turn.loads == 2
 
     @pytest.mark.asyncio
     async def test_a_follow_up_landing_before_the_lock_refresh_reaches_the_model(self, bot: AgentBot) -> None:

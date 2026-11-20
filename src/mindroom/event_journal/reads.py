@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 _PAGE_COLUMNS = """
     logical_event_id, room_id, thread_id, sender, created_ts,
-    revision_event_id, revision_ts, content_json, refresh_token, membership_epoch
+    revision_event_id, revision_ts, content_json, refresh_token, membership_epoch, content_generation
 """
 # Order and stored size only, so a page is sized before any content is loaded.
 # Both backends read a text value's byte length without loading the value;
@@ -705,8 +705,8 @@ def conversation_is_complete(
     return row is not None and bool(row["complete"]) and row["recovery_state"] is None
 
 
-# A thread's hydration marker, and each of its rows' logical ID, visible revision, and refresh token.
-type ThreadFingerprint = tuple[tuple[object, ...], frozenset[tuple[str, str, int | None]]]
+# A thread's hydration marker, and each of its rows' logical ID, visible revision, refresh token, and content generation.
+type ThreadFingerprint = tuple[tuple[object, ...], frozenset[tuple[str, str, int | None, int]]]
 
 
 def thread_fingerprint(
@@ -726,17 +726,20 @@ def thread_fingerprint(
         return None
     rows = transaction.fetchall(
         """
-        SELECT logical_event_id, revision_event_id, refresh_token FROM visible_messages
+        SELECT logical_event_id, revision_event_id, refresh_token, content_generation FROM visible_messages
         WHERE principal_id = ? AND room_id = ? AND thread_id = ?
         UNION ALL
-        SELECT logical_event_id, revision_event_id, refresh_token FROM visible_messages
+        SELECT logical_event_id, revision_event_id, refresh_token, content_generation FROM visible_messages
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
         """,
         (principal_id, room_id, encode_thread_id(thread_id), principal_id, room_id, thread_id),
     )
     return (
         tuple(marker[column] for column in ("hydrated_epoch", "complete", "attempted_policy_rank", "recovery_state")),
-        frozenset((row["logical_event_id"], row["revision_event_id"], row["refresh_token"]) for row in rows),
+        frozenset(
+            (row["logical_event_id"], row["revision_event_id"], row["refresh_token"], int(row["content_generation"]))
+            for row in rows
+        ),
     )
 
 
@@ -910,6 +913,7 @@ def _visible_message(row: Row) -> VisibleMessage:
         revision_event_id=row["revision_event_id"],
         revision_ts=int(row["revision_ts"]),
         content=decode_content(row["content_json"]),
+        content_generation=int(row["content_generation"]),
     )
 
 

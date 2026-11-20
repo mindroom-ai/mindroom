@@ -26,7 +26,7 @@ from mindroom.event_journal import (
     upgrades,
 )
 from tests.conftest import postgres_journal_schema_url
-from tests.test_event_journal_store import admit, message
+from tests.test_event_journal_store import admit, edit, message
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -410,3 +410,47 @@ async def test_thread_markers_from_before_walk_versions_are_walked_again(legacy_
             assert await principal.conversation_is_hydrated(room_id=room_id, thread_id=None)
         finally:
             await store.close()
+
+
+@pytest.mark.asyncio
+async def test_messages_from_before_content_generations_get_one(legacy_database: _LegacyDatabase) -> None:
+    """A message stored before bodies were numbered reads as generation 0, and its next body takes another."""
+    room_id = "!room:example.org"
+    store = legacy_database.open()
+    try:
+        principal = store.principal("agent@alice")
+        await admit(principal, "$root", room_id=room_id)
+        assert await principal.install_hydrated_conversation(
+            room_id=room_id,
+            thread_id="$root",
+            events=(),
+            complete=True,
+            expected_membership_epoch=await principal.membership_epoch(room_id),
+        )
+    finally:
+        await store.close()
+    legacy_database.execute("DROP INDEX visible_messages_content_fingerprint")
+    legacy_database.execute(
+        "CREATE INDEX visible_messages_fingerprint ON visible_messages "
+        "(principal_id, room_id, thread_id, logical_event_id, revision_event_id, refresh_token)",
+    )
+    legacy_database.execute("ALTER TABLE visible_messages DROP COLUMN content_generation")
+
+    for _ in range(2):
+        store = legacy_database.open()
+        try:
+            fingerprint = await store.principal("agent@alice").thread_fingerprint(room_id=room_id, thread_id="$root")
+        finally:
+            await store.close()
+        assert fingerprint is not None
+        assert fingerprint[1] == {("$root", "$root", None, 0)}
+
+    store = legacy_database.open()
+    try:
+        principal = store.principal("agent@alice")
+        await admit(principal, "$edit", room_id=room_id, ts=2_000, content=edit("$root", "edited"))
+        fingerprint = await principal.thread_fingerprint(room_id=room_id, thread_id="$root")
+    finally:
+        await store.close()
+    assert fingerprint is not None
+    assert fingerprint[1] == {("$root", "$edit", None, 1)}

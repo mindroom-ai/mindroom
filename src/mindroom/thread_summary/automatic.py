@@ -376,11 +376,11 @@ async def _countable_thread_history(
     room_id: str,
     thread_id: str,
     held: Sequence[ResolvedVisibleMessage],
-    reply: DeliveredResponse,
 ) -> Sequence[ResolvedVisibleMessage] | None:
     """Return history an automatic pass may count, or nothing.
 
-    ``held`` is the thread as the reply read it, and is that history while nothing but the reply changed since.
+    ``held`` is the thread as the reply read it, and is that history while nothing changed since. The reply's own
+    echo is a change: only a read gives its place among the other messages.
 
     An automatic pass records the counted size as its baseline on every outcome
     it reaches, so it must not run at all on a count it cannot trust. Both reasons it
@@ -389,7 +389,7 @@ async def _countable_thread_history(
     recording.
     """
     try:
-        if await thread_is_unchanged(conversation_reader, room_id, thread_id, held, ignoring_event_id=reply.event_id):
+        if await thread_is_unchanged(conversation_reader, room_id, thread_id, held):
             return held
         return await load_complete_thread_history(conversation_reader, room_id, thread_id)
     except TruncatedThreadHistoryError:
@@ -597,7 +597,7 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
     refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
     baselines = schedule.THREAD_SUMMARY_BASELINES
     async with baselines.lock(room_id, thread_id):
-        projected = await _countable_thread_history(conversation_reader, room_id, thread_id, held, delivered_response)
+        projected = await _countable_thread_history(conversation_reader, room_id, thread_id, held)
         if projected is None:
             return
         # This pass starts at delivery time, so the projection cannot hold the

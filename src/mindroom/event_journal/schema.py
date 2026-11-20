@@ -310,6 +310,8 @@ _TABLES = (
         content_json TEXT,
         refresh_token BIGINT,
         membership_epoch BIGINT NOT NULL,
+        -- Differs for every body this message has stored, so a reader holding one can tell it was replaced.
+        content_generation BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (principal_id, room_id, logical_event_id)
     )
     """,
@@ -740,8 +742,10 @@ _INDEXES = (
     -- An export pass reads every thread's fingerprint, mostly to find it
     -- unchanged. From the table, each row costs a page of its own, plus every
     -- overflow page of its content on the way to `refresh_token`.
-    CREATE INDEX IF NOT EXISTS visible_messages_fingerprint
-    ON visible_messages (principal_id, room_id, thread_id, logical_event_id, revision_event_id, refresh_token)
+    CREATE INDEX IF NOT EXISTS visible_messages_content_fingerprint
+    ON visible_messages (
+        principal_id, room_id, thread_id, logical_event_id, revision_event_id, refresh_token, content_generation
+    )
     """,
     """
     -- A redaction deletes the prompts of the revision it names, so its cost must

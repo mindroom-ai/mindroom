@@ -69,6 +69,8 @@ class ResolvedVisibleMessage:
     latest_event_id: str
     stream_status: str | None = None
     edited_timestamp: int | None = None
+    # The journal's number for the stored body this was read from; it changes whenever that body is replaced.
+    content_generation: int = field(default=0, compare=False)
     thread_id_known: bool = True
     """Whether ``thread_id`` is a fact about this message rather than an absence of one.
 

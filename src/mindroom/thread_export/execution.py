@@ -61,7 +61,7 @@ class _ExportedThread:
 # One source's exported threads by room and thread ID.
 type ExportedThreads = dict[tuple[str, str], _ExportedThread]
 # The rows a strict read returned, as `thread_fingerprint` gives them: the read leaves no refresh owed.
-type _ReadRows = frozenset[tuple[str, str, None]]
+type _ReadRows = frozenset[tuple[str, str, None, int]]
 
 
 logger = get_logger(__name__)
@@ -109,7 +109,8 @@ async def _fetch_thread_payload(
         exported_at=datetime.now(UTC),
         summary=summary,
     )
-    return payload, frozenset((m.event_id, m.latest_event_id, None) for m in messages) if summary_lasts else None
+    rows = frozenset((m.event_id, m.latest_event_id, None, m.content_generation) for m in messages)
+    return payload, rows if summary_lasts else None
 
 
 async def _authorized_room_accumulators(
@@ -220,7 +221,7 @@ async def _export_unless_unchanged(
         return
     marker, rows = thread_fingerprint
 
-    def fingerprint(of_rows: frozenset[tuple[str, str, int | None]]) -> int:
+    def fingerprint(of_rows: frozenset[tuple[str, str, int | None, int]]) -> int:
         return hash((marker, of_rows, room, trusted_sender_ids))
 
     previous = exported.get(key)

@@ -13,6 +13,7 @@ to ask the homeserver for its new body rather than popping a local content stack
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -212,8 +213,8 @@ def _project_original(
         INSERT INTO visible_messages (
             principal_id, room_id, logical_event_id, thread_id, sender,
             created_ts, revision_event_id, revision_ts, content_json,
-            refresh_token, membership_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            refresh_token, membership_epoch, content_generation
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, room_id, logical_event_id) DO NOTHING
         """,
         (
@@ -228,6 +229,8 @@ def _project_original(
             content_json,
             refresh_token,
             membership_epoch,
+            # The clock, so a message deleted and stored again does not repeat a number its earlier bodies had.
+            time.time_ns(),
         ),
     )
     record_projected_prompt(
@@ -491,7 +494,8 @@ def _install_revision(
     transaction.execute(
         """
         UPDATE visible_messages
-        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = ?
+        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = ?,
+            content_generation = content_generation + 1
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
         """,
         (
@@ -663,7 +667,8 @@ def install_refetched_revision(
     row = transaction.fetchone(
         """
         UPDATE visible_messages
-        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = NULL
+        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = NULL,
+            content_generation = content_generation + 1
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
           AND revision_event_id = ? AND refresh_token = ? AND membership_epoch = ?
         RETURNING sender, membership_epoch

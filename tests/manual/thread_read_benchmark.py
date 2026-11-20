@@ -6,7 +6,8 @@ turn holds the reply lock (`reply_turn/locked_turn.py` -> `refresh_model_history
 and the summary gate after the reply (`thread_summary/automatic.py`), each with
 `limit=HYDRATED_PROMPT_WINDOW_MESSAGES`. Between them the thread changes: the
 user's message lands, then the reply and its stream edits. The later two keep
-the earlier read when `thread_is_unchanged` says the thread is as it was.
+the earlier read when `thread_is_unchanged` says the thread is as it was, which
+the summary gate cannot say once the reply's echo landed.
 
 This runs that sequence against a real store and reports, per turn, how many
 reads loaded content, how many rows they loaded and how long the reads took.
@@ -159,10 +160,11 @@ async def _measure(
         ts += 1
         await _admit(principal, f"$u-{length}-{turn}", ts, USER, _content(f"follow-up {turn}", root), root=root)
         held = await read()  # dispatch snapshot
-        held = await read(held)  # prompt read once the turn holds the reply lock
         ts += 1
         reply = f"$a-{length}-{turn}"
         await _admit(principal, reply, ts, AGENT, _content("Thinking...", root), root=root)
+        # The prompt read, once the turn holds the reply lock and sent its placeholder.
+        held = await read(held, own_reply=reply)
         for edit in range(STREAM_EDITS):
             ts += 1
             body = f"{turn}.{edit} {BODY}"
@@ -175,7 +177,7 @@ async def _measure(
                 root=root,
                 replaces=reply,
             )
-        await read(held, own_reply=reply)  # summary gate after the reply
+        await read(held)  # summary gate after the reply, whose echo is a change
     turn_reads = loaded[reads_before:]
     return (
         sum(1 for rows in turn_reads if rows) / TURNS,

@@ -91,6 +91,22 @@ def upgrade_hydration_walk_version(transaction: Transaction, inspector: SchemaIn
     transaction.execute("UPDATE conversation_hydration SET walk_version = 1 WHERE thread_id = ''")
 
 
+# LEGACY_COMPAT: Visible messages stored before a message's bodies were numbered.
+# Legacy format: visible_messages without a content_generation column, and the visible_messages_fingerprint index.
+# Last legacy release: v2026.11.472; replacement: the next release numbers every body a message stores, because a
+# refetch can store a different body under the revision, time and refresh state the message had before.
+# Handling: adds content_generation as 0 to every message and drops the index, which the schema replaces with one
+# that holds the new column. A body stored later takes a later number, so none is taken for one read before it.
+# Coverage: tests/test_journal_upgrade_boundary.py::test_messages_from_before_content_generations_get_one.
+def upgrade_content_generation(transaction: Transaction, inspector: SchemaInspector) -> None:
+    """Number the stored bodies of a journal created before content generations, inside the schema transaction."""
+    columns = inspector.columns("visible_messages")
+    if not columns or "content_generation" in columns:
+        return
+    transaction.execute("ALTER TABLE visible_messages ADD COLUMN content_generation BIGINT NOT NULL DEFAULT 0")
+    transaction.execute("DROP INDEX IF EXISTS visible_messages_fingerprint")
+
+
 _PRE_REPLY_OUTBOX_COLUMNS = (
     "principal_id, delivery_id, stage, event_type, room_id, membership_epoch, thread_id, transaction_id, "
     "payload_json, result_json, edits_event_id, edit_target_pending, attempted, retired, "

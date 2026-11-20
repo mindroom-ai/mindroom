@@ -279,6 +279,7 @@ class VisibleMessage:
     revision_event_id: str
     revision_ts: int
     content: Mapping[str, object]
+    content_generation: int = 0
 
 
 class HydrationPolicy(IntEnum):
