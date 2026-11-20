@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
 
 import httpx
@@ -20,14 +22,16 @@ from mindroom.shared_directories.store import add_shared_directory_member, creat
 from mindroom.tailnet_ssh import links
 from mindroom.tailnet_ssh.links import GatewayReport, GatewayStatus, LinkStatus
 from mindroom.tailnet_ssh.store import Link, read_links, update_links
-from mindroom.workers.models import WorkerHandle, WorkerSshEndpoint
+from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerSshEndpoint
 from tests.api.conftest import api_snapshot, publish_api_payload, trusted_upstream_env
 from tests.api.test_egress_credentials_api import _signed_headers, _trust_signed_users
 from tests.api.test_github_requests import connect as connect_github
 from tests.api.test_oauth_api import _runtime_paths
 from tests.runtime_fakes import bind_test_embedded_runtime
+from tests.test_tailnet_ssh_links import _worker_call
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -84,6 +88,9 @@ class _Manager:
     def __exit__(self, *exc_info: object) -> None:
         return None
 
+    def ensure_worker(self, spec: WorkerSpec) -> WorkerHandle:
+        return next(handle for handle in self.handles if handle.worker_key == spec.worker_key)
+
     def list_workers(self) -> list[WorkerHandle]:
         self.listed += 1
         return list(self.handles)
@@ -126,8 +133,8 @@ class _Portal:
 
         update_links(self.paths, change)
 
-    def report(self, link_id: str, *, enrollment: str = "login", **fields: object) -> None:
-        """Have the gateway report one link's node, by default running and enrolled."""
+    def report(self, link_id: str, *, enrollment: str = "login", age: float = 0.0, **fields: object) -> None:
+        """Have the gateway report one link's node ``age`` seconds ago, by default running and enrolled."""
         report: dict[str, object] = {
             "state": "running",
             "login_url": None,
@@ -140,7 +147,8 @@ class _Portal:
             "worker_key": self.link_by_id(link_id).worker_key,
         }
         status = LinkStatus(**(report | fields))  # type: ignore[arg-type]
-        self.status.report = GatewayReport(enrollment, time.monotonic(), {link_id: status})  # type: ignore[arg-type]
+        received_at = time.monotonic() - age
+        self.status.report = GatewayReport(enrollment, received_at, {link_id: status})  # type: ignore[arg-type]
 
     def link_by_id(self, link_id: str) -> Link:
         link = read_links(self.paths).by_id(link_id)
@@ -331,24 +339,52 @@ def test_removing_a_key_rewrites_projection_and_sets_closed_before(portal: _Port
     assert (ssh_dir / "authorized_keys").read_text() == f"restrict,pty {kept}\n"
 
 
-def test_keys_are_saved_when_a_workers_files_cannot_be_written(
+def test_a_failed_refresh_is_reported_and_the_next_connect_writes_the_keys(
     portal: _Portal,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The keys are stored even when a worker's files cannot be rewritten, which its next connect rewrites."""
+    """Keys whose workers' files cannot be rewritten are stored and the failure answered; a connect writes them first.
+
+    So a running sshd that still holds a removed key never gets a connection before its files hold the stored keys.
+    """
+    kept, removed = _public_key("laptop"), _public_key("phone")
+    assert portal.put_keys(kept, removed).status_code == 204
     link = _connected(portal)
-    portal.manager.handles = [_handle(link.worker_key, ssh_dir=portal.tmp_path / "worker-ssh")]
+    portal.change_link(ALICE, "mind", enrolled_login="alice@github", enrolled_at=time.time())
+    ssh_dir = portal.tmp_path / "worker-ssh"
+    portal.manager.handles = [_handle(link.worker_key, ssh_dir=ssh_dir)]
+    assert portal.put_keys(kept, removed).status_code == 204
+    assert removed in (ssh_dir / "authorized_keys").read_text()
+    write_projection = links.write_projection
 
     def unwritable(*_args: object) -> None:
         raise PermissionError(13, "Permission denied", "/primary/path/to/worker")
 
     monkeypatch.setattr(links, "write_projection", unwritable)
-    kept = _public_key("new")
 
     response = portal.put_keys(kept)
 
-    assert response.status_code == 204
+    assert (response.status_code, response.json()["detail"]) == (503, tailnet_ssh_api._NOT_REFRESHED)
+    assert "/primary/path" not in response.text
     assert portal.get()["keys"] == [kept]
+    assert removed in (ssh_dir / "authorized_keys").read_text()
+
+    served: list[str] = []
+
+    async def start_sshd(_call: object) -> None:
+        served.append((ssh_dir / "authorized_keys").read_text())
+
+    monkeypatch.setattr(links, "write_projection", write_projection)
+    monkeypatch.setattr(links, "agent_terminals", lambda *_args, **_kwargs: SimpleNamespace(stand_ins=object()))
+    monkeypatch.setattr(links, "worker_call", lambda *_args, **_kwargs: _worker_call(link.worker_key))
+    monkeypatch.setattr(links, "_start_sshd", start_sshd)
+    config = api_snapshot(main.app).runtime_config
+    assert config is not None
+    memberships = config_lifecycle.app_state(main.app).runtime.agent_reply_memberships
+
+    asyncio.run(links.connect(config, portal.paths, memberships, portal.status, link.id, "alice@github", "laptop"))
+
+    assert served == [f"restrict,pty {kept}\n"]
 
 
 def test_github_import_adds_keys(portal: _Portal, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -408,10 +444,47 @@ async def test_github_keys_keep_only_public_key_lines(monkeypatch: pytest.Monkey
     """Of GitHub's answer only the lines that are public keys are kept, and at most 64 KiB of it is read."""
     first, second = _public_key(), _public_key()
     body = f"{first}\nnot a key\n{second}\n".encode() + b"#" * (70 * 1024) + f"\n{_public_key()}\n".encode()
-    requests = _github(monkeypatch, lambda _request: httpx.Response(200, content=body))
+    requests = _github(monkeypatch, lambda _request: httpx.Response(200, stream=_CountedStream([body])))
 
     assert await tailnet_ssh_api._fetch_github_keys("alice-gh") == [first, second]
     assert [str(request.url) for request in requests] == ["https://github.com/alice-gh.keys"]
+    assert requests[0].headers["Accept-Encoding"] == "identity"
+
+
+class _CountedStream(httpx.AsyncByteStream):
+    """A response body of ``chunks`` that counts the bytes taken from it."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+        self.taken = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self.chunks:
+            self.taken += len(chunk)
+            yield chunk
+
+
+@pytest.mark.asyncio
+async def test_github_keys_stop_reading_at_64_kib(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reading GitHub's answer stops at 64 KiB: the rest of a longer answer is never taken from the connection."""
+    first = _public_key()
+    stream = _CountedStream([f"{first}\n".encode(), *([b"#" * 4096] * 100)])
+    _github(monkeypatch, lambda _request: httpx.Response(200, stream=stream))
+
+    assert await tailnet_ssh_api._fetch_github_keys("alice-gh") == [first]
+    assert stream.taken <= 64 * 1024 + 4096
+
+
+@pytest.mark.asyncio
+async def test_github_keys_refuse_an_encoded_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An answer compressed against the request's ``identity`` is a 502, never decompressed."""
+    answer = httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=b"\x1f\x8b")
+    _github(monkeypatch, lambda _request: answer)
+
+    with pytest.raises(HTTPException) as raised:
+        await tailnet_ssh_api._fetch_github_keys("alice-gh")
+
+    assert raised.value.status_code == 502
 
 
 @pytest.mark.parametrize(
@@ -629,3 +702,21 @@ def test_suspended_link_shows_no_login_url(portal: _Portal) -> None:
     shown = portal.agent("researcher")["link"]
 
     assert (shown["state"], shown["login_url"]) == ("suspended", None)
+
+
+def test_an_expired_report_is_not_shown(portal: _Portal) -> None:
+    """A gateway report over 90 seconds old says nothing of a node: no sign-in URL, and no enrolled worker."""
+    link = _connected(portal)
+    portal.manager.handles = [_handle(link.worker_key)]
+    portal.report(link.id, state="needs_login", login_url=LOGIN_URL, age=91.0)
+    listed = portal.manager.listed
+
+    assert LOGIN_URL not in portal.client.get(BASE, headers=portal.headers["alice"]).text
+    portal.report(link.id, age=91.0)
+
+    shown = portal.agent("mind")["link"]
+
+    assert (shown["state"], shown["worker"], shown["dns_name"], shown["tailnet"]) == ("pending_login", None, None, None)
+    assert portal.manager.listed == listed
+    portal.report(link.id, age=89.0)
+    assert portal.agent("mind")["link"]["state"] == "enrolled"

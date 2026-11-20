@@ -41,7 +41,7 @@ from mindroom.oauth.credential_lifecycle import (
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.shared_directories.store import is_shareable_agent, load_shared_directories, shared_directory_access
 from mindroom.tailnet_ssh.eligibility import link_ineligibility
-from mindroom.tailnet_ssh.links import link_state, listed_workers, refresh_projections
+from mindroom.tailnet_ssh.links import fresh_link_statuses, link_state, listed_workers, refresh_projections
 from mindroom.tailnet_ssh.projection import authorized_key_lines
 from mindroom.tailnet_ssh.store import (
     HOSTNAME,
@@ -55,10 +55,10 @@ from mindroom.tailnet_ssh.store import (
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.tailnet_ssh.links import GatewayReport, GatewayStatus, LinkStatus
+    from mindroom.tailnet_ssh.links import GatewayStatus, LinkStatus
     from mindroom.tailnet_ssh.store import Link, LinkBook
 
 logger = get_logger(__name__)
@@ -67,6 +67,10 @@ router = APIRouter(prefix="/api/connections/tailnet-ssh", tags=["tailnet-ssh"])
 
 _GITHUB_KEYS_MAX_BYTES = 64 * 1024
 _GITHUB_FAILED = "GitHub did not answer with the account's SSH keys; try again later."
+_NOT_REFRESHED = (
+    "Your SSH keys are saved, but a worker's SSH files could not be updated; "
+    "they are updated before its next SSH connection. Save again to retry now."
+)
 _BAD_HOSTNAME = "A hostname is 1 to 63 lowercase letters, digits, and hyphens, and starts and ends with no hyphen."
 # How the card names a worker by its handle's status; a worker the backend does not list is asleep.
 _WORKER_STATES = {"ready": "ready", "starting": "waking"}
@@ -159,7 +163,7 @@ def _link_row(link: Link, node: LinkStatus | None, *, suspended: bool) -> dict[s
     }
 
 
-def _overview(person: _Person, report: GatewayReport) -> tuple[list[str], list[dict[str, object]]]:
+def _overview(person: _Person, nodes: Mapping[str, LinkStatus]) -> tuple[list[str], list[dict[str, object]]]:
     """Return the person's keys, and each agent they may use that opts in to SSH with their link to it. Blocking.
 
     The backend is asked for its workers only when one of the links is enrolled, the only state that shows its worker.
@@ -179,7 +183,7 @@ def _overview(person: _Person, report: GatewayReport) -> tuple[list[str], list[d
         link = book.link(requester_id, name)
         row = None
         if link is not None and link.desired != "off":
-            row = _link_row(link, report.links.get(link.id), suspended=ineligible is not None)
+            row = _link_row(link, nodes.get(link.id), suspended=ineligible is not None)
             if row["state"] == "enrolled":
                 enrolled.append((row, link.worker_key))
         agents.append(
@@ -230,17 +234,26 @@ async def _github_login(user: ConnectionUserContext) -> str | None:
 
 
 async def _fetch_github_keys(login: str) -> list[str]:
-    """Return the public key lines GitHub publishes for ``login``, read up to 64 KiB, or answer 502."""
+    """Return the public key lines GitHub publishes for ``login``, read up to 64 KiB, or answer 502.
+
+    The answer must come uncompressed, so the bytes read are the bytes kept.
+    """
     content = b""
     try:
         async with (
             httpx.AsyncClient(follow_redirects=False, timeout=10) as client,
-            client.stream("GET", f"https://github.com/{quote(login, safe='')}.keys") as response,
+            client.stream(
+                "GET",
+                f"https://github.com/{quote(login, safe='')}.keys",
+                headers={"Accept-Encoding": "identity"},
+            ) as response,
         ):
-            if response.status_code != 200:
-                logger.warning("tailnet_ssh_github_keys_refused", status=response.status_code)
+            encoding = response.headers.get("Content-Encoding", "identity")
+            if response.status_code != 200 or encoding != "identity":
+                logger.warning("tailnet_ssh_github_keys_refused", status=response.status_code, encoding=encoding)
                 raise _refusal(502, _GITHUB_FAILED)
-            async for chunk in response.aiter_bytes():
+            # The body as it arrives, never decompressed, so no more than one network read past the limit is taken.
+            async for chunk in response.aiter_raw():
                 content += chunk[: _GITHUB_KEYS_MAX_BYTES - len(content)]
                 if len(content) == _GITHUB_KEYS_MAX_BYTES:
                     break
@@ -261,8 +274,9 @@ async def _fetch_github_keys(login: str) -> list[str]:
 async def _change_keys(person: _Person, keys: Callable[[list[str]], list[str]]) -> int:
     """Store as the person's keys what ``keys`` makes of their stored ones, then rewrite their workers' SSH files.
 
-    Return how many more keys are stored than before. A key refused stores nothing and answers 422. A worker whose
-    files cannot be rewritten gets them at its next connect, before its sshd admits anyone, so the keys stay stored.
+    Return how many more keys are stored than before. A key refused stores nothing and answers 422. When a worker's
+    files cannot be rewritten the keys stay stored and the answer is a 503 saying so: sending the same keys again
+    retries, and the worker's next connect writes its files from the stored keys before its sshd gets the connection.
     """
     requester_id = person.requester_id
 
@@ -282,6 +296,7 @@ async def _change_keys(person: _Person, keys: Callable[[list[str]], list[str]]) 
         await asyncio.to_thread(refresh_projections, person.user.config, person.user.runtime_paths, requester_id)
     except OSError as error:
         logger.warning("tailnet_ssh_projections_not_refreshed", error=str(error))
+        raise _refusal(503, _NOT_REFRESHED) from None
     return added
 
 
@@ -302,7 +317,8 @@ async def tailnet_ssh_overview(request: Request, matrix_user_id: _SignedIn) -> d
     person = _person(request, matrix_user_id, status)
     # One report answers the whole listing, also when another comes in meanwhile.
     report = status.report
-    keys, agents = await asyncio.to_thread(_overview, person, report)
+    nodes = fresh_link_statuses(report, monotonic=time.monotonic())
+    keys, agents = await asyncio.to_thread(_overview, person, nodes)
     return {
         "enabled": True,
         "enrollment": report.enrollment,

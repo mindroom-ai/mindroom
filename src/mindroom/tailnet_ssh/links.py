@@ -478,9 +478,12 @@ def refresh_projections(config: Config, runtime_paths: RuntimePaths, requester_i
     _projected(runtime_paths, project)
 
 
+def fresh_link_statuses(report: GatewayReport, *, monotonic: float) -> Mapping[str, LinkStatus]:
+    """Return what a gateway report says of each link's node, or nothing when the report is too old to say it."""
+    return {} if monotonic - report.received_at > _STATUS_SECONDS else report.links
+
+
 def active_worker_keys(status: GatewayStatus, *, monotonic: float) -> frozenset[str]:
     """Return the workers with an open SSH connection, by the gateway's last report unless it is too old."""
-    report = status.report
-    if monotonic - report.received_at > _STATUS_SECONDS:
-        return frozenset()
-    return frozenset(link.worker_key for link in report.links.values() if link.open_connections > 0)
+    nodes = fresh_link_statuses(status.report, monotonic=monotonic)
+    return frozenset(node.worker_key for node in nodes.values() if node.open_connections > 0)
