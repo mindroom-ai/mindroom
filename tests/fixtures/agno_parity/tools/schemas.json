@@ -1037,7 +1037,7 @@
       },
       {
         "name": "inline_image",
-        "description": "Upload an image so it can appear inline; unencrypted rooms only.\nPaste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.",
+        "description": "Upload an image so it can appear inline; unencrypted rooms only.\nPaste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.\nIn an encrypted room, or when this refuses, send the file with ``matrix_message(attachments=[...])`` instead.\nNever link an image to a placeholder or made-up address.",
         "parameters": {
           "type": "object",
           "properties": {

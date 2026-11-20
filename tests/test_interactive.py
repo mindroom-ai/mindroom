@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom import interactive
+from mindroom.matrix.message_builder import markdown_to_html
 from tests.conftest import make_matrix_client_mock
 from tests.cpu_budget_helpers import cpu_budget
 
@@ -212,6 +213,18 @@ Whichever you pick, tell the other tool."""
         )
         assert response.interactive_metadata is not None
         assert response.interactive_metadata.option_map == {"✅": "approve", "1": "approve"}
+
+    def test_interactive_question_with_unloadable_image_renders_a_note(self) -> None:
+        """An image with no uploaded file inside a question reaches formatted_body as a note."""
+        response_text = """```interactive
+{"question": "Which logo? ![logo](mxc://placeholder)", "options": [{"emoji": "✅", "label": "This", "value": "a"}]}
+```"""
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+        html = markdown_to_html(response.formatted_text)
+
+        assert "Which logo? ⚠️ Image not sent: logo (no uploaded file)" in html
+        assert "<img" not in html
 
     def test_parse_and_format_interactive_renders_extra_blocks_as_plain_text(self) -> None:
         """Only the first block gets reactions; later blocks render readably instead of as raw JSON."""
