@@ -22,7 +22,6 @@ from .legacy_schema import (
     upgrade_outbox_reply_rows,
 )
 from .legacy_turn_rows import drop_dense_turn_source_indexes, drop_own_index, upgrade_turn_records_to_rows
-from .projection import number_bodies_above_stored
 from .schema import FINGERPRINT_INDEX, create_statement, schema_statements
 
 if TYPE_CHECKING:
@@ -71,6 +70,11 @@ def upgrade_schema(transaction: Transaction, inspector: SchemaInspector) -> None
     for statement in schema_statements(inspector.dialect):
         if statement != staged:
             transaction.execute(statement)
+    # Once per journal: the count starts at the highest number a stored body holds, zero in a new journal.
+    if transaction.fetchone("SELECT latest FROM content_generations") is None:
+        transaction.execute(
+            "INSERT INTO content_generations SELECT COALESCE(MAX(content_generation), 0) FROM visible_messages",
+        )
     # A redaction's effects read membership, reply, and continuation tables that only the current schema has.
     upgrade_turn_records_to_rows(transaction, inspector)
 
@@ -80,9 +84,7 @@ def build_staged_indexes(transaction: Transaction, inspector: SchemaInspector) -
 
     The schema's transaction holds the locks of its upgrades, on PostgreSQL one that stops readers; the build stops
     only writers. The drop, which on PostgreSQL briefly stops readers too, runs on every open, so a journal an older
-    release opened in between does not keep both. Every open also numbers the bodies this runtime stores above the
-    journal's, which the new index reads at once.
+    release opened in between does not keep both.
     """
     transaction.execute(create_statement(FINGERPRINT_INDEX, inspector.dialect))
     drop_own_index(transaction, inspector, "visible_messages_fingerprint")
-    number_bodies_above_stored(transaction)

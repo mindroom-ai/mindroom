@@ -316,6 +316,12 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS content_generations (
+        -- One row: the number the last stored body took, counted up in the transaction that stores a body.
+        latest BIGINT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS unresolved_edits (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,

@@ -469,9 +469,25 @@ async def test_messages_from_before_content_generations_get_one(legacy_database:
     assert generation != 0
 
 
+async def _stored_generation(store: EventJournalStore, room_id: str, thread_id: str) -> int:
+    """Return the generation of the one message a thread holds."""
+    principal = store.principal("agent@alice")
+    assert await principal.install_hydrated_conversation(
+        room_id=room_id,
+        thread_id=thread_id,
+        events=(),
+        complete=True,
+        expected_membership_epoch=await principal.membership_epoch(room_id),
+    )
+    fingerprint = await principal.thread_fingerprint(room_id=room_id, thread_id=thread_id)
+    assert fingerprint is not None
+    ((*_, generation),) = fingerprint[1]
+    return generation
+
+
 @pytest.mark.asyncio
-async def test_a_reopened_journal_numbers_bodies_above_every_stored_one(legacy_database: _LegacyDatabase) -> None:
-    """A body stored after opening takes a generation above every one on disk, whatever the clock says."""
+async def test_a_reopened_journal_numbers_bodies_above_every_one_it_stored(legacy_database: _LegacyDatabase) -> None:
+    """A body takes a number above every earlier one: a journal numbered before the count was kept, a deleted message."""
     room_id = "!room:example.org"
     store = legacy_database.open()
     try:
@@ -479,22 +495,42 @@ async def test_a_reopened_journal_numbers_bodies_above_every_stored_one(legacy_d
     finally:
         await store.close()
     stored = 9_000_000_000_000_000_000
+    legacy_database.execute("DROP TABLE content_generations")
     legacy_database.execute(f"UPDATE visible_messages SET content_generation = {stored}")  # noqa: S608 - a literal
 
     store = legacy_database.open()
     try:
-        principal = store.principal("agent@alice")
-        await admit(principal, "$edit", room_id=room_id, ts=2_000, content=edit("$root", "edited"))
-        assert await principal.install_hydrated_conversation(
-            room_id=room_id,
-            thread_id="$root",
-            events=(),
-            complete=True,
-            expected_membership_epoch=await principal.membership_epoch(room_id),
-        )
-        fingerprint = await principal.thread_fingerprint(room_id=room_id, thread_id="$root")
+        await admit(store.principal("agent@alice"), "$edit", room_id=room_id, ts=2_000, content=edit("$root", "edited"))
+        edited = await _stored_generation(store, room_id, "$root")
     finally:
         await store.close()
-    assert fingerprint is not None
-    ((*_, generation),) = fingerprint[1]
-    assert generation > stored
+    assert edited > stored
+    legacy_database.execute("DELETE FROM visible_messages")
+
+    store = legacy_database.open()
+    try:
+        await admit(store.principal("agent@alice"), "$later", room_id=room_id, ts=3_000)
+        assert await _stored_generation(store, room_id, "$later") > edited
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_two_open_journals_each_number_their_own_bodies(legacy_database: _LegacyDatabase, tmp_path: Path) -> None:
+    """A journal's next body takes its own next number, whatever another journal this process opened stores meanwhile."""
+    room_id = "!room:example.org"
+    store = legacy_database.open()
+    try:
+        principal = store.principal("agent@alice")
+        await admit(principal, "$root", room_id=room_id)
+        first = await _stored_generation(store, room_id, "$root")
+        other = EventJournalStore.open_sqlite(tmp_path / "other.db")
+        try:
+            for index in range(3):
+                await admit(other.principal("agent@alice"), f"$other{index}", room_id=room_id)
+        finally:
+            await other.close()
+        await admit(principal, "$edit", room_id=room_id, ts=2_000, content=edit("$root", "edited"))
+        assert await _stored_generation(store, room_id, "$root") == first + 1
+    finally:
+        await store.close()

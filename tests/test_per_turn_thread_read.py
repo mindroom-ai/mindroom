@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
@@ -18,7 +17,7 @@ import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.constants import FORK_CONTENT_KEY
-from mindroom.event_journal import EventClass, EventKind, InboundEvent, ProjectedEvent, projection, reads
+from mindroom.event_journal import EventClass, EventKind, InboundEvent, ProjectedEvent, reads
 from mindroom.event_journal.views import ConversationReadView
 from mindroom.matrix import conversation_reads
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -325,13 +324,12 @@ class TestAThreadIsUnchangedOnlyWhenAStrictReadWouldRepeat(ThreadingBehaviorTest
             assert not await thread_is_unchanged(reader, _ROOM, _ROOT, held, ignoring_event_id=_REPLY)
 
     @pytest.mark.asyncio
-    async def test_two_bodies_stored_at_one_clock_reading_get_different_generations(self, bot: AgentBot) -> None:
-        """A message deleted and stored again within one clock reading must not repeat its generation."""
+    async def test_two_bodies_stored_one_after_the_other_get_different_generations(self, bot: AgentBot) -> None:
+        """A message deleted and stored again must not repeat its generation, however close the two are."""
         store = bot._journal_store.principal(bot._journal_principal_id)
         await seed_thread_history(bot, room_id=_ROOM, thread_id=_ROOT, messages=[])
-        with patch.object(projection, "time", SimpleNamespace(time_ns=lambda: 5)):
-            await _admit(bot, _ROOT, "Root", ts=1)
-            await _admit(bot, "$one:localhost", "one", ts=2)
+        await _admit(bot, _ROOT, "Root", ts=1)
+        await _admit(bot, "$one:localhost", "one", ts=2)
 
         fingerprint = await store.thread_fingerprint(room_id=_ROOM, thread_id=_ROOT)
         assert fingerprint is not None
