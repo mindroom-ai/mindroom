@@ -61,8 +61,10 @@ async def test_interrupted_event_publication_preserves_committed_log(
     handle = await _start(owner)
     event_path = _record_dir(handle) / "events.jsonl"
     committed = event_path.read_bytes()
+    flushes: list[int] = []
 
-    def interrupted_flush(_fd: int) -> None:
+    def interrupted_flush(fd: int) -> None:
+        flushes.append(fd)
         message = "Interrupted durable write"
         raise OSError(message)
 
@@ -70,6 +72,9 @@ async def test_interrupted_event_publication_preserves_committed_log(
         fault.setattr(os, "fsync", interrupted_flush)
         with pytest.raises(OSError, match="Interrupted durable write"):
             await owner.append_event(handle, DelegationEvent(kind="output", data={"content": "Résumé 🙂"}))
+    # The failed append's rollback is flushed too, so a power loss cannot bring the event back.
+    assert len(flushes) == 2
+    assert (handle.state_dir / "events.jsonl").read_bytes() == committed
     assert event_path.read_bytes() == committed
     reopened = await owner.reopen(handle.locator)
     await owner.append_event(reopened, DelegationEvent(kind="output", data={"content": "Resumed"}))
@@ -140,8 +145,64 @@ async def test_run_json_and_the_receipt_catch_up_every_32_events_and_256_kib(tmp
 
     large = {f"field_{index}": "x" * 60_000 for index in range(5)}
     await owner.append_event(handle, DelegationEvent(kind="output", data=large))
-    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 33
+    run = _read_json(_record_dir(handle) / "run.json")
+    assert run["event_count"] == 33
+    assert _read_json(_receipt_path(handle))["updated_at"] == run["updated_at"]
     assert _read_json(handle.state_dir / "state.json")["run"]["event_count"] == 33
+
+
+@pytest.mark.asyncio
+async def test_a_failed_state_snapshot_still_exports_the_committed_events_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An event the log committed keeps its oversized value, which only the export holds, when its snapshot fails."""
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
+    paused = DelegationEvent(kind="status", data={"result": "x" * 100_000}, status="paused", event_id="paused")
+
+    def failed_snapshot(*_args: object, **_kwargs: object) -> None:
+        message = "Interrupted snapshot"
+        raise OSError(message)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(records, "write_json_file_durable", failed_snapshot)
+        with pytest.raises(OSError, match="Interrupted snapshot"):
+            await owner.append_event(handle, paused)
+    await owner.append_event(handle, paused)
+    await owner.finish(handle, status="completed", output="Done")
+
+    event = _read_events(_record_dir(handle) / "events.jsonl")[1]
+    assert event["event_id"] == "paused"
+    artifact = _record_dir(handle) / event["data"]["result"]["artifact_path"]
+    assert hashlib.sha256(artifact.read_bytes()).hexdigest() == event["data"]["result"]["sha256"]
+
+
+@pytest.mark.asyncio
+async def test_acknowledging_an_event_the_log_already_holds_flushes_the_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A writer that crashed before its fsync may have left the line unsynced, so a replay that finds it flushes it."""
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
+    event = DelegationEvent(kind="output", data={"content": "once"}, event_id="once")
+    await owner.append_event(handle, event)
+    await owner.finish(handle, status="completed", output="Done")
+    log_inode = (handle.state_dir / "events.jsonl").stat().st_ino
+    flushed: list[int] = []
+    fsync = os.fsync
+
+    def spy_fsync(fd: int) -> None:
+        flushed.append(os.fstat(fd).st_ino)
+        fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    await owner.append_event(handle, event)
+    assert flushed == [log_inode]
+    flushed.clear()
+    await owner.finish(handle, status="completed", output="Done")
+    assert log_inode in flushed
 
 
 @pytest.mark.asyncio

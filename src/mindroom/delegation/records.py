@@ -381,6 +381,7 @@ class DelegationRecordOwner:
             if isinstance(state, WorkspaceOnlyRecord):
                 return
             if event.event_id is not None and _event_id_digest(event.event_id) in state.event_ids:
+                _sync_log(handle)
                 # A replayed status change repairs the views a crash may have left stale.
                 if event.status is not None:
                     _write_exports(handle, state)
@@ -402,9 +403,10 @@ class DelegationRecordOwner:
                 or sequence % _REFRESH_EVERY_EVENTS == 0
                 or (state.log_bytes - len(line)) // _REFRESH_EVERY_BYTES != state.log_bytes // _REFRESH_EVERY_BYTES
             )
+            # The exports go first: an artifact exists only in them, and a failed snapshot leaves the event committed.
+            _write_exports(handle, state, line, artifacts, refresh=refresh)
             if refresh:
                 _write_state(handle, state)
-            _write_exports(handle, state, line, artifacts, refresh=refresh)
 
     def _finish(
         self,
@@ -441,9 +443,12 @@ class DelegationRecordOwner:
                     event_id="delegation_finished",
                 )
                 line = _commit_event(handle, state, payload, terminal=True)
-                _write_state(handle, state)
+            else:
+                _sync_log(handle)
             # Every finish, a replayed one included, rewrites the exports and renders transcript.md.
             _write_exports(handle, state, line, artifacts, final=True)
+            if line:
+                _write_state(handle, state)
 
     def _resolve_handle(self, locator: DelegationRecordLocator) -> DelegationRecordHandle:
         delegation_id = _validated_id(locator.delegation_id)
@@ -650,14 +655,24 @@ def _commit_event(
             _write_all(descriptor, line)
             os.fsync(descriptor)
         except BaseException:
-            # An append that failed must not count when the record is next loaded.
+            # An append that failed must not count when the record is next loaded, after a power loss either.
             with suppress(OSError):
                 os.ftruncate(descriptor, state.log_bytes)
+                os.fsync(descriptor)
             raise
     finally:
         os.close(descriptor)
     _fold_event(state, payload, len(line))
     return line
+
+
+def _sync_log(handle: DelegationRecordHandle) -> None:
+    """Flush the primary log before acknowledging an event it already holds, which a crashed writer may not have."""
+    descriptor = os.open(handle.state_dir / _EVENT_LOG, os.O_WRONLY | os.O_APPEND | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _write_state(handle: DelegationRecordHandle, state: _RecordState) -> None:
