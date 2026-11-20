@@ -34,7 +34,7 @@ from mindroom.hooks import (
 from mindroom.hooks.ingress import IngressHookRunner
 from mindroom.integrations import reply_mirror_for
 from mindroom.matrix.decrypt_diagnostics import DecryptionDiagnostics
-from mindroom.matrix.durable_ingestion import IngestionStats, run_ingestion_pump
+from mindroom.matrix.durable_ingestion import run_ingestion_pump
 from mindroom.matrix.durable_membership import change_local_membership
 from mindroom.matrix.health import (
     clear_matrix_sync_state,
@@ -249,7 +249,6 @@ class AgentBot:
     last_sync_time: datetime | None
     _last_sync_monotonic: float | None
     _first_sync_done: bool
-    _ingestion_stats: IngestionStats
     _bot_ready_hooks_task: asyncio.Task[None] | None = None
     _sync_shutdown_budget: ShutdownBudget | None
     _deferred_stop_required: bool
@@ -310,7 +309,6 @@ class AgentBot:
         self.last_sync_time = None
         self._last_sync_monotonic = None
         self._first_sync_done = False
-        self._ingestion_stats = IngestionStats()
         self._orchestrator_ready_handled = False
         # The Matrix device this bot sends as, captured at login rather than
         # read off the client per send. A transaction ID only deduplicates
@@ -1535,19 +1533,6 @@ class AgentBot:
         """
         first_sync_response = receipt_new and not self._first_sync_done
         self._mark_sync_progress()
-        stats = self._ingestion_stats
-        if receipt_new and not stats.first_frame_logged:
-            # Once per sync loop: a bot dispatches nothing new until this frame, so one line says where a slow start
-            # spent its time. The completing batch's acknowledgement follows this call and is not counted.
-            stats.first_frame_logged = True
-            self.logger.info(
-                "first_sync_frame_completed",
-                elapsed_ms=round((time.monotonic() - stats.started) * 1000),
-                batches=stats.batches,
-                records=stats.records,
-                admit_ms=round(stats.admit_seconds * 1000),
-                ack_ms=round(stats.ack_seconds * 1000),
-            )
         if not self._accepting_work:
             return
         client = self.client
@@ -2072,7 +2057,6 @@ class AgentBot:
             message = "owned Matrix device ID is missing"
             raise PermanentMatrixStartupError(message)
 
-        self._ingestion_stats = IngestionStats()
         runner = asyncio.create_task(
             session.run(),
             name=f"matrix_ingestion_runner_{self.agent_name}",
@@ -2091,7 +2075,6 @@ class AgentBot:
                 after_ack=self._ingestion_admission_progress.set,
                 on_decryption_failure=self._decryption_diagnostics.schedule,
                 sender_is_managed=self._ingress_validator.sender_is_trusted_for_ingress_metadata,
-                stats=self._ingestion_stats,
             ),
             name=f"matrix_ingestion_pump_{self.agent_name}",
         )

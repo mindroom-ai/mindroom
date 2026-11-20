@@ -320,10 +320,8 @@ class TestAgentBot(AgentBotTestBase):
             after_admission: object,
             on_decryption_failure: object,
             sender_is_managed: object,
-            stats: object,
         ) -> None:
             assert after_sync == bot._on_ingestion_frame_completion
-            assert stats is bot._ingestion_stats
             assert after_ack == bot._ingestion_admission_progress.set
             assert before_admission == bot._before_ingestion_admission
             assert wait_for_delivery_projection == bot._wait_for_delivery_projection

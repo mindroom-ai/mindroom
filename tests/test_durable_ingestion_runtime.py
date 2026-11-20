@@ -15,7 +15,6 @@ from uuid import uuid4
 
 import nio
 import pytest
-import structlog
 from nio.durable import DurableSyncConfig, RecordKind, SlidingSyncConfig, SyncBatch, SyncRecord
 from nio.durable.transport import HttpError
 
@@ -31,7 +30,7 @@ from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, RoomMembershipPosition
 from mindroom.hooks import EVENT_BOT_READY, HookRegistry, hook
 from mindroom.matrix._owned_session import MatrixCredentials, open_owned_matrix_session
-from mindroom.matrix.durable_ingestion import IngestionStats, consume_one_ingestion_batch
+from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestration import entity_fleet
@@ -135,71 +134,6 @@ async def test_personal_room_reconciliation_does_not_delay_sync_ack(
         release.set()
         if preparation is not None:
             await preparation
-        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
-
-
-@pytest.mark.asyncio
-async def test_first_sync_frame_logs_one_line_with_what_the_pump_admitted(tmp_path: Path) -> None:
-    """A bot's first completed frame logs once how long it took and what was admitted until then."""
-    bot = _agent_bot(tmp_path)
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    stream = uuid4()
-    state = SyncRecord(RecordKind.STATE, ROOM, {"type": "m.room.name", "state_key": "", "content": {"name": "Room"}})
-    batches = [
-        SyncBatch(stream, 1, (state, state)),
-        SyncBatch(stream, 2, (), completes_sync=True),
-        SyncBatch(stream, 3, (), completes_sync=True),
-    ]
-    principal = bot.journal_principal()
-    consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
-    await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=stream)
-    bot._ingestion_stats = IngestionStats()
-    try:
-        with structlog.testing.capture_logs() as logs:
-            for batch in batches:
-                await consume_one_ingestion_batch(
-                    Session(batch),
-                    principal,
-                    account_id=bot.agent_user.user_id,
-                    after_sync=bot._on_ingestion_frame_completion,
-                    stats=bot._ingestion_stats,
-                )
-    finally:
-        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
-
-    [line] = [log for log in logs if log["event"] == "first_sync_frame_completed"]
-    assert (line["agent"], line["batches"], line["records"]) == ("code", 2, 2)
-    assert line["elapsed_ms"] >= line["admit_ms"] + line["ack_ms"] >= 0
-    assert set(line) >= {"elapsed_ms", "batches", "records", "admit_ms", "ack_ms"}
-    # The third batch's admission and every acknowledgement still count after the line was logged.
-    assert bot._ingestion_stats.batches == 3
-    assert bot._ingestion_stats.ack_seconds > 0
-
-
-@pytest.mark.asyncio
-async def test_first_sync_frame_line_is_logged_once_in_every_sync_loop(tmp_path: Path) -> None:
-    """Each sync loop logs its own first new frame once, whether or not the bot was ready before or accepts work."""
-    bot = _agent_bot(tmp_path)
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    try:
-        with structlog.testing.capture_logs() as logs:
-            await bot._on_ingestion_frame_completion(True)
-            await bot._on_ingestion_frame_completion(True)
-            # A restarted sync loop of the same bot: `sync_forever` starts its pump with fresh counters.
-            bot._ingestion_stats = IngestionStats()
-            await bot._on_ingestion_frame_completion(False)
-            await bot._on_ingestion_frame_completion(True)
-        assert [log["event"] for log in logs].count("first_sync_frame_completed") == 2
-        # A bot that drains before its first new frame logs it once too, though it never becomes ready.
-        bot._first_sync_done = False
-        bot._ingestion_stats = IngestionStats()
-        bot._runtime_view.begin_draining()
-        with structlog.testing.capture_logs() as logs:
-            await bot._on_ingestion_frame_completion(True)
-            await bot._on_ingestion_frame_completion(True)
-        assert [log["event"] for log in logs].count("first_sync_frame_completed") == 1
-        assert bot._first_sync_done is False
-    finally:
         await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
 
