@@ -115,10 +115,10 @@ def stable_entrypoint_preamble(
     """Return the preamble this conversation last sent for the file, or ``fresh_preamble`` when reuse would mislead.
 
     ``fresh_body`` is this turn's preamble without the cut marker. Every prompt and setting in ``frame`` (its header,
-    kept-copy notice, cut marker, and limit) must be unchanged, so an edited override or limit loads again even when
-    the kept text is the same. A kept copy keeps its own marker, so it shows none after the file grows past the limit
-    until it loads again.
-    ``lines`` holds the file's lines when the preload cuts none, else None. A copy that cut none is also kept
+    kept-copy notice, cut marker, limit, and whether the file was cut) must be unchanged, so an edited override or
+    limit loads again even when the kept text is the same, and so does a file that grows past the limit or fits it
+    again; lines appended past a cut keep the copy.
+    ``lines`` holds the file's line-feed-delimited lines when the preload cuts none, else None. A copy that cut none is also kept
     while ``lines`` holds its every line in order, so lines inserted anywhere keep it; ``lines`` fit the limit this
     turn, so the copy's, which they hold, still fit it.
     A changed compaction loads the file again: the request that carries a compaction misses after the system prompt
