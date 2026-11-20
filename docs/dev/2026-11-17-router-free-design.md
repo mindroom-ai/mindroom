@@ -103,6 +103,7 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     A route too long for one event is sent as any long message is: its content goes in an uploaded long-text file, encrypted in an encrypted room, the event keeps a preview and the route's keys, and a route whose file cannot be uploaded is not sent.
     The responder's current message is that prompt, and the messages the route names are left out of the thread history beside it.
     The responder reads the prompt from the route or from the route's file, and never makes one from the messages the route names.
+    One exception keeps what the visible relay did: when a route names a single message and the responder's own thread already holds a newer edit of it by its sender, the responder answers that edit's text, with no fetch from the homeserver.
     While it cannot read the file, and for a route without a `body`, it starts no turn and leaves the route pending.
     No model is ever sent a preview or a stand-in text.
     Writer and reader share one size limit, the most a responder downloads of a long-text file: a steward whose serialized route would pass it sends the route with a notice in the prompt's place and the `io.mindroom.route_too_large` mark, and the responder posts that notice to the person as its answer without asking a model.

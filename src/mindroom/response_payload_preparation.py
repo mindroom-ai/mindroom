@@ -112,6 +112,10 @@ class ResponsePayloadPreparer:
         if pipeline_timing is not None:
             pipeline_timing.mark("response_payload_start")
 
+        # A lone routed message its sender edited since is answered as this responder's own thread holds it.
+        lone = request.prompt_source_event_ids if len(request.prompt_source_event_ids) == 1 else ()
+        edited = [m.body for m in request.thread_history if m.event_id in lone and m.latest_event_id != m.event_id]
+        preparation = replace(preparation, prompt=edited[0]) if edited else preparation
         payload = await self._build_payload(preparation, thread_history=request.thread_history)
 
         prepared_payload = await self.ingress_hook_runner.apply_message_enrichment(

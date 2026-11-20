@@ -110,11 +110,7 @@ async def _select_responder(
 
 
 async def _responder_ready(deps: _RouterRelaySupport, entity_name: str, turn: TurnRecord) -> bool:
-    """Return whether the selected responder can take the turn now.
-
-    A turn whose responder is still starting stays pending, and is routed again once that responder is ready.
-    One whose responder stopped meanwhile settles unanswered.
-    """
+    """Return whether the responder can take the turn: one still starting keeps it pending, a stopped one settles it."""
     readiness = deps.runtime.orchestrator.entity_first_sync_complete(entity_name)
     if readiness is None:
         deps.logger.warning("Selected responder is not running", entity=entity_name)
@@ -147,10 +143,7 @@ async def _earlier_attempt_outcome(deps: _RouterRelaySupport, room_id: str, even
 
 
 async def _still_steward(deps: _RouterRelaySupport, room_id: str, turn: TurnRecord) -> bool:
-    """Return whether this bot is still the room's steward, which it was when it planned to route.
-
-    One that lost the room while it selected drops the turn: the new steward routes its own copy.
-    """
+    """Return whether this bot still stewards the room; one that lost it while selecting leaves the turn to its heir."""
     if deps.turn_policy.is_room_steward(room_id):
         return True
     deps.logger.info("No longer the room's steward; dropping the turn it was routing")

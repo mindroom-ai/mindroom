@@ -18,6 +18,7 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.final_delivery import Completed, FinalDeliveryOutcome
 from mindroom.hooks import EVENT_MESSAGE_ENRICH, HookRegistry, MessageEnrichContext, hook
 from mindroom.inbound_turn_normalizer import DispatchPayload
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.reply_turn.enrichment import prepare_memory_and_model_context
 from mindroom.reply_turn.locked_turn import LockedTurns
@@ -42,7 +43,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.dispatch_handoff import MediaDispatchEvent
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.message_target import MessageTarget
 
 
@@ -87,6 +87,7 @@ def _request(
     preparation: ResponsePayloadPreparation,
     *,
     thread_history: Sequence[ResolvedVisibleMessage],
+    prompt_source_event_ids: tuple[str, ...] = (),
 ) -> ResponseRequest:
     return ResponseRequest(
         sources=ResponseSources(
@@ -94,6 +95,7 @@ def _request(
             logical_source_event_ids=("$event",),
         ),
         thread_history=thread_history,
+        prompt_source_event_ids=prompt_source_event_ids,
         prompt=preparation.prompt,
         user_id="@user:localhost",
         response_envelope=_envelope(target),
@@ -133,6 +135,56 @@ async def test_prepare_builds_request_from_inputs_and_refreshed_history(tmp_path
     build_request = seen[0]
     assert build_request.thread_history is refreshed_history
     assert build_request.prompt == "raw prompt"
+
+
+def _held(event_id: str, body: str, *, revision: str | None = None) -> ResolvedVisibleMessage:
+    """Return one message as this responder's thread holds it, at ``revision`` when its own sender edited it."""
+    return ResolvedVisibleMessage.from_message_data(
+        {"sender": "@user:localhost", "body": body, "timestamp": 1, "event_id": event_id, "content": {"body": body}},
+        thread_id="$thread",
+        latest_event_id=revision or event_id,
+    )
+
+
+@pytest.mark.parametrize(
+    ("held", "routed", "answered"),
+    [
+        # The sender corrected the message while the steward selected: the route was written from the old text.
+        pytest.param([_held("$first", "the corrected text", revision="$edit")], ("$first",), "the corrected text"),
+        # No edit of its sender's: the route's prompt stands. A replacement someone else sent reads the same, as the
+        # thread holds the message as its sender wrote it (``test_a_replacement_from_another_sender_is_not_an_edit``).
+        pytest.param([_held("$first", "the first text")], ("$first",), "raw prompt"),
+        # A batch's prompt is its steward's, whatever its messages became since.
+        pytest.param(
+            [_held("$first", "the corrected text", revision="$edit"), _held("$second", "more")],
+            ("$first", "$second"),
+            "raw prompt",
+        ),
+        # Another message's edit is not the routed one's.
+        pytest.param([_held("$other", "an edited neighbour", revision="$edit")], ("$first",), "raw prompt"),
+        # An unrouted turn's prompt is its own.
+        pytest.param([_held("$event", "the corrected text", revision="$edit")], (), "raw prompt"),
+    ],
+    ids=["edited", "unedited-or-replaced-by-another", "batch", "neighbour-edited", "unrouted"],
+)
+@pytest.mark.asyncio
+async def test_a_lone_routed_message_is_answered_as_its_sender_last_edited_it(
+    tmp_path: Path,
+    held: list[ResolvedVisibleMessage],
+    routed: tuple[str, ...],
+    answered: str,
+) -> None:
+    """A route names one message its sender edited since: the responder answers the text its own thread holds."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread")
+    build = AsyncMock(return_value=DispatchPayload(prompt="built"))
+
+    with patch.object(bot._inbound_turn_normalizer, "build_dispatch_payload_with_attachments", new=build):
+        await bot._request_payload_preparer.prepare(
+            _request(target, _preparation(target), thread_history=held, prompt_source_event_ids=routed),
+        )
+
+    assert build.await_args.args[0].prompt == answered
 
 
 @pytest.mark.asyncio
