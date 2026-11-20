@@ -8491,6 +8491,56 @@ async def test_a_route_is_answered_with_the_text_it_carries_whatever_the_person_
     harness.runtime.client.room_get_event.assert_not_awaited()
 
 
+async def _route_with_file(sent: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
+    """Return a route too long for one event as it goes out, and the long-text file that holds all of it."""
+    uploads: list[bytes] = []
+
+    async def upload(**kwargs: Any) -> tuple[nio.UploadResponse, None]:  # noqa: ANN401
+        uploads.append(kwargs["data_provider"](None, None).read())
+        return nio.UploadResponse("mxc://localhost/long-prompt"), None
+
+    client = make_matrix_client_mock()
+    client.upload = AsyncMock(side_effect=upload)
+    wire = await prepare_large_message(client, _ROOM_ID, sent, room_encrypted=False, sidecar_required=True)
+    return wire, uploads[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routed_for", ["a person", "a managed agent"])
+@pytest.mark.parametrize("filed", [0, 1], ids=["file first", "file last"])
+async def test_two_routes_that_wait_together_are_answered_one_by_one(
+    tmp_path: Path,
+    routed_for: str,
+    filed: int,
+) -> None:
+    """A route is a whole selected turn, so two waiting for one responder never share a turn, whatever their kind."""
+    config = _two_agent_config(tmp_path)
+    with_responder_access(config, "general", users=[_entity_user_id(config, "research")])
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research")
+    prompts = ["Poll the queue.", "Rotate the logs."]
+    prompts[filed] += " Details." * 8_000
+    file = b""
+    routes = []
+    for index, prompt in enumerate(prompts):
+        sent = _route_content(config, thread_id=_THREAD_ROOT, event_ids=(f"$task-{index}:localhost",), body=prompt)
+        if routed_for == "a managed agent":
+            # A managed agent's scheduled fire is routed as the plain message it is, for no person.
+            del sent[constants.SOURCE_KIND_KEY], sent[constants.ORIGINAL_SENDER_KEY]
+        if index == filed:
+            sent, file = await _route_with_file(sent)
+        routes.append(_route_as_delivered(config, sent, steward="research", event_id=f"$route-{index}:localhost"))
+    harness.runtime.client.download = AsyncMock(return_value=MagicMock(spec=nio.DownloadResponse, body=file))
+
+    with patch.object(harness.ingress, "_adaptive_text_debounce_seconds", AsyncMock(return_value=60.0)):
+        for route in routes:
+            await harness.ingress.handle_text_event(room, route)
+        await harness.gate.drain_all()
+        await harness.runner.settle_inbox_responses()
+
+    assert [request.prompt for request in harness.runner.requests] == prompts
+
+
 @pytest.mark.asyncio
 async def test_a_route_too_large_for_one_event_is_read_whole_from_its_file(tmp_path: Path) -> None:
     """A prompt too long for one event travels as the route's long-text file, which its responder reads whole.
@@ -8500,19 +8550,11 @@ async def test_a_route_too_large_for_one_event_is_read_whole_from_its_file(tmp_p
     config = _two_agent_config(tmp_path)
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research")
-    uploads: list[bytes] = []
-
-    async def upload(**kwargs: Any) -> tuple[nio.UploadResponse, None]:  # noqa: ANN401
-        uploads.append(kwargs["data_provider"](None, None).read())
-        return nio.UploadResponse("mxc://localhost/long-prompt"), None
-
-    upload_client = make_matrix_client_mock()
-    upload_client.upload = AsyncMock(side_effect=upload)
     prompt = "Which release is next? " + "Details. " * 8_000
     sent = _route_content(config, thread_id="$question:localhost", body=prompt)
     settings = {constants.SCHEDULED_MODEL_KEY: "default", constants.SCHEDULED_HISTORY_LIMIT_KEY: 3}
     sent |= {constants.ROUTE_PROMPT_STRUCTURED_KEY: True, **settings}
-    wire = await prepare_large_message(upload_client, _ROOM_ID, sent, room_encrypted=False, sidecar_required=True)
+    wire, file = await _route_with_file(sent)
     assert wire["body"] != prompt
     # The event keeps what its responder reads beside the prompt, as a long scheduled task's per-run settings.
     assert {key: wire.get(key) for key in settings} == settings
@@ -8526,7 +8568,7 @@ async def test_a_route_too_large_for_one_event_is_read_whole_from_its_file(tmp_p
     assert harness.ignored_dispatch_sources == []
 
     # The same route, delivered again once the file can be read, is answered in full.
-    client.download = AsyncMock(return_value=MagicMock(spec=nio.DownloadResponse, body=uploads[0]))
+    client.download = AsyncMock(return_value=MagicMock(spec=nio.DownloadResponse, body=file))
     await harness.deliver(room, _route_as_delivered(config, wire, steward="research"))
 
     [request] = harness.runner.requests
