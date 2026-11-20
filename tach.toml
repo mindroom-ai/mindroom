@@ -2511,6 +2511,7 @@ expose = [
 [[modules]]
 path = "mindroom.workflow_runs.engine"
 depends_on = [
+    "mindroom.delegation.personas",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.replay",
     "mindroom.workflow_runs.store",

@@ -20,6 +20,8 @@ from mindroom.agents import apply_tool_approval_capability
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.custom_tools.workflow import WorkflowTools
+from mindroom.delegation import lifecycle
+from mindroom.delegation.state import SubagentPersona
 from mindroom.llm.runs import RunStatus
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.script_runs import manager as manager_module
@@ -45,7 +47,7 @@ from tests.tool_job_helpers import (
     tool_job_journal,
     wait_for_status,
 )
-from tests.workflow_helpers import CallFailed, WorkflowStack, tool_args, workflow_stack
+from tests.workflow_helpers import CallFailed, NodeFailed, WorkflowStack, tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -241,6 +243,39 @@ async def test_a_child_agent_gets_the_report_inline(stack: WorkflowStack) -> Non
     assert run.origin_job_id is not None
     assert run.origin_job_id.startswith("inline:")
     assert stack.store.get_run(run.run_id).job_id is None
+
+
+@pytest.mark.asyncio
+async def test_a_narrowed_childs_run_calls_the_tools_its_persona_keeps_and_no_other(tmp_path: Path) -> None:
+    """A run has the tools of the turn that started it: a child narrowed to some tools gets no other tool of its agent.
+
+    The child's turn is a real one (`running_child_id`), so its call waits for the run even with background jobs off.
+    """
+    with workflow_stack(tmp_path, extra_tools=("workflow",), require_approval=()) as stack:
+        stack.context.config.background_tool_jobs = BackgroundToolJobsConfig(enabled=False)
+        persona = SubagentPersona("inline", "counter", "Count.", tools=("workflow", "counter.text"))
+        child = SimpleNamespace(delegation_id="child-1")
+        token = lifecycle._CHILD_RUN.set(lifecycle.ChildRunObservation(child, None))  # type: ignore[arg-type]
+        try:
+            call = asyncio.create_task(
+                stack.call("start_workflow", context=replace(stack.context, persona=persona), source=SCRIPT),
+            )
+            await stack.until(lambda: [run.state for run in stack.store.list_runs()] == [WorkflowRunState.RUNNING])
+        finally:
+            lifecycle._CHILD_RUN.reset(token)
+        [run] = stack.store.list_runs()
+        stack.run_id = run.run_id
+
+        assert run.persona is not None
+        assert run.persona["tools"] == ["workflow", "counter.text"]
+        assert await stack.result("@0", "tool", tool_args("counter", "text", size=3)) == "xxx"
+        with pytest.raises(NodeFailed, match=r"counter\.append is not a tool of the agent that started this run"):
+            await stack.result("@1", "tool", tool_args("counter", "append", line="outside the persona"))
+        assert stack.counting_tool.lines == []
+        assert stack.counting_tool.calls == 1
+        await stack.finish_attempt(result="the report")
+        assert await asyncio.wait_for(call, SETTLE_TIMEOUT_SECONDS) == "the report"
+        await stack.engine.close()
 
 
 @pytest.mark.asyncio

@@ -272,7 +272,8 @@ class WorkflowTools(Toolkit):
                 room_id=context.room_id,
                 thread_root_event_id=context.resolved_thread_id,
                 execution_identity=serialize_tool_execution_identity(context.execution_identity),
-                persona=None,
+                # The tools a narrowed agent was left with are the run's, whatever its agent has.
+                persona=asdict(context.persona) if context.persona is not None else None,
                 title=str(title)[:_MAX_TITLE_CHARS] if title else None,
                 source=text,
                 source_digest=hashlib.sha256(text.encode()).hexdigest(),

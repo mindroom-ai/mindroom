@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import NAMESPACE_OID, uuid5
 from weakref import WeakValueDictionary
 
+from mindroom.delegation.personas import persona_allows
 from mindroom.logging_config import get_logger
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.manager import ScriptRunLimits
@@ -251,7 +252,8 @@ class WorkflowEngine:
                 started_at=utc_timestamp(),
             ),
         )
-        call = self._run_tool_node(attempt, node, call_id, grant, cast("dict[str, object]", arguments))
+        kept = cast("list[str] | None", (run.persona or {}).get("tools"))
+        call = self._run_tool_node(attempt, node, call_id, grant, cast("dict[str, object]", arguments), kept)
         self._spawn(run.run_id, call)
         return _receipt(node)
 
@@ -358,8 +360,11 @@ class WorkflowEngine:
         call_id: str,
         grant: ScriptToolGrant,
         arguments: dict[str, object],
+        kept: list[str] | None,
     ) -> None:
+        """Run one tool call and settle its node; *kept* is the tool list of the narrowed agent that started the run."""
         try:
+            _require_kept(kept, grant)
             call = await self.broker.execute_for_workflow(attempt, call_id=call_id, grant=grant, arguments=arguments)
             state, result, error = _call_outcome(node, call)
         except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
@@ -402,6 +407,13 @@ class WorkflowEngine:
             )
             condition.notify_all()
         return ended
+
+
+def _require_kept(kept: list[str] | None, grant: ScriptToolGrant) -> None:
+    """Refuse a tool outside *kept*; checked at every call beside the owner's live tools, so a run never has more."""
+    if kept is not None and not persona_allows(tuple(kept), grant.toolkit_name, grant.function_name):
+        msg = f"{grant.toolkit_name}.{grant.function_name} is not a tool of the agent that started this run."
+        raise ScriptRunStoreError(msg)
 
 
 def _receipt(node: WorkflowNode) -> NodeReceipt:
