@@ -730,10 +730,10 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
         runtime_paths: constants.RuntimePaths,
         *,
         touch_live_workers: Callable[[WorkerBackend], None],
-        computer_worker_keys: frozenset[str] = frozenset(),
+        held_worker_keys: frozenset[str] = frozenset(),
     ) -> int:
         assert touch_live_workers is touch_live_workers_of_the_runtime
-        assert computer_worker_keys == frozenset()
+        assert held_worker_keys == frozenset()
         cleanup_paths.append(runtime_paths.config_path)
         if len(cleanup_paths) == 1:
             main.initialize_api_app(main.app, second_runtime)
@@ -839,12 +839,12 @@ def test_worker_cleanup_touches_workers_with_a_call_in_flight_before_maintenance
         workers_api.maintain_leased_workers(
             worker_manager,
             touch_live_workers=lambda _backend: None,
-            computer_worker_keys=frozenset(),
+            held_worker_keys=frozenset(),
         )
     workers_api.maintain_leased_workers(
         worker_manager,
         touch_live_workers=lambda _backend: None,
-        computer_worker_keys=frozenset(),
+        held_worker_keys=frozenset(),
     )
 
     assert actions == ["touch agent:busy", "maintain", "maintain"]

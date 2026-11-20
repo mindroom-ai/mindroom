@@ -98,6 +98,7 @@ from mindroom.runtime_state import (
     set_runtime_ready,
 )
 from mindroom.startup_errors import EventJournalLostError, PermanentStartupError
+from mindroom.tailnet_ssh.links import GatewayStatus
 from mindroom.tool_jobs.runtime import ToolJobRuntime, get_background_runtime
 from mindroom.tool_system import plugins as plugins_module
 from mindroom.tool_system.plugins import PluginGeneration, config_plugins
@@ -1190,6 +1191,56 @@ class TestAgentBot(AgentBotTestBase):
             await _run_api_server("127.0.0.1", 8765, "INFO", _serving_runtime(runtime_paths), asyncio.Event())
 
         server.return_value.serve.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_api_server_serves_the_tailnet_ssh_gateway_beside_the_api(
+        self,
+        tmp_path: Path,
+        unused_tcp_port: int,
+    ) -> None:
+        """With the gateway's token set, its listener answers from the runtime's config while the API serves."""
+        port = unused_tcp_port
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+        runtime_paths = resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path / "data",
+            process_env={"MINDROOM_TAILNET_SSH_GATEWAY_TOKEN": "tok", "MINDROOM_TAILNET_SSH_PORT": str(port)},
+        )
+        answers: list[tuple[int, object]] = []
+        statuses: list[object] = []
+
+        class ReturningServer:
+            should_exit = True
+            force_exit = False
+            received_signal_name = None
+
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: Callable[[str, int], Awaitable[None]] | None = None,
+            ) -> None:
+                del on_started
+
+            async def serve(self) -> None:
+                statuses.append(api_config_lifecycle.app_state(api_main.app).tailnet_ssh_status)
+                async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
+                    for headers in ({}, {"Authorization": "Bearer tok"}):
+                        answer = await client.get("/links", headers=headers)
+                        answers.append((answer.status_code, answer.json()))
+
+        shutdown_requested = asyncio.Event()
+        shutdown_requested.set()
+        await config_lifecycle_module.load_startup_config(runtime_paths, api_enabled=True)
+        with patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer):
+            await _run_api_server("127.0.0.1", 8765, "INFO", _serving_runtime(runtime_paths), shutdown_requested)
+
+        assert answers == [(401, {"detail": "Unauthorized"}), (200, [])]
+        assert statuses == [GatewayStatus()]
+        assert api_config_lifecycle.app_state(api_main.app).tailnet_ssh_status is None
+        socket.create_server(("127.0.0.1", port)).close()
 
     @pytest.mark.asyncio
     async def test_run_api_server_binds_process_local_script_runtime(self, tmp_path: Path) -> None:

@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.script_runs.broker import ScriptToolBroker
+    from mindroom.tailnet_ssh.links import GatewayStatus
     from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
     from mindroom.worker_computer.sessions import ComputerSessionStore
     from mindroom.workers.backend import WorkerBackend
@@ -98,6 +99,8 @@ class _MindroomAppState:
     openai_responses: set[ActiveResponseIdentity] = field(default_factory=set)
     mcp_gateway_runtime: GatewayRuntime | None = None
     computer_sessions: ComputerSessionStore | None = None
+    # The tailnet SSH gateway's last report, held while its listener serves; None while tailnet SSH is off.
+    tailnet_ssh_status: GatewayStatus | None = None
     client_sessions: ClientSessionStore | None = None
     # Bound while `mindroom run` serves this app; plugin routes read live room membership through it, each joined
     # user with their display name in the room, and read a room's state, whether it is a direct message, and where a
