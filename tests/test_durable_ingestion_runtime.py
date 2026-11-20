@@ -45,7 +45,7 @@ from tests.durable_sync_helpers import skip_crypto_maintenance
 from tests.journal_helpers import admit_dispatch_event, membership_position
 from tests.matrix_state_helpers import save_matrix_state
 from tests.test_bot_ready_hook import _agent_bot
-from tests.test_durable_ingestion_admission import ROOM, Session
+from tests.test_durable_ingestion_admission import ROOM, Session, message
 from tests.test_event_journal_store import admit, interactive_edit, interactive_prompt, projection
 from tests.test_room_invites import _handle_invite, _live_router_invite_scenario, _pending_room_invites
 
@@ -183,7 +183,7 @@ async def test_slow_first_frame_side_effect_does_not_delay_router_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     slow_side_effect: str,
 ) -> None:
-    """The router's first frame releases its waiting messages while a bot:ready hook or a room state reconcile runs."""
+    """While a bot:ready hook or a room state reconcile runs, the router dispatches its waiting message and the next batch's."""
     bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
     # Access by listed users needs no grant refresh, so only the first frame's completion releases dispatch.
     listed_users = ResponderAccessConfig(current_room_members=False, members_of_rooms=[], users=["@alice:localhost"])
@@ -193,6 +193,7 @@ async def test_slow_first_frame_side_effect_does_not_delay_router_dispatch(
     entered = asyncio.Event()
     release = asyncio.Event()
     dispatched = asyncio.Event()
+    dispatched_ids: list[str] = []
 
     @hook(EVENT_BOT_READY)
     async def slow_ready(_ctx: object) -> None:
@@ -213,13 +214,14 @@ async def test_slow_first_frame_side_effect_does_not_delay_router_dispatch(
         bot._router.mark_joined_for_room_state(ROOM)
         monkeypatch.setattr(bot._router, "_reconcile_room_state", slow_reconcile)
 
-    async def on_message(_room: nio.MatrixRoom, _event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
+    async def on_message(_room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
+        dispatched_ids.append(event.event_id)
         dispatched.set()
         return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
     bot._journal_dispatcher.callbacks = replace(bot._journal_dispatcher.callbacks, on_message=on_message)
     # A message an earlier batch of the first frame admitted waits for that frame to complete.
-    message = nio.RoomMessageText.from_dict(
+    waiting = nio.RoomMessageText.from_dict(
         {
             "type": "m.room.message",
             "event_id": "$voice:localhost",
@@ -231,35 +233,44 @@ async def test_slow_first_frame_side_effect_does_not_delay_router_dispatch(
     await admit_dispatch_event(
         bot._journal_dispatcher,
         nio.MatrixRoom(ROOM, bot.agent_user.user_id),
-        message,
+        waiting,
         EventKind.MESSAGE,
         EventClass.ACTIONABLE,
     )
     batch = SyncBatch(uuid4(), 1, (), completes_sync=True)
+    next_batch = SyncBatch(batch.stream_id, 2, (message("$next:localhost"),), completes_sync=True)
     principal = bot.journal_principal()
     consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
     await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=batch.stream_id)
     session = Session(batch)
-    frame = asyncio.create_task(
-        consume_one_ingestion_batch(
-            session,
-            principal,
-            account_id=bot.agent_user.user_id,
-            after_sync=bot._on_ingestion_frame_completion,
-        ),
-    )
+
+    async def pump() -> None:
+        """Consume the first frame, then the batch behind it, waking the dispatcher as the pump does."""
+        for following in (next_batch, None):
+            await consume_one_ingestion_batch(
+                session,
+                principal,
+                account_id=bot.agent_user.user_id,
+                after_sync=bot._on_ingestion_frame_completion,
+            )
+            bot._journal_dispatcher.wake()
+            session.batch = following
+
+    frames = asyncio.create_task(pump())
     try:
         async with asyncio.timeout(2):
             await entered.wait()
             await dispatched.wait()
-            if slow_side_effect == "bot_ready_hook":
-                # Hooks may run until their timeout, so the frame is acknowledged without them.
-                await frame
-                assert session.acked == [batch]
+            # Neither holds the frame's acknowledgement, so the batch behind it is admitted and dispatched as well.
+            await frames
+            while "$next:localhost" not in dispatched_ids:
+                dispatched.clear()
+                await dispatched.wait()
+        assert session.acked == [batch, next_batch]
         assert not release.is_set()
     finally:
         release.set()
-        await frame
+        await frames
         await bot._journal_dispatcher.stop()
         await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
