@@ -1964,6 +1964,23 @@ async def test_file_backend_conversation_reloads_its_entrypoint_when_its_framing
 
 
 @pytest.mark.asyncio
+async def test_file_backend_conversation_reloads_its_entrypoint_when_its_limit_or_marker_changes(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A new limit or marker override that keeps the same lines still changes the marker the copy shows."""
+    config.defaults.max_preload_file_chars = _THREE_ENTRY_LINES
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    await _conversation_preamble(config, thread)
+
+    config.defaults.max_preload_file_chars = _THREE_ENTRY_LINES + 1
+    assert _cut_marker(memory_path, _THREE_ENTRY_LINES + 1) in await _conversation_preamble(config, thread)
+    config.prompts["PRELOAD_FILE_CUT_MARKER_TEMPLATE"] = "Cut `{path}` at {max_chars}."
+    assert f"Cut `{memory_path}` at {_THREE_ENTRY_LINES + 1}." in await _conversation_preamble(config, thread)
+
+
+@pytest.mark.asyncio
 async def test_file_backend_conversation_clears_its_entrypoint_once_memory_is_emptied(
     storage_path: Path,
     config: Config,

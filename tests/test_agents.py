@@ -3430,24 +3430,55 @@ def test_preload_leaves_a_file_within_its_limit_unmarked(tmp_path: Path) -> None
     assert "prompt limit" not in role
 
 
-@pytest.mark.asyncio
-async def test_memory_entrypoint_and_a_context_file_get_the_same_cut(tmp_path: Path) -> None:
-    """One rule cuts every preloaded file: MEMORY.md keeps exactly what a context file of the same text keeps."""
+async def _memory_preamble(tmp_path: Path, text: str, max_chars: int) -> str:
+    """Return the MEMORY.md preamble of an agent whose MEMORY.md is ``text``, cut to ``max_chars`` characters."""
     config = _test_config()
     config.agents["general"].memory_backend = "file"
     workspace = agent_workspace_root_path(tmp_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text(_LONG_FILE, encoding="utf-8")
-    role = _context_files_role(tmp_path, {"SOUL.md": _LONG_FILE}, 70)
+    (workspace / "MEMORY.md").write_bytes(text.encode())
     bound = _bind_runtime_paths(config, _runtime_paths(tmp_path))
-    bound.defaults.max_preload_file_chars = 70
-
+    bound.defaults.max_preload_file_chars = max_chars
     parts = await build_memory_prompt_parts("x", "general", bound, runtime_paths_for(bound))
+    return parts.session_preamble
 
-    kept = "line 00 of the file\nline 01 of the file\nline 02 of the file"
-    soul, memory = workspace / "SOUL.md", workspace / "MEMORY.md"
-    assert f"\n{kept}\n{_cut_marker(soul, 70)}" in role
-    assert parts.session_preamble.endswith(f"\n{kept}\n{_cut_marker(memory, 70)}")
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "max_chars", "kept"),
+    [
+        (_LONG_FILE, 70, "line 00 of the file\nline 01 of the file\nline 02 of the file"),
+        ("aa\r\nbb\r\ncc\r\n", 6, "aa\r"),
+    ],
+    ids=["lines", "crlf"],
+)
+async def test_memory_entrypoint_and_a_context_file_get_the_same_cut(
+    tmp_path: Path,
+    text: str,
+    max_chars: int,
+    kept: str,
+) -> None:
+    """One rule cuts every preloaded file: MEMORY.md keeps exactly what a context file of the same text keeps."""
+    role = _context_files_role(tmp_path, {"SOUL.md": text}, max_chars)
+    preamble = await _memory_preamble(tmp_path, text, max_chars)
+
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    assert f"\n{kept}\n{_cut_marker(workspace / 'SOUL.md', max_chars)}" in role
+    assert preamble.endswith(f"\n{kept}\n{_cut_marker(workspace / 'MEMORY.md', max_chars)}")
+
+
+@pytest.mark.asyncio
+async def test_a_file_over_the_read_cap_keeps_its_cut_as_it_grows(tmp_path: Path) -> None:
+    """A one-line file past the 1 MiB read cap still inlines its first characters and the marker, unchanged by appends."""
+    huge = "x" * ((1 << 20) + 10)
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    role = _context_files_role(tmp_path, {"SOUL.md": huge}, 100)
+    preamble = await _memory_preamble(tmp_path, huge, 100)
+
+    assert f"\n{'x' * 100}\n{_cut_marker(workspace / 'SOUL.md', 100)}" in role
+    assert preamble.endswith(f"\n{'x' * 100}\n{_cut_marker(workspace / 'MEMORY.md', 100)}")
+    assert _context_files_role(tmp_path, {"SOUL.md": huge + "y"}, 100) == role
+    assert await _memory_preamble(tmp_path, huge + "y", 100) == preamble
 
 
 def test_agent_context_section_states_files_are_preloaded(
@@ -4440,6 +4471,26 @@ def test_config_rejects_retired_auto_resume_after_restart() -> None:
             defaults={"auto_resume_after_restart": True},
             agents={"calculator": {"display_name": "CalculatorAgent"}},
         )
+
+
+def test_config_ignores_overrides_of_the_retired_cut_markers() -> None:
+    """Overrides of the marker templates the per-file cut replaced still load, and a save drops them."""
+    config = Config(
+        prompts={
+            "CONTEXT_TRUNCATION_MARKER_TEMPLATE": "[{omitted_chars} omitted]",
+            "CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE": "[{title}: {omitted_chars} omitted]",
+            "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE": "[{included_lines} of {total_lines}]",
+            "PERSONALITY_CONTEXT_SECTION_HEADING": "## Files",
+        },
+    )
+
+    assert config.prompts == {"PERSONALITY_CONTEXT_SECTION_HEADING": "## Files"}
+
+
+def test_a_curation_prompt_override_with_retired_placeholders_names_them() -> None:
+    """The curation prompt lost its MEMORY.md line and token placeholders; an override still using them says which."""
+    with pytest.raises(ValidationError, match="Unsupported prompt placeholder.*: max_entrypoint_lines, memory_lines"):
+        Config(prompts={"PROMPT_CURATION_PROMPT_TEMPLATE": "{memory_lines} lines, cap {max_entrypoint_lines}"})
 
 
 def test_config_ignores_the_retired_shared_preload_budget() -> None:

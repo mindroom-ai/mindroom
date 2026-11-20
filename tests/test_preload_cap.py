@@ -28,3 +28,14 @@ def test_appending_past_the_cut_never_changes_the_kept_text() -> None:
 
     assert cap_preload_text(text + "\nappended line", 40) == kept
     assert cap_preload_text(text + " appended to the last line", 40) == kept
+
+
+def test_whitespace_inside_the_kept_text_is_kept() -> None:
+    """The kept text is exactly the file's first characters, spaces at its end included."""
+    assert cap_preload_text("abc  def", 5) == ("abc  ", True)
+    assert cap_preload_text("a  \nbb\ncc", 7) == ("a  \nbb", True)
+
+
+def test_only_a_line_feed_ends_a_line() -> None:
+    """A carriage return counts as a character of its line, as every loader passes the file's text unchanged."""
+    assert cap_preload_text("aa\r\nbb\r\ncc", 6) == ("aa\r", True)
