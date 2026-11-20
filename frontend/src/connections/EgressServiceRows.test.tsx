@@ -1180,9 +1180,9 @@ describe("connected accounts", () => {
         "Use your Google Drive account for Agent Keys?",
       );
       // A compact control at the start, not stretched across the dialog's grid.
-      expect(within(dialog).getByRole("radiogroup", { name: "Access" })).toHaveClass(
-        "justify-self-start",
-      );
+      expect(
+        within(dialog).getByRole("radiogroup", { name: "Access" }),
+      ).toHaveClass("justify-self-start");
       expect(
         within(dialog).getByRole("radio", { name: "Read only" }),
       ).toBeChecked();
