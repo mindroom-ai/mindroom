@@ -575,7 +575,12 @@ def _finish_approval_continuation(
         principal_id,
         approval_id,
         may_end=lambda: may_end(transaction, principal_id, approval_id=approval_id),
-        end=lambda ending: replies.approval_finished(transaction, principal_id, ending, owner_available=owner_available),
+        end=lambda ending: replies.approval_finished(
+            transaction,
+            principal_id,
+            ending,
+            owner_available=owner_available,
+        ),
     )
 
 

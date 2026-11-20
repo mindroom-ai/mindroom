@@ -978,7 +978,11 @@ class ApprovalManager:
         retire = self.cards.approvals.retire_approval_card
         return [
             await self._expire_stored(card, reason=reason)
-            or (unedited and not self._sender_ready(card) and await retire(delivery_id=card.delivery_id, without_edit=True))
+            or (
+                unedited
+                and not self._sender_ready(card)
+                and await retire(delivery_id=card.delivery_id, without_edit=True)
+            )
             for room_id in await self.cards.approvals.pending_approval_room_ids()
             async for card in self._pending_cards(self.cards, room_id)
             if matches(card)
