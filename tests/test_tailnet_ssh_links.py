@@ -1014,7 +1014,10 @@ async def test_connect_refuses_when_sshds_files_cannot_be_written(
     assert refused.value.status_code == 503
     assert str(tmp_path) not in refused.value.detail
     assert manager.calls == ["eligibility", "ensure_worker", "projection"]
-    assert [(log["event"], log["link_id"]) for log in logs] == [("tailnet_ssh_projection_not_written", link.id)]
+    assert [(log["event"], log["link_id"]) for log in logs] == [
+        ("tailnet_ssh_projection_not_written", link.id),
+        ("tailnet_ssh_connect_refused", link.id),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1024,7 +1027,7 @@ async def test_connect_logs_peer_but_never_a_login_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One line says who connected to which link; the login URL the gateway reported is in no line.
+    """One line says who connected to which link, and one who was refused and how; no line holds the login URL.
 
     The lines are read from structlog, which this suite does not pass on to ``caplog``.
     """
@@ -1049,7 +1052,40 @@ async def test_connect_logs_peer_but_never_a_login_url(
             "peer_login": "alice@github",
             "peer_node": "alice-laptop",
         },
+        {
+            "event": "tailnet_ssh_connect_refused",
+            "log_level": "info",
+            "link_id": link.id,
+            "peer_login": "eve@github",
+            "peer_node": "alice-laptop",
+            "status_code": 403,
+        },
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_connect_waits_for_its_worker_on_a_pool_of_its_own(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that takes minutes to start holds a connect thread, never one of the pool the primary shares."""
+    link = _enrolled()
+    _store(paths, link)
+    manager = _wire_connect(monkeypatch, tmp_path, link)
+    threads: list[str] = []
+    ensure_worker = manager.ensure_worker
+
+    def recorded(spec: WorkerSpec) -> WorkerHandle:
+        threads.append(threading.current_thread().name)
+        return ensure_worker(spec)
+
+    monkeypatch.setattr(manager, "ensure_worker", recorded)
+
+    await _connect(config, paths, link.id)
+
+    assert [name.startswith("mindroom-tailnet-ssh-connect") for name in threads] == [True]
 
 
 @pytest.mark.parametrize(

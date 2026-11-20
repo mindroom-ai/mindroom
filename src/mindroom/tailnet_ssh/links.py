@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 import aiohttp
@@ -69,6 +72,10 @@ _NO_SSH_PORT = (
 )
 _NO_SHELL = "This agent has no shell tool."
 _MEMBERSHIP_PENDING = "Whether you may use this agent is not known yet; try again in a few seconds."
+# A connect may wait as long as the worker ready timeout (600 s hosted) for its worker to start. Those waits get
+# threads of their own, so a few sleeping or failing workers cannot fill the default pool the rest of the primary
+# shares; a connect beyond this many waits for a free connect thread.
+_CONNECT_EXECUTOR = ThreadPoolExecutor(max_workers=32, thread_name_prefix="mindroom-tailnet-ssh-connect")
 
 
 class LinkReport(BaseModel):
@@ -477,10 +484,22 @@ async def connect(
     """Return the host and port of the sshd that serves one connection the gateway accepted, or raise ``ConnectRefused``.
 
     In order: the link is on and admits the peer's login, it is eligible now, its worker starts and has an SSH port,
-    sshd's files are written, and the runner starts sshd. It may take as long as a worker takes to start.
+    sshd's files are written, and the runner starts sshd. It may take as long as a worker takes to start. Each
+    connect and each refusal is logged with the link and the peer.
     """
-    endpoint, call = await asyncio.to_thread(_admit, config, runtime_paths, membership_index, link_id, peer_login)
-    await _start_sshd(call)
+    admit = partial(_admit, config, runtime_paths, membership_index, link_id, peer_login)
+    try:
+        endpoint, call = await asyncio.get_running_loop().run_in_executor(_CONNECT_EXECUTOR, copy_context().run, admit)
+        await _start_sshd(call)
+    except ConnectRefused as refused:
+        logger.info(
+            "tailnet_ssh_connect_refused",
+            link_id=link_id,
+            peer_login=peer_login,
+            peer_node=peer_node,
+            status_code=refused.status_code,
+        )
+        raise
     logger.info("tailnet_ssh_connect", link_id=link_id, peer_login=peer_login, peer_node=peer_node)
     return endpoint.host, endpoint.port
 
