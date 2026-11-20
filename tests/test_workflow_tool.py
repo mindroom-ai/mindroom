@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
@@ -725,6 +726,26 @@ async def test_ninth_top_level_run_is_refused_and_nested_runs_do_not_count(stack
     await stack.call("cancel_workflow", run_id=eighth["run_id"])
     assert json.loads(await stack.call("start_workflow", source=SCRIPT))["run_id"].startswith("wf-")
     nested.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_start_waits_for_the_stores_writer_off_the_event_loop(stack: WorkflowStack) -> None:
+    """While another write holds the database, the start waits on a thread and the loop goes on serving others."""
+    loop = asyncio.get_running_loop()
+    writer = sqlite3.connect(stack.store.database_path, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        began = loop.time()
+        call = asyncio.create_task(stack.call("start_workflow", source=SCRIPT))
+        for _ in range(10):
+            await asyncio.sleep(0.01)
+        waited = loop.time() - began
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+
+    assert waited < 1
+    assert json.loads(await asyncio.wait_for(call, SETTLE_TIMEOUT_SECONDS))["run_id"].startswith("wf-")
 
 
 @pytest.mark.asyncio

@@ -82,8 +82,12 @@ class WorkflowRunStore:
         self._enter_wal()
         self._migrate()
 
-    def reserve_run(self, run: WorkflowRun) -> tuple[WorkflowRun, bool]:
-        """Store *run*, or return the run its `origin_job_id` already reserved and `False`."""
+    def reserve_run(self, run: WorkflowRun, *, max_active: int | None = None) -> tuple[WorkflowRun, bool]:
+        """Store *run*, or return the run its `origin_job_id` already reserved and `False`.
+
+        A new top-level run is refused once its agent and owner have *max_active* live ones, counted in the write
+        that would store it, so racing starts never exceed the limit and a refused one leaves no row.
+        """
         validated_workflow_run_id(run.run_id)
         values = {**_row_values(run, _RUN_JSON_FIELDS), "reservation_digest": _reservation_digest(run)}
         with self._write_transaction() as connection:
@@ -98,6 +102,15 @@ class WorkflowRunStore:
                         msg = f"This call already started workflow run {row['run_id']} with another owner, script or arguments."
                         raise WorkflowRunConflictError(msg)
                     return _run_from_row(row), False
+            if max_active is not None and run.parent_run_id is None:
+                active = connection.execute(
+                    "SELECT COUNT(*) FROM workflow_runs WHERE agent_name = ? AND owner_user_id = ? "  # noqa: S608
+                    f"AND parent_run_id IS NULL AND state NOT IN ({_TERMINAL_STATE_PLACEHOLDERS})",
+                    (run.agent_name, run.owner_user_id, *_TERMINAL_STATE_VALUES),
+                ).fetchone()[0]
+                if active >= max_active:
+                    msg = f"You have {max_active} workflow runs in progress, the limit. Wait for one to end or cancel one."
+                    raise WorkflowRunStoreError(msg)
             try:
                 _insert(connection, "INSERT INTO workflow_runs", values)
             except sqlite3.IntegrityError as exc:

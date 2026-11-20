@@ -252,7 +252,7 @@ class WorkflowTools(Toolkit):
             adapter={"workflow_job": job_id, "workflow": run_id},
             operation=operation,
             cancel=cancel,
-            refused=partial(store.delete_intent, run_id) if created else None,
+            refused=partial(asyncio.to_thread, store.delete_intent, run_id) if created else None,
             handle=handle,
         )
 
@@ -276,37 +276,28 @@ class WorkflowTools(Toolkit):
             raise WorkflowRunStoreError(placement)
         text = (await engine.scripts.resolve_source(context, source=source, path=path)).decode()
         hours = self.limits.max_runtime_hours
-        store = engine.store
-        # Written on the loop: no await lies between the intent and the caller's next step, which launches the run
-        # or hands the runtime the job that deletes the intent when it is not admitted.
-        run, created = store.reserve_run(
-            WorkflowRun(
-                run_id=new_workflow_run_id(),
-                agent_name=context.agent_name,
-                owner_user_id=context.requester_id,
-                room_id=context.room_id,
-                thread_root_event_id=context.resolved_thread_id,
-                execution_identity=serialize_tool_execution_identity(context.execution_identity),
-                # The tools a narrowed agent was left with are the run's, whatever its agent has.
-                persona=asdict(context.persona) if context.persona is not None else None,
-                title=str(title)[:_MAX_TITLE_CHARS] if title else None,
-                source=text,
-                source_digest=hashlib.sha256(text.encode()).hexdigest(),
-                args=arguments.get("args"),
-                max_concurrent=max_concurrent,
-                max_cost_usd=None,
-                resource_profile=arguments.get("resource_profile"),
-                runtime_seconds_left=hours * 3600 if hours else None,
-                origin_job_id=origin,
-            ),
+        intent = WorkflowRun(
+            run_id=new_workflow_run_id(),
+            agent_name=context.agent_name,
+            owner_user_id=context.requester_id,
+            room_id=context.room_id,
+            thread_root_event_id=context.resolved_thread_id,
+            execution_identity=serialize_tool_execution_identity(context.execution_identity),
+            # The tools a narrowed agent was left with are the run's, whatever its agent has.
+            persona=asdict(context.persona) if context.persona is not None else None,
+            title=str(title)[:_MAX_TITLE_CHARS] if title else None,
+            source=text,
+            source_digest=hashlib.sha256(text.encode()).hexdigest(),
+            args=arguments.get("args"),
+            max_concurrent=max_concurrent,
+            max_cost_usd=None,
+            resource_profile=arguments.get("resource_profile"),
+            runtime_seconds_left=hours * 3600 if hours else None,
+            origin_job_id=origin,
         )
-        limit = self.limits.max_concurrent_runs
-        owner = {"agent_name": run.agent_name, "owner_user_id": run.owner_user_id}
-        if created and len(store.list_runs(**owner, top_level_only=True, include_finished=False)) > limit:
-            store.delete_intent(run.run_id)
-            msg = f"You have {limit} workflow runs in progress, the limit. Wait for one to end or cancel one."
-            raise WorkflowRunStoreError(msg)
-        return run, created
+        # On a thread, where it waits for the store's writer. A call cancelled meanwhile deletes nothing: its
+        # redelivery finds the intent, or recovery removes it.
+        return await asyncio.to_thread(engine.store.reserve_run, intent, max_active=self.limits.max_concurrent_runs)
 
 
 def _workflow_job_outcome(run: WorkflowRun) -> BackgroundOutcome:

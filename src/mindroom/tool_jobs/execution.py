@@ -490,7 +490,7 @@ async def _run_managed_call(
                 if job.refused is not None:
                     # A cancelled start may have been admitted, so only a start the runtime refused takes
                     # back what preparing its job wrote.
-                    job.refused()
+                    await job.refused()
                 raise
         waited = await runtime.wait(
             job_id,

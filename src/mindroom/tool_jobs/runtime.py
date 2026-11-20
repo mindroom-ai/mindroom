@@ -112,7 +112,7 @@ class JobSpec:
     adapter: dict[str, Any]
     operation: _Operation
     cancel: _Cleanup | None = None
-    refused: Callable[[], object] | None = None
+    refused: Callable[[], Awaitable[object]] | None = None
     handle: Callable[[BackgroundJob], str] | None = None
 
 
