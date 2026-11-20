@@ -342,7 +342,8 @@ Of MindRoom's secrets it holds the token alone, which the chart keeps in a Secre
 The chart's policies let it reach the listener's port, port 2222 of marked workers, DNS, and public TCP 443 or the operator's proxy, and let nothing reach it.
 A connection is admitted three times, by three owners: the person's tailnet policy decides which devices reach the machine, the gateway closes a connection unless its peer's Tailscale login is the link's one login, and the worker's sshd takes only public keys, those of the link's person.
 A tailnet's default policy lets every member reach every machine, so the gateway checks every connection, before it asks the primary and so before a worker wakes, and the primary checks the login again; a tagged device has no login and is refused.
-sshd forwards nothing, by `sshd_config` and by `restrict` on every key line: no TCP, socket, agent, X11, or tunnel forwarding, so worker code gets no way through a session to the person's device, tailnet, or SSH agent.
+The sshd the primary configures forwards nothing, by `sshd_config` and by `restrict` on every key line: no TCP, socket, agent, X11, or tunnel forwarding.
+That is the worker's word, and the person's client must not rely on it: sshd runs as the agent's uid, so worker code can replace it and plant shell startup files, and a person must not offer the worker agent or X11 forwarding (`ssh -A`, `ForwardX11`), nor use a client that trusts the remote, such as VS Code Remote-SSH.
 Each machine's node keys, which are that machine to its tailnet, live in the gateway's state volume under the link's id; no worker mounts it, and removing a link signs the machine out and deletes them.
 A node's login URL signs the machine in to the tailnet of whoever opens it, so only `GET /api/connections/tailnet-ssh` returns it, to the link's owner, and the gateway writes it to neither its log nor that volume.
 
