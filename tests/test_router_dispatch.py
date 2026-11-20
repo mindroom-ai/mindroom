@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -189,6 +190,23 @@ class TestAgentBot(AgentBotTestBase):
 
         assert relay.await_args.args[2] is image
         assert relay.await_args.kwargs["handled_turn"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_turn_that_is_no_route_needs_no_content_to_pass_the_route_reader(self, tmp_path: Path) -> None:
+        """Only a route's content is read for its prompt: a synthetic event without content passes as it is."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(make_mock_agent_user(), config=config, runtime_paths=runtime_paths_for(config))
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.agent_user.user_id)
+        text = PreparedIngress(
+            sender="@user:localhost",
+            event_id="$text",
+            body="hello",
+            source={"content": {"msgtype": "m.text", "body": "hello"}},
+        )
+        turn = make_test_turn(room, text, "@user:localhost")
+        turn = replace(turn, event=replace(turn.event, source={}))
+
+        assert await bot._turn_dispatcher._with_routed_text(turn) is turn
 
     @pytest.mark.asyncio
     async def test_router_joined_room_startup_sends_welcome_after_join(

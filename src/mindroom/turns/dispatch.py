@@ -421,9 +421,9 @@ class TurnDispatcher:
 
     async def _with_routed_text(self, turn: PreparedTurn) -> PreparedTurn | None:
         """Return a routed turn with its steward's prompt, the route's text or its long-text file's, or None while unread."""
-        content, body = turn.event.source["content"], turn.event.body
         if not turn.facts.routed_event_ids:
             return turn
+        content, body = turn.event.source["content"], turn.event.body
         if prompt_file := content.get(ROUTE_PROMPT_FILE_KEY):
             content = await self.deps.normalizer.long_text_content(prompt_file)
             body = content.get("body")
