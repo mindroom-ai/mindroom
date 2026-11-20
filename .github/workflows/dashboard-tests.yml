@@ -53,5 +53,12 @@ jobs:
       - name: Lint
         run: bun run lint
 
+      # tsc here is TypeScript 7; lint still type-checks through the TypeScript 6 API.
+      - name: Type-check
+        run: bun run type-check
+
       - name: Run tests
         run: bun run test --run
+
+      - name: Build
+        run: bun run build
