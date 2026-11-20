@@ -14,9 +14,10 @@ from mindroom.commands.handler import COMMAND_TYPES_WITH_SIDE_EFFECTS, handle_co
 from mindroom.commands.parsing import CommandType, _CommandParser, get_command_help
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
+from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
-from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
-from mindroom.history.session_context import create_scope_session_storage
+from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig, ModelPricing
+from mindroom.history.session_context import create_scope_session_storage, scope_session_database_path
 from mindroom.history.storage import has_queued_force_compaction, new_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.users import AgentMatrixUser
@@ -150,8 +151,9 @@ def test_compact_is_a_listed_side_effect_command() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", ["code", "squad"])
-async def test_named_entity_compacts_before_its_next_reply_in_this_thread(tmp_path: Path, name: str) -> None:
+async def test_named_entity_compacts_before_its_next_reply_in_this_conversation(tmp_path: Path, name: str) -> None:
     config, paths = _config(tmp_path)
+    _seed(config, paths, name)
     result = await _compact(config, paths, name)
     assert result == f"✅ `{name}` compacts its context before its next reply in this thread."
     assert _queued(config, paths, name)
@@ -160,6 +162,7 @@ async def test_named_entity_compacts_before_its_next_reply_in_this_thread(tmp_pa
 @pytest.mark.asyncio
 async def test_named_room_mode_agent_compacts_the_room_session(tmp_path: Path) -> None:
     config, paths = _config(tmp_path)
+    _seed(config, paths, "lobby", room_mode=True)
     result = await _compact(config, paths, "lobby", target=_target(in_thread=False))
     assert result == "✅ `lobby` compacts its context before its next reply in this room."
     assert _queued(config, paths, "lobby", room_mode=True)
@@ -168,8 +171,9 @@ async def test_named_room_mode_agent_compacts_the_room_session(tmp_path: Path) -
 @pytest.mark.asyncio
 async def test_named_thread_agent_outside_a_thread_is_refused(tmp_path: Path) -> None:
     config, paths = _config(tmp_path)
+    _seed(config, paths, "code")
     result = await _compact(config, paths, "code", target=_target(in_thread=False))
-    assert "inside an existing thread" in result
+    assert result == "`code` has nothing to compact here yet."
     assert not _queued(config, paths, "code")
 
 
@@ -191,6 +195,21 @@ async def test_named_entity_refusals_set_no_flag(tmp_path: Path, args_text: str,
 @pytest.mark.asyncio
 async def test_unavailable_compaction_reports_the_reason(tmp_path: Path) -> None:
     config, paths = _config(tmp_path, context_window=None)
+    _seed(config, paths, "code")
+    result = await _compact(config, paths, "code")
+    assert result == (
+        "❌ `code` cannot compact its context because no context_window is configured on the active model."
+    )
+    assert not _queued(config, paths, "code")
+
+
+@pytest.mark.asyncio
+async def test_compaction_availability_checks_the_requesters_budget_fallback(tmp_path: Path) -> None:
+    config, paths = _config(tmp_path)
+    config.models["default"].pricing = ModelPricing(input=5, output=30)
+    config.models["fallback"] = ModelConfig(provider="openai", id="test-fallback")
+    config.budgets = BudgetsConfig(fallback_model="fallback", monthly_limit_usd=0)
+    _seed(config, paths, "code")
     result = await _compact(config, paths, "code")
     assert result == (
         "❌ `code` cannot compact its context because no context_window is configured on the active model."
@@ -203,13 +222,14 @@ async def test_private_agent_compacts_only_the_requesters_own_store(tmp_path: Pa
     config, paths = _config(tmp_path)
     config.agents["code"].private = AgentPrivateConfig(per="user")
     config.agents["code"].access = ResponderAccessConfig(users=[ALICE, "@bob:example.test"])
+    _seed(config, paths, "code")
     assert (await _compact(config, paths, "code")).startswith("✅")
     assert _queued(config, paths, "code")
     assert not _queued(config, paths, "code", requester_id="@bob:example.test")
 
 
 @pytest.mark.asyncio
-async def test_bare_compact_flags_only_addressable_entities_that_spoke_here(tmp_path: Path) -> None:
+async def test_bare_compact_flags_only_addressable_entities_with_a_session_here(tmp_path: Path) -> None:
     config, paths = _config(tmp_path)
     for name in ("code", "squad", "secret"):
         _seed(config, paths, name)
@@ -226,6 +246,26 @@ async def test_bare_compact_flags_only_addressable_entities_that_spoke_here(tmp_
 
 
 @pytest.mark.asyncio
+async def test_bare_compact_continues_after_an_unreadable_store(tmp_path: Path) -> None:
+    config, paths = _config(tmp_path)
+    database = scope_session_database_path(
+        scope=_scope(config, "docs"),
+        config=config,
+        runtime_paths=paths,
+        execution_identity=None,
+    )
+    database.parent.mkdir(parents=True, exist_ok=True)
+    database.write_text("not a database", encoding="utf-8")
+    _seed(config, paths, "squad")
+
+    assert (await _compact(config, paths, "")).splitlines() == [
+        "❌ `docs`: its history could not be read.",
+        "✅ `squad` compacts its context before its next reply in this thread.",
+    ]
+    assert _queued(config, paths, "squad")
+
+
+@pytest.mark.asyncio
 async def test_bare_compact_outside_a_thread_reaches_room_mode_entities(tmp_path: Path) -> None:
     config, paths = _config(tmp_path)
     _seed(config, paths, "lobby", room_mode=True)
@@ -235,7 +275,11 @@ async def test_bare_compact_outside_a_thread_reaches_room_mode_entities(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_bare_compact_without_sessions_says_nothing_to_compact_and_provisions_nothing(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [("", "Nothing to compact here."), ("code", "`code` has nothing to compact here yet.")],
+)
+async def test_compact_without_sessions_does_not_provision_storage(tmp_path: Path, name: str, expected: str) -> None:
     config, paths = _config(tmp_path)
     config.agents["code"].private = AgentPrivateConfig(per="user")
 
@@ -243,8 +287,8 @@ async def test_bare_compact_without_sessions_says_nothing_to_compact_and_provisi
         return {path for path in paths.storage_root.rglob("*") if path.is_file()}
 
     before = stored_files()
-    assert await _compact(config, paths, "") == "Nothing to compact here."
-    # No conversation database and no private owner record for the entities that never spoke here.
+    assert await _compact(config, paths, name) == expected
+    # No conversation database and no private owner record for the entities without a session here.
     assert stored_files() == before
 
 
@@ -259,7 +303,10 @@ def _reply_runner(tmp_path: Path, entity_name: str) -> ResponseRunner:
     config.agents["general"].private = AgentPrivateConfig(per="user")
     config.agents["helper"] = AgentConfig(display_name="Helper", rooms=["!room:localhost"])
     config.teams["squad"] = TeamConfig(
-        display_name="Squad", role="Pair up", agents=["helper"], rooms=["!room:localhost"]
+        display_name="Squad",
+        role="Pair up",
+        agents=["helper"],
+        rooms=["!room:localhost"],
     )
     agent_user = AgentMatrixUser(
         agent_name=entity_name,
@@ -276,11 +323,19 @@ def _reply_runner(tmp_path: Path, entity_name: str) -> ResponseRunner:
 @pytest.mark.parametrize("entity_name", ["general", "squad"])
 async def test_the_reply_path_reads_the_flag_the_command_writes(tmp_path: Path, entity_name: str) -> None:
     runner = _reply_runner(tmp_path, entity_name)
+    config, paths = runner.deps.runtime.config, runner.deps.runtime_paths
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$command")
+    scope = runner.deps.state_writer.history_scope()
+    identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id=REQUESTER)
+    seed_session_row(
+        create_scope_session_storage(scope=scope, config=config, runtime_paths=paths, execution_identity=identity),
+        new_scope_session(session_id=target.session_id, scope=scope),
+    )
     result = await handle_compact_command(
         entity_name,
-        config=runner.deps.runtime.config,
-        runtime_paths=runner.deps.runtime_paths,
-        target=MessageTarget.resolve("!room:localhost", "$thread", "$command"),
+        config=config,
+        runtime_paths=paths,
+        target=target,
         requester_id=REQUESTER,
         membership_index=runner.deps.runtime.agent_reply_memberships,
     )
@@ -292,7 +347,7 @@ async def test_the_reply_path_reads_the_flag_the_command_writes(tmp_path: Path, 
         identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id=requester_id)
         return await runner._has_queued_forced_compaction(
             session_id=target.session_id,
-            scope=runner.deps.state_writer.history_scope(),
+            scope=scope,
             execution_identity=identity,
         )
 
@@ -321,6 +376,7 @@ def _event(body: str) -> nio.RoomMessageText:
 @pytest.mark.parametrize("acts_for_requester", [False, True])
 async def test_handler_runs_compact_only_for_the_human_in_person(tmp_path: Path, acts_for_requester: bool) -> None:
     config, paths = _config(tmp_path)
+    _seed(config, paths, "code")
     send_response = AsyncMock(return_value="$reply")
     record_command_result = AsyncMock()
     context = make_test_command_handler_context(

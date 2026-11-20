@@ -9616,6 +9616,7 @@ depends_on = [
     "mindroom.history.manual",
     "mindroom.history.types",
     "mindroom.tool_system.worker_routing",
+    "mindroom.turn_model",
 ]
 
 [[modules]]

@@ -47,7 +47,7 @@ _COMMAND_DOCS = {
     ),
     CommandType.COMPACT: (
         "/compact [agent_or_team]",
-        "Compact the agents' context before their next reply in this thread",
+        "Compact the agents' context before their next reply in this conversation",
     ),
     CommandType.SCHEDULE: ("/schedule <task>", "Schedule a task"),
     CommandType.LIST_SCHEDULES: ("/list_schedules", "List scheduled tasks"),

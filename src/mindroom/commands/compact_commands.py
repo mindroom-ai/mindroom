@@ -8,13 +8,18 @@ from mindroom.authorization import addressable_responder_names, is_sender_allowe
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.manual import schedule_compaction_before_next_reply, scope_has_session
 from mindroom.history.types import HistoryScope
+from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from mindroom.turn_model import TurnBudget
 
 if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+
+logger = get_logger(__name__)
 
 
 async def handle_compact_command(
@@ -25,11 +30,13 @@ async def handle_compact_command(
     target: MessageTarget,
     requester_id: str,
     membership_index: AgentReplyMembershipIndex,
+    budget_monitor: BudgetMonitor | None = None,
 ) -> str:
-    """Compact the named agent or team, else every one the requester may address that already has a session here."""
+    """Compact an addressable agent or team, or all of them, if they have a session in this conversation."""
     words = args_text.split()
     if len(words) > 1:
         return "Use `/compact [agent_or_team]`."
+    budget = TurnBudget(budget_monitor, requester_id, log_fallback=False)
     if words:
         name = words[0]
         if name not in config.agents and name not in config.teams:
@@ -44,15 +51,20 @@ async def handle_compact_command(
             require_resolved_membership=True,
         ):
             return f"Access denied for `{name}`."
-        reply = await _compact(name, config, runtime_paths, target, requester_id, only_stored=False)
-        return reply or f"Run `/compact {name}` inside an existing thread for `{name}`."
+        reply = await _compact(name, config, runtime_paths, target, budget)
+        return reply or f"`{name}` has nothing to compact here yet."
     names = addressable_responder_names(requester_id, target.room_id, config, runtime_paths, membership_index)
-    replies = [
-        reply
-        for name in names
-        if name != ROUTER_AGENT_NAME
-        and (reply := await _compact(name, config, runtime_paths, target, requester_id, only_stored=True))
-    ]
+    replies = []
+    for name in names:
+        if name == ROUTER_AGENT_NAME:
+            continue
+        try:
+            reply = await _compact(name, config, runtime_paths, target, budget)
+        except Exception:
+            logger.exception("Could not request compaction", entity=name, room_id=target.room_id)
+            reply = f"❌ `{name}`: its history could not be read."
+        if reply is not None:
+            replies.append(reply)
     return "\n".join(replies) or "Nothing to compact here."
 
 
@@ -61,9 +73,7 @@ async def _compact(
     config: Config,
     runtime_paths: RuntimePaths,
     target: MessageTarget,
-    requester_id: str,
-    *,
-    only_stored: bool,
+    budget: TurnBudget,
 ) -> str | None:
     """Request compaction for ``name`` in this conversation; None when it has no session here to compact."""
     room_mode = config.get_entity_thread_mode(name, runtime_paths, room_id=target.room_id) == "room"
@@ -82,13 +92,13 @@ async def _compact(
         channel="matrix",
         agent_name=name,
         runtime_paths=runtime_paths,
-        requester_id=requester_id,
+        requester_id=budget.requester_id,
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
         resolved_thread_id=target.resolved_thread_id,
         session_id=target.session_id,
     )
-    if only_stored and not await scope_has_session(
+    if not await scope_has_session(
         scope=scope,
         session_id=target.session_id,
         runtime_paths=runtime_paths,
@@ -106,6 +116,7 @@ async def _compact(
         active_model_name=None,
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
+        budget=budget,
     )
     if unavailable is not None:
         return f"❌ `{name}` cannot compact its context because {unavailable}."

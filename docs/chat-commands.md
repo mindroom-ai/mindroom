@@ -23,7 +23,7 @@ This page lists every command and fully covers `/help`, `/hi`, and `/config`; th
 | `/cancel_job <id\|all>` | Cancel a background job by the short ID `/jobs` shows, or all of them in this thread, or in the whole room when sent outside any thread | [Background jobs](tools/agent-orchestration.md#background-jobs) |
 | `/desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent | [Desktop](tools/desktop.md#desktop) |
 | `/mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](tools/agent-cli.md#mode) |
-| `/compact [agent_or_team]` | Compact the context of one agent or team, or of every one you may address that has replied in this thread, before its next reply | [History](configuration/history.md#manual-compaction) |
+| `/compact [agent_or_team]` | Compact context before the next reply in this conversation (bare `/compact` applies to every agent or configured team you may address that has a conversation here) | [History](configuration/history.md#manual-compaction) |
 | `/model [name\|name@level\|list\|reset]` | Show or switch the model used in the current thread | [Models](configuration/models.md#model) |
 | `/room_model [name\|name@level\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) | [Models](configuration/models.md#room_model) |
 | `/thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room (set/reset require a room admin) | [Threads](configuration/threads.md#thread_mode) |

@@ -141,7 +141,8 @@ The request runs before the next reply in the same conversation and always uses 
 It requires a summary model with a `context_window` and the same 2,000-token summary input budget; otherwise the tool returns `Error: Compaction is unavailable for this scope because ...` with the reason.
 
 You can request the same compaction from chat with `/compact` (or `!compact`).
-`/compact <agent_or_team>` requests it for one agent or configured team you may address; `/compact` alone requests it for every agent and team you may address that already has history in this conversation.
+`/compact <agent_or_team>` requests it for one agent or configured team; `/compact` alone requests it for all of them.
+Both forms only reach agents and configured teams you may address that already have a conversation here.
 The conversation is the thread, or the whole room for an agent or team in room mode; for a thread-mode agent, send it inside the thread.
 The reply has one line per agent or team, with the reason when compaction is unavailable for it.
 

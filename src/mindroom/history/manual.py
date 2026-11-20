@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.turn_model import TurnBudget
 
 
 logger = get_logger(__name__)
@@ -97,6 +98,7 @@ async def schedule_compaction_before_next_reply(
     active_model_name: str | None,
     room_id: str | None,
     thread_id: str | None = None,
+    budget: TurnBudget | None = None,
 ) -> str | None:
     """Schedule compaction as ``request_compaction_before_next_reply`` does; return why it is unavailable, else None.
 
@@ -108,7 +110,7 @@ async def schedule_compaction_before_next_reply(
         config,
         runtime_paths,
         ModelScope(entity=entity_name, room_id=room_id, thread_id=thread_id, explicit=active_model_name),
-        None,
+        budget,
     )
     execution_plan = resolve_history_execution_plan(
         config=config,
