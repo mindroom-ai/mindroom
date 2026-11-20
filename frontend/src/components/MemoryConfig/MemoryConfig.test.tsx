@@ -403,54 +403,23 @@ describe("MemoryConfig", () => {
     });
   });
 
-  it("loads and updates the entrypoint token cap without touching other file settings", async () => {
-    mockStore({
-      memory: {
-        backend: "file",
-        embedder: mockConfig.memory!.embedder,
-        file: {
-          max_entrypoint_lines: 120,
-          max_entrypoint_tokens: 30000,
-        },
-      },
-    });
-    render(<MemoryConfig />);
-
-    const tokenInput = document.getElementById(
-      "entrypoint-max-tokens",
-    ) as HTMLInputElement;
-    expect(tokenInput.value).toBe("30000");
-    fireEvent.change(tokenInput, { target: { value: "20000" } });
-
-    await waitFor(() => {
-      expect(mockUpdateMemoryConfig).toHaveBeenCalledWith(
-        expect.objectContaining({
-          file: {
-            max_entrypoint_lines: 120,
-            max_entrypoint_tokens: 20000,
-          },
-        }),
-      );
-    });
-  });
-
   it("falls back to the default when a numeric field is cleared", () => {
     mockStore({
       memory: {
         backend: "file",
         embedder: mockConfig.memory!.embedder,
-        file: { max_entrypoint_lines: 120 },
+        auto_flush: { flush_interval_seconds: 120 },
       },
     });
     render(<MemoryConfig />);
 
-    fireEvent.change(document.getElementById("entrypoint-max-lines")!, {
+    fireEvent.change(document.getElementById("flush-interval-seconds")!, {
       target: { value: "" },
     });
 
     expect(mockUpdateMemoryConfig).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        file: { max_entrypoint_lines: 200, max_entrypoint_tokens: 50000 },
+        auto_flush: expect.objectContaining({ flush_interval_seconds: 300 }),
       }),
     );
   });
@@ -465,7 +434,7 @@ describe("MemoryConfig", () => {
         memory: {
           ...mockConfig.memory!,
           backend: "file",
-          file: { max_entrypoint_lines: 120 },
+          auto_flush: { flush_interval_seconds: 120 },
         },
       } as Config,
     });
@@ -473,20 +442,20 @@ describe("MemoryConfig", () => {
     render(<MemoryConfig />);
 
     const input = document.getElementById(
-      "entrypoint-max-lines",
+      "flush-interval-seconds",
     ) as HTMLInputElement;
     for (const value of ["", "5", "50"]) {
       fireEvent.change(input, { target: { value } });
       expect(input).toHaveDisplayValue(value);
     }
     expect(
-      actual.useConfigStore.getState().config?.memory.file
-        ?.max_entrypoint_lines,
+      actual.useConfigStore.getState().config?.memory.auto_flush
+        ?.flush_interval_seconds,
     ).toBe(50);
 
     fireEvent.change(input, { target: { value: "" } });
     fireEvent.blur(input);
-    expect(input).toHaveDisplayValue("200");
+    expect(input).toHaveDisplayValue("300");
   });
 
   it("enables auto flush and entrypoint search from their selects", async () => {
@@ -615,6 +584,12 @@ describe("MemoryConfig", () => {
       document.getElementById("team-reads-member-memory"),
     ).not.toBeInTheDocument();
     expect(document.getElementById("file-memory-path")).not.toBeInTheDocument();
+    expect(
+      document.getElementById("entrypoint-max-lines"),
+    ).not.toBeInTheDocument();
+    expect(
+      document.getElementById("entrypoint-max-tokens"),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("Team Reads Members:")).not.toBeInTheDocument();
   });
 

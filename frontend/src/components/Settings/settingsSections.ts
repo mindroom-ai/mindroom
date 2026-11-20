@@ -72,7 +72,7 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
           "num_history_messages",
           "max_tool_calls_from_history",
           "compaction",
-          "max_preload_chars",
+          "max_preload_file_chars",
           "thread_summary_model",
           "thread_summary_temperature",
           "thread_summary_first_threshold",
