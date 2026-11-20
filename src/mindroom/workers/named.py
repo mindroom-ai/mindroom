@@ -85,6 +85,11 @@ class _NamedWorkerBackend(Protocol):
         """Remove one exact worker and all backend-owned state."""
 
 
+def _named_backend(backend: WorkerBackend) -> _NamedWorkerBackend:
+    """Return ``backend``, whose ``named_workers_max`` is above 0, as one that runs named workers."""
+    return cast("_NamedWorkerBackend", backend)
+
+
 @dataclass(slots=True)
 class _NamedWorker:
     """One worker a fleet started: the size it was started with and the start its last call ran in."""
@@ -302,7 +307,7 @@ def ensure_named_worker(
         # Read before the workers that exist, so a start that ends in between is counted there, never nowhere.
         with _lock:
             starting = frozenset(_starting)
-        counted = cast("_NamedWorkerBackend", backend).named_worker_keys() | starting
+        counted = _named_backend(backend).named_worker_keys() | starting
         if worker_key not in counted:
             mine = sum(pinned_worker_state_scope_key(key) == normal_worker_key for key in counted)
             if mine >= call.agent_limit:
@@ -339,7 +344,7 @@ def _retire_workers(runtime_paths: RuntimePaths, worker_keys: tuple[str, ...]) -
     with lease as backend:
         if backend.named_workers_max < 1:
             return
-        named_backend = cast("_NamedWorkerBackend", backend)
+        named_backend = _named_backend(backend)
 
         def retire(worker_key: str) -> None:
             try:
