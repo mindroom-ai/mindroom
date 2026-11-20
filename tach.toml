@@ -1569,6 +1569,7 @@ visibility = [
     "mindroom.turns.ingress",
     "mindroom.custom_tools.egress_credentials",
     "mindroom.custom_tools.temporary_secrets",
+    "mindroom.custom_tools.email_invite",
 ]
 
 [[modules]]
@@ -4301,6 +4302,7 @@ visibility = [
     "mindroom.matrix.room_accounts",
     "mindroom.room_tree.note",
     "mindroom.email_invites.policy",
+    "mindroom.custom_tools.email_invite",
 ]
 
 [[modules]]
@@ -4468,6 +4470,20 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.mcp_gateway.admission",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.email_invite"
+depends_on = [
+    "mindroom.approval.tool_approval",
+    "mindroom.constants",
+    "mindroom.email_invites.mail",
+    "mindroom.email_invites.policy",
+    "mindroom.email_invites.store",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]
@@ -5789,6 +5805,7 @@ depends_on = [
     "mindroom.api.connection_agents",
     "mindroom.api.plugin_routes",
     "mindroom.config.main",
+    "mindroom.config.tool_aliases",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.hooks",
