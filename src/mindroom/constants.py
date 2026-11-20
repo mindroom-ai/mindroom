@@ -1071,6 +1071,8 @@ ROUTE_EVENT_TYPE = "io.mindroom.route"
 ROUTE_PROMPT_STRUCTURED_KEY = "io.mindroom.route_prompt_structured"
 # In a route handed to its responder: the long-text file of a route whose prompt is too long for one event.
 ROUTE_PROMPT_FILE_KEY = "io.mindroom.route_prompt_file"
+# In a route's content: its `body` is not a prompt but the notice its responder posts, the turn being too long to read.
+ROUTE_TOO_LARGE_KEY = "io.mindroom.route_too_large"
 # In a route's content: the steward's transcript of each voice message it routes, by event ID.
 ROUTE_VOICE_TRANSCRIPTS_KEY = "io.mindroom.voice_transcripts"
 # Transcripts over this many encoded bytes are left to the responder's own checkpoint.

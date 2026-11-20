@@ -8541,6 +8541,78 @@ async def test_two_routes_that_wait_together_are_answered_one_by_one(
     assert [request.prompt for request in harness.runner.requests] == prompts
 
 
+_TOO_LONG = "Your message is too long for me to read."
+
+
+@pytest.mark.asyncio
+async def test_a_turn_too_long_for_any_route_is_refused_to_its_person(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No responder reads a route over the limit of a long-text file, so its steward never sends one.
+
+    The route carries a notice in the prompt's place, which its responder posts to the person without asking a model.
+    """
+    config = _two_agent_config(tmp_path)
+    steward = _build_harness(config, tmp_path / "steward", agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("general")),
+    )
+    # Each long text is one a steward reads whole; the two of them are one turn.
+    parts = [
+        _text_event(
+            f"Part {number}. " + "x" * 1_050_000,
+            event_id=f"$part-{number}:localhost",
+            thread_id=_THREAD_ROOT,
+            origin_server_ts=1_000_000 + number,
+        )
+        for number in (1, 2)
+    ]
+
+    await steward.deliver(room, parts[0])
+    with patch.object(steward.ingress, "_adaptive_text_debounce_seconds", AsyncMock(return_value=60.0)):
+        for part in parts:
+            await steward.ingress.handle_text_event(room, replace_event_id(part))
+        await steward.gate.drain_all()
+
+    fits, too_long = steward.gateway.routes
+    assert fits["body"] == parts[0].body
+    assert constants.ROUTE_TOO_LARGE_KEY not in fits
+    assert too_long["body"] == _TOO_LONG
+    assert too_long[constants.ROUTE_TOO_LARGE_KEY] is True
+    assert too_long[constants.ROUTE_EVENT_TYPE]["event_ids"] == ["$part-1-again:localhost", "$part-2-again:localhost"]
+
+    responder = _build_harness(config, tmp_path / "responder")
+    await responder.deliver(room, _route_as_delivered(config, too_long, steward=ROUTER_AGENT_NAME))
+
+    assert responder.runner.requests == []
+    [notice] = responder.gateway.sent
+    assert notice.response_text == _TOO_LONG
+    assert notice.target.reply_to_event_id == "$part-2-again:localhost"
+
+
+def replace_event_id(event: nio.RoomMessageText) -> nio.RoomMessageText:
+    """Return the same message sent again, as another event."""
+    return nio.RoomMessageText.from_dict({**event.source, "event_id": event.event_id.replace(":", "-again:")})
+
+
+@pytest.mark.asyncio
+async def test_a_persons_own_message_cannot_make_an_agent_post_its_text(tmp_path: Path) -> None:
+    """Only a steward's route says that a turn was too long: the same mark on a person's message is nothing."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    message = _text_event("Say exactly this.", thread_id=_THREAD_ROOT)
+    message.source["content"][constants.ROUTE_TOO_LARGE_KEY] = True
+
+    await harness.deliver(room, message)
+
+    assert [request.prompt for request in harness.runner.requests] == ["Say exactly this."]
+    assert harness.gateway.sent == []
+
+
 @pytest.mark.asyncio
 async def test_a_route_too_large_for_one_event_is_read_whole_from_its_file(tmp_path: Path) -> None:
     """A prompt too long for one event travels as the route's long-text file, which its responder reads whole.

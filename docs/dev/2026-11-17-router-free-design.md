@@ -105,6 +105,7 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     The responder reads the prompt from the route or from the route's file, and never makes one from the messages the route names.
     While it cannot read the file, and for a route without a `body`, it starts no turn and leaves the route pending.
     No model is ever sent a preview or a stand-in text.
+    Writer and reader share one size limit, the most a responder downloads of a long-text file: a steward whose serialized route would pass it sends the route with a notice in the prompt's place and the `io.mindroom.route_too_large` mark, and the responder posts that notice to the person as its answer without asking a model.
     A route is a whole turn its steward selected, so it shares a turn with nothing: two routes waiting for one responder are answered one by one, whatever their source kind.
     A message its sender edits while it waits for its turn takes the edit, which settles then, and the journal stores the waiting message as edited: after a crash the message replays with the correction, for a steward and for an agent answering directly.
     Only the responder a route names processes it: every other bot settles it unread, having run its hooks for the person's own message.

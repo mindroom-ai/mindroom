@@ -44,7 +44,7 @@ logger = get_logger(__name__)
 # children have now each dropped a msgtype after shipping.
 type VisibleRoomMessage = nio.RoomMessageFormatted | nio.RoomMessageMedia | nio.RoomEncryptedMedia
 
-_MXC_TEXT_MAX_BYTES = 2 * 1024 * 1024
+MXC_TEXT_MAX_BYTES = 2 * 1024 * 1024
 _MAX_SIDECAR_HOPS = 8
 
 
@@ -162,7 +162,7 @@ async def _download_mxc_text(
 
     """
     try:
-        body = await download_mxc_bytes(client, mxc_url, max_bytes=_MXC_TEXT_MAX_BYTES)
+        body = await download_mxc_bytes(client, mxc_url, max_bytes=MXC_TEXT_MAX_BYTES)
         if body is None:
             return None
 

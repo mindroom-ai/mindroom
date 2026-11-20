@@ -15,6 +15,7 @@ from mindroom.constants import (
     PER_FIRE_THREAD_ROOT_KEY,
     ROUTE_EVENT_TYPE,
     ROUTE_PROMPT_STRUCTURED_KEY,
+    ROUTE_TOO_LARGE_KEY,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
     ROUTE_VOICE_TRANSCRIPTS_LIMIT,
     SOURCE_KIND_KEY,
@@ -30,6 +31,7 @@ from mindroom.dispatch_source import (
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.media import is_matrix_media_dispatch_event
+from mindroom.matrix.message_content import MXC_TEXT_MAX_BYTES
 from mindroom.matrix.room_history_reads import UnresolvedOpaqueRoomHistoryError
 from mindroom.routing import suggest_responder_for_message
 from mindroom.turn_origin import original_sender_for_router_relay
@@ -267,7 +269,6 @@ async def execute_router_relay(  # noqa: PLR0911
     extra_content: dict[str, Any] | None = None,
     media_events: list[MediaDispatchEvent] | None = None,
     handled_turn: TurnRecord | None = None,
-    scheduled_prompt: str | None = None,
     prompt_is_structured: bool = False,
 ) -> bool:
     """Route one turn as the room's steward; return whether the steward itself was selected and answers it.
@@ -352,8 +353,10 @@ async def execute_router_relay(  # noqa: PLR0911
         route["thread_id"] = thread_event_id
     transcripts = await _voice_transcripts(deps, route["event_ids"])
     content: dict[str, Any] = {**routed_extra_content, ROUTE_EVENT_TYPE: route, **transcripts}
-    # The steward read every message of the turn, which its responder may not: the route carries its whole prompt.
-    content |= {"body": scheduled_prompt or message or event.body, ROUTE_PROMPT_STRUCTURED_KEY: prompt_is_structured}
+    # The route carries its steward's whole prompt or, past what a responder reads of a long-text file, a notice.
+    content |= {"body": message or event.body, ROUTE_PROMPT_STRUCTURED_KEY: prompt_is_structured}
+    readable = len(json.dumps(content, ensure_ascii=False).encode()) <= MXC_TEXT_MAX_BYTES
+    content |= {} if readable else {"body": "Your message is too long for me to read.", ROUTE_TOO_LARGE_KEY: True}
     event_id = await deps.delivery_gateway.send_route(room.room_id, content)
     with bound_log_context(**resolved_target.log_context):
         if event_id is None:

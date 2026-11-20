@@ -1078,7 +1078,7 @@ class TestDownloadMxcText:
     @pytest.mark.asyncio
     async def test_download_rejects_plaintext_over_byte_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Oversized sidecar bytes should not be decoded."""
-        monkeypatch.setattr(message_content_module, "_MXC_TEXT_MAX_BYTES", 5)
+        monkeypatch.setattr(message_content_module, "MXC_TEXT_MAX_BYTES", 5)
         client = _make_client()
         response = MagicMock(spec=nio.DownloadResponse)
         response.body = b"123456"
@@ -1094,7 +1094,7 @@ class TestDownloadMxcText:
         measure it, so any room member could point a sidecar at a file as large
         as the homeserver accepts and have every agent buffer all of it.
         """
-        limit = message_content_module._MXC_TEXT_MAX_BYTES
+        limit = message_content_module.MXC_TEXT_MAX_BYTES
         response = FakeMediaResponse(b"x" * (5 * limit))
         client = _make_client()
         client.send = AsyncMock(return_value=response)
@@ -1111,7 +1111,7 @@ class TestDownloadMxcText:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Oversized encrypted sidecars should be rejected before decryption allocates plaintext."""
-        monkeypatch.setattr(message_content_module, "_MXC_TEXT_MAX_BYTES", 5)
+        monkeypatch.setattr(message_content_module, "MXC_TEXT_MAX_BYTES", 5)
         client = _make_client()
         response = MagicMock(spec=nio.DownloadResponse)
         response.body = b"123456"

@@ -1512,7 +1512,7 @@ class TestRouterSkipsSingleAgent:
             "extra_content": None,
             "media_events": None,
             "handled_turn": None,
-            "scheduled_prompt": None,
+            "prompt_is_structured": False,
         }
 
         # Verify it didn't log about skipping

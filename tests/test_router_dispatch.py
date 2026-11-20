@@ -143,7 +143,6 @@ class TestAgentBot(AgentBotTestBase):
             extra_content={"com.mindroom.original_sender": "@user:localhost"},
             media_events=None,
             handled_turn=None,
-            scheduled_prompt=None,
             prompt_is_structured=False,
         )
 
@@ -840,7 +839,6 @@ class TestAgentBot(AgentBotTestBase):
             ORIGINAL_SENDER_KEY: "@user:localhost",
             SCHEDULED_HISTORY_LIMIT_KEY: 4,
         }
-        assert call["scheduled_prompt"] == event.body
 
     @pytest.mark.asyncio
     async def test_scheduled_router_handoff_carries_the_task_in_its_body(self, tmp_path: Path) -> None:
@@ -886,7 +884,6 @@ class TestAgentBot(AgentBotTestBase):
             event=event,
             thread_history=[],
             requester_user_id="@user:localhost",
-            scheduled_prompt=event.body,
         )
 
         route = bot._delivery_gateway.send_route.await_args.args[1]

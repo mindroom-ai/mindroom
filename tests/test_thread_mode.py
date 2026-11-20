@@ -539,8 +539,8 @@ class TestRouterHandoffThreadMode:
             "event_ids": ["$user_event"],
             "thread_id": "$thread_root",
         }
-        # An agent that answers in a thread reads the person's message there.
-        assert "body" not in captured_content
+        # The route carries the steward's prompt for the turn, whatever the thread shows its responder.
+        assert captured_content["body"] == "Help me"
 
 
 class TestCreateSessionIdWithNoneThread:

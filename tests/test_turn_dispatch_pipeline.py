@@ -914,14 +914,12 @@ class TestAgentBot(AgentBotTestBase):
             extra_content: dict[str, Any] | None = None,
             media_events: list[object] | None = None,
             handled_turn: TurnRecord | None = None,
-            scheduled_prompt: str | None = None,
             prompt_is_structured: bool = False,  # noqa: ARG001
         ) -> None:
             assert message == "hello"
             assert requester_user_id == "@user:localhost"
             assert extra_content is None
             assert media_events is None
-            assert scheduled_prompt is None
             assert handled_turn is not None
             assert handled_turn.source_event_prompts == {"$voice": "voice prompt", "$text": "hello"}
             # The relay attaches the conversation and its owner to the turn it is handed, before its first write.
