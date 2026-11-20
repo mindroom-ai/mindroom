@@ -479,17 +479,17 @@ def _offered_entries(
 
 def _without_colliding_mcp_functions(entries: Sequence[_ToolkitEntry], *, agent_name: str) -> list[AdaptedToolkit]:
     """Return the toolkits of ``entries``, each MCP one without the functions whose name another toolkit offers."""
-    owners: dict[str, list[tuple[_ToolkitEntry, str]]] = {}
+    owners: dict[str, list[_ToolkitEntry]] = {}
     for entry in entries:
         for function in entry.adapted.functions:
-            owners.setdefault(function.name, []).append((entry, entry.adapted.name))
+            owners.setdefault(function.name, []).append(entry)
     toolkits: list[AdaptedToolkit] = []
     for entry in entries:
         toolkit = entry.adapted
         if isinstance(entry.toolkit, MindRoomMCPToolkit):
             kept: list[ToolFunction] = []
             for function in toolkit.functions:
-                others = [*dict.fromkeys(name for owner, name in owners[function.name] if owner is not entry)]
+                others = [*dict.fromkeys(owner.adapted.name for owner in owners[function.name] if owner is not entry)]
                 if not others:
                     kept.append(function)
                     continue
