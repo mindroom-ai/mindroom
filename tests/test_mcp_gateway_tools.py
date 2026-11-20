@@ -211,7 +211,7 @@ async def test_egress_credentials_is_offered_only_while_the_broker_is_on(tmp_pat
         process_env={
             "MINDROOM_CONNECTIONS_AGENT": "personal",
             "MATRIX_HOMESERVER": "https://example.org",
-            **({"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}),
+            "MINDROOM_EGRESS_BROKER_PORT": "8768" if broker_on else "off",
         },
     )
     config = Config.validate_with_runtime(
