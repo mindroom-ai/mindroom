@@ -29,8 +29,10 @@ from mindroom.tool_jobs.publication import _job_state
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundJob
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function_names
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
+from mindroom.workflow_runs.engine import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowRunState
 from tests.access_schema_support import with_responder_access
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
@@ -589,6 +591,26 @@ def test_description_lists_the_configured_models(stack: WorkflowStack) -> None:
         "resource_profile",
     }
     assert "Stop a run" in (functions["cancel_workflow"].description or "")
+
+
+def test_the_registered_toolkit_takes_its_limits_from_the_agents_tool_entry(stack: WorkflowStack) -> None:
+    """An agent's `workflow` entry sets the limits, and `get_workflow` can write its answer to a workspace file."""
+    context = stack.context
+    toolkit = get_tool_by_name(
+        "workflow",
+        context.runtime_paths,
+        tools=context.plugins.tools,
+        runtime_config=context.config,
+        tool_config_overrides={"max_concurrent_runs": 2, "max_runtime_hours": 0},
+        tool_output_workspace_root=context.agent_workspace_root(create=True),
+        worker_target=None,
+    )
+    functions = {function.name: function for function in adapt_toolkit(toolkit, key="workflow").functions}
+
+    assert isinstance(toolkit, WorkflowTools)
+    assert toolkit.limits == WorkflowLimits(max_concurrent_runs=2, max_runtime_hours=0)
+    assert "Models: default." in (functions["start_workflow"].description or "")
+    assert "mindroom_output_path" in functions["get_workflow"].parameters["properties"]
 
 
 def test_no_function_name_is_shared_with_dynamic_workflow(stack: WorkflowStack) -> None:
