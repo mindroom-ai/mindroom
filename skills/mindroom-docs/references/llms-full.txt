@@ -11819,11 +11819,17 @@ Search results include title, author, published date, URL, and page text truncat
 | `category` | `text` | `null` | Content category, such as `news`; replaces the per-call `category`. |
 | `include_domains` | `string[]` | `null` | Domain allowlist. |
 | `exclude_domains` | `string[]` | `null` | Domain denylist. |
+| `include_text` | `string[]` | `null` | Text every result must contain. |
+| `exclude_text` | `string[]` | `null` | Text no result may contain. |
+| `user_location` | `text` | `null` | Two-letter country code that localizes results. |
+| `moderation` | `boolean` | `null` | Filter unsafe content from results. |
+| `highlights` | `boolean` | `false` | Add the most relevant snippets of each page to results. |
+| `subpages` | `number` | `null` | Number of linked subpages to crawl and return with each result. |
 | `start_published_date` | `text` | `null` | Earliest publication date, ISO 8601. |
 | `end_published_date` | `text` | `null` | Latest publication date, ISO 8601. |
 | `start_crawl_date` | `text` | `null` | Deprecated; Exa ignores it. |
 | `end_crawl_date` | `text` | `null` | Deprecated; Exa ignores it. |
-| `livecrawl` | `text` | `always` | Has no effect. |
+| `livecrawl` | `text` | `null` | Live-crawl mode such as `always`, `fallback`, or `never`; unset leaves Exa's default. |
 | `model` | `text` | `null` | Model for `exa_answer()` only: `exa` or `exa-pro`. |
 | `research_model` | `text` | `exa-research` | Model for `research()` only: `exa-research` or `exa-research-pro`. |
 | `timeout` | `number` | `30` | API timeout in seconds. |
@@ -13750,6 +13756,7 @@ Deletion is enabled by default; set `enable_delete_message: false` for read and 
 | `enable_list_channels` | `boolean` | `true` | Enable `list_channels()`. |
 | `enable_delete_message` | `boolean` | `true` | Enable `delete_message()`. |
 | `all` | `boolean` | `false` | Enable every function. |
+| `timeout` | `number` | `30` | Per-request HTTP timeout in seconds. |
 
 ## [`telegram`]
 
@@ -14195,6 +14202,7 @@ agents:
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `api_key` | `password` | `no` | `null` | Linear API key; required unless `LINEAR_API_KEY` is set. |
+| `timeout` | `number` | `no` | `30` | Per-request HTTP timeout in seconds. |
 
 ```yaml
 agents:
