@@ -170,6 +170,7 @@ class ApprovalRecovery:
         Each paused turn resumes as after a timeout; a later call finds only a card whose edit waits for a router bot.
         A router the config no longer starts never edits its card, which then retires unedited, keeping its pending look.
         """
+        # LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
         assert self.manager is not None
         absent = self.owner_absent is not None and self.owner_absent()
         await self.manager.expire_cards(lambda card: card.sender_principal_id is None, _UPGRADE_REASON, absent)

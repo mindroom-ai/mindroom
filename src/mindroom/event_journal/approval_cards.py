@@ -691,6 +691,7 @@ _VIEW_COLUMNS = f"""
     scope.delivery_id AS scope_delivery_id,
     scheduled.any_arguments_offered AS any_arguments_offered
 """
+# LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
 _VIEW_JOINS = """
     LEFT JOIN room_membership AS membership
       ON membership.principal_id = COALESCE(cards.sender_principal_id, cards.principal_id)
@@ -775,6 +776,7 @@ _LIVE_REQUESTS = f"""
 
 def pending_room_ids(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
     """Return every current-membership room where this principal has a live request card."""
+    # LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
     rows = transaction.fetchall(
         f"""
         SELECT DISTINCT cards.room_id/*bytes*/ AS room_id
@@ -840,6 +842,7 @@ def pending_cards(
 
 def retire_completed_for_departure(transaction: Transaction, principal_id: str, *, room_id: str) -> None:
     """Finish the retirement a crash left after a terminal edit's acknowledgement, before departure fences the room."""
+    # LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
     rows = transaction.fetchall(
         f"""
         SELECT cards.principal_id, cards.delivery_id
@@ -881,6 +884,7 @@ def deny_for_departed_card_owner(
     A card never attempted is deleted outright; an attempted one keeps its
     terminal-edit debt, as the ledger that holds it never leaves a room.
     """
+    # LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
     failed = transaction.fetchall(
         """
         UPDATE approval_continuations
@@ -904,6 +908,7 @@ def deny_for_departed_card_owner(
     # A failing reply's sources are runnable again, and its own principal is not the one writing this.
     for row in failed:
         approval_signals.freed(transaction, str(row["principal_id"]), str(row["approval_id"]))
+    # LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
     rows = transaction.fetchall(
         """
         SELECT cards.principal_id, cards.delivery_id, cards.owner_id, cards.generation, cards.tool_call_id,
