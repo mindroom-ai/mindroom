@@ -495,3 +495,7 @@ _.mark_stale  # Workflow run API the workflow engine calls from B2b on (src/mind
 _.usage_totals  # Workflow run API the workflow engine calls from B2b on (src/mindroom/workflow_runs/store.py)
 _.node_usage  # Workflow run API the workflow engine calls from B2b on (src/mindroom/workflow_runs/store.py)
 _.append_log  # Workflow run API the workflow engine calls from B2b on (src/mindroom/workflow_runs/store.py)
+node_digest  # Workflow replay API the workflow engine calls from B2b on (src/mindroom/workflow_runs/replay.py)
+DirtyLanes  # Workflow replay API the workflow engine calls from B2b on (src/mindroom/workflow_runs/replay.py)
+_.mark_after  # Workflow replay API the workflow engine calls from B2b on (src/mindroom/workflow_runs/replay.py)
+_.is_dirty  # Workflow replay API the workflow engine calls from B2b on (src/mindroom/workflow_runs/replay.py)

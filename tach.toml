@@ -2472,6 +2472,22 @@ expose = [
 ]
 
 [[modules]]
+path = "mindroom.workflow_runs.replay"
+depends_on = ["mindroom.workflow_runs.models"]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.replay"]
+expose = [
+    "Decision",
+    "DirtyLanes",
+    "decide",
+    "node_digest",
+    "parent_group",
+    "split_key",
+    "stale_keys",
+]
+
+[[modules]]
 path = "mindroom.api.schedules"
 depends_on = [
     "mindroom.api.config_lifecycle",
