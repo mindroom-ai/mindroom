@@ -199,13 +199,6 @@ if TYPE_CHECKING:
             default=False,
         ),
         ConfigField(
-            name="subpages",
-            label="Subpages",
-            type="number",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
             name="show_results",
             label="Show Results",
             type="boolean",
