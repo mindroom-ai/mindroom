@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 import sys
 from contextlib import suppress
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
+import click
 import typer
 from rich.console import Group, NewLine
 from rich.rule import Rule
@@ -40,9 +41,7 @@ def select[Value: str](message: str, choices: Sequence[tuple[Value, str]]) -> Va
             ),
         )
     else:
-        # Typer prompts take a type annotation; a Literal of the values lists them and rejects anything else.
-        values: object = Literal[tuple(value for value, _ in choices)]  # ty: ignore[invalid-type-form]
-        picked = typer.prompt(message, default=choices[0][0], type=values)
+        picked = typer.prompt(message, default=choices[0][0], type=click.Choice([value for value, _ in choices]))
     return next(value for value, _ in choices if value == picked)
 
 

@@ -7,10 +7,10 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING
 
+import click
 import pytest
 import typer
 from rich.text import Text
-from typer import _click as click
 from typer import rich_utils
 from typer.core import TyperCommand, TyperGroup
 from typer.testing import CliRunner
@@ -31,19 +31,19 @@ _SUMMARY_MAX_LENGTH = 71
 _EXAMPLE_MAX_LENGTH = 78
 
 
-def _commands(group: TyperGroup, path: tuple[str, ...] = ()) -> Iterator[tuple[tuple[str, ...], click.Command]]:
+def _commands(group: click.Group, path: tuple[str, ...] = ()) -> Iterator[tuple[tuple[str, ...], click.Command]]:
     context = click.Context(group)
     for name in group.list_commands(context):
         command = group.get_command(context, name)
         assert command is not None
         yield (*path, name), command
-        if isinstance(command, TyperGroup):
+        if isinstance(command, click.Group):
             yield from _commands(command, (*path, name))
 
 
-def _root() -> TyperGroup:
+def _root() -> click.Group:
     root = typer.main.get_command(app)
-    assert isinstance(root, TyperGroup)
+    assert isinstance(root, click.Group)
     return root
 
 

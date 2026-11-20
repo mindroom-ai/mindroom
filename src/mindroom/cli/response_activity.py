@@ -64,9 +64,8 @@ def _wait_for_idle(
     wait: float,
 ) -> ResponseActivity | DetailedResponseActivity:
     """Poll while busy or timed out; idle, unavailable, or the deadline ends the wait with that result."""
-    # Checked here, not by a Typer `min`, which would reject NaN before `--json` can report it.
-    if not math.isfinite(wait) or wait < 0:
-        msg = "--wait must be finite and not negative."
+    if not math.isfinite(wait):
+        msg = "--wait must be finite."
         raise ValueError(msg)
     deadline = monotonic() + wait
     while True:
@@ -123,6 +122,7 @@ def check_active_responses(
     wait: float = typer.Option(
         0.0,
         "--wait",
+        min=0,
         help="Poll up to this many seconds while busy or timed out; unavailable ends the wait.",
     ),
     json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
