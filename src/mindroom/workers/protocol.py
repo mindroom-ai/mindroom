@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import fields
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, field_validator, model_serializer
 
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
@@ -151,6 +151,14 @@ class ExecuteResponse(_WireModel):
     failure_kind: FailureKind | None = None
     # What the tool reported about a structured result, such as a command's exit status.
     metadata: dict[str, Any] | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_metadata(self, dump: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # A call that asked for no structured result gets the answer it always got.
+        answer = dump(self)
+        if answer.get("metadata") is None:
+            answer.pop("metadata", None)
+        return answer
 
 
 class SaveAttachmentResponse(_WireModel):

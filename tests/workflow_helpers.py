@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any, Self
 from uuid import uuid4
 
 import httpx
-from agno.tools import Toolkit
 from fastapi import FastAPI
 
 import mindroom.workflow as sdk
@@ -36,6 +35,7 @@ from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, RUN_ID_ENV, TO
 from mindroom.script_runs.models import TERMINAL_SCRIPT_RUN_STATES, ScriptRunRecord, ScriptRunState
 from mindroom.script_runs.reasons import PROCESS_EXIT_OBSERVED
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
+from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workflow_runs.engine import WorkflowEngine
 from mindroom.workflow_runs.models import (
