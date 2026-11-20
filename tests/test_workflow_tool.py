@@ -500,6 +500,19 @@ async def test_another_agents_run_id_reads_as_unknown(stack: WorkflowStack) -> N
     assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.RUNNING
 
 
+@pytest.mark.asyncio
+async def test_a_long_title_is_kept_whole_on_the_run_and_stays_out_of_the_jobs_state(stack: WorkflowStack) -> None:
+    """The run keeps the title as given, since only a frame that shows it shortens it; the job's room state has none."""
+    title = "Count every placeholder thing in the invented inventory, twice, " * 4
+    handle = await _started(stack, title=title)
+    job = stack.jobs.retained_jobs()[0]
+
+    assert len(title) > 200
+    assert stack.store.get_run(handle["run_id"]).title == title
+    assert handle["title"] == title
+    assert title[:20] not in json.dumps([job.adapter, _job_state(job)])
+
+
 def test_jobs_state_names_the_run_and_carries_no_title(stack: WorkflowStack) -> None:
     """Room state is not encrypted: a workflow job's entry holds IDs only."""
     run_id = "wf-" + "c" * 32

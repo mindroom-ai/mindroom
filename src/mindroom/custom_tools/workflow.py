@@ -58,7 +58,7 @@ Where the call cannot be a background job, it waits and returns the report itsel
 """
 _ONE_SOURCE = "Give exactly one of source or path."
 _NEEDS_JOBS = "Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow."
-_MAX_TITLE_CHARS = 80
+
 _ACTIVE = frozenset({WorkflowNodeState.QUEUED, WorkflowNodeState.RUNNING, WorkflowNodeState.WAITING})
 _FAILED = frozenset({WorkflowNodeState.FAILED, WorkflowNodeState.INDETERMINATE})
 _JOB_STATUS: dict[WorkflowRunState, Literal["completed", "failed", "cancelled", "interrupted"]] = {
@@ -287,7 +287,8 @@ class WorkflowTools(Toolkit):
             execution_identity=serialize_tool_execution_identity(context.execution_identity),
             # The tools a narrowed agent was left with are the run's, whatever its agent has.
             persona=asdict(context.persona) if context.persona is not None else None,
-            title=str(title)[:_MAX_TITLE_CHARS] if title else None,
+            # Kept whole: a frame that shows it shortens it.
+            title=str(title) if title else None,
             source=text,
             source_digest=hashlib.sha256(text.encode()).hexdigest(),
             args=arguments.get("args"),
