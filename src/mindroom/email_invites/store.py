@@ -38,18 +38,14 @@ class EmailInviteLimitError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class EmailInvite:
-    """One stored invite request; `inviter_id`, `sent_at` are None while it waits for approval.
-
-    `agent_name` is the entity whose Matrix account took the request and, once the link is sent, the one whose
-    account the link names: it alone answers the claim, sends the Matrix invite and posts the notices.
-    """
+    """One stored invite request; `inviter_id`, `sent_at` are None while it waits for approval."""
 
     id: int
     room_id: str
     thread_id: str | None
     email: str
     requested_by: str
-    agent_name: str
+    agent_name: str  # Once sent: the entity whose account the link names, the only one that answers its claim.
     created_at: int
     expires_at: int
     inviter_id: str | None
@@ -163,14 +159,12 @@ def issue_code(
         invite = invite or _insert(connection, request, current, expiry_days)
         _enforce(connection, "address", 3, "email = ? AND sent_at > ?", (request.email, current - _DAY))
         _enforce(connection, "deployment", 50, "sent_at > ?", (current - _DAY,))
-        expires_at = current + expiry_days * _DAY
         connection.execute(
             "UPDATE email_invites SET inviter_id = ?, agent_name = ?, code_hash = ?, sent_at = ?, expires_at = ?"
             " WHERE id = ?",
-            (request.person, request.agent_name, _hash(code), current, expires_at, invite.id),
+            (request.person, request.agent_name, _hash(code), current, current + expiry_days * _DAY, invite.id),
         )
-    sent = replace(invite, inviter_id=request.person, agent_name=request.agent_name, sent_at=current)
-    return replace(sent, expires_at=expires_at), code
+        return _select(connection, "id = ?", (invite.id,))[0], code
 
 
 def open_invites(paths: RuntimePaths, room_id: str, now: int | None = None) -> list[EmailInvite]:
@@ -231,10 +225,7 @@ def start_sending(paths: RuntimePaths, invite_id: int, claimant: str, now: int |
 
 
 def abandon_sending(paths: RuntimePaths, *, invite_id: int | None = None, agent_name: str) -> list[EmailInvite]:
-    """Revoke one request of an entity, or at its start all, left sending with an unknown outcome.
-
-    Return those this call revoked. Another entity's request is left alone: its own account may still be sending it.
-    """
+    """Revoke one request of an entity, or at its start all, left sending with an unknown outcome; return those."""
     where = "sending_at IS NOT NULL AND invited_at IS NULL AND revoked = 0 AND agent_name = ?" + (
         "" if invite_id is None else " AND id = ?"
     )

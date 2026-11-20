@@ -49,14 +49,8 @@ def _claim(event: nio.UnknownToDeviceEvent) -> tuple[str, str] | None:
 
 
 class _Receiver:
-    def __init__(
-        self,
-        client: nio.AsyncClient,
-        agent_name: str,
-        paths: RuntimePaths,
-        config_getter: Callable[[], Config],
-    ) -> None:
-        self.client, self.agent_name, self.paths, self.config_getter = client, agent_name, paths, config_getter
+    def __init__(self, client: nio.AsyncClient, name: str, paths: RuntimePaths, config: Callable[[], Config]) -> None:
+        self.client, self.agent_name, self.paths, self.config_getter = client, name, paths, config
         self.limiter = OnboardingRateLimiter(60, 10)
 
     def admit(self, event: nio.UnknownToDeviceEvent) -> tuple[str, str] | None:
