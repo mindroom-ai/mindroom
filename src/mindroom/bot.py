@@ -438,7 +438,7 @@ class AgentBot:
                 store=principal,
                 runtime=self._runtime_view,
                 self_sender=runtime_matrix_id.full_id,
-                sender_is_managed=lambda sender: self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender),
+                had_tool_markers=lambda sender: self._ingress_validator.sender_had_tool_markers(sender),
             ),
         )
         self._conversation_resolver = ConversationResolver(
@@ -2076,6 +2076,7 @@ class AgentBot:
                 after_ack=self._ingestion_admission_progress.set,
                 on_decryption_failure=self._decryption_diagnostics.schedule,
                 sender_is_managed=self._ingress_validator.sender_is_trusted_for_ingress_metadata,
+                had_tool_markers=self._ingress_validator.sender_had_tool_markers,
             ),
             name=f"matrix_ingestion_pump_{self.agent_name}",
         )

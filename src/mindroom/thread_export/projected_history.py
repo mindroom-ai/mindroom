@@ -109,7 +109,7 @@ def export_conversation_reader(
     config: Config,
     store: ExportProjectionView,
     self_sender: str,
-    sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    had_tool_markers: Callable[[str], bool] = lambda _sender: False,
 ) -> ProjectedThreadReader:
     """Return an export reader borrowing the running owner's client and principal.
 
@@ -125,7 +125,7 @@ def export_conversation_reader(
                 store=store,
                 runtime=_ExportClientRuntime(client=client, config=config),
                 self_sender=self_sender,
-                sender_is_managed=sender_is_managed,
+                had_tool_markers=had_tool_markers,
                 # The three ceilings and the name they go by. The name is what
                 # a walk writes into the marker, so these must be changed
                 # together: a policy is the whole set, and recording one of

@@ -28,7 +28,7 @@ from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visib
 from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Collection, Container
 
 logger = get_logger(__name__)
 
@@ -137,7 +137,7 @@ def _with_event_marker(
 async def _resolve_event_content(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None,
-    agent_sender_ids: Collection[str],
+    agent_sender_ids: Container[str],
 ) -> tuple[dict[str, Any], bool]:
     """Return one event's canonical content plus whether resolving it changed anything."""
     preview_content = _normalized_content_dict(event_source.get("content", {}))
@@ -205,7 +205,7 @@ async def extract_and_resolve_message(
     client: nio.AsyncClient | None = None,
     *,
     trusted_sender_ids: Collection[str] = (),
-    agent_sender_ids: Collection[str] = (),
+    agent_sender_ids: Container[str] = (),
 ) -> dict[str, Any]:
     """Extract message data and resolve large message content if needed.
 
@@ -259,7 +259,7 @@ async def extract_edit_body(
     client: nio.AsyncClient | None = None,
     *,
     trusted_sender_ids: Collection[str] = (),
-    agent_sender_ids: Collection[str] = (),
+    agent_sender_ids: Container[str] = (),
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
     resolved_content, _ = await _resolve_event_content(event_source, client, agent_sender_ids)
@@ -280,7 +280,7 @@ async def extract_edit_body(
 async def resolve_event_source_content(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None = None,
-    agent_sender_ids: Collection[str] = (),
+    agent_sender_ids: Container[str] = (),
 ) -> dict[str, Any]:
     """Return an event source with canonical v2 sidecar content hydrated when available."""
     resolved_content, content_changed = await _resolve_event_content(event_source, client, agent_sender_ids)

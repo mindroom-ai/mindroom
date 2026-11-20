@@ -26,7 +26,7 @@ from mindroom.dispatch_source import (
     source_kind_allows_trusted_original_sender,
     source_kind_from_content,
 )
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry, tool_marker_senders
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo, reply_to_event_id_from_content
 from mindroom.matrix.guarded_rooms import guarded_room
@@ -251,6 +251,13 @@ class IngressValidator:
     def sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
         """Return whether one sender may supply trusted ingress metadata: the entity registry manages it."""
         return self.managed_entity_name_for_sender(sender_id) is not None
+
+    def sender_had_tool_markers(self, sender_id: str) -> bool:
+        """Return whether one sender's replies reached Matrix without their tool markers: any agent's, ours or not.
+
+        Its text is read with them back in. That trusts it with nothing: see ``ToolMarkerSenders``.
+        """
+        return sender_id in tool_marker_senders(self.deps.runtime.config, self.deps.runtime_paths)
 
     def managed_entity_name_for_sender(self, sender_id: str) -> str | None:
         """Return the configured entity alias for an exact current Matrix user ID."""

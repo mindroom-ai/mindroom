@@ -38,7 +38,7 @@ from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
 from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping
+    from collections.abc import Container, Mapping
     from pathlib import Path
 
     import nio
@@ -595,7 +595,7 @@ def _message_columns(
     message: dict[str, Any],
     edits: list[dict[str, Any]],
     reactions: dict[str, set[str]],
-    agents: Collection[str],
+    agents: Container[str],
     *,
     edited: str = "[edited]",
     thread_page: bool = False,
@@ -630,7 +630,7 @@ def _message_columns(
     )
 
 
-def _message_lines(events: list[dict[str, Any]], agents: Collection[str], *, thread_page: bool = False) -> list[str]:
+def _message_lines(events: list[dict[str, Any]], agents: Container[str], *, thread_page: bool = False) -> list[str]:
     """Return a line for each message among ``events``, in their order, with the edits and reactions among them.
 
     A run of messages that cannot be read is one line that counts them. On a ``thread_page``, a page of one thread, a
@@ -685,7 +685,7 @@ def _page_query(parameters: dict[str, object], page_token: str | None) -> str:
 async def read_messages(
     client: nio.AsyncClient,
     room_id: str,
-    agents: Collection[str],
+    agents: Container[str],
     *,
     event_id: str | None,
     thread_id: str | None,
@@ -714,7 +714,7 @@ async def _thread(
     client: nio.AsyncClient,
     room: str,
     thread: str,
-    agents: Collection[str],
+    agents: Container[str],
     *,
     page_token: str | None,
     count: int,
@@ -741,7 +741,7 @@ async def _around(client: nio.AsyncClient, room: str, event: str, *, count: int)
 async def search_messages(
     client: nio.AsyncClient,
     query: str,
-    agents: Collection[str],
+    agents: Container[str],
     *,
     room_id: str | None,
     page_token: str | None,

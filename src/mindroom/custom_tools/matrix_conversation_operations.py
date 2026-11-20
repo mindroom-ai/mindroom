@@ -24,7 +24,7 @@ from mindroom.custom_tools.attachments import (
     send_resolved_attachments,
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import tool_marker_senders
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result, send_room_event_result
@@ -503,7 +503,7 @@ class MatrixMessageOperations:
             [event for event in reversed(response.chunk) if is_visible_room_message(event)],
             context.client,
             trusted_sender_ids=trusted_visible_sender_ids(context.config, context.runtime_paths),
-            agent_sender_ids=entity_identity_registry(context.config, context.runtime_paths).managed_user_ids,
+            agent_sender_ids=tool_marker_senders(context.config, context.runtime_paths),
         )
         messages = sorted(resolved.values(), key=lambda message: message.timestamp)
         return self._result(

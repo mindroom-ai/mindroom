@@ -20,11 +20,11 @@ from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_STREAMING, STREA
 from mindroom.custom_tools.matrix_conversation_operations import _message_payload
 from mindroom.custom_tools.matrix_user_reads import _message_lines
 from mindroom.delivery_gateway import _reply_row_wire_content
-from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
+from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry, tool_marker_senders
 from mindroom.event_journal import DeliveryStage, MatrixDelivery, matrix_delivery_payload
-from mindroom.event_journal.models import ReplyRowFacts
+from mindroom.event_journal.models import ConversationPage, ReplyRowFacts, VisibleMessage
 from mindroom.execution_preparation import _context_body_from_visible_message
-from mindroom.judgment.conversation import message_judgment_text
+from mindroom.judgment.conversation import conversation_context_before_sources, message_judgment_text
 from mindroom.matrix import large_messages
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
@@ -41,6 +41,7 @@ from mindroom.matrix.client_visible_messages import (
     resolve_visible_event_source,
     thread_root_body_preview,
 )
+from mindroom.matrix.conversation_reads import projected_thread_history
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from mindroom.matrix.large_messages import (
     EDIT_MESSAGE_SIZE_LIMIT,
@@ -58,6 +59,7 @@ from mindroom.matrix.room_history_reads import (
     find_outbox_delivery_event_id_via_room_messages,
     missing_outbox_delivery_copy_indices_via_room_messages,
 )
+from mindroom.mid_turn import MidTurnGate, MidTurnOutcome, QueuedMessage
 from mindroom.requester_identity import mindroom_user_id
 from mindroom.tool_system import events
 from mindroom.tool_system.events import (
@@ -521,6 +523,103 @@ async def test_the_reads_that_know_the_runtime_take_the_internal_user_for_a_pers
     assert await read(agent) == [sent, sent, "After.", "After."]
     for sender in (_INTERNAL_USER, _PERSON):
         assert await read(sender) == [wire, wire, wire["body"], "--- After."]
+
+
+# Accounts named as MindRoom names its agents that this runtime does not run: another server's, and one of its own
+# that has left its config. Their replies reached Matrix without markers too.
+_ELSEWHERE, _FORMER = "@mindroom_code:elsewhere.example", "@mindroom_retired:localhost"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sender", [_ELSEWHERE, _FORMER])
+async def test_a_reply_of_calls_alone_by_an_agent_this_runtime_does_not_run_leaves_the_judge_its_history(
+    runtime: ToolRuntimeContext,
+    sender: str,
+) -> None:
+    """A message queued in a later turn is judged, as it is where every reply has its markers in its text.
+
+    A reply without text is history the judge cannot read, and then nothing queued is judged.
+    """
+    config, paths = runtime.config, runtime.runtime_paths
+    registry = entity_identity_registry(config, paths)
+    agent = registry.current_ids["general"].full_id
+    built = _sent(_case("a reply of calls alone"))
+    held = tool_markers_out_of_text(built)
+    assert held["body"] == ""
+
+    def synced(event_id: str, ts: int, sender: str, content: dict[str, Any]) -> VisibleMessage:
+        """Return the row of one event as this agent's sync stores it."""
+        thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}} if event_id != "$root" else {}
+        views = ingestion_timeline_views(
+            room_id=_ROOM,
+            source={**_event({**content, **thread}, event_id, sender), "origin_server_ts": ts},
+            self_sender=agent,
+            provenance=nio.TimelineEventProvenance.LIVE,
+            sender_is_managed=registry.is_managed_user_id,
+            had_tool_markers=tool_marker_senders(config, paths).__contains__,
+        )
+        assert views is not None
+        projected = views[1]
+        assert projected is not None
+        return VisibleMessage(event_id, _ROOM, "$root", sender, ts, event_id, ts, projected.content)
+
+    async def judged(reply: dict[str, Any]) -> tuple[MidTurnOutcome, int]:
+        """Return what a message queued in the turn after ``reply`` comes to, and how often the judge was asked."""
+        rows = (
+            synced("$root", 1, _PERSON, {"msgtype": "m.text", "body": "Count the walruses."}),
+            synced("$reply", 2, sender, reply),
+            synced("$next", 3, _PERSON, {"msgtype": "m.text", "body": "Now count the seals."}),
+        )
+        history = projected_thread_history(ConversationPage(rows, (), None), complete=True)
+        context = conversation_context_before_sources(
+            history,
+            source_event_ids=("$next",),
+            thread_id="$root",
+            config=config,
+            runtime_paths=paths,
+        )
+        requests = []
+
+        async def can_wait(request: object) -> bool:
+            requests.append(request)
+            return True
+
+        gate = MidTurnGate("Now count the seals.", can_wait, requester_id=_PERSON, conversation_context=context)
+        queued = QueuedMessage("$queued", "And the otters after that.", requester_id=_PERSON)
+        return await gate.decide((queued,), current=lambda: True), len(requests)
+
+    assert await judged(built) == (MidTurnOutcome.WAIT, 1)
+    assert await judged(held) == (MidTurnOutcome.WAIT, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", _SENT_CASES, ids=[case["name"] for case in _SENT_CASES])
+async def test_every_read_gives_the_text_of_an_agent_this_runtime_does_not_run_as_it_was_written(
+    runtime: ToolRuntimeContext,
+    case: dict[str, Any],
+) -> None:
+    """Its markers go back as the text they were, and the internal user's account stays a person's."""
+    config, paths = runtime.config, runtime.runtime_paths
+    senders = tool_marker_senders(config, paths)
+    sent, wire = _sent(case), _wire(case)
+    edit = build_edit_event_content(event_id="$reply", new_content=sent, new_text=sent["body"])
+    wire_edit = tool_markers_out_of_text(edit)
+    known = {"config": config, "runtime_paths": paths}
+
+    for sender in (_ELSEWHERE, _FORMER):
+        assert sender in senders
+        event, its_edit = _event(wire, sender=sender), _event(wire_edit, "$edit", sender)
+        fetched = await resolve_event_source_content(event, None, senders)
+        assert fetched["content"] == sent
+        assert await extract_edit_body(its_edit, None, agent_sender_ids=senders) == (sent["body"], sent)
+        source, _body = await resolve_visible_event_source(event, None, fallback_body="", **known)
+        assert source["content"] == sent
+        assert _message_lines([event, its_edit], senders) == _message_lines(
+            [_event(sent, sender=sender), _event(edit, "$edit", sender)],
+            senders,
+        )
+    for sender in (_INTERNAL_USER, _PERSON, [_ELSEWHERE], None):
+        assert sender not in senders
 
 
 @pytest.mark.asyncio

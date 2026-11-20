@@ -319,10 +319,17 @@ def ingestion_timeline_views(
     expected_event_id: str | None = None,
     security_metadata: Mapping[str, object] | None = None,
     sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    had_tool_markers: Callable[[str], bool] | None = None,
 ) -> tuple[InboundEvent, ProjectedEvent | None] | None:
-    """Classify one durable timeline input, or return its compatibility fate."""
+    """Classify one durable timeline input, or return its compatibility fate.
+
+    ``had_tool_markers`` says whose text lost its tool markers on its way to Matrix, which is no word on whom this
+    runtime manages: another server's agent is one. Without it, they are the senders it manages.
+    """
     message = "Unsupported ingestion event"
-    if isinstance(content := source.get("content"), dict) and sender_is_managed(str(source.get("sender"))):
+    if isinstance(content := source.get("content"), dict) and (had_tool_markers or sender_is_managed)(
+        str(source.get("sender")),
+    ):
         # A turn and the projection read an agent's synced reply with its tool markers in its text.
         source = {**source, "content": tool_markers_in_text(cast("dict[str, object]", content))}
     parsed = parse_matrix_media_event_source(source) if is_encrypted_media_event_source(source) else None

@@ -439,9 +439,12 @@ async def test_an_export_takes_the_internal_user_for_a_person_as_a_turn_does(tmp
     call = export.await_args
     assert call is not None
     (source,) = call.kwargs["sources"]
-    is_agent = source.reader.reader.hydrator.sender_is_managed
+    had_tool_markers = source.reader.reader.hydrator.had_tool_markers
     senders = ["@mindroom_code:localhost", "@mindroom_router:localhost", internal_user, "@alice:localhost"]
-    assert [is_agent(sender) for sender in senders] == [True, True, False, False]
+    assert [had_tool_markers(sender) for sender in senders] == [True, True, False, False]
+    # An agent that has left the config and another server's sent their replies without markers too.
+    assert had_tool_markers("@mindroom_retired:localhost")
+    assert had_tool_markers("@mindroom_code:elsewhere.example")
 
 
 async def test_invited_rooms_read_through_the_invited_entity_bot(tmp_path: Path) -> None:

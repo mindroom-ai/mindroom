@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Container, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, TypeIs
 
 import nio
 
 from mindroom.constants import STREAM_STATUS_KEY
-from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
+from mindroom.entity_resolution import current_internal_sender_ids, tool_marker_senders
 from mindroom.matrix.event_info import EventInfo, reply_to_event_id_from_content
 from mindroom.matrix.message_content import (
     VisibleRoomMessage,
@@ -228,7 +228,7 @@ async def extract_visible_edit_body(
         event_source,
         client,
         trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
-        agent_sender_ids=entity_identity_registry(config, runtime_paths).managed_user_ids,
+        agent_sender_ids=tool_marker_senders(config, runtime_paths),
     )
 
 
@@ -243,7 +243,7 @@ async def resolve_visible_event_source(
 ) -> tuple[dict[str, Any], str]:
     """Resolve one event source plus its canonical visible body from runtime config."""
     normalized_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
-    agents = entity_identity_registry(config, runtime_paths).managed_user_ids
+    agents = tool_marker_senders(config, runtime_paths)
     resolved_event_source = await resolve_event_source_content(normalized_event_source, client, agents)
     return resolved_event_source, visible_body_from_event_source(
         resolved_event_source,
@@ -307,7 +307,7 @@ async def bundled_replacement_body(
 ) -> str | None:
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
     trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
-    agents = entity_identity_registry(config, runtime_paths).managed_user_ids
+    agents = tool_marker_senders(config, runtime_paths)
     for candidate in bundled_replacement_candidates(event_source):
         resolved_candidate = await resolve_event_source_content(candidate, client, agents)
         body = bundled_visible_body_preview(
@@ -509,7 +509,7 @@ async def apply_latest_edits_to_messages(
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
     edit_candidates: EditCandidates,
     trusted_sender_ids: Collection[str] = (),
-    agent_sender_ids: Collection[str] = (),
+    agent_sender_ids: Container[str] = (),
 ) -> None:
     """Apply latest edits to message records, reconstructing originals that were never seen."""
     for original_event_id in edit_candidates.original_event_ids():
@@ -571,7 +571,7 @@ async def resolve_latest_visible_messages(
     client: nio.AsyncClient,
     *,
     trusted_sender_ids: Collection[str] = (),
-    agent_sender_ids: Collection[str] = (),
+    agent_sender_ids: Container[str] = (),
 ) -> dict[str, ResolvedVisibleMessage]:
     """Resolve the latest visible message state by original event ID for a set of message events."""
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}

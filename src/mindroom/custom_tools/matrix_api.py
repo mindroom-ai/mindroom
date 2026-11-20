@@ -14,7 +14,7 @@ from mindroom.constants import ACTING_REQUESTER_KEY
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import tool_marker_senders
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.client_room_admin import room_admin_power_user
@@ -32,6 +32,8 @@ from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
+    from collections.abc import Container
+
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
@@ -346,7 +348,7 @@ class MatrixApiTools(Toolkit):
     def _normalize_search_event_payload(
         cls,
         raw_event: object,
-        agents: frozenset[str],
+        agents: Container[str],
     ) -> dict[str, object]:
         raw_event_dict = cls._copy_string_keyed_dict(raw_event) or {}
         event_id = raw_event_dict.get("event_id")
@@ -372,7 +374,7 @@ class MatrixApiTools(Toolkit):
     def _normalize_search_context_payload(
         cls,
         raw_context: object,
-        agents: frozenset[str],
+        agents: Container[str],
     ) -> dict[str, object] | None:
         context_dict = cls._copy_string_keyed_dict(raw_context)
         if context_dict is None:
@@ -1249,7 +1251,7 @@ class MatrixApiTools(Toolkit):
         if isinstance(response, _MatrixSearchResponse):
             normalized_results: list[dict[str, object]] = []
             include_context = event_context is not None
-            agents = entity_identity_registry(context.config, context.runtime_paths).managed_user_ids
+            agents = tool_marker_senders(context.config, context.runtime_paths)
             for raw_result in response.results:
                 event_payload = self._normalize_search_event_payload(raw_result.get("result"), agents)
                 rank = raw_result.get("rank")

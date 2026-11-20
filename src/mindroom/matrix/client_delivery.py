@@ -25,6 +25,7 @@ from mindroom.matrix.large_messages import (
 )
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_thread_relation
+from mindroom.matrix_identifiers import has_agent_username
 from mindroom.timing import emit_timing_event
 from mindroom.tool_system.events import tool_markers_out_of_text
 
@@ -148,7 +149,7 @@ async def _send_prepared_room_message(  # noqa: PLR0911
         if write_allowed is not None and not write_allowed():
             return None
         # MindRoom Chat puts the markers back for an account with such a username and for no other.
-        if str(client.user_id).lower().startswith("@mindroom_"):
+        if has_agent_username(client.user_id):
             content_sent = tool_markers_out_of_text(content_sent)
         if cache_bypass:
             access_token = client.access_token

@@ -26,7 +26,7 @@ from mindroom.custom_tools.matrix_user_reads import (
     search_messages,
 )
 from mindroom.custom_tools.matrix_user_writes import MatrixUserWrite, write_as_person
-from mindroom.entity_resolution import prepared_entity_names_by_user_id
+from mindroom.entity_resolution import prepared_entity_names_by_user_id, tool_marker_senders
 from mindroom.matrix.user_masquerade import create_user_masquerade_client, user_appservice_token
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import (
@@ -196,8 +196,13 @@ class MatrixUserTools(Toolkit):
         if action == "download":
             return await self._download(client, require_tool_runtime_context(), str(room_id), str(event_id))
         # The router, the agents and the teams that have a Matrix account, which a new one gets after it is configured:
-        # their replies are read with their tool markers in their text.
-        agents = prepared_entity_names_by_user_id(self._config(), self._runtime_paths)
+        # their replies are read with their tool markers in their text, and so are those of any other agent.
+        config = self._config()
+        agents = tool_marker_senders(
+            config,
+            self._runtime_paths,
+            prepared_entity_names_by_user_id(config, self._runtime_paths),
+        )
         if action == "messages":
             return await read_messages(
                 client,

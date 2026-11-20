@@ -572,8 +572,9 @@ class ConversationHydrator:
     # bounds never once used them and every thread the bot had answered in was
     # unexportable until a rejoin moved the membership epoch.
     require_complete: bool = False
-    # Whose replies are an agent's: theirs are stored with their tool markers in their text, as sync stores them.
-    sender_is_managed: Callable[[str], bool] = lambda _sender: False
+    # Whose replies reached Matrix without their tool markers: theirs are stored with them in their text, as sync
+    # stores them. Another server's agent is one, so this says nothing about whom this runtime manages.
+    had_tool_markers: Callable[[str], bool] = lambda _sender: False
     _in_flight: dict[tuple[str, str | None], asyncio.Task[None]] = field(
         default_factory=dict,
         init=False,
@@ -598,7 +599,7 @@ class ConversationHydrator:
     def _projected(self, room_id: str, event: nio.Event) -> ProjectedEvent | None:
         """Project one fetched event, an agent's reply with its tool markers in its text before anything reads it."""
         projected = _projected_from_event(room_id, event, self_sender=self.self_sender)
-        if projected is None or not self.sender_is_managed(projected.sender):
+        if projected is None or not self.had_tool_markers(projected.sender):
             return projected
         return replace(projected, content=tool_markers_in_text(projected.content))
 

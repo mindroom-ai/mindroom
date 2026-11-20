@@ -4213,7 +4213,12 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.client_delivery"
-depends_on = ["mindroom.llm", "mindroom.matrix.guarded_rooms", "mindroom.tool_system.events"]
+depends_on = [
+    "mindroom.llm",
+    "mindroom.matrix.guarded_rooms",
+    "mindroom.matrix_identifiers",
+    "mindroom.tool_system.events",
+]
 visibility = [
     "mindroom.bot_room_lifecycle",
     "mindroom.call_transcripts.router_room",
