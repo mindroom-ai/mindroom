@@ -823,15 +823,22 @@ async def test_pending_router_card_is_ended_once_at_upgrade(
         pending = await approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
         assert isinstance(pending, ApprovalCardView)
         assert await approvals.approval_card_sender(delivery_id=pending.delivery_id) == (None, _ROOM)
+        assert not pending.decided
 
-        assert await recovery._end_cards_without_sender() == 1
+        await recovery._end_cards_without_sender()
 
         card = await approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
         assert isinstance(card, ApprovalCardView)
         assert (card.decided, card.retired) == (True, retired)
         assert [delivery.stage for delivery in sent] == ([DeliveryStage.FINAL] if router_in_room else [])
         # A later startup finds the card again only while its edit still waits for a router bot.
-        assert await recovery._end_cards_without_sender() == (0 if retired else 1)
+        live = [card.delivery_id for card in await approvals.pending_approval_cards(room_id=_ROOM)]
+        assert live == ([] if retired else [pending.delivery_id])
+        await recovery._end_cards_without_sender()
+        card = await approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
+        assert isinstance(card, ApprovalCardView)
+        assert (card.decided, card.retired) == (True, retired)
+        assert [delivery.stage for delivery in sent] == ([DeliveryStage.FINAL] if router_in_room else [])
     finally:
         await manager.shutdown()
         await store.close()

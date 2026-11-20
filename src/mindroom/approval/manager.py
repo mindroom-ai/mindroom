@@ -969,14 +969,14 @@ class ApprovalManager:
         )
         return self.cards is not None and all(owned)
 
-    async def expire_cards(self, matches: Callable[..., bool], reason: str, gone: bool = False) -> list[bool]:
-        """Expire every live card that matches; ``gone`` retires unedited one whose removed sender has no bot left."""
+    async def expire_cards(self, matches: Callable[..., bool], reason: str, unedited: bool = False) -> list[bool]:
+        """Expire every live card that matches; ``unedited`` retires unedited one whose removed sender has no bot left."""
         if self.cards is None:
             return []
         retire = self.cards.approvals.retire_approval_card
         return [
             await self._expire_stored(card, reason=reason)
-            or (gone and not self._sender_ready(card) and await retire(delivery_id=card.delivery_id, without_edit=True))
+            or (unedited and not self._sender_ready(card) and await retire(delivery_id=card.delivery_id, without_edit=True))
             for room_id in await self.cards.approvals.pending_approval_room_ids()
             async for card in self._pending_cards(self.cards, room_id)
             if matches(card)
