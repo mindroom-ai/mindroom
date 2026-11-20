@@ -164,6 +164,21 @@ async def test_nonzero_exit_leads_with_its_exit_code(shell_toolkit: AnyToolkit) 
 
 
 @pytest.mark.asyncio
+async def test_a_saved_success_keeps_stdout_in_the_file_and_names_its_stderr_in_the_receipt(
+    shell_toolkit: AnyToolkit,
+    tmp_path: Path,
+) -> None:
+    """The file holds stdout exactly, and the receipt says how much stderr there was and how it ended."""
+    result = await _run(shell_toolkit, {"args": "echo out; echo warn >&2", "mindroom_output_path": "out.txt"})
+
+    receipt = json.loads(str(result.result))["mindroom_tool_output"]
+    assert (tmp_path / "out.txt").read_text() == "out\n"
+    assert (receipt["stderr_bytes"], receipt["stderr_tail"]) == (5, "warn")
+    quiet = await _run(shell_toolkit, {"args": "echo out", "mindroom_output_path": "quiet.txt"})
+    assert "stderr_bytes" not in json.loads(str(quiet.result))["mindroom_tool_output"]
+
+
+@pytest.mark.asyncio
 async def test_redirect_preserves_stdout_receipt_on_nonzero_exit(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
     """Redirected nonterminal CLI output must use the same complete failure formatting."""
     result = await _run(
@@ -176,9 +191,7 @@ async def test_redirect_preserves_stdout_receipt_on_nonzero_exit(shell_toolkit: 
 
     assert result.status == "success"
     assert json.loads(str(result.result))["mindroom_tool_output"]["exit_code"] == 3
-    assert (tmp_path / "receipt.txt").read_text() == (
-        'Exit code 3\nOutput:\n{"status":"queued","call_id":"call-1"}'
-    )
+    assert (tmp_path / "receipt.txt").read_text() == ('Exit code 3\nOutput:\n{"status":"queued","call_id":"call-1"}')
 
 
 @pytest.mark.asyncio

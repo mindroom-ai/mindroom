@@ -447,20 +447,50 @@ async def test_run_shell_command_keeps_stderr_on_success(tmp_path: Path) -> None
     entrypoint = tool.functions["run_shell_command"]
 
     assert await entrypoint("echo out; echo warn >&2") == "out\nStderr:\nwarn"
-    assert (
-        await entrypoint("seq 1 5 >&2", tail=2)
-        == "Stderr:\n[Showing the last 2 of 5 lines. Pass a larger tail, or narrow the command.]\n4\n5"
+    # The notice of a cut leads the result even when only stderr was cut, and names the stream.
+    assert await entrypoint("seq 1 5 >&2", tail=2) == (
+        "[Showing the last 2 of 5 stderr lines. Pass a larger tail, or narrow the command.]\nStderr:\n4\n5"
     )
 
 
 def test_a_tail_cut_of_byte_capped_output_gives_one_notice() -> None:
-    """Output cut by both the byte cap and ``tail`` says so in one notice."""
+    """Output cut by both the byte cap and ``tail`` says so in one notice, counting every line printed."""
     buffer = _OutputBuffer(max_bytes=12)
     buffer.append("1\n2\n3\n4\n5\n6\n7\n8\n")
 
     assert buffer.render(tail=2) == (
-        "[Showing the last 2 of 6 lines; output truncated to the last 12 bytes. "
+        "[Showing the last 2 of 8 lines; output truncated to the last 12 bytes. "
         "Redirect command output to a file for complete results.]\n7\n8"
+    )
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_a_notice_counts_blank_lines_and_a_missing_final_newline_alike(newline: str) -> None:
+    """A blank last line counts as a line with LF as with CRLF; uncut output keeps its old form."""
+    buffer = _OutputBuffer()
+    buffer.append(f"a{newline}b{newline}{newline}")
+    unterminated = _OutputBuffer()
+    unterminated.append(f"a{newline}b")
+
+    assert buffer.render(tail=1).splitlines()[0] == (
+        "[Showing the last 1 of 3 lines. Pass a larger tail, or narrow the command.]"
+    )
+    assert buffer.render() == f"a{newline}b{newline}{newline}".rstrip("\n")
+    assert unterminated.render(tail=1).splitlines() == [
+        "[Showing the last 1 of 2 lines. Pass a larger tail, or narrow the command.]",
+        "b",
+    ]
+
+
+def test_the_line_cap_keeps_line_boundaries_across_appends() -> None:
+    """Trimming to the line cap keeps the newline before the next append, and the notice names the cap."""
+    buffer = _OutputBuffer(max_lines=2)
+    buffer.append("1\n2\n3\n")
+    buffer.append("4\n")
+
+    assert buffer.render() == (
+        "[Showing the last 2 of 4 lines; output truncated to the last 2 lines. "
+        "Redirect command output to a file for complete results.]\n3\n4"
     )
 
 
@@ -473,7 +503,8 @@ async def test_run_shell_command_truncates_large_output_by_bytes(tmp_path: Path)
     script = "for i in range(120): print(f'{i:03d}:' + 'x' * 1000)"
     result = await entrypoint([sys.executable, "-c", script], tail=120)
 
-    assert "Output truncated to the last" in result
+    assert result.startswith("[Showing the last ")
+    assert " of 120 lines; output truncated to the last 51200 bytes." in result
     assert "119:" in result
     assert "000:" not in result
     assert len(result.encode("utf-8")) <= _MAX_OUTPUT_BYTES + 200
@@ -488,7 +519,8 @@ async def test_run_shell_command_truncates_large_stderr_by_bytes(tmp_path: Path)
     script = "import sys\nfor i in range(120): print(f'{i:03d}:' + 'x' * 1000, file=sys.stderr)\nsys.exit(1)\n"
     result = await entrypoint([sys.executable, "-c", script])
 
-    assert result.startswith("Exit code 1\nStderr:\n[Output truncated to the last")
+    assert result.startswith("Exit code 1\nStderr:\n[Showing the last ")
+    assert " of 120 lines; output truncated to the last 51200 bytes." in result
     assert "119:" in result
     assert "000:" not in result
     assert len(result.encode("utf-8")) <= _MAX_OUTPUT_BYTES + 200
@@ -503,7 +535,8 @@ async def test_run_shell_command_truncates_many_short_lines_by_rendered_bytes(tm
     script = "for _ in range(10000): print('xxxxxx')"
     result = await entrypoint([sys.executable, "-c", script], tail=10000)
 
-    assert result.startswith("[Output truncated to the last")
+    assert result.startswith("[Showing the last ")
+    assert " of 10000 lines; output truncated to the last 51200 bytes." in result
     assert len(result.encode("utf-8")) <= _MAX_OUTPUT_BYTES + 200
 
 

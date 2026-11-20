@@ -275,6 +275,31 @@ async def test_signal_record_reports_delivery_and_kill_command_names_the_signal(
 
 
 @pytest.mark.asyncio
+async def test_checking_a_finished_success_shows_its_stderr_after_its_output(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """A finished background success shows its stderr, tailed like its stdout, after the status and output."""
+    result = await run_command(
+        registry,
+        namespace="test",
+        argv=["/bin/sh", "-c", "echo out; echo warn >&2; echo again >&2"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=1,
+        timeout=10,
+        register_finished=True,
+    )
+    assert result.handle is not None
+
+    status, rest = check_command(registry, namespace="test", handle=result.handle).split("\n", 1)
+    assert status.startswith("Status: FINISHED (exit code 0, ")
+    assert rest == (
+        "Output:\nout\nStderr:\n[Showing the last 1 of 2 lines. Pass a larger tail, or narrow the command.]\nagain"
+    )
+
+
+@pytest.mark.asyncio
 async def test_register_finished_keeps_a_command_that_finished_in_time_as_a_finished_record(
     registry: dict[str, ProcessRecord],
     tmp_path: Path,

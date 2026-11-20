@@ -88,6 +88,11 @@ class CapturedShellStream:
         self.file.seek(0)
         return self.file.read().decode("utf-8")
 
+    def tail(self, max_bytes: int = 2048, max_lines: int = 20) -> str:
+        """Return the end of the retained stream: its last ``max_lines`` lines within its last ``max_bytes``."""
+        self.file.seek(max(0, self.file.seek(0, 2) - max_bytes))
+        return "\n".join(self.file.read().decode("utf-8", errors="ignore").rstrip("\n").split("\n")[-max_lines:])
+
 
 class ShellOutputCapture:
     """Own both output streams and publish only a complete supported result."""
@@ -112,6 +117,11 @@ class ShellOutputCapture:
             # The receipt is all the caller sees, so a failed or killed command, saved or not, must say how it
             # exited. A command its owner stopped, such as at its timeout, is explained by the interruption instead.
             receipt["mindroom_tool_output"]["exit_code"] = return_code
+        if return_code == 0 and self.stderr.byte_count:
+            # A success saves its stdout alone, so the receipt says what it printed to stderr.
+            receipt["mindroom_tool_output"]["stderr_bytes"] = self.stderr.byte_count
+            if self.stderr.error is None:
+                receipt["mindroom_tool_output"]["stderr_tail"] = self.stderr.tail()
         return json.dumps(receipt)
 
     def _publish_receipt(self, return_code: int | None) -> dict[str, dict[str, object]]:
