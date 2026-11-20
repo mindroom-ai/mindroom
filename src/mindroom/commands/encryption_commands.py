@@ -32,6 +32,7 @@ async def _confirm_encrypt(
     requester_user_id: str,
     sender_user_id: str,
     put_state: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]] | None,
+    steward_may_write_state: Callable[[str, str], bool] | None,
 ) -> str:
     """Enable encryption for a room admin through ``put_state``, the room steward's, or explain why not."""
     admin_user_id = await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id))
@@ -44,14 +45,15 @@ async def _confirm_encrypt(
         return "❌ Failed to enable encryption. Run the command again to retry."
     if failure is None:
         return "🔐 End-to-end encryption is now enabled for this room. This cannot be undone."
-    if not failure:
-        return moderator_rights_message("enable encryption")
-    return (
-        f"❌ Failed to enable encryption: {failure[:_FAILURE_REASON_MAX_CHARS]}\n\n"
-        # The requester already passed the room-admin check, so only the room steward's power can be missing.
-        f"If this is a permission error: {moderator_rights_message('enable encryption')} "
-        "You can also enable it from your own client."
+    # A server without encryption answers M_FORBIDDEN too, so the steward's own power tells the two refusals apart.
+    lacks_power = (
+        failure.startswith("M_FORBIDDEN")
+        and steward_may_write_state is not None
+        and not steward_may_write_state(room_id, "m.room.encryption")
     )
+    if not failure or lacks_power:
+        return moderator_rights_message("enable encryption")
+    return f"❌ Failed to enable encryption: {failure[:_FAILURE_REASON_MAX_CHARS]}"
 
 
 async def handle_encrypt_command(
@@ -62,6 +64,7 @@ async def handle_encrypt_command(
     requester_user_id: str,
     sender_user_id: str,
     put_state: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]] | None = None,
+    steward_may_write_state: Callable[[str, str], bool] | None = None,
 ) -> str:
     """Review or enable Matrix end-to-end encryption for the current room."""
     encrypted = await room_encryption_enabled(client, room_id)
@@ -80,7 +83,9 @@ async def handle_encrypt_command(
         )
     if requested not in _CONFIRM_ARGUMENTS:
         return f"❌ Unknown argument `{args_text.strip()}`.\n\n{_ENCRYPT_USAGE}"
-    return await _confirm_encrypt(client, room_id, requester_user_id, sender_user_id, put_state)
+    return await _confirm_encrypt(
+        client, room_id, requester_user_id, sender_user_id, put_state, steward_may_write_state
+    )
 
 
 async def handle_e2ee_command(

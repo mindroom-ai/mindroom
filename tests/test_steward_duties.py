@@ -20,6 +20,7 @@ from mindroom.steward_duties import (
     StewardDutiesDeps,
     moderator_rights_message,
     put_room_state_as_steward,
+    steward_may_write_state,
 )
 from tests.conftest import install_bots, test_runtime_paths
 from tests.identity_helpers import entity_ids
@@ -221,6 +222,20 @@ async def test_put_room_state_as_steward_returns_false_without_power(tmp_path: P
     assert not await put_room_state_as_steward(room.orchestrator.room_steward, ROOM_ID, "io.mindroom.test", {"a": 2})
     room.bots.clear()
     assert not await put_room_state_as_steward(room.orchestrator.room_steward, ROOM_ID, "io.mindroom.test", {"a": 3})
+
+
+def test_steward_may_write_state_reads_the_stewards_own_power() -> None:
+    """A refusal is for lack of power when the steward's own view of the room gives it less than the event needs."""
+    levels = nio.PowerLevels(defaults=nio.DefaultLevels(state_default=50), users={"@weak:localhost": 0})
+    client = SimpleNamespace(user_id="@weak:localhost", rooms={ROOM_ID: SimpleNamespace(power_levels=levels)})
+    steward = cast("Any", SimpleNamespace(client=client))
+
+    assert not steward_may_write_state(lambda _room_id: steward, ROOM_ID, "m.room.encryption")
+    levels.users["@weak:localhost"] = 50
+    assert steward_may_write_state(lambda _room_id: steward, ROOM_ID, "m.room.encryption")
+    # No steward, or one that does not hold the room yet, may write nothing.
+    assert not steward_may_write_state(lambda _room_id: None, ROOM_ID, "m.room.encryption")
+    assert not steward_may_write_state(lambda _room_id: steward, "!other:localhost", "m.room.encryption")
 
 
 def test_moderator_rights_message_text() -> None:

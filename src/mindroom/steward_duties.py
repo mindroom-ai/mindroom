@@ -72,6 +72,14 @@ async def runs_room_hooks(
     return await orchestrator.event_journal_store().claim_room_event(room_id, event_id, purpose, owner) == agent_name
 
 
+def steward_may_write_state(room_steward: Callable[[str], AgentBot | None], room_id: str, event_type: str) -> bool:
+    """Return whether the room's steward may write one state event type, by its own view of the room's power levels."""
+    steward = room_steward(room_id)
+    client = None if steward is None else steward.client
+    room = None if client is None else client.rooms.get(room_id)
+    return client is not None and room is not None and room.power_levels.can_user_send_state(client.user_id, event_type)
+
+
 async def room_state_response_as_steward(
     room_steward: Callable[[str], AgentBot | None],
     room_id: str,

@@ -13,7 +13,11 @@ from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import COMMAND_TYPES_WITH_SIDE_EFFECTS, CommandType
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.model_selection import model_selection_names_runtime, model_selection_targets_other_runtime
-from mindroom.steward_duties import put_room_state_as_steward, room_state_response_as_steward
+from mindroom.steward_duties import (
+    put_room_state_as_steward,
+    room_state_response_as_steward,
+    steward_may_write_state,
+)
 from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
@@ -198,6 +202,7 @@ class CommandTurnExecutor:
             scheduled_tasks=orchestrator.scheduled_tasks,
             put_room_state=partial(put_room_state_as_steward, orchestrator.room_steward),
             room_state_response=partial(room_state_response_as_steward, orchestrator.room_steward),
+            steward_may_write_state=partial(steward_may_write_state, orchestrator.room_steward),
         )
         await handle_command(
             context=context,

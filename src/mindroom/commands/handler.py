@@ -193,6 +193,8 @@ class CommandHandlerContext:
     put_room_state: Callable[..., Awaitable[bool | None]]
     # The same write, returning the homeserver's answer (None without a steward) so a refusal can be quoted.
     room_state_response: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]]
+    # Whether the room's steward holds the power to write one state event type: (room_id, event_type).
+    steward_may_write_state: Callable[[str, str], bool]
 
 
 def _format_agent_description(agent_name: str, config: Config, tools: ToolRegistry) -> str:
@@ -584,6 +586,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             requester_user_id=requester_user_id,
             sender_user_id=_room_admin_sender(context, event, requester_user_id),
             put_state=context.room_state_response,
+            steward_may_write_state=context.steward_may_write_state,
         )
 
     elif command.type == CommandType.E2EE:

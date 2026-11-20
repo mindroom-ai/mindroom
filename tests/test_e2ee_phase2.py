@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
@@ -374,21 +374,31 @@ class TestEncryptCommand:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "reason",
+        ("errcode", "reason", "steward_may_write", "moderator_rights"),
         [
-            "Encryption is disabled on this homeserver.",
+            # The steward lacks the power to write the state, which only moderator rights can fix.
+            ("M_FORBIDDEN", "You don't have permission to send m.room.encryption.", False, True),
+            # A server without encryption refuses a steward that holds the power; no rights would help.
+            ("M_FORBIDDEN", "Encryption is disabled on this homeserver.", True, False),
             # Tuwunel's form: the errcode is already in the message and is shown once.
-            "M_FORBIDDEN: Encryption is disabled on this homeserver.",
-            "You don't have permission to send m.room.encryption.",
+            ("M_FORBIDDEN", "M_FORBIDDEN: Encryption is disabled on this homeserver.", True, False),
+            ("M_UNKNOWN", "Internal server error.", False, False),
         ],
     )
-    async def test_confirm_reports_the_homeservers_refusal(self, reason: str) -> None:
-        """A refused confirm quotes the homeserver, so a server without encryption is not mistaken for a permission gap."""
+    async def test_confirm_reports_the_homeservers_refusal(
+        self,
+        errcode: str,
+        reason: str,
+        steward_may_write: bool,
+        moderator_rights: bool,
+    ) -> None:
+        """A refusal for lack of power asks for moderator rights and nothing else; any other quotes the homeserver."""
         client = AsyncMock(spec=nio.AsyncClient)
         client.rooms = {}
         client.room_get_state_event.return_value = _state_error("M_NOT_FOUND")
-        refusal = nio.RoomPutStateError.from_dict({"errcode": "M_FORBIDDEN", "error": reason}, "!room:localhost")
+        refusal = nio.RoomPutStateError.from_dict({"errcode": errcode, "error": reason}, "!room:localhost")
         admin_gate = AsyncMock(return_value="@requester:localhost")
+        may_write = Mock(return_value=steward_may_write)
 
         with patch("mindroom.commands.encryption_commands.room_admin_power_user", new=admin_gate):
             response = await handle_encrypt_command(
@@ -398,14 +408,17 @@ class TestEncryptCommand:
                 requester_user_id="@requester:localhost",
                 sender_user_id="@sender:localhost",
                 put_state=AsyncMock(return_value=refusal),
+                steward_may_write_state=may_write,
             )
 
-        shown = reason.removeprefix("M_FORBIDDEN: ")
+        shown = reason.removeprefix(f"{errcode}: ")
         assert response == (
-            f"❌ Failed to enable encryption: M_FORBIDDEN: {shown}\n\n"
-            "If this is a permission error: I need moderator rights in this room to enable encryption. "
-            "You can also enable it from your own client."
+            "I need moderator rights in this room to enable encryption."
+            if moderator_rights
+            else f"❌ Failed to enable encryption: {errcode}: {shown}"
         )
+        if errcode == "M_FORBIDDEN":
+            may_write.assert_called_once_with("!room:localhost", "m.room.encryption")
         client.room_put_state.assert_not_awaited()
 
 

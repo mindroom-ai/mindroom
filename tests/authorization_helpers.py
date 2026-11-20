@@ -104,6 +104,7 @@ def make_test_command_handler_context(*args: Any, **kwargs: Any) -> CommandHandl
         "room_state_response",
         partial(room_state_response_as_steward, lambda _room_id: steward),
     )
+    kwargs.setdefault("steward_may_write_state", lambda _room_id, _event_type: True)
     return CommandHandlerContext(*args, **kwargs)
 
 
