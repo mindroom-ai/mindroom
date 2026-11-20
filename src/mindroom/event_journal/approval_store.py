@@ -391,7 +391,7 @@ class ApprovalStore(PrincipalRows):
 
         Returns the work its commit left for afterwards, or ``None`` when the run is not ready to finish.
         """
-        return await self._write(_finish_approval_continuation, approval_id)
+        return await self._write(_finish_approval_continuation, approval_id, owner_available=True)
 
     async def enqueue_unavailable_approval_notice(
         self,
@@ -419,7 +419,7 @@ class ApprovalStore(PrincipalRows):
 
         Returns the work its commit left for afterwards, or ``None`` when the run may not be discarded.
         """
-        return await self._write(_discard_unavailable_approval_continuation, approval_id)
+        return await self._write(_finish_approval_continuation, approval_id, owner_available=False)
 
     @property
     def signals(self) -> ApprovalSignals:
@@ -564,48 +564,18 @@ def _finish_approval_continuation(
     transaction: Transaction,
     principal_id: str,
     approval_id: str,
+    *,
+    owner_available: bool,
 ) -> tuple[PostCommitEffect, ...] | None:
-    """Settle a paused run whose FINAL delivery ended, and end its reply."""
+    """End a paused run and its reply: settled after its FINAL delivery, or discarded when its owner is permanently gone."""
+    # Without an owner to settle the reply, the notice is what the room sees.
+    may_end = approval_continuations.may_finish if owner_available else approval_continuations.may_discard_unavailable
     return _end_approval(
         transaction,
         principal_id,
         approval_id,
-        may_end=lambda: approval_continuations.may_finish(
-            transaction,
-            principal_id,
-            approval_id=approval_id,
-        ),
-        end=lambda finishing: replies.approval_finished(
-            transaction,
-            principal_id,
-            finishing,
-            owner_available=True,
-        ),
-    )
-
-
-def _discard_unavailable_approval_continuation(
-    transaction: Transaction,
-    principal_id: str,
-    approval_id: str,
-) -> tuple[PostCommitEffect, ...] | None:
-    """Release a run whose owner is permanently gone, ending the reply it paused."""
-    # The owner that could settle the reply is gone; the notice is what the room sees.
-    return _end_approval(
-        transaction,
-        principal_id,
-        approval_id,
-        may_end=lambda: approval_continuations.may_discard_unavailable(
-            transaction,
-            principal_id,
-            approval_id=approval_id,
-        ),
-        end=lambda discarded: replies.approval_finished(
-            transaction,
-            principal_id,
-            discarded,
-            owner_available=False,
-        ),
+        may_end=lambda: may_end(transaction, principal_id, approval_id=approval_id),
+        end=lambda ending: replies.approval_finished(transaction, principal_id, ending, owner_available=owner_available),
     )
 
 
