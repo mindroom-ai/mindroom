@@ -23,11 +23,8 @@ from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_handoff import MediaDispatchEvent, PreparedIngress
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.logging_config import bound_log_context
-from mindroom.matrix.client_visible_messages import (
-    bundled_replacement_body,
-    bundled_replacement_candidates,
-    resolve_visible_event_source,
-)
+from mindroom.matrix.client_visible_messages import resolve_visible_event_source
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.image_handler import download_image
 from mindroom.matrix.media import (
     AudioMessageEvent,
@@ -240,28 +237,23 @@ class InboundTurnNormalizer:
             return None
         return await self.resolve_text_event(TextNormalizationRequest(event=event))
 
-    async def fetched_message_text(self, event: nio.Event | None) -> str | None:
-        """Return the text of a message read by its ID as ingress reads one, in its sender's latest revision, if any."""
-        if is_file_message_event(event):
-            prepared = await self.prepare_file_sidecar_text_event(event)
-        elif isinstance(event, nio.RoomMessageFormatted):
-            prepared = await self.resolve_text_event(TextNormalizationRequest(event=event))
+    async def fetched_message_text(self, room_id: str, event_id: str, revision_id: str | None) -> str | None:
+        """Return a message's whole text, read by its ID or by its sender's edit ``revision_id``, else None."""
+        read = [await self._client().room_get_event(room_id, i) for i in (event_id, revision_id) if i is not None]
+        event, revision = (r.event if isinstance(r, nio.RoomGetEventResponse) else None for r in (read[0], read[-1]))
+        if event is None or revision is None or revision.sender != event.sender:
+            return None
+        if EventInfo.from_event(revision.source).original_event_id != (revision_id and event_id):
+            # Only its sender's edit of this message is a revision of it.
+            return None
+        if is_file_message_event(revision):
+            prepared = await self.prepare_file_sidecar_text_event(revision)
+        elif isinstance(revision, nio.RoomMessageFormatted):
+            prepared = await self.resolve_text_event(TextNormalizationRequest(event=revision))
         else:
             return None
-        if prepared is None or holds_unresolved_sidecar(prepared.source["content"]):
-            # A preview is not the message: the file is read on a later try.
-            return None
-        candidates = bundled_replacement_candidates(event.source)
-        # A replacement from anyone but the message's sender is not an edit of it.
-        if any(c.get("sender", event.sender) != event.sender for c in candidates):
-            return prepared.body
-        edited = await bundled_replacement_body(
-            event.source,
-            client=self._client(),
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-        )
-        return edited or prepared.body
+        # A preview is not the message: the file is read on a later try.
+        return None if prepared is None or holds_unresolved_sidecar(prepared.source["content"]) else prepared.body
 
     async def register_routed_attachment(
         self,

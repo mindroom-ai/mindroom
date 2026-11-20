@@ -103,6 +103,8 @@ class PendingEvent:
     claim: TurnClaim | None = None
     notice: QueuedHumanNoticeReservation | None = None
     selection: InteractiveSelectionDispatch | None = None
+    # The sender's edit that gave the event its text while it waited, if one did.
+    revision_event_id: str | None = None
 
     def close(self) -> None:
         """Release this event's claim and queued notice when it will not dispatch; idempotent."""
@@ -131,6 +133,8 @@ class PreparedTurn:
     stopped_reply: bool
     payload: DispatchPayloadMetadata
     current_prompt_is_structured: bool
+    # The edit each source edited while it waited was read in, by source event ID.
+    revisions: dict[str, str]
     media_events: tuple[MediaDispatchEvent, ...]
     # The batch's per-event claims and queued notices, which dispatch replaces and releases.
     claims: tuple[TurnClaim, ...]
@@ -491,6 +495,7 @@ def build_prepared_turn(
         stopped_reply=any(event.notice.stopped_reply for event in ordered_pending_events if event.notice is not None),
         payload=_batch_payload_metadata(ordered_pending_events),
         current_prompt_is_structured=prompt_rendering.is_structured,
+        revisions={e.event.event_id: e.revision_event_id for e in ordered_pending_events if e.revision_event_id},
         media_events=tuple(
             pending_event.event.raw_event
             for pending_event in ordered_pending_events

@@ -8500,21 +8500,27 @@ async def test_a_route_is_answered_with_the_text_it_carries_whatever_the_person_
     harness.runtime.client.room_get_event.assert_not_awaited()
 
 
-def _read_by_id(content: dict[str, Any], **source: Any) -> AsyncMock:  # noqa: ANN401
-    """Return a homeserver that answers an exact read of the person's question with one event of this content."""
-    response = nio.RoomGetEventResponse()
-    response.event = nio.Event.parse_event(
-        {
-            "content": content,
-            "event_id": "$question:localhost",
-            "sender": _SENDER,
-            "origin_server_ts": 1_000_000,
-            "room_id": _ROOM_ID,
-            "type": "m.room.message",
-            **source,
-        },
-    )
-    return AsyncMock(return_value=response)
+def _read_by_id(content: dict[str, Any], *others: dict[str, Any], **source: Any) -> AsyncMock:  # noqa: ANN401
+    """Return a homeserver that answers an exact read of the person's question, of this content, and of ``others``."""
+    question = {
+        "content": content,
+        "event_id": "$question:localhost",
+        "sender": _SENDER,
+        "origin_server_ts": 1_000_000,
+        "room_id": _ROOM_ID,
+        "type": "m.room.message",
+        **source,
+    }
+
+    def read(_room_id: str, event_id: str) -> nio.RoomGetEventResponse | nio.RoomGetEventError:
+        stored = next((event for event in (question, *others) if event["event_id"] == event_id), None)
+        if stored is None:
+            return nio.RoomGetEventError("not found")
+        response = nio.RoomGetEventResponse()
+        response.event = nio.Event.parse_event(stored)
+        return response
+
+    return AsyncMock(side_effect=read)
 
 
 @pytest.mark.asyncio
@@ -8550,39 +8556,113 @@ async def test_a_route_without_a_prompt_reads_a_long_message_in_full(tmp_path: P
     assert harness.ignored_dispatch_sources == []
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("editor", "text"), [(_SENDER, "July, not June."), ("@mallory:localhost", "June.")])
-async def test_a_route_without_a_prompt_reads_a_message_as_its_sender_last_edited_it(
-    tmp_path: Path,
-    editor: str,
-    text: str,
-) -> None:
-    """The steward routed the person's correction, so its responder answers that; nobody else's edit replaces it."""
-    config = _two_agent_config(tmp_path)
-    harness = _build_harness(config, tmp_path)
-    room = _room_with_members(config, "general", "research")
-    correction = {
+def _correction(*, sender: str = _SENDER, of: str = "$question:localhost") -> dict[str, Any]:
+    """Return an edit of the person's question to its corrected text."""
+    return {
         "content": {
             "body": "* July, not June.",
             "msgtype": "m.text",
             "m.new_content": {"body": "July, not June.", "msgtype": "m.text"},
-            "m.relates_to": {"rel_type": "m.replace", "event_id": "$question:localhost"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": of},
         },
         "event_id": "$correction:localhost",
-        "sender": editor,
+        "sender": sender,
         "origin_server_ts": 1_000_001,
         "room_id": _ROOM_ID,
         "type": "m.room.message",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("bundled", "stored", "prompts"),
+    [
+        # However much of the edit the homeserver bundles with the question, the edit is read by its own ID.
+        ({"m.replace": _correction()}, [_correction()], ["July, not June."]),
+        ({"m.replace": {"event_id": "$correction:localhost"}}, [_correction()], ["July, not June."]),
+        ({}, [_correction()], ["July, not June."]),
+        # Only the sender's own edit of this message is a revision of it, and only one that can be read.
+        ({}, [_correction(sender="@mallory:localhost")], []),
+        ({}, [_correction(of="$other:localhost")], []),
+        ({}, [], []),
+    ],
+    ids=["bundled", "bundled by ID", "not bundled", "another sender's", "of another message", "unreadable"],
+)
+async def test_a_route_without_a_prompt_reads_the_edit_its_steward_selected(
+    tmp_path: Path,
+    bundled: dict[str, Any],
+    stored: list[dict[str, Any]],
+    prompts: list[str],
+) -> None:
+    """The steward routed the person's correction, so its responder answers that or, until it can read it, nothing."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research")
+    question = {"body": "June.", "msgtype": "m.text"}
+    harness.runtime.client.room_get_event = _read_by_id(question, *stored, unsigned={"m.relations": bundled})
+    route = _route_message(config, steward="research", thread_id="$question:localhost", body=None)
+    route.source["content"][constants.ROUTE_REVISIONS_KEY] = {"$question:localhost": "$correction:localhost"}
+
+    await harness.deliver(room, route)
+
+    assert [request.prompt for request in harness.runner.requests] == prompts
+    assert harness.ignored_dispatch_sources == []
+
+
+@pytest.mark.asyncio
+async def test_a_route_without_a_prompt_reads_a_message_as_sent_when_its_steward_selected_no_edit(
+    tmp_path: Path,
+) -> None:
+    """An edit the route does not name came after the steward read the message, so it is not what was routed."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research")
     harness.runtime.client.room_get_event = _read_by_id(
         {"body": "June.", "msgtype": "m.text"},
-        unsigned={"m.relations": {"m.replace": correction}},
+        unsigned={"m.relations": {"m.replace": _correction()}},
     )
 
     await harness.deliver(room, _route_message(config, steward="research", thread_id="$question:localhost", body=None))
 
     [request] = harness.runner.requests
-    assert request.prompt == text
+    assert request.prompt == "June."
+
+
+@pytest.mark.asyncio
+async def test_a_steward_names_the_edit_it_selected_on_a_route_without_a_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message edited while it waited is routed as edited: a route too large for its text names that edit."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("general")),
+    )
+    original = _text_event("June.", event_id="$question:localhost", thread_id=_THREAD_ROOT)
+    corrected = "July, not June. " + "x" * constants.ROUTE_VOICE_TRANSCRIPTS_LIMIT
+    edit = _text_event(f"* {corrected}", event_id="$correction:localhost", origin_server_ts=1_000_001)
+    edit.source["content"]["m.new_content"] = {"body": corrected, "msgtype": "m.text"}
+    edit.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": original.event_id}
+    key = CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER))
+
+    with patch.object(harness.ingress, "_adaptive_text_debounce_seconds", AsyncMock(return_value=60.0)):
+        await harness.ingress.handle_text_event(room, original)
+
+        async def queued() -> None:
+            while not harness.gate.queued_pending_events(key):  # noqa: ASYNC110
+                await asyncio.sleep(0.001)
+
+        await asyncio.wait_for(queued(), timeout=5)
+        await harness.ingress.handle_text_event(room, edit)
+        await harness.gate.drain_all()
+
+    [route] = harness.gateway.routes
+    assert route[constants.ROUTE_EVENT_TYPE]["event_ids"] == [original.event_id]
+    assert "body" not in route
+    assert route[constants.ROUTE_REVISIONS_KEY] == {original.event_id: edit.event_id}
 
 
 @pytest.mark.asyncio

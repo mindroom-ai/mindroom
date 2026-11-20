@@ -8,8 +8,6 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
-import nio
-
 from mindroom.attachments.storage import parse_attachment_ids_from_event_source
 from mindroom.authorization import is_requester_joined_to_room
 from mindroom.background_tasks import create_background_task
@@ -19,6 +17,7 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTE_EVENT_TYPE,
     ROUTE_PROMPT_STRUCTURED_KEY,
+    ROUTE_REVISIONS_KEY,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SCHEDULED_MODEL_KEY,
@@ -72,6 +71,7 @@ from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
+    import nio
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
@@ -200,6 +200,8 @@ def _attachment_parts(prepared: _PreparedTextDispatch) -> tuple[list[str], list[
         extra_content[SCHEDULED_HISTORY_LIMIT_KEY] = prepared.dispatch.scheduled_history_budget.limit
     if prepared.dispatch.scheduled_model is not None:
         extra_content[SCHEDULED_MODEL_KEY] = prepared.dispatch.scheduled_model
+    if turn.revisions:
+        extra_content[ROUTE_REVISIONS_KEY] = turn.revisions
     return message_attachment_ids, trusted_attachment_ids, extra_content
 
 
@@ -453,11 +455,7 @@ class TurnDispatcher:
         )
 
     async def _with_routed_text(self, turn: PreparedTurn) -> PreparedTurn | None:
-        """Return a turn a steward routed to this bot with what the person wrote as its text, or None if unreadable.
-
-        A route carries its steward's prompt for the turn. One that carries none names the person's messages, and
-        each is read by its ID: as this bot or the steward transcribed it, else as the homeserver returns it.
-        """
+        """Return a routed turn with the prompt its steward read as its text, or None while that cannot be read."""
         content = turn.event.source["content"]
         if not turn.facts.routed_event_ids:
             return turn
@@ -468,9 +466,8 @@ class TurnDispatcher:
             voice = await self.deps.turn_store.prepared_voice_for_source(event_id)
             body = voice.body if voice is not None else content.get(ROUTE_VOICE_TRANSCRIPTS_KEY, {}).get(event_id)
             if body is None:
-                response = await self._client().room_get_event(turn.room.room_id, event_id)
-                event = response.event if isinstance(response, nio.RoomGetEventResponse) else None
-                body = await self.deps.normalizer.fetched_message_text(event)
+                revision = content.get(ROUTE_REVISIONS_KEY, {}).get(event_id)
+                body = await self.deps.normalizer.fetched_message_text(turn.room.room_id, event_id, revision)
                 if body is None:
                     self.deps.logger.warning("Cannot read a routed message; its turn stays pending", event_id=event_id)
                     return None

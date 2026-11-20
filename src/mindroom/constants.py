@@ -1069,6 +1069,8 @@ SILENT_SCHEDULE_EVENT_TYPE = "io.mindroom.scheduled.trigger"
 ROUTE_EVENT_TYPE = "io.mindroom.route"
 # In a route's content: whether its `body`, the steward's prompt for the turn, holds the steward's own message tags.
 ROUTE_PROMPT_STRUCTURED_KEY = "io.mindroom.route_prompt_structured"
+# In a route's content: the sender's edit its steward read each edited message in, by event ID.
+ROUTE_REVISIONS_KEY = "io.mindroom.route_revisions"
 # In a route's content: the steward's transcript of each voice message it routes, by event ID.
 ROUTE_VOICE_TRANSCRIPTS_KEY = "io.mindroom.voice_transcripts"
 # The route stays a small event: transcripts over this many encoded bytes are left to the responder's own checkpoint,
