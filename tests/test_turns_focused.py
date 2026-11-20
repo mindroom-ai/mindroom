@@ -90,6 +90,7 @@ from mindroom.event_journal import (
 from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.event_journal.opening import open_event_journal
+from mindroom.execution_preparation import _build_unseen_context_messages, render_prepared_messages_text
 from mindroom.hooks import (
     EVENT_MESSAGE_RECEIVED,
     HookContextSupport,
@@ -8304,6 +8305,83 @@ async def test_a_routed_message_runs_its_room_hook_once(tmp_path: Path, first_em
 
     assert observed == [("$question:localhost", first_emitter)]
     assert len(harness.runner.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routed", [("$question:localhost",), ("$first:localhost", "$question:localhost")])
+async def test_a_routed_responders_model_input_holds_the_persons_text_and_the_thread_before_it(
+    tmp_path: Path,
+    routed: tuple[str, ...],
+) -> None:
+    """The model of a routed responder reads the thread so far and, as its current message, what the person wrote."""
+    config = _two_agent_config(tmp_path)
+    thread = thread_history_result(
+        [
+            make_visible_message(sender=_SENDER, body="We deploy on Fridays", event_id=_THREAD_ROOT),
+            make_visible_message(sender=_SENDER, body="One more thing first", event_id="$first:localhost"),
+            make_visible_message(sender=_SENDER, body="Which release is next?", event_id="$question:localhost"),
+        ],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, thread_history=thread)
+    room = _room_with_members(config, "general", "research")
+
+    await harness.deliver(room, _route_message(config, steward="research", thread_id=_THREAD_ROOT, event_ids=routed))
+
+    [request] = harness.runner.requests
+    # The steward's hidden route carries no text, and `message:received` hooks see what the person wrote.
+    assert request.response_envelope.body == "Which release is next?"
+    # The reply's own builder turns the request and the thread the reply reads into what the model is sent.
+    turn, _unseen = _build_unseen_context_messages(
+        request.prompt,
+        thread,
+        transient_context_messages=(),
+        seen_event_ids=set(),
+        current_event_id=request.reply_to_event_id,
+        active_event_ids=(),
+        response_sender_id=_entity_user_id(config, "general"),
+        current_sender_id=request.user_id,
+        member_display_names={},
+        current_timestamp_ms=None,
+        prompt_event_id=request.reply_to_event_id,
+        current_prompt_is_structured=request.current_prompt_is_structured,
+        config=config,
+        timezone="UTC",
+        attachment_context=None,
+    )
+    before, current = render_prepared_messages_text([*turn.context, turn.prompt]).split("Current message:\n")
+    assert current == (f'<msg event_id="$question:localhost" from="{_SENDER}"><![CDATA[Which release is next?]]></msg>')
+    # Each earlier message of the thread, an earlier message of the routed batch too, is read once, in order.
+    assert before.index("We deploy on Fridays") < before.index("One more thing first")
+    assert "Which release is next?" not in before
+
+
+@pytest.mark.asyncio
+async def test_a_routed_responder_reads_a_voice_message_as_its_steward_transcribed_it(tmp_path: Path) -> None:
+    """The thread shows a voice message as its audio file, so its routed responder answers the route's transcript."""
+    config = _two_agent_config(tmp_path)
+    audio = make_visible_message(sender=_SENDER, body="voice.ogg", event_id="$question:localhost")
+    harness = _build_harness(config, tmp_path, thread_history=thread_history_result([audio], is_full_history=True))
+    room = _room_with_members(config, "general", "research")
+    route = _route_as_delivered(
+        config,
+        {
+            constants.ROUTE_EVENT_TYPE: {
+                "entity": _entity_user_id(config, "general"),
+                "event_ids": ["$question:localhost"],
+                "thread_id": "$question:localhost",
+            },
+            constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            constants.ORIGINAL_SENDER_KEY: _SENDER,
+            constants.ROUTE_VOICE_TRANSCRIPTS_KEY: {"$question:localhost": "Which release is next?"},
+        },
+        steward="research",
+    )
+
+    await harness.deliver(room, route)
+
+    [request] = harness.runner.requests
+    assert request.prompt == "Which release is next?"
 
 
 @pytest.mark.asyncio

@@ -30,6 +30,7 @@ from mindroom.constants import (
     PER_FIRE_THREAD_ROOT_KEY,
     ROUTE_EVENT_TYPE,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
+    ROUTED_PROMPT_PLACEHOLDER,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SCHEDULED_MODEL_KEY,
     SILENT_SCHEDULE_EVENT_TYPE,
@@ -465,8 +466,6 @@ def _completing(
     return run
 
 
-# What a routed responder is asked; the person's own message is in the conversation it reads.
-_ROUTED_PROMPT = "could you help with this?"
 # The relay context a route carries for its responder. Any other content of a route is dropped.
 _ROUTE_CONTEXT_KEYS = (
     SOURCE_KIND_KEY,
@@ -544,8 +543,9 @@ def _route_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFormatted:
     message = _as_message(
         event,
         build_message_content(
-            # Only a relayed scheduled task carries its prompt; a person's message is read from the conversation.
-            body if isinstance(body, str) and body.strip() else _ROUTED_PROMPT,
+            # A route carries the text of a scheduled prompt and of a turn answered in the room; the responder
+            # of any other reads what the person wrote from the thread.
+            body if isinstance(body, str) and body.strip() else ROUTED_PROMPT_PLACEHOLDER,
             mentioned_user_ids=[entity],
             thread_event_id=thread_id,
             reply_to_event_id=event_ids[-1],

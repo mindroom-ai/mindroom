@@ -16,6 +16,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
+    ROUTED_PROMPT_PLACEHOLDER,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SCHEDULED_MODEL_KEY,
     VOICE_PREFIX,
@@ -330,6 +331,7 @@ class TurnDispatcher:
 
         timing_scope_token = None
         try:
+            turn = await self._with_routed_text(turn)
             dispatch_timing = get_dispatch_pipeline_timing(turn.event.source)
             prepared = await self._prepare_text_dispatch(
                 turn,
@@ -447,6 +449,26 @@ class TurnDispatcher:
             name=f"prompt_summary_{turn.room.room_id}_{thread_id}",
             owner=self.deps.runtime,
         )
+
+    async def _with_routed_text(self, turn: PreparedTurn) -> PreparedTurn:
+        """Return a turn a steward routed to this bot in a thread with what the person wrote as its text.
+
+        Such a route names the person's messages and carries no text. The newest is the turn's own message, read as
+        this bot or the steward transcribed it, else as the thread shows it; the thread's history holds the others.
+        """
+        routed, thread_id = turn.facts.routed_event_id, turn.coalescing_key.thread_id
+        if routed is None or thread_id is None or turn.event.body != ROUTED_PROMPT_PLACEHOLDER:
+            return turn
+        mentions = self.deps.resolver.pre_hydration_mentions(room=turn.room, event=turn.event)
+        if not mentions[1]:
+            return turn
+        voice = await self.deps.turn_store.prepared_voice_for_source(routed)
+        transcripts = turn.event.source["content"].get(ROUTE_VOICE_TRANSCRIPTS_KEY, {})
+        body = voice.body if voice is not None else transcripts.get(routed)
+        if body is None:
+            thread = await self.deps.resolver.fetch_thread_history(turn.room.room_id, thread_id)
+            body = next((message.body for message in thread if message.event_id == routed), None)
+        return turn if body is None else replace(turn, event=replace(turn.event, body=body))
 
     async def _prepare_text_dispatch(
         self,
