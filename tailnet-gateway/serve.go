@@ -69,7 +69,7 @@ func (g *Gateway) carry(ctx context.Context, id string, n Node, conn net.Conn) {
 	}
 
 	woken := make(chan worker, 1)
-	go func() { woken <- g.wake(ctx, cancel, id, conn, login, peer) }()
+	go func() { woken <- g.wake(ctx, id, conn, login, peer) }()
 	// Until the worker's first bytes are in, this loop alone writes to the peer, one line at a time, and it is over
 	// before they are sent on, so no line to wait follows them.
 	var to worker
@@ -126,8 +126,8 @@ type worker struct {
 // wake asks the primary where the connection goes and reaches the worker it names, which may take the primary as
 // long as a worker takes to start, and the worker workerTimeout to take the connection and send its first bytes.
 //
-// ctx is the connection's: the worker's end is closed when it ends, which giveUp makes it do.
-func (g *Gateway) wake(ctx context.Context, giveUp func(), id string, conn net.Conn, login, peer string) worker {
+// ctx is the connection's: the worker's end is closed when it ends.
+func (g *Gateway) wake(ctx context.Context, id string, conn net.Conn, login, peer string) worker {
 	host, port, err := g.primary.Connect(ctx, id, login, peer)
 	var refused *RefusedError
 	if errors.As(err, &refused) {
@@ -147,25 +147,33 @@ func (g *Gateway) wake(ctx context.Context, giveUp func(), id string, conn net.C
 		return worker{}
 	}
 
-	answered := make(chan struct{})
-	defer close(answered)
+	// The worker's time is for its dial and its first bytes alone: it ends this context, not the connection's, and
+	// once the bytes are in it closes nothing.
+	inTime, timeUp := context.WithCancel(ctx)
+	defer timeUp()
 	go func() {
 		select {
 		case <-g.clock.After(workerTimeout):
-			giveUp()
-		case <-answered:
+			timeUp()
+		case <-inTime.Done():
 		}
 	}()
-	sshd, err := g.dial(ctx, net.JoinHostPort(host, strconv.Itoa(port)))
+	sshd, err := g.dial(inTime, net.JoinHostPort(host, strconv.Itoa(port)))
 	if err == nil {
 		context.AfterFunc(ctx, func() { sshd.Close() })
+		silent := context.AfterFunc(inTime, func() { sshd.Close() })
 		if !g.reach(id, conn) {
 			return worker{}
 		}
 		first := make([]byte, 4096)
 		var n int
-		if n, err = sshd.Read(first); err == nil {
+		n, err = sshd.Read(first)
+		// From here the worker's time may be up as it likes, unless it already was.
+		if answered := silent(); err == nil && answered {
 			return worker{sshd, first[:n]}
+		}
+		if err == nil {
+			err = errors.New("its time was up")
 		}
 	}
 	if g.settle(id, conn, workerUnreachable) {

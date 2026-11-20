@@ -365,6 +365,36 @@ func TestWorkerThatSaysNothingIsGivenUpAfter10Seconds(t *testing.T) {
 	}
 }
 
+func TestWorkerThatAnswersAsItsTimeIsUpKeepsTheConnectionItGot(t *testing.T) {
+	f := newFixtures(t, "login")
+	worker := f.wake(t)
+	node := f.serving(t, on(idA))
+	// Which of the two comes first is not the test's to say, so it is tried often: whenever the peer got the
+	// worker's first bytes, the connection is the worker's and its time for them ends nothing any more.
+	for try := range 300 {
+		greet := worker.holdGreetings(t)
+		peer := node.dial(t)
+		theirs := worker.conn(t)
+
+		go greet()
+		f.clock.advance(10 * time.Second)
+
+		got := line(peer)
+		for got == waking {
+			got = line(peer)
+		}
+		if got == banner {
+			fmt.Fprint(theirs, "later\r\n")
+			if after := line(peer); after != "later\r\n" {
+				t.Fatalf("try %d: the peer got the worker's banner and then read %q, want what the worker sent next", try, after)
+			}
+		}
+		peer.Close()
+		// Past the minute that limits the link's connect calls.
+		f.clock.advance(time.Minute)
+	}
+}
+
 func TestPeerThatTakesNoPreBannerIsDropped(t *testing.T) {
 	f := newFixtures(t, "login")
 	f.wake(t)
