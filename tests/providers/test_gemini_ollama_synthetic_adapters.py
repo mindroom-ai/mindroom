@@ -408,16 +408,52 @@ def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -
     }
 
 
-def test_gemini_api_keeps_v1beta_unless_the_config_authors_a_version(tmp_path: Path) -> None:
-    """google-genai 3 defaults the Gemini API to v1; the client stays on v1beta unless ``http_options`` names one."""
-    default = gemini_adapter.build_provider(ModelConfig(**_config(GEMINI)), runtime_paths_for(tmp_path))
-    authored = gemini_adapter.build_provider(
-        ModelConfig(**_config(GEMINI, client_params={"http_options": {"api_version": "v1"}})),
+@pytest.mark.parametrize(
+    ("http_options", "expected"),
+    [
+        (None, "v1beta"),
+        ({"api_version": "v1"}, "v1"),
+        ({"apiVersion": "v1alpha"}, "v1alpha"),
+        ({"api_version": None}, "v1beta"),
+        ({"apiVersion": None}, "v1beta"),
+        ({"retryOptions": {"attempts": 3}}, "v1beta"),
+    ],
+    ids=["unset", "snake-case", "camel-case-alias", "snake-case-null", "alias-null", "retry-alias"],
+)
+def test_gemini_api_keeps_v1beta_unless_the_config_authors_a_version(
+    tmp_path: Path,
+    http_options: dict[str, Any] | None,
+    expected: str,
+) -> None:
+    """google-genai 3 defaults the Gemini API to v1; the client stays on v1beta unless ``http_options`` names one.
+
+    Either spelling of an option builds a client, and a null version counts as unset.
+    """
+    client_params = {} if http_options is None else {"http_options": http_options}
+    adapter = gemini_adapter.build_provider(
+        ModelConfig(**_config(GEMINI, client_params=client_params)),
         runtime_paths_for(tmp_path),
     )
 
-    assert default._sdk_client()._api_client._http_options.api_version == "v1beta"
-    assert authored._sdk_client()._api_client._http_options.api_version == "v1"
+    sent = adapter._sdk_client()._api_client._http_options
+    assert sent.api_version == expected
+    assert sent.retry_options is not None
+    assert sent.retry_options.attempts == 1
+
+
+def test_vertex_ai_keeps_its_sdk_default_api_version_with_a_null_version(tmp_path: Path) -> None:
+    """Vertex AI gets no v1beta default; a null or aliased version leaves it to the SDK or the config."""
+    null = gemini_adapter.build_provider(
+        ModelConfig(**_config(GEMINI_VERTEX, client_params={"http_options": {"api_version": None}})),
+        runtime_paths_for(tmp_path),
+    )
+    aliased = gemini_adapter.build_provider(
+        ModelConfig(**_config(GEMINI_VERTEX, client_params={"http_options": {"apiVersion": "v1"}})),
+        runtime_paths_for(tmp_path),
+    )
+
+    assert null._client_params()["http_options"] == {"retry_options": {"attempts": 1}}
+    assert aliased._client_params()["http_options"] == {"api_version": "v1", "retry_options": {"attempts": 1}}
 
 
 @pytest.mark.asyncio

@@ -301,12 +301,17 @@ class GeminiProvider:
         # retries an upload's transfer a fixed number of times, which no option turns off.
         # google-genai 3 sends the Gemini API to v1, which lacks the -latest aliases, preview models, and caches, so the
         # Gemini API keeps v1beta unless ``client_params`` authors another version. Vertex AI keeps its own default.
-        api_version = {} if settings.vertexai else {"api_version": _GEMINI_API_VERSION}
-        params["http_options"] = {
-            **api_version,
-            **(params.get("http_options") or {}),
-            "retry_options": {"attempts": 1},
-        }
+        # The SDK takes each option under its snake_case name or its camelCase alias, but refuses both at once, and a
+        # null version counts as unset.
+        http_options = dict(params.get("http_options") or {})
+        http_options.pop("retryOptions", None)
+        aliased_version = http_options.pop("apiVersion", None)
+        api_version = http_options.pop("api_version", None) or aliased_version
+        if api_version is None and not settings.vertexai:
+            api_version = _GEMINI_API_VERSION
+        if api_version is not None:
+            http_options["api_version"] = api_version
+        params["http_options"] = {**http_options, "retry_options": {"attempts": 1}}
         return params
 
 
