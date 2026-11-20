@@ -291,6 +291,10 @@ class ConversationReadView(_HydrationMarkerView):
         """Return the newest visible event in one thread, or nothing."""
         return await self._read(reads.latest_visible_event_id, room_id=room_id, thread_id=thread_id)
 
+    async def thread_fingerprint(self, *, room_id: str, thread_id: str) -> reads.ThreadFingerprint | None:
+        """Return what a strict read of one thread depends on: its hydration marker and rows, or None without a marker."""
+        return await self._read(reads.thread_fingerprint, room_id=room_id, thread_id=thread_id)
+
     async def conversation_hydration_was_truncated(self, *, room_id: str, thread_id: str | None) -> bool:
         """Return whether a walk ran for this conversation and stopped at a ceiling."""
         return await self._read(reads.conversation_hydration_was_truncated, room_id=room_id, thread_id=thread_id)
@@ -460,10 +464,6 @@ class ExportProjectionView(ConversationReadView, HydrationView):
     async def conversation_is_complete(self, *, room_id: str, thread_id: str | None) -> bool:
         """Return whether this conversation's hydration walk reached its end."""
         return await self._read(reads.conversation_is_complete, room_id=room_id, thread_id=thread_id)
-
-    async def thread_fingerprint(self, *, room_id: str, thread_id: str) -> reads.ThreadFingerprint | None:
-        """Return what a strict read of one thread depends on: its hydration marker and rows, or None without a marker."""
-        return await self._read(reads.thread_fingerprint, room_id=room_id, thread_id=thread_id)
 
 
 class MatrixDeliveryView(_MembershipEpochView):

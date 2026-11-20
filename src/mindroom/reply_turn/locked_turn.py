@@ -337,6 +337,8 @@ class LockedTurns:
             refreshed_history = await self.deps.resolver.fetch_thread_history(
                 request.room_id,
                 request.thread_id,
+                held=request.thread_history,
+                ignoring_event_id=exclude_event_id,
             )
         except Exception as exc:
             if request.requires_model_history_refresh:

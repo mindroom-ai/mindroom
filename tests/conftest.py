@@ -2355,6 +2355,8 @@ def make_conversation_reader_mock() -> ConversationReader:
         SimpleNamespace(
             may_have_unread_history=AsyncMock(return_value=False),
             hydration_was_truncated=AsyncMock(return_value=False),
+            # No hydration marker stands, so a caller holding an earlier read of a thread reads it again.
+            store=SimpleNamespace(thread_fingerprint=AsyncMock(return_value=None)),
             read=AsyncMock(return_value=page),
             read_strict=AsyncMock(return_value=page),
             latest_thread_event_id=AsyncMock(return_value=None),

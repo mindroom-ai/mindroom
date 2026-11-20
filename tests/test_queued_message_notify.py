@@ -1448,9 +1448,12 @@ async def test_refresh_model_history_after_lock_refreshes_empty_thread_history(t
             ),
         )
 
+    # The request's own history goes along, so a thread unchanged since it was read is not loaded again.
     mock_fetch_thread_history.assert_awaited_once_with(
         "!room:localhost",
         "$thread",
+        held=[],
+        ignoring_event_id=None,
     )
     assert request.thread_history == fresh_history
 

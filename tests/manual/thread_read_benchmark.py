@@ -1,18 +1,21 @@
 """Measure what one turn's thread reads cost as the thread grows.
 
-A turn in a thread reads the whole thread from the journal several times: the
-dispatch snapshot (`turns/dispatch.py` -> `extract_dispatch_context`), the
-strict prompt read (`reply_turn/locked_turn.py` -> `refresh_model_history`) and
-the summary gate after the reply (`thread_summary/automatic.py`), each with
+A turn in a thread has three readers of the whole thread: the dispatch snapshot
+(`turns/dispatch.py` -> `extract_dispatch_context`), the prompt read once the
+turn holds the reply lock (`reply_turn/locked_turn.py` -> `refresh_model_history`)
+and the summary gate after the reply (`thread_summary/automatic.py`), each with
 `limit=HYDRATED_PROMPT_WINDOW_MESSAGES`. Between them the thread changes: the
-user's message lands, then the reply and its stream edits.
+user's message lands, then the reply and its stream edits. The later two keep
+the earlier read when `thread_is_unchanged` says the thread is as it was.
 
 This runs that sequence against a real store and reports, per turn, how many
-rows came back from the database with their content and how long the reads took.
+reads loaded content, how many rows they loaded and how long the reads took.
 
 Run it with::
 
-    uv run python tests/manual/thread_read_benchmark.py [sqlite|postgres://...]
+    uv run python tests/manual/thread_read_benchmark.py [sqlite|postgres://...] [--reload]
+
+``--reload`` makes every reader load the thread, as each did before they shared a read.
 """
 
 from __future__ import annotations
@@ -26,12 +29,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.event_journal import EventClass, EventJournalStore, EventKind, InboundEvent, ProjectedEvent
-from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
+from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES, ConversationHydrator
+from mindroom.matrix.conversation_reads import ConversationReader, complete_thread_history, thread_is_unchanged
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.event_journal.backend import Backend, Operation, Row, Transaction
+    from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 ROOM = "!bench:example.org"
 USER = "@tester:example.org"
@@ -97,9 +102,22 @@ async def _admit(
     )
 
 
-async def _measure(store: EventJournalStore, length: int, loaded: list[int]) -> tuple[float, float, float, float]:
-    """Seed one thread of ``length`` messages, run ``TURNS`` turns, return reads, rows and ms per turn, and ms per read."""
+async def _measure(
+    store: EventJournalStore,
+    length: int,
+    loaded: list[int],
+    *,
+    share: bool,
+) -> tuple[float, float, float, float, float]:
+    """Seed one thread of ``length`` messages and run ``TURNS`` turns.
+
+    Returns, per turn, how many reads loaded content, how many rows they loaded and the milliseconds all three reads
+    took, then the median milliseconds of a read that loaded the thread and of one that found it unchanged.
+    """
     principal = store.principal(PRINCIPAL)
+    # The marker stands, so the hydrator never walks and needs no homeserver.
+    hydrator = ConversationHydrator(store=principal, runtime=cast("Any", None), self_sender=AGENT)
+    reader = ConversationReader(store=principal, hydrator=hydrator)
     root = f"$root-{length}"
     ts = 1_000
     await _admit(principal, root, ts, USER, _content(BODY, None), root=None)
@@ -107,24 +125,41 @@ async def _measure(store: EventJournalStore, length: int, loaded: list[int]) -> 
         ts += 1
         sender = AGENT if index % 2 else USER
         await _admit(principal, f"$m-{length}-{index}", ts, sender, _content(f"{index} {BODY}", root), root=root)
+    await principal.install_hydrated_conversation(
+        room_id=ROOM,
+        thread_id=root,
+        events=(),
+        complete=True,
+        expected_membership_epoch=await principal.membership_epoch(ROOM),
+    )
 
-    read_ms: list[float] = []
-    reads_before = len(loaded)
+    load_ms: list[float] = []
+    check_ms: list[float] = []
 
-    async def read() -> None:
+    async def read(held: ThreadHistoryResult | None = None, *, own_reply: str | None = None) -> ThreadHistoryResult:
+        """Read the thread as one of a turn's three readers does: keep ``held`` if it stands, else load the thread."""
         started = time.perf_counter()
-        page = await principal.read_conversation(room_id=ROOM, thread_id=root, limit=HYDRATED_PROMPT_WINDOW_MESSAGES)
-        read_ms.append((time.perf_counter() - started) * 1000)
-        assert page.messages[0].logical_event_id == root
+        if (
+            share
+            and held is not None
+            and await thread_is_unchanged(reader, ROOM, root, held, ignoring_event_id=own_reply)
+        ):
+            check_ms.append((time.perf_counter() - started) * 1000)
+            return held
+        history = await complete_thread_history(reader, ROOM, root)
+        load_ms.append((time.perf_counter() - started) * 1000)
+        assert history.is_full_history
+        assert history[0].event_id == root
+        return history
 
     await read()  # The read that first sees the thread, as a restart or a cold thread does.
-    read_ms.clear()
-    del loaded[reads_before:]
+    load_ms.clear()
+    reads_before = len(loaded)
     for turn in range(TURNS):
         ts += 1
         await _admit(principal, f"$u-{length}-{turn}", ts, USER, _content(f"follow-up {turn}", root), root=root)
-        await read()  # dispatch snapshot
-        await read()  # strict prompt read
+        held = await read()  # dispatch snapshot
+        held = await read(held)  # prompt read once the turn holds the reply lock
         ts += 1
         reply = f"$a-{length}-{turn}"
         await _admit(principal, reply, ts, AGENT, _content("Thinking...", root), root=root)
@@ -140,13 +175,14 @@ async def _measure(store: EventJournalStore, length: int, loaded: list[int]) -> 
                 root=root,
                 replaces=reply,
             )
-        await read()  # summary gate after the reply
+        await read(held, own_reply=reply)  # summary gate after the reply
     turn_reads = loaded[reads_before:]
     return (
-        len(turn_reads) / TURNS,
+        sum(1 for rows in turn_reads if rows) / TURNS,
         sum(turn_reads) / TURNS,
-        sum(read_ms) / TURNS,
-        statistics.median(read_ms),
+        (sum(load_ms) + sum(check_ms)) / TURNS,
+        statistics.median(load_ms),
+        statistics.median(check_ms) if check_ms else float("nan"),
     )
 
 
@@ -187,7 +223,9 @@ class _CountingBackend:
 
 async def main() -> None:
     """Print one row per thread length."""
-    target = sys.argv[1] if len(sys.argv) > 1 else "sqlite"
+    arguments = [argument for argument in sys.argv[1:] if argument != "--reload"]
+    share = "--reload" not in sys.argv
+    target = arguments[0] if arguments else "sqlite"
     loaded: list[int] = []
     with tempfile.TemporaryDirectory() as directory:
         opened = (
@@ -200,12 +238,13 @@ async def main() -> None:
             approval_signals=opened.approval_signals,
         )
         try:
-            print(f"backend={target.split(':')[0]} turns={TURNS} window={HYDRATED_PROMPT_WINDOW_MESSAGES}")
-            print("| L | full reads/turn | rows loaded/turn | read ms/turn | ms/read p50 |")
-            print("|---|---|---|---|---|")
+            mode = "shared" if share else "reload"
+            print(f"backend={target.split(':')[0]} turns={TURNS} window={HYDRATED_PROMPT_WINDOW_MESSAGES} mode={mode}")
+            print("| L | loads/turn | rows loaded/turn | read ms/turn | load ms p50 | unchanged check ms p50 |")
+            print("|---|---|---|---|---|---|")
             for length in LENGTHS:
-                per_turn_reads, rows, ms, p50 = await _measure(store, length, loaded)
-                print(f"| {length} | {per_turn_reads:.0f} | {rows:.0f} | {ms:.2f} | {p50:.2f} |")
+                loads, rows, ms, load_p50, check_p50 = await _measure(store, length, loaded, share=share)
+                print(f"| {length} | {loads:.0f} | {rows:.0f} | {ms:.2f} | {load_p50:.2f} | {check_p50:.2f} |")
         finally:
             await opened.close()
 

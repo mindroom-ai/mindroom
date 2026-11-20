@@ -1858,6 +1858,7 @@ class ResponseRunner:
                 response_target=turn.runtime.tool_context.target,
                 thread_summary_message_count_hint=self.locked.thread_summary_message_count_hint(request),
                 thread_summary_entity_name=self.deps.agent_name,
+                thread_history=request.thread_history,
             )
 
         async with self._turn_dispatch_scope(turn, progress=progress) as dispatched:

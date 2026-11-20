@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
-from mindroom.matrix.conversation_reads import refetched_thread_history, with_delivered_response
+from mindroom.matrix.conversation_reads import refetched_thread_history, thread_is_unchanged, with_delivered_response
 from mindroom.matrix.thread_forks import fork_parent_thread_id
 from mindroom.requester_identity import is_managed_entity_id
 from mindroom.thread_summary import schedule
@@ -375,8 +375,12 @@ async def _countable_thread_history(
     conversation_reader: ConversationReader,
     room_id: str,
     thread_id: str,
-) -> ThreadHistoryResult | None:
+    held: Sequence[ResolvedVisibleMessage],
+    reply: DeliveredResponse,
+) -> Sequence[ResolvedVisibleMessage] | None:
     """Return history an automatic pass may count, or nothing.
+
+    ``held`` is the thread as the reply read it, and is that history while nothing but the reply changed since.
 
     An automatic pass records the counted size as its baseline on every outcome
     it reaches, so it must not run at all on a count it cannot trust. Both reasons it
@@ -385,6 +389,8 @@ async def _countable_thread_history(
     recording.
     """
     try:
+        if await thread_is_unchanged(conversation_reader, room_id, thread_id, held, ignoring_event_id=reply.event_id):
+            return held
         return await load_complete_thread_history(conversation_reader, room_id, thread_id)
     except TruncatedThreadHistoryError:
         logger.info(
@@ -578,9 +584,12 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
     delivered_response: DeliveredResponse,
     entity_name: str,
     membership_index: AgentReplyMembershipIndex,
+    held: Sequence[ResolvedVisibleMessage] = (),
     retitle: bool = False,
 ) -> None:
     """Generate an early summary, then one-shot initial tags on its first refresh.
+
+    ``held`` is the thread as the reply being summarized read it, which saves reading an unchanged thread again.
 
     ``retitle`` summarizes now, whatever the thread's count, for a message that changes what the thread is about,
     such as a call's notes. A pinned or resolved thread keeps its title all the same.
@@ -588,7 +597,7 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
     refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
     baselines = schedule.THREAD_SUMMARY_BASELINES
     async with baselines.lock(room_id, thread_id):
-        projected = await _countable_thread_history(conversation_reader, room_id, thread_id)
+        projected = await _countable_thread_history(conversation_reader, room_id, thread_id, held, delivered_response)
         if projected is None:
             return
         # This pass starts at delivery time, so the projection cannot hold the

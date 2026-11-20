@@ -17,7 +17,7 @@ from mindroom.timing import timed
 from mindroom.tool_system.events import strip_visible_tool_markers
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
     import nio
     import structlog
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal.store import PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
 
@@ -42,6 +43,8 @@ class ResponseOutcome:
     response_target: MessageTarget | None = None
     thread_summary_message_count_hint: int | None = None
     thread_summary_entity_name: str | None = None
+    # The thread as the reply read it; the summary pass reads from it while the thread is otherwise unchanged.
+    thread_history: Sequence[ResolvedVisibleMessage] = ()
 
     @property
     def session_id(self) -> str | None:
@@ -61,7 +64,9 @@ class PostResponseEffectsDeps:
     notify_response_finished: Callable[[float | None], None] | None = None
     persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
-    queue_thread_summary: Callable[[str, str, str | None, DeliveredResponse], None] | None = None
+    queue_thread_summary: (
+        Callable[[str, str, str | None, DeliveredResponse, Sequence[ResolvedVisibleMessage]], None] | None
+    ) = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +118,7 @@ class PostResponseEffectsSupport:
         thread_id: str,
         entity_name: str | None,
         delivered_response: DeliveredResponse,
+        held: Sequence[ResolvedVisibleMessage] = (),
         *,
         retitle: bool = False,
     ) -> None:
@@ -125,6 +131,7 @@ class PostResponseEffectsSupport:
             runtime_paths=self.runtime_paths,
             conversation_reader=self.conversation_reader,
             delivered_response=delivered_response,
+            held=held,
             entity_name=entity_name or self.agent_name,
             membership_index=self.runtime.agent_reply_memberships,
             retitle=retitle,
@@ -326,4 +333,5 @@ async def apply_post_response_effects(
                 event_id=response_event_id,
                 body=_delivered_body(final_delivery_outcome),
             ),
+            outcome.thread_history,
         )

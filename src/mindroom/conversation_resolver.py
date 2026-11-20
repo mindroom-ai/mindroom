@@ -25,11 +25,12 @@ from mindroom.matrix.conversation_reads import (
     complete_thread_history,
     consecutive_agent_messages,
     projected_thread_history,
+    thread_is_unchanged,
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.matrix.thread_forks import is_thread_fork_root, with_fork_prefix
+from mindroom.matrix.thread_forks import fork_parent_thread_id, is_thread_fork_root, with_fork_prefix
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import (
     RelatedEventUnavailableError,
@@ -659,8 +660,22 @@ class ConversationResolver:
         self,
         room_id: str,
         thread_id: str,
+        *,
+        held: Sequence[ResolvedVisibleMessage] = (),
+        ignoring_event_id: str | None = None,
     ) -> ThreadHistoryResult:
-        """Fetch complete thread history, and the parents it forks from, from the conversation projection."""
+        """Fetch complete thread history, and the parents it forks from, from the conversation projection.
+
+        ``held`` is this turn's earlier read of the thread, returned when the thread did not change since, so an
+        unchanged thread is loaded once. A fork is always read again: its parents can change without it.
+        """
+        reader = self.deps.conversation_reader
+        if (
+            isinstance(held, ThreadHistoryResult)
+            and fork_parent_thread_id(held, thread_id) is None
+            and await thread_is_unchanged(reader, room_id, thread_id, held, ignoring_event_id=ignoring_event_id)
+        ):
+            return held
         return await self._with_fork_prefix(room_id, thread_id, mode=ThreadReadMode.STRICT)
 
     async def consecutive_agent_messages(self, room_id: str, thread_id: str | None, *, limit: int) -> int:

@@ -1349,7 +1349,7 @@ class TestMaybeGenerateThreadSummary:
 
         run_linked.set()
         await effects[0]
-        (_room, _thread, _entity, delivered) = queue_thread_summary.call_args.args
+        (_room, _thread, _entity, delivered, _held) = queue_thread_summary.call_args.args
         await _summary_pass(self.client, config, self.rp, self.conversation_reader, delivered_response=delivered)
 
         assert len(model.requests) == 2

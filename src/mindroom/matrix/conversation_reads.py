@@ -468,6 +468,30 @@ async def complete_thread_history(
     return projected_thread_history(page, complete=not truncated)
 
 
+async def thread_is_unchanged(
+    reader: ConversationReader,
+    room_id: str,
+    thread_id: str,
+    history: Sequence[ResolvedVisibleMessage],
+    *,
+    ignoring_event_id: str | None = None,
+) -> bool:
+    """Return whether `complete_thread_history` now would return exactly ``history``, loading no content.
+
+    For a turn that read its thread and must later see what arrived since: any message added, edited, redacted or
+    removed changes the thread's fingerprint, and then the caller reads again. ``ignoring_event_id`` is a message the
+    caller leaves out of its history anyway, its own answer, whose echo may have landed since.
+    """
+    if not (isinstance(history, ThreadHistoryResult) and history.is_full_history):
+        return False
+    fingerprint = await reader.store.thread_fingerprint(room_id=room_id, thread_id=thread_id)
+    if fingerprint is None:
+        return False
+    (_, complete, _, recovery_state), rows = fingerprint
+    held = {(message.event_id, message.latest_event_id, None) for message in history}
+    return bool(complete) and recovery_state is None and {row for row in rows if row[0] != ignoring_event_id} == held
+
+
 async def refetched_thread_history(
     reader: ConversationReader,
     room_id: str,

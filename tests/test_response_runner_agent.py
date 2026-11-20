@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import nio
@@ -2378,9 +2378,12 @@ class TestAgentBot(AgentBotTestBase):
 
         assert resolution == Owned()
         assert await recorded_reply_event(bot, "$event") == "$response1"
+        # The request's own history goes along, so a thread unchanged since it was read is not loaded again.
         mock_fetch_thread_history.assert_awaited_once_with(
             "!test:localhost",
             "$thread",
+            held=stale_history,
+            ignoring_event_id="$response1",
         )
         turn = answer.call_args.args[0]
         assert list(turn.thread_history) == fresh_history
@@ -2647,6 +2650,8 @@ class TestAgentBot(AgentBotTestBase):
             # The answer that queued this pass, which the projection cannot
             # hold until sync echoes it back.
             delivered_response=DeliveredResponse(event_id="$response", body="ok"),
+            # The thread as the reply read it, which the pass keeps while the thread is unchanged.
+            held=ANY,
             entity_name=bot.agent_name,
             membership_index=bot._runtime_view.agent_reply_memberships,
             retitle=False,
@@ -2767,6 +2772,7 @@ class TestAgentBot(AgentBotTestBase):
             runtime_paths=bot.runtime_paths,
             conversation_reader=bot._conversation_reader,
             delivered_response=DeliveredResponse(event_id="$response", body="ok"),
+            held=ANY,
             entity_name=bot.agent_name,
             membership_index=bot._runtime_view.agent_reply_memberships,
             retitle=False,

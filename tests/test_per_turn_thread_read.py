@@ -16,11 +16,16 @@ import nio
 import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.constants import FORK_CONTENT_KEY
 from mindroom.event_journal import EventClass, EventKind, InboundEvent, ProjectedEvent
 from mindroom.event_journal.views import ConversationReadView
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
+from mindroom.matrix.conversation_reads import complete_thread_history, thread_is_unchanged
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.thread_summary import automatic
 from tests.conftest import drain_coalescing
+from tests.journal_helpers import record_room_history_recovery
 from tests.response_runner_helpers import streamed_answer
 from tests.threading_helpers import ThreadingBehaviorTestBase, _matrix_room, _message, seed_thread_history
 
@@ -28,7 +33,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     from mindroom.bot import AgentBot
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 _ROOM = "!test:localhost"
 _ROOT = "$thread_root:localhost"
@@ -48,8 +52,9 @@ async def _admit(
     sender: str = _USER,
     replaces: str | None = None,
     redacts: str | None = None,
+    thread_id: str = _ROOT,
 ) -> None:
-    """Land one event of the thread in the bot's journal, as sync does: a message, an edit or a redaction."""
+    """Land one event of a thread in the bot's journal, as sync does: a message, an edit or a redaction."""
     content: dict[str, object] = {"msgtype": "m.text", "body": body}
     if replaces is not None:
         content = {
@@ -62,7 +67,7 @@ async def _admit(
         InboundEvent(
             event_id=event_id,
             room_id=_ROOM,
-            thread_id=_ROOT,
+            thread_id=thread_id,
             kind=EventKind.MESSAGE if redacts is None else EventKind.REDACTION,
             event_class=EventClass.CONTEXT_ONLY,
             sender=sender,
@@ -72,7 +77,7 @@ async def _admit(
         ProjectedEvent(
             event_id=event_id,
             room_id=_ROOM,
-            thread_id=_ROOT,
+            thread_id=thread_id,
             sender=sender,
             origin_server_ts=ts,
             content=content,
@@ -263,3 +268,113 @@ class TestOneTurnLoadsItsThreadOnce(ThreadingBehaviorTestBase):
         assert turn.model_history == [*_SEEDED, _FOLLOW_UP]
         assert turn.summary_history == [*summarized, _FOLLOW_UP, "the answer"]
         assert turn.loads == 2
+
+
+class TestAThreadIsUnchangedOnlyWhenAStrictReadWouldRepeat(ThreadingBehaviorTestBase):
+    """What lets a caller keep an earlier read: a whole history, a standing complete walk, and the same rows."""
+
+    @pytest.mark.asyncio
+    async def test_a_whole_read_of_a_thread_nothing_touched_stands(self, bot: AgentBot) -> None:
+        """The read just made is what a read now would return, and so is one missing only the ignored event."""
+        async with _thread(bot):
+            held = await complete_thread_history(bot.conversation_reader, _ROOM, _ROOT)
+            assert await thread_is_unchanged(bot.conversation_reader, _ROOM, _ROOT, held)
+
+            await _admit(bot, _REPLY, "Thinking...", ts=101, sender=_BOT)
+            await _admit(bot, "$other:localhost", "other", ts=102)
+
+            assert not await thread_is_unchanged(bot.conversation_reader, _ROOM, _ROOT, held, ignoring_event_id=_REPLY)
+            held = await complete_thread_history(bot.conversation_reader, _ROOM, _ROOT)
+            without_reply = thread_history_result([m for m in held if m.event_id != _REPLY], is_full_history=True)
+            assert await thread_is_unchanged(
+                bot.conversation_reader,
+                _ROOM,
+                _ROOT,
+                without_reply,
+                ignoring_event_id=_REPLY,
+            )
+            assert not await thread_is_unchanged(bot.conversation_reader, _ROOM, _ROOT, without_reply)
+
+    @pytest.mark.asyncio
+    async def test_a_history_that_is_not_the_whole_thread_never_stands(self, bot: AgentBot) -> None:
+        """A page of a longer thread and a plain list prove nothing about the rest of the thread."""
+        async with _thread(bot):
+            held = await complete_thread_history(bot.conversation_reader, _ROOM, _ROOT)
+
+            partial = thread_history_result(held, is_full_history=False)
+            assert not await thread_is_unchanged(bot.conversation_reader, _ROOM, _ROOT, partial)
+            assert not await thread_is_unchanged(bot.conversation_reader, _ROOM, _ROOT, list(held))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("walk", ["none", "stopped short"])
+    async def test_a_thread_no_walk_vouches_for_is_read_again(self, bot: AgentBot, walk: str) -> None:
+        """Without a marker a strict read walks the server; after a walk that stopped short it is not whole."""
+        seeded = [_message(event_id=_ROOT, body="Root", thread_id=_ROOT)]
+        await seed_thread_history(bot, room_id=_ROOM, thread_id=_ROOT, messages=seeded, hydrated=False)
+        store = bot._journal_store.principal(bot._journal_principal_id)
+        if walk == "stopped short":
+            await store.install_hydrated_conversation(
+                room_id=_ROOM,
+                thread_id=_ROOT,
+                events=(),
+                complete=False,
+                expected_membership_epoch=await store.membership_epoch(_ROOM),
+            )
+        held = thread_history_result(seeded, is_full_history=True)
+
+        assert not await thread_is_unchanged(bot.conversation_reader, _ROOM, _ROOT, held)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("repair_stopped_short", [False, True])
+    async def test_a_gap_in_the_rooms_history_makes_the_thread_read_again(
+        self,
+        bot: AgentBot,
+        repair_stopped_short: bool,
+    ) -> None:
+        """A skipped sync interval may hide a message of the thread, awaiting its repair and after one that gave up."""
+        async with _thread(bot):
+            held = await complete_thread_history(bot.conversation_reader, _ROOM, _ROOT)
+            store = bot._journal_store.principal(bot._journal_principal_id)
+
+            recovery = await record_room_history_recovery(store, _ROOM)
+            assert recovery is not None
+            if repair_stopped_short:
+                await store.settle_room_history_recovery(
+                    recovery,
+                    exhausted_server=False,
+                    unreadable=False,
+                    attempted_policy_rank=0,
+                    expected_membership_epoch=await store.membership_epoch(_ROOM),
+                )
+                assert await store.conversation_is_hydrated(room_id=_ROOM, thread_id=_ROOT)
+
+            assert not await thread_is_unchanged(bot.conversation_reader, _ROOM, _ROOT, held)
+
+    @pytest.mark.asyncio
+    async def test_a_fork_is_read_again_because_its_parent_can_change_without_it(self, bot: AgentBot) -> None:
+        """A fork's own rows stay the same while the fork point lands in its parent."""
+        parent, fork = "$parent:localhost", "$fork:localhost"
+        reference = {FORK_CONTENT_KEY: {"thread_id": parent, "event_id": "$point:localhost"}}
+        fork_root = ResolvedVisibleMessage.synthetic(
+            sender=_USER,
+            body="Fork",
+            event_id=fork,
+            content={"msgtype": "m.text", "body": "Fork", **reference},
+            thread_id=fork,
+        )
+        await seed_thread_history(
+            bot,
+            room_id=_ROOM,
+            thread_id=parent,
+            messages=[_message(event_id=parent, body="Parent", thread_id=parent)],
+        )
+        await seed_thread_history(bot, room_id=_ROOM, thread_id=fork, messages=[fork_root])
+        resolver = bot._conversation_resolver
+        held = await resolver.fetch_thread_history(_ROOM, fork)
+        assert [message.body for message in held] == ["Fork"]
+        assert held.is_full_history
+
+        await _admit(bot, "$point:localhost", "the fork point", ts=5, thread_id=parent)
+
+        again = await resolver.fetch_thread_history(_ROOM, fork, held=held)
+        assert [message.body for message in again] == ["Parent", "the fork point", "Fork"]
