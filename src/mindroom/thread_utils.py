@@ -75,12 +75,15 @@ def _extract_mentioned_user_ids(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[str]:
-    """Extract mentioned user IDs from message content, without managed entities when its mentions wake no agent."""
+    """Extract mentioned user IDs from message content, without agents and teams when its mentions wake no agent.
+
+    The owner account stays listed: it answers nobody, so a message aimed at it is aimed at no agent either way.
+    """
     user_ids = _listed_or_found_user_ids(content, config, runtime_paths)
     if content.get(WAKE_MENTIONED_KEY) is not False:
         return user_ids
     registry = entity_identity_registry(config, runtime_paths)
-    return [user_id for user_id in user_ids if not registry.is_managed_user_id(user_id)]
+    return [user_id for user_id in user_ids if not registry.is_managed_user_id(user_id, include_router=False)]
 
 
 def history_mentioned_user_ids(

@@ -50,7 +50,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.config.participation import ParticipationConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, WAKE_MENTIONED_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -2276,13 +2276,13 @@ async def test_owner_device_runs_the_selection_chat_sends_in_an_agents_thread(co
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner_joined", [True, False])
 @pytest.mark.parametrize("body", ["hello there", "!help", "1"])
-@pytest.mark.parametrize("html_pill", [False, True])
+@pytest.mark.parametrize("pill", ["m.mentions", "html", "non-waking"])
 async def test_a_message_aimed_only_at_the_owner_gets_silence(
     tmp_path: Path,
     *,
     owner_joined: bool,
     body: str,
-    html_pill: bool,
+    pill: str,
 ) -> None:
     """A pill of the owner account targets no agent: the only agent neither answers, runs the command nor picks."""
     agents = {"general": AgentConfig(display_name="General")}
@@ -2292,11 +2292,13 @@ async def test_a_message_aimed_only_at_the_owner_gets_silence(
     room.members_synced = True
     owner_id = _entity_user_id(config, ROUTER_AGENT_NAME)
     event = _text_event(body)
-    if html_pill:
-        pill = f'<a href="https://matrix.to/#/{owner_id}">MindRoom</a>'
-        event.source["content"] |= {"format": "org.matrix.custom.html", "formatted_body": f"{pill} {body}"}
+    if pill == "html":
+        link = f'<a href="https://matrix.to/#/{owner_id}">MindRoom</a>'
+        event.source["content"] |= {"format": "org.matrix.custom.html", "formatted_body": f"{link} {body}"}
     else:
         event.source["content"]["m.mentions"] = {"user_ids": [owner_id]}
+        if pill == "non-waking":
+            event.source["content"][WAKE_MENTIONED_KEY] = False
     claim = harness.ingress.deps.interactive_questions.claim_interactive_text = AsyncMock(return_value=None)
 
     with patch.object(harness.dispatcher.deps.command_executor, "execute", new=AsyncMock()) as execute:
