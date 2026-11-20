@@ -618,12 +618,11 @@ def message_tool_trace(content: Mapping[str, object]) -> list[ToolTraceEntry] | 
     if not isinstance(payload, dict):
         return None
     events = cast("dict[str, object]", payload).get("events")
-    if not isinstance(events, list):
+    # Marker [n] names entry n, so a list with an entry that is no call has no entry to trust.
+    if not isinstance(events, list) or not all(isinstance(event, dict) for event in events):
         return []
     try:
-        return deserialize_tool_trace(
-            cast("list[Mapping[str, object]]", [event for event in events if isinstance(event, dict)]),
-        )
+        return deserialize_tool_trace(cast("list[Mapping[str, object]]", events))
     except RuntimeError:
         # Any room member can send this key, so a malformed trace reads as one without entries.
         return []

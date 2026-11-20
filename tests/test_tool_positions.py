@@ -231,3 +231,9 @@ async def test_preparing_a_message_that_fits_checks_room_encryption_no_more() ->
         )
     assert prepared.content == _wire(_case("calls between two paragraphs share one position"))
     resolve.assert_not_awaited()
+
+
+def test_a_trace_with_an_entry_that_is_no_call_names_no_marker() -> None:
+    """Marker [n] names entry n; skipping a broken entry would give marker [1] the next entry's call."""
+    content = _content("A\n\n🔧 `read_file` [1]", "", 2, [1, {**_SHELL, "args_preview": "cmd=rm"}])
+    assert "shell" not in (message_judgment_text(_message(content)) or "")
