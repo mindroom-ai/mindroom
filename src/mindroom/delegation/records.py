@@ -382,9 +382,8 @@ class DelegationRecordOwner:
                 return
             if event.event_id is not None and _event_id_digest(event.event_id) in state.event_ids:
                 _sync_log(handle)
-                # A replayed status change repairs the views a crash may have left stale.
-                if event.status is not None:
-                    _write_exports(handle, state)
+                # A replay repairs the event export a crash may have left short, and a replayed status change the views.
+                _write_exports(handle, state, refresh=event.status is not None)
                 return
             _ensure_active(state.run)
             sequence = state.run["event_count"] + 1

@@ -179,6 +179,23 @@ async def test_a_failed_state_snapshot_still_exports_the_committed_events_artifa
 
 
 @pytest.mark.asyncio
+async def test_a_replayed_event_repairs_an_event_export_a_crash_left_short(tmp_path: Path) -> None:
+    """An event the log committed before a crash cut its export short reaches the workspace log on its replay."""
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
+    event_path = _record_dir(handle) / "events.jsonl"
+    before = event_path.read_bytes()
+    event = DelegationEvent(kind="tool_call", data={"tool_name": "lookup"}, event_id="call")
+    await owner.append_event(handle, event)
+    event_path.write_bytes(before)
+
+    await owner.append_event(handle, event)
+
+    assert event_path.read_bytes() == (handle.state_dir / "events.jsonl").read_bytes()
+    assert [entry["event_id"] for entry in _read_events(event_path)] == ["delegation_started", "call"]
+
+
+@pytest.mark.asyncio
 async def test_acknowledging_an_event_the_log_already_holds_flushes_the_log(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
