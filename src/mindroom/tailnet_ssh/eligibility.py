@@ -36,10 +36,15 @@ Reason = Literal["backend", "not_enabled", "scope", "shared_workspace", "joined_
 
 @dataclass(frozen=True)
 class Ineligible:
-    """The first condition a link fails; ``detail`` names a joined directory as ``owner/name``."""
+    """The first condition a link fails; ``detail`` names a joined directory as ``owner/name``.
+
+    ``pending`` marks a ``not_authorized`` that only says the person's room membership is not known yet, as after a
+    primary's start or a reload: it may turn out either way, so it suspends a link and never removes it.
+    """
 
     reason: Reason
     detail: str | None = None
+    pending: bool = False
 
 
 def _concrete_users_alone(config: Config, agent_name: str) -> tuple[str, ...] | None:
@@ -95,6 +100,36 @@ def config_error(config: Config, agent_name: str) -> str | None:
     return None
 
 
+def _not_authorized(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    requester_id: str,
+    agent_name: str,
+    worker_key: str,
+    membership_index: AgentReplyMembershipIndex,
+) -> Ineligible | None:
+    """Return ``not_authorized`` unless the key is the person's and they may use the agent, pending while not known."""
+    # why-lazy: authorization loads nio; the worker backends import this module for the launch rule, and the
+    # sandbox runner imports them.
+    from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder  # noqa: PLC0415
+
+    if user_agent_worker_key_requester(worker_key) != requester_id:
+        return Ineligible("not_authorized")
+    try:
+        allowed = is_sender_allowed_for_responder(
+            requester_id,
+            agent_name,
+            None,
+            config,
+            runtime_paths,
+            membership_index,
+            require_resolved_membership=True,
+        )
+    except ReplyMembershipPendingError:
+        return Ineligible("not_authorized", pending=True)
+    return None if allowed else Ineligible("not_authorized")
+
+
 def link_ineligibility(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -104,10 +139,6 @@ def link_ineligibility(
     membership_index: AgentReplyMembershipIndex,
 ) -> Ineligible | None:
     """Return the first condition a link of ``requester_id`` to ``agent_name`` over ``worker_key`` fails, or None."""
-    # why-lazy: authorization loads nio; the worker backends import this module for the launch rule, and the
-    # sandbox runner imports them.
-    from mindroom.authorization import is_sender_allowed_for_responder  # noqa: PLC0415
-
     if not worker_backend_kind(runtime_paths).dedicated:
         return Ineligible("backend")
     agent = config.agents.get(agent_name)
@@ -120,11 +151,9 @@ def link_ineligibility(
         or _key_agent(worker_key, config.agents) != agent_name
     ):
         return Ineligible("scope")
-    if (
-        not is_sender_allowed_for_responder(requester_id, agent_name, None, config, runtime_paths, membership_index)
-        or user_agent_worker_key_requester(worker_key) != requester_id
-    ):
-        return Ineligible("not_authorized")
+    denied = _not_authorized(config, runtime_paths, requester_id, agent_name, worker_key, membership_index)
+    if denied is not None:
+        return denied
     if not policy.is_private and _concrete_users_alone(config, agent_name) != (requester_id,):
         return Ineligible("shared_workspace")
     joined = _joined_directory(config, runtime_paths, agent_name)

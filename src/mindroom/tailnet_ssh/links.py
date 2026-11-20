@@ -65,6 +65,7 @@ _NO_SSH_PORT = (
     "This worker has no SSH port; with Docker, MINDROOM_DOCKER_WORKER_PUBLISH_HOST must not be a wildcard address."
 )
 _NO_SHELL = "This agent has no shell tool."
+_MEMBERSHIP_PENDING = "Whether you may use this agent is not known yet; try again in a few seconds."
 
 
 @dataclass(frozen=True)
@@ -148,7 +149,8 @@ def _desired(
     """Return what the gateway is to do with a link stored ``on``.
 
     It is removed when its agent is gone, its person may no longer use the agent, its worker is no longer the one
-    that person's turns run in, or nobody enrolled it within a day; failing any other condition suspends it.
+    that person's turns run in, or nobody enrolled it within a day; failing any other condition suspends it, as does
+    room membership that is not known yet.
     """
     if link.agent_name not in config.agents:
         return "removing"
@@ -161,7 +163,7 @@ def _desired(
         membership_index,
     )
     if (
-        (ineligible is not None and ineligible.reason == "not_authorized")
+        (ineligible is not None and ineligible.reason == "not_authorized" and not ineligible.pending)
         or resolve_target(config, runtime_paths, link.requester_id, link.agent_name).worker_key != link.worker_key
         or (link.enrolled_at is None and now - link.created_at >= _UNENROLLED_SECONDS)
     ):
@@ -383,6 +385,8 @@ def _admit(
         link.worker_key,
         membership_index,
     )
+    if ineligible is not None and ineligible.pending:
+        raise ConnectRefused(503, _MEMBERSHIP_PENDING)
     if ineligible is not None:
         raise ConnectRefused(409, ineligible.reason)
     target = resolve_target(config, runtime_paths, link.requester_id, link.agent_name)

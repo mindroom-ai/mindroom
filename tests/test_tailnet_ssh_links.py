@@ -39,6 +39,8 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerSshEndpoint
 from mindroom.workers.protocol import ExecuteRequest
+from tests.access_schema_support import membership_index
+from tests.conftest import bind_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -96,6 +98,27 @@ def paths(tmp_path: Path) -> RuntimePaths:
 def config(paths: RuntimePaths) -> Config:
     """Alice's own agent, a private agent everyone has an instance of, and an agent without tailnet SSH."""
     return Config.validate_with_runtime(deepcopy(_DATA), paths)
+
+
+@pytest.fixture
+def room_config(paths: RuntimePaths) -> Config:
+    """Beside the usual agents, a private agent whose people are the members of the lobby room."""
+    data = deepcopy(_DATA)
+    data["agents"]["research"] = {
+        "display_name": "Research",
+        "private": {"per": "user_agent"},
+        "tailnet_ssh": True,
+        "rooms": ["lobby"],
+    }
+    return bind_runtime_paths(Config.validate_with_runtime(data, paths), paths)
+
+
+def _pending_index(config: Config, index: str) -> AgentReplyMembershipIndex:
+    """Room membership not known yet: as at a primary's start, or after a reload invalidated it."""
+    memberships = AgentReplyMembershipIndex()
+    if index == "invalidated":
+        memberships.invalidate(config, reason="config_reload")
+    return memberships
 
 
 def _key(requester: str, agent: str, scope: str = "user_agent") -> str:
@@ -308,6 +331,78 @@ def test_off_links_are_not_listed_and_suspended_is_computed(config: Config, path
     assert [(row["id"], row["desired"]) for row in rows] == [(joined.id, "suspended")]
     assert _stored(paths, joined) == joined
     assert _stored(paths, off) == off
+
+
+@pytest.mark.parametrize("index", ["fresh", "invalidated"])
+def test_pending_room_membership_suspends_and_never_removes(
+    room_config: Config,
+    paths: RuntimePaths,
+    index: str,
+) -> None:
+    """While room membership is not known yet a room-granted link is suspended: only a known denial removes it."""
+    link = _enrolled(agent="research", closed_before=NOW - 5)
+    _store(paths, link)
+    memberships = _pending_index(room_config, index)
+
+    rows = desired_links(room_config, paths, memberships, GatewayStatus(), now=NOW)
+
+    assert [(row["id"], row["desired"], row["closed_before"]) for row in rows] == [(link.id, "suspended", NOW - 5)]
+    assert _stored(paths, link) == link
+
+
+@pytest.mark.asyncio
+async def test_a_known_room_denial_removes_a_room_granted_link(room_config: Config, paths: RuntimePaths) -> None:
+    """Once the lobby's members are known, Alice's link stays while she is one of them and is removed once she is not."""
+    link = _enrolled(agent="research")
+    _store(paths, link)
+
+    member = desired_links(
+        room_config,
+        paths,
+        await membership_index(room_config, {"lobby": {ALICE}}),
+        GatewayStatus(),
+        now=NOW + 1,
+    )
+    left = desired_links(
+        room_config,
+        paths,
+        await membership_index(room_config, {"lobby": {BOB}}),
+        GatewayStatus(),
+        now=NOW + 2,
+    )
+
+    assert [(row["id"], row["desired"]) for row in member] == [(link.id, "on")]
+    assert [(row["id"], row["desired"], row["closed_before"]) for row in left] == [(link.id, "removing", NOW + 2)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("index", ["fresh", "invalidated"])
+async def test_connect_refuses_while_room_membership_is_pending(
+    room_config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    index: str,
+) -> None:
+    """A connect is refused, for a retry, while it is not known whether the person may use the agent."""
+    link = _enrolled(agent="research")
+    _store(paths, link)
+    manager = _wire_connect(monkeypatch, tmp_path, link)
+
+    with pytest.raises(ConnectRefused) as refused:
+        await connect(
+            room_config,
+            paths,
+            _pending_index(room_config, index),
+            GatewayStatus(GatewayReport("login")),
+            link.id,
+            "alice@github",
+            "alice-laptop",
+        )
+
+    assert refused.value.status_code == 503
+    assert "ensure_worker" not in manager.calls
+    assert _stored(paths, link) == link
 
 
 @pytest.mark.parametrize("trigger", ["agent_removed", "not_authorized", "worker_key_changed", "never_enrolled_24h"])

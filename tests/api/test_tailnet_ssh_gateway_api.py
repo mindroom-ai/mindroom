@@ -47,7 +47,7 @@ from mindroom.runtime_env_policy import (
     worker_extra_env,
 )
 from mindroom.tailnet_ssh.links import ConnectRefused, GatewayReport, GatewayStatus, LinkStatus, resolve_target
-from mindroom.tailnet_ssh.store import Link, new_link, update_links
+from mindroom.tailnet_ssh.store import Link, new_link, read_links, update_links
 from mindroom.worker_computer.sessions import ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.models import WorkerMaintenanceResult
@@ -136,11 +136,11 @@ def client(api_app: FastAPI) -> TestClient:
     return TestClient(gateway_app(api_app, "tok"))
 
 
-def _stored_link(api_app: FastAPI) -> Link:
-    """Store Alice's link to her agent, enrolled, for the worker her turns run in."""
+def _stored_link(api_app: FastAPI, agent: str = "mine") -> Link:
+    """Store Alice's link to the agent, enrolled, for the worker her turns run in."""
     config, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
     now = time.time()
-    link = new_link(ALICE, "mine", resolve_target(config, paths, ALICE, "mine").worker_key, "mine", now=now)
+    link = new_link(ALICE, agent, resolve_target(config, paths, ALICE, agent).worker_key, agent, now=now)
     link = link.model_copy(update={"enrolled_login": "alice@github", "enrolled_at": now})
     update_links(paths, lambda book: book.links.append(link))
     return link
@@ -221,6 +221,38 @@ def test_get_links_returns_desired_rows(
             "login_after": link.login_after,
         },
     ]
+
+
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("index", ["fresh", "invalidated"])
+def test_get_links_suspends_a_room_granted_link_while_membership_is_pending(
+    api_app: FastAPI,
+    client: TestClient,
+    index: str,
+) -> None:
+    """At a primary's start, or after a reload, room membership is not known: a room-granted link waits, suspended."""
+    data = deepcopy(_DATA)
+    data["agents"]["research"] = {
+        "display_name": "Research",
+        "private": {"per": "user_agent"},
+        "tailnet_ssh": True,
+        "rooms": ["lobby"],
+    }
+    state = config_lifecycle.require_api_state(api_app)
+    paths = state.snapshot.runtime_paths
+    config = Config.validate_with_runtime(data, paths)
+    state.snapshot = config_lifecycle.ApiSnapshot(2, paths, runtime_config=config)
+    if index == "invalidated":
+        config_lifecycle.app_state(api_app).runtime.agent_reply_memberships.invalidate(config, reason="config_reload")
+    link = _stored_link(api_app, "research")
+
+    response = client.get("/links", headers=AUTH)
+
+    assert response.status_code == 200
+    assert [(row["id"], row["desired"], row["closed_before"]) for row in response.json()] == [
+        (link.id, "suspended", link.closed_before),
+    ]
+    assert read_links(paths).by_id(link.id) == link
 
 
 def test_status_is_stored_and_answers_204(
