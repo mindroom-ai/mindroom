@@ -126,6 +126,8 @@ class ScheduledTaskRuntime:
     async def restore_room(self, bot: AgentBot, room_id: str) -> int:
         """Start runners for the pending tasks this bot owns in a room it joined; return how many started.
 
+        A task the router owned gets its runner from the first bot that restores
+        the room, under the heir that bot's one read of the room elects.
         A task whose owner is no longer configured is failed by any restoring bot
         that may write the room's schedule state.
         """
@@ -159,7 +161,8 @@ class ScheduledTaskRuntime:
         for task in tasks:
             # Every task read from a room has an owner; one whose stored owner is no Matrix ID fails as ownerless.
             owner_id: str | None = task.owner_id or ""
-            if owner_id == router_id:
+            legacy = owner_id == router_id
+            if legacy:
                 # LEGACY_COMPAT: Scheduled tasks the router owned.
                 # Legacy format: Scheduled-task state whose "owner" is the router's Matrix ID, or that has no owner
                 #   and was last written by the router; the router ran every task in a room it could serve.
@@ -167,9 +170,12 @@ class ScheduledTaskRuntime:
                 #   when written; replacement: unreleased, the first release with this change stores the bot that
                 #   saves a task as its owner.
                 # Handling: The task runs under the first agent or team its message mentions that is joined and may
-                #   post its trigger, else the one with the lowest Matrix ID, read from the room's full state. The new
-                #   owner is never written back; a room with no such agent keeps the task pending and logs a warning.
-                # Coverage: tests/test_scheduled_task_runtime.py::test_restore_reowns_router_task_and_fires_through_new_owner.
+                #   post its trigger, else the one with the lowest Matrix ID, read from the room's full state. The first
+                #   bot that restores the room starts that heir's runner, so two reads that disagree start one runner.
+                #   The new owner is never written back; a room with no such agent keeps the task pending and logs a
+                #   warning.
+                # Coverage: tests/test_scheduled_task_runtime.py::test_restore_reowns_router_task_and_fires_through_new_owner,
+                #   tests/test_scheduled_task_runtime.py::test_restores_that_straddle_a_power_change_start_one_runner_for_a_router_task.
                 mentioned = parse_mentions_in_text(task.workflow.message, config, self.runtime_paths)[1]
                 owner_id = legacy_router_task_owner(
                     room,
@@ -192,16 +198,12 @@ class ScheduledTaskRuntime:
                     continue
                 await self._fail_owner_removed_task(bot, room_id, task.task_id, owner_id)
                 continue
-            if owner == bot.agent_name and await self._restore_task(bot, client, task):
+            if (legacy or owner == bot.agent_name) and await self._restore_task(owner, client, task):
                 restored += 1
         return restored
 
-    async def _restore_task(
-        self,
-        bot: AgentBot,
-        client: nio.AsyncClient,
-        task: ScheduledTaskRecord,
-    ) -> bool:
+    async def _restore_task(self, owner: str, client: nio.AsyncClient, task: ScheduledTaskRecord) -> bool:
+        """Start one pending task's runner under its owner, through the restoring bot's client."""
         workflow = task.workflow
         if workflow.schedule_type == "cron" and not workflow.cron_schedule:
             logger.warning("skipping_recurring_task_without_cron_schedule", task_id=task.task_id)
@@ -223,11 +225,11 @@ class ScheduledTaskRuntime:
                     logger.exception("Failed to mark ancient task as failed", task_id=task.task_id)
                     return False
                 # An edit or cancellation landed after the room was read: decide on what it left.
-                return current is not None and await self._restore_task(bot, client, current)
+                return current is not None and await self._restore_task(owner, client, current)
             if missed_by > 0:
                 # Its runner fires once the owner finished its first sync.
                 logger.warning("Restored missed one-time task", task_id=task.task_id, missed_by_seconds=missed_by)
-        return self._start_runner(bot.agent_name, task.task_id, workflow)
+        return self._start_runner(owner, task.task_id, workflow)
 
     async def fail_removed(self, entity_names: set[str]) -> None:
         """Fail the running tasks of entities removed from the config, while their bots still have their clients.

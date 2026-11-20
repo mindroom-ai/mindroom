@@ -916,7 +916,8 @@ async def test_restore_reowns_router_task_and_fires_through_new_owner(tmp_path: 
 
     with patch("mindroom.scheduling.executor.execute_scheduled_workflow", new=_delivered()) as execute:
         restored = [await runtime.restore_room(bot, ROOM_ID) for bot in (general, helper)]
-        assert restored == [0, 1]
+        # The first bot to restore the room starts the heir's runner; the heir's own restore finds it running.
+        assert restored == [1, 0]
         await asyncio.wait_for(runtime._runners[TASK_ID][1], timeout=2)
 
     execute.assert_awaited_once()
@@ -924,6 +925,30 @@ async def test_restore_reowns_router_task_and_fires_through_new_owner(tmp_path: 
     assert room.task()["content"]["status"] == "completed"
     # The new owner is never written back: a rewrite keeps the router as the task's stored owner.
     assert room.task()["content"]["owner"] == ids["router"]
+
+
+@pytest.mark.asyncio
+async def test_restores_that_straddle_a_power_change_start_one_runner_for_a_router_task(tmp_path: Path) -> None:
+    """Two bots whose restore reads elect each other still start one runner, under the first read's heir."""
+    config, runtime_paths, ids = _config_and_ids(tmp_path, "general", "helper")
+    assert ids["general"] < ids["helper"]
+    room = _SharedRoom({ids["general"]: 0, ids["helper"]: 100})
+    power = {"state_default": 50, "events_default": 50}
+    # Only the helper may post when the first bot reads the room.
+    room._put("m.room.power_levels", "", {"users": dict(room.members), **power}, ids["helper"])
+    content = {"task_id": TASK_ID, "workflow": _workflow(due=False).model_dump_json(), "status": "pending"}
+    room._put("com.mindroom.scheduled.task", TASK_ID, {**content, "owner": ids["router"]}, ids["router"])
+    general = scheduling_bot(room.client(ids["general"]), agent_name="general")
+    helper = scheduling_bot(room.client(ids["helper"]), agent_name="helper")
+    runtime = _runtime(runtime_paths, config, {"general": general, "helper": helper})
+
+    assert await runtime.restore_room(general, ROOM_ID) == 1
+    # The lower Matrix ID may post by the time the helper reads the room, so that read elects it.
+    room._put("m.room.power_levels", "", {"users": {ids["general"]: 100, ids["helper"]: 100}, **power}, ids["helper"])
+    assert await runtime.restore_room(helper, ROOM_ID) == 0
+
+    assert [(task_id, runner.owner) for task_id, (runner, _task) in runtime._runners.items()] == [(TASK_ID, "helper")]
+    await runtime.stop()
 
 
 @pytest.mark.asyncio
