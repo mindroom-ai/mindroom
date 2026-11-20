@@ -96,6 +96,7 @@ def _child(
     *,
     delegation_id: str = "d1",
     task: str = "research",
+    title: str = "",
     persona: SubagentPersona | None = None,
 ) -> DelegationChild:
     identity = ToolExecutionIdentity(
@@ -122,12 +123,13 @@ def _child(
         subagent_id="s1",
         agent_mode="standard",
         persona=persona,
+        title=title,
     )
 
 
-def _activity(*, task: str = "research", persona: SubagentPersona | None = None) -> _SubagentActivity:
+def _activity(*, task: str = "research", title: str = "", persona: SubagentPersona | None = None) -> _SubagentActivity:
     return _SubagentActivity.start(
-        _child(task=task, persona=persona),
+        _child(task=task, title=title, persona=persona),
         parent_delegation_id="p0",
         root_caller_agent_name="lead",
         now=1.0,
@@ -408,6 +410,36 @@ def test_the_task_is_redacted_once_from_a_capped_head(monkeypatch: pytest.Monkey
     assert a.snapshot().task == "t" * 1_000
 
 
+def test_a_restored_child_s_title_is_redacted_whole_then_cut_to_one_line_of_80() -> None:
+    """A title from stored metadata is sanitized as it is published: a credential the cut would split is masked."""
+    lead = "Check the deploy job on the staging host before "
+    token = "mrb1." + "Ab3_" * 40 + "." + "Z9y-" * 10 + "abc"
+    # The token starts before character 80 and ends after it.
+    assert len(lead) + 1 < 80 < len(lead) + 1 + len(token)
+
+    title = _activity(title=f"{lead}\n{token} please").snapshot().title
+
+    assert "mrb1" not in title
+    assert len(title) <= 80
+    assert title.startswith(lead)
+    long = _activity(title="Measure cold start " * 10).snapshot().title
+    assert len(long) <= 80
+    assert long.startswith("Measure cold start Measure")
+
+
+def test_a_title_s_url_password_after_long_whitespace_is_redacted() -> None:
+    """Whitespace collapses before redaction, so a URL password far into the raw title is still masked."""
+    title = _activity(title=" " * 3_990 + "Fetch https://admin:Q7v-placeholder-pw@example.org/report").snapshot().title
+
+    assert "placeholder" not in title
+    assert title.startswith("Fetch https://")
+
+
+def test_a_restored_title_that_is_not_text_is_no_title() -> None:
+    """A stored child whose title is not text publishes none, so its row shows the task."""
+    assert _activity(title=3).snapshot().title == ""  # type: ignore[arg-type]
+
+
 def test_terminal_status_sets_ended_at_and_running_clears_it() -> None:
     """Terminal statuses end the run; resuming clears the end."""
     a = _activity()
@@ -640,7 +672,18 @@ def _delegating_turn(
     entity_ids(config, paths)
     identity = _identity()
     parent = ScriptedModel(
-        [calls(tool_call("run_subagent", "delegate", agent_name="child", task="Add one and two")), answer("Done")],
+        [
+            calls(
+                tool_call(
+                    "run_subagent",
+                    "delegate",
+                    agent_name="child",
+                    task="Add one and two",
+                    title=" Add\n numbers ",
+                ),
+            ),
+            answer("Done"),
+        ],
     )
     ScriptedAgents(models, by_session={identity.session_id: parent}).install(monkeypatch)
     runtime = _delegate_runtime_context(config, paths, execution_identity=identity)
@@ -684,6 +727,7 @@ async def test_a_delegated_child_reports_running_text_tools_then_completed(
     assert (last.items[0].tool.tool_name, last.items[0].state) == ("add", "done")
     assert _text(last) == "Three"
     assert (last.caller_agent_name, last.agent_name) == ("leader", "child")
+    assert (last.task, last.title) == ("Add one and two", "Add numbers")
     assert last.parent_delegation_id is None
     assert not _OPEN
 

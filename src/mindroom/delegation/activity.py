@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.background_tasks import create_background_task
-from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, child_execution_identity
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, child_execution_identity, display_title
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.events import ToolTraceEntry, format_tool_completed_event, format_tool_started_event
@@ -90,6 +90,8 @@ class SubagentSnapshot:
     usage: Mapping[str, int | float] | None = None
     # Set on the failed end a turn gets when a shutdown stops its attempt, which its job may continue with a later turn.
     interrupted_by_restart: bool = False
+    # What the call that started the sub-agent named it, on one line of at most 80 characters, redacted; empty for none.
+    title: str = ""
 
 
 type SubagentSink = Callable[[SubagentSnapshot], None]
@@ -160,6 +162,7 @@ class _SubagentActivity:
     task: str
     thread_id: str | None
     started_at: float
+    title: str = ""
     status: _SubagentStatus = "running"
     ended_at: float | None = None
     result: str | None = None
@@ -199,6 +202,8 @@ class _SubagentActivity:
             model_name=child.model_name,
             source="workflow" if is_workflow else "delegate",
             task=_clip(child.task, _MAX_TASK_CHARACTERS),
+            # The child may come from stored metadata a worker could write, so its title is sanitized here.
+            title=display_title(child.title),
             thread_id=identity.resolved_thread_id or identity.thread_id,
             started_at=now,
         )
@@ -295,6 +300,7 @@ class _SubagentActivity:
             model_name=self.model_name,
             source=self.source,
             task=self.task,
+            title=self.title,
             thread_id=self.thread_id,
             status=self.status,
             started_at=self.started_at,

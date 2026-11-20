@@ -519,6 +519,15 @@ def _reasoning_field(fields: Mapping[str, Any]) -> object:
     return fields.get("reasoning") if reasoning is None else reasoning
 
 
+def _thinking_text(thinking: object) -> str:
+    """Return the text of a typed ``thinking`` part: a string, or a list of ``text`` parts."""
+    if isinstance(thinking, str):
+        return thinking
+    if not isinstance(thinking, list):
+        return ""
+    return "".join(item["text"] for item in thinking if isinstance(item, Mapping) and isinstance(item.get("text"), str))
+
+
 @dataclass(slots=True)
 class ChatStream:
     """Fold streamed Chat Completions chunks into deltas and one finished turn.
@@ -554,14 +563,28 @@ class ChatStream:
                 events.extend(self._add_reasoning(_extra(delta)))
         return events
 
-    def _add_content(self, chunk: ChatCompletionChunk, content: str | None) -> list[StreamEvent]:
+    def _add_content(self, chunk: ChatCompletionChunk, content: str | list[Any] | None) -> list[StreamEvent]:
         if content is None:
             return []
         self.parts.provider_data.update(_reply_metadata(chunk))
+        if isinstance(content, list):
+            # Mistral's GLM models send content as typed parts: ``text`` and ``thinking`` (whose text is a part list).
+            return [event for part in content for event in self._add_content_part(part)]
         if content:
             # OpenRouter's reasoning chunks carry an empty content, which is no output.
             self._output_at = time.monotonic()
         return self._add_text(self._think.add(content))
+
+    def _add_content_part(self, part: object) -> list[StreamEvent]:
+        """Fold one typed content part: a ``text`` part is reply text, a ``thinking`` part is reasoning."""
+        if not isinstance(part, Mapping):
+            return []
+        if part.get("type") == "text" and isinstance(text := part.get("text"), str) and text:
+            self._output_at = time.monotonic()
+            return self._add_text(self._think.add(text))
+        if part.get("type") == "thinking" and (reasoning := _thinking_text(part.get("thinking"))):
+            return self._add_reasoning({"reasoning": reasoning})
+        return []
 
     def _add_text(self, deltas: list[TextDelta | ReasoningDelta]) -> list[StreamEvent]:
         """Record the reply text and inline reasoning the think-tag splitter released."""

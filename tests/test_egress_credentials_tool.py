@@ -25,7 +25,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import egress_credentials as egress_credentials_module
 from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
 from mindroom.egress_broker.secrets import save_secret
-from mindroom.egress_broker.user_services import save_user_service
+from mindroom.egress_broker.user_services import load_user_services, save_user_service
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.credential_store import _oauth_credential_database_path
@@ -1107,6 +1107,21 @@ async def test_a_key_card_shows_a_link_and_a_field_hint(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_key_card_asks_for_the_overleaf_git_token(tmp_path: Path) -> None:
+    """The Overleaf preset takes a key, so the card names Overleaf and the Git bridge host the token goes to."""
+    tool, context = _asking(tmp_path, {"overleaf": {"preset": "overleaf"}})
+
+    task = _start(tool, context, "overleaf", url="https://www.overleaf.com/user/settings")
+    card = await _posted_card(context, task)
+    secret_request_registry().resolve(_request_id(card), "declined")
+    await task
+
+    content = card[SECRET_REQUEST_CONTENT_KEY]
+    assert (content["service"], content["display_name"]) == ("overleaf", "Overleaf")
+    assert content["hosts"] == ["git.overleaf.com"]
+
+
+@pytest.mark.asyncio
 async def test_a_key_card_refuses_a_link_no_card_can_show(tmp_path: Path) -> None:
     """A link that is no `http` or `https` page posts no card and tells the agent why."""
     tool, context = _asking(tmp_path)
@@ -1332,6 +1347,138 @@ async def test_refuses_without_posting(
     assert message in result["message"]
     assert result["link"] is None
     context.client.room_send.assert_not_awaited()
+
+
+# A service the agent proposes, as the card shows it.
+_ACME: dict[str, object] = {
+    "display_name": "Acme",
+    "rules": [
+        {"host": "api.acme.test", "path_prefix": "/v1/", "auth": {"type": "bearer"}},
+        {"host": "git.acme.test", "port": 8443, "auth": {"type": "header", "name": "X-Key"}},
+    ],
+    "placeholder_env": {"ACME_TOKEN": "mindroom-brokered"},
+}
+_ACME_SHOWN = {
+    "name": "acme",
+    "display_name": "Acme",
+    "rules": [
+        {"host": "api.acme.test", "path_prefix": "/v1/", "auth": {"type": "bearer"}},
+        {"host": "git.acme.test", "path_prefix": "/", "port": 8443, "auth": {"type": "header", "name": "X-Key"}},
+    ],
+    "placeholder_env": {"ACME_TOKEN": "mindroom-brokered"},
+}
+
+
+def _propose(
+    tool: EgressCredentialsTools,
+    context: ToolRuntimeContext,
+    new_service: dict[str, object],
+    service: str = "acme",
+) -> asyncio.Task[str]:
+    with tool_runtime_context(context):
+        return asyncio.create_task(tool.request_secret(service, _REASON, new_service=new_service))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_scope", ["user_agent", "shared"])
+async def test_a_card_proposes_a_new_service_that_only_saving_creates(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+) -> None:
+    """The card shows the proposed service's rules and env; nothing is stored until the user saves."""
+    tool, context = _asking(tmp_path, worker_scope=worker_scope)
+    if worker_scope == "shared":
+        # On the shared agent its credential manager Bob answers for its keys.
+        context = replace(context, requester_id=_BOB)
+
+    task = _propose(tool, context, _ACME)
+    card = await _posted_card(context, task)
+    pending = secret_request_registry().claim(_request_id(card), room_id=_ROOM, now=time.time())
+    assert pending is not None
+    secret_request_registry().resolve(pending.request_id, "declined")
+    await task
+
+    content = card[SECRET_REQUEST_CONTENT_KEY]
+    assert (content["service"], content["display_name"]) == ("acme", "Acme")
+    assert content["hosts"] == ["api.acme.test", "git.acme.test"]
+    assert content["new_service"] == _ACME_SHOWN
+    assert "replaces" not in content
+    assert pending.target.new_service == EgressService.model_validate({**_ACME, "oauth_provider": None})
+    manager = get_runtime_credentials_manager(context.runtime_paths)
+    assert load_user_services(manager, pending.target.worker_target) == {}
+    assert _final_card(context, "declined")[SECRET_REQUEST_CONTENT_KEY]["new_service"] == _ACME_SHOWN
+
+
+@pytest.mark.asyncio
+async def test_a_proposed_preset_service_takes_a_key_not_an_account(tmp_path: Path) -> None:
+    """A preset's account login is dropped: a service proposed in chat only ever uses the key the user saves."""
+    tool, context = _asking(tmp_path)
+
+    task = _propose(tool, context, {"preset": "github", "display_name": "GitHub (acme)"}, "github-acme")
+    card = await _posted_card(context, task)
+    pending = secret_request_registry().claim(_request_id(card), room_id=_ROOM, now=time.time())
+    assert pending is not None
+    secret_request_registry().resolve(pending.request_id, "declined")
+    await task
+
+    assert pending.target.new_service is not None
+    assert pending.target.new_service.oauth_provider is None
+    assert pending.target.new_service.authored_model_dump() == {
+        "preset": "github",
+        "display_name": "GitHub (acme)",
+        "oauth_provider": None,
+    }
+    assert card[SECRET_REQUEST_CONTENT_KEY]["new_service"]["display_name"] == "GitHub (acme)"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "new_service", "message"),
+    [
+        pytest.param("github", _ACME, "already used by a service your administrator configured", id="config-name"),
+        pytest.param("mine", _ACME, "already used by a service of your own", id="own-name"),
+        pytest.param("Not A Name", _ACME, "must match", id="bad-name"),
+        pytest.param("acme", {"display_name": "Acme"}, "at least one rule", id="no-rules"),
+        pytest.param("acme", {**_ACME, "rules": [{"host": "x://y"}]}, "host must not contain scheme", id="bad-rule"),
+        pytest.param("acme", {**_ACME, "agents": ["code"]}, "cannot set agents", id="operator-field"),
+        pytest.param("acme", {**_ACME, "oauth_provider": "github"}, "cannot set oauth_provider", id="account"),
+        pytest.param("acme", {**_ACME, "restrict_only": True}, "cannot set restrict_only", id="restrict-only"),
+        pytest.param(
+            "acme",
+            {**_ACME, "placeholder_env": {"LD_PRELOAD": "x"}},
+            "LD_PRELOAD is not allowed as a placeholder",
+            id="placeholder",
+        ),
+        pytest.param(
+            "acme",
+            {**_ACME, "rules": [{"host": f"h{index}.acme.test", "auth": {"type": "bearer"}} for index in range(51)]},
+            "at most 50 rules",
+            id="too-many-rules",
+        ),
+        pytest.param("acme", _ACME, "these hosts cannot be used: api.acme.test, git.acme.test", id="denied-hosts"),
+    ],
+)
+async def test_refuses_a_proposed_service_without_posting(
+    tmp_path: Path,
+    name: str,
+    new_service: dict[str, object],
+    message: str,
+) -> None:
+    """A proposal the Agent Keys page would refuse, or one that takes a name in use, posts no card and says why."""
+    tool, context = _asking(tmp_path)
+    manager = get_runtime_credentials_manager(context.runtime_paths)
+    _save_mine(manager, "mine", _SERVICES["openai"], context.config.egress_broker.services)
+    if message.startswith("these hosts"):
+        # The operator allows only hosts its own services cover.
+        broker = context.config.egress_broker.model_copy(update={"unmatched_hosts": "deny"})
+        context = replace(context, config=context.config.model_copy(update={"egress_broker": broker}))
+
+    result = json.loads(await _propose(tool, context, new_service, name))
+
+    assert result["status"] == "error"
+    assert message in result["message"]
+    context.client.room_send.assert_not_awaited()
+    assert set(load_user_services(manager, worker_target())) == {"mine"}
 
 
 @pytest.mark.asyncio

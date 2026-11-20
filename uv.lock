@@ -4259,7 +4259,7 @@ requires-dist = [
     { name = "cron-descriptor", specifier = ">=1.4.5" },
     { name = "croniter", specifier = ">=6" },
     { name = "cryptography", specifier = ">=47" },
-    { name = "daytona", marker = "extra == 'daytona'" },
+    { name = "daytona", marker = "extra == 'daytona'", specifier = "<1" },
     { name = "ddgs", marker = "extra == 'duckduckgo'" },
     { name = "ddgs", marker = "extra == 'googlesearch'" },
     { name = "docker", marker = "extra == 'docker'" },

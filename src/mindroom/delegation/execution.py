@@ -1030,6 +1030,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             previous=target.previous_child,
             parent_tool_call_id=tool.tool_call_id,
             parent_requirement_id=pause_id,
+            title=target.title,
             persona=target.persona,
             dedicated_worker=target.dedicated_worker,
             worker_resource_profile=target.resource_profile,

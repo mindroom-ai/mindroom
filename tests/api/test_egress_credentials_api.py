@@ -3231,6 +3231,50 @@ def test_user_services_are_loaded_off_the_event_loop(
     assert not any(on_loop)
 
 
+def test_adding_a_service_never_replaces_one_of_the_same_name(egress_portal: dict[str, Any]) -> None:
+    """An Add (`If-None-Match: *`) is refused for a name the scope has, which keeps its rules and key; an edit replaces."""
+    portal = egress_portal
+    client, headers = portal["client"], portal["headers"]["alice"]
+    assert _put_service(portal, "alice", "personal", "notes").status_code == 204
+    assert _put_key(portal, "alice", "personal", "notes", "notes-key").status_code == 204
+    other = {"rules": [{"host": "api.other.example.com", "auth": {"type": "bearer"}}]}
+
+    added = client.put(_service_url("personal", "notes"), json=other, headers={**headers, "If-None-Match": "*"})
+
+    assert added.status_code == 412, added.text
+    assert _get_service(portal, "alice", "personal", "notes").json() == _NOTES
+    assert _egress_row(portal, "alice", "personal", "notes")["configured"] is True
+    assert _put_service(portal, "alice", "personal", "notes", other).status_code == 204
+    assert (
+        client.put(_service_url("personal", "new"), json=other, headers={**headers, "If-None-Match": "*"}).status_code
+        == 204
+    )
+
+
+@pytest.mark.parametrize("entry", ["inactive", "listed-late"])
+def test_an_add_of_any_stored_name_is_a_412_before_anything_changes(
+    egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    entry: str,
+) -> None:
+    """An inactive entry, or one stored after the route read the listing, refuses an Add as well, and keeps its key."""
+    portal = egress_portal
+    if entry == "inactive":
+        _store_raw_entries(portal, {"notes": {"rules": []}})
+    else:
+        assert _put_service(portal, "alice", "personal", "notes").status_code == 204
+        monkeypatch.setattr(egress_credentials, "load_user_services", lambda *_args: {})
+    secrets.save_secret(get_runtime_credentials_manager(portal["paths"]), _scope_target(portal), "notes", "kept")
+    headers = {**portal["headers"]["alice"], "If-None-Match": "*"}
+
+    added = portal["client"].put(_service_url("personal", "notes"), json=_NOTES, headers=headers)
+
+    assert (added.status_code, added.json()["detail"]) == (412, "You already have a service with this name")
+    assert (
+        secrets.load_secret(get_runtime_credentials_manager(portal["paths"]), _scope_target(portal), "notes") == "kept"
+    )
+
+
 # --- Inactive entries ---
 
 

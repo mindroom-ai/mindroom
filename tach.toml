@@ -5863,6 +5863,8 @@ depends_on = ["mindroom.credentials.policy", "mindroom.egress_broker"]
 path = "mindroom.custom_tools.egress_credentials"
 depends_on = [
     "mindroom.approval.tool_approval",
+    "mindroom.config.egress_broker",
+    "mindroom.config.main",
     "mindroom.egress_broker",
     "mindroom.runtime_resolution",
     "mindroom.secret_request_cards",
@@ -7085,6 +7087,7 @@ expose = [
     "names_canonical_parent",
     "resolve_room_reference",
     "room_admin_power_user",
+    "room_encryption_enable_failure",
     "room_encryption_enabled",
 ]
 from = ["mindroom.matrix.client_room_admin"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -56,6 +57,7 @@ from tests.approval_card_helpers import resolve_card_event
 from tests.approval_continuation_helpers import claim_continuation
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, request_envelope
 from tests.journal_helpers import admit_dispatch_event
+from tests.journal_membership_helpers import admit_room_membership, room_membership_admission
 from tests.reply_span_helpers import paused_for_approval
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
 from tests.test_event_journal_store import corrupt
@@ -4115,6 +4117,487 @@ class _ApprovalWakeReplayView(_FlakyReplayView):
             self.tail_read_entered.set()
             await self.release_tail_read.wait()
         return page
+
+
+@dataclass
+class _CountingReplayView(_FlakyReplayView):
+    """Count the rows every pending read looks at, and hide chosen events from them."""
+
+    rows_read: int = 0
+    hidden: set[str] = field(default_factory=set)
+    # Set to hold a discovery read after it has taken its snapshot.
+    hold_scan: asyncio.Event | None = None
+    scan_read: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def pending(
+        self,
+        *,
+        limit: int = 256,
+        room_id: str | None = None,
+        after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
+    ) -> PendingPage:
+        page = await super().pending(
+            limit=limit,
+            room_id=room_id,
+            after_receipt_order=after_receipt_order,
+            runtime_generation=runtime_generation,
+        )
+        self.rows_read += len(page) + page.unreadable_rows
+        if room_id is None and self.hold_scan is not None:
+            self.scan_read.set()
+            await self.hold_scan.wait()
+        return PendingPage(
+            tuple(event for event in page if event.event_id not in self.hidden),
+            resume_after=page.resume_after,
+            reached_end=page.reached_end,
+            unreadable_rows=page.unreadable_rows,
+        )
+
+
+class _HeldSettlement:
+    """One principal's dispatch view whose ignored-source settlement waits to be let through."""
+
+    def __init__(self, inner: PrincipalStore) -> None:
+        self._inner = inner
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.error: Exception | None = None
+
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401 - a pass-through proxy
+        return getattr(self._inner, name)
+
+    async def settle_many(self, event_ids: tuple[str, ...]) -> tuple[str, ...]:
+        if self.error is not None:
+            raise self.error
+        self.entered.set()
+        await self.release.wait()
+        return await self._inner.settle_many(event_ids)
+
+
+class TestInFlightTurnsAreNotReread:
+    """A wake costs what is new, however many turns the bot already has running."""
+
+    @staticmethod
+    async def _admit(store: PrincipalStore, event: nio.Event, room_id: str = ROOM) -> None:
+        # Unprojected: these rows are only ever paged, and there are many of them.
+        await store.admit(_inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE))
+
+    async def test_a_wake_reads_new_work_not_the_turns_in_flight_in_other_rooms(self, alice: PrincipalStore) -> None:
+        """Every running turn is a pending row its owner will hand back by itself.
+
+        Discovery restarted at the front of the backlog on every wake, so each
+        new event paged through every in-flight turn of every room only to skip
+        it: with N turns running and N more events arriving, N squared rows,
+        each one joined and decoded. A lane still reads its own room from the
+        front, which is what keeps that room's callbacks in receipt order.
+        """
+        in_flight = _BATCH_SIZE + 2
+        wakes = 5
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return not event.event_id.startswith("$busy")
+
+        for index in range(in_flight):
+            await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index), f"!busy{index % 8}:example.org")
+        store = _CountingReplayView(alice)
+        worker = PendingEventWorker(store=store, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            assert len(worker._deferred) == in_flight
+            store.rows_read = 0
+
+            for index in range(wakes):
+                await self._admit(alice, text_event(f"$new{index}", ts=9_000 + index))
+                await _dispatch_worker_pass(worker)
+
+            assert handled[in_flight:] == [f"$new{index}" for index in range(wakes)]
+            assert len(await alice.pending(limit=in_flight + wakes)) == in_flight
+            # Discovery and the room's lane each read the new row; nothing reads the other rooms' turns.
+            assert store.rows_read <= 4 * wakes
+        finally:
+            await worker.stop()
+
+    async def test_work_that_turns_up_behind_in_flight_turns_is_found_by_the_sweep(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """Reading only the tail must not turn into never reading the rest.
+
+        A pending source can become runnable with no admission and no owner to
+        announce it: another agent's write frees a source an approval held. It
+        sits before the scan's tail and before its room's cursor, so the sweep
+        that looks for lost owners also has to send a scan back to the front,
+        and that scan has to rewind the room.
+        """
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return event.event_id != "$busy"
+
+        for event_id in ("$freed", "$busy"):
+            await self._admit(alice, text_event(event_id))
+        store = _CountingReplayView(alice, hidden={"$freed"})
+        worker = PendingEventWorker(store=store, handle=handle, deferral_scan_seconds=0.01)
+        worker.start()
+        try:
+            await _eventually(lambda: handled == ["$busy"] and not worker._lanes)
+            store.hidden.clear()
+
+            # The room already admitted a later receipt, so the revisit is paced once.
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: handled == ["$busy", "$freed"])
+        finally:
+            await worker.stop()
+
+    async def test_a_source_being_settled_as_ignored_is_not_read_as_handed_back(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The worker forgets an ignored source once its settlement is durable, not before.
+
+        Released first, the source is pending and owned by nobody for as long
+        as the write takes. A lane that reads the room in that window takes it
+        for a source handed back: it paces the whole room behind a cooldown, or
+        defers the source again to an owner about to let go of it, which the
+        liveness sweep then reports as lost. Every agent that is not addressed
+        ignores every message, so under load each of them did this constantly.
+        """
+        owned = True
+        store = _HeldSettlement(alice)
+
+        async def on_message(_room: nio.MatrixRoom, _event: nio.Event) -> TurnDispatchOutcome:
+            return TurnDispatchOutcome.DEFERRED
+
+        dispatcher = TestDeferralOwnership._dispatcher(cast("PrincipalStore", store))
+        dispatcher.callbacks = replace(
+            dispatcher.callbacks,
+            on_message=cast("Any", on_message),
+            source_has_live_owner=lambda _event_id: owned,
+        )
+        dispatcher.release_turn_replay()
+        worker = dispatcher._worker
+        await self._admit(alice, text_event("$ignored"))
+        try:
+            await _dispatch_worker_pass(worker)
+            assert list(worker._deferred) == ["$ignored"]
+
+            settling = asyncio.create_task(dispatcher.settle_intentionally_ignored_turn_sources(("$ignored",)))
+            await asyncio.wait_for(store.entered.wait(), timeout=5)
+            with capture_logs() as logs:
+                await _dispatch_worker_pass(worker)
+                await _dispatch_worker_pass(worker)
+                assert not worker._room_retries
+
+                store.release.set()
+                await asyncio.wait_for(settling, timeout=5)
+                owned = False
+                assert not worker._deferred
+                await _dispatch_worker_pass(worker)
+            assert [log["event"] for log in logs if log["log_level"] == "warning"] == []
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            store.release.set()
+            await dispatcher.stop()
+
+    async def test_a_sweeps_whole_scan_survives_the_scan_it_collides_with(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The sweep asks for a whole scan while a tail scan is still reading.
+
+        Asked for by resetting the scan's position, the request was gone as soon
+        as that scan finished and wrote its position back, so the wake the sweep
+        left read only the tail again. Each collision put the source off by a
+        whole sweep interval, and a busy bot's scans collide with every sweep.
+        """
+        handled: list[str] = []
+        sweeps: list[asyncio.Event] = []
+        real_sleep = asyncio.sleep
+
+        async def sleep(delay: float) -> None:
+            task = asyncio.current_task()
+            if delay and task is not None and task.get_name() == "pending_event_deferral_scan":
+                sweeps.append(gate := asyncio.Event())
+                await gate.wait()
+            else:
+                await real_sleep(delay)
+
+        monkeypatch.setattr(asyncio, "sleep", sleep)
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return event.event_id != "$busy"
+
+        for event_id in ("$busy", "$freed"):
+            await self._admit(alice, text_event(event_id))
+        store = _CountingReplayView(alice, hidden={"$freed"})
+        worker = PendingEventWorker(store=store, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            assert handled == ["$busy"]
+            await _eventually(lambda: len(sweeps) == 1)
+
+            # The source becomes runnable, and a tail scan has already taken its snapshot.
+            store.hidden.clear()
+            store.hold_scan = asyncio.Event()
+            scan = asyncio.create_task(worker._dispatch_ready_rooms())
+            await asyncio.wait_for(store.scan_read.wait(), timeout=5)
+            sweeps[0].set()
+            await _eventually(lambda: len(sweeps) == 2)
+            store.hold_scan.set()
+            await asyncio.wait_for(scan, timeout=5)
+            assert handled == ["$busy"]
+
+            store.hold_scan = None
+            await _dispatch_worker_pass(worker)
+            assert handled == ["$busy", "$freed"]
+        finally:
+            await worker.stop()
+
+    async def test_no_admission_commits_behind_a_receipt_already_read(self, alice: PrincipalStore) -> None:
+        """Reading only what was admitted after the last scan assumes receipt order is commit order.
+
+        A database hands out receipts when a row is inserted, not when it
+        commits, so two writers could commit 11 before 10. The journal has one:
+        a runtime holds its database exclusively, and its single writer task
+        takes a batch's receipts and commits it before the next batch takes any.
+        A reader racing many admissions must never see a receipt appear below
+        one it has already seen.
+        """
+        admissions = 150
+        seen: set[int] = set()
+        late: list[int] = []
+
+        async def read() -> None:
+            receipts = {event.receipt_order for event in await alice.pending(limit=admissions)}
+            late.extend(receipt for receipt in receipts - seen if receipt < max(seen, default=0))
+            seen.update(receipts)
+
+        async def watch() -> None:
+            while len(seen) < admissions:
+                await read()
+
+        watcher = asyncio.create_task(watch())
+        await asyncio.gather(
+            *(self._admit(alice, text_event(f"$e{index:03d}", ts=1_000 + index)) for index in range(admissions)),
+        )
+        await asyncio.wait_for(watcher, timeout=10)
+
+        assert late == []
+
+    async def test_a_failed_ignore_settlement_hands_its_source_back_as_a_retry(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A settlement that rolled back leaves the source pending with no owner.
+
+        Forgetting it the way a settled source is forgotten queued the room
+        without rewinding it. The room's lane was already past the source and,
+        with any other turn in flight, discovery read only the tail, so nothing
+        looked at the source again until the sweep.
+        """
+        owned = {"$ignored", "$busy"}
+        calls: list[str] = []
+        store = _HeldSettlement(alice)
+        store.error = RuntimeError("the journal is unwritable")
+
+        async def on_message(_room: nio.MatrixRoom, event: nio.Event) -> TurnDispatchOutcome:
+            calls.append(event.event_id)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        dispatcher = TestDeferralOwnership._dispatcher(cast("PrincipalStore", store))
+        dispatcher.callbacks = replace(
+            dispatcher.callbacks,
+            on_message=cast("Any", on_message),
+            source_has_live_owner=lambda event_id: event_id in owned,
+        )
+        dispatcher.release_turn_replay()
+        worker = dispatcher._worker
+        for event_id in ("$ignored", "$busy"):
+            await self._admit(alice, text_event(event_id))
+        try:
+            await _dispatch_worker_pass(worker)
+            assert list(worker._deferred) == ["$ignored", "$busy"]
+
+            with pytest.raises(RuntimeError, match="the journal is unwritable"):
+                await dispatcher.settle_intentionally_ignored_turn_sources(("$ignored",))
+            owned.discard("$ignored")
+
+            # The room already admitted a later receipt, so the revisit is paced once.
+            await _dispatch_worker_pass(worker)
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: not worker._room_is_backing_off(ROOM))
+            await _dispatch_worker_pass(worker)
+            assert calls == ["$ignored"]
+            assert await alice.unsettled_event_ids() == frozenset({"$busy"})
+        finally:
+            await dispatcher.stop()
+
+    async def test_a_source_a_departing_router_frees_still_runs_before_later_work_in_its_room(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A room's callbacks run in receipt order, also when an older one becomes runnable silently.
+
+        A router that leaves fails the paused replies its cards held, in its
+        own transaction: the responder's source becomes runnable with no
+        admission and no owner to hand it back. The room's lane is already past
+        it, behind a turn still in flight, so the next message in the room ran
+        first unless that write also sends the lane back.
+        """
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return event.event_id == "$new"
+
+        await _ApprovalContinuations.admit_sources(alice)
+        await self._admit(alice, text_event("$busy", ts=2_000))
+        await paused_for_approval(
+            alice,
+            replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation="live"),
+        )
+        await _ApprovalContinuations.remember_card(journal_store.principal("router@shared"))
+        worker = PendingEventWorker(store=alice, handle=handle, runtime_generation="live")
+        stop_following = journal_store.approval_signals.follow_paused_replies(
+            "agent@alice",
+            paused=lambda _reply: None,
+            ended=lambda _approval_id: None,
+            freed=lambda room_id: worker.wake(room_id=room_id),
+        )
+        try:
+            await _dispatch_worker_pass(worker)
+            assert handled == ["$busy"]
+
+            await admit_room_membership(journal_store.principal("router@shared"), ROOM, "leave")
+            await self._admit(alice, text_event("$new", ts=3_000))
+            await _dispatch_worker_pass(worker)
+            # The room already admitted a later receipt, so the revisit is paced once.
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: not worker._room_is_backing_off(ROOM))
+            await _dispatch_worker_pass(worker)
+
+            assert handled == ["$busy", "$source-1", "$new"]
+        finally:
+            stop_following()
+            await worker.stop()
+
+    async def test_a_reader_ahead_of_the_departure_signal_still_runs_the_freed_source_first(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A commit is visible to readers before its signals are published, so the lane cannot lean on the signal.
+
+        The departure and the room's next message commit in one batch. A wake
+        that reads between that commit and the writer publishing it sees the new
+        message and the freed source together, with no rewind yet.
+        """
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return event.event_id == "$new"
+
+        await _ApprovalContinuations.admit_sources(alice)
+        await self._admit(alice, text_event("$busy", ts=2_000))
+        await paused_for_approval(
+            alice,
+            replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation="live"),
+        )
+        await _ApprovalContinuations.remember_card(journal_store.principal("router@shared"))
+        worker = PendingEventWorker(store=alice, handle=handle, runtime_generation="live")
+        stop_following = journal_store.approval_signals.follow_paused_replies(
+            "agent@alice",
+            paused=lambda _reply: None,
+            ended=lambda _approval_id: None,
+            freed=lambda room_id: worker.wake(room_id=room_id),
+        )
+        writes = cast("Any", journal_store.backend)._writes
+        apply, committed, publish = writes.apply, threading.Event(), threading.Event()
+
+        def apply_then_wait(operations: Any) -> Any:  # noqa: ANN401 - the backend's own batch types
+            outcomes = apply(operations)
+            if len(operations) == 2:
+                committed.set()
+                assert publish.wait(SETTLE_TIMEOUT_SECONDS)
+            return outcomes
+
+        try:
+            await _dispatch_worker_pass(worker)
+            assert handled == ["$busy"]
+
+            router = journal_store.principal("router@shared")
+            departure = await room_membership_admission(router, ROOM, "leave")
+            assert departure is not None
+            writes.apply = apply_then_wait
+            batch = asyncio.gather(
+                router.admit_ingestion_batch(departure),
+                self._admit(alice, text_event("$new", ts=3_000)),
+            )
+            await _eventually(committed.is_set)
+            # A callback that ran settles through the writer, so the pass may need the barrier gone to finish.
+            ahead = asyncio.ensure_future(_dispatch_worker_pass(worker))
+            await _eventually(lambda: ahead.done() or handled != ["$busy"])
+            publish.set()
+            await asyncio.gather(ahead, batch)
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: not worker._room_is_backing_off(ROOM))
+            await _dispatch_worker_pass(worker)
+
+            assert handled == ["$busy", "$source-1", "$new"]
+        finally:
+            publish.set()
+            writes.apply = apply
+            stop_following()
+            await worker.stop()
+
+    async def test_the_first_turn_in_flight_starts_the_sweep_while_its_lane_still_runs(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The sweep is what bounds how long silently runnable work waits, so it starts with the first deferral.
+
+        Started only once a pass or a lane finished, it was not running while
+        the lane that recorded the deferral sat in its next callback, and the
+        wait became that callback's length plus a whole sweep interval.
+        """
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handle(event: JournalEvent) -> bool:
+            if event.event_id == "$blocked":
+                entered.set()
+                await release.wait()
+            return False
+
+        for event_id in ("$busy", "$blocked"):
+            await self._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await worker._dispatch_ready_rooms()
+            await asyncio.wait_for(entered.wait(), timeout=5)
+
+            assert list(worker._deferred) == ["$busy"]
+            assert worker._deferral_scan is not None
+            assert not worker._deferral_scan.done()
+        finally:
+            release.set()
+            await worker.stop()
 
 
 class TestStoreFailuresBelongToTheLane:

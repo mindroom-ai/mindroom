@@ -536,9 +536,14 @@ _MATRIX_DELIVERY_FAILURE_REASONS: dict[MatrixDeliveryFailureKind, str] = {
     MatrixDeliveryFailureKind.ENCRYPTION_GUARD: "encrypted delivery rejected by local trust policy",
     MatrixDeliveryFailureKind.UNKNOWN_ENCRYPTION_STATE: "room encryption state unknown",
     MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE: "matrix event exceeds the hard size limit",
+    MatrixDeliveryFailureKind.ENCRYPTION_REFUSED: "homeserver refuses encrypted events",
     MatrixDeliveryFailureKind.SEND_EXCEPTION: "matrix delivery raised a local exception",
     MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE: "matrix delivery returned an unexpected response",
 }
+# Refusals no resend can change: the outbox records them as permanent failures instead of retrying.
+_PERMANENT_MATRIX_DELIVERY_FAILURES = frozenset(
+    {MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, MatrixDeliveryFailureKind.ENCRYPTION_REFUSED},
+)
 
 
 def _matrix_delivery_failure_reason(outcome: MatrixSendOutcome) -> str:
@@ -689,7 +694,7 @@ class DeliveryGateway:
         )
         if isinstance(outcome, MatrixDeliveryFailure):
             detail = _matrix_delivery_failure_reason(outcome)
-            if outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+            if outcome.kind in _PERMANENT_MATRIX_DELIVERY_FAILURES:
                 raise PermanentDeliveryError(detail)
             msg = f"Matrix refused {what} for turn {claimed.delivery_id!r} stage {claimed.stage.value!r}: {detail}"
             raise _DeliveryRefusedError(msg)

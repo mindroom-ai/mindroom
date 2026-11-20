@@ -601,14 +601,16 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 command_event_id=event.event_id,
             )
         else:
-            response_text = handle_model_command(
+            response_text, result_extra_content = handle_model_command(
                 command.args.get("args_text", ""),
+                client=context.client,
                 config=context.config,
                 runtime_paths=context.runtime_paths,
                 membership_index=context.agent_reply_memberships,
                 room_id=room.room_id,
                 thread_id=effective_thread_id,
                 requester_user_id=requester_user_id,
+                command_event_id=event.event_id,
             )
 
     elif command.type == CommandType.ROOM_MODEL:
