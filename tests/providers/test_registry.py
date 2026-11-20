@@ -730,10 +730,15 @@ def _forbid_client_copies(monkeypatch: pytest.MonkeyPatch, client_class: type) -
     [
         ({"ANTHROPIC_AUTH_TOKEN": "tok-env"}, {}, {"authorization": "Bearer tok-env"}),
         ({"ANTHROPIC_API_KEY": "sk-env"}, {}, {"x-api-key": "sk-env"}),
+        (
+            {"ANTHROPIC_API_KEY": "sk-env", "ANTHROPIC_AUTH_TOKEN": "tok-env"},
+            {},
+            {"authorization": "Bearer tok-env", "x-api-key": "sk-env"},
+        ),
         ({}, {}, None),
         ({}, {"auth_token": "tok", "credentials": StaticToken("tok-provider")}, {"authorization": "Bearer tok"}),
     ],
-    ids=["env-token", "env-key", "no-credential", "token-beside-provider"],
+    ids=["env-token", "env-key", "env-key-and-token", "no-credential", "token-beside-provider"],
 )
 async def test_a_claude_model_without_a_resolved_key_authenticates_as_its_sdk_would(
     runtime_paths: RuntimePaths,

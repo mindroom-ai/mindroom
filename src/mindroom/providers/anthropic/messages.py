@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import os
 import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
@@ -772,6 +773,9 @@ def _with_key_header(kwargs: dict[str, Any]) -> AsyncAnthropic:
     if provider and token is not None:
         _warn_token_shadows_provider()
         client.auth_token = token
+    elif key is None and token is None and client.api_key and client.auth_token is None:
+        # SDK 2 keeps only ANTHROPIC_API_KEY when both env credentials are set; SDK 1 sent the token beside it.
+        client.auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN") or None
     return send_key_as_x_api_key(client, client.api_key if key is None else key)
 
 
