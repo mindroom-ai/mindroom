@@ -369,7 +369,7 @@ async def test_a_refused_router_binding_needs_no_retry(room_state: RoomState) ->
     assert await reconcile_room_router_binding(client, config, paths, ROOM_ID) is True
     duties = _router_duties(room_state)
     duties.mark_joined_for_room_state(ROOM_ID)
-    await duties.publish_joined_room_state()
+    await _publish_joined_rooms(duties)
     assert not duties._room_state_retries
 
 
@@ -395,7 +395,7 @@ async def test_router_publishes_its_binding_on_start_and_join(room_state: RoomSt
     del events[ROUTER_EVENT_TYPE, ""]
     duties = _router_duties(room_state)
     duties.mark_joined_for_room_state(ROOM_ID)
-    await duties.publish_joined_room_state()
+    await _publish_joined_rooms(duties)
     assert events[ROUTER_EVENT_TYPE, ""] == binding
 
 
@@ -781,6 +781,13 @@ def _router_duties(state: RoomState) -> StewardDuties:
     return StewardDuties(deps)
 
 
+def _publish_joined_rooms(duties: StewardDuties) -> asyncio.Task[None]:
+    """Publish the joined rooms in the background, as a completed sync frame does, and return that publish."""
+    duties.publish_joined_room_state()
+    (task,) = duties._room_state_publishes
+    return task
+
+
 def _membership_event(user_id: str, membership: str, previous: str) -> nio.RoomMemberEvent:
     event = nio.RoomMemberEvent.from_dict(
         {
@@ -854,7 +861,7 @@ async def test_retained_ad_hoc_room_is_reconciled(room_state: RoomState, trigger
     else:
         duties = _router_duties(room_state)
         duties.mark_joined_for_room_state(ROOM_ID)
-        await duties.publish_joined_room_state()
+        await _publish_joined_rooms(duties)
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
 
 
@@ -1066,6 +1073,7 @@ async def test_router_invite_join_after_agent_publishes_on_next_frame(room_state
     assert (EVENT_TYPE, "") not in events
     _sync_live_room(room_state)
     await bot._on_ingestion_frame_completion(True)
+    assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
     assert _accounts(room_state) == sorted([router_id, ids["agent1"].full_id])
     # The frame publishes a join once; later frames reconcile nothing until another join.
@@ -1091,7 +1099,7 @@ async def test_router_lists_joined_mindroom_accounts_by_any_user_name(room_state
     else:
         duties = _router_duties(room_state)
         duties.mark_joined_for_room_state(ROOM_ID)
-        await duties.publish_joined_room_state()
+        await _publish_joined_rooms(duties)
     assert _accounts(room_state) == sorted(
         ["@alice.mind:localhost", *(ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1", "team1"))],
     )
@@ -1169,12 +1177,12 @@ async def test_accounts_failure_is_nonfatal_and_retried(room_state: RoomState, f
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("earlier_triggers", [1, 2])
-async def test_sync_frame_waits_at_most_ten_seconds_behind_slow_triggers_in_its_room(
+async def test_joined_room_publish_waits_at_most_ten_seconds_behind_slow_triggers_in_its_room(
     room_state: RoomState,
     monkeypatch: pytest.MonkeyPatch,
     earlier_triggers: int,
 ) -> None:
-    """The reconcile timeout covers the wait for the room's lock, so the router's sync frame stalls at most 10 seconds."""
+    """The reconcile timeout covers the wait for the room's lock, so a joined room's publish ends within 10 seconds."""
     _config, _paths, _, _, client = room_state
 
     async def unanswered(*_args: object, **_kwargs: object) -> None:
@@ -1189,7 +1197,7 @@ async def test_sync_frame_waits_at_most_ten_seconds_behind_slow_triggers_in_its_
     triggers = [asyncio.create_task(setup.publish_room_state()) for _ in range(earlier_triggers)]
     duties = _router_duties(room_state)
     duties.mark_joined_for_room_state(ROOM_ID)
-    frame = asyncio.create_task(duties.publish_joined_room_state())
+    frame = _publish_joined_rooms(duties)
     while True:
         # Drain ready callbacks and timeout cancellation without wall-clock sleeps.
         for _ in range(20):
@@ -1245,7 +1253,7 @@ async def test_reconcile_that_times_out_behind_a_slow_one_is_retried(
             )
         if now == 6 and second_trigger == "frame":
             duties.mark_joined_for_room_state(ROOM_ID)
-            tasks.append(asyncio.create_task(duties.publish_joined_room_state()))
+            tasks.append(_publish_joined_rooms(duties))
         # Drain ready callbacks and timeout cancellation without wall-clock sleeps.
         for _ in range(50):
             await asyncio.sleep(0)
@@ -1350,14 +1358,17 @@ async def test_the_router_owns_its_room_state_retry(room_state: RoomState) -> No
 
 
 @pytest.mark.asyncio
-async def test_router_stop_cancels_its_room_state_retry_without_waiting(room_state: RoomState) -> None:
-    """A stopping router discards the retry, so it leaves its stop budget to the replies it drains."""
+async def test_router_stop_cancels_its_room_state_tasks_without_waiting(room_state: RoomState) -> None:
+    """A stopping router discards its publish and retry, so they leave its stop budget to the replies it drains."""
     config, paths, ids, _, client = room_state
     user = AgentMatrixUser(ROUTER_AGENT_NAME, ids[ROUTER_AGENT_NAME].full_id, "Router", TEST_PASSWORD)
     bot = install_runtime_journal_support(make_test_agent_bot(user, config=config, runtime_paths=paths))
     bot.client = client
     duties = bot.steward_duties
     await _hang_a_room_state_retry(duties, room_state)
+    duties.mark_joined_for_room_state(ROOM_ID)
+    publish = _publish_joined_rooms(duties)
     budget = bot._sync_shutdown_budget = ShutdownBudget.start(5.0)
     await bot.prepare_for_sync_shutdown()
     assert budget.remaining_seconds() > 4
+    assert publish.cancelled()

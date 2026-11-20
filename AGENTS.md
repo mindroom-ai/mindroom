@@ -233,13 +233,12 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Qwen | Local 27B | Qwen3.8-27B | `qwen3.8:27b` (Ollama), `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL` (llama.cpp) |
 | Moonshot Kimi Code login | Frontier via Kimi Code CLI | Kimi K3.1 Pro | `k3.1-pro` |
 | Google (Gemini API) | Max intelligence | Gemini 4 Carbon | `gemini-4-carbon` |
-| Google (Gemini API) | Efficient frontier reasoning | Gemini 4 Argon | `gemini-4-argon` |
+| Google (Gemini API) | Interactive frontier coding | Gemini 4 Neon | `gemini-4-neon` |
 | Google (Gemini API) | Standard text / coding | Gemini 4 Hydrogen | `gemini-4-hydrogen` |
-| Google (Gemini API) | Fast / cheap text | Gemini 3.5 Flash-Lite | `gemini-3.5-flash-lite` |
 | Google (Gemini API) | Image generation / editing | Nano Banana 2.1 | `gemini-nano-banana-2.1` |
 | Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 | `gemini-embedding-2` |
 
-Model IDs were checked against the provider and Codex model catalogs on November 18, 2026.
+Model IDs were checked against the provider and Codex model catalogs on November 18, 2026 (Google models on November 20, 2026).
 OpenRouter uses `anthropic/claude-fable-5.2`, and the direct Anthropic and Vertex APIs use `claude-fable-5-2`.
 `bedrock_claude` (bedrock-mantle) uses `anthropic.claude-fable-5-1`: Bedrock serves Fable 5.2 only on `bedrock-runtime`.
 Likewise, OpenRouter uses `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5`, and Bedrock uses `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5`.
@@ -250,8 +249,7 @@ For `anthropic`, prefer `claude-sonnet-5-5`, `claude-opus-5-5`, and `claude-haik
 For `vertexai_claude`, use the current Vertex AI request name from the provider docs instead of assuming the Anthropic API ID carries over unchanged.
 Current Google Cloud docs list bare Vertex IDs for `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`.
 Do not assume `@default` or dated `@...` suffixes are universally required for Vertex AI Claude.
-For Gemini API text and coding work, prefer `gemini-4-hydrogen` as the standard stable model unless you intentionally need the cheaper `gemini-3.5-flash-lite` tier.
-Use `gemini-4-argon` for faster, cheaper frontier reasoning than `gemini-4-carbon`.
+For Gemini API work, prefer `gemini-4-hydrogen` for everyday text and coding, `gemini-4-neon` for complex interactive coding, and `gemini-4-carbon` for long-horizon deep verification.
 The Google rows above are for the Gemini API / AI Studio `google` provider, not for Vertex AI.
 For `vertexai`, verify the current Vertex AI docs instead of assuming Gemini API names or defaults carry over unchanged.
 Current [Vertex AI image docs](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/image-generation) document `gemini-nano-banana-2.1`, `gemini-3-pro-image`, `gemini-3.1-flash-image`, and `gemini-3.1-flash-lite-image`; `gemini-nano-banana-2.1` serves only the `global` location.

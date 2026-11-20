@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -125,7 +126,13 @@ class _Room:
             duties.mark_joined_for_room_state(ROOM_ID)
         if power_levels:
             await duties.power_levels_event(self.bots[name].client.rooms[ROOM_ID], MagicMock())
-        await duties.publish_joined_room_state()
+        await _publish(duties)
+
+
+async def _publish(duties: StewardDuties, *, every_room: bool = False) -> None:
+    """Publish the marked rooms in the background, as a settled sync frame does, and wait for that publish."""
+    duties.publish_joined_room_state(every_room=every_room)
+    await asyncio.gather(*duties._room_state_publishes)
 
 
 @pytest.mark.asyncio
@@ -183,9 +190,9 @@ async def test_power_levels_event_makes_new_steward_publish(tmp_path: Path) -> N
 async def test_sync_that_opens_publishes_every_stewarded_room(tmp_path: Path) -> None:
     """A bot's first settled frame publishes the rooms it stewards, as a power change in state alone reaches no callback."""
     room = _Room(tmp_path, (ROUTER_AGENT_NAME, "agent1"))
-    await room.duties("agent1").publish_joined_room_state(every_room=True)
+    await _publish(room.duties("agent1"), every_room=True)
     assert room.writes == []
-    await room.duties(ROUTER_AGENT_NAME).publish_joined_room_state(every_room=True)
+    await _publish(room.duties(ROUTER_AGENT_NAME), every_room=True)
     owner = room.ids[ROUTER_AGENT_NAME]
     assert sorted(room.writes) == [(owner, ACCOUNTS, owner), (owner, BINDING, ""), (owner, THREAD_MODE, "")]
 

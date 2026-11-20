@@ -43,7 +43,7 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
     """
     try:
         identities = prepared_entity_names_by_user_id(config, runtime_paths)
-        # The deadline covers the lock wait too, so a sync frame queued behind other triggers stalls at most 10 s.
+        # The deadline covers the lock wait too, so a trigger queued behind other triggers waits at most 10 s.
         async with asyncio.timeout(10):
             # Serialize the comparison and write so concurrent triggers cannot send duplicate or stale values.
             async with _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):

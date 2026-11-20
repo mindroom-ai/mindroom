@@ -151,6 +151,8 @@ class StewardDuties:
     _member_join_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     # Rooms whose state is due since the last sync frame; a local join's room has no members until that frame.
     _joined_room_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    # The marked-room publishes in flight, which run in the background so no sync frame waits for a room state read.
+    _room_state_publishes: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     # The one background retry per room that a failed room state reconcile schedules.
     _room_state_retries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
     # Rooms where a trigger failed while their retry ran, so that retry runs once more.
@@ -177,11 +179,11 @@ class StewardDuties:
             self.deps.logger.warning("orphaned_bot_cleanup_failed", error=str(e))
 
     def stopping(self) -> None:
-        """Cancel the room state retries, which a stopping bot discards, without waiting.
+        """Cancel the room state publishes and retries, which a stopping bot discards, without waiting.
 
         The next steward redoes them, and waiting for them would spend the stop budget its replies need to finish.
         """
-        for task in self._room_state_retries.values():
+        for task in (*self._room_state_publishes, *self._room_state_retries.values()):
             task.cancel()
 
     async def room_joined(self, room_id: str) -> None:
@@ -197,7 +199,7 @@ class StewardDuties:
         """Publish a room's state after its power levels changed, which can change its steward."""
         self._joined_room_ids.add(room.room_id)
 
-    async def publish_joined_room_state(self, *, every_room: bool = False) -> None:
+    def publish_joined_room_state(self, *, every_room: bool = False) -> None:
         """Reconcile the thread mode and MindRoom accounts of the marked rooms, each through its steward.
 
         ``every_room`` first marks each room this bot stewards: a sync that starts can bring a power change as state
@@ -207,6 +209,16 @@ class StewardDuties:
         if every_room and client is not None:
             self._joined_room_ids.update(room_id for room_id in client.rooms if self.is_steward(room_id))
         room_ids, self._joined_room_ids = self._joined_room_ids, set()
+        if room_ids:
+            task = create_background_task(
+                self._publish_rooms(room_ids),
+                name="steward_joined_room_state",
+                owner=self.deps.runtime,
+            )
+            self._room_state_publishes.add(task)
+            task.add_done_callback(self._room_state_publishes.discard)
+
+    async def _publish_rooms(self, room_ids: set[str]) -> None:
         await asyncio.gather(*(self._publish_room_state(room_id) for room_id in room_ids))
 
     async def _publish_room_state(self, room_id: str) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from copy import deepcopy
@@ -14,7 +15,10 @@ import yaml
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends.kubernetes_config import KubernetesWorkerBackendConfig
+from mindroom.workers.backends.kubernetes_config import (
+    KubernetesWorkerBackendConfig,
+    kubernetes_backend_config_signature,
+)
 from mindroom.workers.backends.kubernetes_resources import KubernetesResourceManager
 from mindroom.workers.runtime import build_worker_launch_config
 
@@ -198,6 +202,8 @@ def test_kubernetes_config_reads_trigger_sidecars_and_volumes_from_env(tmp_path:
         (_EXTRA_VOLUMES_ENV, '[{"name":"trigger-state","emptyDir":{},"hostPath":{"path":"/tmp"}}]'),
         (_EXTRA_VOLUMES_ENV, '[{"name":"trigger-state","emptyDir":{}},{"name":"trigger-state","emptyDir":{}}]'),
         (_EXTRA_VOLUMES_ENV, '[{"name":"worker-storage","emptyDir":{}}]'),
+        (_EXTRA_CONTAINERS_ENV, '[{"name":"trigger-listener","image":"busybox","resources":{"limits":{"cpu":true}}}]'),
+        (_EXTRA_VOLUMES_ENV, '[{"name":"trigger-state","emptyDir":{"sizeLimit":false}}]'),
     ],
 )
 def test_kubernetes_config_rejects_invalid_trigger_sidecar_json(
@@ -210,6 +216,139 @@ def test_kubernetes_config_rejects_invalid_trigger_sidecar_json(
 
     with pytest.raises(WorkerBackendError, match=env_name):
         KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+
+def test_kubernetes_config_keeps_sidecars_in_the_clients_wire_form(tmp_path: Path) -> None:
+    """Numeric quantities and Python field names become the client's wire form, which also signs the config."""
+
+    def config_for(cpu: object, divisor: object, size_limit: object, *, python: bool) -> KubernetesWorkerBackendConfig:
+        value_from, field_ref, size, downward, read_only = (
+            ("value_from", "resource_field_ref", "size_limit", "downward_api", "read_only")
+            if python
+            else ("valueFrom", "resourceFieldRef", "sizeLimit", "downwardAPI", "readOnly")
+        )
+        cpu_ref = {field_ref: {"resource": "limits.cpu", "divisor": divisor}}
+        container = {
+            "name": "trigger-listener",
+            "image": "busybox",
+            "volumeMounts": [{"name": "trigger-state", "mountPath": "/state", read_only: True}],
+            "env": [{"name": "CPU", value_from: cpu_ref}],
+            "resources": {"requests": {"cpu": cpu, "memory": "32Mi"}, "limits": {"cpu": cpu}},
+        }
+        volumes = [
+            {"name": "trigger-state", "emptyDir": {size: size_limit}},
+            {"name": "pod-info", "projected": {"sources": [{downward: {"items": [{"path": "cpu", **cpu_ref}]}}]}},
+        ]
+        env = _base_env(**{_EXTRA_CONTAINERS_ENV: json.dumps([container]), _EXTRA_VOLUMES_ENV: json.dumps(volumes)})
+        return KubernetesWorkerBackendConfig.from_runtime(_runtime_paths(tmp_path, env))
+
+    numeric = config_for(0.5, 1, 1024, python=True)
+    strings = config_for("0.5", "1", "1024", python=False)
+
+    assert numeric == strings
+    container = numeric.extra_containers[0]
+    assert container["resources"] == {"requests": {"cpu": "0.5", "memory": "32Mi"}, "limits": {"cpu": "0.5"}}
+    assert container["env"][0]["valueFrom"]["resourceFieldRef"]["divisor"] == "1"
+    assert container["volumeMounts"] == [{"name": "trigger-state", "mountPath": "/state", "readOnly": True}]
+    assert numeric.extra_volumes[0]["emptyDir"] == {"sizeLimit": "1024"}
+    projected = numeric.extra_volumes[1]["projected"]["sources"][0]["downwardAPI"]["items"][0]
+    assert projected["resourceFieldRef"]["divisor"] == "1"
+    runtime_paths = _runtime_paths(tmp_path, {})
+    assert kubernetes_backend_config_signature(
+        numeric,
+        runtime_paths,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+    ) == kubernetes_backend_config_signature(strings, runtime_paths, auth_token=_TEST_AUTH_TOKEN, storage_root=tmp_path)
+
+
+def test_kubernetes_config_keeps_explicit_sidecar_nulls(tmp_path: Path) -> None:
+    """An explicit null clears a live field in a strategic merge patch, so it survives and signs unlike omission."""
+
+    def config_for(env_var: dict[str, object]) -> KubernetesWorkerBackendConfig:
+        container = {"name": "trigger-listener", "image": "busybox", "env": [env_var]}
+        env = _base_env(**{_EXTRA_CONTAINERS_ENV: json.dumps([container])})
+        return KubernetesWorkerBackendConfig.from_runtime(_runtime_paths(tmp_path, env))
+
+    cleared = config_for({"name": "MODE", "value": "listen", "valueFrom": None})
+    omitted = config_for({"name": "MODE", "value": "listen"})
+
+    assert cleared.extra_containers[0]["env"] == [{"name": "MODE", "value": "listen", "valueFrom": None}]
+    runtime_paths = _runtime_paths(tmp_path, {})
+    assert kubernetes_backend_config_signature(
+        cleared,
+        runtime_paths,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+    ) != kubernetes_backend_config_signature(omitted, runtime_paths, auth_token=_TEST_AUTH_TOKEN, storage_root=tmp_path)
+
+
+def test_kubernetes_config_names_sidecar_fields_the_client_rejects_without_their_values(tmp_path: Path) -> None:
+    """A nested typo fails at config load with its location; neither an unknown key nor a value is echoed."""
+    container = {
+        "name": "trigger-listener",
+        "image": "busybox",
+        "env": [{"name": "TOKEN", "valeu": "hunter2-secret"}],
+        "securityContext": {"hunter2-pasted-key": True},
+    }
+    runtime_paths = _runtime_paths(tmp_path, _base_env(**{_EXTRA_CONTAINERS_ENV: json.dumps([container])}))
+
+    with pytest.raises(WorkerBackendError) as raised:
+        KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert str(raised.value) == (
+        f"{_EXTRA_CONTAINERS_ENV}[0] is not a valid Kubernetes Container: "
+        "env.0: invalid value (extra_forbidden); securityContext: invalid value (extra_forbidden)"
+    )
+    assert raised.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    ("env_name", "item"),
+    [
+        (_EXTRA_CONTAINERS_ENV, {"name": "trigger-listener", "image": "busybox", "hunter2-key": True}),
+        (
+            _EXTRA_CONTAINERS_ENV,
+            {"name": "trigger-listener", "image": "busybox", "resources": {"limits": {"hunter2": True}}},
+        ),
+        (
+            _EXTRA_CONTAINERS_ENV,
+            {"name": "trigger-listener", "image": "busybox", "resources": {"limits": {"hunter2": []}}},
+        ),
+        (
+            _EXTRA_CONTAINERS_ENV,
+            {"name": "trigger-listener", "image": "busybox", "resources": {"limits": {"hunter2": None}}},
+        ),
+        (_EXTRA_CONTAINERS_ENV, {"name": "trigger-listener", "image": "busybox", "securityContext": {"hunter2": 1}}),
+        (_EXTRA_VOLUMES_ENV, {"name": "trigger-state", "emptyDir": {}, "hunter2-key": True}),
+        (
+            _EXTRA_VOLUMES_ENV,
+            {
+                "name": "pod-info",
+                "projected": {
+                    "sources": [
+                        {"clusterTrustBundle": {"path": "ca", "labelSelector": {"matchLabels": {"hunter2": True}}}},
+                        {
+                            "podCertificate": {
+                                "signerName": "x",
+                                "keyType": "RSA3072",
+                                "userAnnotations": {"hunter2": True},
+                            }
+                        },
+                    ],
+                },
+            },
+        ),
+    ],
+)
+def test_kubernetes_config_never_echoes_rejected_sidecar_keys(tmp_path: Path, env_name: str, item: object) -> None:
+    """A rejected key can be a pasted credential, so the error names only its parent and our own field names."""
+    runtime_paths = _runtime_paths(tmp_path, _base_env(**{env_name: json.dumps([item])}))
+
+    with pytest.raises(WorkerBackendError, match=re.escape(f"{env_name}[0]")) as raised:
+        KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert "hunter2" not in str(raised.value)
 
 
 def test_worker_pod_template_appends_trigger_sidecar_and_volume_without_main_mount(tmp_path: Path) -> None:

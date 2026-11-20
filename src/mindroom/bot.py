@@ -249,6 +249,7 @@ class AgentBot:
     last_sync_time: datetime | None
     _last_sync_monotonic: float | None
     _first_sync_done: bool
+    _bot_ready_hooks_task: asyncio.Task[None] | None = None
     _sync_shutdown_budget: ShutdownBudget | None
     _deferred_stop_required: bool
     _deferred_stop_phase: DeferredStopPhase | None
@@ -1356,7 +1357,11 @@ class AgentBot:
         receipt_new: bool,
         first_sync_response: bool,
     ) -> None:
-        """Run side effects that do not own raw sync checkpoint safety; only a new frame opens the observer."""
+        """Run side effects that do not own raw sync checkpoint safety; only a new frame opens the observer.
+
+        Nothing here decides what a source may do, so hooks and room state run in background tasks and hold neither
+        dispatch nor this frame's acknowledgement.
+        """
         orchestrator = self.orchestrator
         membership_sync = orchestrator.agent_reply_membership_sync
         opened = receipt_new and membership_sync.observer_frame_settled(self.matrix_id.full_id)
@@ -1364,16 +1369,21 @@ class AgentBot:
             orchestrator.config,
             orchestrator.refresh_agent_reply_memberships,
         )
-        await self.steward_duties.publish_joined_room_state(every_room=opened)
         self._schedule_delivery_recovery()
         self._schedule_handled_turn_cleanup()
         if first_sync_response:
-            await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
+            # Observer hooks may each run until their timeout.
+            self._bot_ready_hooks_task = create_background_task(
+                self._emit_agent_lifecycle_event(EVENT_BOT_READY),
+                name=f"bot_ready_hooks_{self.agent_name}",
+                owner=self._runtime_view,
+            )
         self._personal_room_lifecycle.schedule_reconciliation()
 
         if self._first_sync_done and not self._orchestrator_ready_handled:
             await self.orchestrator.handle_bot_ready(self)
             self._orchestrator_ready_handled = True
+        self.steward_duties.publish_joined_room_state(every_room=opened)
 
     def _before_ingestion_admission(
         self,
@@ -1947,6 +1957,9 @@ class AgentBot:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)
             self._sync_shutdown_budget = shutdown_budget
         self.steward_duties.stopping()
+        if self._bot_ready_hooks_task is not None:
+            # Waiting for an observer hook would spend the budget the replies drained below need to finish.
+            self._bot_ready_hooks_task.cancel()
         await self._personal_room_lifecycle.cancel_reconciliation(timeout_seconds=shutdown_budget.remaining_seconds())
         background_tasks_completed = await wait_for_background_tasks(
             timeout=shutdown_budget.remaining_seconds(),

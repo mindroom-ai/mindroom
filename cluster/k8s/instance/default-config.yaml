@@ -37,10 +37,6 @@ models:
     provider: openrouter
     id: google/gemini-4-hydrogen
     context_window: 1048576
-  gemini_lite:
-    provider: openrouter
-    id: google/gemini-3.5-flash-lite
-    context_window: 1048576
   deepseek:
     provider: openrouter
     id: deepseek/deepseek-v4.1-flash-1017
