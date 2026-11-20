@@ -137,6 +137,7 @@ claude_agent = [
 clickup = [
   "requests",
 ]
+coding = []
 compact_context = []
 composio = [
   "composio-agno",
@@ -192,6 +193,7 @@ external_trigger_manager = []
 fal = [
   "fal-client",
 ]
+file = []
 file_generation = [
   "python-docx>=1.2",
   "reportlab",

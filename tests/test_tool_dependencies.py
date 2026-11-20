@@ -144,6 +144,15 @@ def test_tool_extras_in_sync_with_pyproject() -> None:
         pytest.fail(f"Tool extras out of sync with pyproject.toml:\n{output}")
 
 
+def test_the_earlier_names_of_filesystem_stay_empty_extras() -> None:
+    """An install command that names the coding or file extra still resolves after the toolkits became filesystem."""
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    extras = pyproject["project"]["optional-dependencies"]
+    assert (extras["coding"], extras["file"], extras["filesystem"]) == ([], [], [])
+    locked = next(line for line in Path("uv.lock").read_text(encoding="utf-8").splitlines() if "provides-extras" in line)
+    assert all(f'"{extra}"' in locked for extra in ("coding", "file", "filesystem"))
+
+
 def test_core_runtime_imports_are_declared_as_base_dependencies() -> None:
     """Core runtime modules should not rely on transitive dependencies."""
     base_dependencies = _base_dependency_names()
