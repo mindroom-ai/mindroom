@@ -117,10 +117,14 @@ class LinkStatus:
 
 @dataclass(frozen=True)
 class GatewayReport:
-    """One report of the gateway, whole: when it came (monotonic), and each link's node."""
+    """One report of the gateway, whole: when it came (monotonic), each link's node, and how the gateway enrols.
+
+    ``enrollment`` is None until the gateway reports in this primary session.
+    """
 
     received_at: float = 0.0
     links: Mapping[str, LinkStatus] = field(default_factory=dict)
+    enrollment: Literal["login", "auth_key"] | None = None
 
 
 @dataclass
@@ -176,14 +180,16 @@ def _desired(
     link: Link,
     *,
     now: float,
+    reported: bool,
     node: LinkStatus | None,
     directories: Sequence[SharedDirectory],
 ) -> Literal["on", "suspended", "removing"]:
-    """Return what the gateway is to do with a link stored ``on``, whose node the gateway last reported as ``node``.
+    """Return what the gateway is to do with a link stored ``on``, whose node a fresh report shows as ``node``.
 
     It is removed when its agent is gone, its person may no longer use the agent, its worker is no longer the one
     that person's turns run in, or nobody enrolled it within a day and it is not waiting for an admin's approval;
-    failing any other condition suspends it, as does room membership that is not known yet.
+    failing any other condition suspends it, as does room membership that is not known yet. Whether a node waits for
+    approval only a fresh report says, so without one (``reported`` false) no link is dropped for its age.
     """
     if link.agent_name not in config.agents:
         return "removing"
@@ -197,7 +203,7 @@ def _desired(
         directories,
     )
     # A node waiting for an admin's approval was signed in to, however long the approval takes.
-    expires = link.enrolled_at is None and (node is None or node.state != "needs_approval")
+    expires = reported and link.enrolled_at is None and (node is None or node.state != "needs_approval")
     if (
         (ineligible is not None and ineligible.reason == "not_authorized" and not ineligible.pending)
         or resolve_target(config, runtime_paths, link.requester_id, link.agent_name).worker_key != link.worker_key
@@ -232,17 +238,20 @@ def desired_links(
     """Bring the stored links in line with the config, and return the gateway's ``GET /links`` rows. Blocking.
 
     With an operator key, at most once a minute, every worker that serves SSH and has no link gets one, unless the
-    link would be removed at once; one that is not eligible now is added and suspended. A link its person parked as
+    link would be removed at once; one that is not eligible now is added and suspended. Only a report of this primary
+    session tells an operator key: the stored mode may be one the gateway left while the primary restarted. A link its person parked as
     ``off`` is a link, so it is not added again. A key gone from a person's keys, as when the operator removes one
     from the config, closes their open sessions.
     """
     workers: list[WorkerHandle] = []
     # The backend and the shared directories are read outside the store's lock, which connects and the portal wait for.
-    if now - status.operator_sync_at >= _OPERATOR_SYNC_SECONDS and read_links(runtime_paths).enrollment == "auth_key":
+    report = status.report
+    if report.enrollment == "auth_key" and now - status.operator_sync_at >= _OPERATOR_SYNC_SECONDS:
         status.operator_sync_at = now
         workers = listed_workers(runtime_paths)
     directories = load_shared_directories(runtime_paths)
-    nodes = fresh_link_statuses(status.report, monotonic=monotonic)
+    reported = _is_fresh(report, monotonic=monotonic)
+    nodes = report.links if reported else {}
     agent_names: dict[str, str | None] = {}
     for name in config.agents:
         part = normalize_worker_key_part(name)
@@ -251,7 +260,16 @@ def desired_links(
 
     def desired(link: Link) -> Literal["on", "suspended", "removing"]:
         node = nodes.get(link.id)
-        return _desired(config, runtime_paths, membership_index, link, now=now, node=node, directories=directories)
+        return _desired(
+            config,
+            runtime_paths,
+            membership_index,
+            link,
+            now=now,
+            reported=reported,
+            node=node,
+            directories=directories,
+        )
 
     def reconcile(book: LinkBook) -> list[dict[str, object]]:
         for handle in workers if book.enrollment == "auth_key" else []:
@@ -330,7 +348,7 @@ def record_status(
             )
         return reported
 
-    status.report = GatewayReport(monotonic, update_links(runtime_paths, settle))
+    status.report = GatewayReport(monotonic, update_links(runtime_paths, settle), payload.enrollment)
 
 
 def link_state(link: Link, status: LinkStatus | None, *, suspended: bool) -> str:
@@ -533,9 +551,14 @@ def refresh_projections(config: Config, runtime_paths: RuntimePaths, requester_i
     _projected(runtime_paths, project)
 
 
+def _is_fresh(report: GatewayReport, *, monotonic: float) -> bool:
+    """Return whether the gateway reported in this primary session, recently enough to say what its nodes are."""
+    return report.enrollment is not None and monotonic - report.received_at <= _STATUS_SECONDS
+
+
 def fresh_link_statuses(report: GatewayReport, *, monotonic: float) -> Mapping[str, LinkStatus]:
     """Return what a gateway report says of each link's node, or nothing when the report is too old to say it."""
-    return {} if monotonic - report.received_at > _STATUS_SECONDS else report.links
+    return report.links if _is_fresh(report, monotonic=monotonic) else {}
 
 
 def active_worker_keys(status: GatewayStatus, *, monotonic: float) -> frozenset[str]:

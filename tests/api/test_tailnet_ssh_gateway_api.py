@@ -530,9 +530,9 @@ def test_only_a_fresh_report_with_open_connections_holds_a_worker(api_app: FastA
     assert status is not None
     links = {"busy": _link_status("worker-busy", 1), "quiet": _link_status("worker-quiet", 0)}
 
-    status.report = GatewayReport(time.monotonic(), links)
+    status.report = GatewayReport(time.monotonic(), links, "login")
     assert active_tailnet_ssh_worker_keys(api_app) == {"worker-busy"}
-    status.report = GatewayReport(time.monotonic() - 91, links)
+    status.report = GatewayReport(time.monotonic() - 91, links, "login")
     assert active_tailnet_ssh_worker_keys(api_app) == frozenset()
 
 
@@ -548,7 +548,7 @@ async def test_both_maintenance_paths_touch_ssh_workers(api_app: FastAPI, monkey
     """
     status = tailnet_ssh_status(api_app)
     assert status is not None
-    status.report = GatewayReport(time.monotonic(), {"abc": _link_status("worker-ssh", 1)})
+    status.report = GatewayReport(time.monotonic(), {"abc": _link_status("worker-ssh", 1)}, "login")
     computer_sessions = ComputerSessionStore()
     # A viewer whose stream is open holds its worker, which `authorized_target` names "worker".
     computer_sessions.create(authorized_target()).stream = asyncio.Event()

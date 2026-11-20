@@ -155,7 +155,7 @@ class _Portal:
             "worker_key": self.link_by_id(link_id).worker_key,
         }
         status = LinkStatus(**(report | fields))  # type: ignore[arg-type]
-        self.status.report = GatewayReport(time.monotonic() - age, {link_id: status})
+        self.status.report = GatewayReport(time.monotonic() - age, {link_id: status}, enrollment)
 
         def store(book: LinkBook) -> None:
             book.enrollment = enrollment

@@ -164,9 +164,10 @@ def _store_enrollment(paths: RuntimePaths, enrollment: Literal["login", "auth_ke
 
 
 def _operator_status(paths: RuntimePaths, *, operator_sync_at: float = 0.0) -> GatewayStatus:
-    """Store that the gateway enrols with an operator's key, and return what is known of it in memory."""
-    _store_enrollment(paths, "auth_key")
-    return GatewayStatus(operator_sync_at=operator_sync_at)
+    """Have the gateway report, in this primary session, that it enrols with an operator's key; return what is known."""
+    status = GatewayStatus(operator_sync_at=operator_sync_at)
+    _post(paths, status, {}, enrollment="auth_key")
+    return status
 
 
 def _rows(
@@ -429,8 +430,10 @@ def test_removal_triggers_set_removing(config: Config, paths: RuntimePaths, trig
     }[trigger]
     kept = [_enrolled(agent="mind", created_at=NOW - 2 * DAY), _link(BOB, "mind", now=NOW - DAY + 1)]
     _store(paths, link, *kept)
+    status = GatewayStatus()
+    _post(paths, status, {})
 
-    rows = _rows(config, paths)
+    rows = _rows(config, paths, status)
 
     assert [(row["id"], row["desired"], row["closed_before"]) for row in rows] == [
         (link.id, "removing", NOW),
@@ -443,21 +446,30 @@ def test_removal_triggers_set_removing(config: Config, paths: RuntimePaths, trig
     assert [_stored(paths, other) for other in kept] == kept
 
     # A removal already under way is not started again.
-    _rows(config, paths, now=NOW + 5)
+    _rows(config, paths, status, now=NOW + 5)
     assert _stored(paths, link) == removed
 
 
 def test_a_node_waiting_for_approval_is_not_dropped_at_a_day(config: Config, paths: RuntimePaths) -> None:
-    """An admin may take more than a day to approve a node, so its link waits; without a fresh report it is dropped."""
+    """An admin may take more than a day to approve a node, so its link waits.
+
+    Whether it waits is known only from a fresh report of this primary session, so without one nothing is dropped.
+    """
     link = _link(now=NOW - DAY)
     _store(paths, link)
     status = GatewayStatus()
-    _post(paths, status, {link.id: _report("needs_approval", login_name=None)}, now=NOW - 10, monotonic=100.0)
 
-    assert [(row["id"], row["desired"]) for row in _rows(config, paths, status, monotonic=150.0)] == [(link.id, "on")]
-    assert [(row["id"], row["desired"]) for row in _rows(config, paths, status, monotonic=191.0)] == [
-        (link.id, "removing"),
-    ]
+    def desired(monotonic: float) -> list[tuple[object, object]]:
+        return [(row["id"], row["desired"]) for row in _rows(config, paths, status, monotonic=monotonic)]
+
+    # Right after a primary restart, before the gateway's first report.
+    assert desired(100.0) == [(link.id, "on")]
+    _post(paths, status, {link.id: _report("needs_approval", login_name=None)}, now=NOW - 10, monotonic=100.0)
+    assert desired(150.0) == [(link.id, "on")]
+    # The report is too old to say the node still waits, and too old to say it does not.
+    assert desired(191.0) == [(link.id, "on")]
+    _post(paths, status, {link.id: _report("needs_login", login_name=None)}, monotonic=200.0)
+    assert desired(210.0) == [(link.id, "removing")]
 
 
 def test_shared_directories_are_read_once_per_reconcile(
@@ -727,6 +739,27 @@ def test_a_steady_gateway_rewrites_nothing(config: Config, paths: RuntimePaths) 
 
     assert status.report.links[link.id].open_connections == 1
     assert (path.stat().st_ino, path.stat().st_mtime_ns) == (stored.st_ino, stored.st_mtime_ns)
+
+
+def test_a_stored_operator_mode_adds_no_link_before_the_gateway_reports(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gateway may restart with sign-ins instead of a key, so only its report in this primary session adds links."""
+    manager = _manager(monkeypatch, _handle(_key(ALICE, "mine"), tmp_path / "mine"))
+    _store_enrollment(paths, "auth_key")
+    status = GatewayStatus()
+
+    assert _rows(config, paths, status) == []
+    _post(paths, status, {}, enrollment="login")
+    assert _rows(config, paths, status, now=NOW + 61) == []
+    assert manager.calls == []
+
+    _post(paths, status, {}, enrollment="auth_key")
+    assert [row["hostname"] for row in _rows(config, paths, status, now=NOW + 122)] == ["mine"]
+    assert manager.calls == ["list_workers"]
 
 
 def test_login_mode_adds_no_links(
@@ -1259,7 +1292,11 @@ def test_a_report_is_published_whole_and_never_changed(paths: RuntimePaths) -> N
 
     assert assigned == ["report"]
     assert first == kept
-    assert status.report == GatewayReport(20.0, {link.id: replace(kept.links[link.id], open_connections=0)})
+    assert status.report == GatewayReport(
+        20.0,
+        {link.id: replace(kept.links[link.id], open_connections=0)},
+        "auth_key",
+    )
     with pytest.raises(FrozenInstanceError):
         status.report.received_at = 30.0  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
@@ -1269,7 +1306,7 @@ def test_a_report_is_published_whole_and_never_changed(paths: RuntimePaths) -> N
 def test_active_worker_keys_reads_one_report() -> None:
     """A report that comes in while the workers in use are read does not lend its age to the last one's links."""
     held = {"abc": LinkStatus("running", None, None, None, None, None, 1, None, "worker")}
-    status = _ChangingStatus(GatewayReport(1000.0, {}), GatewayReport(0.0, held))
+    status = _ChangingStatus(GatewayReport(1000.0, {}, "login"), GatewayReport(0.0, held, "login"))
 
     keys = active_worker_keys(cast("GatewayStatus", status), monotonic=1001.0)
 
