@@ -509,7 +509,8 @@ class ScriptRunManager:
                         owner_user_id=context.requester_id,
                         include_finished=False,
                     )
-                    if len(active) >= max_concurrent_runs:
+                    # Plain scripts and workflow attempts each count against their own limit.
+                    if sum(active_run.entry == run.entry for active_run in active) >= max_concurrent_runs:
                         _raise_concurrent_run_limit()
                     await run_blocking_until_complete(self.store.create_run, run)
                 created = await asyncio.to_thread(self.store.get_run, run.run_id)

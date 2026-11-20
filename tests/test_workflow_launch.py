@@ -385,3 +385,37 @@ async def test_validated_shim_hands_a_workflow_to_the_sdk_and_removes_the_token(
         assert len(gateway.requests) == requests_before
         assert gateway.finished is None
         assert not token_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_workflow_attempts_and_plain_scripts_are_admitted_from_separate_counts(tmp_path: Path) -> None:
+    """A full set of workflow attempts leaves the owner's plain scripts their slots, and the other way round."""
+    manager, _backend, _client = _manager(tmp_path)
+    manager.grant_resolver = lambda _context, **_options: (ScriptToolGrant("calculator", "add"),)
+    context = _context(tmp_path)
+    one = ScriptRunLimits(max_concurrent_runs=1)
+
+    attempt = await manager.run(context, source="print('ok')\n", workflow_run_id=RUN, limits=one)
+    script = await manager.run(context, source="print('ok')\n", limits=one)
+
+    with pytest.raises(ScriptRunManagerError, match="concurrent-run limit"):
+        await manager.run(context, source="print('ok')\n", workflow_run_id="wf-" + "d" * 32, limits=one)
+    with pytest.raises(ScriptRunManagerError, match="concurrent-run limit"):
+        await manager.run(context, source="print('ok')\n", limits=one)
+    assert [run.run_id for run in manager.store.list_runs(include_finished=False)] == [script.run_id, attempt.run_id]
+
+
+@pytest.mark.asyncio
+async def test_plain_scripts_at_their_limit_do_not_refuse_a_workflow_attempt(tmp_path: Path) -> None:
+    """The plain-script limit counts plain scripts only, so a workflow attempt still starts beside a full set."""
+    manager, _backend, _client = _manager(tmp_path)
+    manager.grant_resolver = lambda _context, **_options: (ScriptToolGrant("calculator", "add"),)
+    context = _context(tmp_path)
+
+    for _ in range(3):
+        await manager.run(context, source="print('ok')\n")
+    attempt = await manager.run(context, source="print('ok')\n", workflow_run_id=RUN)
+
+    assert attempt.workflow_run_id == RUN
+    with pytest.raises(ScriptRunManagerError, match="concurrent-run limit"):
+        await manager.run(context, source="print('ok')\n")
