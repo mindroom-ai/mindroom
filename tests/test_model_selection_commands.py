@@ -288,6 +288,42 @@ async def test_structured_selection_runs_on_the_runtime_it_names(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_a_command_is_aimed_by_its_requester_mentions_and_thread(tmp_path: Path) -> None:
+    """Whom a command is aimed at is decided from the dispatch's requester, mentioned agents and thread history."""
+    client, config, _, _, _, _ = picker_setup(tmp_path)
+    executor = _build_harness(config, tmp_path / "turns", agent_name="router").dispatcher.deps.command_executor
+    executor.deps.runtime.client = client
+    event = root_event(event_id="$command", content={"body": "!help", "msgtype": "m.text"})
+    command = command_parser.parse(event.body)
+    mentioned, history = [MagicMock()], [MagicMock()]
+    aims = AsyncMock(return_value=False)
+    with patch("mindroom.turn_policy.TurnPolicy.aims_command_at_me", new=aims):
+        owned = await executor.execute_if_owned(
+            client.rooms[ROOM],
+            event,
+            USER,
+            command,
+            dispatch=MagicMock(
+                target=MessageTarget.resolve(ROOM, "$root", "$command"),
+                requester_user_id=USER,
+                context=MagicMock(mentioned_agents=mentioned, planning_thread_history=history),
+            ),
+            handled_turn=TurnRecord.create(["$command"]),
+            acts_for_requester=False,
+        )
+    assert owned is False
+    aims.assert_awaited_once_with(
+        client.rooms[ROOM],
+        USER,
+        command,
+        mentioned,
+        history,
+        source_event_id="$command",
+        names_me=False,
+    )
+
+
+@pytest.mark.asyncio
 async def test_replay_preserves_result_after_single_real_mutation(tmp_path: Path) -> None:
     """A failed Matrix send must replay the frozen result even after current state changes."""
     client, config, paths, _, router, _ = picker_setup(tmp_path)
