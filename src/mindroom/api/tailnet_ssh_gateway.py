@@ -55,6 +55,8 @@ logger = get_logger(__name__)
 TOKEN_ENV = "MINDROOM_TAILNET_SSH_GATEWAY_TOKEN"  # noqa: S105 - the variable's name
 PORT_ENV = "MINDROOM_TAILNET_SSH_PORT"
 DEFAULT_PORT = 8769
+# A refused body's log lists the types of at most this many of its errors.
+_LOGGED_ERROR_TYPES = 10
 
 
 class _Peer(BaseModel):
@@ -112,14 +114,21 @@ def _link_service(api_app: FastAPI) -> tuple[Config, RuntimePaths, AgentReplyMem
 async def _body[T: BaseModel](request: Request, model: type[T]) -> T:
     """Return the request's JSON body as ``model``, or answer 422 with one sentence.
 
-    Pydantic's errors repeat what they reject, and a status report carries login URLs, so none of them is answered;
-    the log names each error's location and type only.
+    Pydantic's errors repeat what they reject, and a status report carries login URLs, so none of them is answered.
+    An error's location holds the body's own keys, such as link ids, so the log names neither: only how many errors
+    there are, and the type of the first few.
     """
     try:
         return model.model_validate_json(await request.body())
     except ValidationError as error:
-        errors = [{"loc": ".".join(map(str, item["loc"])), "type": item["type"]} for item in error.errors()]
-    logger.warning("tailnet_ssh_gateway_body_refused", model=model.__name__, errors=errors)
+        error_types = [item["type"] for item in error.errors()[:_LOGGED_ERROR_TYPES]]
+        error_count = error.error_count()
+    logger.warning(
+        "tailnet_ssh_gateway_body_refused",
+        model=model.__name__,
+        error_count=error_count,
+        error_types=error_types,
+    )
     raise HTTPException(status_code=422, detail="The request body is not what the gateway contract describes.")
 
 
