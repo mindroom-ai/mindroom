@@ -25,6 +25,7 @@ the only way to hold the invariant.
 from __future__ import annotations
 
 import json
+from importlib.util import find_spec
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -158,7 +159,15 @@ def test_the_json_reader_does_not_borrow_the_cached_chunking_strategy(indexer: F
     assert reader.chunking_strategy is not cached.chunking_strategy
 
 
-@pytest.mark.parametrize("suffix", [".pdf", ".docx", ".pptx"])
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        ".pdf",
+        ".docx",
+        # MindRoom ships no python-pptx, so its indexer skips PPTX files unless a deployment installs it.
+        pytest.param(".pptx", marks=pytest.mark.skipif(find_spec("pptx") is None, reason="python-pptx not installed")),
+    ],
+)
 def test_document_readers_chunk_paragraphs_as_agno_3_0_did(suffix: str, indexer: FileIndexer) -> None:
     """PDF, DOCX, and PPTX keep Agno's paragraph chunking at its size, and its chunks keep 3.0.9's whitespace.
 
