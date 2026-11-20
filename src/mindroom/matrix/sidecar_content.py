@@ -11,7 +11,7 @@ _LONG_TEXT_METADATA_KEY = "io.mindroom.long_text"
 _SETTLED_DROPPED_KEYS = frozenset({_LONG_TEXT_METADATA_KEY, "url", "file", "filename", "info", "m.new_content"})
 
 
-def validated_mxc_url(value: object) -> str | None:
+def _validated_mxc_url(value: object) -> str | None:
     """Return one structurally complete Matrix content URI."""
     if not isinstance(value, str) or not value.startswith("mxc://"):
         return None
@@ -26,12 +26,12 @@ def sidecar_mxc_url(content: Mapping[str, Any]) -> str | None:
         return None
     if metadata.get("encoding") != "matrix_event_content_json":
         return None
-    if (url := validated_mxc_url(content.get("url"))) is not None:
+    if (url := _validated_mxc_url(content.get("url"))) is not None:
         return url
     encrypted_file = content.get("file")
     if not isinstance(encrypted_file, dict):
         return None
-    return validated_mxc_url(encrypted_file.get("url"))
+    return _validated_mxc_url(encrypted_file.get("url"))
 
 
 def sidecar_content_to_resolve(content: Mapping[str, Any]) -> Mapping[str, Any] | None:

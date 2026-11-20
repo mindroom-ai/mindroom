@@ -18,7 +18,6 @@ from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
 from mindroom.matrix.event_info import UNQUOTED_REPLY_RELATION_KEY
-from mindroom.matrix.sidecar_content import validated_mxc_url
 
 # Standard Matrix-safe HTML tags.
 _GENERAL_FORMATTED_BODY_TAGS = frozenset(
@@ -509,32 +508,35 @@ _IMAGE_SCANNER = _build_markdown_renderer()
 _IMAGE_SCANNER.inline.ruler.at("image", _recording_image)
 
 
-def _unloadable(image_token: Token) -> bool:
-    src = str(image_token.attrs["src"])
-    return not re.match(r"https?://[^/]", src, re.IGNORECASE) and validated_mxc_url(src) is None
+def _loadable(src: str) -> bool:
+    web_or_mxc = r"https?://([^/?#@]*@)?[^/?#@:\[\]]+([:/?#].*)?|mxc://[^/]+/[^/]+"
+    return re.fullmatch(web_or_mxc, src, re.IGNORECASE | re.DOTALL) is not None
 
 
 def replace_unsendable_images(text: str) -> str:
-    """Replace each image that is not ``mxc://server/media_id`` or ``http(s)://`` with a note; code stays as written."""
+    """Replace each image that is not ``mxc://server/media_id`` or ``http(s)://host`` with a note, where that is safe."""
     if "![" not in text:
         return text
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
     env: dict[str, list[tuple[int, int, Token]]] = {}
-    cursors = dict(enumerate([0, *(newline.end() for newline in re.finditer("\n", text))]))
+    bounds = [0, *(newline.end() for newline in re.finditer("\n", normalized)), len(normalized)]
     edits: list[tuple[int, int, str]] = []
-    for block in _IMAGE_SCANNER.parse(text, env):
-        # The inline text starts on its first source line, after any quote, list, or table-cell markup before it.
-        row, first_line = (block.map or [0])[0], block.content.split("\n", 1)[0]
-        if block.type != "inline" or (base := text.find(first_line, cursors.get(row, 0))) < 0:
+    for block in _IMAGE_SCANNER.parse(normalized, env):
+        if block.type != "inline" or not block.map:
             continue
-        cursors[row] = base + len(first_line)
+        first, last = bounds[block.map[0]], bounds[min(block.map[1], len(bounds) - 1)]
         for start, end, token in env.get("images", []):
-            if any(child is token for child in block.children or ()) and _unloadable(token):
-                source, skip = block.content[start:end], block.content.count(block.content[start:end], 0, start)
-                if len(parts := text[base:].split(source, skip + 1)) == skip + 2:
-                    edits.append((at := base + len(source.join(parts[: skip + 1])), at + len(source), token.content))
+            source = block.content[start:end]
+            mine = any(child is token for child in block.children or ())
+            # Only a source found exactly once in its own block's lines is surely the image, never code beside it.
+            if mine and not _loadable(str(token.attrs["src"])) and normalized.count(source, first, last) == 1:
+                at = normalized.index(source, first, last)
+                edits.append((at, at + len(source), token.content or "image"))
+    edits.sort()
+    assert all(edits[index][1] <= edits[index + 1][0] for index in range(len(edits) - 1)), edits
     for start, end, alt in reversed(edits):
-        text = f"{text[:start]}\u26a0\ufe0f Image not sent: {alt or 'image'} (no uploaded file){text[end:]}"
-    return text
+        normalized = f"{normalized[:start]}\u26a0\ufe0f Image not sent: {alt} (no uploaded file){normalized[end:]}"
+    return normalized if edits else text
 
 
 def markdown_to_html(text: str) -> str:

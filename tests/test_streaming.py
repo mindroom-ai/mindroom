@@ -1690,3 +1690,11 @@ async def test_a_resumed_final_event_only_answer_lands_below_the_stopped_text(co
     assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
     assert final.display_text == f"{_RESUMED_PREFIX}The second half."
     assert outcome.visible_body_state == "visible_body"
+
+
+@pytest.mark.parametrize("in_progress", [True, False])
+def test_streamed_reply_text_notes_images_no_client_can_load(in_progress: bool) -> None:
+    """Progress edits, live frames, and the final write all show the note for a made-up image link."""
+    display_text, _ = streaming_mod._visible_text("Logo: ![logo](att_1)", in_progress=in_progress)
+
+    assert display_text == "Logo: \u26a0\ufe0f Image not sent: logo (no uploaded file)"

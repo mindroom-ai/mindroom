@@ -16,7 +16,7 @@ from mindroom.interactive_models import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
-from mindroom.matrix.message_builder import build_reaction_content
+from mindroom.matrix.message_builder import build_reaction_content, replace_unsendable_images
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -441,6 +441,8 @@ def parse_and_format_interactive(
         The formatted response and any prompt metadata extracted from it.
 
     """
+    # Every agent reply and matrix_message text passes here, so an image no client can load becomes a note here once.
+    response_text = replace_unsendable_images(response_text)
     matches = _interactive_block_matches(response_text)
 
     if not matches:
