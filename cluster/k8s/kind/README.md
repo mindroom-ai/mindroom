@@ -152,6 +152,9 @@ kubectl logs -n mindroom-staging -l app=platform-frontend -f
 
 # Deploy and smoke-test a real MindRoom instance
 python -m cluster.k8s.kind.smoke_instance
+
+# Smoke-test a Kubernetes worker with tailnet SSH: its Service's ports and its sshd
+python -m cluster.k8s.kind.smoke_tailnet_ssh_worker
 ```
 
 ## Clean Up
@@ -169,6 +172,7 @@ kind delete cluster --name mindroom
 - `build_load_images.sh` - Build and load platform + MindRoom Docker images
 - `install_platform.sh` - Deploy platform via Helm
 - `smoke_instance.py` - Deploy and verify a MindRoom instance
+- `smoke_tailnet_ssh_worker.py` - Start a Kubernetes worker with and without the tailnet SSH mark and verify its Service and sshd, by running `tailnet_ssh_worker_probe.py` in a pod
 - `start-fresh.sh` - Complete setup from scratch
 - `setup-local-access.sh` - Configure ingress for local domains
 - `test-access.sh` - Test all access methods
