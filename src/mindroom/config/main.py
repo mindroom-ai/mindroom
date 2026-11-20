@@ -148,6 +148,7 @@ from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
 from mindroom.room_reply_modes import resolve_room_reply_mode_override
 from mindroom.room_thread_modes import resolve_room_thread_mode_override
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.tailnet_ssh.eligibility import config_error as tailnet_ssh_config_error
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import control_plane_owns_private_templates, validate_workspace_template_dir
@@ -745,13 +746,8 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_tailnet_ssh_agents(self) -> Config:
         """Require every agent with tailnet_ssh to have a worker and workspace per person."""
-        if not any(agent.tailnet_ssh for agent in self.agents.values()):
-            return self
-        # why-lazy: the eligibility rule imports authorization, which loads nio and Matrix modules config import must not.
-        from mindroom.tailnet_ssh.eligibility import config_error  # noqa: PLC0415
-
         for agent_name in self.agents:
-            if (error := config_error(self, agent_name)) is not None:
+            if (error := tailnet_ssh_config_error(self, agent_name)) is not None:
                 raise ValueError(error)
         return self
 

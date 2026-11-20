@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -334,19 +333,6 @@ def test_empty_tailnet_ssh_section_is_left_out_of_authored_config(tmp_path: Path
     config = _load(_paths(tmp_path), data)
     assert config.tailnet_ssh.logins == {}
     assert "tailnet_ssh" not in config.authored_model_dump()
-
-
-def test_config_without_opted_in_agents_skips_the_eligibility_import(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The rule pulls in authorization and Matrix modules, which a config no agent opts in from never needs."""
-    monkeypatch.setitem(sys.modules, "mindroom.tailnet_ssh.eligibility", None)
-    data = _data()
-    data["agents"] = {"plain": _DATA["agents"]["plain"]}
-    assert _load(_paths(tmp_path), data).agents["plain"].tailnet_ssh is False
-    with pytest.raises(ImportError):
-        _load(_paths(tmp_path), _data())
 
 
 def _launch(config: Config) -> WorkerLaunchConfig:

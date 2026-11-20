@@ -12,7 +12,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.access_policy import resolve_responder_access
-from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.config.resolution import agent_policy
 from mindroom.matrix_identifiers import is_concrete_matrix_user_id
 from mindroom.shared_directories.store import is_shareable_agent, load_shared_directories, shared_directory_access
@@ -105,6 +104,10 @@ def link_ineligibility(
     membership_index: AgentReplyMembershipIndex,
 ) -> Ineligible | None:
     """Return the first condition a link of ``requester_id`` to ``agent_name`` over ``worker_key`` fails, or None."""
+    # why-lazy: authorization loads nio; the worker backends import this module for the launch rule, and the
+    # sandbox runner imports them.
+    from mindroom.authorization import is_sender_allowed_for_responder  # noqa: PLC0415
+
     if not worker_backend_kind(runtime_paths).dedicated:
         return Ineligible("backend")
     agent = config.agents.get(agent_name)
