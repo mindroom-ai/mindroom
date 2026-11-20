@@ -32,8 +32,20 @@ from mindroom.api.tailnet_ssh_gateway import (
     tailnet_ssh_status,
 )
 from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.runtime_env_policy import isolated_worker_runtime_env, public_worker_startup_env
+from mindroom.constants import (
+    RuntimePaths,
+    is_workspace_env_overlay_name_allowed,
+    resolve_runtime_paths,
+    shell_extra_env_values,
+)
+from mindroom.runtime_env_policy import (
+    is_trusted_tool_runtime_env_file_name,
+    is_trusted_tool_runtime_process_env_name,
+    isolated_worker_runtime_env,
+    public_worker_startup_env,
+    sandbox_runner_startup_process_env,
+    worker_extra_env,
+)
 from mindroom.tailnet_ssh.links import ConnectRefused, GatewayStatus, LinkStatus, resolve_target
 from mindroom.tailnet_ssh.store import Link, new_link, update_links
 from mindroom.workers.backend import WorkerBackend
@@ -394,10 +406,24 @@ async def test_listener_port_defaults_to_8769(
     ]
 
 
-def test_gateway_token_never_reaches_a_worker_env() -> None:
-    """Neither a worker's startup manifest nor its runtime env carries the gateway's token."""
+@pytest.mark.parametrize("pattern", ["MINDROOM_*", "*_TOKEN", "*", TOKEN_ENV])
+def test_gateway_token_never_reaches_a_worker_env(pattern: str) -> None:
+    """No worker's startup manifest, runtime env, or extra env carries the gateway's token, nor does a tool's env.
+
+    A shell passthrough pattern an operator sets gives an agent's shell the other values it names, never the token.
+    """
     assert public_worker_startup_env({TOKEN_ENV: "t"}) == {}
     assert isolated_worker_runtime_env({TOKEN_ENV: "t"}) == {}
+    assert worker_extra_env({TOKEN_ENV: "t"}) == {}
+    assert sandbox_runner_startup_process_env({TOKEN_ENV: "t"}) == {}
+    assert not is_trusted_tool_runtime_env_file_name(TOKEN_ENV)
+    assert not is_trusted_tool_runtime_process_env_name(TOKEN_ENV)
+    assert not is_workspace_env_overlay_name_allowed(TOKEN_ENV)
+
+    env = {TOKEN_ENV: "t", "MINDROOM_SERVICE_TOKEN": "passed"}
+    passed = shell_extra_env_values(extra_env_passthrough=f"MINDROOM_SERVICE_TOKEN,{pattern}", process_env=env)
+
+    assert dict(passed) == {"MINDROOM_SERVICE_TOKEN": "passed"}
 
 
 def test_only_a_fresh_report_with_open_connections_holds_a_worker(api_app: FastAPI) -> None:
