@@ -684,6 +684,26 @@ async def test_operator_link_without_login_refuses_everyone(
 
 
 @pytest.mark.asyncio
+async def test_an_empty_operator_login_admits_no_loginless_peer(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty login is no login: a tagged device, whose login the gateway reports as empty, is refused."""
+    config.tailnet_ssh.logins[ALICE] = ""
+    link = _enrolled()
+    _store(paths, link)
+    manager = _wire_connect(monkeypatch, tmp_path, link)
+
+    with pytest.raises(ConnectRefused) as refused:
+        await _connect(config, paths, link.id, "", _operator_status(operator_sync_at=NOW))
+
+    assert refused.value.status_code == 403
+    assert manager.calls == []
+
+
+@pytest.mark.asyncio
 async def test_connect_order(
     config: Config,
     paths: RuntimePaths,

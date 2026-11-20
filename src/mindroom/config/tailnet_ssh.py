@@ -61,7 +61,7 @@ class TailnetSshConfig(BaseModel):
 
     logins: dict[str, str] = Field(
         default_factory=dict,
-        description="The Tailscale login, such as bas@github, each person's operator keys admit from their tailnet",
+        description="With an operator key: the Tailscale login, such as bas@github, each person's link admits",
         json_schema_extra=dashboard_hint(key_placeholder="@alice:example.org"),
     )
     authorized_keys: dict[str, list[str]] = Field(
@@ -74,6 +74,11 @@ class TailnetSshConfig(BaseModel):
     @classmethod
     def _validate_logins(cls, value: dict[str, str]) -> dict[str, str]:
         validate_concrete_matrix_user_ids(list(value), field_name="tailnet_ssh.logins")
+        # A tagged device has an empty login, so an empty value would admit every tagged device.
+        blank = sorted(user_id for user_id, login in value.items() if not login.strip())
+        if blank:
+            msg = f"tailnet_ssh.logins needs a Tailscale login for {', '.join(blank)}, not an empty value."
+            raise ValueError(msg)
         return value
 
     @field_validator("authorized_keys")

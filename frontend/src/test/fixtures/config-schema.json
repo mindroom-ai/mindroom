@@ -5444,7 +5444,7 @@
             "type": "string"
           },
           "default": {},
-          "description": "The Tailscale login, such as bas@github, each person's operator keys admit from their tailnet",
+          "description": "With an operator key: the Tailscale login, such as bas@github, each person's link admits",
           "title": "Logins",
           "type": "object",
           "x-mindroom": {

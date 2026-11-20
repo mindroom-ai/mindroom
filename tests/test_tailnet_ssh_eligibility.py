@@ -319,6 +319,8 @@ def test_config_authorized_keys_are_normalized_and_keyed_by_concrete_ids(tmp_pat
     for section in (
         {"authorized_keys": {"@*:example.org": [key]}},
         {"logins": {"@*:example.org": "everyone@github"}},
+        {"logins": {ALICE: ""}},
+        {"logins": {ALICE: "  "}},
         {"authorized_keys": {ALICE: ["-----BEGIN OPENSSH PRIVATE KEY-----"]}},
         {"unknown": {}},
     ):

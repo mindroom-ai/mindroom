@@ -375,7 +375,7 @@ def _admit(
     """Check a connection, wake the link's worker, and write sshd's files; all that precedes starting sshd. Blocking."""
     link = _on_link(read_links(runtime_paths), link_id)
     allowed_login = _allowed_login(config, status.report.enrollment, link)
-    if allowed_login is None or peer_login != allowed_login:
+    if not allowed_login or peer_login != allowed_login:
         raise ConnectRefused(403, "This link admits another Tailscale login.")
     ineligible = link_ineligibility(
         config,
