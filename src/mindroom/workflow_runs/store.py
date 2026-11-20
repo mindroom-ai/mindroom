@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, fields, replace
 from typing import TYPE_CHECKING, Any
 
+from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.script_runs.models import utc_timestamp
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
@@ -201,10 +201,10 @@ class WorkflowRunStore:
         """Record how *generation* of a node ended; false and no change when the node has moved on."""
         with self._write_transaction() as connection:
             saved = connection.execute(
-                "SELECT seq FROM workflow_nodes WHERE run_id = ? AND key = ? AND generation = ?",
+                "SELECT seq, result_file FROM workflow_nodes WHERE run_id = ? AND key = ? AND generation = ?",
                 (run_id, key, generation),
             ).fetchone()
-            if saved is None:
+            if saved is None or saved["result_file"] is not None:
                 return False
             stored, result_file = self._inline_result(run_id, saved["seq"], generation, result)
             connection.execute(
@@ -283,17 +283,19 @@ class WorkflowRunStore:
         return len(rows)
 
     def _inline_result(self, run_id: str, seq: int, generation: int, result: object) -> tuple[object, str | None]:
-        """Return the result to keep in the row and, when it was too large, the file that holds all of it."""
+        """Return the result to keep in the row and, when it was too large, the file that holds all of it.
+
+        The file is published whole and durably before the caller commits the row that names it.
+        Callers never ask for the file of a row that is already committed with one.
+        """
         encoded = _dumps(result)  # ASCII, so its length is its size in bytes
         if len(encoded) <= _MAX_INLINE_RESULT_BYTES:
             return result, None
         result_file = f"results/{run_id}/{seq}-{generation}.json"
         path = self.directory / result_file
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="ascii") as file:
-            file.write(encoded)
-            file.flush()
-            os.fsync(file.fileno())
+        for directory in (path.parent.parent, path.parent):
+            create_directory_durable(directory, mode=0o700)
+        write_json_file_durable(path, result, strict_atomic_replace=True)
         return encoded[:_RESULT_PREVIEW_BYTES], result_file
 
     def _select_runs(self, where: str, params: Iterable[object]) -> list[WorkflowRun]:

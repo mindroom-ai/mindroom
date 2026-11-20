@@ -365,6 +365,49 @@ def test_large_result_spills_to_a_file_and_prune_removes_it(tmp_path: Path) -> N
     assert not (store.directory / "results" / node.run_id).exists()
 
 
+def test_settling_again_never_touches_a_committed_spill(tmp_path: Path) -> None:
+    """A row that names a spill file keeps that file and its preview, whatever a later settlement brings."""
+    store, node = _store_with_node(tmp_path)
+    first = {"text": "a" * (9 * 1024 * 1024)}
+    assert store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result=first)
+    settled = _saved(store)
+    assert settled.result_file is not None
+    spilled = store.directory / settled.result_file
+
+    second = {"text": "b" * (9 * 1024 * 1024)}
+    assert not store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result=second)
+    assert not store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.FAILED, error={"kind": "late"})
+    assert json.loads(spilled.read_text()) == first
+    assert _saved(store) == settled
+
+
+def test_failed_spill_write_publishes_no_file_and_no_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A spill appears under its name only whole, and the row names it only after that."""
+    store, first = _store_with_node(tmp_path)
+    big = {"text": "a" * (9 * 1024 * 1024)}
+    assert store.settle_node(first.run_id, first.key, 1, state=WorkflowNodeState.COMPLETED, result=big)
+    node = store.put_node(_node(key="@1", state=WorkflowNodeState.RUNNING))
+    results = store.directory / "results" / node.run_id
+
+    def refuse(_fd: int) -> None:
+        msg = "placeholder disk failure"
+        raise OSError(msg)
+
+    with monkeypatch.context() as patched:
+        patched.setattr("os.fsync", refuse)
+        with pytest.raises(OSError, match="placeholder disk failure"):
+            store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result=big)
+    assert [path.name for path in results.iterdir()] == ["1-1.json"]
+    assert _saved(store, "@1") == node
+
+    assert store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result=big)
+    assert json.loads((results / "2-1.json").read_text()) == big
+    assert sorted(path.name for path in results.iterdir()) == ["1-1.json", "2-1.json"]
+
+
 def test_prune_removes_only_old_finished_runs(tmp_path: Path) -> None:
     """Prune takes a finished run's rows and leaves newer and unfinished runs whole."""
     store = WorkflowRunStore(tmp_path / "w.sqlite3")
