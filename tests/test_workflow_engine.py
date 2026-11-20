@@ -110,7 +110,8 @@ async def test_launch_starts_the_first_attempt_with_the_workflow_limits(stack: W
 
     assert (run.state, run.attempt, run.script_run_id) == (WorkflowRunState.RUNNING, 1, stack.attempt.run_id)
     assert stack.attempt.workflow_run_id == run.run_id
-    assert stack.scripts.limits == [ScriptRunLimits(max_concurrent_runs=8, max_tool_calls_per_minute=600)]
+    # The store limits the owner's runs when one is reserved, so the attempt carries no run limit of its own.
+    assert stack.scripts.limits == [ScriptRunLimits(max_tool_calls_per_minute=600)]
 
 
 @pytest.mark.asyncio

@@ -147,10 +147,7 @@ class WorkflowEngine:
                     source=run.source,
                     workflow_run_id=run_id,
                     resource_profile=cast("ScriptResourceProfileName | None", run.resource_profile),
-                    limits=ScriptRunLimits(
-                        max_concurrent_runs=limits.max_concurrent_runs,
-                        max_tool_calls_per_minute=limits.max_tool_calls_per_minute,
-                    ),
+                    limits=ScriptRunLimits(max_tool_calls_per_minute=limits.max_tool_calls_per_minute),
                 )
             except Exception as exc:
                 logger.warning("workflow_launch_refused", run_id=run_id, error=str(exc))
