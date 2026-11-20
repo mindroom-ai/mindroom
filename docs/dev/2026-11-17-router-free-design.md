@@ -102,6 +102,7 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     A prompt over 16 KiB is left out unless it is a scheduled task's, to keep the route a small event.
     The responder's current message is that prompt, and the messages the route names are left out of the thread history beside it.
     For a route without a `body` (an older or a very large one) the responder reads each named message by its event ID, and when it cannot read one it starts no turn and leaves the route pending.
+    It reads each as ingress reads a message: a long text sent as a file is read whole, and a bundled replacement gives its sender's latest revision.
     No model is ever sent a stand-in text.
     Only the responder a route names processes it: every other bot settles it unread, having run its hooks for the person's own message.
     The steward routes under `router.access` alone, so a candidate steward whose own access denies the person still routes the person's message, and answers it itself, runs the person's commands and runs its own `message:received` hooks only when its own access allows.
