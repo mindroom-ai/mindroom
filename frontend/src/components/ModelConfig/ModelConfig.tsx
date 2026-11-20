@@ -14,6 +14,7 @@ import {
   createSortedRowModel,
   rowSortingFeature,
   sortFn_alphanumeric,
+  sortFn_basic,
   sortFn_text,
   tableFeatures,
   useTable,
@@ -419,12 +420,37 @@ function getKeyStatusDisplay(
   };
 }
 
-// Sorting resolves the default "auto" sort function only among registered ones: alphanumeric for values with digits, else text.
 const modelTableFeatures = tableFeatures({
   rowSortingFeature,
   sortedRowModel: createSortedRowModel(),
-  sortFns: { alphanumeric: sortFn_alphanumeric, text: sortFn_text },
+  sortFns: {
+    alphanumeric: sortFn_alphanumeric,
+    basic: sortFn_basic,
+    text: sortFn_text,
+  },
 });
+
+const SPLIT_DIGITS = /([0-9]+)/;
+
+/**
+ * Pick the sort function TanStack Table 8 picked on its own, so the models keep their order.
+ * It sampled only the rows after the tenth, so with ten models or fewer it compared the raw values (case-sensitive,
+ * `model-10` before `model-2`); past that, values with digits sort naturally and the rest ignore case.
+ */
+function sortFnFor<TValue>(
+  rows: readonly ModelRowData[],
+  value: (row: ModelRowData) => TValue,
+): "alphanumeric" | "basic" | "text" {
+  const sampled = rows.slice(10).map(value);
+  if (
+    sampled.some(
+      (item) => typeof item === "string" && item.split(SPLIT_DIGITS).length > 1,
+    )
+  ) {
+    return "alphanumeric";
+  }
+  return sampled.some((item) => typeof item === "string") ? "text" : "basic";
+}
 
 function SortableHeader({
   label,
@@ -1451,6 +1477,7 @@ export function ModelConfig() {
   const columns: ColumnDef<typeof modelTableFeatures, ModelRowData>[] = [
     {
       accessorKey: "modelName",
+      sortFn: sortFnFor(rows, (row) => row.modelName),
       header: ({ column }) => <SortableHeader label="Name" column={column} />,
       cell: ({ row }) => {
         const isEditing = editingRowId === row.original.modelName && rowDraft;
@@ -1488,6 +1515,7 @@ export function ModelConfig() {
     {
       id: "provider",
       accessorFn: (row) => row.providerName,
+      sortFn: sortFnFor(rows, (row) => row.providerName),
       header: ({ column }) => (
         <SortableHeader label="Provider" column={column} />
       ),
@@ -1545,6 +1573,7 @@ export function ModelConfig() {
     },
     {
       accessorKey: "modelId",
+      sortFn: sortFnFor(rows, (row) => row.modelId),
       header: ({ column }) => (
         <SortableHeader label="Model ID" column={column} />
       ),
@@ -1609,6 +1638,7 @@ export function ModelConfig() {
     {
       id: "apiKey",
       accessorFn: (row) => row.keyDisplay?.keyId || "",
+      sortFn: sortFnFor(rows, (row) => row.keyDisplay?.keyId || ""),
       header: ({ column }) => (
         <SortableHeader label="API Key" column={column} />
       ),
