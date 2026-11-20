@@ -115,6 +115,9 @@ class PersonalRoomLifecycle:
     # A live join and a reconciliation pass can both reach one user; only one may register the account.
     _provisioning: set[tuple[str, str]] = field(default_factory=set, init=False)
     _reconciled: bool = field(default=False, init=False)
+    # The onboarding rooms this bot stewarded when the pass that set ``_reconciled`` began; a room it takes over after
+    # is read by another pass.
+    _reconciled_rooms: frozenset[str] = field(default=frozenset(), init=False)
     _config_revision: int = field(default=0, init=False)
     _completed_candidates: set[tuple[str, str]] = field(default_factory=set, init=False)
     _candidate_backoff: dict[tuple[str, str], _CandidateBackoff] = field(default_factory=dict, init=False)
@@ -135,13 +138,16 @@ class PersonalRoomLifecycle:
     _next_reconciliation_at: float = field(default=0.0, init=False)
     _rerun_after_pass: bool = field(default=False, init=False)
 
-    @property
-    def _observes_onboarding_joins(self) -> bool:
-        """Whether this bot stewards an onboarding room, whose recorded intent and backfill its passes settle."""
+    def _stewarded_onboarding_rooms(self) -> frozenset[str]:
+        """The onboarding rooms this bot stewards, whose recorded intent and backfill its passes settle."""
         settings = self.runtime.config.personal_rooms
-        return settings is not None and any(
-            self.is_steward(room_id) for room_id in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
-        )
+        if settings is None:
+            return frozenset()
+        return frozenset(filter(self.is_steward, resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)))
+
+    def _settled(self) -> bool:
+        """Whether the last pass settled every onboarding room this bot stewards now."""
+        return self._reconciled and self._stewarded_onboarding_rooms() <= self._reconciled_rooms
 
     def onboards_from(self, room_id: str) -> bool:
         """Whether the room is a configured onboarding room, whose joins every bot there enters into their claim."""
@@ -214,8 +220,8 @@ class PersonalRoomLifecycle:
             self._retry_candidates.clear()
             return
         if (
-            self._reconciled
-            or not (self._observes_onboarding_joins or self._retry_candidates)
+            self._settled()
+            or not (self._stewarded_onboarding_rooms() or self._retry_candidates)
             or self._reconciliation_task is not None
             or monotonic() < self._next_reconciliation_at
         ):
@@ -558,8 +564,8 @@ class PersonalRoomLifecycle:
         """
         revision = self._config_revision
         settings = self.runtime.config.personal_rooms
-        observes = self._observes_onboarding_joins
-        if self._reconciled or not (observes or self._retry_candidates) or settings is None:
+        stewarded = self._stewarded_onboarding_rooms()
+        if self._settled() or not (stewarded or self._retry_candidates) or settings is None:
             return
         if not self._reconciliation_ready(settings):
             return
@@ -582,8 +588,8 @@ class PersonalRoomLifecycle:
             if not await self._reconcile_candidate(candidate, revision):
                 failed = True
         # A live trigger that failed during this pass is still owed a retry, and a pass for retries alone read no lobby.
-        if observes and not failed and not self._retry_candidates and revision == self._config_revision:
-            self._reconciled = True
+        if stewarded and not failed and not self._retry_candidates and revision == self._config_revision:
+            self._reconciled, self._reconciled_rooms = True, stewarded
 
     async def _reconcile_candidate(self, candidate: tuple[str, str], revision: int) -> bool:
         """Retry one candidate when due or its personal room's membership changed; False leaves it pending."""

@@ -17,6 +17,7 @@ import asyncio
 import itertools
 import time
 from typing import TYPE_CHECKING, NamedTuple, cast, get_args
+from weakref import WeakValueDictionary
 
 from mindroom.config.agent import RoomReplyMode
 from mindroom.constants import tracking_dir
@@ -64,7 +65,7 @@ class ReplyModeRead(NamedTuple):
 _known: dict[tuple[Path, str], _Copy] = {}
 _NEVER_READ = _Copy(None, 0, _UNCONFIRMED)
 # One room's writes run one at a time, so an older runtime's override moves into it once and after no newer write.
-_writes: dict[tuple[Path, str], asyncio.Lock] = {}
+_writes: WeakValueDictionary[tuple[Path, str], asyncio.Lock] = WeakValueDictionary()
 
 
 def _key(runtime_paths: RuntimePaths, room_id: str) -> tuple[Path, str]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -12,6 +13,7 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom import room_modes
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
@@ -33,6 +35,7 @@ from mindroom.room_thread_modes import (
 )
 from mindroom.runtime_shutdown import ShutdownBudget
 from mindroom.steward_duties import StewardDuties, StewardDutiesDeps, reconcile_held_room_states
+from tests.access_schema_support import member_event
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -485,6 +488,15 @@ async def test_a_refused_mode_change_does_not_undo_one_made_meanwhile(room_state
 
 
 @pytest.mark.asyncio
+async def test_a_finished_thread_mode_change_keeps_no_lock_for_its_room(room_state: RoomState) -> None:
+    """A room's change lock lives only while a change holds it, so the locks do not grow with every room changed."""
+    config, paths, _, _, client = room_state
+    assert await change_room_thread_mode(client, config, paths, ROOM_ID, "thread") is True
+    gc.collect()
+    assert (str(paths.storage_root), ROOM_ID) not in room_modes._CHANGES
+
+
+@pytest.mark.asyncio
 async def test_live_config_reload_publishes_without_room_setup(room_state: RoomState) -> None:
     """Mode edits apply live, so a reload with no restarts still updates client state."""
     config, paths, _, events, client = room_state
@@ -776,7 +788,7 @@ def _router_duties(state: RoomState) -> StewardDuties:
         personal_rooms=MagicMock(),
     )
     deps.hook_context.registry.has_hooks.return_value = False
-    deps.personal_rooms._observes_onboarding_joins = False
+    deps.personal_rooms.onboards_from.return_value = False
     deps.runtime.orchestrator.room_steward.return_value = MagicMock(agent_name=ROUTER_AGENT_NAME)
     return StewardDuties(deps)
 
@@ -789,19 +801,23 @@ def _publish_joined_rooms(duties: StewardDuties) -> asyncio.Task[None]:
 
 
 def _membership_event(user_id: str, membership: str, previous: str) -> nio.RoomMemberEvent:
-    event = nio.RoomMemberEvent.from_dict(
-        {
-            "type": "m.room.member",
-            "event_id": f"${membership}",
-            "origin_server_ts": 1,
-            "sender": user_id,
-            "state_key": user_id,
-            "content": {"membership": membership},
-            "unsigned": {"prev_content": {"membership": previous}},
-        },
+    return member_event(user_id, membership, previous, event_id=f"${membership}")
+
+
+@pytest.mark.asyncio
+async def test_the_owner_duties_these_tests_build_onboard_from_no_room(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no join hooks and no onboarding room, a person's join takes no join-baseline path."""
+    client = room_state[4]
+    emit = AsyncMock()
+    monkeypatch.setattr("mindroom.steward_duties.emit_room_member_join_at_least_once", emit)
+    await _router_duties(room_state).member_event(
+        client.rooms[ROOM_ID],
+        _membership_event("@alice:localhost", "join", "leave"),
     )
-    assert isinstance(event, nio.RoomMemberEvent)
-    return event
+    emit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

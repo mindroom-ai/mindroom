@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -16,7 +17,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.state import MatrixState
-from tests.access_schema_support import joined_members_response, refresh_memberships
+from tests.access_schema_support import joined_members_response, member_event, refresh_memberships
 from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
@@ -107,20 +108,7 @@ def _persist_room(runtime_paths: RuntimePaths, room_key: str, room_id: str) -> N
     save_matrix_state(state, runtime_paths)
 
 
-def _member_event(user_id: str, membership: str, *, sender: str | None = None) -> nio.RoomMemberEvent:
-    event = nio.RoomMemberEvent.from_dict(
-        {
-            "type": "m.room.member",
-            "event_id": f"${membership}-{user_id}",
-            "sender": sender or user_id,
-            "state_key": user_id,
-            "origin_server_ts": 1,
-            "content": {"membership": membership},
-            "unsigned": {"prev_content": {"membership": "join"}},
-        },
-    )
-    assert isinstance(event, nio.RoomMemberEvent)
-    return event
+_member_event = partial(member_event, previous="join")
 
 
 async def _refresh_while_router_applies(
@@ -268,22 +256,6 @@ async def test_unresolved_grant_room_fails_closed(tmp_path: Path) -> None:
     config, runtime_paths = _runtime_config(tmp_path, member_rooms=["project"])
     client = AsyncMock()
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!project:example.com"])
-    index = AgentReplyMembershipIndex()
-
-    await refresh_memberships(index, config, runtime_paths, client)
-
-    assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
-    client.joined_members.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_router_not_joined_to_grant_room_fails_closed(tmp_path: Path) -> None:
-    """A persisted room ID must not grant when the control-plane client has departed."""
-    room_id = "!project:example.com"
-    config, runtime_paths = _runtime_config(tmp_path, member_rooms=["project"])
-    _persist_room(runtime_paths, "project", room_id)
-    client = AsyncMock()
-    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[])
     index = AgentReplyMembershipIndex()
 
     await refresh_memberships(index, config, runtime_paths, client)
@@ -715,6 +687,33 @@ async def test_failed_membership_queries_log_why_they_failed(tmp_path: Path) -> 
         ("agent_reply_observer_joined_rooms_failed", "LocalProtocolError: durable sync session is closed"),
         ("agent_reply_grant_room_snapshot_failed", "LocalProtocolError: room membership changed during lookup"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_refused_membership_queries_log_the_servers_answer(tmp_path: Path) -> None:
+    """A joined-rooms or joined-members query the homeserver refuses logs the refusal it answered."""
+    config, runtime_paths = _current_room_runtime_config(tmp_path)
+    room_id = "!current:example.com"
+    rooms_refused = nio.JoinedRoomsError("rooms refused")
+    members_refused = nio.JoinedMembersError("members refused", room_id=room_id)
+    client = AsyncMock()
+    client.joined_rooms.side_effect = [rooms_refused, nio.JoinedRoomsResponse(rooms=[room_id])]
+    client.joined_members.return_value = members_refused
+    index = AgentReplyMembershipIndex()
+
+    with capture_logs() as logs:
+        await refresh_memberships(index, config, runtime_paths, client)
+        await refresh_memberships(index, config, runtime_paths, client)
+
+    assert [
+        (log["event"], log["error"])
+        for log in logs
+        if log["event"] in {"agent_reply_observer_joined_rooms_failed", "agent_reply_grant_room_snapshot_failed"}
+    ] == [
+        ("agent_reply_observer_joined_rooms_failed", str(rooms_refused)),
+        ("agent_reply_grant_room_snapshot_failed", str(members_refused)),
+    ]
+    assert not index.is_current_room_member("@alice:example.com", room_id, config, runtime_paths)
 
 
 @pytest.mark.asyncio

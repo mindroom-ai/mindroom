@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import time
 from contextlib import asynccontextmanager, contextmanager
@@ -15,6 +16,7 @@ import nio
 import pytest
 from pydantic import ValidationError
 
+from mindroom import room_reply_modes
 from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -236,6 +238,15 @@ async def test_the_override_is_the_rooms_reply_mode_setting(tmp_path: Path) -> N
     with patch("mindroom.room_reply_modes.time.monotonic", return_value=time.monotonic() + 3600):
         assert not (await _refresh(client, runtime_paths, ROOM_ID)).ok
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
+
+
+@pytest.mark.asyncio
+async def test_a_finished_write_keeps_no_lock_for_its_room(tmp_path: Path) -> None:
+    """A room's write lock lives only while a write holds it, so the locks do not grow with every room written."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    assert await write_room_reply_mode(_Homeserver().client(), runtime_paths, ROOM_ID, "mentions")
+    gc.collect()
+    assert room_reply_modes._key(runtime_paths, ROOM_ID) not in room_reply_modes._writes
 
 
 @pytest.mark.asyncio

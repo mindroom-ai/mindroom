@@ -299,6 +299,22 @@ def service(tmp_path: Path, server: MatrixServer, monkeypatch: pytest.MonkeyPatc
     return PersonalRoomService("helper", runtime, paths, AsyncMock(return_value=True))
 
 
+def _lifecycle(service: PersonalRoomService, *, stewards_lobby: bool = False) -> PersonalRoomLifecycle:
+    """Return a lifecycle on ``service``: the lobby's steward with a synced target, else a bot with neither."""
+    return PersonalRoomLifecycle(
+        agent_name="router" if stewards_lobby else "helper",
+        runtime=service.runtime,
+        runtime_paths=service.runtime_paths,
+        service=service,
+        lookup_target=lambda _agent: PersonalRoomTarget(service, True) if stewards_lobby else None,
+        config_reload=Mock(),
+        report_membership_change=Mock(),
+        is_steward=lambda _room_id: stewards_lobby,
+        poster_client=lambda _room_id, _device_id: service.runtime.client,
+        owner_client=lambda: service.runtime.client,
+    )
+
+
 def move_onboarding_to_new_room(owner: PersonalRoomService, server: MatrixServer) -> None:
     """Keep the requester eligible after replacing the original onboarding room."""
     owner.runtime.config.rooms["new"] = owner.runtime.config.rooms["lobby"].model_copy()
@@ -330,18 +346,7 @@ async def test_validated_replacement_source_completes_deferred_welcome(
 
     server.set_member(room_id, "@alice:localhost", "join")
     if owner_event_processed:
-        lifecycle = PersonalRoomLifecycle(
-            "helper",
-            owner.runtime,
-            owner.runtime_paths,
-            owner,
-            lambda _: None,
-            Mock(),
-            Mock(),
-            lambda _room_id: False,
-            lambda _room_id, _device_id: owner.runtime.client,
-            lambda: owner.runtime.client,
-        )
+        lifecycle = _lifecycle(owner)
         await lifecycle.member_event(
             nio.MatrixRoom(room_id, server.user_id),
             _room_member_event(prev_membership="invite"),
@@ -350,18 +355,7 @@ async def test_validated_replacement_source_completes_deferred_welcome(
 
     restarted = service(tmp_path, server, monkeypatch, welcome_dispatch=True, welcome="Changed {user}")
     restarted.runtime.config = owner.runtime.config
-    router = PersonalRoomLifecycle(
-        "router",
-        restarted.runtime,
-        restarted.runtime_paths,
-        restarted,
-        lambda _: PersonalRoomTarget(restarted, True),
-        Mock(),
-        Mock(),
-        lambda _room_id: True,
-        lambda _room_id, _device_id: restarted.runtime.client,
-        lambda: restarted.runtime.client,
-    )
+    router = _lifecycle(restarted, stewards_lobby=True)
     await router._reconcile()
     record = read_personal_room(path)
     assert record.source_room_id == "!lobby:localhost"
@@ -745,18 +739,7 @@ async def test_a_pending_guest_removal_retry_does_not_delay_shutdown(
     server.fail_kick = True
     await owner.guest_membership_event(room, "@bob:localhost", "invite")
     retry = owner._guest_removal_retries[room_id]
-    lifecycle = PersonalRoomLifecycle(
-        agent_name="helper",
-        runtime=owner.runtime,
-        runtime_paths=owner.runtime_paths,
-        service=owner,
-        lookup_target=lambda _agent: None,
-        config_reload=Mock(),
-        report_membership_change=Mock(),
-        is_steward=lambda _room_id: False,
-        poster_client=lambda _room_id, _device_id: owner.runtime.client,
-        owner_client=lambda: owner.runtime.client,
-    )
+    lifecycle = _lifecycle(owner)
 
     await asyncio.wait_for(lifecycle.cancel_reconciliation(timeout_seconds=1), timeout=2)
 
@@ -770,18 +753,7 @@ async def test_the_room_lifecycle_removes_an_invited_person(tmp_path: Path, monk
     server = MatrixServer()
     owner = service(tmp_path, server, monkeypatch, welcome="")
     room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
-    lifecycle = PersonalRoomLifecycle(
-        agent_name="helper",
-        runtime=owner.runtime,
-        runtime_paths=owner.runtime_paths,
-        service=owner,
-        lookup_target=lambda _agent: None,
-        config_reload=Mock(),
-        report_membership_change=Mock(),
-        is_steward=lambda _room_id: False,
-        poster_client=lambda _room_id, _device_id: owner.runtime.client,
-        owner_client=lambda: owner.runtime.client,
-    )
+    lifecycle = _lifecycle(owner)
     room = nio.MatrixRoom(room_id, server.user_id)
     room.add_member("@alice:localhost", None, None)
     room.add_member("@bob:localhost", None, None, invited=True)
@@ -1095,8 +1067,8 @@ async def test_a_guest_the_agent_cannot_remove_settles_the_lobby_join_with_a_war
 @pytest.mark.parametrize(
     ("access_token", "error"),
     [
-        (None, "Personal-room initial join failed: the router's admin join had no access token"),
-        (TEST_PASSWORD, "Personal-room initial join failed: the router's admin join answered HTTP 403 M_FORBIDDEN"),
+        (None, "Personal-room initial join failed: the admin join had no access token"),
+        (TEST_PASSWORD, "Personal-room initial join failed: the admin join answered HTTP 403 M_FORBIDDEN"),
     ],
 )
 async def test_a_refused_initial_join_says_why_in_the_reconciliation_warning(
@@ -1105,7 +1077,7 @@ async def test_a_refused_initial_join_says_why_in_the_reconciliation_warning(
     access_token: str | None,
     error: str,
 ) -> None:
-    """The retried failure names the admin join's HTTP status and errcode, or the router's missing token, and no more."""
+    """The retried failure names the admin join's HTTP status and errcode, or its missing token, and no more."""
     server = MatrixServer()
     owner = service(tmp_path, server, monkeypatch, auto_join_requester=True, welcome="", backfill=True)
     refused = Mock(status=403)
@@ -1114,18 +1086,7 @@ async def test_a_refused_initial_join_says_why_in_the_reconciliation_warning(
     )
     server.send = AsyncMock(return_value=refused)
     server.access_token = access_token
-    router = PersonalRoomLifecycle(
-        "router",
-        owner.runtime,
-        owner.runtime_paths,
-        owner,
-        lambda _: PersonalRoomTarget(owner, True),
-        Mock(),
-        Mock(),
-        lambda _room_id: True,
-        lambda _room_id, _device_id: owner.runtime.client,
-        lambda: owner.runtime.client,
-    )
+    router = _lifecycle(owner, stewards_lobby=True)
 
     with capture_logs() as logs:
         await router._reconcile()
@@ -1564,12 +1525,6 @@ class RouterAccount(MatrixServer):
         self.user_id = "@mindroom_router:localhost"
         self.state = server.state
         self.rooms = {room_id: nio.MatrixRoom(room_id, self.user_id) for room_id in room_ids}
-        self.member_reads: list[str] = []
-
-    async def joined_members(self, room_id: str) -> object:
-        """Record which room's members were read before answering like the shared server."""
-        self.member_reads.append(room_id)
-        return await super().joined_members(room_id)
 
     async def room_put_state(
         self,
@@ -2715,18 +2670,7 @@ async def test_owner_event_retires_initial_join_after_later_invite(
     room_id = "!personal1:localhost"
     path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
     assert read_personal_room(path).initial_join_pending is True
-    lifecycle = PersonalRoomLifecycle(
-        "helper",
-        owner.runtime,
-        owner.runtime_paths,
-        owner,
-        lambda _agent: None,
-        Mock(),
-        Mock(),
-        lambda _room_id: False,
-        lambda _room_id, _device_id: owner.runtime.client,
-        lambda: owner.runtime.client,
-    )
+    lifecycle = _lifecycle(owner)
     server.set_member(room_id, "@alice:localhost", observed_membership)
     event = _room_member_event(membership=observed_membership, prev_membership=previous_membership)
     if observed_membership == "join":
@@ -2764,18 +2708,7 @@ async def test_owner_event_retirement_requires_recorded_room_and_user(
     with pytest.raises(RuntimeError, match="initial join"):
         await owner.ensure("@alice:localhost", "!lobby:localhost", server)
     path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
-    lifecycle = PersonalRoomLifecycle(
-        "helper",
-        owner.runtime,
-        owner.runtime_paths,
-        owner,
-        lambda _agent: None,
-        Mock(),
-        Mock(),
-        lambda _room_id: False,
-        lambda _room_id, _device_id: owner.runtime.client,
-        lambda: owner.runtime.client,
-    )
+    lifecycle = _lifecycle(owner)
     leave = _room_member_event(membership="leave", prev_membership="invite")
     await lifecycle.member_event(nio.MatrixRoom("!other:localhost", server.user_id), leave)
     await lifecycle.member_event(
@@ -2797,18 +2730,7 @@ async def test_unrecorded_owner_event_creates_no_lock_when_feature_disabled(
     owner = service(tmp_path, server, monkeypatch)
     owner.runtime.config.personal_rooms = None
     path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
-    lifecycle = PersonalRoomLifecycle(
-        "helper",
-        owner.runtime,
-        owner.runtime_paths,
-        owner,
-        lambda _agent: None,
-        Mock(),
-        Mock(),
-        lambda _room_id: False,
-        lambda _room_id, _device_id: owner.runtime.client,
-        lambda: owner.runtime.client,
-    )
+    lifecycle = _lifecycle(owner)
     await lifecycle.member_event(
         nio.MatrixRoom("!other:localhost", server.user_id),
         _room_member_event(membership="leave", prev_membership="invite"),
@@ -3325,18 +3247,7 @@ async def test_a_refused_initial_join_counts_when_the_homeserver_joins_the_owner
         return "answered HTTP 403 M_FORBIDDEN"
 
     monkeypatch.setattr("mindroom.matrix.personal_rooms.admin_join_room_user_failure", refused_while_auto_accepted)
-    router = PersonalRoomLifecycle(
-        "router",
-        owner.runtime,
-        owner.runtime_paths,
-        owner,
-        lambda _: PersonalRoomTarget(owner, True),
-        Mock(),
-        Mock(),
-        lambda _room_id: True,
-        lambda _room_id, _device_id: owner.runtime.client,
-        lambda: owner.runtime.client,
-    )
+    router = _lifecycle(owner, stewards_lobby=True)
 
     with capture_logs() as logs:
         await router._reconcile()
@@ -3362,7 +3273,7 @@ async def test_a_refused_initial_join_without_the_owners_join_still_fails(
         AsyncMock(return_value="answered HTTP 403 M_FORBIDDEN"),
     )
 
-    with pytest.raises(RuntimeError, match="the router's admin join answered HTTP 403 M_FORBIDDEN"):
+    with pytest.raises(RuntimeError, match="the admin join answered HTTP 403 M_FORBIDDEN"):
         await owner.ensure("@alice:localhost", "!lobby:localhost", server)
 
     path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
@@ -3442,7 +3353,7 @@ async def test_a_slow_membership_read_still_ends_the_wait_on_time(
 
     server.room_get_state_event = slow_owner_read
 
-    with pytest.raises(RuntimeError, match="the router's admin join answered HTTP 403 M_FORBIDDEN"):
+    with pytest.raises(RuntimeError, match="the admin join answered HTTP 403 M_FORBIDDEN"):
         await asyncio.wait_for(owner.ensure("@alice:localhost", "!lobby:localhost", server), timeout=5)
 
     path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")

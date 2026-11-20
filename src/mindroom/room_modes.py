@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING
+from weakref import WeakValueDictionary
 
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 from mindroom.room_thread_modes import (
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.room_thread_modes import RoomThreadMode
 
-_CHANGES: dict[tuple[str, str], asyncio.Lock] = {}
+_CHANGES: WeakValueDictionary[tuple[str, str], asyncio.Lock] = WeakValueDictionary()
 
 
 async def change_room_thread_mode(
