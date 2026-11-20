@@ -19,6 +19,7 @@ import (
 const (
 	idA = "0123456789abcdef"
 	idB = "fedcba9876543210"
+	idC = "0011223344556677"
 )
 
 // fakePrimary is the primary's internal listener as the gateway sees it: an empty list of links and a 204 for a

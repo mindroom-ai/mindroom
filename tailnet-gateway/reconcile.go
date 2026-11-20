@@ -76,7 +76,7 @@ type Gateway struct {
 
 	// mu guards the maps below; no call to a node, the primary or the disk is made under it, except Observed.
 	mu sync.Mutex
-	// links is what the primary listed last, by link id.
+	// links is what the primary listed last, by link id; a pass replaces it and nothing changes it in place.
 	links map[string]DesiredLink
 	// started says that a pass has started the node of every link listed as on or suspended; until then the
 	// gateway holds none of them, and a report without them would tell the primary they are gone.
@@ -191,15 +191,17 @@ func (g *Gateway) Run(ctx context.Context) {
 // A node the primary does not list is stopped and its state kept, so an empty answer destroys no enrolment, and a
 // pass that cannot read the links returns the error and changes nothing.
 //
-// The removals come last, since a logout may take 10 s: by then every other link has its node and its new row, and
-// the status may be reported.
+// A pass first does what the new rows revoke, before any call to a node, which may take 10 s: the rows are the ones
+// connections are checked against from then on, and the connections of a link that is removing or no longer listed
+// are closed. Then every link that stays gets its node, after which the status may be reported, and the removals
+// come last.
 func (g *Gateway) Reconcile(ctx context.Context) error {
 	answer, err := g.primary.Links(ctx)
 	if err != nil {
 		return err
 	}
 	listed := make(map[string]DesiredLink, len(answer))
-	var removing []DesiredLink
+	var keeping, removing []DesiredLink
 	for _, link := range answer {
 		if !linkID.MatchString(link.ID) {
 			log.Printf("ignoring a link whose id is not 16 hex characters: %q", link.ID)
@@ -207,7 +209,7 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 		}
 		switch link.Desired {
 		case "on", "suspended":
-			g.keep(ctx, link)
+			keeping = append(keeping, link)
 		case "removing":
 			removing = append(removing, link)
 		default:
@@ -218,10 +220,15 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 	}
 
 	g.mu.Lock()
-	var unlisted []string
-	for id := range g.nodes {
-		if _, ok := listed[id]; !ok {
-			unlisted = append(unlisted, id)
+	before := g.links
+	g.links = listed
+	var revoked []net.Conn
+	for id, open := range g.conns {
+		if link, ok := listed[id]; !ok || link.Desired == "removing" {
+			for conn := range open {
+				revoked = append(revoked, conn)
+			}
+			delete(g.conns, id)
 		}
 	}
 	for id := range g.lastError {
@@ -234,7 +241,22 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 			delete(g.removed, id)
 		}
 	}
-	g.links, g.started = listed, true
+	g.mu.Unlock()
+	for _, conn := range revoked {
+		conn.Close()
+	}
+
+	for _, link := range keeping {
+		g.keep(ctx, link, before[link.ID].LoginAfter != link.LoginAfter)
+	}
+	g.mu.Lock()
+	g.started = true
+	var unlisted []string
+	for id := range g.nodes {
+		if _, ok := listed[id]; !ok {
+			unlisted = append(unlisted, id)
+		}
+	}
 	g.mu.Unlock()
 	for _, id := range unlisted {
 		if node := g.drop(id); node != nil {
@@ -257,12 +279,10 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 }
 
 // keep runs the link's node, and asks a node that needs a login for a new login URL when it fell back from running
-// or the link's login_after moved.
-func (g *Gateway) keep(ctx context.Context, link DesiredLink) {
+// or the link's login_after moved since the pass before.
+func (g *Gateway) keep(ctx context.Context, link DesiredLink, moved bool) {
 	g.mu.Lock()
 	node := g.nodes[link.ID]
-	// A link that has a node was listed by the pass that started it.
-	moved := g.links[link.ID].LoginAfter != link.LoginAfter
 	owed := g.relogin[link.ID]
 	g.mu.Unlock()
 	if node == nil {

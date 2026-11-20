@@ -126,6 +126,20 @@ type fakeNodes struct {
 	// logoutHeld and logoutEntered are given to every node started from now on.
 	logoutHeld    chan struct{}
 	logoutEntered chan struct{}
+	// startHeld, when set, holds every start until endStarts closes it; startEntered tells of each one held.
+	startHeld    chan struct{}
+	startEntered chan struct{}
+	endStarts    func()
+}
+
+// holdStarts makes every start of a node wait for the returned release, which the end of the gateway's loop calls
+// too; entered tells of each one that waits.
+func (f *fakeNodes) holdStarts() (entered <-chan struct{}, release func()) {
+	held := make(chan struct{})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.startHeld, f.startEntered, f.endStarts = held, make(chan struct{}, 16), sync.OnceFunc(func() { close(held) })
+	return f.startEntered, f.endStarts
 }
 
 // holdLogouts makes the Logout of every node started from now on wait for the returned release, which the test's
@@ -142,6 +156,10 @@ func (f *fakeNodes) holdLogouts(t *testing.T) (entered <-chan struct{}, release 
 }
 
 func (f *fakeNodes) start(dir, hostname string) (Node, error) {
+	f.mu.Lock()
+	held, entered := f.startHeld, f.startEntered
+	f.mu.Unlock()
+	hold(context.Background(), held, entered)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.startErr != nil {
@@ -300,6 +318,13 @@ func (f *fixtures) start(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		cancel()
+		// A start takes no context, so one still held would hold the loop's end.
+		f.nodes.mu.Lock()
+		endStarts := f.nodes.endStarts
+		f.nodes.mu.Unlock()
+		if endStarts != nil {
+			endStarts()
+		}
 		<-done
 	})
 }
@@ -582,6 +607,46 @@ func TestUnlistedStateIsStoppedAndKept(t *testing.T) {
 	f.reconcile(t)
 	if back := f.nodes.node(t, 2); back.dir != unlisted.dir {
 		t.Errorf("the link came back in %s, want %s", back.dir, unlisted.dir)
+	}
+}
+
+func TestRevokedConnectionsAreClosedBeforeAnyNodeCall(t *testing.T) {
+	f := newFixtures(t, "login")
+	slow := on(idA)
+	f.primary.list(t, slow, on(idB), on(idC))
+	f.run(t)
+	slowNode, removedNode := f.nodes.node(t, 0), f.nodes.node(t, 1)
+	endRelogin := slowNode.holdRelogin(t)
+	f.connect(t, idA)
+	removed, unlisted := f.connect(t, idB), f.connect(t, idC)
+	// The link listed first has a node whose new login does not come back; of the others one is removed and one
+	// is no longer listed.
+	slow.LoginAfter = 200
+	f.primary.list(t, slow, removing(idB))
+
+	f.clock.advance(5 * time.Second)
+	await(t, slowNode.reloginEntered, "the pass that asks the node for a new login")
+
+	if !closed(t, removed) {
+		t.Error("the connection of a link that is removed is open while another link's node is asked for a login")
+	}
+	if !closed(t, unlisted) {
+		t.Error("the connection of a link no longer listed is open while another link's node is asked for a login")
+	}
+	if got := removedNode.called("Logout"); got != 0 {
+		t.Errorf("%d Logout calls before the other link's login came back, want the logout after it", got)
+	}
+	endRelogin()
+	f.clock.settle(t)
+
+	f.gateway.mu.Lock()
+	open := len(f.gateway.conns[idA])
+	f.gateway.mu.Unlock()
+	if open != 1 {
+		t.Errorf("the link that stays on has %d open connections, want its 1", open)
+	}
+	if got := f.gateway.Status()[idB].State; got != "removed" || removedNode.called("Logout") != 1 {
+		t.Errorf("state = %q after %d Logout calls, want the link removed after 1", got, removedNode.called("Logout"))
 	}
 }
 
@@ -928,6 +993,30 @@ func TestStatusThePrimaryDidNotTakeIsPostedOnTheNextPass(t *testing.T) {
 
 	if got := len(f.posted(t)); got != 2 {
 		t.Errorf("%d status posts, want 2: the one refused and one on the pass after it", got)
+	}
+}
+
+func TestNoStatusIsPostedWhileTheFirstNodesStart(t *testing.T) {
+	f := newFixtures(t, "login")
+	starts, endStarts := f.nodes.holdStarts()
+	f.primary.list(t, on(idA), on(idB))
+	f.start(t)
+	await(t, starts, "the start of its first node")
+	f.clock.asleep(t, 1)
+
+	// A report now would hold neither node, and tell the primary both are gone.
+	f.clock.advance(5 * time.Second)
+	f.clock.asleep(t, 1)
+	early := len(f.posted(t))
+	endStarts()
+	f.clock.settle(t)
+
+	posted := f.posted(t)
+	if early != 0 || len(posted) != 1 {
+		t.Fatalf("%d status posts while the first nodes started and %d after, want 0 and 1", early, len(posted))
+	}
+	if links := posted[0]["links"].(map[string]any); links[idA] == nil || links[idB] == nil {
+		t.Errorf("first status post = %v, want both links' nodes", links)
 	}
 }
 
