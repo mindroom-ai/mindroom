@@ -167,6 +167,7 @@ def _room_lifecycle(
             admit_response=MagicMock(),
             on_configured_room_joined=AsyncMock(),
             on_room_joined=AsyncMock(),
+            publish_server_state=AsyncMock(),
             get_conversation_reader=MagicMock(),
             get_agent_bot=agent_bot,
         ),

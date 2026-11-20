@@ -112,6 +112,8 @@ class BotRoomLifecycleDeps:
     on_configured_room_joined: Callable[[str], Awaitable[None]]
     # Every successful join, configured, invited, or listed, so the bot restores the room's schedules.
     on_room_joined: Callable[[str], Awaitable[None]]
+    # Publishes the entity's server state in a room it is in without a membership command.
+    publish_server_state: Callable[[str], Awaitable[None]]
     get_conversation_reader: Callable[[], ConversationReader]
     # Every running agent's bot by name, which a contact request from another deployment needs to post its notice.
     get_agent_bot: Callable[[str], AgentBot | None]
@@ -425,6 +427,7 @@ class BotRoomLifecycle:
             desired_rooms.update(invited_rooms)
         # A room saved for an account that accepts no invite is never joined; one it is in is restored as joined.
         for room_id in sorted(invited_rooms & current_rooms - desired_rooms):
+            await self.deps.publish_server_state(room_id)
             await self._room_joined(room_id)
             await self.deps.on_configured_room_joined(room_id)
 

@@ -35,6 +35,7 @@ from mindroom.hooks.matrix_admin import build_hook_matrix_admin
 from mindroom.logging_config import get_logger
 from mindroom.matrix import client_room_admin, invited_rooms_store
 from mindroom.matrix.client_room_admin import RoomJoinOutcome, invite_to_room
+from mindroom.matrix.event_types import MINDROOM_SERVER_EVENT_TYPE
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     is_inviter_allowed,
@@ -205,6 +206,7 @@ def _invitee_room_lifecycle(
             admit_response=MagicMock(),
             on_configured_room_joined=AsyncMock(),
             on_room_joined=AsyncMock(),
+            publish_server_state=AsyncMock(),
             get_conversation_reader=MagicMock(),
             get_agent_bot=lambda _name: None,
         ),
@@ -2000,6 +2002,11 @@ async def test_owner_does_not_join_a_room_its_saved_invite_record_names(
     assert lifecycle.invited_room_ids() == {"!saved-invite:localhost"}
     # A cold start reads the joined room's state once, so a snooze older than the synced timeline still wakes.
     assert list(snoozes._runtime._snoozes) == [(room_id, "$root") for room_id in joined]
+    # The joined room advertises this start's server, as a membership command would have published it.
+    published = [
+        call.args[0] for call in bot.client.room_put_state.await_args_list if call.args[1] == MINDROOM_SERVER_EVENT_TYPE
+    ]
+    assert published == joined
 
 
 @pytest.mark.asyncio

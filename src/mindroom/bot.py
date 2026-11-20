@@ -376,6 +376,7 @@ class AgentBot:
                 admit_response=self._runtime_view.admission_fence,
                 on_configured_room_joined=self._post_join_room_setup,
                 on_room_joined=self._restore_joined_room,
+                publish_server_state=self._publish_server_state,
                 get_conversation_reader=lambda: self._conversation_reader,
                 get_agent_bot=lambda name: self.orchestrator.agent_bots.get(name),
             ),
@@ -1113,9 +1114,13 @@ class AgentBot:
                 subscribe_awaited_rooms=lambda: subscribe_sliding_rooms(session, self.config, self.rooms),
                 is_authorized=is_authorized,
             )
-        if changed and target_membership == "join" and self.client is not None:
-            await publish_server_state(self.client, room_id, self._server_state_content(self.config))
+        if changed and target_membership == "join":
+            await self._publish_server_state(room_id)
         return changed
+
+    async def _publish_server_state(self, room_id: str) -> None:
+        if self.client is not None:
+            await publish_server_state(self.client, room_id, self._server_state_content(self.config))
 
     def _server_state_content(self, config: Config) -> dict[str, object]:
         """Return the server state this entity publishes under ``config``."""
