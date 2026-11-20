@@ -94,6 +94,7 @@ class WorkflowEngine:
         self._changed: WeakValueDictionary[str, asyncio.Condition] = WeakValueDictionary()
         self._tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._attending: Counter[object] = Counter()
+        self._inline_runs: dict[object, str] = {}
         self._closed = False
         self._launching: dict[asyncio.Task[WorkflowRun], str] = {}
 
@@ -202,8 +203,9 @@ class WorkflowEngine:
     ) -> WorkflowRun:
         """Reserve, launch and wait for a run that is no job, as one of the calls of *origin* that wait for it.
 
-        A cancelled call only stops waiting, and its reservation still ends. When it was the last call and MindRoom
-        is not stopping, nobody is left to receive the report, so the engine cancels the run.
+        A cancelled call only stops waiting, and its reservation still ends. Whenever a call leaves, however it ends,
+        and no other call of *origin* is left while MindRoom is not stopping, nobody can receive the report, so the
+        engine cancels the run. A call whose reservation is refused holds the run only until that refusal.
         """
         key: object = origin or object()
         self._attending[key] += 1
@@ -212,13 +214,14 @@ class WorkflowEngine:
             run, _ = await wait_for_future_until_complete(reserving)
             await self.launch(run.run_id, context, limits)
             return await self.wait(run.run_id)
-        except asyncio.CancelledError:
-            stopping = self._closed or context.orchestrator is None or not context.orchestrator.running
-            if self._attending[key] == 1 and not stopping and not reserving.cancelled() and not reserving.exception():
-                await run_coroutine_until_complete(self.cancel(reserving.result()[0].run_id, reason=_ABANDONED))
-            raise
         finally:
+            if not reserving.cancelled() and not reserving.exception():
+                self._inline_runs[key] = reserving.result()[0].run_id
             self._attending -= Counter({key: 1})
+            stopping = self._closed or context.orchestrator is None or not context.orchestrator.running
+            if not self._attending[key] and (run_id := self._inline_runs.pop(key, None)) and not stopping:
+                # A run that ended is left as it ended.
+                await run_coroutine_until_complete(self.cancel(run_id, reason=_ABANDONED))
 
     def status(self, run_id: str) -> tuple[WorkflowRun, list[WorkflowNode]]:
         """Return the run and its current nodes."""

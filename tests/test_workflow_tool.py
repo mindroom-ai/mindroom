@@ -610,6 +610,37 @@ async def test_a_cancelled_inline_call_leaves_the_run_to_the_call_that_still_wai
 
 
 @pytest.mark.asyncio
+async def test_a_refused_retry_that_outlives_the_last_inline_caller_leaves_no_run_without_a_caller(
+    stack: WorkflowStack,
+) -> None:
+    """A retry still reading its script when the last caller is cancelled is refused afterwards: the run then stops."""
+    first = await _inline(stack, call_id="call-1")
+    [run] = stack.store.list_runs()
+    read, resolve_source = asyncio.Event(), stack.scripts.resolve_source
+
+    async def held(context: ToolRuntimeContext, **options: str | None) -> bytes:
+        await read.wait()
+        return await resolve_source(context, **options)
+
+    stack.scripts.resolve_source = held
+    retry = asyncio.create_task(
+        stack.call("start_workflow", depth=1, call_id="call-1", source=SCRIPT + "# changed\n"),
+    )
+    await asyncio.sleep(0.05)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert stack.store.get_run(run.run_id).state is WorkflowRunState.RUNNING
+
+    read.set()
+    with pytest.raises(CallFailed, match="another owner, script or arguments"):
+        await retry
+
+    assert stack.store.get_run(run.run_id).state is WorkflowRunState.CANCELLED
+    assert stack.script_store.get_run(stack.scripts.launched[0].run_id).state is ScriptRunState.CANCELLED
+
+
+@pytest.mark.asyncio
 async def test_an_inline_call_cancelled_because_mindroom_stops_does_not_cancel_its_run(stack: WorkflowStack) -> None:
     """A stopping MindRoom cancels its calls, which is no cancel of their runs: the restart judges those."""
     call = await _inline(stack)
