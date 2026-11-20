@@ -1,5 +1,5 @@
 {
-  "description": "MindRoom tool positions (io.mindroom.tool_trace version 3). 'sent' is a reply as the backend renders it, its markers in the text (version 2); 'wire' is what it sends to Matrix: the text without the markers of its calls, and on each call 'body_line', the number of lines of the wire body before its marker, and 'at', the number of top-level blocks of the wire formatted_body before it (null: the call has no such key). A top-level block is a top-level element with its content, a top-level void element, or a run of top-level text with a non-whitespace character. A reader puts each marker back as 'sent' has it: a body line before line 'body_line' with a blank line after it, or at the end after a blank line; a <p> before block 'at' or at the end. A call without the key gets no marker, and one whose position is no integer, is past the end or lies before an earlier call's goes at the end. 'wire' null: the text would not read back exactly, so the backend sends 'sent' as it is. Shared by mindroom (tests/fixtures) and mindroom-chat (src/app/matrix/protocol/__fixtures__); change both copies together.",
+  "description": "MindRoom tool positions (io.mindroom.tool_trace version 3). 'sent' is a reply as the backend builds it, its markers in the text (version 2); 'wire' is what Matrix gets: the text without the markers of its calls, and on each such call 'body_line', the number of lines of the wire body before its marker, and 'at', the number of top-level blocks of the wire formatted_body before it (null: the call has neither key, and no marker). A top-level block is a top-level element with its content, a top-level void element, or a run of top-level text with a non-whitespace character; a tag name ends at the first character that is no ASCII letter, digit or hyphen. A reader puts each marker back as 'sent' has it: a body line before line 'body_line' with a blank line after it, or at the end after a blank line; a <p> and a newline before block 'at' or at the end. For a position that is no integer, is past the end or lies before an earlier call's, MindRoom Chat puts the marker at the end and the backend reads the content as it is. 'wire' null: the backend sends 'sent' as it is, version 2, because no marker would go, a marker line is not also a top-level <p> of the same call in the same order, a line that looks like a marker would stay, or the text would not read back exactly. 'rendered' false: the formatted_body is not the backend's rendering of the body. Shared by mindroom (tests/fixtures) and mindroom-chat (src/app/matrix/protocol/__fixtures__); change both copies together.",
   "cases": [
     {
       "name": "calls between two paragraphs share one position",
@@ -171,85 +171,27 @@
     {
       "name": "a call without a marker gets no position",
       "sent": {
-        "body": "Done.",
-        "formatted_body": "<p>Done.</p>\n",
+        "body": "🔧 `shell` [1]\n\nDone.",
+        "formatted_body": "<p>🔧 <code>shell</code> [1]</p>\n<p>Done.</p>\n",
         "events": [
           {
             "type": "tool_call_completed",
             "tool_name": "shell",
             "args_preview": "cmd=ls",
             "result_preview": "notes.txt"
+          },
+          {
+            "type": "tool_call_completed",
+            "tool_name": "read_file",
+            "args_preview": "path=notes.txt"
           }
         ]
       },
       "wire": {
         "body": "Done.",
         "formatted_body": "<p>Done.</p>\n",
-        "body_line": [null],
-        "at": [null]
-      }
-    },
-    {
-      "name": "a call inside a list item keeps its marker in the text",
-      "sent": {
-        "body": "- item a\n\n  🔧 `shell` [1]\n\n- item b",
-        "formatted_body": "<ul>\n<li>\n<p>item a</p>\n<p>🔧 <code>shell</code> [1]</p>\n</li>\n<li>\n<p>item b</p>\n</li>\n</ul>\n",
-        "events": [
-          {
-            "type": "tool_call_completed",
-            "tool_name": "shell",
-            "args_preview": "cmd=ls",
-            "result_preview": "notes.txt"
-          }
-        ]
-      },
-      "wire": {
-        "body": "- item a\n\n  🔧 `shell` [1]\n\n- item b",
-        "formatted_body": "<ul>\n<li>\n<p>item a</p>\n<p>🔧 <code>shell</code> [1]</p>\n</li>\n<li>\n<p>item b</p>\n</li>\n</ul>\n",
-        "body_line": [null],
-        "at": [null]
-      }
-    },
-    {
-      "name": "raw HTML around a call keeps its HTML marker",
-      "sent": {
-        "body": "<p>Before\n\n🔧 `shell` [1]\n\nAfter</p>",
-        "formatted_body": "<p>Before\n<p>🔧 <code>shell</code> [1]</p>\n<p>After</p></p>\n",
-        "events": [
-          {
-            "type": "tool_call_completed",
-            "tool_name": "shell",
-            "args_preview": "cmd=ls",
-            "result_preview": "notes.txt"
-          }
-        ]
-      },
-      "wire": {
-        "body": "<p>Before\n\nAfter</p>",
-        "formatted_body": "<p>Before\n<p>🔧 <code>shell</code> [1]</p>\n<p>After</p></p>\n",
-        "body_line": [2],
-        "at": [null]
-      }
-    },
-    {
-      "name": "a link reference that links the index keeps its HTML marker",
-      "sent": {
-        "body": "See [1].\n\n🔧 `shell` [1]\n\n[1]: https://example.org",
-        "formatted_body": "<p>See <a href=\"https://example.org\">1</a>.</p>\n<p>🔧 <code>shell</code> <a href=\"https://example.org\">1</a></p>\n",
-        "events": [
-          {
-            "type": "tool_call_completed",
-            "tool_name": "shell",
-            "args_preview": "cmd=ls",
-            "result_preview": "notes.txt"
-          }
-        ]
-      },
-      "wire": {
-        "body": "See [1].\n\n[1]: https://example.org",
-        "formatted_body": "<p>See <a href=\"https://example.org\">1</a>.</p>\n<p>🔧 <code>shell</code> <a href=\"https://example.org\">1</a></p>\n",
-        "body_line": [2],
-        "at": [null]
+        "body_line": [0, null],
+        "at": [0, null]
       }
     },
     {
@@ -283,6 +225,108 @@
         ]
       },
       "wire": null
+    },
+    {
+      "name": "a call inside a list item stays version 2",
+      "sent": {
+        "body": "- item a\n\n  🔧 `shell` [1]\n\n- item b",
+        "formatted_body": "<ul>\n<li>\n<p>item a</p>\n<p>🔧 <code>shell</code> [1]</p>\n</li>\n<li>\n<p>item b</p>\n</li>\n</ul>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": null
+    },
+    {
+      "name": "raw HTML around a call stays version 2",
+      "sent": {
+        "body": "<p>Before\n\n🔧 `shell` [1]\n\nAfter</p>",
+        "formatted_body": "<p>Before\n<p>🔧 <code>shell</code> [1]</p>\n<p>After</p></p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": null
+    },
+    {
+      "name": "a link reference that links the index stays version 2",
+      "sent": {
+        "body": "See [1].\n\n🔧 `shell` [1]\n\n[1]: https://example.org",
+        "formatted_body": "<p>See <a href=\"https://example.org\">1</a>.</p>\n<p>🔧 <code>shell</code> <a href=\"https://example.org\">1</a></p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": null
+    },
+    {
+      "name": "a fenced example of the marker of a call that shows none stays version 2",
+      "sent": {
+        "body": "Example:\n\n```\n🔧 `shell` [1]\n\ncode\n```\n\nDone.",
+        "formatted_body": "<p>Example:</p>\n<pre><code>🔧 `shell` [1]\n\ncode\n</code></pre>\n<p>Done.</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": null
+    },
+    {
+      "name": "a call without a marker alone stays version 2",
+      "sent": {
+        "body": "Done.",
+        "formatted_body": "<p>Done.</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": null
+    },
+    {
+      "name": "a raw tag with a letter outside ASCII is a block of its own",
+      "rendered": false,
+      "sent": {
+        "body": "prefix <xé>stuff</xé>\n\n🔧 `shell` [1]\n\nNext",
+        "formatted_body": "prefix <xé>stuff</xé>\n<p>🔧 <code>shell</code> [1]</p>\n<p>Next</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": {
+        "body": "prefix <xé>stuff</xé>\n\nNext",
+        "formatted_body": "prefix <xé>stuff</xé>\n<p>Next</p>\n",
+        "body_line": [2],
+        "at": [2]
+      }
     }
   ]
 }

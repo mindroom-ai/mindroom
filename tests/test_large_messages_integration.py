@@ -37,7 +37,7 @@ from mindroom.streaming import (
     StreamInputChunk,
     send_streaming_response,
 )
-from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry, body_with_tool_markers
+from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry, tool_markers_in_text
 from tests.conftest import push_stream_chunk
 from tests.streaming_helpers import reply_hooks
 
@@ -812,7 +812,7 @@ async def test_replacement_streaming_tool_start_preserves_prior_visible_text() -
 
     target_content = client.messages_sent[-1][2].get("m.new_content", client.messages_sent[-1][2])
     assert target_content["body"].startswith("hello")
-    assert "save_file" in body_with_tool_markers(target_content["body"], target_content)
+    assert "save_file" in tool_markers_in_text(target_content)["body"]
 
 
 @pytest.mark.asyncio
@@ -849,7 +849,7 @@ async def test_replacement_streaming_preserves_visible_tool_marker_across_snapsh
 
     target_content = client.messages_sent[-1][2].get("m.new_content", client.messages_sent[-1][2])
     assert target_content["body"].startswith("hello world")
-    shown = body_with_tool_markers(target_content["body"], target_content)
+    shown = tool_markers_in_text(target_content)["body"]
     assert "save_file" in shown
     assert "⏳" not in shown
 

@@ -58,7 +58,7 @@ from mindroom.streaming import (
     ProgressPermission,
     format_stream_error_note,
 )
-from mindroom.tool_system.events import ToolTraceEntry, body_with_tool_markers
+from mindroom.tool_system.events import ToolTraceEntry, tool_markers_in_text
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import RevisionSnapshotChangedError, TurnRecord
@@ -155,7 +155,7 @@ def _sent_bodies(bot: AgentBot) -> list[str]:
     for call in bot.client.room_send.await_args_list:
         content = call.kwargs["content"]
         shown = content.get("m.new_content", content)
-        bodies.append(body_with_tool_markers(str(shown.get("body", "")), shown))
+        bodies.append(str(tool_markers_in_text(shown).get("body", "")))
     return bodies
 
 

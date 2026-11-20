@@ -31,6 +31,7 @@ from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_conversation_operations import MatrixMessageOperationResult
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.event_journal import ProjectedEvent
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_visible_messages import trusted_visible_sender_ids
@@ -42,7 +43,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.teams.members import _as_member
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
-from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content, tool_markers_out_of_text
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -73,6 +74,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from mindroom.config.models import FileAccess
+    from mindroom.event_journal import EventJournalStore
     from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 
 
@@ -2510,3 +2512,52 @@ async def test_matrix_message_read_drops_tool_markers_from_bodies() -> None:
 
     assert "All good." in payload["messages"][0]["body"]
     assert "🔧" not in json.dumps(payload, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_read_thread_is_the_same_for_a_reply_stored_as_matrix_got_it(
+    journal_store: EventJournalStore,
+) -> None:
+    """A whole thread read, edit options included, reads a reply stored without its markers as one stored with them."""
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "tool-positions-v1.json").read_text(encoding="utf-8"))
+    sent = next(case for case in fixture["cases"] if case["name"].startswith("a separator after a call"))["sent"]
+    marked = {
+        "msgtype": "m.text",
+        "body": sent["body"],
+        "format": "org.matrix.custom.html",
+        "formatted_body": sent["formatted_body"],
+        "io.mindroom.tool_trace": {"version": 2, "events": sent["events"]},
+    }
+    wire = tool_markers_out_of_text(marked)
+    assert wire["body"] == "---\n\n\nAfter."
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    payloads = []
+    for principal, content in (("marked", marked), ("wire", wire)):
+        store = journal_store.principal(principal)
+        reply = ProjectedEvent(
+            event_id="$reply",
+            room_id=ctx.room_id,
+            thread_id=ctx.thread_id,
+            sender="@mindroom_general:localhost",
+            origin_server_ts=1,
+            content=content,
+            replaces_event_id=None,
+            redacts_event_id=None,
+        )
+        assert await store.install_hydrated_conversation(
+            room_id=ctx.room_id,
+            thread_id=ctx.thread_id,
+            events=(reply,),
+            complete=True,
+            expected_membership_epoch=await store.membership_epoch(ctx.room_id),
+        )
+        page = await store.read_conversation(room_id=ctx.room_id, thread_id=ctx.thread_id, limit=10)
+        ctx.conversation_reader.read.return_value = page
+        ctx.conversation_reader.read_strict.return_value = page
+        with tool_runtime_context(ctx):
+            payloads.append(json.loads(await tool.matrix_message(action="read")))
+
+    assert payloads[0] == payloads[1]
+    assert payloads[1]["messages"][0]["body"] == "After."
+    assert payloads[1]["edit_options"][0]["body_preview"] == "After."

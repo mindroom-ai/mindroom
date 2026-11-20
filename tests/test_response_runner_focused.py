@@ -175,8 +175,8 @@ from mindroom.tool_system.approval_exemptions import register_tool_approval_exem
 from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
-    body_with_tool_markers,
     format_tool_started_event,
+    tool_markers_in_text,
 )
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
@@ -3949,7 +3949,7 @@ def _approval_reply_edits(client: AsyncClient) -> list[tuple[str, str]]:
         content = call.kwargs["content"]
         if content.get("m.relates_to", {}).get("event_id") == "$waiting" and "m.new_content" in content:
             shown = content["m.new_content"]
-            edits.append((shown[STREAM_STATUS_KEY], body_with_tool_markers(shown["body"], shown)))
+            edits.append((shown[STREAM_STATUS_KEY], tool_markers_in_text(shown)["body"]))
     return edits
 
 

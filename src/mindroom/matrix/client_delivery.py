@@ -138,7 +138,8 @@ async def _send_prepared_room_message(  # noqa: PLR0911
     """Send one prepared Matrix room message and normalize local delivery exceptions.
 
     Every message, edit, reaction, and file sent to a room passes here, so a send into the room this context guards
-    is refused here as a failed one.
+    is refused here as a failed one, and a reply's tool markers leave its text here, after it was sized, frozen and
+    wrapped with them in. Reading the event back restores that content (``tool_markers_in_text``).
     """
     if send_refused(room_id):
         logger.warning("matrix_send_refused_in_guarded_room", room_id=room_id, operation=operation)
@@ -146,6 +147,7 @@ async def _send_prepared_room_message(  # noqa: PLR0911
     try:
         if write_allowed is not None and not write_allowed():
             return None
+        content_sent = tool_markers_out_of_text(content_sent)
         if cache_bypass:
             access_token = client.access_token
             if not access_token:
@@ -319,11 +321,8 @@ async def _prepare_matrix_message(
 
     content_sent = content
     if not content_is_prepared:
-        # Reasoning must not push an ordinary-size message or edit into a sidecar. Sent without its tool markers, the
-        # content only changes in preparation when it moves to a sidecar.
-        fitted = tool_markers_out_of_text(
-            fit_reasoning_to_ordinary_event(client, room_id, content, room_encrypted=room_encrypted),
-        )
+        # Reasoning must not push an ordinary-size message or edit into a sidecar.
+        fitted = fit_reasoning_to_ordinary_event(client, room_id, content, room_encrypted=room_encrypted)
         try:
             content_sent = await prepare_large_message(
                 client,
@@ -406,8 +405,8 @@ async def send_message_outcome(
     """Send a message to a Matrix room and return the delivered payload or a typed failure.
 
     ``content_is_prepared`` is reserved for payloads already frozen in
-    durable storage. Those bytes must reach Matrix verbatim so the durable record
-    remains an exact description of the wire event. With ``sidecar_required`` a
+    durable storage. They reach Matrix as frozen, but for the send's last step that takes tool
+    markers out of the text, so the durable record remains what the wire event reads back as. With ``sidecar_required`` a
     message too large for one event is not sent when its sidecar cannot be uploaded.
     """
     room_encrypted = await resolve_room_encryption_outcome(client, room_id, operation=operation)

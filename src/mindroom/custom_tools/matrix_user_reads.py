@@ -35,6 +35,7 @@ from mindroom.matrix.media import (
     parse_matrix_media_event_source,
 )
 from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
+from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -609,7 +610,8 @@ def _message_columns(
         default=None,
     )
     content = _content(message) if latest is None else _mapping(_content(latest).get("m.new_content"))
-    text, file_note = _said(message, content)
+    # A MindRoom reply is read with its tool markers in its text, as it was before they left it on the way to Matrix.
+    text, file_note = _said(message, tool_markers_in_text(content))
     notes = [
         text,
         edited if latest else None,

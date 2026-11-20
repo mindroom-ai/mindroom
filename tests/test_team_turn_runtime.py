@@ -69,7 +69,7 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg
-from mindroom.tool_system.events import FailedReply, StructuredStreamChunk, body_with_tool_markers
+from mindroom.tool_system.events import FailedReply, StructuredStreamChunk, tool_markers_in_text
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -3401,7 +3401,7 @@ def _shown(bot: AgentBot) -> str:
     """Return what the reply shows now: the body of its last send or edit, with its tool markers back."""
     content = bot.client.room_send.await_args_list[-1].kwargs["content"]
     shown = content.get("m.new_content", content)
-    return body_with_tool_markers(str(shown["body"]), shown)
+    return str(tool_markers_in_text(shown)["body"])
 
 
 @pytest.mark.asyncio

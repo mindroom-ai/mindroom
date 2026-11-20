@@ -539,6 +539,7 @@ depends_on = [
     "mindroom.matrix.sidecar_content",
     "mindroom.model_selection",
     "mindroom.reply_lifecycle",
+    "mindroom.tool_system.events",
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_record",
 ]
@@ -632,6 +633,7 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.matrix.agent_authored",
     "mindroom.matrix.transport_progress",
+    "mindroom.tool_system.events",
 ]
 visibility = [
     "mindroom.journal_dispatch",
@@ -2619,6 +2621,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.visible_body",
+    "mindroom.tool_system.events",
 ]
 visibility = ["mindroom.custom_tools.matrix_user", "mindroom.custom_tools.matrix_user_writes"]
 
@@ -4188,7 +4191,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.client_delivery"
-depends_on = ["mindroom.llm", "mindroom.matrix.guarded_rooms"]
+depends_on = ["mindroom.llm", "mindroom.matrix.guarded_rooms", "mindroom.tool_system.events"]
 visibility = [
     "mindroom.bot_room_lifecycle",
     "mindroom.call_transcripts.router_room",
@@ -4655,6 +4658,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.sidecar_content",
     "mindroom.matrix.visible_body",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -5909,7 +5913,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.events"
-depends_on = []
+depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.tool_system.approval_exemptions"
@@ -7646,7 +7650,9 @@ expose = [
     "strip_visible_tool_markers",
     "tool_args_chat_preview",
     "tool_marker_text",
+    "tool_markers_in_text",
     "tool_markers_match_trace",
+    "tool_markers_out_of_text",
     "with_stored_calls",
 ]
 from = ["mindroom.tool_system.events"]

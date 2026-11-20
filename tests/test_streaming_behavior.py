@@ -69,8 +69,8 @@ from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
-    body_with_tool_markers,
     format_tool_started_event,
+    tool_markers_in_text,
 )
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
@@ -107,7 +107,7 @@ _INTERRUPTION_SUMMARY = "(turn stopped before completion)"
 def _shown_body(content: dict[str, Any]) -> str:
     """Return the body MindRoom Chat reads from one sent payload: its replacement's, with its tool markers back."""
     shown = content.get("m.new_content", content)
-    return body_with_tool_markers(shown["body"], shown)
+    return tool_markers_in_text(shown)["body"]
 
 
 async def _aiter(*events: object) -> AsyncIterator[object]:

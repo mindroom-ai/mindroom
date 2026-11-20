@@ -40,13 +40,7 @@ from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.message_extras import build_message_extras_content
 from mindroom.matrix.thread_forks import with_fork_prefix
 from mindroom.requester_identity import is_human_requester_id
-from mindroom.tool_system.events import (
-    body_with_tool_markers,
-    body_without_tool_markers,
-    has_tool_trace,
-    strip_visible_tool_markers,
-    tool_markers_in_text,
-)
+from mindroom.tool_system.events import body_without_tool_markers, has_tool_trace, strip_visible_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -71,11 +65,10 @@ def _message_payload(message: ResolvedVisibleMessage) -> dict[str, object]:
     payload = message.to_dict()
     if not has_tool_trace(message.content):
         return payload
-    # The agent reads a sent reply (trace version 3) as its markers in the text gave it (version 2).
-    body = strip_visible_tool_markers(body_with_tool_markers(message.body, message.content))
+    body = strip_visible_tool_markers(message.body)
     # The rendered HTML and the streaming canonical body repeat the markers, and the plain body carries the text.
     dropped = {"format", "formatted_body", STREAM_VISIBLE_BODY_KEY}
-    content = {key: value for key, value in tool_markers_in_text(message.content).items() if key not in dropped}
+    content = {key: value for key, value in message.content.items() if key not in dropped}
     content["body"] = strip_visible_tool_markers(str(content.get("body", "")))
     return {**payload, "body": body, "content": content}
 

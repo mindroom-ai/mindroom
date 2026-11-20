@@ -68,7 +68,7 @@ from mindroom.reply_presentation import TEAM_PLACEHOLDER, Presentation, decode_p
 from mindroom.response_sources import Owned, SourceFate
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, _flush_phase_boundary_if_needed
 from mindroom.tool_system.agno_toolkits import Toolkit
-from mindroom.tool_system.events import body_with_tool_markers
+from mindroom.tool_system.events import tool_markers_in_text
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
@@ -216,7 +216,7 @@ class _Homeserver:
 def _body(content: Mapping[str, Any]) -> str:
     """Return the body MindRoom Chat reads, following an edit into its replacement, with its tool markers back."""
     shown = visible_content_from_content(content)
-    return body_with_tool_markers(str(shown.get("body", "")), shown)
+    return str(tool_markers_in_text(shown).get("body", ""))
 
 
 def _trace_events(content: Mapping[str, Any]) -> list[dict[str, Any]]:

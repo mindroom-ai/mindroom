@@ -15,12 +15,9 @@ from mindroom.matrix.segmented_messages import (
     SEGMENT_COUNT_KEY,
     _chunk_mentions,
     _render_segment_html,
-    _rich_text_content,
     _unclosed_fence_start,
-    _with_tool_trace,
     segment_matrix_content,
 )
-from mindroom.tool_system.events import ToolTraceEntry, body_with_tool_markers
 
 
 def _body() -> str:
@@ -310,7 +307,7 @@ def test_a_split_reply_tells_receivers_how_many_segments_it_has(*, edit: bool) -
 
 
 # Replies whose first segment's tool trace fills it to within the count's bytes, as a plain message and as an edit.
-@pytest.mark.parametrize(("seed", "edit"), [(255, False), (61, True)])
+@pytest.mark.parametrize(("seed", "edit"), [(1383, False), (1146, True)])
 def test_a_first_segment_filled_to_its_budget_is_still_sent_as_segments(seed: int, *, edit: bool) -> None:
     """A first segment with no room left for the segment count goes without it instead of falling back to the sidecar."""
     rng = random.Random(seed)  # noqa: S311 - a fixed test fixture, not a secret
@@ -500,23 +497,18 @@ def test_segments_carry_their_own_renumbered_tool_trace() -> None:
     parts = [segmented.first, *segmented.continuations]
     names: list[str] = []
     for part in parts:
-        # Segments go to Matrix without marker lines; their trace says where each call sits.
-        assert "🔧" not in part["body"]
-        assert "🔧" not in part["formatted_body"]
-        restored = body_with_tool_markers(part["body"], part)
-        numbers = _marker_numbers(restored)
+        numbers = _marker_numbers(part["body"])
         trace = part.get("io.mindroom.tool_trace")
         if not numbers:
             assert trace is None
             continue
-        assert trace["version"] == 3
         assert numbers == list(range(1, len(numbers) + 1))
         assert [event["tool_name"] for event in trace["events"]] == [
-            line.split("`")[1] for line in restored.splitlines() if line.startswith("🔧 `")
+            line.split("`")[1] for line in part["body"].splitlines() if line.startswith("🔧 `")
         ]
         names.extend(event["tool_name"] for event in trace["events"])
     assert names == ["alpha", "beta", "gamma"]
-    assert sum(1 for part in parts if part.get("io.mindroom.tool_trace")) >= 2
+    assert sum(1 for part in parts if _marker_numbers(part["body"])) >= 2
     assert all(calculate_event_size(part) <= _SEGMENT_TARGET_PLAINTEXT_BYTES for part in parts)
 
 
@@ -545,7 +537,7 @@ def test_tool_trace_never_splits_a_short_answer() -> None:
     replacement = segmented.first["m.new_content"]
     assert "io.mindroom.tool_trace" not in segmented.first
     assert [event["tool_name"] for event in replacement["io.mindroom.tool_trace"]["events"]] == names
-    assert _marker_numbers(body_with_tool_markers(replacement["body"], replacement)) == list(range(1, 41))
+    assert _marker_numbers(replacement["body"]) == list(range(1, 41))
     assert calculate_event_size(segmented.first) <= _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES
 
 
@@ -553,42 +545,19 @@ def test_segment_without_room_for_its_trace_drops_its_markers() -> None:
     """Markers whose trace cannot fit are removed, since readers only strip markers a trace proves."""
     names = [f"tool_{index}" for index in range(80)]
     body = "Done.\n\n" + "\n\n".join(f"🔧 `{name}` [{index}]" for index, name in enumerate(names, start=1))
-    trace = [ToolTraceEntry(type="tool_call_completed", tool_name=name, args_preview="a" * 150) for name in names]
-    source = {"msgtype": "m.text", "body": body}
-
-    # Sent without its markers, a segment's trace fits wherever its markers did, so only a tight budget drops it.
-    segment = _with_tool_trace(
-        body,
-        trace,
-        lambda chunk: _rich_text_content(source, chunk),
-        target_bytes=2_000,
-        in_new_content=False,
-    )
-
-    assert "io.mindroom.tool_trace" not in segment
-    assert "🔧" not in segment["body"]
-    assert segment["body"].startswith("Done.")
-
-
-def test_a_segmented_edit_that_opens_with_a_call_sends_no_marker_in_its_fallback() -> None:
-    """The fallback's "* " prefix keeps an opening marker from being a line of its own; it goes all the same."""
-    body = "🔧 `alpha` [1]\n\n" + _body()
-    events = [{"type": "tool_call_completed", "tool_name": "alpha"}]
+    events = [
+        {"type": "tool_call_completed", "tool_name": name, "args_preview": "a" * 150, "result_preview": "r" * 500}
+        for name in names
+    ]
     content = build_matrix_edit_content(
         event_id="$placeholder",
-        new_content=build_message_content(
-            body,
-            extra_content={"io.mindroom.tool_trace": {"version": 2, "events": events}},
-        ),
+        new_content={"msgtype": "m.text", "body": body, "io.mindroom.tool_trace": {"version": 2, "events": events}},
     )
 
-    segmented = segment_matrix_content(content, room_encrypted=False, continuation_thread_id="$thread")
+    segmented = segment_matrix_content(content, room_encrypted=True)
 
     assert segmented is not None
-    first = segmented.first
-    assert first["body"].startswith("* ## Section 0")
-    assert first["body"] == f"* {first['m.new_content']['body']}"
-    assert "🔧" not in first["formatted_body"]
-    assert body_with_tool_markers(first["m.new_content"]["body"], first["m.new_content"]).startswith(
-        "🔧 `alpha` [1]\n\n",
-    )
+    replacement = segmented.first["m.new_content"]
+    assert "io.mindroom.tool_trace" not in replacement
+    assert "🔧" not in replacement["body"]
+    assert replacement["body"].startswith("Done.")

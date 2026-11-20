@@ -6,7 +6,7 @@ import json
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -29,9 +29,13 @@ from mindroom.constants import (
     WAKE_MENTIONED_KEY,
 )
 from mindroom.custom_tools.thread_move import ThreadMoveTools, _plan_thread_copy, _PlannedCopy
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
+from mindroom.matrix.client_delivery import (
+    DeliveredMatrixEvent,
+    MatrixDeliveryFailure,
+    MatrixDeliveryFailureKind,
+    send_message_result,
+)
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.thread_history_result import thread_history_result
@@ -42,7 +46,7 @@ from mindroom.tool_system.events import (
     ToolTraceEntry,
     body_without_tool_markers,
     build_tool_trace_content,
-    html_block_spans,
+    tool_markers_in_text,
     tool_markers_out_of_text,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -258,28 +262,6 @@ def test_plan_prefix_keeps_a_leading_tool_marker_on_its_own_line() -> None:
     assert "🔧" not in body_without_tool_markers(copy.content["body"], copy.content)
 
 
-def test_plan_prefix_keeps_a_sent_replys_calls_in_their_places() -> None:
-    """The name goes before a relayed version-3 reply as it reads with its markers, which sending takes out again."""
-    events = [{"type": "tool_call_completed", "tool_name": "shell", "body_line": 2, "at": 1}]
-    content = {
-        "msgtype": "m.text",
-        "body": "Checking.\n\nDone.",
-        "format": "org.matrix.custom.html",
-        "formatted_body": "<p>Checking.</p>\n<p>Done.</p>\n",
-        TOOL_TRACE_CONTENT_KEY: {"version": 3, "events": events},
-    }
-    [copy] = _plan(_message(ABSENT_ID, content), display_names={ABSENT_ID: "Research"})
-
-    assert copy.content["body"] == "Research: Checking.\n\n🔧 `shell` [1]\n\nDone."
-    sent = tool_markers_out_of_text(copy.content)
-    assert sent["body"] == "Research: Checking.\n\nDone."
-    html = sent["formatted_body"]
-    [at] = [event["at"] for event in sent[TOOL_TRACE_CONTENT_KEY]["events"]]
-    assert html.startswith("<strong>Research</strong>: <p>Checking.</p>")
-    assert html[html_block_spans(html)[at][0] :] == "<p>Done.</p>\n"
-    assert events[0]["at"] == 1
-
-
 @pytest.mark.parametrize("events", [5, "events", [1, None, {"tool_name": 3, "at": "x"}]])
 def test_plan_relays_a_malformed_trace_without_failing(events: object) -> None:
     """Any room member can write the trace, so a copy reads one of any shape as its text alone."""
@@ -288,6 +270,7 @@ def test_plan_relays_a_malformed_trace_without_failing(events: object) -> None:
     [copy] = _plan(_message(ABSENT_ID, content), display_names={ABSENT_ID: "Research"})
 
     assert copy.content["body"] == "Research: Done."
+    assert tool_markers_out_of_text(copy.content) is copy.content
 
 
 def test_plan_escapes_display_name_in_formatted_prefix() -> None:
@@ -758,35 +741,50 @@ async def test_move_thread_copies_tags_posts_notice_and_resolves_source(tmp_path
     assert payload["warnings"] == []
 
 
+_SHELL_CALL = {"type": "tool_call_completed", "tool_name": "shell"}
+
+
 @pytest.mark.asyncio
-async def test_move_thread_copies_replies_sent_before_tool_markers_left_the_text(tmp_path: Path) -> None:
-    """A reply with its markers in its text (trace version 2) goes out without them, which is no shortened copy."""
+@pytest.mark.parametrize("events", [[_SHELL_CALL], [None, _SHELL_CALL], ["shell"]])
+async def test_move_thread_sends_each_copy_of_a_reply_with_tool_calls_whole(tmp_path: Path, events: list[Any]) -> None:
+    """A copy goes through the real send: its markers leave its text there, or stay when its trace names no call."""
     move = _move(tmp_path)
-    reply = "Checking.\n\n🔧 `shell` [1]\n\nDone."
-    legacy = {
+    reply = f"Checking.\n\n🔧 `shell` [{len(events)}]\n\nDone."
+    with_calls = {
         "msgtype": "m.text",
         "body": reply,
         "format": "org.matrix.custom.html",
         "formatted_body": markdown_to_html(reply),
-        TOOL_TRACE_CONTENT_KEY: {"version": 2, "events": [{"type": "tool_call_completed", "tool_name": "shell"}]},
+        TOOL_TRACE_CONTENT_KEY: {"version": 2, "events": events},
     }
     history = _thread(move)
-    history[1] = _message(move.ids["code"], legacy, "$code:localhost")
-    history[2] = _message(move.ids["research"], legacy, "$research:localhost")
-    sends = _delivered_sends()
+    history[1] = _message(move.ids["code"], with_calls, "$code:localhost")
+    history[2] = _message(move.ids["research"], with_calls, "$research:localhost")
+    client = make_matrix_client_mock()
+    event_ids = iter(f"$copy{index}:localhost" for index in range(100))
+    client.room_send = AsyncMock(side_effect=lambda **_kwargs: nio.RoomSendResponse(next(event_ids), TARGET_ROOM_ID))
 
-    async def send(client: object, room_id: str, content: dict[str, Any], **kwargs: object) -> DeliveredMatrixEvent:
-        delivered = await sends(client, room_id, content, **kwargs)
-        prepared = await prepare_large_message(MagicMock(spec=nio.AsyncClient), room_id, content, room_encrypted=False)
-        return DeliveredMatrixEvent(event_id=delivered.event_id, content_sent=prepared)
+    async def send(
+        _client: object,
+        room_id: str,
+        content: dict[str, Any],
+        **kwargs: bool,
+    ) -> DeliveredMatrixEvent | None:
+        return await send_message_result(client, room_id, content, **kwargs)
 
     with _matrix(move, history, send=AsyncMock(side_effect=send)) as mocks:
         payload = await _run()
 
     assert payload["status"] == "ok"
     assert payload["copied"] == 3
-    copies = [call.args[2] for call in mocks.send.await_args_list[1:3]]
-    assert [copy["body"] for copy in copies] == [reply, f"{move.ids['research']}: {reply}"]
+    planned = [call.args[2] for call in mocks.send.await_args_list[1:3]]
+    assert [copy["body"] for copy in planned] == [reply, f"{move.ids['research']}: {reply}"]
+    sent = [call.kwargs["content"] for call in client.room_send.await_args_list[1:3]]
+    without_markers = ["Checking.\n\nDone.", f"{move.ids['research']}: Checking.\n\nDone."]
+    assert [copy["body"] for copy in sent] == (
+        without_markers if events == [_SHELL_CALL] else [reply, planned[1]["body"]]
+    )
+    assert [tool_markers_in_text(copy) for copy in sent] == planned
     assert mocks.set_tag.await_args_list[-1].args[1:] == (SOURCE_ROOM_ID, ROOT_ID, RESOLVED_THREAD_TAG)
 
 
