@@ -256,6 +256,8 @@ Matrix sync callback
 | `script_runs/shim.py` | Import-light entry point that verifies a run's snapshot inside the script process and runs its source |
 | `script_runs/wire.py` | The primary-worker script protocol: its version, request and response models, normalized receipts, and error |
 | `script_runs/worker_client.py` | The primary's HTTP client for a worker's script routes |
+| `workflow_runs/models.py` | Workflow run and node records, their states, dispatch handles, and the run ID |
+| `workflow_runs/store.py` | The SQLite store of workflow runs, nodes, usage entries, and log lines, with versioned migrations and spilled large results |
 | `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
 | `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through, and the listener helper the second listeners beside the API share |
 | `script_sdk.py` | The standard-library `MindRoomTools` client a script calls tools with |

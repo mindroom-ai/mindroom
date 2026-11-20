@@ -2438,6 +2438,40 @@ path = "mindroom.script_runs.recovery"
 depends_on = ["mindroom.script_runs.wire"]
 
 [[modules]]
+path = "mindroom.workflow_runs.models"
+depends_on = []
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.models"]
+expose = [
+    "DispatchHandle",
+    "NodeReceipt",
+    "NodeRequest",
+    "TERMINAL_RUN_STATES",
+    "WorkflowNode",
+    "WorkflowNodeState",
+    "WorkflowRun",
+    "WorkflowRunState",
+    "new_workflow_run_id",
+    "validated_workflow_run_id",
+]
+
+[[modules]]
+path = "mindroom.workflow_runs.store"
+depends_on = ["mindroom.workflow_runs.models"]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.store"]
+expose = [
+    "SCHEMA_VERSION",
+    "UsageTotals",
+    "WorkflowRunConflictError",
+    "WorkflowRunNotFoundError",
+    "WorkflowRunStore",
+    "WorkflowRunStoreError",
+]
+
+[[modules]]
 path = "mindroom.api.schedules"
 depends_on = [
     "mindroom.api.config_lifecycle",
