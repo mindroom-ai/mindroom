@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
@@ -13,7 +14,7 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths, tracking_dir
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.tailnet_ssh import links
 from mindroom.tailnet_ssh.links import (
@@ -474,6 +475,56 @@ def test_operator_mode_adds_links_once_a_minute(
     assert read_links(paths).link(BOB, "mind") is not None
 
 
+def test_operator_mode_adds_a_link_that_is_suspended_for_now(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that serves SSH gets its link also while the link is not eligible: suspended, not left out."""
+    create_shared_directory(paths, owner="other", name="specs")
+    add_shared_directory_member(paths, owner="other", name="specs", member="mine")
+    _manager(monkeypatch, _handle(_key(ALICE, "mine"), tmp_path / "mine"))
+
+    rows = _rows(config, paths, GatewayStatus(enrollment="auth_key"))
+
+    added = read_links(paths).link(ALICE, "mine")
+    assert added is not None
+    assert added.desired == "on"
+    assert [(row["id"], row["desired"]) for row in rows] == [(added.id, "suspended")]
+
+
+def test_operator_mode_adds_no_link_for_a_key_two_agents_share(
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker key whose agent part two configured names give is no one agent's, so it gets no link."""
+    data = deepcopy(_DATA)
+    data["agents"]["mine_"] = deepcopy(data["agents"]["mine"])
+    config = Config.validate_with_runtime(data, paths)
+    _manager(monkeypatch, _handle(_key(ALICE, "mine"), tmp_path / "mine"))
+
+    assert _rows(config, paths, GatewayStatus(enrollment="auth_key")) == []
+    assert read_links(paths).links == []
+
+
+def test_a_steady_gateway_rewrites_nothing(config: Config, paths: RuntimePaths) -> None:
+    """A reconcile or a report that changes no link leaves the stored file untouched."""
+    link = _enrolled()
+    _store(paths, link)
+    path = tracking_dir(paths) / "tailnet_ssh.json"
+    stored = path.stat()
+    status = GatewayStatus()
+
+    _rows(config, paths, status)
+    _post(paths, status, {link.id: _report(open_connections=1)})
+    _rows(config, paths, status, now=NOW + 5)
+
+    assert status.links[link.id].open_connections == 1
+    assert (path.stat().st_ino, path.stat().st_mtime_ns) == (stored.st_ino, stored.st_mtime_ns)
+
+
 def test_login_mode_adds_no_links(
     config: Config,
     paths: RuntimePaths,
@@ -684,6 +735,71 @@ async def test_connect_writes_the_keys_stored_when_the_worker_is_up(
         await _connect(config, paths, link.id)
     assert refused.value.status_code == 404
     assert manager.calls == ["eligibility", "ensure_worker"]
+
+
+@pytest.mark.asyncio
+async def test_a_key_removed_while_connect_writes_is_not_left_in_the_worker(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connect that has read the keys writes them before a revocation's refresh reads and writes, never after.
+
+    The revocation arrives when connect has read the keys and not yet written them. It has to wait for that
+    write, or the removed key, written last, would stay in the worker.
+    """
+    link = _enrolled()
+    _store(paths, link)
+    update_links(paths, lambda book: set_keys(book, ALICE, [PUBLIC_KEY], now=NOW))
+    _wire_connect(monkeypatch, tmp_path, link)
+    write_projection = links.write_projection
+    first = iter([True])
+    waited: list[bool] = []
+
+    def revoke() -> None:
+        update_links(paths, lambda book: set_keys(book, ALICE, [], now=NOW + 1))
+        refresh_projections(config, paths, ALICE)
+
+    revocation = threading.Thread(target=revoke)
+
+    def overlapped(projection_dir: Path, link: Link, key_lines: list[str]) -> None:
+        if next(first, False):
+            revocation.start()
+            revocation.join(timeout=0.5)
+            waited.append(revocation.is_alive())
+        write_projection(projection_dir, link, key_lines)
+
+    monkeypatch.setattr(links, "write_projection", overlapped)
+    await _connect(config, paths, link.id)
+    revocation.join(timeout=10)
+
+    assert waited == [True]
+    assert not revocation.is_alive()
+    assert (tmp_path / "ssh" / "authorized_keys").read_text() == ""
+
+
+@pytest.mark.asyncio
+async def test_connect_refuses_when_sshds_files_cannot_be_written(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ready worker whose SSH folder the primary cannot write is a refusal, and its runner is not asked."""
+    link = _enrolled()
+    _store(paths, link)
+    manager = _wire_connect(monkeypatch, tmp_path, link)
+    (tmp_path / "blocked").write_text("")
+    manager.handles = [_handle(link.worker_key, tmp_path / "blocked" / "ssh")]
+
+    with capture_logs() as logs, pytest.raises(ConnectRefused) as refused:
+        await _connect(config, paths, link.id)
+
+    assert refused.value.status_code == 503
+    assert str(tmp_path) not in refused.value.detail
+    assert manager.calls == ["eligibility", "ensure_worker", "projection"]
+    assert [(log["event"], log["link_id"]) for log in logs] == [("tailnet_ssh_projection_not_written", link.id)]
 
 
 @pytest.mark.asyncio

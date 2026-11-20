@@ -41,7 +41,7 @@ from mindroom.workers.models import WorkerSpec
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
@@ -181,14 +181,19 @@ def desired_links(
 ) -> list[dict[str, object]]:
     """Bring the stored links in line with the config, and return the gateway's ``GET /links`` rows. Blocking.
 
-    With an operator key, at most once a minute, every worker that serves SSH and has no link gets one, if the link
-    would be on; a link its person parked as ``off`` is a link, so it is not added again.
+    With an operator key, at most once a minute, every worker that serves SSH and has no link gets one, unless the
+    link would be removed at once; one that is not eligible now is added and suspended. A link its person parked as
+    ``off`` is a link, so it is not added again.
     """
     workers: list[WorkerHandle] = []
     if status.enrollment == "auth_key" and now - status.operator_sync_at >= _OPERATOR_SYNC_SECONDS:
         status.operator_sync_at = now
         workers = _listed_workers(runtime_paths)
-    agent_names = {normalize_worker_key_part(name): name for name in config.agents}
+    agent_names: dict[str, str | None] = {}
+    for name in config.agents:
+        part = normalize_worker_key_part(name)
+        # A key part that two configured names give is no one agent's.
+        agent_names[part] = None if part in agent_names else name
 
     def desired(link: Link) -> Literal["on", "suspended", "removing"]:
         return _desired(config, runtime_paths, membership_index, link, now=now)
@@ -201,7 +206,7 @@ def desired_links(
                 continue
             if book.link(requester_id, agent_name) is None:
                 link = new_link(requester_id, agent_name, handle.worker_key, default_hostname(agent_name), now=now)
-                if desired(link) == "on":
+                if desired(link) != "removing":
                     book.links.append(link)
         verdicts = {link.id: desired(link) for link in book.links if link.desired == "on"}
         remove_links(book, lambda link: verdicts.get(link.id) == "removing", now=now)
@@ -286,15 +291,23 @@ def link_state(link: Link, status: LinkStatus | None, *, suspended: bool) -> str
     return "needs_login" if enrolled else "pending_login"
 
 
-def _on_link(runtime_paths: RuntimePaths, link_id: str) -> tuple[LinkBook, Link]:
-    """Return the stored book and its link with this id, which must be on."""
-    book = read_links(runtime_paths)
+def _on_link(book: LinkBook, link_id: str) -> Link:
+    """Return the book's link with this id, which must be on."""
     link = book.by_id(link_id)
     if link is None:
         raise ConnectRefused(404, "No such link.")
     if link.desired != "on":
         raise ConnectRefused(409, "This link is not connected.")
-    return book, link
+    return link
+
+
+def _projected[T](runtime_paths: RuntimePaths, project: Callable[[LinkBook], T]) -> T:
+    """Write sshd's files from the stored book, the read and the write as one step under the store's lock.
+
+    Every write of those files goes through here, and keys change under the same lock. So the files written last
+    hold the keys stored at that time, and a connect that read a key cannot write it after its removal was written.
+    """
+    return update_links(runtime_paths, project)
 
 
 def _ready_endpoint(runtime_paths: RuntimePaths, target: ResolvedWorkerTarget, worker_key: str) -> WorkerSshEndpoint:
@@ -347,7 +360,7 @@ def _admit(
     peer_login: str,
 ) -> tuple[WorkerSshEndpoint, WorkerCall]:
     """Check a connection, wake the link's worker, and write sshd's files; all that precedes starting sshd. Blocking."""
-    _, link = _on_link(runtime_paths, link_id)
+    link = _on_link(read_links(runtime_paths), link_id)
     allowed_login = _allowed_login(config, status, link)
     if allowed_login is None or peer_login != allowed_login:
         raise ConnectRefused(403, "This link admits another Tailscale login.")
@@ -365,10 +378,19 @@ def _admit(
     if target.worker_key != link.worker_key:
         raise ConnectRefused(409, "This link's worker is no longer the agent's.")
     endpoint = _ready_endpoint(runtime_paths, target, link.worker_key)
-    # The worker may have taken minutes to start: sshd gets the keys stored now, and none for a link removed since.
-    book, link = _on_link(runtime_paths, link_id)
-    write_projection(endpoint.projection_dir, link, authorized_key_lines(config, book, link.requester_id))
-    return endpoint, _shell_call(config, runtime_paths, link)
+
+    def project(book: LinkBook) -> Link:
+        # The worker may have taken minutes to start: sshd gets the keys stored now, and none for a link removed since.
+        current = _on_link(book, link_id)
+        try:
+            write_projection(endpoint.projection_dir, current, authorized_key_lines(config, book, current.requester_id))
+        except OSError as error:
+            # The error names the primary's path to the worker's files, and the refusal reaches the card.
+            logger.warning("tailnet_ssh_projection_not_written", link_id=link_id, error=str(error))
+            raise ConnectRefused(503, "The worker's SSH files could not be written.") from None
+        return current
+
+    return endpoint, _shell_call(config, runtime_paths, _projected(runtime_paths, project))
 
 
 def _refusal_detail(answer: bytes) -> str:
@@ -431,14 +453,18 @@ def refresh_projections(config: Config, runtime_paths: RuntimePaths, requester_i
     """Rewrite sshd's files in each of the person's workers that serves SSH, after their keys changed. Blocking.
 
     A worker that is not listed with an SSH port gets them at its next connect, before its sshd starts.
+    Call it after the keys are stored: the workers are listed first, so one a connect made ready before is among them.
     """
     endpoints = {handle.worker_key: handle.ssh_endpoint for handle in _listed_workers(runtime_paths)}
-    book = read_links(runtime_paths)
-    key_lines = authorized_key_lines(config, book, requester_id)
-    for link in book.links:
-        endpoint = endpoints.get(link.worker_key)
-        if link.requester_id == requester_id and endpoint is not None:
-            write_projection(endpoint.projection_dir, link, key_lines)
+
+    def project(book: LinkBook) -> None:
+        key_lines = authorized_key_lines(config, book, requester_id)
+        for link in book.links:
+            endpoint = endpoints.get(link.worker_key)
+            if link.requester_id == requester_id and endpoint is not None:
+                write_projection(endpoint.projection_dir, link, key_lines)
+
+    _projected(runtime_paths, project)
 
 
 def active_worker_keys(status: GatewayStatus, *, monotonic: float) -> frozenset[str]:

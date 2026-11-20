@@ -183,9 +183,10 @@ def read_links(runtime_paths: RuntimePaths) -> LinkBook:
 
 
 def update_links[T](runtime_paths: RuntimePaths, change: Callable[[LinkBook], T]) -> T:
-    """Apply one change to the stored book under the file lock, store the result, and return what the change returns.
+    """Apply one change to the stored book under the file lock, and return what the change returns.
 
-    A change that raises stores nothing.
+    The book is stored only when the change changed it, so a change may also just act on what is stored while
+    nothing else can change it. A change that raises stores nothing.
     """
     path = _links_path(runtime_paths)
     with advisory_file_lock(tracking_dir(runtime_paths) / "tailnet_ssh.lock"):
@@ -193,6 +194,9 @@ def update_links[T](runtime_paths: RuntimePaths, change: Callable[[LinkBook], T]
             book = _parse(path, path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             book = LinkBook()
+        stored = book.model_dump(mode="json")
         result = change(book)
-        write_json_file_durable(path, book.model_dump(mode="json"), strict_atomic_replace=True)
+        changed = book.model_dump(mode="json")
+        if changed != stored:
+            write_json_file_durable(path, changed, strict_atomic_replace=True)
     return result

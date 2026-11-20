@@ -175,6 +175,27 @@ def test_update_links_round_trips_and_writes_under_tracking(tmp_path: Path) -> N
     assert read_links(runtime_paths) == book
 
 
+def test_update_links_writes_only_a_changed_book(tmp_path: Path) -> None:
+    """A change that leaves the book as it was writes no file: none before the first link, and no new one after."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    path = tracking_dir(runtime_paths) / "tailnet_ssh.json"
+
+    assert update_links(runtime_paths, lambda book: len(book.links)) == 0
+    assert not path.exists()
+
+    link = new_link(ALICE, "mind_alice", ALICE_KEY, "mind-alice", now=1.0)
+    update_links(runtime_paths, lambda book: book.links.append(link))
+    stored = path.stat()
+
+    assert update_links(runtime_paths, lambda book: book.by_id(link.id)) == link
+    update_links(runtime_paths, lambda book: remove_links(book, lambda _link: False, now=2.0))
+    assert (path.stat().st_ino, path.stat().st_mtime_ns) == (stored.st_ino, stored.st_mtime_ns)
+
+    update_links(runtime_paths, lambda book: remove_links(book, lambda _link: True, now=2.0))
+    assert path.stat().st_ino != stored.st_ino
+    assert read_links(runtime_paths).links[0].desired == "removing"
+
+
 def test_invalid_file_error_names_fields_but_not_secrets(tmp_path: Path) -> None:
     """A corrupt file is reported by path and error types, never with its values or input-derived names."""
     runtime_paths = test_runtime_paths(tmp_path)
