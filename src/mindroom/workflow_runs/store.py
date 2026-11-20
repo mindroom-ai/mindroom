@@ -33,8 +33,13 @@ _MAX_INLINE_RESULT_BYTES = 8 * 1024 * 1024
 _RESULT_PREVIEW_BYTES = 64 * 1024
 _RUN_JSON_FIELDS = frozenset({"execution_identity", "persona", "args", "result"})
 _NODE_JSON_FIELDS = frozenset({"request", "handle", "members", "result", "error", "links"})
-# The origin key belongs to the reservation, which stays as it was made.
-_RUN_UPDATE_FIELDS = frozenset(field.name for field in fields(WorkflowRun)) - {"run_id", "origin_job_id"}
+# A run keeps the owner and the origin key it was reserved with; a redelivered start is checked against both.
+_OWNER_COLUMNS = ("agent_name", "owner_user_id", "room_id", "thread_root_event_id")
+_RUN_UPDATE_FIELDS = frozenset(field.name for field in fields(WorkflowRun)) - {
+    "run_id",
+    "origin_job_id",
+    *_OWNER_COLUMNS,
+}
 _ENDED_NODE_STATES = frozenset(WorkflowNodeState) - {
     WorkflowNodeState.QUEUED,
     WorkflowNodeState.RUNNING,
@@ -88,7 +93,8 @@ class WorkflowRunStore:
                     (run.origin_job_id,),
                 ).fetchone()
                 if row is not None:
-                    if row["reservation_digest"] != values["reservation_digest"]:
+                    same_owner = all(row[column] == values[column] for column in _OWNER_COLUMNS)
+                    if not same_owner or row["reservation_digest"] != values["reservation_digest"]:
                         msg = f"This call already started workflow run {row['run_id']} with another owner, script or arguments."
                         raise WorkflowRunConflictError(msg)
                     return _run_from_row(row), False

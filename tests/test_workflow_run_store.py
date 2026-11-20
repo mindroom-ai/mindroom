@@ -184,6 +184,29 @@ def test_redelivered_start_hits_its_run_after_an_edited_resume(tmp_path: Path) -
     assert store.get_run(_RUN_A) == resumed
 
 
+@pytest.mark.parametrize(
+    ("field", "column_value"),
+    [
+        ("agent_name", "other"),
+        ("owner_user_id", "@other:example.org"),
+        ("room_id", "!other:example.org"),
+        ("thread_root_event_id", "$other"),
+    ],
+)
+def test_a_run_keeps_its_owner_and_a_hit_checks_the_stored_one(tmp_path: Path, field: str, column_value: str) -> None:
+    """The owner cannot be updated, and a row whose owner differs anyway is never returned to the first owner."""
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    first, _ = store.reserve_run(_run(_RUN_A, origin_job_id="job-1"))
+    with pytest.raises(WorkflowRunStoreError, match=field):
+        store.update_run(_RUN_A, **{field: column_value})
+    assert store.reserve_run(_run(_RUN_B, origin_job_id="job-1")) == (first, False)
+
+    with sqlite3.connect(store.database_path) as connection:
+        connection.execute(f"UPDATE workflow_runs SET {field} = ?", (column_value,))  # noqa: S608
+    with pytest.raises(WorkflowRunConflictError):
+        store.reserve_run(_run(_RUN_B, origin_job_id="job-1"))
+
+
 def test_reservation_compares_canonical_json_arguments(tmp_path: Path) -> None:
     """Key order does not matter, and a boolean is not the number it equals in Python."""
     store = WorkflowRunStore(tmp_path / "w.sqlite3")
