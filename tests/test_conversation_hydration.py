@@ -26,7 +26,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
-from mindroom.event_journal import EventClass, EventKind, HistoryRecoveryState, HydrationPolicy, ProjectedEvent
+from mindroom.event_journal import EventClass, EventKind, HistoryRecoveryState, HydrationPolicy, ProjectedEvent, reads
 from mindroom.execution_preparation import _get_unseen_messages_for_sender
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_delivery import build_edit_event_content
@@ -48,9 +48,12 @@ from mindroom.matrix.conversation_reads import (
     refetched_thread_history,
 )
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
+from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
+from mindroom.tool_system.events import tool_markers_out_of_text
 from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_download
 from tests.journal_helpers import record_room_history_recovery
+from tests.test_tool_positions import _SENT_CASES, _sent, _wire
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
@@ -3349,6 +3352,100 @@ class TestEncryptedRelations:
 
         assert await bodies(alice) == ["readable"]
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
+
+
+AGENT = "@mindroom_other:example.org"
+
+
+def _is_agent(sender: str) -> bool:
+    return sender == AGENT
+
+
+def _reply_with_calls(body: str, calls: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return a reply as the backend builds it, its tool markers in its text, and as Matrix holds it, without them."""
+    built = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_html(body),
+        "io.mindroom.tool_trace": {
+            "version": 2,
+            "events": [{"type": "tool_call_completed", "tool_name": "shell"}] * calls,
+        },
+    }
+    held = tool_markers_out_of_text(built)
+    assert held is not built
+    return built, held
+
+
+class TestRepliesWithToolCalls:
+    """A fetched reply is stored as a synced one is: an agent's with its tool markers in its text."""
+
+    @pytest.mark.parametrize("sender", [AGENT, ALICE])
+    async def test_a_refresh_past_an_unreadable_edit_puts_the_notice_after_the_reply_as_its_agent_built_it(
+        self,
+        alice: PrincipalStore,
+        sender: str,
+    ) -> None:
+        """The notice follows the whole reply, and nobody else's message gets marker lines its sender never wrote."""
+        built, held = _reply_with_calls("Before.\n\n🔧 `shell` [1]", 1)
+        await redact_current_edit(alice)
+        edit_of_it = {"rel_type": "m.replace", "event_id": "$m"}
+        client = FakeClient(
+            events={"$m": {**raw("$m", "first", sender=sender), "content": held}},
+            relations={"$m": [encrypted("$e2", sender=sender, ts=4_000, relates_to=edit_of_it)]},
+            olm=object(),
+        )
+
+        assert await hydrator(alice, client, sender_is_managed=_is_agent).refresh((await refreshes(alice))[0])
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
+        read_as = built if sender == AGENT else held
+        assert [m.content for m in page.messages] == [
+            {**read_as, "body": f"{read_as['body']}\n\n{_UNREADABLE_EDIT_NOTICE}"},
+        ]
+
+    async def test_a_hydrated_thread_holds_each_reply_of_an_agent_as_it_was_built(self, alice: PrincipalStore) -> None:
+        """History, summaries, exports, judges and the read tool read these rows with main's code, unchanged."""
+        thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}}
+        replies = [
+            {**raw(f"$reply{ts}", "", sender=AGENT, ts=ts), "content": {**_wire(case), **thread}}
+            for ts, case in enumerate(_SENT_CASES, start=2)
+        ]
+        client = FakeClient(events={"$root": raw("$root", "root")}, relations={"$root": replies})
+
+        await hydrator(alice, client, sender_is_managed=_is_agent).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=50)
+        held = {m.logical_event_id: m.content for m in page.messages}
+        for ts, case in enumerate(_SENT_CASES, start=2):
+            assert held[f"$reply{ts}"] == {**_sent(case), **thread}
+
+    async def test_a_hydrated_thread_fills_its_pages_as_a_synced_one_does(
+        self,
+        journal_store: EventJournalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A page ends at a size, so the same replies must have the same size whichever way they arrived."""
+        built, held = _reply_with_calls("\n\n".join(f"🔧 `shell` [{index}]" for index in range(1, 9)), 8)
+        sizes = [len(json.dumps(content, separators=(",", ":"))) for content in (built, held)]
+        monkeypatch.setattr(reads, "PAGE_CONTENT_BUDGET_BYTES", sum(sizes))
+
+        async def page_of(principal: str, content: dict[str, Any]) -> tuple[list[object], bool]:
+            """Return the bodies of the newest page of a thread of two such replies, and whether it is the whole thread."""
+            store = journal_store.principal(principal)
+            thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}}
+            replies = [
+                {**raw(f"$reply{ts}", "", sender=AGENT, ts=ts), "content": {**content, **thread}} for ts in (2, 3)
+            ]
+            client = FakeClient(events={"$root": raw("$root", "root")}, relations={"$root": replies})
+            await hydrator(store, client, sender_is_managed=_is_agent).ensure_hydrated(room_id=ROOM, thread_id="$root")
+            page = await store.read_conversation(room_id=ROOM, thread_id="$root", limit=50)
+            return [m.content["body"] for m in page.messages], page.next_cursor is None
+
+        page = await page_of("agent@held", held)
+        assert page == await page_of("agent@built", built)
+        assert (len(page[0]), page[1]) == (2, False)
 
 
 class TestReplyFallback:

@@ -242,11 +242,12 @@ async def resolve_visible_event_source(
 ) -> tuple[dict[str, Any], str]:
     """Resolve one event source plus its canonical visible body from runtime config."""
     normalized_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
-    resolved_event_source = await resolve_event_source_content(normalized_event_source, client)
+    trusted = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
+    resolved_event_source = await resolve_event_source_content(normalized_event_source, client, trusted)
     return resolved_event_source, visible_body_from_event_source(
         resolved_event_source,
         fallback_body,
-        trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
+        trusted_sender_ids=trusted,
     )
 
 
@@ -306,7 +307,7 @@ async def bundled_replacement_body(
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
     trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
     for candidate in bundled_replacement_candidates(event_source):
-        resolved_candidate = await resolve_event_source_content(candidate, client)
+        resolved_candidate = await resolve_event_source_content(candidate, client, trusted_sender_ids)
         body = bundled_visible_body_preview(
             resolved_candidate,
             trusted_sender_ids=trusted_sender_ids,

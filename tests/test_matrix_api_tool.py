@@ -28,7 +28,9 @@ from mindroom.custom_tools.matrix_api import MatrixApiTools, _MatrixSearchRespon
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.message_target import MessageTarget
+from mindroom.tool_system.events import tool_markers_out_of_text
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -1195,6 +1197,50 @@ async def test_matrix_api_search_event_context_preserves_profile_info() -> None:
             },
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_search_snippets_show_an_agents_tool_calls_and_put_none_in_a_persons_message() -> None:
+    """A snippet is made from the reply as its agent built it, which Matrix holds without its tool marker lines."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    agent = entity_identity_registry(ctx.config, ctx.runtime_paths).current_ids["general"].full_id
+
+    def reply(body: str, calls: int) -> tuple[dict[str, object], dict[str, object]]:
+        built: dict[str, object] = {
+            "msgtype": "m.text",
+            "body": body,
+            "format": "org.matrix.custom.html",
+            "formatted_body": markdown_to_html(body),
+            "io.mindroom.tool_trace": {
+                "version": 2,
+                "events": [{"type": "tool_call_completed", "tool_name": "shell"}] * calls,
+            },
+        }
+        return built, tool_markers_out_of_text(built)
+
+    async def snippets(hit: dict[str, object], neighbour: dict[str, object], sender: str) -> list[object]:
+        ctx.client._send.return_value = _MatrixSearchResponse(
+            count=1,
+            next_batch=None,
+            results=[
+                _search_result(
+                    result=_raw_event(sender=sender, content=hit),
+                    context={"events_before": [_raw_event(sender=sender, content=neighbour)], "events_after": []},
+                ),
+            ],
+        )
+        with tool_runtime_context(ctx):
+            payload = json.loads(await tool.matrix_api(action="search", search_term="needle", event_context={}))
+        (result,) = payload["results"]
+        return [result["snippet"], result["context"]["events_before"][0]["snippet"]]
+
+    (hit, held_hit), (neighbour, held_neighbour) = reply("The needle.\n\n🔧 `shell` [1]", 1), reply("🔧 `shell` [1]", 1)
+    assert (held_hit["body"], held_neighbour["body"]) == ("The needle.", "")
+
+    assert await snippets(held_hit, held_neighbour, agent) == ["The needle. 🔧 `shell` [1]", "🔧 `shell` [1]"]
+    assert await snippets(hit, neighbour, agent) == ["The needle. 🔧 `shell` [1]", "🔧 `shell` [1]"]
+    assert await snippets(held_hit, held_neighbour, "@alice:localhost") == ["The needle.", ""]
 
 
 @pytest.mark.asyncio

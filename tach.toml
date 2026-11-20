@@ -539,7 +539,6 @@ depends_on = [
     "mindroom.matrix.sidecar_content",
     "mindroom.model_selection",
     "mindroom.reply_lifecycle",
-    "mindroom.tool_system.events",
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_record",
 ]
@@ -689,6 +688,7 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.sidecar_content",
     "mindroom.matrix.transport_progress",
+    "mindroom.tool_system.events",
 ]
 visibility = [
     "mindroom.bot",
@@ -2622,6 +2622,8 @@ depends_on = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.visible_body",
     "mindroom.tool_system.events",
+    "mindroom.entity_resolution",
+    "mindroom.tool_system.runtime_context",
 ]
 visibility = ["mindroom.custom_tools.matrix_user", "mindroom.custom_tools.matrix_user_writes"]
 
@@ -2802,6 +2804,7 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.interactive",
     "mindroom.stop",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -4166,6 +4169,8 @@ depends_on = [
     "mindroom.matrix.reserved_content",
     "mindroom.matrix.thread_mutation_impact",
     "mindroom.tool_system.authoring",
+    "mindroom.entity_resolution",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -4791,6 +4796,7 @@ depends_on = [
     "mindroom.thread_export.service",
     "mindroom.thread_export.storage",
     "mindroom.tool_system.worker_routing",
+    "mindroom.entity_resolution",
 ]
 visibility = ["mindroom.orchestrator"]
 

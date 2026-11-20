@@ -11,8 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.events import tool_markers_in_text
-
 from .identity import agent_of_principal, decode_thread_id, encode_thread_id
 from .membership_state import claim_membership_epoch
 from .models import (
@@ -911,8 +909,7 @@ def _visible_message(row: Row) -> VisibleMessage:
         created_ts=int(row["created_ts"]),
         revision_event_id=row["revision_event_id"],
         revision_ts=int(row["revision_ts"]),
-        # A row hydration or a delivery stored holds a reply as Matrix got it; readers get its tool markers back.
-        content=tool_markers_in_text(decode_content(row["content_json"])),
+        content=decode_content(row["content_json"]),
     )
 
 

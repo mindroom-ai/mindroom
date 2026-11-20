@@ -19,7 +19,8 @@ from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_STREAMING, STREA
 from mindroom.custom_tools.matrix_conversation_operations import _message_payload
 from mindroom.custom_tools.matrix_user_reads import _message_lines
 from mindroom.delivery_gateway import _reply_row_wire_content
-from mindroom.event_journal import DeliveryStage, MatrixDelivery, ProjectedEvent, matrix_delivery_payload
+from mindroom.entity_resolution import entity_identity_registry
+from mindroom.event_journal import DeliveryStage, MatrixDelivery, matrix_delivery_payload
 from mindroom.event_journal.models import ReplyRowFacts
 from mindroom.execution_preparation import _context_body_from_visible_message
 from mindroom.judgment.conversation import message_judgment_text
@@ -33,7 +34,6 @@ from mindroom.matrix.client_delivery import (
     send_message_result,
 )
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-from mindroom.matrix.conversation_reads import projected_visible_messages
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from mindroom.matrix.large_messages import (
     EDIT_MESSAGE_SIZE_LIMIT,
@@ -42,7 +42,11 @@ from mindroom.matrix.large_messages import (
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import markdown_to_html
-from mindroom.matrix.message_content import extract_edit_body, resolve_event_source_content
+from mindroom.matrix.message_content import (
+    extract_and_resolve_message,
+    extract_edit_body,
+    resolve_event_source_content,
+)
 from mindroom.matrix.room_history_reads import (
     find_outbox_delivery_event_id_via_room_messages,
     missing_outbox_delivery_copy_indices_via_room_messages,
@@ -54,14 +58,18 @@ from mindroom.tool_system.events import (
     tool_markers_in_text,
     tool_markers_out_of_text,
 )
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import make_matrix_client_mock
+from tests.test_matrix_api_tool import _make_context
 from tests.test_mentions import _default_runtime_paths, _make_config, _runtime_paths_for
 
 if TYPE_CHECKING:
-    from mindroom.event_journal import EventJournalStore
+    from collections.abc import Iterator
+
 
 _ROOM = "!room:localhost"
 _AGENT = "@mindroom_code:localhost"
+_PERSON = "@person:localhost"
 _TRACE_KEY = "io.mindroom.tool_trace"
 _CASES = json.loads((Path(__file__).parent / "fixtures" / "tool-positions-v1.json").read_text(encoding="utf-8"))[
     "cases"
@@ -379,9 +387,24 @@ def test_reading_what_was_sent_gives_the_reply_back_exactly(case: dict[str, Any]
     assert _readers(_message(tool_markers_in_text(wire))) == _readers(_message(sent))
 
 
+def _is_agent(sender: str) -> bool:
+    return sender == _AGENT
+
+
+@pytest.fixture
+def tool_call_agent() -> Iterator[str]:
+    """Run the test as a tool call of a runtime, and return the Matrix ID of that runtime's agent."""
+    context = _make_context()
+    with tool_runtime_context(context):
+        yield entity_identity_registry(context.config, context.runtime_paths).current_ids["general"].full_id
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", _SENT_CASES, ids=[case["name"] for case in _SENT_CASES])
-async def test_every_way_into_the_backend_reads_the_reply_as_it_was_built(case: dict[str, Any]) -> None:
+async def test_every_way_into_the_backend_reads_an_agents_reply_as_it_was_built(
+    case: dict[str, Any],
+    tool_call_agent: str,
+) -> None:
     """A synced event, a fetched one and one a person's account reads all carry the reply with its markers."""
     sent, wire = _sent(case), _wire(case)
     edit = build_edit_event_content(event_id="$reply", new_content=sent, new_text=sent["body"])
@@ -393,6 +416,7 @@ async def test_every_way_into_the_backend_reads_the_reply_as_it_was_built(case: 
         source=_event(wire),
         self_sender="@mindroom_other:localhost",
         provenance=nio.TimelineEventProvenance.LIVE,
+        sender_is_managed=_is_agent,
     )
     assert views is not None
     inbound, projected = views
@@ -400,16 +424,48 @@ async def test_every_way_into_the_backend_reads_the_reply_as_it_was_built(case: 
     assert projected is not None
     assert projected.content == sent
 
-    fetched = await resolve_event_source_content(_event(wire), None)
+    fetched = await resolve_event_source_content(_event(wire), None, [_AGENT])
     assert fetched["content"] == sent
-    edited_body, edited_content = await extract_edit_body(_event(wire_edit, "$edit"), None)
-    assert (edited_body, edited_content) == (sent["body"], sent)
+    message = await extract_and_resolve_message(nio.RoomMessage.parse_event(_event(wire)), trusted_sender_ids=[_AGENT])
+    assert (message["body"], message["content"]) == (sent["body"], sent)
+    edited = await extract_edit_body(_event(wire_edit, "$edit"), None, trusted_sender_ids=[_AGENT])
+    assert edited == (sent["body"], sent)
 
-    for wire_events, sent_events in (
-        ([_event(wire)], [_event(sent)]),
-        ([_event(wire), _event(wire_edit, "$edit")], [_event(sent), _event(edit, "$edit")]),
-    ):
-        assert _message_lines(wire_events) == _message_lines(sent_events)
+    def read_by_a_person(reply: dict[str, Any], its_edit: dict[str, Any]) -> list[list[str]]:
+        events = [_event(reply, sender=tool_call_agent), _event(its_edit, "$edit", tool_call_agent)]
+        return [_message_lines(events[:1]), _message_lines(events)]
+
+    assert read_by_a_person(wire, wire_edit) == read_by_a_person(sent, edit)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("tool_call_agent")
+async def test_no_way_into_the_backend_puts_markers_in_a_message_that_is_no_agents() -> None:
+    """Anyone can write positions into a trace, and only an agent's reply had marker lines to put back."""
+    wire = _wire(_case(_BETWEEN))
+    wire_edit = {**wire, "body": f"* {wire['body']}", "m.new_content": wire}
+    event, edit = _event(wire, sender=_PERSON), _event(wire_edit, "$edit", _PERSON)
+    assert tool_markers_in_text(wire)["body"] != wire["body"]
+
+    views = ingestion_timeline_views(
+        room_id=_ROOM,
+        source=event,
+        self_sender=_AGENT,
+        provenance=nio.TimelineEventProvenance.LIVE,
+        sender_is_managed=_is_agent,
+    )
+    assert views is not None
+    inbound, projected = views
+    assert inbound.source["content"] == wire
+    assert projected is not None
+    assert projected.content == wire
+
+    assert await resolve_event_source_content(event, None, [_AGENT]) is event
+    message = await extract_and_resolve_message(nio.RoomMessage.parse_event(event), trusted_sender_ids=[_AGENT])
+    assert (message["body"], message["content"]) == (wire["body"], wire)
+    assert await extract_edit_body(edit, None, trusted_sender_ids=[_AGENT]) == (wire["body"], wire)
+
+    assert all("🔧" not in line for line in _message_lines([event, edit]))
 
 
 @pytest.mark.asyncio
@@ -445,40 +501,6 @@ async def test_recovery_finds_in_the_room_the_reply_an_earlier_device_sent(edit:
     assert missing == [1]
 
 
-@pytest.mark.asyncio
-async def test_the_conversation_projection_serves_the_reply_as_it_was_built(journal_store: EventJournalStore) -> None:
-    """History, summaries, exports, judges and the read tool read projection rows, whichever write stored them."""
-    store = journal_store.principal("principal")
-    projections = [
-        ProjectedEvent(
-            event_id=f"$reply{number}",
-            room_id=_ROOM,
-            thread_id="$thread",
-            sender=_AGENT,
-            origin_server_ts=number,
-            content=_wire(case),
-            replaces_event_id=None,
-            redacts_event_id=None,
-        )
-        for number, case in enumerate(_SENT_CASES)
-    ]
-    assert await store.install_hydrated_conversation(
-        room_id=_ROOM,
-        thread_id="$thread",
-        events=tuple(projections),
-        complete=True,
-        expected_membership_epoch=await store.membership_epoch(_ROOM),
-    )
-
-    page = await store.read_conversation(room_id=_ROOM, thread_id="$thread", limit=len(_SENT_CASES))
-
-    messages = projected_visible_messages(page)
-    assert len(messages) == len(_SENT_CASES)
-    for message, case in zip(messages, _SENT_CASES, strict=True):
-        assert _readers(message)[:2] == [case["sent"]["body"], _sent(case)]
-        assert _readers(message)[2:] == _readers(_message(_sent(case)))[2:]
-
-
 def test_the_model_reads_a_separator_after_a_call_as_it_always_did() -> None:
     """History drops a separator that follows a marker, which it can only do for a reply read with its markers."""
     case = _case("a separator after a call and extra blank lines stay")
@@ -488,11 +510,11 @@ def test_the_model_reads_a_separator_after_a_call_as_it_always_did() -> None:
     assert body_without_tool_markers(message.body, message.content) == "After."
 
 
-def test_a_person_reading_a_reply_of_calls_alone_sees_its_calls() -> None:
+def test_a_person_reading_a_reply_of_calls_alone_sees_its_calls(tool_call_agent: str) -> None:
     """The reads of a person's own account keep marker lines as text, so a reply of calls alone is not empty."""
     case = _case("a reply of calls alone")
 
-    (line,) = _message_lines([_event(_wire(case))])
+    (line,) = _message_lines([_event(_wire(case), sender=tool_call_agent)])
 
     assert "🔧 `shell` [1]" in line
     assert "🔧 `shell` [2] ⏳" in line

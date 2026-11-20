@@ -75,7 +75,7 @@ from mindroom.reply_turn.inbox import InboxResponses
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import ProgressPermission
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.events import ToolTraceEntry, tool_markers_out_of_text
 from mindroom.turn_record import TurnRecord
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -1446,6 +1446,46 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert len(projections) == 1
         assert projections[0].content == visible
+
+    async def test_a_delivered_reply_with_tool_calls_is_projected_as_it_was_built(self, tmp_path: Path) -> None:
+        """Matrix holds the reply without its tool markers, and the projection holds every reply with them."""
+        outbox = FakeOutbox()
+        built = {
+            "msgtype": "m.text",
+            "body": "🔧 `shell` [1]\n\nChoose",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<p>🔧 <code>shell</code> [1]</p>\n<p>Choose</p>\n",
+            "io.mindroom.tool_trace": {"version": 2, "events": [{"type": "tool_call_completed", "tool_name": "shell"}]},
+            "io.mindroom.interactive": {
+                "creator_agent": "agent",
+                "option_labels": {"1": "Yes"},
+                "options": {"1": "yes"},
+                "question_text": "Choose?",
+                "source_event_id": "$cause",
+            },
+        }
+        held = tool_markers_out_of_text(built)
+        assert held["body"] == "Choose"
+        await outbox.enqueue_matrix_delivery(
+            delivery_id="$cause",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload=built,
+        )
+        claimed = await outbox.load_matrix_delivery(delivery_id="$cause", stage=DeliveryStage.FINAL)
+        assert claimed is not None
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.runtime.client.room_get_event.return_value = _delivered_event_response(
+            _ROOM_ID,
+            "$sent",
+            content=held,
+        )
+        gateway.deps.runtime.client.room_get_event.side_effect = None
+
+        projections = await gateway._observe_delivered(claimed, "$sent")
+
+        assert [projection.content for projection in projections] == [built]
 
     async def test_an_edit_acknowledgement_projects_its_target_before_the_edit(self, tmp_path: Path) -> None:
         """A missed target echo cannot leave an acknowledged prompt edit unresolved."""

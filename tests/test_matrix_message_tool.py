@@ -31,11 +31,11 @@ from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_conversation_operations import MatrixMessageOperationResult
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-from mindroom.event_journal import ProjectedEvent
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_visible_messages import trusted_visible_sender_ids
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
+from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY, MatrixMessageExtra
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
@@ -2518,7 +2518,7 @@ async def test_matrix_message_read_drops_tool_markers_from_bodies() -> None:
 async def test_matrix_message_read_thread_is_the_same_for_a_reply_stored_as_matrix_got_it(
     journal_store: EventJournalStore,
 ) -> None:
-    """A whole thread read, edit options included, reads a reply stored without its markers as one stored with them."""
+    """A whole thread read, edit options included, reads a reply Matrix holds without its markers as one with them."""
     fixture = json.loads((Path(__file__).parent / "fixtures" / "tool-positions-v1.json").read_text(encoding="utf-8"))
     sent = next(case for case in fixture["cases"] if case["name"].startswith("a separator after a call"))["sent"]
     marked = {
@@ -2535,16 +2535,23 @@ async def test_matrix_message_read_thread_is_the_same_for_a_reply_stored_as_matr
     payloads = []
     for principal, content in (("marked", marked), ("wire", wire)):
         store = journal_store.principal(principal)
-        reply = ProjectedEvent(
-            event_id="$reply",
+        # As sync stores it: the content Matrix holds, read from an agent.
+        views = ingestion_timeline_views(
             room_id=ctx.room_id,
-            thread_id=ctx.thread_id,
-            sender="@mindroom_general:localhost",
-            origin_server_ts=1,
-            content=content,
-            replaces_event_id=None,
-            redacts_event_id=None,
+            source={
+                "type": "m.room.message",
+                "event_id": "$reply",
+                "sender": "@mindroom_general:localhost",
+                "origin_server_ts": 1,
+                "content": content,
+            },
+            self_sender="@mindroom_other:localhost",
+            provenance=nio.TimelineEventProvenance.LIVE,
+            sender_is_managed=lambda _sender: True,
         )
+        assert views is not None
+        assert views[1] is not None
+        reply = replace(views[1], thread_id=ctx.thread_id)
         assert await store.install_hydrated_conversation(
             room_id=ctx.room_id,
             thread_id=ctx.thread_id,

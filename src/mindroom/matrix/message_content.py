@@ -137,14 +137,16 @@ def _with_event_marker(
 async def _resolve_event_content(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None,
+    trusted_sender_ids: Collection[str],
 ) -> tuple[dict[str, Any], bool]:
     """Return one event's canonical content plus whether resolving it changed anything."""
     preview_content = _normalized_content_dict(event_source.get("content", {}))
     resolved_content = await _resolve_canonical_content(preview_content, client)
     if resolved_content is not preview_content:
         resolved_content = _with_event_marker(_with_event_relation(resolved_content, preview_content), preview_content)
-    # A fetched reply is read with its tool markers in its text, as a synced one is.
-    resolved_content = tool_markers_in_text(resolved_content)
+    if event_source.get("sender") in trusted_sender_ids:
+        # An agent's fetched reply is read with its tool markers in its text, as a synced one is.
+        resolved_content = tool_markers_in_text(resolved_content)
     return resolved_content, resolved_content is not preview_content
 
 
@@ -220,7 +222,7 @@ async def extract_and_resolve_message(
         the full text from the attachment.
 
     """
-    resolved_content, _ = await _resolve_event_content(event.source, client)
+    resolved_content, _ = await _resolve_event_content(event.source, client, trusted_sender_ids)
     resolved_body = visible_body_from_content(
         resolved_content,
         event.body,
@@ -257,7 +259,7 @@ async def extract_edit_body(
     trusted_sender_ids: Collection[str] = (),
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
-    resolved_content, _ = await _resolve_event_content(event_source, client)
+    resolved_content, _ = await _resolve_event_content(event_source, client, trusted_sender_ids)
     new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
     body = visible_body_from_content(
         new_content,
@@ -275,9 +277,10 @@ async def extract_edit_body(
 async def resolve_event_source_content(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None = None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Return an event source with canonical v2 sidecar content hydrated when available."""
-    resolved_content, content_changed = await _resolve_event_content(event_source, client)
+    resolved_content, content_changed = await _resolve_event_content(event_source, client, trusted_sender_ids)
     if not content_changed:
         return event_source
 

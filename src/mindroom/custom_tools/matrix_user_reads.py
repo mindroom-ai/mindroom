@@ -27,6 +27,7 @@ from mindroom.attachments.storage import register_bytes_attachment
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import RETAINED_MEDIA_MAX_BYTES
+from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.matrix.client_room_admin import resolve_room_reference
 from mindroom.matrix.media import (
     MATRIX_MEDIA_EVENT_TYPES,
@@ -36,6 +37,7 @@ from mindroom.matrix.media import (
 )
 from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
 from mindroom.tool_system.events import tool_markers_in_text
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -610,8 +612,11 @@ def _message_columns(
         default=None,
     )
     content = _content(message) if latest is None else _mapping(_content(latest).get("m.new_content"))
-    # A MindRoom reply is read with its tool markers in its text, as it was before they left it on the way to Matrix.
-    text, file_note = _said(message, tool_markers_in_text(content))
+    # An agent's reply is read with its tool markers in its text, as it was before they left it on the way to Matrix.
+    turn = get_tool_runtime_context()
+    if turn and message.get("sender") in current_internal_sender_ids(turn.config, turn.runtime_paths):
+        content = tool_markers_in_text(content)
+    text, file_note = _said(message, content)
     notes = [
         text,
         edited if latest else None,

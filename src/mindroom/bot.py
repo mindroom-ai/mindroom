@@ -436,6 +436,7 @@ class AgentBot:
                 store=principal,
                 runtime=self._runtime_view,
                 self_sender=runtime_matrix_id.full_id,
+                sender_is_managed=lambda sender: self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender),
             ),
         )
         self._conversation_resolver = ConversationResolver(
