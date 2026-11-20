@@ -223,13 +223,6 @@ class JournalDispatcher:
         can be terminal with nothing durable behind it.
         """
         needs_turn_replay = _needs_turn_replay(event)
-        logger.warning(
-            "rfs_dispatch_event",
-            callback=getattr(self.callbacks.on_message, "__self__", None) and self.callbacks.on_message.__self__.agent_name,
-            event_id=event.event_id,
-            kind=event.kind.value,
-            released=self._turn_replay_released,
-        )
         if needs_turn_replay and not self._turn_replay_released:
             # Turn work waits until the orchestrator has started responders.
             return False
