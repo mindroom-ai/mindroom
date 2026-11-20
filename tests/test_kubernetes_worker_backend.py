@@ -357,6 +357,7 @@ class _FakeCoreApi:
         self.created_secret_bodies: list[dict[str, object]] = []
         self.patched_secret_bodies: list[tuple[str, object]] = []
         self.deleted_secret_names: list[str] = []
+        self.api_client = _FakeApiClient(self)
 
     def list_namespaced_pod(self, namespace: str, **kwargs: object) -> _FakeRawResponse:
         return _absence_inventory(self.pods, namespace, **kwargs)
@@ -441,6 +442,30 @@ class _FakeCoreApi:
         if pod is None:
             raise _FakeApiError(404)
         return pod
+
+
+class _FakeApiClient:
+    def __init__(self, core_api: _FakeCoreApi) -> None:
+        self._core_api = core_api
+
+    def select_header_accept(self, _content_types: list[str]) -> str:
+        return "application/json"
+
+    def call_api(
+        self,
+        _resource_path: str,
+        _method: str,
+        path_params: dict[str, str],
+        _query_params: list[object],
+        header_params: dict[str, str],
+        *,
+        body: object,
+        **_kwargs: object,
+    ) -> object:
+        assert header_params["Content-Type"] == "application/merge-patch+json"
+        name = path_params["name"]
+        namespace = path_params["namespace"]
+        return self._core_api.patch_namespaced_secret(name, namespace, body)
 
 
 def test_kubernetes_deployment_snapshot_tolerates_missing_status() -> None:
@@ -1259,7 +1284,7 @@ def test_kubernetes_backend_can_use_one_precreated_auth_secret(tmp_path: Path) -
 
 
 def test_kubernetes_auth_secret_patch_goes_through_the_installed_client() -> None:
-    """The Secret patch must match the installed client's API and send a merge whose nulls delete keys."""
+    """The Secret patch must match the installed client's API and send a merge patch whose nulls delete keys."""
     from kubernetes import client as kubernetes_client  # noqa: PLC0415
 
     backend, _apps_api, _core_api = _backend(auth_secret_name="auth")  # noqa: S106
@@ -1276,7 +1301,7 @@ def test_kubernetes_auth_secret_patch_goes_through_the_installed_client() -> Non
     method, url = request.call_args.args
     assert method == "PATCH"
     assert url == f"https://kubernetes.invalid/api/v1/namespaces/{backend._resources.config.namespace}/secrets/auth"
-    assert request.call_args.kwargs["headers"]["Content-Type"] == "application/strategic-merge-patch+json"
+    assert request.call_args.kwargs["headers"]["Content-Type"] == "application/merge-patch+json"
     data = json.loads(request.call_args.kwargs["body"])["data"]
     assert data == {"worker-a": None, "worker-a.credentials-encryption-key": None}
 

@@ -263,7 +263,32 @@ class _AppsApiProtocol(Protocol):
     def list_namespaced_replica_set(self, namespace: str, **kwargs: object) -> _KubernetesRawResponse: ...
 
 
+class _KubernetesApiClientProtocol(Protocol):
+    def select_header_accept(self, content_types: list[str]) -> str: ...
+
+    def call_api(
+        self,
+        resource_path: str,
+        method: str,
+        path_params: dict[str, str],
+        query_params: list[object],
+        header_params: dict[str, str],
+        *,
+        body: object,
+        post_params: list[object],
+        files: dict[str, object],
+        response_type: str,
+        auth_settings: list[str],
+        _return_http_data_only: bool,
+        _preload_content: bool,
+        _request_timeout: object | None,
+        collection_formats: dict[str, str],
+    ) -> object: ...
+
+
 class _CoreApiProtocol(Protocol):
+    api_client: _KubernetesApiClientProtocol
+
     def read_namespaced_service(self, name: str, namespace: str) -> object: ...
 
     def create_namespaced_service(self, namespace: str, body: dict[str, object]) -> object: ...
@@ -275,8 +300,6 @@ class _CoreApiProtocol(Protocol):
     def read_namespaced_secret(self, name: str, namespace: str) -> object: ...
 
     def create_namespaced_secret(self, namespace: str, body: dict[str, object]) -> object: ...
-
-    def patch_namespaced_secret(self, name: str, namespace: str, body: dict[str, object]) -> object: ...
 
     def delete_namespaced_secret(self, name: str, namespace: str) -> None: ...
 
@@ -890,8 +913,28 @@ class KubernetesResourceManager:
         self._delete_object(self._core.delete_namespaced_secret, secret_name)
 
     def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:
-        # The client sends a dict body as a strategic merge patch, where a null value deletes the key from `data`.
-        self._core.patch_namespaced_secret(secret_name, self.config.namespace, body)
+        api_client = self._core.api_client
+        api_client.call_api(
+            "/api/v1/namespaces/{namespace}/secrets/{name}",
+            "PATCH",
+            {"name": secret_name, "namespace": self.config.namespace},
+            [],
+            {
+                "Accept": api_client.select_header_accept(
+                    ["application/json", "application/yaml", "application/vnd.kubernetes.protobuf", "application/cbor"],
+                ),
+                "Content-Type": "application/merge-patch+json",
+            },
+            body=body,
+            post_params=[],
+            files={},
+            response_type="V1Secret",
+            auth_settings=["BearerToken"],
+            _return_http_data_only=True,
+            _preload_content=True,
+            _request_timeout=None,
+            collection_formats={},
+        )
 
     def _recreate_deployment(
         self,
