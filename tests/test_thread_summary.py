@@ -916,6 +916,16 @@ class TestMaybeGenerateThreadSummary:
         (sent,) = _sent_summaries(self.client)
         assert sent["summary"] == "Trip plan"
 
+    async def test_provisional_title_of_a_routed_batch_reads_every_message_the_thread_shows(self) -> None:
+        """A routed attachment and the text sent with it are titled together, each as the thread shows it."""
+        model = self._summarizer(_title("Video summary"))
+        self._history(_make_thread_history(2))
+
+        await self._provisional(None, prompt_event_ids=("$event0", "$event1"), prompt_as_shown=True)
+
+        assert "Message 0\nMessage 1" in _prompt(model.requests[0])
+        assert _sent_summaries(self.client)[0]["summary"] == "Video summary"
+
     def _fork_of_thread(self, parent: Sequence[ResolvedVisibleMessage], fork: Sequence[ResolvedVisibleMessage]) -> None:
         """Serve the parent thread ``_THREAD`` and its fork ``$fork``, whose root ``fork`` starts."""
         pages = {}

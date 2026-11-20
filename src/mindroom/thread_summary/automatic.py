@@ -515,13 +515,12 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
             )
             if (prompt_message := await untitled_prompt(history)) is None:
                 return
+            # A routed turn holds no text: it is titled from each of its messages as the thread shows it.
+            shown = "\n".join(message.body for message in history if message.event_id in prompt_event_ids)
+            body = shown if prompt_as_shown else prompt
             model_name = resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name)
             title = await _provisional_title(
-                replace(prompt_message, body=prompt)
-                if prompt is not None
-                else prompt_message
-                if prompt_as_shown
-                else None,
+                replace(prompt_message, body=body) if body is not None else None,
                 history,
                 thread_id,
                 parent_summary=partial(

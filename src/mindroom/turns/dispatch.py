@@ -392,18 +392,18 @@ class TurnDispatcher:
             return
         prompt: str | None
         prompt_event_ids = turn.handled_turn.source_event_ids
-        routed_event_id = turn.facts.routed_event_id
-        if routed_event_id is not None:
+        routed_event_ids = turn.facts.routed_event_ids
+        if routed_event_ids:
             if (
-                thread_id != routed_event_id
+                thread_id not in routed_event_ids
                 or turn.handled_turn.is_coalesced
                 or turn.payload.raw_audio_fallback
                 or turn.payload.voice_transcript
             ):
                 return
-            # A hidden route carries no text of the person's: their message is titled as the thread shows it.
+            # A hidden route carries no text of the person's: their messages are titled as the thread shows them.
             prompt = None
-            prompt_event_ids = (thread_id,)
+            prompt_event_ids = routed_event_ids
         elif turn.handled_turn.is_coalesced:
             if thread_id not in prompt_event_ids:
                 return
@@ -439,7 +439,7 @@ class TurnDispatcher:
                 self.deps.runtime_paths,
                 prompt_event_ids=prompt_event_ids,
                 prompt=prompt,
-                prompt_as_shown=routed_event_id is not None,
+                prompt_as_shown=bool(routed_event_ids),
                 conversation_reader=self.deps.resolver.deps.conversation_reader,
                 entity_name=self.deps.agent_name,
                 membership_index=self.deps.runtime.agent_reply_memberships,

@@ -8106,9 +8106,10 @@ def _route_message(
     entity: str = "general",
     thread_id: str | None = None,
     event_id: str = "$route:localhost",
+    event_ids: tuple[str, ...] = ("$question:localhost",),
 ) -> nio.RoomMessageFormatted:
-    """Return a steward's route of `$question:localhost` to an entity, as journal dispatch hands it to ingress."""
-    route = {"entity": _entity_user_id(config, entity), "event_ids": ["$question:localhost"]}
+    """Return a steward's route of the person's ``event_ids`` to an entity, as journal dispatch hands it to ingress."""
+    route = {"entity": _entity_user_id(config, entity), "event_ids": list(event_ids)}
     return _route_as_delivered(
         config,
         {
@@ -8131,6 +8132,24 @@ def _two_agent_config(tmp_path: Path) -> Config:
         ),
         test_runtime_paths(tmp_path / "runtime"),
     )
+
+
+@pytest.mark.asyncio
+async def test_a_routed_batch_starting_a_thread_is_titled_from_every_message_of_it(tmp_path: Path) -> None:
+    """A routed attachment and the text sent in its thread are one first turn, titled as the thread shows them."""
+    config = _two_agent_config(tmp_path)
+    config.defaults.thread_summary_first_threshold = 1
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
+    batch = ("$question:localhost", "$caption:localhost")
+    route = _route_message(config, steward="research", thread_id=batch[0], event_ids=batch)
+
+    with patch("mindroom.turns.dispatch.maybe_generate_prompt_summary", new=AsyncMock()) as early_title:
+        await harness.deliver(room, route)
+
+    assert early_title.call_args.kwargs["prompt_event_ids"] == batch
+    assert early_title.call_args.kwargs["prompt"] is None
+    assert early_title.call_args.kwargs["prompt_as_shown"] is True
 
 
 @pytest.mark.asyncio
