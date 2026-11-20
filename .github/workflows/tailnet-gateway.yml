@@ -10,6 +10,10 @@ on:
     branches: [main]
     paths:
       - "tailnet-gateway/**"
+      - "src/mindroom/tailnet_ssh/**"
+      - "src/mindroom/api/worker_ssh.py"
+      - "local/instances/deploy/Dockerfile.mindroom"
+      - "tests/test_tailnet_ssh_headscale_e2e.py"
       - ".github/workflows/tailnet-gateway.yml"
 
 permissions:
@@ -52,3 +56,82 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+
+  # The gateway image and the worker image in a real tailnet: Headscale, Tailscale clients, and stock SSH clients.
+  headscale-e2e:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+    env:
+      REGISTRY: ghcr.io
+      OWNER: ${{ github.repository_owner }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # The worker image copies LFS files, and the build cache holds their content.
+          lfs: true
+          persist-credentials: false
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          driver-opts: |
+            network=host
+            image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Both builds read the cache build-mindroom.yml writes, and write none.
+      - name: Build the gateway image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+        with:
+          context: .
+          file: tailnet-gateway/Dockerfile
+          load: true
+          tags: mindroom-tailnet-gateway:e2e
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-tailnet-gateway:buildcache-amd64
+          provenance: false
+          sbom: false
+
+      - name: Build the worker image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+        with:
+          context: .
+          file: local/instances/deploy/Dockerfile.mindroom
+          load: true
+          tags: mindroom:e2e
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom:buildcache-amd64
+          provenance: false
+          sbom: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Install rsync
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rsync
+
+      - name: Run the Headscale integration test
+        env:
+          MINDROOM_TAILNET_SSH_E2E: "1"
+          MINDROOM_TAILNET_SSH_E2E_GATEWAY_IMAGE: mindroom-tailnet-gateway:e2e
+          MINDROOM_TAILNET_SSH_E2E_WORKER_IMAGE: mindroom:e2e
+        run: uv run pytest tests/test_tailnet_ssh_headscale_e2e.py -x -n 0 --no-cov

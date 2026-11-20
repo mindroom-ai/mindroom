@@ -35,6 +35,7 @@ _CODE_RUNNING_JOBS = (
     ("smoke-stacks.yml", "smoke"),
     ("tach.yml", "check"),
     ("tailnet-gateway.yml", "go-test"),
+    ("tailnet-gateway.yml", "headscale-e2e"),
 )
 
 
