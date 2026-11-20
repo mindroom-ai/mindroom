@@ -284,8 +284,8 @@ def _validate_early_response_headers(request: Request) -> None:
         raise HTTPException(400, "Unsupported MCP protocol version")
 
 
-def _input_schema(name: str) -> dict[str, Any]:
-    return next(tool.input_schema for tool in _meta_tools() if tool.name == name)
+def _input_schema(name: str) -> dict[str, Any] | None:
+    return next((tool.input_schema for tool in _meta_tools() if tool.name == name), None)
 
 
 def _request_identity(ctx: ServerRequestContext) -> tuple[Request, tuple[GatewayPrincipal, type, int | str]] | None:
@@ -454,9 +454,9 @@ class GatewayServer:
         name: str,
         arguments: dict[str, Any],
     ) -> types.CallToolResult:
-        if name not in _OPERATION_NAMES:
+        schema = _input_schema(name) if name in _OPERATION_NAMES else None
+        if schema is None:
             return _result(_error(GatewayErrorCode.TOOL_NOT_FOUND, "Unknown gateway operation."))
-        schema = _input_schema(name)
         if not Draft202012Validator(schema).is_valid(arguments):
             return _result(_error(GatewayErrorCode.INVALID_ARGUMENTS, "Gateway operation arguments are invalid."))
         identity = _request_identity(ctx)
