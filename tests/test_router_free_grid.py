@@ -8,7 +8,8 @@ account and never the owner account sent anything visible, and that nothing a pe
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import time
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
@@ -21,14 +22,16 @@ from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, _VoiceNormalizationResult
 from mindroom.routing_judgment import ResponderSelection
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.conftest import approval_manager_for_test, bind_runtime_paths, test_runtime_paths
 from tests.test_approval_receipt_transport import (  # noqa: F401 - sending_clients is a pytest fixture
+    _ROOM,
     _bot,
     _delivery,
     _transport,
     sending_clients,
 )
 from tests.test_turns_focused import (
+    _ROOM_ID,
     _SENDER,
     _build_harness,
     _entity_user_id,
@@ -125,23 +128,32 @@ async def _deliver(harness: _Harness, room: nio.MatrixRoom, event: nio.Event) ->
         await harness.deliver(room, event)
 
 
-def _visible(harness: _Harness) -> list[Any]:
-    """Return everything this account showed the room: replies it started, messages it sent, and its edits."""
-    return [*harness.runner.requests, *harness.gateway.sent, *harness.gateway.edited]
+# What the answering account shows the room on each path: (replies, messages it sends itself). A reply is the one
+# message its runner posts; a voice turn also posts the transcript, and a command posts its result and no reply.
+SHOWN = {
+    "text": (1, 0),
+    "voice": (1, 1),
+    "untargeted command": (0, 1),
+    "mentioned command": (0, 1),
+    "scheduled prompt": (1, 0),
+}
 
 
-@pytest.mark.parametrize("path", PATHS)
-@pytest.mark.parametrize("room_name", ROOMS)
-async def test_one_account_answers_and_no_other_account_shows_anything(
+def _shown(harness: _Harness) -> tuple[int, int, int, int]:
+    """Return what this account showed the room: its replies, the messages it sent, its edits and its reactions."""
+    gateway = harness.gateway
+    return (len(harness.runner.requests), len(gateway.sent), len(gateway.edited), len(gateway.reactions))
+
+
+async def _run_cell(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     journal_store: EventJournalStore,
     room_name: str,
     path: str,
-) -> None:
-    """Each path gets exactly one answer, from the account the table names, and nothing from anyone else."""
+) -> tuple[dict[str, _Harness], nio.Event]:
+    """Deliver one path's event to every account of the room, and each route to every account but its steward."""
     accounts = ROOMS[room_name]
-    answerer = ANSWERS[room_name][PATHS.index(path)]
     config = _config(tmp_path, accounts)
     room = _room_with_members(config, *accounts)
     room.members_synced = True
@@ -155,9 +167,8 @@ async def test_one_account_answers_and_no_other_account_shows_anything(
         harness.runtime.orchestrator.journal_store = journal_store
         harness.runtime.orchestrator.steward = accounts[0]
 
-    for name, harness in harnesses.items():
-        if event.sender != _entity_user_id(config, name) or path == "scheduled prompt":
-            await _deliver(harness, room, event)
+    for harness in harnesses.values():
+        await _deliver(harness, room, event)
     # Each hidden route a steward sent reaches every other account, as sync delivers it.
     for steward, harness in harnesses.items():
         for number, content in enumerate(harness.gateway.routes):
@@ -165,34 +176,84 @@ async def test_one_account_answers_and_no_other_account_shows_anything(
             for name, other in harnesses.items():
                 if name != steward:
                     await _deliver(other, room, route)
+    return harnesses, event
 
-    shown = {name: _visible(harness) for name, harness in harnesses.items()}
-    answers = {
-        name: harness.gateway.sent if "command" in path else harness.runner.requests
-        for name, harness in harnesses.items()
+
+@pytest.mark.parametrize("path", PATHS)
+@pytest.mark.parametrize("room_name", ROOMS)
+async def test_one_account_answers_and_no_other_account_shows_anything(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    journal_store: EventJournalStore,
+    room_name: str,
+    path: str,
+) -> None:
+    """Each path gets exactly what the table says from the account it names, and nothing from anyone else."""
+    accounts = ROOMS[room_name]
+    answerer = ANSWERS[room_name][PATHS.index(path)]
+
+    harnesses, event = await _run_cell(tmp_path, monkeypatch, journal_store, room_name, path)
+
+    # Every reply, message, edit and reaction is counted, so one more of any of them from any account fails the cell.
+    assert {name: _shown(harness) for name, harness in harnesses.items()} == {
+        name: (*SHOWN[path], 0, 0) if name == answerer else (0, 0, 0, 0) for name in accounts
     }
-    assert {name: len(found) for name, found in answers.items() if found} == {answerer: 1}
-    assert [name for name, found in shown.items() if found] == [answerer]
+    answering = harnesses[answerer]
+    for request in answering.runner.requests:
+        envelope = request.response_envelope
+        assert (envelope.agent_name, envelope.requester_id, envelope.room_id) == (answerer, _SENDER, _ROOM_ID)
+        assert envelope.target.reply_to_event_id == event.event_id
+    for sent in answering.gateway.sent:
+        assert sent.target.room_id == _ROOM_ID
+        assert "router" not in sent.response_text.lower()
+        # The one message a voice turn sends is the transcript, marked so that no account takes it as a turn.
+        marked = (sent.extra_content or {}).get(constants.VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
+        assert (marked, _SPOKEN in sent.response_text) == ((path == "voice"),) * 2
     assert [name for name, harness in harnesses.items() if harness.gateway.routes] in ([], [accounts[0]])
-    for harness in harnesses.values():
-        assert harness.gateway.failed_dispatches == []
-        assert not [sent for sent in harness.gateway.sent if "router" in sent.response_text.lower()]
+    assert [harness.gateway.failed_dispatches for harness in harnesses.values()] == [[]] * len(accounts)
 
 
 @pytest.mark.parametrize("edits_event_id", [None, "$card"])
 @pytest.mark.parametrize("room_name", ROOMS)
-async def test_a_gated_tool_call_shows_one_card_from_the_agent_that_asks(
+async def test_a_gated_tool_call_shows_one_card_from_the_agent_whose_turn_asks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    journal_store: EventJournalStore,
     sending_clients: list[nio.AsyncClient],  # noqa: F811
     room_name: str,
     edits_event_id: str | None,
 ) -> None:
-    """The agent whose tool call waits for approval sends the card and its closing edit; no other account does."""
-    accounts = ROOMS[room_name]
-    asking = accounts[-1]
-    bots = {name: _bot(name) for name in accounts}
-    asked_by = f"{asking}@{bots[asking].client.user_id}"
+    """The agent whose turn answers a person sends the card its gated tool call needs, and the card's closing edit."""
+    harnesses, _ = await _run_cell(tmp_path, monkeypatch, journal_store, room_name, "text")
+    [envelope] = [request.response_envelope for harness in harnesses.values() for request in harness.runner.requests]
+    bots = {name: _bot(name) for name in ROOMS[room_name]}
+    manager = approval_manager_for_test(
+        test_runtime_paths(tmp_path / "approvals"),
+        prepare_approval_event=AsyncMock(side_effect=lambda _room_id, _thread_id, content, _sender: content),
+        responder_principal_id=lambda entity: f"{entity}@{bots[entity].client.user_id}",
+    )
 
-    send, _resolve, _device_id = await _transport(bots, {"card-1": asked_by}).pinned_delivery("card-1")
+    # The turn's own entity asks, as the reply that pauses on a gated call does.
+    card = await manager.prepare_reply_card(
+        approval_id="card-1",
+        continuation_id="card-1",
+        continuation_generation=0,
+        entity_name=envelope.agent_name,
+        response_event_id="$reply",
+        tool_call_id="call-1",
+        tool_name="shell",
+        arguments={"command": "ls"},
+        room_id=_ROOM,
+        requester_id=envelope.requester_id,
+        approver_user_id=envelope.requester_id,
+        expires_at_ns=time.time_ns() + 60_000_000_000,
+        agent_name=envelope.agent_name,
+        thread_id=None,
+        grant_operation=None,
+    )
+    assert card is not None
+    transport = _transport(bots, {"card-1": card.sender_principal_id})
+    send, _resolve, _device_id = await transport.pinned_delivery("card-1")
     await send(_delivery(edits_event_id=edits_event_id))
 
-    assert sending_clients == [bots[asking].client]
+    assert sending_clients == [bots[envelope.agent_name].client]
