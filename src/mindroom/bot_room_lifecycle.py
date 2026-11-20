@@ -419,12 +419,11 @@ class BotRoomLifecycle:
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
         current_rooms = set(joined_rooms or ())
-        if not self._should_accept_invite():
-            # A room saved for an account that accepts no invite is one it keeps, never one to join.
-            invited_rooms &= current_rooms
         desired_rooms = set(self.deps.get_configured_rooms())
         desired_rooms.update(self.deps.get_retained_room_ids())
-        desired_rooms.update(invited_rooms)
+        if self._should_accept_invite():
+            # A room saved for an account that accepts no invite stays on record and is never a reason to join.
+            desired_rooms.update(invited_rooms)
 
         for room_id in desired_rooms:
             if room_id in current_rooms:
@@ -769,6 +768,8 @@ class BotRoomLifecycle:
         if event.source["content"].get("via"):
             self._follow_listed_rooms(room.room_id)
             return
+        if self.deps.agent_name == ROUTER_AGENT_NAME:
+            return  # The owner account stays in every room it joined.
         create_background_task(
             self._leave_unlisted_room(room.room_id, event.state_key),
             name=f"unlisted_room_leave_{self.deps.agent_name}",

@@ -1951,11 +1951,13 @@ async def test_owner_stays_in_a_joined_room_nothing_tracks(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("joined", [[], ["!saved-invite:localhost"]], ids=["invited", "joined"])
 async def test_owner_does_not_join_a_room_its_saved_invite_record_names(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    joined: list[str],
 ) -> None:
-    """A room the router once saved as invited is no reason to join: the owner leaves a pending invite there alone."""
+    """A room the router once saved as invited is kept on record and never a reason for a membership command."""
     config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
     invited_path = _invited_rooms_path(config, ROUTER_AGENT_NAME)
     invited_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1963,14 +1965,14 @@ async def test_owner_does_not_join_a_room_its_saved_invite_record_names(
     bot = make_test_agent_bot(agent_user=_router_user(), config=config, runtime_paths=runtime_paths_for(config))
     install_runtime_journal_support(bot)
     bot.client = AsyncMock(invited_rooms={"!saved-invite:localhost": MagicMock()})
-    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
+    lifecycle = bot._room_lifecycle
+    lifecycle.deps = replace(lifecycle.deps, change_membership=AsyncMock(return_value=True))
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=joined))
 
-    await bot._room_lifecycle.join_configured_rooms()
+    await lifecycle.join_configured_rooms()
 
-    join_room.assert_not_awaited()
-    assert bot._room_lifecycle.invited_room_ids() == {"!saved-invite:localhost"}
+    lifecycle.deps.change_membership.assert_not_awaited()
+    assert lifecycle.invited_room_ids() == {"!saved-invite:localhost"}
 
 
 @pytest.mark.asyncio
