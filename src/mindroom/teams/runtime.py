@@ -28,7 +28,7 @@ from mindroom.agent_loop.run import (
     run_agent,
     started_run_fields,
 )
-from mindroom.agent_loop.tools import PreparedTools, sorted_specs
+from mindroom.agent_loop.tools import PreparedTools, sorted_specs, tool_result_content
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.messages import Message
@@ -277,7 +277,7 @@ def _answer_delegation(
     for index in reversed(range(len(messages))):
         message = messages[index]
         if message.role == "tool" and message.tool_call_id == call.tool_call_id:
-            messages[index] = replace(message, content=call.result)
+            messages[index] = replace(message, content=tool_result_content(call.result, is_error=call.is_error))
             return
 
 
