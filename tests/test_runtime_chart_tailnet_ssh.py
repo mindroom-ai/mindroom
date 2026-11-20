@@ -41,6 +41,33 @@ WORKER_SELECTOR = {
 }
 SSH_WORKER_SELECTOR = {**WORKER_SELECTOR, "mindroom.ai/tailnet-ssh": "true"}
 PRIVATE_RANGES = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"]
+# The gateway's egress before extraEgress and the public 443 rule: DNS, the primary's listener, and marked workers.
+BASE_GATEWAY_EGRESS = [
+    {
+        "to": [
+            {
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+                "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+            },
+        ],
+        "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}],
+    },
+    {"to": [{"podSelector": {"matchLabels": CONTROL_PLANE_SELECTOR}}], "ports": [{"protocol": "TCP", "port": 8769}]},
+    {
+        "to": [
+            {
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": WORKER_NAMESPACE}},
+                "podSelector": {"matchLabels": SSH_WORKER_SELECTOR},
+            },
+        ],
+        "ports": [{"protocol": "TCP", "port": 2222}],
+    },
+]
+PUBLIC_443_EGRESS = {
+    "to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": PRIVATE_RANGES}}],
+    "ports": [{"protocol": "TCP", "port": 443}],
+}
+PROXY_EGRESS_RULE = {"to": [{"ipBlock": {"cidr": "192.0.2.10/32"}}], "ports": [{"protocol": "TCP", "port": 3128}]}
 BASE_VALUES = ("workers.sandbox.proxyToken.value=test-token",)
 WORKER_VALUES = (
     "workers.backend=kubernetes",
@@ -264,33 +291,14 @@ def test_gateway_policy_has_no_ingress_and_only_named_egress() -> None:
     assert spec["policyTypes"] == ["Ingress", "Egress"]
     assert not spec.get("ingress")
     assert _rule_ports(egress) == {(53, "UDP"), (53, "TCP"), (8769, "TCP"), (2222, "TCP"), (443, "TCP")}
-    assert [port for rule in egress for port in rule["ports"] if port["protocol"] == "UDP"] == [
-        {"protocol": "UDP", "port": 53},
-    ]
-    assert {
-        "to": [{"podSelector": {"matchLabels": CONTROL_PLANE_SELECTOR}}],
-        "ports": [{"protocol": "TCP", "port": 8769}],
-    } in egress
-    assert {
-        "to": [
-            {
-                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": WORKER_NAMESPACE}},
-                "podSelector": {"matchLabels": SSH_WORKER_SELECTOR},
-            },
-        ],
-        "ports": [{"protocol": "TCP", "port": 2222}],
-    } in egress
-    ip_blocks = [peer["ipBlock"] for rule in egress for peer in rule["to"] if "ipBlock" in peer]
-    assert ip_blocks == [{"cidr": "0.0.0.0/0", "except": PRIVATE_RANGES}]
-    assert {"to": [{"ipBlock": ip_blocks[0]}], "ports": [{"protocol": "TCP", "port": 443}]} in egress
+    assert egress == [*BASE_GATEWAY_EGRESS, PUBLIC_443_EGRESS]
 
 
 def test_https_proxy_drops_public_443_and_requires_extra_egress() -> None:
     """With a proxy the public 443 rule is gone and only the operator's rule admits the proxy."""
     egress = _resource(_render(*ENABLED, *PROXY_EGRESS), "NetworkPolicy", NAME)["spec"]["egress"]
 
-    assert (443, "TCP") not in _rule_ports(egress)
-    assert egress[-1] == {"to": [{"ipBlock": {"cidr": "192.0.2.10/32"}}], "ports": [{"protocol": "TCP", "port": 3128}]}
+    assert egress == [*BASE_GATEWAY_EGRESS, PROXY_EGRESS_RULE]
 
     completed = _run_helm_template(
         RUNTIME_CHART,

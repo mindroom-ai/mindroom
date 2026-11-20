@@ -786,6 +786,7 @@ Three NetworkPolicies fence the gateway:
 
 - `<fullname>-tailnet-ssh-workers`, in the worker namespace, admits gateway pods to TCP 2222 on worker pods labelled `mindroom.ai/tailnet-ssh: "true"` only; other workers gain nothing, and no worker gains egress.
   It renders with the chart's worker NetworkPolicy (`workers.kubernetes.networkPolicy.create`), to which it is additive.
+  With `workers.kubernetes.networkPolicy.create=false` the chart renders no gateway-to-worker grant, and an operator-managed policy must admit the gateway pods on TCP 2222 to pods labelled `mindroom.ai/tailnet-ssh: "true"`.
 - `<fullname>-tailnet-ssh-primary` admits gateway pods to `tailnetSsh.port` on the control-plane pod; it renders with `networkPolicy.create`, because alone it would isolate an otherwise open control-plane pod.
 - `<fullname>-tailnet-ssh` admits no ingress to the gateway and lets it reach only DNS (`egressProxy.networkPolicy.dns`), the primary's listener port, the labelled worker pods on TCP 2222, the `extraEgress` rules, and TCP 443 on public addresses (every private, carrier-grade NAT, and link-local range excluded).
   No UDP besides DNS is allowed, so tailnet traffic is relayed over DERP, which needs `controlplane.tailscale.com` and the `derp*.tailscale.com` hosts, or the Headscale URL and its DERP servers.
@@ -808,6 +809,7 @@ tailnetSsh:
           port: 3128
 ```
 
+`extraEgress` rules are added exactly as written and are the operator's responsibility: the chart does not check them, so they should admit only the proxy, with no UDP, because a broader rule widens the gateway's egress and can defeat its DERP-only operation.
 The proxy must not be the workers' Squid (`approvedEgress` or `egressProxy`), because allowing the Tailscale hosts there would open them to workers too.
 
 The chart fails when `tailnetSsh.enabled` is set without `workers.backend: kubernetes`, when `tailnetSsh.port` equals `runtime.apiPort`, `scriptGateway.port`, or `egressBroker.port`, and when `httpsProxy` is set without `extraEgress`.
