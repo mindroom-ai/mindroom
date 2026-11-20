@@ -1733,7 +1733,7 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
             runtime_paths,
         )
         await claude_turn(replace(direct, http_client=wire.client), ModelRequest(messages=_user()))
-        assert wire.requests[-1].headers["authorization"] == "Bearer config-key"
+        assert wire.requests[-1].headers["x-api-key"] == "config-key"
 
         bedrock = build_provider(
             ModelConfig(provider="bedrock_claude", id="anthropic.claude-sonnet-5-5"),
@@ -1957,7 +1957,7 @@ async def test_client_params_override_route_settings_but_not_headers_or_the_http
     await claude_turn(direct, ModelRequest(messages=_user()))
     request = wire.requests[-1]
     assert str(request.url) == "https://gateway.example/anthropic/v1/messages"
-    assert request.headers["authorization"] == "Bearer params-key"
+    assert request.headers["x-api-key"] == "params-key"
     assert request.headers["x-mindroom"] == "authored"
 
     vertex = route_provider(

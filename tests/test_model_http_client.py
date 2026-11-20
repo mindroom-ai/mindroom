@@ -293,7 +293,7 @@ async def test_runtime_shutdown_closes_pooled_model_connections(tmp_path: Path, 
 
 # A model request's own headers: the key its SDK sends, a header its config authors, and a header its run binds.
 _OWN_HEADERS = {"x-api-key", "api-key", "authorization", "x-config", "x-run"}
-_CLAUDE_OWN_HEADERS = {"authorization", "x-config", "x-run"}
+_CLAUDE_OWN_HEADERS = {"x-api-key", "x-config", "x-run"}
 _BODY_HEADERS = {"content-type", "content-length", "transfer-encoding"}
 
 
@@ -315,7 +315,7 @@ async def _send_with_run_headers(provider: ModelProvider) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [307, 302])
-@pytest.mark.parametrize(("route", "key"), [("anthropic", "authorization"), ("azure", "api-key")])
+@pytest.mark.parametrize(("route", "key"), [("anthropic", "x-api-key"), ("azure", "api-key")])
 async def test_a_redirect_to_another_origin_gets_only_a_fresh_request_s_headers(
     tmp_path: Path,
     server: _ModelsServer,

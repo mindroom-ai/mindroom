@@ -363,6 +363,12 @@ async def create_memory_instance(
         # sampling values, and their max_completion_tokens cap would also count reasoning, so they get Mem0's
         # reasoning-model request instead, unless the config sets ``is_reasoning_model`` itself.
         llm_config.is_reasoning_model = True
+    if memory_llm is not None and memory_llm.provider == "anthropic":
+        # Mem0 builds its own Claude client, whose key SDK 2 would send as a bearer; it goes in X-Api-Key as on the chat route.
+        from mindroom.providers.anthropic.messages import send_key_as_x_api_key  # noqa: PLC0415
+
+        client = cast("Any", memory.llm).client
+        send_key_as_x_api_key(client, client.api_key)
     install_mem0_usage_capture(memory.llm, memory_llm.provider if memory_llm is not None else "ollama")
     embedder_provider = config.memory.embedder.provider
     if embedder_provider == "openai":

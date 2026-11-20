@@ -13,7 +13,9 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
+import anthropic
 import httpx
+import httpx2
 import pytest
 from anthropic.resources.messages import Messages
 from anthropic.types import Message as AnthropicMessage
@@ -366,6 +368,45 @@ class TestMemoryConfig:
         sent = create_message.call_args.kwargs
         assert not {"temperature", "top_p", "top_k"} & sent.keys()
         inspect.signature(Messages.create).bind(mem0_llm.client.messages, **sent)  # the SDK takes every argument
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("custom_headers", "sent"),
+        [(None, {"x-api-key": "sk-shared"}), ("X-Api-Key: gw", {"x-api-key": "gw"})],
+        ids=["shared-key", "gateway-key"],
+    )
+    async def test_mem0_anthropic_sends_its_key_as_x_api_key_which_a_gateway_key_replaces(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        custom_headers: str | None,
+        sent: dict[str, str],
+    ) -> None:
+        """Mem0's own Claude client sends the shared key as SDK 1 did, so a gateway's ``X-Api-Key`` replaces it."""
+        if custom_headers is not None:
+            monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", custom_headers)
+        runtime_paths = _runtime_paths(tmp_path)
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
+        llm = {"model": "claude-haiku-5-5", "anthropic_base_url": "https://gateway.example"}
+        config = Config(memory={"llm": {"provider": "anthropic", "config": llm}}, router=RouterConfig(model="default"))
+        llm_config = _get_memory_config(tmp_path / "memory", config, runtime_paths)["llm"]
+        mem0_llm = LlmFactory.create(llm_config["provider"], llm_config["config"])
+        requests: list[httpx2.Request] = []
+
+        def reply(request: httpx2.Request) -> httpx2.Response:
+            requests.append(request)
+            return httpx2.Response(400, json={"type": "error", "error": {"type": "invalid_request_error"}})
+
+        mem0_llm.client._client = httpx2.Client(transport=httpx2.MockTransport(reply))
+        stored = SimpleNamespace(llm=mem0_llm, embedding_model=MagicMock(), vector_store=MagicMock())
+        with patch.object(AsyncMemory, "from_config", return_value=stored):
+            await create_memory_instance(tmp_path / "memory", config, runtime_paths)
+
+        with pytest.raises(anthropic.BadRequestError):
+            mem0_llm.client.messages.create(model="claude-haiku-5-5", max_tokens=1, messages=[])
+
+        headers = requests[0].headers
+        assert {name: headers[name] for name in ("authorization", "x-api-key") if name in headers} == sent
 
     def test_mem0_openai_memory_llm_keeps_its_authored_sampling_for_claude_models(self, tmp_path: Path) -> None:
         """Only Mem0's Anthropic LLM omits a sampling value set to None; its OpenAI LLM would send it as null."""

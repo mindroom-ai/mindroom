@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 import anthropic
-from anthropic import NOT_GIVEN, AsyncAnthropic, AsyncAnthropicVertex, omit
+from anthropic import NOT_GIVEN, AsyncAnthropic, AsyncAnthropicVertex
 from anthropic.lib.streaming import (
     ParsedBetaContentBlockStopEvent,
     ParsedBetaMessageStopEvent,
@@ -299,7 +299,7 @@ class ClaudeProvider:
         """
         timer = TurnTimer()
         client, body = await asyncio.to_thread(self._prepare, request)
-        kwargs = self._without_implicit_key(client, with_request_headers(body.kwargs))
+        kwargs = with_request_headers(body.kwargs)
         try:
             await request.on_send(sdk_request_body(kwargs, _SDK_OPTION_KEYS))
             manager = client.beta.messages.stream(**kwargs) if body.beta else client.messages.stream(**kwargs)
@@ -573,7 +573,7 @@ class ClaudeProvider:
         kwargs["http_client"] = self.http_client
         kwargs["max_retries"] = 0
         if self.route == "anthropic":
-            return AsyncAnthropic(**kwargs)
+            return _with_key_header(kwargs)
         if self.route == "vertexai_claude":
             client = self._vertex_client(kwargs)
         else:
@@ -583,24 +583,6 @@ class ClaudeProvider:
         # SDK 2.7 adds ANTHROPIC_CUSTOM_HEADERS, meant for the direct API, to the platform clients, with no opt-out.
         client._custom_headers = dict(default_headers)
         return client
-
-    def _without_implicit_key(self, client: _AsyncClaudeClient, kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Keep the client's key off a direct request that carries an ``X-Api-Key`` from elsewhere, as SDK 1 did.
-
-        SDK 2 sends the key as ``Authorization``, which an ``X-Api-Key`` from ``ANTHROPIC_CUSTOM_HEADERS``, the bound
-        request headers, or the config no longer replaces. A config that authors both a key and the header keeps both.
-        """
-        settings = self.settings
-        client_headers = client._custom_headers
-        sent = {str(name).casefold() for name in (*client_headers, *(kwargs.get("extra_headers") or {}))}
-        authored = {str(name).casefold() for name in self._authored_default_headers() or {}}
-        authored |= {str(name).casefold() for name in (settings.request_params or {}).get("extra_headers") or {}}
-        two_hop = "x-api-key" in authored and bool(
-            settings.api_key or settings.auth_token or (settings.client_params or {}).get("auth_token"),
-        )
-        if self.route != "anthropic" or "x-api-key" not in sent or "authorization" in sent or two_hop:
-            return kwargs
-        return {**kwargs, "extra_headers": {**(kwargs.get("extra_headers") or {}), "Authorization": omit}}
 
     def _vertex_client(self, kwargs: dict[str, Any]) -> AsyncAnthropicVertex:
         """Build a Vertex client; without configured credentials it shares the adapter's ambient ones.
@@ -770,6 +752,30 @@ def _sends_thinking_binding(params: dict[str, Any]) -> bool:
     """Return whether the thinking the request sends carries a ``block_binding``, which needs the binding beta."""
     thinking = _thinking_owner(params).get("thinking")
     return isinstance(thinking, dict) and thinking.get("block_binding") is not None
+
+
+def _with_key_header(kwargs: dict[str, Any]) -> AsyncAnthropic:
+    """Build a direct client that sends its key in ``X-Api-Key`` (``send_key_as_x_api_key``).
+
+    The SDK takes one credential, so the key leaves the arguments; without another one, an empty key keeps the SDK
+    from reading a credential from the process env.
+    """
+    key = kwargs.pop("api_key", None)
+    if not any(kwargs.get(name) is not None for name in ("auth_token", "credentials", "config", "profile")):
+        kwargs["api_key"] = ""
+    return send_key_as_x_api_key(AsyncAnthropic(**kwargs), key)
+
+
+def send_key_as_x_api_key[ClientT: anthropic.Anthropic | AsyncAnthropic](client: ClientT, key: str | None) -> ClientT:
+    """Make a direct client send ``key`` in ``X-Api-Key``, as SDK 1 did, where SDK 2 sends its ``api_key`` as a bearer.
+
+    An ``X-Api-Key`` from the config, ``ANTHROPIC_CUSTOM_HEADERS``, or the request then replaces the key, and an
+    ``auth_token`` still goes out as ``Authorization`` beside it. Without either header, the request fails unsent.
+    """
+    client.api_key = None
+    if key:
+        client._custom_headers = {"X-Api-Key": key, **client._custom_headers}
+    return client
 
 
 def predates_bedrock_api_2026(model_id: str) -> bool:
@@ -1012,4 +1018,10 @@ def _warn_dropped_sampling(route: ClaudeRouteKind, model_id: str, settings: Clau
         logger.warning("claude_sampling_controls_dropped", model=model_id, route=route, names=names)
 
 
-__all__ = ["ClaudeProvider", "build_provider", "predates_bedrock_api_2026", "vertex_project_and_region"]
+__all__ = [
+    "ClaudeProvider",
+    "build_provider",
+    "predates_bedrock_api_2026",
+    "send_key_as_x_api_key",
+    "vertex_project_and_region",
+]

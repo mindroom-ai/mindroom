@@ -17,7 +17,6 @@ from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_E
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
 from mindroom.providers.credentials import (
     api_key_env_reference,
-    claude_authored_credentials,
     model_with_dashboard_key,
     resolve_api_key_reference,
 )
@@ -207,8 +206,6 @@ def stream_idle_timeout_seconds(model_config: ModelConfig, runtime_paths: Runtim
 def check_extra_kwargs(model_config: ModelConfig, runtime_paths: RuntimePaths) -> None:
     """Raise ``ValueError`` for an ``extra_kwargs`` key the route that serves ``model_config`` does not accept.
 
-    A direct Claude model that authors more than one client credential fails too (``claude_authored_credentials``).
-
     Config load calls this so such a key fails before any model is built; it reads only the routes' key tables,
     so no provider SDK loads.
     """
@@ -224,6 +221,3 @@ def check_extra_kwargs(model_config: ModelConfig, runtime_paths: RuntimePaths) -
     for level in model_config.reasoning.levels if model_config.reasoning else ():
         extra_kwargs.update(apply_reasoning_level(model_config.at_level(level)).extra_kwargs or {})
     reject_unsupported_extra_kwargs(extra_kwargs, allowed, provider=model_config.provider)
-    if provider == "anthropic" and len(credentials := claude_authored_credentials(model_config)) > 1:
-        msg = f"sets {' and '.join(credentials)}, but the Anthropic client takes one credential; keep one of them."
-        raise ValueError(msg)

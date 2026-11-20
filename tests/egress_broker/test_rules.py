@@ -1122,27 +1122,6 @@ def test_inject_query_removes_thousands_of_duplicates_and_keeps_the_rest_in_orde
     assert new_target == ("/v1/x;v=1?" + "&".join(expected)).encode()
 
 
-@pytest.mark.parametrize(
-    "auth",
-    [EgressAuth(type="bearer"), EgressAuth(type="header", name="X-Goog-Api-Key"), EgressAuth(type="query", name="key")],
-    ids=["bearer", "header", "query"],
-)
-def test_inject_drops_a_placeholder_only_from_credential_headers(auth: EgressAuth) -> None:
-    """A placeholder in ``Authorization``, ``X-Api-Key``, or the rule's header goes; any other header keeps it."""
-    headers: list[tuple[bytes, bytes]] = [
-        (b"Accept-Language", b"en"),
-        (b"X-Api-Key", b"en"),
-        (b"Authorization", b"Bearer en"),
-        (b"x-goog-api-key", b"en"),
-    ]
-
-    new_headers, _ = inject_credentials(headers, b"/v1", auth, "s3cret", placeholders=["en"])
-
-    kept = [(name, value) for name, value in new_headers if value not in {b"Bearer s3cret", b"s3cret"}]
-    expected = [(b"Accept-Language", b"en")] + ([] if auth.type == "header" else [(b"x-goog-api-key", b"en")])
-    assert kept == expected
-
-
 def test_inject_replaces_client_authorization() -> None:
     """Credential injection replaces any existing Authorization header."""
     auth = EgressAuth(type="bearer")

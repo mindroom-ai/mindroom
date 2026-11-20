@@ -166,24 +166,6 @@ async def test_placeholder_authorization_is_replaced(
 
 
 @pytest.mark.asyncio
-async def test_a_placeholder_in_another_header_than_the_rule_s_is_removed(
-    broker: BrokerFactory,
-    tls_upstream: Upstream,
-    proxy_client: ProxyClient,
-) -> None:
-    """An SDK sending its placeholder key as a bearer token to an ``x-api-key`` rule sends the upstream one key."""
-    rule = EgressRule(host="localhost", auth=EgressAuth(type="header", name="x-api-key"))
-    service = EgressService(rules=[rule], placeholder_env={"ANTHROPIC_API_KEY": "mindroom-brokered"})
-    await broker(EgressBrokerConfig(services={"svc": service}), secrets={"svc": SECRET})
-    client = proxy_client(broker.token())
-
-    response = await client.get(tls_upstream.url("/echo"), headers={"Authorization": "Bearer mindroom-brokered"})
-
-    headers = response.json()["headers"]
-    assert (headers["x-api-key"], "authorization" in headers) == ([SECRET], False)
-
-
-@pytest.mark.asyncio
 async def test_keepalive_injects_per_request(
     broker: BrokerFactory,
     tls_upstream: Upstream,

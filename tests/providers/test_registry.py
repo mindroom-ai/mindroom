@@ -20,7 +20,7 @@ from google.oauth2.credentials import Credentials
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from mindroom.config.main import Config, ConfigRuntimeValidationError, iter_config_validation_messages
+from mindroom.config.main import Config, iter_config_validation_messages
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
@@ -540,7 +540,7 @@ async def test_api_key_precedence(
 
 # The header each keyed family sends its key in, and how it formats it.
 _KEY_HEADERS: dict[str, tuple[dict[str, Any], str, str]] = {
-    "anthropic": ({"provider": "anthropic", "id": "claude-sonnet-5-5"}, "authorization", "Bearer {key}"),
+    "anthropic": ({"provider": "anthropic", "id": "claude-sonnet-5-5"}, "x-api-key", "{key}"),
     "azure": (
         {"provider": "azure", "id": "gpt-6-astra", "extra_kwargs": {"azure_endpoint": "https://r.openai.azure.com"}},
         "api-key",
@@ -634,40 +634,72 @@ async def test_a_llama_cpp_model_without_its_own_key_never_sends_a_shared_one(
 
 
 @pytest.mark.asyncio
+async def test_a_model_with_an_auth_token_never_sends_the_shared_key(runtime_paths: RuntimePaths, wire: Wire) -> None:
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
+    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs={"auth_token": "tok"})
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert wire.requests[0].headers["authorization"] == "Bearer tok"
+    assert "x-api-key" not in wire.requests[0].headers
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("extra_kwargs", "dashboard_key", "sent"),
+    ("extra_kwargs", "custom_headers", "bound", "sent"),
     [
-        ({"auth_token": "tok"}, None, {"authorization": "Bearer tok"}),
-        ({"auth_token": "tok"}, "sk-dashboard", {"authorization": "Bearer tok"}),
-        ({"client_params": {"auth_token": "tok"}}, None, {"authorization": "Bearer tok"}),
-        ({"client_params": {"auth_token": "tok"}}, "sk-dashboard", {"authorization": "Bearer tok"}),
+        ({}, None, {}, {"x-api-key": "sk-shared"}),
+        ({"default_headers": {"X-Api-Key": "gw"}}, None, {}, {"x-api-key": "gw"}),
+        ({}, "X-Api-Key: gw", {}, {"x-api-key": "gw"}),
+        ({}, None, {"x-api-key": "gw"}, {"x-api-key": "gw"}),
+        ({"auth_token": "tok"}, None, {"X-Api-Key": "gw"}, {"authorization": "Bearer tok", "x-api-key": "gw"}),
         (
-            {"base_url": "https://gateway.example", "default_headers": {"X-Api-Key": "gw"}},
-            "sk-dashboard",
-            {"x-api-key": "gw"},
+            {"api_key": "sk-own", "default_headers": {"Authorization": "Bearer gwt"}},
+            None,
+            {},
+            {"authorization": "Bearer gwt", "x-api-key": "sk-own"},
         ),
-        ({"request_params": {"extra_headers": {"X-Api-Key": "gw"}}}, None, {"x-api-key": "gw"}),
+        (
+            {"auth_token": "tok", "client_params": {"api_key": "sk-own"}},
+            None,
+            {},
+            {"authorization": "Bearer tok", "x-api-key": "sk-own"},
+        ),
     ],
-    ids=["auth-token", "auth-token-dashboard", "client-token", "client-token-dashboard", "header", "request-header"],
+    ids=[
+        "shared-key",
+        "config-gateway",
+        "env-gateway",
+        "callback-gateway",
+        "token-and-callback",
+        "key-and-header",
+        "both",
+    ],
 )
-async def test_an_authored_claude_credential_never_goes_out_beside_an_implicit_key(
+async def test_a_claude_key_goes_out_as_x_api_key_which_a_gateway_key_replaces(
     runtime_paths: RuntimePaths,
     wire: Wire,
     monkeypatch: pytest.MonkeyPatch,
     extra_kwargs: dict[str, Any],
-    dashboard_key: str | None,
+    custom_headers: str | None,
+    bound: dict[str, str],
     sent: dict[str, str],
 ) -> None:
-    """The shared key, the dashboard's key, and the SDK's ``ANTHROPIC_API_KEY`` stay local beside an authored one."""
-    credentials = get_runtime_shared_credentials_manager(runtime_paths)
-    credentials.save_credentials("anthropic", {"api_key": "sk-shared"})
-    if dashboard_key is not None:
-        credentials.save_credentials("model:target", {"api_key": dashboard_key})
+    """The direct route sends its key in ``X-Api-Key``, as SDK 1 did, and never the process env's credentials."""
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-process")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-process")
+    if custom_headers is not None:
+        monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", custom_headers)
     model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs)
     wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
 
-    with pytest.raises(ProviderError):
+    with bind_request_headers(lambda: bound), pytest.raises(ProviderError):
         await complete(
             build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
             ModelRequest(messages=[_user()]),
@@ -678,62 +710,14 @@ async def test_an_authored_claude_credential_never_goes_out_beside_an_implicit_k
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("source", "extra_kwargs", "sent"),
-    [
-        ("env", {}, {"x-api-key": "gw"}),
-        ("callback", {}, {"x-api-key": "gw"}),
-        ("config", {"default_headers": {"X-Api-Key": "gw"}}, {"x-api-key": "gw"}),
-        (
-            "config",
-            {"api_key": "sk-own", "default_headers": {"X-Api-Key": "gw"}},
-            {"x-api-key": "gw", "authorization": "Bearer sk-own"},
-        ),
-        (
-            "config",
-            {"default_headers": {}, "client_params": {"default_headers": {"X-Api-Key": "gw"}}},
-            {"authorization": "Bearer sk-shared"},
-        ),
-    ],
-    ids=["env", "callback", "config", "authored-two-hop", "shadowed-map"],
-)
-async def test_an_implicit_claude_key_never_goes_out_beside_a_gateway_key(
-    runtime_paths: RuntimePaths,
-    wire: Wire,
-    monkeypatch: pytest.MonkeyPatch,
-    source: str,
-    extra_kwargs: dict[str, Any],
-    sent: dict[str, str],
-) -> None:
-    """A gateway ``X-Api-Key`` from the env, the bound headers, or the config keeps the shared key local.
-
-    Only a config that authors both a key and the header sends both; a header in a shadowed map is not sent.
-    """
-    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
-    if source == "env":
-        monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Api-Key: gw")
-    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs)
-    provider = build_model_provider(Config(models={"target": model_config}), runtime_paths, "target")
-    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
-
-    with (
-        bind_request_headers(lambda: {"X-Api-Key": "gw"} if source == "callback" else {}),
-        pytest.raises(ProviderError),
-    ):
-        await complete(provider, ModelRequest(messages=[_user()]))
-
-    headers = wire.requests[0].headers
-    assert {name: headers[name] for name in ("authorization", "x-api-key") if name in headers} == sent
-
-
-@pytest.mark.asyncio
-async def test_an_empty_default_header_map_clears_the_client_params_one(
+async def test_a_blank_openai_compatible_key_never_falls_back_to_the_shared_one(
     runtime_paths: RuntimePaths,
     wire: Wire,
 ) -> None:
-    """An explicit empty ``default_headers`` replaces ``client_params.default_headers``, as an unset one would not."""
-    extra_kwargs = {"api_key": "sk-own", "default_headers": {}, "client_params": {"default_headers": {"X-Label": "x"}}}
-    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs)
+    """A custom endpoint's explicitly empty ``client_params.api_key`` keeps the shared OpenAI key local."""
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("openai", {"api_key": "sk-shared"})
+    extra_kwargs = {"base_url": "https://llm.example/v1", "client_params": {"api_key": ""}}
+    model_config = ModelConfig(provider="openai", id="gpt-6-luna", extra_kwargs=extra_kwargs)
     wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
 
     with pytest.raises(ProviderError):
@@ -742,47 +726,7 @@ async def test_an_empty_default_header_map_clears_the_client_params_one(
             ModelRequest(messages=[_user()]),
         )
 
-    assert "x-label" not in wire.requests[0].headers
-
-
-@pytest.mark.asyncio
-async def test_blank_claude_credentials_count_as_unset(runtime_paths: RuntimePaths, wire: Wire) -> None:
-    """A blank ``auth_token`` or ``client_params`` key is no credential, so the shared key goes out alone."""
-    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
-    extra_kwargs = {"auth_token": "  ", "client_params": {"api_key": "", "auth_token": ""}}
-    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs)
-    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
-
-    with pytest.raises(ProviderError):
-        await complete(
-            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
-            ModelRequest(messages=[_user()]),
-        )
-
-    assert wire.requests[0].headers["authorization"] == "Bearer sk-shared"
-
-
-@pytest.mark.parametrize(
-    ("model", "named"),
-    [
-        ({"api_key": "sk-a", "extra_kwargs": {"auth_token": "tok"}}, "api_key and auth_token"),
-        ({"extra_kwargs": {"auth_token": "tok", "client_params": {"api_key": "sk-a"}}}, "api_key and auth_token"),
-        (
-            {"extra_kwargs": {"api_key": "sk-a", "client_params": {"profile": "work"}}},
-            "api_key and client_params.profile",
-        ),
-    ],
-    ids=["key-and-token", "client-key-and-token", "key-and-profile"],
-)
-def test_config_load_rejects_two_authored_claude_credentials(
-    runtime_paths: RuntimePaths,
-    model: dict[str, Any],
-    named: str,
-) -> None:
-    """The SDK takes one credential, so a config that authors two fails at load, naming both, before any request."""
-    data = {"models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5-5", **model}}}
-    with pytest.raises(ConfigRuntimeValidationError, match=rf"^models\.default: sets {named}, but the Anthropic"):
-        Config.validate_with_runtime(data, runtime_paths)
+    assert wire.requests == []
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ that has no key before any request fails.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.config.models import split_model_reference
 from mindroom.config.schema_hints import ENV_PLACEHOLDER_PATTERN
@@ -14,7 +14,6 @@ from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import get_api_key_for_provider
-from mindroom.logging_config import get_logger
 from mindroom.providers.names import provider_route
 
 if TYPE_CHECKING:
@@ -22,11 +21,8 @@ if TYPE_CHECKING:
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
 
-logger = get_logger(__name__)
-
 __all__ = [
     "api_key_env_reference",
-    "claude_authored_credentials",
     "dashboard_api_key",
     "gemini_uses_vertexai",
     "missing_model_api_key_provider",
@@ -44,10 +40,6 @@ _ALTERNATIVE_AUTH_KWARGS: dict[str, tuple[str, ...]] = {
     "anthropic": ("auth_token",),
     "azure": ("azure_ad_token", "azure_ad_token_provider"),
 }
-# The Claude client's own credentials besides ``api_key``, which ``client_params`` may also set, and the headers a
-# direct model's config may send a credential in.
-_CLAUDE_CLIENT_CREDENTIALS = ("credentials", "config", "profile")
-_CLAUDE_CREDENTIAL_HEADERS = frozenset({"authorization", "x-api-key"})
 
 # Routes that authenticate without an API key and ignore a configured one.
 _KEYLESS_ROUTES = frozenset({"bedrock_claude", "codex", "kimi", "synthetic", "vertexai_claude"})
@@ -64,46 +56,10 @@ def dashboard_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | Non
 
 
 def model_with_dashboard_key(model_name: str, model_config: ModelConfig, runtime_paths: RuntimePaths) -> ModelConfig:
-    """Return the model with the key the dashboard saved for it as its ``api_key``, which beats a configured one.
-
-    A model that authenticates another way (``uses_alternative_auth``) keeps its config: an implicit key never goes
-    out beside a credential its config authors.
-    """
-    if not (dashboard_key := dashboard_api_key(model_name, runtime_paths)):
-        return model_config
-    if uses_alternative_auth(model_config, runtime_paths):
-        logger.debug("dashboard_api_key_ignored_with_authored_credential", model=model_name)
-        return model_config
-    return model_config.model_copy(update={"api_key": dashboard_key})
-
-
-def claude_authored_credentials(model_config: ModelConfig) -> list[str]:
-    """Return the direct Claude client credentials a model's config authors, by field name.
-
-    The SDK takes one; ``check_extra_kwargs`` rejects a config that authors more, before any request.
-    """
-    extra_kwargs = model_config.extra_kwargs or {}
-    client_params = extra_kwargs.get("client_params") or {}
-    names = ["api_key"] if own_api_key(model_config) else []
-    names += ["auth_token"] * bool(extra_kwargs.get("auth_token") or client_params.get("auth_token"))
-    return names + [f"client_params.{name}" for name in _CLAUDE_CLIENT_CREDENTIALS if client_params.get(name)]
-
-
-def _claude_authors_credential(extra_kwargs: dict[str, Any]) -> bool:
-    """Return whether a direct Claude model's config authors a credential other than ``api_key``, header included."""
-    client_params = extra_kwargs.get("client_params") or {}
-    request_params = extra_kwargs.get("request_params") or {}
-    # A top-level ``default_headers``, an empty one included, replaces the one in ``client_params``.
-    default_headers = extra_kwargs.get("default_headers")
-    headers = (
-        client_params.get("default_headers") if default_headers is None else default_headers,
-        request_params.get("extra_headers"),
-    )
-    return bool(
-        extra_kwargs.get("auth_token")
-        or any(client_params.get(name) for name in ("auth_token", *_CLAUDE_CLIENT_CREDENTIALS))
-        or any(str(name).casefold() in _CLAUDE_CREDENTIAL_HEADERS for mapping in headers for name in mapping or {}),
-    )
+    """Return the model with the key the dashboard saved for it as its ``api_key``, which beats a configured one."""
+    if dashboard_key := dashboard_api_key(model_name, runtime_paths):
+        return model_config.model_copy(update={"api_key": dashboard_key})
+    return model_config
 
 
 def own_api_key(model_config: ModelConfig) -> str | None:
@@ -180,16 +136,13 @@ def gemini_uses_vertexai(model_config: ModelConfig, runtime_paths: RuntimePaths)
 def uses_alternative_auth(model_config: ModelConfig, runtime_paths: RuntimePaths) -> bool:
     """Return whether a model authenticates with a provider credential other than ``api_key``.
 
-    Gemini on Vertex AI authenticates with Google Cloud credentials, and a direct Claude model with any credential its
-    config authors besides ``api_key``, a credential header included. Such a model never falls back to the provider's
-    shared key or the dashboard's key; the provider adapters build it with this rule.
+    Gemini on Vertex AI authenticates with Google Cloud credentials. Such a model never falls back to the provider's
+    shared key; the provider adapters build it with this rule.
     """
     provider = provider_route(model_config.provider)
     if provider == "google":
         return gemini_uses_vertexai(model_config, runtime_paths)
     extra_kwargs = model_config.extra_kwargs or {}
-    if provider == "anthropic":
-        return _claude_authors_credential(extra_kwargs)
     return any(extra_kwargs.get(name) for name in _ALTERNATIVE_AUTH_KWARGS.get(provider, ()))
 
 

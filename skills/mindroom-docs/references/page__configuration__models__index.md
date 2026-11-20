@@ -181,7 +181,6 @@ Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a b
 A model key written as `${NAME}`, such as `api_key: ${OPENROUTER_TEAM_API_KEY}`, is read from that environment variable (or `NAME_FILE`), so two models of one provider can use different accounts while the keys stay out of `config.yaml`; the whole value must be the reference.
 When the variable is unset and that key is the one the model uses, `mindroom config validate` and `mindroom doctor` name it and replies fail with an error naming it; a key saved in the dashboard that overrides it prevents both.
 A model that authenticates another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or Vertex AI for `google` and `gemini`) never receives the shared key.
-An `anthropic` model also never receives the shared key or a dashboard key when its config sets a credential in `client_params` (`auth_token`, `credentials`, `config`, or `profile`) or an `Authorization` or `X-Api-Key` header in `default_headers` or `request_params.extra_headers`; a config that sets two of `api_key`, `auth_token`, and those `client_params` credentials fails to load, because the Claude client takes one.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 
 Shared API keys are read from these variables:
@@ -494,7 +493,7 @@ A null, empty, or whitespace-only `base_url`, `project_id`, `region`, `location`
 `max_retries` is not accepted, since MindRoom retries failed requests itself (see [Retries](#retries)); a model that sets it fails config validation with an error that says to remove it.
 `role_map` is not accepted either: Chat Completions requests send the system prompt as `developer` to OpenAI's own API and as `system` to every other endpoint, including an OpenAI-compatible server such as vLLM or llama.cpp set as `provider: openai` with its `base_url`, so remove it.
 
-- `base_url`, a string, sends requests to a custom endpoint, such as an OpenAI-compatible server or, on `anthropic`, an Anthropic-compatible gateway's root URL without a `/v1` suffix, because the Claude client appends its own API path, and sends the key as `Authorization: Bearer`, so a gateway that reads only `X-Api-Key` needs the key there, in `default_headers` without `api_key`; `client_params.base_url` wins when both are set, and either left empty or null sets no endpoint.
+- `base_url`, a string, sends requests to a custom endpoint, such as an OpenAI-compatible server or, on `anthropic`, an Anthropic-compatible gateway's root URL without a `/v1` suffix, because the Claude client appends its own API path; `client_params.base_url` wins when both are set, and either left empty or null sets no endpoint.
 - `api_key` is the same as the model's `api_key` field.
 - `request_params` holds request body fields that MindRoom merges over its own.
 - `extra_body` adds JSON body fields, for example for [OpenRouter provider routing](#openrouter-provider-routing).

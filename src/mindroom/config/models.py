@@ -743,7 +743,7 @@ def _is_blank(value: object) -> bool:
 
 
 def _endpoint_settings(settings: Mapping[str, Any], field_name: str) -> dict[str, Any]:
-    """Return ``settings`` without a null or blank endpoint, project, region, or credential key; reject a bad ``base_url``."""
+    """Return ``settings`` without a null or blank endpoint, project, or region key; reject a non-string ``base_url``."""
     endpoint = settings.get("base_url")
     if endpoint is not None and not isinstance(endpoint, str):
         msg = f"{field_name}.base_url must be a string, not {type(endpoint).__name__}"
@@ -751,8 +751,7 @@ def _endpoint_settings(settings: Mapping[str, Any], field_name: str) -> dict[str
     return {
         key: item
         for key, item in settings.items()
-        if key not in {"base_url", "project_id", "region", "location", "aws_region", "api_key", "auth_token"}
-        or not _is_blank(item)
+        if key not in {"base_url", "project_id", "region", "location", "aws_region"} or not _is_blank(item)
     }
 
 
@@ -905,7 +904,7 @@ class ModelConfig(BaseModel):
     @field_validator("extra_kwargs")
     @classmethod
     def _validate_client_settings(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """Drop a null or blank endpoint, project, region, or credential key; reject a mistyped ``client_params`` or ``base_url``.
+        """Drop a null or blank endpoint, project, or region key; reject a wrongly typed ``client_params`` or ``base_url``.
 
         The providers that accept these keys pass ``client_params`` to their API client.
         A dropped key sets nothing on any route, so the runtime env fills it where a route reads one.
