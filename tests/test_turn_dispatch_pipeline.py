@@ -916,7 +916,7 @@ class TestAgentBot(AgentBotTestBase):
             handled_turn: TurnRecord | None = None,
             prompt_is_structured: bool = False,  # noqa: ARG001
         ) -> None:
-            assert message == "hello"
+            assert message is None
             assert requester_user_id == "@user:localhost"
             assert extra_content is None
             assert media_events is None
@@ -940,13 +940,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_policy,
                 "plan_turn",
-                new=AsyncMock(
-                    return_value=DispatchPlan(
-                        kind="route",
-                        router_message="hello",
-                        router_event=event,
-                    ),
-                ),
+                new=AsyncMock(return_value=DispatchPlan(kind="route")),
             ),
             patch(
                 "mindroom.turns.dispatch.execute_router_relay",

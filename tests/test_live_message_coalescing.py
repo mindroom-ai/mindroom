@@ -99,7 +99,7 @@ from mindroom.response_sources import Owned, SourceFate
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
-from mindroom.turns.dispatch import TurnDispatcher
+from mindroom.turns.dispatch import TurnDispatcher, _attachment_parts
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -5269,7 +5269,6 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
 
     async def plan_turn(
         _room: object,
-        _event: object,
         prepared_dispatch: PreparedDispatch,
         **_kwargs: object,
     ) -> DispatchPlan:
@@ -6830,13 +6829,18 @@ async def _capture_gate_dispatches(
     media_batches: list[list[object]] = []
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
-    async def record_plan(*args: object, **kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[2])
+    async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
+        dispatch = cast("PreparedDispatch", args[1])
         envelopes.append(dispatch.envelope)
-        media_batches.append(list(cast("list[object] | None", kwargs.get("media_events")) or []))
-        if captured_plan_extra_content is not None:
-            captured_plan_extra_content.append(kwargs.get("extra_content"))
         return _respond_dispatch_plan()
+
+    def record_attachment_parts(prepared: Any) -> tuple[list[str], list[str], dict[str, Any]]:  # noqa: ANN401
+        # What the turn would route with: its media batch and its extra content.
+        parts = _attachment_parts(prepared)
+        media_batches.append(list(prepared.turn.media_events))
+        if captured_plan_extra_content is not None:
+            captured_plan_extra_content.append(parts[2] or None)
+        return parts
 
     async def record_response(*args: object, **_kwargs: object) -> None:
         await prepare_payload_via_seam(bot, args)
@@ -6869,6 +6873,7 @@ async def _capture_gate_dispatches(
             new=AsyncMock(side_effect=_resolver_mention_context(bot, captured_context_event_ids)),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
+        patch("mindroom.turns.dispatch._attachment_parts", side_effect=record_attachment_parts),
         patch.object(bot._turn_dispatcher, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
         patch.object(
             bot._inbound_turn_normalizer,
@@ -7559,11 +7564,15 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
     captured_extra_content: list[object] = []
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
-    async def record_plan(*args: object, **kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[2])
+    async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
+        dispatch = cast("PreparedDispatch", args[1])
         captured_envelopes.append(dispatch.envelope)
-        captured_extra_content.append(kwargs.get("extra_content"))
         return _respond_dispatch_plan()
+
+    def record_attachment_parts(prepared: Any) -> tuple[list[str], list[str], dict[str, Any]]:  # noqa: ANN401
+        parts = _attachment_parts(prepared)
+        captured_extra_content.append(parts[2] or None)
+        return parts
 
     async def record_payload_request(request: DispatchPayloadWithAttachmentsRequest) -> DispatchPayload:
         payload_requests.append(request)
@@ -7579,6 +7588,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
             new=AsyncMock(side_effect=_resolver_mention_context(bot)),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
+        patch("mindroom.turns.dispatch._attachment_parts", side_effect=record_attachment_parts),
         patch.object(bot._turn_dispatcher, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
         patch.object(
             bot._inbound_turn_normalizer,
@@ -7628,7 +7638,7 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
     async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[2])
+        dispatch = cast("PreparedDispatch", args[1])
         captured_envelopes.append(dispatch.envelope)
         return _respond_dispatch_plan()
 
@@ -7688,7 +7698,7 @@ async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(t
     captured_handled_turns: list[TurnRecord] = []
 
     async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[2])
+        dispatch = cast("PreparedDispatch", args[1])
         captured_envelopes.append(dispatch.envelope)
         return _respond_dispatch_plan()
 

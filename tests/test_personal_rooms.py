@@ -3092,7 +3092,6 @@ async def test_dispatched_welcome_selects_target_through_real_turn_policy(
     assert dispatch is not None
     plan = await target._turn_policy.plan_turn(
         room,
-        event,
         dispatch,
         has_active_response_for_target=lambda _target: False,
     )

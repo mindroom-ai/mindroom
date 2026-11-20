@@ -168,7 +168,6 @@ async def _plan(
 ) -> object:
     return await policy.plan_turn(
         room,
-        _text_event("hello agents"),
         dispatch,
         has_active_response_for_target=lambda _target: has_active_response,
     )
@@ -610,7 +609,6 @@ async def test_router_routes_untagged_message_with_multiple_candidates(config: C
     plan = await _plan(policy, room, _dispatch(_context(), agent_name=ROUTER_AGENT_NAME))
 
     assert plan.kind == "route"
-    assert plan.router_event is not None
 
 
 @pytest.mark.asyncio

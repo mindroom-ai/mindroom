@@ -22,7 +22,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_handoff import prepare_media_ingress
+from mindroom.dispatch_handoff import PreparedIngress, prepare_media_ingress
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
@@ -32,7 +32,7 @@ from mindroom.routing_judgment import ResponderSelection
 from mindroom.teams.formation import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_record import TurnRecord
-from mindroom.turns.dispatch import TurnDispatcher
+from mindroom.turns.dispatch import TurnDispatcher, _PreparedTextDispatch
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -54,6 +54,7 @@ from tests.conftest import (
 )
 from tests.identity_helpers import entity_ids
 from tests.runtime_fakes import ready_runtime
+from tests.turn_dispatch_helpers import make_test_turn
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -145,6 +146,49 @@ class TestAgentBot(AgentBotTestBase):
             handled_turn=None,
             prompt_is_structured=False,
         )
+
+    @pytest.mark.asyncio
+    async def test_a_turn_whose_one_source_is_its_routed_media_hands_the_relay_no_record(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A one-source turn routed as its media event needs no tracked record, even when its text event differs."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(make_mock_agent_user(), config=config, runtime_paths=runtime_paths_for(config))
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.agent_user.user_id)
+        image = nio.RoomMessageImage.from_dict(
+            {
+                "event_id": "$img",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "content": {"msgtype": "m.image", "body": "photo.jpg", "url": "mxc://localhost/img"},
+            },
+        )
+        text = PreparedIngress(
+            sender="@user:localhost",
+            event_id="$text",
+            body="[Attached image]",
+            source={"content": {"msgtype": "m.text", "body": "[Attached image]"}},
+        )
+        turn = make_test_turn(
+            room,
+            text,
+            "@user:localhost",
+            media_events=[image],
+            handled_turn=TurnRecord.create(["$img"]),
+        )
+        prepared = _PreparedTextDispatch(
+            turn=turn,
+            handled_turn=turn.handled_turn,
+            dispatch=MagicMock(),
+            dispatch_started_at=0.0,
+        )
+
+        with patch("mindroom.turns.dispatch.execute_router_relay", new=AsyncMock(return_value=False)) as relay:
+            await bot._turn_dispatcher._execute_route_plan(room, prepared, None)
+
+        assert relay.await_args.args[2] is image
+        assert relay.await_args.kwargs["handled_turn"] is None
 
     @pytest.mark.asyncio
     async def test_router_joined_room_startup_sends_welcome_after_join(

@@ -59,7 +59,6 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.config.participation import ParticipationConfig
     from mindroom.conversation_resolver import MessageContext
-    from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, PreparedIngress
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
@@ -107,10 +106,6 @@ class DispatchPlan:
 
     kind: Literal["ignore", "route", "respond"]
     response_action: ResponseAction | None = None
-    router_message: str | None = None
-    extra_content: dict[str, Any] | None = None
-    media_events: list[MediaDispatchEvent] | None = None
-    router_event: DispatchEvent | None = None
 
 
 @dataclass(frozen=True)
@@ -628,13 +623,7 @@ class TurnPolicy:
     async def _plan_routing(
         self,
         room: nio.MatrixRoom,
-        event: DispatchEvent,
         dispatch: PreparedDispatch,
-        *,
-        message: str | None = None,
-        extra_content: dict[str, Any] | None = None,
-        media_events: list[MediaDispatchEvent] | None = None,
-        router_event: DispatchEvent | None = None,
     ) -> DispatchPlan:
         """Plan a turn this entity does not answer by its own rules: the room's steward routes one that names nobody.
 
@@ -661,25 +650,15 @@ class TurnPolicy:
         if len(available_responders) == 1:
             self.deps.logger.info("Skipping routing: only one responder candidate")
             return ignore
-        return DispatchPlan(
-            kind="route",
-            router_message=message,
-            extra_content=extra_content,
-            media_events=media_events,
-            router_event=router_event or event,
-        )
+        return DispatchPlan(kind="route")
 
     @timed("dispatch_action_resolution")
     async def plan_turn(
         self,
         room: nio.MatrixRoom,
-        event: PreparedIngress,
         dispatch: PreparedDispatch,
         *,
         has_active_response_for_target: Callable[[MessageTarget], bool],
-        extra_content: dict[str, Any] | None = None,
-        media_events: list[MediaDispatchEvent] | None = None,
-        router_event: DispatchEvent | None = None,
     ) -> DispatchPlan:
         """Return the explicit policy plan for one prepared inbound turn.
 
@@ -705,15 +684,7 @@ class TurnPolicy:
             )
             if action.kind != "skip":
                 return DispatchPlan(kind="respond", response_action=action)
-        return await self._plan_routing(
-            room,
-            event,
-            dispatch,
-            message=event.body if media_events else None,
-            extra_content=extra_content,
-            media_events=media_events,
-            router_event=router_event,
-        )
+        return await self._plan_routing(room, dispatch)
 
     async def _reply_mode_awaits_mention(
         self,
