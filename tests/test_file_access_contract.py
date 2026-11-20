@@ -11,6 +11,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -696,10 +697,14 @@ def test_grep_never_reads_a_planted_link_target(
     if search == "no-ripgrep":
         monkeypatch.setattr(filesystem_module.shutil, "which", lambda _name: None)
     elif search == "ripgrep-raced-through-a-link":
-        monkeypatch.setattr(filesystem_module.shutil, "which", lambda _name: "rg")
         names = [workspace / name for name in ("leak.json", "d /x.txt", "d/x.txt", "gone.txt", "notes.txt")]
-        monkeypatch.setattr(filesystem_module.subprocess, "Popen", lambda *_args, **_kwargs: _NominatingRipgrep(names))
-    elif shutil.which("rg") is None:
+        real_popen = subprocess.Popen
+
+        def nominating_popen(args: list[str], **kwargs: object) -> object:
+            return _NominatingRipgrep(names) if "--files-with-matches" in args else real_popen(args, **kwargs)
+
+        monkeypatch.setattr(filesystem_module.subprocess, "Popen", nominating_popen)
+    if search != "no-ripgrep" and shutil.which("rg") is None:
         pytest.skip("ripgrep is not installed")
     result = FilesystemTools(base_dir=str(workspace)).grep("sk-", context=1)
 

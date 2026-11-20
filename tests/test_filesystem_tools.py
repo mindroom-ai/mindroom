@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 import tracemalloc
 from typing import TYPE_CHECKING, Any
 
@@ -1262,15 +1263,13 @@ class TestGrep:
         assert len(reads) == 2
         assert peak < 6 * size
 
-    @pytest.mark.parametrize("ripgrep", [True, False], ids=["ripgrep", "no-ripgrep"])
     def test_workspace_grep_decodes_by_the_byte_order_mark(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        ripgrep: bool,
     ) -> None:
         """A UTF-16 file matches as text with its own line numbers, and a UTF-8 mark is not part of the first line."""
-        _use_ripgrep(monkeypatch, ripgrep)
+        _use_ripgrep(monkeypatch, ripgrep=True)
         (tmp_path / "wide.txt").write_bytes("first\nneedle café\n".encode("utf-16"))
         (tmp_path / "marked.txt").write_bytes("needle first\n".encode("utf-8-sig"))
 
@@ -1339,6 +1338,7 @@ class TestGrep:
             literal=False,
             context=0,
             limit=2,
+            restrict_to_base_dir=False,
         )
 
         assert result is not None
@@ -1428,6 +1428,7 @@ class TestGrep:
             literal=False,
             context=1,
             limit=1,
+            restrict_to_base_dir=False,
         )
 
         assert result is not None
@@ -1506,6 +1507,67 @@ class TestGrep:
         """Handles invalid regex gracefully."""
         result = tools.grep("[invalid")
         assert isinstance(result, str)
+
+    def test_workspace_grep_matches_in_ripgreps_dialect(
+        self,
+        tools: FilesystemTools,
+        tmp_base: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Workspace grep matches as unrestricted grep does: a carriage return before a line end, POSIX and Unicode classes.
+
+        A file named as the path that holds NUL bytes keeps its own line numbers too.
+        """
+        _use_ripgrep(monkeypatch, ripgrep=True)
+        (tmp_base / "crlf.txt").write_bytes(b"first\r\nsecond 42\nThird\n\x00\x00\nlast 7\n")
+        unrestricted = FilesystemTools(base_dir=str(tmp_base), file_access="unrestricted")
+
+        for pattern, expected in (
+            (r"\r$", "crlf.txt:1:first"),
+            ("[[:digit:]]+", "crlf.txt:2:second 42\ncrlf.txt:5:last 7"),
+            (r"\p{Lu}", "crlf.txt:3:Third"),
+        ):
+            assert tools.grep(pattern, path="crlf.txt") == expected
+            assert unrestricted.grep(pattern, path="crlf.txt") == expected
+
+    @pytest.mark.parametrize("slow", ["nominating", "matching"])
+    def test_workspace_grep_stops_a_slow_ripgrep_at_the_deadline(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        slow: str,
+    ) -> None:
+        """Nominating and matching both run in ripgrep under one deadline: the one still running then is killed."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "fast.txt").write_text("fast needle\n")
+        (workspace / "slow.txt").write_text("slow needle\n")
+        pid_file = tmp_path / "pid"
+        hang = f"echo $$ > '{pid_file}'; exec sleep 60"
+        match = {"path": {"text": "<stdin>"}, "lines": {"text": "fast needle\n"}, "line_number": 1}
+        fake_ripgrep = tmp_path / "rg"
+        fake_ripgrep.write_text(
+            "#!/bin/sh\n"
+            'case " $* " in *" --files-with-matches "*)\n'
+            f"  printf '%s\\0' '{workspace}/fast.txt'\n"
+            f"  {hang if slow == 'nominating' else ''}\n"
+            f"  printf '%s\\0' '{workspace}/slow.txt'; exit 0;;\n"
+            "esac\n"
+            f'case "$(cat)" in slow*) {hang};; esac\n'
+            f"printf '%s\\n' '{json.dumps({'type': 'match', 'data': match})}'\n",
+        )
+        fake_ripgrep.chmod(0o755)
+        monkeypatch.setattr(filesystem_module.shutil, "which", lambda _name: str(fake_ripgrep))
+        monkeypatch.setattr(filesystem_module, "_GREP_TIMEOUT_SECONDS", 1.0)
+
+        started = time.monotonic()
+        result = FilesystemTools(base_dir=str(workspace)).grep("needle")
+        elapsed = time.monotonic() - started
+
+        assert result == "fast.txt:1:fast needle\n\n[grep timed out after 1 seconds; results are incomplete.]"
+        assert 1.0 <= elapsed < 10
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid_file.read_text()), 0)
 
     def test_workspace_grep_returns_ripgreps_refusal_of_a_pattern(
         self,

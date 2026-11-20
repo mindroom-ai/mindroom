@@ -7,7 +7,6 @@ ripgrep-backed grep, gitignore-aware file discovery, and an opt-in delete.
 from __future__ import annotations
 
 import bisect
-import codecs
 import difflib
 import itertools
 import json
@@ -17,9 +16,9 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unicodedata
-from collections.abc import Generator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass
 from glob import has_magic
 from pathlib import Path
@@ -49,7 +48,7 @@ from mindroom.shared_directories.tool_roots import no_shared_directory_roots, sh
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator, Iterable, Iterator
 
     from mindroom.config.models import FileAccess
     from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
@@ -58,6 +57,7 @@ _MAX_LINES = 2000
 _MAX_BYTES = 50 * 1024  # 50KB
 _MAX_LINE_CHARS = 500  # Per-line truncation for grep output
 _DEFAULT_GREP_LIMIT = 100
+_GREP_TIMEOUT_SECONDS = 30.0
 _DEFAULT_FIND_LIMIT = 1000
 _DEFAULT_LS_LIMIT = 500
 _MAX_HINT_CHARS = 200
@@ -946,9 +946,9 @@ class FilesystemTools(Toolkit):
             return validation_error
 
         search = (pattern, search_path, self.base_dir, effective_glob, ignore_case, literal, context, limit)
-        # Ripgrep opens files by path, so only unrestricted access takes its word for what a file holds.
-        if self.restrict_to_base_dir or (rg_result := _run_ripgrep(*search)) is None:
-            return _python_grep(*search, self.restrict_to_base_dir)
+        rg_result = _run_ripgrep(*search, self.restrict_to_base_dir)
+        if rg_result is None:
+            return _python_grep_fallback(*search, self.restrict_to_base_dir)
         return rg_result
 
     @shared_directory_aware("path", writes=False)
@@ -1071,32 +1071,8 @@ def _parse_rg_event(raw: str) -> _RgEvent | None:
     return _RgEvent(event_type=event_type, path_text=path_text, line_text=line_text, line_number=line_number)
 
 
-def _rg_command(
-    rg_binary: str,
-    output: list[str],
-    pattern: str,
-    search_path: Path,
-    glob_filter: str | None,
-    ignore_case: bool,
-    literal: bool,
-) -> list[str]:
-    """Return the ripgrep command for one search, which reports through the ``output`` options."""
-    args = [rg_binary, *output, "--color=never"]
-    if ignore_case:
-        args.append("-i")
-    if literal:
-        args.append("-F")
-    if glob_filter:
-        args.extend(["--glob", glob_filter])
-    return [*args, "--", pattern, str(search_path)]
-
-
-class _NominationError(Exception):
-    """Ripgrep could not name the files that may match; the message is the grep result."""
-
-
-def _rg_candidates(args: list[str]) -> Generator[Path]:
-    """Yield the files a ``--files-with-matches --null`` ripgrep names, as it finds them.
+def _rg_candidates(args: list[str], expired: threading.Event) -> Generator[Path]:
+    """Yield the files a ``--files-with-matches --null`` ripgrep names, as it finds them, until the deadline.
 
     Closing it stops ripgrep, so no more of its output is ever held than one chunk of names.
     """
@@ -1104,7 +1080,7 @@ def _rg_candidates(args: list[str]) -> Generator[Path]:
         tempfile.TemporaryFile() as errors,
         subprocess.Popen(args, stdout=subprocess.PIPE, stderr=errors, bufsize=0) as process,
     ):
-        timer = threading.Timer(30, process.kill)
+        timer = threading.Timer(_GREP_TIMEOUT_SECONDS, process.kill)
         timer.start()
         try:
             pending = b""
@@ -1113,15 +1089,58 @@ def _rg_candidates(args: list[str]) -> Generator[Path]:
                 *names, pending = (pending + chunk).split(b"\0")
                 yield from (Path(os.fsdecode(name)) for name in names)
             if (code := process.wait()) < 0:
-                message = "Error: grep timed out after 30 seconds."
-                raise _NominationError(message)
-            if code not in (0, 1):
+                expired.set()
+            elif code not in (0, 1):
                 errors.seek(0)
                 stderr = errors.read(4096).decode(errors="replace").strip()
-                raise _NominationError(f"Error running grep: {stderr}" if stderr else "Error running grep.")
+                raise subprocess.CalledProcessError(code, args, stderr=stderr)
         finally:
             timer.cancel()
             process.kill()
+
+
+def _confined_rg_events(
+    nominate: list[str],
+    match: list[str],
+    base_dir: Path,
+    expired: threading.Event,
+) -> Generator[_RgEvent]:
+    """Yield what the ``match`` ripgrep finds in each file the ``nominate`` one names, until the deadline sets ``expired``.
+
+    Ripgrep opens files by path, so what it finds in one only nominates it: the events come from a ripgrep fed the
+    bytes the capped no-follow reader returns, one file at a time, and a file that reader refuses is skipped.
+    """
+    deadline = time.monotonic() + _GREP_TIMEOUT_SECONDS
+    with closing(_rg_candidates(nominate, expired)) as candidates:
+        for candidate in candidates:
+            try:
+                payload = read_resolved_file(base_dir, resolve_base_dir_path(base_dir, str(candidate)))
+                remaining = deadline - time.monotonic()
+                found = subprocess.run(match, check=False, input=payload, capture_output=True, timeout=remaining)
+            except (OSError, ValueError):
+                continue
+            except subprocess.TimeoutExpired:
+                expired.set()
+                return
+            for event in filter(None, map(_parse_rg_event, found.stdout.decode().splitlines())):
+                event.path_text = str(candidate)
+                yield event
+
+
+def _run_confined_ripgrep(nominate: list[str], match: list[str], base_dir: Path, limit: int, context: int) -> str:
+    """Return the formatted results of a workspace search, with a note when the deadline cut it short."""
+    expired = threading.Event()
+    try:
+        with closing(_confined_rg_events(nominate, match, base_dir, expired)) as events:
+            output = _format_rg_output(events, limit, context, base_dir)
+    except subprocess.CalledProcessError as error:
+        return f"Error running grep: {error.stderr}" if error.stderr else "Error running grep."
+    if not expired.is_set():
+        return output
+    timed_out = f"grep timed out after {_GREP_TIMEOUT_SECONDS:g} seconds"
+    if output == "No matches found.":
+        return f"Error: {timed_out}."
+    return f"{output}\n\n[{timed_out}; results are incomplete.]"
 
 
 def _run_ripgrep(
@@ -1133,18 +1152,27 @@ def _run_ripgrep(
     literal: bool,
     context: int,
     limit: int,
+    restrict_to_base_dir: bool,
 ) -> str | None:
     """Run ripgrep and return formatted results. Returns None if rg is not available."""
     rg_binary = shutil.which("rg")
     if rg_binary is None:
         return None
 
-    output = ["--json", *(["-C", str(context)] if context > 0 else [])]
-    args = _rg_command(rg_binary, output, pattern, search_path, glob_filter, ignore_case, literal)
+    options = ["--color=never", *(["-i"] if ignore_case else []), *(["-F"] if literal else [])]
+    report = [rg_binary, "--json", *options, *(["-C", str(context)] if context > 0 else [])]
+    target = [*(["--glob", glob_filter] if glob_filter else []), "--", pattern, str(search_path)]
+    if restrict_to_base_dir:
+        nominate = [rg_binary, "--files-with-matches", "--null", *options, *target]
+        # Nominated files are text, numbered by their own lines; none's events are held past the limit's last match.
+        match = [*report, "--text", "--max-count", str(limit + 1), "--", pattern, "-"]
+        return _run_confined_ripgrep(nominate, match, base_dir, limit, context)
+
+    args = [*report, *target]
     try:
-        result = subprocess.run(args, check=False, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(args, check=False, capture_output=True, text=True, timeout=_GREP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
-        return "Error: grep timed out after 30 seconds."
+        return f"Error: grep timed out after {_GREP_TIMEOUT_SECONDS:g} seconds."
 
     if result.returncode == 1:
         return "No matches found."
@@ -1152,7 +1180,7 @@ def _run_ripgrep(
         stderr = result.stderr.strip()
         return f"Error running grep: {stderr}" if stderr else "Error running grep."
 
-    return _format_rg_output(result.stdout, limit, context, base_dir)
+    return _format_rg_output(filter(None, map(_parse_rg_event, result.stdout.splitlines())), limit, context, base_dir)
 
 
 def _format_rg_line(event: _RgEvent, base_dir: Path) -> str:
@@ -1182,19 +1210,15 @@ def _append_trailing_context(
     pending_context.clear()
 
 
-def _format_rg_output(stdout: str, limit: int, context: int, base_dir: Path) -> str:
-    """Parse ripgrep JSON output and format as text lines."""
+def _format_rg_output(events: Iterable[_RgEvent], limit: int, context: int, base_dir: Path) -> str:
+    """Format ripgrep's match and context events as text lines, taking no more of them than ``limit`` needs."""
     output_lines: list[str] = []
     pending_context: list[_RgEvent] = []
     match_count = 0
     was_limited = False
     last_match: _RgEvent | None = None
 
-    for raw_line in stdout.splitlines():
-        event = _parse_rg_event(raw_line)
-        if event is None:
-            continue
-
+    for event in events:
         if event.event_type == "context":
             pending_context.append(event)
             continue
@@ -1264,16 +1288,11 @@ def _grep_file(
     match_count: int,
     restrict_to_base_dir: bool,
 ) -> int:
-    """Search a single file, read once through the capped reader, for regex matches. Returns updated match_count."""
+    """Search a single file for regex matches. Returns updated match_count."""
     try:
         resolved = resolve_base_dir_path(base_dir, str(filepath), restrict_to_base_dir)
-        payload = read_resolved_file(base_dir, resolved)
+        text = read_resolved_file(base_dir, resolved).decode("utf-8")
     except (OSError, ValueError):
-        return match_count
-    # Decode as ripgrep does: UTF-16 by its byte order mark, else UTF-8; a file holding NUL is binary.
-    utf16 = payload.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE))
-    text = payload.decode("utf-16" if utf16 else "utf-8-sig", errors="replace")
-    if "\0" in text:
         return match_count
 
     rel = format_path_for_output(filepath, base_dir)
@@ -1347,22 +1366,7 @@ def _collect_grep_files(search_path: Path, glob_filter: str | None) -> list[Path
     return _filter_hidden_and_ignored(files, search_path)
 
 
-def _grep_candidates(
-    pattern: str,
-    search_path: Path,
-    glob_filter: str | None,
-    ignore_case: bool,
-    literal: bool,
-    restrict_to_base_dir: bool,
-) -> Generator[Path] | list[Path] | str:
-    """Return the files to match, or an error: under workspace access those ripgrep nominates, else those a walk finds."""
-    if restrict_to_base_dir and (rg_binary := shutil.which("rg")) is not None:
-        output = ["--files-with-matches", "--null"]
-        return _rg_candidates(_rg_command(rg_binary, output, pattern, search_path, glob_filter, ignore_case, literal))
-    return _collect_grep_files(search_path, glob_filter)
-
-
-def _python_grep(
+def _python_grep_fallback(
     pattern: str,
     search_path: Path,
     base_dir: Path,
@@ -1373,38 +1377,34 @@ def _python_grep(
     limit: int,
     restrict_to_base_dir: bool,
 ) -> str:
-    """Match in Python, one file at a time, on bytes read through the capped reader."""
+    """Pure Python grep fallback when ripgrep is not available."""
+    if literal:
+        pattern = re.escape(pattern)
     flags = re.IGNORECASE if ignore_case else 0
     try:
-        regex = re.compile(re.escape(pattern) if literal else pattern, flags)
+        regex = re.compile(pattern, flags)
     except re.error as e:
         return f"Error: Invalid regex pattern: {e}"
 
-    files = _grep_candidates(pattern, search_path, glob_filter, ignore_case, literal, restrict_to_base_dir)
-    if isinstance(files, str):
-        return files
+    files_or_error = _collect_grep_files(search_path, glob_filter)
+    if isinstance(files_or_error, str):
+        return files_or_error
 
     results: list[str] = []
     match_count = 0
-    try:
-        for filepath in files:
-            match_count = _grep_file(
-                filepath,
-                base_dir,
-                regex,
-                context,
-                limit,
-                results,
-                match_count,
-                restrict_to_base_dir,
-            )
-            if match_count > limit:
-                break
-    except _NominationError as error:
-        return str(error)
-    finally:
-        if isinstance(files, Generator):
-            files.close()
+    for filepath in files_or_error:
+        match_count = _grep_file(
+            filepath,
+            base_dir,
+            regex,
+            context,
+            limit,
+            results,
+            match_count,
+            restrict_to_base_dir,
+        )
+        if match_count > limit:
+            break
 
     if not results:
         return "No matches found."
