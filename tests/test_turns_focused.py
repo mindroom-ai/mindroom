@@ -5394,6 +5394,28 @@ async def test_a_routed_room_level_silent_schedule_stays_quiet_and_replies_to_no
 
 
 @pytest.mark.asyncio
+async def test_a_scheduled_prompt_too_large_for_other_routes_is_still_carried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent schedule's prompt is in no message its responder could read, so its route carries it at any size."""
+    config = _two_agent_config(tmp_path)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    steward = _build_harness(config, tmp_path / "steward", agent_name=ROUTER_AGENT_NAME)
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("research")),
+    )
+    prompt = "Poll the queue. " * (constants.ROUTE_VOICE_TRANSCRIPTS_LIMIT // 16 + 1)
+
+    # No history limit is set: the task is trusted as scheduled by its intent alone.
+    await steward.deliver(room, _silent_schedule_event(config, extra_content={"body": prompt}))
+
+    [route] = steward.gateway.routes
+    assert route["body"] == prompt
+
+
+@pytest.mark.asyncio
 async def test_eventless_silent_schedule_completion_is_terminal_before_recovery(tmp_path: Path) -> None:
     """An admitted successful no-response turn cannot replay after cleanup."""
     config = _single_agent_config(tmp_path, "room")

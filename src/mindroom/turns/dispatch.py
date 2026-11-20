@@ -738,7 +738,9 @@ class TurnDispatcher:
                 extra_content=plan.extra_content,
                 media_events=None if single_direct_media_route else plan.media_events,
                 handled_turn=tracked_turn,
-                scheduled_prompt=turn.event.body if prepared.dispatch.scheduled_history_budget is not None else None,
+                scheduled_prompt=(
+                    turn.event.body if prepared.dispatch.envelope.origin.intent is TurnIntent.SCHEDULED_FIRE else None
+                ),
                 prompt_is_structured=turn.current_prompt_is_structured,
             )
 
