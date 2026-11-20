@@ -479,8 +479,6 @@ class _HydrationWriteTransaction:
 
     def execute(self, sql: str, params: Sequence[object] = ()) -> None:
         """Run one statement and record the durable hydration effect it requests."""
-        if "INSERT INTO visible_messages" in sql:
-            self.shape.projected_messages += 1
         if "INSERT INTO conversation_hydration" in sql:
             self.shape.hydration_markers += 1
         if "UPDATE room_history_recovery SET state = ?" in sql and params[0] == "repaired":
@@ -490,7 +488,9 @@ class _HydrationWriteTransaction:
         self._inner.execute(sql, params)
 
     def fetchone(self, sql: str, params: Sequence[object] = ()) -> Mapping[str, object] | None:
-        """Run one query and record its durable fence claims."""
+        """Run one query and record its durable fence claims, or the message it asks to project."""
+        if "INSERT INTO visible_messages" in sql:
+            self.shape.projected_messages += 1
         if "INSERT INTO room_membership" in sql:
             self.shape.membership_claims += 1
         if "UPDATE room_history_recovery SET state = state" in sql:

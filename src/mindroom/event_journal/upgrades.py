@@ -64,17 +64,18 @@ _JOURNAL_UPGRADES: tuple[_JournalUpgrade, ...] = (
 
 def upgrade_schema(transaction: Transaction, inspector: SchemaInspector) -> None:
     """Run every journal upgrade in order, create the current schema, and fill it from the tables they kept."""
+    numbered = "content_generation" in inspector.columns("visible_messages")
     for upgrade in _JOURNAL_UPGRADES:
         upgrade(transaction, inspector)
     staged = create_statement(FINGERPRINT_INDEX, inspector.dialect)
     for statement in schema_statements(inspector.dialect):
         if statement != staged:
             transaction.execute(statement)
-    # Once per journal: the count starts at the highest number a stored body holds, zero in a new journal.
+    # Once per journal: the count starts at the highest number a body holds. That is 0 unless bodies were numbered
+    # before this open, so only then is every message read for it, under the locks of this transaction.
     if transaction.fetchone("SELECT latest FROM content_generations") is None:
-        transaction.execute(
-            "INSERT INTO content_generations SELECT COALESCE(MAX(content_generation), 0) FROM visible_messages",
-        )
+        highest = "SELECT COALESCE(MAX(content_generation), 0) FROM visible_messages" if numbered else "SELECT 0"
+        transaction.execute(f"INSERT INTO content_generations {highest}")
     # A redaction's effects read membership, reply, and continuation tables that only the current schema has.
     upgrade_turn_records_to_rows(transaction, inspector)
 

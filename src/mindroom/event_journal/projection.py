@@ -30,10 +30,12 @@ if TYPE_CHECKING:
     from .backend import Row, Transaction
 
 
-def _next_generation(transaction: Transaction) -> int:
-    """Take the journal's next body number in the transaction that stores the body, so no body repeats one."""
-    (row,) = transaction.fetchall("UPDATE content_generations SET latest = latest + 1 RETURNING latest")
-    return int(row["latest"])
+def _write_numbered_body(transaction: Transaction, sql: str, params: tuple[object, ...]) -> Row | None:
+    """Run a write that numbers its body one above the journal's count, and count that number if a row took it."""
+    row = transaction.fetchone(sql, params)
+    if row is not None:
+        transaction.execute("UPDATE content_generations SET latest = latest + 1")
+    return row
 
 
 _RELATES_TO = "m.relates_to"
@@ -214,14 +216,16 @@ def _project_original(
     revises was held, and is applied now that its target exists.
     """
     content_json, refresh_token = _stored_body(event.content, receipt_order)
-    transaction.execute(
+    _write_numbered_body(
+        transaction,
         """
         INSERT INTO visible_messages (
             principal_id, room_id, logical_event_id, thread_id, sender,
             created_ts, revision_event_id, revision_ts, content_json,
             refresh_token, membership_epoch, content_generation
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT latest + 1 FROM content_generations))
         ON CONFLICT (principal_id, room_id, logical_event_id) DO NOTHING
+        RETURNING logical_event_id
         """,
         (
             principal_id,
@@ -235,7 +239,6 @@ def _project_original(
             content_json,
             refresh_token,
             membership_epoch,
-            _next_generation(transaction),
         ),
     )
     record_projected_prompt(
@@ -496,18 +499,20 @@ def _install_revision(
     receipt_order: int,
 ) -> None:
     content_json, refresh_token = _stored_body(content, receipt_order)
-    transaction.execute(
+    _write_numbered_body(
+        transaction,
         """
         UPDATE visible_messages
-        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = ?, content_generation = ?
+        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = ?,
+            content_generation = (SELECT latest + 1 FROM content_generations)
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
+        RETURNING logical_event_id
         """,
         (
             revision_event_id,
             revision_ts,
             content_json,
             refresh_token,
-            _next_generation(transaction),
             principal_id,
             room_id,
             logical_event_id,
@@ -669,10 +674,12 @@ def install_refetched_revision(
     if is_redacted(transaction, principal_id, room_id, revision_event_id):
         return None
     content_json = _dumps(content)
-    row = transaction.fetchone(
+    row = _write_numbered_body(
+        transaction,
         """
         UPDATE visible_messages
-        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = NULL, content_generation = ?
+        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = NULL,
+            content_generation = (SELECT latest + 1 FROM content_generations)
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
           AND revision_event_id = ? AND refresh_token = ? AND membership_epoch = ?
         RETURNING sender, membership_epoch
@@ -681,7 +688,6 @@ def install_refetched_revision(
             revision_event_id,
             revision_ts,
             content_json,
-            _next_generation(transaction),
             principal_id,
             room_id,
             logical_event_id,

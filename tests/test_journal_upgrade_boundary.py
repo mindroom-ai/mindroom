@@ -22,11 +22,13 @@ from mindroom.event_journal import (
     IngestionBatchAdmission,
     IngestionRecordAdmission,
     IngestionRecordDisposition,
+    postgres_backend,
+    sqlite_backend,
     turn_rows,
     upgrades,
 )
 from tests.conftest import postgres_journal_schema_url
-from tests.test_event_journal_store import admit, edit, message
+from tests.test_event_journal_store import admit, edit, message, projection
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -534,3 +536,67 @@ async def test_two_open_journals_each_number_their_own_bodies(legacy_database: _
         assert await _stored_generation(store, room_id, "$root") == first + 1
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_replaying_stored_messages_takes_no_numbers(legacy_database: _LegacyDatabase) -> None:
+    """Hydrating a thread again stores no body, so the next body takes the number after the last one stored."""
+    room_id = "!room:example.org"
+    store = legacy_database.open()
+    try:
+        principal = store.principal("agent@alice")
+        await admit(principal, "$root", room_id=room_id)
+        first = await _stored_generation(store, room_id, "$root")
+        for _ in range(2):
+            assert await principal.install_hydrated_conversation(
+                room_id=room_id,
+                thread_id="$root",
+                events=(projection("$root", room_id=room_id),),
+                complete=True,
+                expected_membership_epoch=await principal.membership_epoch(room_id),
+            )
+        await admit(principal, "$edit", room_id=room_id, ts=2_000, content=edit("$root", "edited"))
+        assert await _stored_generation(store, room_id, "$root") == first + 1
+    finally:
+        await store.close()
+
+
+class _Recording:
+    """A transaction that lists every statement run through it."""
+
+    def __init__(self, transaction: object, statements: list[str]) -> None:
+        self._transaction = transaction
+        self._statements = statements
+
+    def __getattr__(self, name: str) -> Callable[..., object]:
+        run = getattr(self._transaction, name)
+
+        def recorded(sql: str, *args: object) -> object:
+            self._statements.append(sql)
+            return run(sql, *args)
+
+        return recorded
+
+
+@pytest.mark.asyncio
+async def test_numbering_a_released_journal_reads_no_message_for_the_highest_number(
+    legacy_database: _LegacyDatabase,
+) -> None:
+    """The open that first numbers the messages gave each 0, so it must not read them all, readers shut out, to learn it."""
+    legacy_database.execute("""
+        INSERT INTO visible_messages VALUES (
+            '@bot:example.org', '!room:example.org', '$old', '', '@user:example.org', 1, '$old', 1, NULL, 37, 0);
+    """)
+    statements: list[str] = []
+
+    def recorded(transaction: object, inspector: object) -> None:
+        upgrades.upgrade_schema(_Recording(transaction, statements), inspector)  # type: ignore[arg-type]
+
+    with (
+        patch.object(sqlite_backend, "upgrade_schema", recorded),
+        patch.object(postgres_backend, "upgrade_schema", recorded),
+    ):
+        await legacy_database.open().close()
+    assert any("content_generations" in statement for statement in statements)
+    assert not [statement for statement in statements if "MAX(content_generation)" in statement]
+    assert legacy_database.query("SELECT latest FROM content_generations") == [(0,)]
