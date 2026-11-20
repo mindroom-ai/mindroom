@@ -414,7 +414,7 @@ async def test_a_repeated_inline_call_with_another_script_is_refused_and_tells_n
 
     other = await _refused(stack, "start_workflow", depth=1, call_id="call-1", source=SCRIPT + "# changed\n")
 
-    assert "another owner, script or arguments" in other
+    assert other == "This call already started a workflow run with another owner, script or arguments."
     assert len(stack.scripts.launched) == 1
     stack.run_id = run.run_id
     await stack.finish_attempt(result="the first report")
