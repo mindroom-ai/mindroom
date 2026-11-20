@@ -125,12 +125,17 @@ class BatchCheckpoint:
                 )
                 for observed_id, call in batch.calls.items()
             }
-            # Each observed call takes its own entry's place, so the record keeps the batch's call order, refused
-            # calls included; a call the record does not hold yet follows.
-            recorded = {tool.tool_call_id for tool in run.tools or ()}
-            run.tools = [observed.get(tool.tool_call_id, tool) for tool in run.tools or ()] + [
-                tool for observed_id, tool in observed.items() if observed_id not in recorded
-            ]
+            # Each observed call takes its own entry's place, the latest under its id since a provider may reuse one,
+            # so the record keeps the batch's call order, refused calls included; a call the record does not hold yet
+            # follows.
+            tools = list(run.tools or ())
+            latest = {tool.tool_call_id: index for index, tool in enumerate(tools)}
+            for observed_id, execution in observed.items():
+                if observed_id in latest:
+                    tools[latest[observed_id]] = execution
+                else:
+                    tools.append(execution)
+            run.tools = tools
             await self._save(run)
             batch.persisted = True
 
