@@ -11,7 +11,7 @@ from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.requester_identity import mindroom_user_id
-from mindroom.tool_system.events import body_with_tool_tags, message_tool_trace
+from mindroom.tool_system.events import body_with_tool_markers, body_with_tool_tags, message_tool_trace
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -32,7 +32,11 @@ def message_judgment_text(message: ResolvedVisibleMessage) -> str | None:
         if not message.body.strip():
             return None
         trace = message_tool_trace(message.content)
-        body = message.body if trace is None else body_with_tool_tags(message.body, trace)
+        body = (
+            message.body
+            if trace is None
+            else body_with_tool_tags(body_with_tool_markers(message.body, message.content), trace)
+        )
         return f"{body}\n[with attachments]" if message.content.get(ATTACHMENT_IDS_KEY) else body
     kind = (msgtype.removeprefix("m.") if isinstance(msgtype, str) else "") or "media"
     filename = message.content.get("filename")

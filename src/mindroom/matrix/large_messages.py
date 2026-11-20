@@ -41,6 +41,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import markdown_to_html
+from mindroom.tool_system.events import tool_markers_out_of_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -887,11 +888,13 @@ async def prepare_large_message(
 
     Returns:
         The original content object when no preparation is needed, otherwise
-        modified content with a preview and MXC reference. The identity
+        modified content without tool markers or with a preview and MXC reference. The identity
         guarantee lets the delivery boundary avoid a redundant state lookup
         when this coroutine completed without yielding.
 
     """
+    # The last step before Matrix: the text goes without tool markers, the sidecar included.
+    content = tool_markers_out_of_text(content)
     is_edit = is_edit_message(content)
     size_limit = EDIT_MESSAGE_SIZE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
     encrypted_delivery_safe = room_encrypted or prepare_for_encrypted_delivery

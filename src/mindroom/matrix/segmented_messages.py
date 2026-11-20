@@ -27,6 +27,7 @@ from mindroom.tool_system.events import (
     message_tool_trace,
     renumbered_tool_trace,
     strip_visible_tool_markers,
+    tool_markers_out_of_text,
 )
 
 if TYPE_CHECKING:
@@ -231,8 +232,8 @@ def _with_tool_trace(
     holder = segment["m.new_content"] if in_new_content else segment
     for entries_slice in _shrinking_trace_slices(entries):
         holder.update(build_tool_trace_content(entries_slice) or {})
-        if calculate_event_size(segment) <= target_bytes:
-            return segment
+        if calculate_event_size(sent := tool_markers_out_of_text(segment)) <= target_bytes:
+            return sent
         holder.pop(TOOL_TRACE_CONTENT_KEY, None)
     # Without a trace, readers cannot tell the markers from typed text, so they go too.
     return build(strip_visible_tool_markers(renumbered))

@@ -38,7 +38,7 @@ from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, get_thread_tags, set_thread_tag
 from mindroom.thread_utils import history_mentioned_user_ids
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.events import is_visible_tool_marker_line
+from mindroom.tool_system.events import html_block_spans, is_visible_tool_marker_line, moved_tool_positions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -129,7 +129,12 @@ def _attribute_relay(content: dict[str, Any], sender: str, name: str) -> None:
     separator = "\n\n" if is_visible_tool_marker_line(body.split("\n", 1)[0]) else " "
     content["body"] = f"{name}:{separator}{body}"
     if "formatted_body" in content:
-        content["formatted_body"] = f"<strong>{html.escape(name)}</strong>: {content['formatted_body']}"
+        sent_html = str(content["formatted_body"])
+        content["formatted_body"] = f"<strong>{html.escape(name)}</strong>: {sent_html}"
+        if TOOL_TRACE_CONTENT_KEY in content:
+            # The name adds blocks before every call of a reply sent without its markers.
+            added = len(html_block_spans(content["formatted_body"])) - len(html_block_spans(sent_html))
+            content[TOOL_TRACE_CONTENT_KEY] = moved_tool_positions(content[TOOL_TRACE_CONTENT_KEY], added)
 
 
 @dataclass(frozen=True, slots=True)

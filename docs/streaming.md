@@ -99,7 +99,7 @@ MindRoom never appends an ellipsis to generated text, and clients may draw their
 
 ## Tool Calls During Streaming
 
-When an agent calls tools, MindRoom shows inline markers in the message text:
+When an agent calls tools, MindRoom builds each reply with a marker line per call:
 
 ```
 🔧 `web_search` [1] ⏳       ← tool call started
@@ -107,6 +107,9 @@ When an agent calls tools, MindRoom shows inline markers in the message text:
 ```
 
 The number in brackets counts tool calls within the message, and `io.mindroom.tool_trace.events[N-1]` in the event content holds the tool name, argument preview, result preview, and `tool_call_id` for call `[N]`.
+Live frames carry the marker lines, but messages and edits go to Matrix without them (`io.mindroom.tool_trace` version 3), so clients without tool support show only the text.
+Each call's trace entry says where its line was instead: `at` counts the top-level HTML blocks of the sent `formatted_body` before it, and calls that stood together share one `at`; a call inside a list or quote counts as after it.
+MindRoom Chat puts the lines back where `at` says and draws them as tool rows; version 2 messages, sent before this, keep their marker lines in the text.
 A completed call that did not succeed (it errored, was refused or denied, or was cancelled or interrupted) also carries `is_error: true`, and its result preview says why; the key is omitted on a call that succeeded and on a started one, in live frames and the final event alike.
 A secret request card (`io.mindroom.secret_request`) that a reply's tool call posted names that reply's event (`response_event_id`) and the call (`tool_call_id`), so a client can draw the card at the call's line; a call made through the CLI from a Bash call has its own line, which the card names.
 Tools that start in quick succession appear together in one edit.

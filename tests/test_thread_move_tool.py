@@ -36,7 +36,12 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagRecord, ThreadTagsError, ThreadTagsState
 from mindroom.thread_utils import get_all_mentioned_agents_in_thread
-from mindroom.tool_system.events import ToolTraceEntry, body_without_tool_markers, build_tool_trace_content
+from mindroom.tool_system.events import (
+    ToolTraceEntry,
+    body_without_tool_markers,
+    build_tool_trace_content,
+    html_block_spans,
+)
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -247,6 +252,25 @@ def test_plan_prefix_keeps_a_leading_tool_marker_on_its_own_line() -> None:
     assert copy.content["body"].splitlines()[0].endswith(":")
     assert body_without_tool_markers(copy.content["body"], copy.content).splitlines()[-1] == "found it"
     assert "🔧" not in body_without_tool_markers(copy.content["body"], copy.content)
+
+
+def test_plan_prefix_keeps_a_sent_replys_calls_in_their_places() -> None:
+    """The name before a relayed version-3 reply adds blocks to its HTML, so its calls' positions move with them."""
+    events = [{"type": "tool_call_completed", "tool_name": "shell", "at": 1}]
+    content = {
+        "msgtype": "m.text",
+        "body": "Checking.\n\nDone.",
+        "format": "org.matrix.custom.html",
+        "formatted_body": "<p>Checking.</p>\n<p>Done.</p>\n",
+        TOOL_TRACE_CONTENT_KEY: {"version": 3, "events": events},
+    }
+    [copy] = _plan(_message(ABSENT_ID, content), display_names={ABSENT_ID: "Research"})
+
+    html = copy.content["formatted_body"]
+    [at] = [event["at"] for event in copy.content[TOOL_TRACE_CONTENT_KEY]["events"]]
+    assert html.startswith("<strong>Research</strong>: <p>Checking.</p>")
+    assert html[html_block_spans(html)[at][0] :] == "<p>Done.</p>\n"
+    assert events[0]["at"] == 1
 
 
 def test_plan_escapes_display_name_in_formatted_prefix() -> None:
