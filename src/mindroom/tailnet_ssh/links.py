@@ -2,7 +2,8 @@
 
 The gateway is a pipe. It asks here which nodes to run (``desired_links``), says what it sees (``record_status``),
 and asks for each accepted connection where to send it (``connect``), which is where a worker is woken and its sshd
-started. What the gateway reports is kept in memory only, in a ``GatewayStatus``, and is empty until its first post.
+started. What the gateway reports of its nodes is kept in memory only, in a ``GatewayStatus``, and is empty until its
+first post; how it enrols them is stored with the links, so it is known again as soon as the primary restarts.
 """
 
 from __future__ import annotations
@@ -106,9 +107,8 @@ class LinkStatus:
 
 @dataclass(frozen=True)
 class GatewayReport:
-    """One report of the gateway, whole: how its nodes enrol, when it came (monotonic), and each link's node."""
+    """One report of the gateway, whole: when it came (monotonic), and each link's node."""
 
-    enrollment: Literal["login", "auth_key"] | None = None
     received_at: float = 0.0
     links: Mapping[str, LinkStatus] = field(default_factory=dict)
 
@@ -220,9 +220,8 @@ def desired_links(
     ``off`` is a link, so it is not added again.
     """
     workers: list[WorkerHandle] = []
-    # Every row is answered by one report, also when another comes in meanwhile.
-    enrollment = status.report.enrollment
-    if enrollment == "auth_key" and now - status.operator_sync_at >= _OPERATOR_SYNC_SECONDS:
+    # The backend is asked outside the store's lock, which connects and the portal wait for.
+    if now - status.operator_sync_at >= _OPERATOR_SYNC_SECONDS and read_links(runtime_paths).enrollment == "auth_key":
         status.operator_sync_at = now
         workers = listed_workers(runtime_paths)
     agent_names: dict[str, str | None] = {}
@@ -235,7 +234,7 @@ def desired_links(
         return _desired(config, runtime_paths, membership_index, link, now=now)
 
     def reconcile(book: LinkBook) -> list[dict[str, object]]:
-        for handle in workers:
+        for handle in workers if book.enrollment == "auth_key" else []:
             requester_id = user_agent_worker_key_requester(handle.worker_key)
             agent_name = agent_names.get(worker_key_agent_name(handle.worker_key) or "")
             if handle.ssh_endpoint is None or requester_id is None or agent_name is None:
@@ -251,7 +250,7 @@ def desired_links(
                 "id": link.id,
                 "hostname": link.hostname,
                 "desired": verdicts.get(link.id, "removing"),
-                "allowed_login": _allowed_login(config, enrollment, link),
+                "allowed_login": _allowed_login(config, book.enrollment, link),
                 "closed_before": link.closed_before,
                 "login_after": link.login_after,
             }
@@ -272,13 +271,15 @@ def record_status(
 ) -> None:
     """Keep the gateway's ``POST /status`` report in ``status``, whole and at once, and store what it settles. Blocking.
 
-    A node reported ``removed`` ends its link's removal. The first ``running`` report enrols a link: the login that
-    signed in is the one it admits from then on, whoever signs in later. A node an operator key enrolled pins no
-    login, so it admits nobody except through the config. A report for a link the store does not hold is ignored.
+    How the gateway enrols its nodes is stored. A node reported ``removed`` ends its link's removal. The first
+    ``running`` report enrols a link: the login that signed in is the one it admits from then on, whoever signs in
+    later. A node an operator key enrolled pins no login, so it admits nobody except through the config. A report
+    for a link the store does not hold is ignored.
     """
     operator = payload.enrollment == "auth_key"
 
     def settle(book: LinkBook) -> dict[str, LinkStatus]:
+        book.enrollment = payload.enrollment
         reported: dict[str, LinkStatus] = {}
         for link_id, report in payload.links.items():
             link = book.by_id(link_id)
@@ -303,7 +304,7 @@ def record_status(
             )
         return reported
 
-    status.report = GatewayReport(payload.enrollment, monotonic, update_links(runtime_paths, settle))
+    status.report = GatewayReport(monotonic, update_links(runtime_paths, settle))
 
 
 def link_state(link: Link, status: LinkStatus | None, *, suspended: bool) -> str:
@@ -389,13 +390,13 @@ def _admit(
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
-    status: GatewayStatus,
     link_id: str,
     peer_login: str,
 ) -> tuple[WorkerSshEndpoint, WorkerCall]:
     """Check a connection, wake the link's worker, and write sshd's files; all that precedes starting sshd. Blocking."""
-    link = _on_link(read_links(runtime_paths), link_id)
-    allowed_login = _allowed_login(config, status.report.enrollment, link)
+    book = read_links(runtime_paths)
+    link = _on_link(book, link_id)
+    allowed_login = _allowed_login(config, book.enrollment, link)
     if not allowed_login or peer_login != allowed_login:
         raise ConnectRefused(403, "This link admits another Tailscale login.")
     ineligible = link_ineligibility(
@@ -461,7 +462,6 @@ async def connect(
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
-    status: GatewayStatus,
     link_id: str,
     peer_login: str,
     peer_node: str,
@@ -471,15 +471,7 @@ async def connect(
     In order: the link is on and admits the peer's login, it is eligible now, its worker starts and has an SSH port,
     sshd's files are written, and the runner starts sshd. It may take as long as a worker takes to start.
     """
-    endpoint, call = await asyncio.to_thread(
-        _admit,
-        config,
-        runtime_paths,
-        membership_index,
-        status,
-        link_id,
-        peer_login,
-    )
+    endpoint, call = await asyncio.to_thread(_admit, config, runtime_paths, membership_index, link_id, peer_login)
     await _start_sshd(call)
     logger.info("tailnet_ssh_connect", link_id=link_id, peer_login=peer_login, peer_node=peer_node)
     return endpoint.host, endpoint.port

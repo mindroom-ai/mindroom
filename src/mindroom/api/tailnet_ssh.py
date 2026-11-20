@@ -163,8 +163,8 @@ def _link_row(link: Link, node: LinkStatus | None, *, suspended: bool) -> dict[s
     }
 
 
-def _overview(person: _Person, nodes: Mapping[str, LinkStatus]) -> tuple[list[str], list[dict[str, object]]]:
-    """Return the person's keys, and each agent they may use that opts in to SSH with their link to it. Blocking.
+def _overview(person: _Person, nodes: Mapping[str, LinkStatus]) -> dict[str, object]:
+    """Return the gateway's enrolment mode, the person's keys, and their agents that opt in to SSH, with links. Blocking.
 
     The backend is asked for its workers only when one of the links is enrolled, the only state that shows its worker.
     """
@@ -207,7 +207,7 @@ def _overview(person: _Person, nodes: Mapping[str, LinkStatus]) -> tuple[list[st
         statuses = {handle.worker_key: handle.status for handle in listed_workers(runtime_paths)}
         for row, worker_key in enrolled:
             row["worker"] = _WORKER_STATES.get(statuses.get(worker_key, ""), "asleep")
-    return book.keys.get(requester_id, []), agents
+    return {"enrollment": book.enrollment, "keys": book.keys.get(requester_id, []), "agents": agents}
 
 
 async def _github_login(user: ConnectionUserContext) -> str | None:
@@ -315,17 +315,9 @@ async def tailnet_ssh_overview(request: Request, matrix_user_id: _SignedIn) -> d
     if status is None:
         return {"enabled": False, "enrollment": None, "keys": [], "github_login": None, "agents": []}
     person = _person(request, matrix_user_id, status)
-    # One report answers the whole listing, also when another comes in meanwhile.
-    report = status.report
-    nodes = fresh_link_statuses(report, monotonic=time.monotonic())
-    keys, agents = await asyncio.to_thread(_overview, person, nodes)
-    return {
-        "enabled": True,
-        "enrollment": report.enrollment,
-        "keys": keys,
-        "github_login": await _github_login(person.user),
-        "agents": agents,
-    }
+    nodes = fresh_link_statuses(status.report, monotonic=time.monotonic())
+    overview = await asyncio.to_thread(_overview, person, nodes)
+    return {"enabled": True, **overview, "github_login": await _github_login(person.user)}
 
 
 @router.put("/keys", status_code=204)
@@ -397,12 +389,13 @@ async def request_login(agent_name: str, person: _Changing) -> None:
 async def disconnect_agent(agent_name: str, person: _Changing) -> None:
     """Disconnect the link: its sessions close and the gateway logs its node out.
 
-    With an operator key the link is parked ``off``, so the gateway does not add it again.
+    With an operator key the link is parked ``off``, so the gateway does not add it again; the stored mode decides,
+    so a disconnect right after a primary restart parks too.
     """
-    park = person.status.report.enrollment == "auth_key"
 
     def disconnect(book: LinkBook) -> None:
         link = _own_link(book, person.requester_id, agent_name)
+        park = book.enrollment == "auth_key"
         remove_links(book, lambda candidate: candidate is link, now=time.time(), park=park)
 
     await asyncio.to_thread(update_links, person.user.runtime_paths, disconnect)

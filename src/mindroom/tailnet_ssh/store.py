@@ -47,12 +47,17 @@ class Link(BaseModel):
 
 
 class LinkBook(BaseModel):
-    """Every link, and each person's SSH public key lines keyed by canonical Matrix ID."""
+    """Every link, each person's SSH public key lines keyed by canonical Matrix ID, and how the gateway enrols nodes.
+
+    ``enrollment`` is what the gateway's last report said, None before its first. It is stored, not kept in memory,
+    so after a primary restart an operator key's links admit their login and are parked on disconnect at once.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     links: list[Link] = Field(default_factory=list)
     keys: dict[str, list[str]] = Field(default_factory=dict)
+    enrollment: Literal["login", "auth_key"] | None = None
 
     def link(self, requester_id: str, agent_name: str) -> Link | None:
         """Return the person's link to the agent, of which there is at most one."""

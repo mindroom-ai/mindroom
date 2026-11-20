@@ -6,7 +6,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import httpx
 import pytest
@@ -15,12 +15,13 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle, main
 from mindroom.api import tailnet_ssh as tailnet_ssh_api
 from mindroom.api.connection_agents import resolve_connection_agent, resolve_connection_user
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.tailnet_ssh import links
-from mindroom.tailnet_ssh.links import GatewayReport, GatewayStatus, LinkStatus
+from mindroom.tailnet_ssh.links import GatewayReport, GatewayStatus, LinkReport, LinkStatus, StatusReport
 from mindroom.tailnet_ssh.store import Link, read_links, update_links
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerSshEndpoint
 from tests.api.conftest import api_snapshot, publish_api_payload, trusted_upstream_env
@@ -133,7 +134,14 @@ class _Portal:
 
         update_links(self.paths, change)
 
-    def report(self, link_id: str, *, enrollment: str = "login", age: float = 0.0, **fields: object) -> None:
+    def report(
+        self,
+        link_id: str,
+        *,
+        enrollment: Literal["login", "auth_key"] = "login",
+        age: float = 0.0,
+        **fields: object,
+    ) -> None:
         """Have the gateway report one link's node ``age`` seconds ago, by default running and enrolled."""
         report: dict[str, object] = {
             "state": "running",
@@ -147,8 +155,12 @@ class _Portal:
             "worker_key": self.link_by_id(link_id).worker_key,
         }
         status = LinkStatus(**(report | fields))  # type: ignore[arg-type]
-        received_at = time.monotonic() - age
-        self.status.report = GatewayReport(enrollment, received_at, {link_id: status})  # type: ignore[arg-type]
+        self.status.report = GatewayReport(time.monotonic() - age, {link_id: status})
+
+        def store(book: LinkBook) -> None:
+            book.enrollment = enrollment
+
+        update_links(self.paths, store)
 
     def link_by_id(self, link_id: str) -> Link:
         link = read_links(self.paths).by_id(link_id)
@@ -382,7 +394,7 @@ def test_a_failed_refresh_is_reported_and_the_next_connect_writes_the_keys(
     assert config is not None
     memberships = config_lifecycle.app_state(main.app).runtime.agent_reply_memberships
 
-    asyncio.run(links.connect(config, portal.paths, memberships, portal.status, link.id, "alice@github", "laptop"))
+    asyncio.run(links.connect(config, portal.paths, memberships, link.id, "alice@github", "laptop"))
 
     assert served == [f"restrict,pty {kept}\n"]
 
@@ -645,6 +657,39 @@ def test_disconnect_sets_removing_and_parks_in_operator_mode(portal: _Portal) ->
 
     parked = portal.link(ALICE, "team_mind")
     assert (parked.desired, parked.park_when_removed) == ("removing", True)
+
+
+def test_a_disconnect_right_after_a_restart_stays_disconnected(portal: _Portal, tmp_path: Path) -> None:
+    """Disconnecting an operator key's link before the restarted primary hears from the gateway parks it all the same.
+
+    Else the gateway logs the node out, the link is dropped, and the next operator reconcile adds it again.
+    """
+    link = _connected(portal, "team_mind", "team-mind")
+    # Before the restart the gateway said it enrols with an operator key; the primary's status is fresh now.
+    links.record_status(
+        portal.paths,
+        GatewayStatus(),
+        StatusReport(enrollment="auth_key", links={link.id: LinkReport(state="running")}),
+        now=time.time(),
+        monotonic=time.monotonic(),
+    )
+    assert portal.status == GatewayStatus()
+
+    assert portal.client.delete(f"{BASE}/agents/team_mind", headers=portal.headers["alice"]).status_code == 204
+
+    assert (portal.link(ALICE, "team_mind").desired, portal.link(ALICE, "team_mind").park_when_removed) == (
+        "removing",
+        True,
+    )
+    removed = StatusReport(enrollment="auth_key", links={link.id: LinkReport(state="removed")})
+    links.record_status(portal.paths, portal.status, removed, now=time.time(), monotonic=time.monotonic())
+    portal.manager.handles = [_handle(link.worker_key, ssh_dir=tmp_path / "ssh")]
+    config, paths = config_lifecycle.read_app_committed_runtime_config(main.app)
+    rows = links.desired_links(config, paths, AgentReplyMembershipIndex(), portal.status, now=time.time() + 61)
+
+    assert rows == []
+    assert [(stored.id, stored.desired) for stored in read_links(portal.paths).links] == [(link.id, "off")]
+    assert portal.agent("team_mind")["link"] is None
 
 
 def test_mutations_refuse_cross_origin_and_query_parameters(portal: _Portal) -> None:

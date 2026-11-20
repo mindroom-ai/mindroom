@@ -152,18 +152,10 @@ def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
 
     @app.post("/links/{link_id}/connect")
     async def connect_link(link_id: str, request: Request) -> dict[str, str | int]:
-        config, runtime_paths, memberships, status = _link_service(api_app)
+        config, runtime_paths, memberships, _status = _link_service(api_app)
         peer = await _body(request, _Peer)
         try:
-            host, port = await connect(
-                config,
-                runtime_paths,
-                memberships,
-                status,
-                link_id,
-                peer.peer_login,
-                peer.peer_node,
-            )
+            host, port = await connect(config, runtime_paths, memberships, link_id, peer.peer_login, peer.peer_node)
         except ConnectRefused as refused:
             raise HTTPException(status_code=refused.status_code, detail=refused.detail) from None
         return {"host": host, "port": port}

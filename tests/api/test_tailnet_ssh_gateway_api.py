@@ -275,7 +275,7 @@ def test_status_is_stored_and_answers_204(
     assert on_event_loop == [False]
     status = tailnet_ssh_status(api_app)
     assert status is not None
-    assert status.report.enrollment == "login"
+    assert read_links(config_lifecycle.read_app_committed_runtime_config(api_app)[1]).enrollment == "login"
     assert status.report.links[link.id].state == "running"
     assert status.report.links[link.id].open_connections == 2
     assert active_tailnet_ssh_worker_keys(api_app) == {link.worker_key}
@@ -365,7 +365,7 @@ def test_connect_answers_endpoint_or_refusal_detail(
     assert (refused.status_code, refused.json()) == (409, {"detail": "x"})
     config, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
     state = config_lifecycle.app_state(api_app)
-    expected = (config, paths, state.runtime.agent_reply_memberships, state.tailnet_ssh_status)
+    expected = (config, paths, state.runtime.agent_reply_memberships)
     assert calls == [(*expected, "abc", "alice@github", "laptop")] * 2
 
 
@@ -530,9 +530,9 @@ def test_only_a_fresh_report_with_open_connections_holds_a_worker(api_app: FastA
     assert status is not None
     links = {"busy": _link_status("worker-busy", 1), "quiet": _link_status("worker-quiet", 0)}
 
-    status.report = GatewayReport("login", time.monotonic(), links)
+    status.report = GatewayReport(time.monotonic(), links)
     assert active_tailnet_ssh_worker_keys(api_app) == {"worker-busy"}
-    status.report = GatewayReport("login", time.monotonic() - 91, links)
+    status.report = GatewayReport(time.monotonic() - 91, links)
     assert active_tailnet_ssh_worker_keys(api_app) == frozenset()
 
 
@@ -548,7 +548,7 @@ async def test_both_maintenance_paths_touch_ssh_workers(api_app: FastAPI, monkey
     """
     status = tailnet_ssh_status(api_app)
     assert status is not None
-    status.report = GatewayReport("login", time.monotonic(), {"abc": _link_status("worker-ssh", 1)})
+    status.report = GatewayReport(time.monotonic(), {"abc": _link_status("worker-ssh", 1)})
     computer_sessions = ComputerSessionStore()
     # A viewer whose stream is open holds its worker, which `authorized_target` names "worker".
     computer_sessions.create(authorized_target()).stream = asyncio.Event()
