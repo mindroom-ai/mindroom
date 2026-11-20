@@ -95,6 +95,7 @@ _AGENT_LIVE_FIELDS = frozenset(
         "show_tool_calls",
         "skill_learning",
         "skills",
+        "tailnet_ssh",
         "terminals",
         "thread_exports",
         "thread_mode",

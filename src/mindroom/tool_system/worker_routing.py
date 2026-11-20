@@ -9,7 +9,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
 from mindroom.workers.placements import DedicatedWorkerPlacement
@@ -40,6 +40,8 @@ _SHARED_ONLY_INTEGRATION_NAMES = frozenset({"spotify", "spotify_oauth", "homeass
 _SUBAGENT_PIN_PREFIX = "subagent="
 _SUBAGENT_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 _SUBAGENT_PIN_PATTERN = re.compile(rf"{re.escape(_SUBAGENT_PIN_PREFIX)}[0-9a-f]{{32}}")
+# The part `workers.models.process_worker_key` pins a script run's worker with, before the agent part.
+_SCRIPT_PIN_PATTERN = re.compile(r"script-[0-9a-f]{32}")
 
 
 @dataclass(frozen=True)
@@ -609,6 +611,26 @@ def worker_key_agent_name(worker_key: str) -> str | None:
     if scope == "user_agent":
         return parts[-1] if len(parts) >= 5 else None
     return parts[-1]
+
+
+def user_agent_worker_key_requester(worker_key: str) -> str | None:
+    """Return the requester an unpinned ``user_agent`` key names, or None for any other key.
+
+    The requester part may itself contain ``:``, so it is everything between the scope and the agent part, and it
+    counts only when encoding it again reproduces the key. A subagent or script-run pin before the agent part means
+    the key is not the requester's own worker.
+    """
+    parts = worker_key.split(":")
+    if resolved_worker_key_scope(worker_key) != "user_agent" or len(parts) < 5:
+        return None
+    if subagent_worker_state_scope_key(worker_key) is not None or _SCRIPT_PIN_PATTERN.fullmatch(parts[-2]):
+        return None
+    encoded = ":".join(parts[3:-1])
+    if not encoded.startswith("~"):
+        return None
+    requester = unquote(encoded[1:])
+    rebuilt = ":".join((*parts[:3], _encode_worker_requester_part(requester), parts[-1]))
+    return requester if requester and rebuilt == worker_key else None
 
 
 def _resolve_execution_identity_for_worker_scope(

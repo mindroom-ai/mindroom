@@ -3797,6 +3797,21 @@ depends_on = [
     "mindroom.config.resolution",
     "mindroom.tool_system.plugins",
     "mindroom.delegation.personas",
+    "mindroom.config.tailnet_ssh",
+    "mindroom.tailnet_ssh.eligibility",
+]
+
+[[modules]]
+path = "mindroom.config.tailnet_ssh"
+depends_on = ["mindroom.config.schema_hints"]
+
+[[modules]]
+path = "mindroom.tailnet_ssh.eligibility"
+depends_on = [
+    "mindroom.config.resolution",
+    "mindroom.matrix_identifiers",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.workers.backend_kinds",
 ]
 
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
@@ -7510,10 +7525,12 @@ expose = [
     "supports_tool_name_for_worker_scope",
     "unsupported_shared_only_integration_message",
     "unsupported_shared_only_integration_names",
+    "user_agent_worker_key_requester",
     "private_root_name",
     "visible_workspace_roots",
     "written_by_other_workers",
     "worker_dir_name",
+    "worker_key_agent_name",
     "worker_log_id",
     "worker_root_path",
     "worker_scope_allows_shared_only_integrations",

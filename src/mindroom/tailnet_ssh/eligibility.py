@@ -1,0 +1,153 @@
+"""Whether a person's tailnet SSH link to an agent's worker may exist: the one rule config, launch, and links share.
+
+A link is eligible only on a dedicated worker backend, for an agent that opts in with ``tailnet_ssh: true``, whose
+worker is per person and agent, whose workspace is that person's alone, and whose worker mounts no shared directory
+another agent owns. ``worker_scope`` is a reuse rule, not a data partition, so the rule names the workspace's owner.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from functools import partial
+from typing import TYPE_CHECKING, Literal
+
+from mindroom.access_policy import resolve_responder_access
+from mindroom.authorization import is_sender_allowed_for_responder
+from mindroom.config.resolution import agent_policy
+from mindroom.matrix_identifiers import is_concrete_matrix_user_id
+from mindroom.shared_directories.store import is_shareable_agent, load_shared_directories, shared_directory_access
+from mindroom.tool_system.worker_routing import (
+    normalize_worker_key_part,
+    user_agent_worker_key_requester,
+    worker_key_agent_name,
+)
+from mindroom.workers.backend_kinds import worker_backend_kind
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.workers.backends._dedicated_worker_common import SharedDirectoryMount
+    from mindroom.workers.models import WorkerLaunchConfig
+
+Reason = Literal["backend", "not_enabled", "scope", "shared_workspace", "joined_directory", "not_authorized"]
+
+
+@dataclass(frozen=True)
+class Ineligible:
+    """The first condition a link fails; ``detail`` names a joined directory as ``owner/name``."""
+
+    reason: Reason
+    detail: str | None = None
+
+
+def _concrete_users_alone(config: Config, agent_name: str) -> tuple[str, ...] | None:
+    """Return the users an agent admits when only concrete users are admitted, with no room grants, else None."""
+    access = resolve_responder_access(config, agent_name)
+    if (
+        not access.users
+        or not all(is_concrete_matrix_user_id(user_id) for user_id in access.users)
+        or access.members_of_rooms
+        or access.current_room_members
+    ):
+        return None
+    return access.users
+
+
+def _is_own_key(worker_key: str, agent_name: str) -> bool:
+    """Return whether a key is an unpinned ``user_agent`` key of this agent."""
+    agent_part = normalize_worker_key_part(agent_name)
+    return user_agent_worker_key_requester(worker_key) is not None and worker_key_agent_name(worker_key) == agent_part
+
+
+def _joined_directory(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> str | None:
+    """Return the first stored shared directory the agent joined but does not own, as ``owner/name``."""
+    is_shareable = partial(is_shareable_agent, config)
+    for directory in load_shared_directories(runtime_paths):
+        if shared_directory_access(directory, (agent_name,), is_shareable) is False:
+            return f"{directory.owner}/{directory.name}"
+    return None
+
+
+def config_error(config: Config, agent_name: str) -> str | None:
+    """Return the sentence that makes ``tailnet_ssh: true`` on this agent invalid config, or None.
+
+    The number of users is not checked, because a created agent's owner may add co-owners; that suspends links.
+    """
+    if not config.agents[agent_name].tailnet_ssh:
+        return None
+    policy = agent_policy(config, agent_name)
+    prefix = f"agents.{agent_name}.tailnet_ssh requires "
+    if policy.effective_execution_scope != "user_agent":
+        return f"{prefix}worker_scope: user_agent or private.per: user_agent, not {policy.scope_label}."
+    if not policy.is_private and _concrete_users_alone(config, agent_name) is None:
+        return (
+            f"{prefix}a private agent, or access.users of concrete Matrix user IDs "
+            "with members_of_rooms: [] and current_room_members off."
+        )
+    return None
+
+
+def link_ineligibility(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    requester_id: str,
+    agent_name: str,
+    worker_key: str | None,
+    membership_index: AgentReplyMembershipIndex,
+) -> Ineligible | None:
+    """Return the first condition a link of ``requester_id`` to ``agent_name`` over ``worker_key`` fails, or None."""
+    if not worker_backend_kind(runtime_paths).dedicated:
+        return Ineligible("backend")
+    agent = config.agents.get(agent_name)
+    if agent is None or not agent.tailnet_ssh:
+        return Ineligible("not_enabled")
+    policy = agent_policy(config, agent_name)
+    if (
+        policy.effective_execution_scope != "user_agent"
+        or worker_key is None
+        or not _is_own_key(worker_key, agent_name)
+    ):
+        return Ineligible("scope")
+    if (
+        not is_sender_allowed_for_responder(requester_id, agent_name, None, config, runtime_paths, membership_index)
+        or user_agent_worker_key_requester(worker_key) != requester_id
+    ):
+        return Ineligible("not_authorized")
+    if not policy.is_private and _concrete_users_alone(config, agent_name) != (requester_id,):
+        return Ineligible("shared_workspace")
+    joined = _joined_directory(config, runtime_paths, agent_name)
+    return None if joined is None else Ineligible("joined_directory", joined)
+
+
+def ssh_eligible_launch(
+    worker_key: str,
+    launch: WorkerLaunchConfig,
+    private_agent_names: frozenset[str] | None,
+    shared_mounts: Sequence[SharedDirectoryMount],
+) -> bool:
+    """Return whether a worker about to launch with ``shared_mounts`` gets the tailnet SSH mark.
+
+    The person is the key's requester and the agent the one launch agent whose name the key's agent part encodes;
+    a private agent must be one the worker may see. A read-only shared mount is a directory another agent owns.
+    """
+    requester_id = user_agent_worker_key_requester(worker_key)
+    agent_part = worker_key_agent_name(worker_key)
+    if requester_id is None or agent_part is None:
+        return False
+    names = [name for name in launch.agent_policies if normalize_worker_key_part(name) == agent_part]
+    if len(names) != 1:
+        return False
+    agent_name = names[0]
+    policy = launch.agent_policies[agent_name]
+    agent = launch.config.agents.get(agent_name)
+    if agent is None or not agent.tailnet_ssh or policy.effective_execution_scope != "user_agent":
+        return False
+    if policy.is_private:
+        if private_agent_names is None or agent_name not in private_agent_names:
+            return False
+    elif _concrete_users_alone(launch.config, agent_name) != (requester_id,):
+        return False
+    return not any(mount.read_only for mount in shared_mounts)

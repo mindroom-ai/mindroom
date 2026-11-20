@@ -99,6 +99,7 @@ from mindroom.config.resolution import (
 from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
 from mindroom.config.slack import SlackConfig
+from mindroom.config.tailnet_ssh import TailnetSshConfig
 from mindroom.config.validation import TimezoneName  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
 from mindroom.config.yaml_includes import (
@@ -204,6 +205,7 @@ _OPTIONAL_SECTION_NAMES = (
     "external_trigger_policy",
     "matrix_sync",
     "tool_approval",
+    "tailnet_ssh",
 )
 
 
@@ -470,6 +472,10 @@ class Config(BaseModel):
         default_factory=SlackConfig,
         description="Slack integration: how Slack workspace members map to Matrix users",
     )
+    tailnet_ssh: TailnetSshConfig = Field(
+        default_factory=TailnetSshConfig,
+        description="Tailnet SSH: the Tailscale login and SSH keys an operator sets for each person",
+    )
     timezone: TimezoneName = Field(
         default="UTC",
         description="IANA timezone for dates, times, and schedules (e.g., 'America/New_York'); agents can override it",
@@ -734,6 +740,17 @@ class Config(BaseModel):
                 invalid_room_references,
             )
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_tailnet_ssh_agents(self) -> Config:
+        """Require every agent with tailnet_ssh to have a worker and workspace per person."""
+        # why-lazy: the eligibility rule imports authorization, which loads nio and Matrix modules config import must not.
+        from mindroom.tailnet_ssh.eligibility import config_error  # noqa: PLC0415
+
+        for agent_name in self.agents:
+            if (error := config_error(self, agent_name)) is not None:
+                raise ValueError(error)
         return self
 
     @model_validator(mode="after")

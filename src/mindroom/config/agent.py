@@ -476,6 +476,13 @@ class AgentConfig(BaseModel):
         default=False,
         description="Allow run_subagent to run a subagent in its own dedicated worker on the docker or kubernetes worker backend",
     )
+    tailnet_ssh: bool = Field(
+        default=False,
+        description=(
+            "Let each person reach their own worker for this agent with ssh from their tailnet; needs "
+            "worker_scope user_agent and a private agent or access.users of concrete IDs with no room grants"
+        ),
+    )
 
     @property
     def tool_names(self) -> list[str]:
