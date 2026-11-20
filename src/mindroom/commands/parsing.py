@@ -27,6 +27,7 @@ class CommandType(Enum):
     CONFIG = "config"  # Configuration command
     DESKTOP = "desktop"  # Requester-scoped Desktop pairing
     MODE = "mode"
+    COMPACT = "compact"  # Compact context before the next reply
     MODEL = "model"  # Per-thread model override command
     ROOM_MODEL = "room_model"  # Room-level model override command
     THREAD_MODE = "thread_mode"  # Room-level thread mode override command
@@ -43,6 +44,10 @@ _COMMAND_DOCS = {
     CommandType.MODE: (
         "/mode <agent> minimal|standard|show|reset",
         "Switch one agent between standard tools and a Bash-only interface",
+    ),
+    CommandType.COMPACT: (
+        "/compact [agent_or_team]",
+        "Compact the agents' context before their next reply in this conversation",
     ),
     CommandType.SCHEDULE: ("/schedule <task>", "Schedule a task"),
     CommandType.LIST_SCHEDULES: ("/list_schedules", "List scheduled tasks"),
@@ -147,6 +152,7 @@ class _CommandParser:
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
     DESKTOP_PATTERN = re.compile(r"^!desktop(?:\s+(.+))?$", re.IGNORECASE)
     MODE_PATTERN = re.compile(r"^!mode(?:\s+(.+))?$", re.IGNORECASE)
+    COMPACT_PATTERN = re.compile(r"^!compact(?:\s+(.+))?$", re.IGNORECASE)
     MODEL_PATTERN = re.compile(r"^!model(?:\s+(.+))?$", re.IGNORECASE)
     ROOM_MODEL_PATTERN = re.compile(r"^!room[_-]?model(?:\s+(.+))?$", re.IGNORECASE)
     THREAD_MODE_PATTERN = re.compile(r"^!thread[_-]?mode(?:\s+(.+))?$", re.IGNORECASE)
@@ -263,6 +269,14 @@ class _CommandParser:
         match = self.MODE_PATTERN.match(message)
         if match:
             return Command(type=CommandType.MODE, args={"args_text": (match.group(1) or "").strip()}, raw_text=raw_text)
+
+        match = self.COMPACT_PATTERN.match(message)
+        if match:
+            return Command(
+                type=CommandType.COMPACT,
+                args={"args_text": (match.group(1) or "").strip()},
+                raw_text=raw_text,
+            )
 
         match = self.MODEL_PATTERN.match(message)
         if match:

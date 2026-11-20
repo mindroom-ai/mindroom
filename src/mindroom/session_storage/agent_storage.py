@@ -121,6 +121,17 @@ def create_session_storage(
     return create_agent_state_storage(agent_name, resolved_storage.session_state_root)
 
 
+def agent_session_database_path(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> Path:
+    """Return the database file ``create_session_storage`` opens for this agent, resolved without creating anything."""
+    resolved_storage = resolve_agent_storage(agent_name, config, runtime_paths, execution_identity=execution_identity)
+    return TableNames(agent_name).database_path(resolved_storage.session_state_root)
+
+
 def save_compaction_usage(
     store: ConversationStore,
     *,

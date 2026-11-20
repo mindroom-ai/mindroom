@@ -5577,6 +5577,7 @@ depends_on = [
     "mindroom.tool_jobs.client_cancel",
     "mindroom.tool_jobs.runtime",
     "mindroom.commands.mode_commands",
+    "mindroom.commands.compact_commands",
     "mindroom.model_selection",
     "mindroom.matrix.room_membership",
     "mindroom.commands.config_commands",
@@ -6925,6 +6926,7 @@ from = ["mindroom.session_storage.legacy_conversion_backup"]
 
 [[interfaces]]
 expose = [
+    "agent_session_database_path",
     "create_agent_state_storage",
     "create_session_storage",
     "create_state_storage",
@@ -9605,6 +9607,16 @@ depends_on = [
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.commands.compact_commands"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.history.manual",
+    "mindroom.history.types",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.turn_model",
 ]
 
 [[modules]]
