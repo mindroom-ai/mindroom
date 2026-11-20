@@ -509,6 +509,7 @@ visibility = [
     "mindroom.delegation.personas",
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agent_cli.minimal_mode_preflight",
+    "mindroom.tailnet_ssh.links",
     "mindroom.terminal.client",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.tool_environment",
@@ -3826,6 +3827,19 @@ depends_on = ["mindroom.atomic_file", "mindroom.tailnet_ssh.store"]
 [[modules]]
 path = "mindroom.tailnet_ssh.session"
 depends_on = []
+
+[[modules]]
+path = "mindroom.tailnet_ssh.links"
+depends_on = [
+    "mindroom.agent_cli.shell_contract",
+    "mindroom.bounded_bytes",
+    "mindroom.runtime_resolution",
+    "mindroom.tailnet_ssh.eligibility",
+    "mindroom.tailnet_ssh.projection",
+    "mindroom.tailnet_ssh.store",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.worker_routing",
+]
 
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
 [[modules]]
