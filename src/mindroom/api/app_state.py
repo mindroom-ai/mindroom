@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.call_transcripts.service import AgentCallRoom, CallTranscriptService
     from mindroom.config.reload_status import ConfigReloadStatus
-    from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.history_visibility import RoomHistory
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
@@ -74,7 +73,6 @@ class ExternalTriggerRuntime:
     # It posts the trigger it answers, under its own run phase and the runtime's admission gate.
     target_bot: Callable[[str], AgentBot | None]
     config_generation: int
-    is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]]
 
 
 @dataclass

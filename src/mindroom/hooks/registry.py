@@ -107,8 +107,8 @@ class HookRegistry:
                 # hooks say `scope="room"` or `scope="service"`.
                 # Handling: registered with one warning as service scope on bot:ready and as room scope elsewhere, with
                 # the filter cleared; on config:reloaded the filter stays and, as before, never matches.
-                # Coverage: tests/test_hook_registry.py::test_router_alias_on_bot_ready_becomes_service_scope and the
-                # `test_router_*` tests beside it
+                # Coverage: tests/test_hook_registry.py::test_router_alias_registration and
+                # ::test_router_alias_warns_once_with_plugin_and_hook_name
                 if agents == (ROUTER_AGENT_NAME,) and metadata.event_name != EVENT_CONFIG_RELOADED:
                     scope = "service" if metadata.event_name == EVENT_BOT_READY else "room"
                     agents = None

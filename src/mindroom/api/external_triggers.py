@@ -40,6 +40,7 @@ from mindroom.external_triggers.store import (
     external_trigger_replay_store,
 )
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.response_admission import (
     ResponseAdmissionRefusedError,
 )
@@ -50,7 +51,6 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.api.app_state import ExternalTriggerRuntime
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -88,7 +88,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
     payload = _parse_payload(body)
     if trigger_snapshot.allowed_kinds and payload.kind not in trigger_snapshot.allowed_kinds:
         raise HTTPException(status_code=422, detail="External trigger kind is not allowed")
-    _runtime, target_bot = _require_trigger_target(request, trigger_snapshot)
+    target_bot = _require_trigger_target(request, trigger_snapshot)
     try:
         async with target_bot.admission_fence():
             config_lifecycle.rebind_current_request_snapshot(request)
@@ -103,8 +103,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
             payload = _parse_payload(body)
             if trigger_snapshot.allowed_kinds and payload.kind not in trigger_snapshot.allowed_kinds:
                 raise HTTPException(status_code=422, detail="External trigger kind is not allowed")
-            runtime, current_target_bot = _require_trigger_target(request, trigger_snapshot)
-            if current_target_bot is not target_bot:
+            if _require_trigger_target(request, trigger_snapshot) is not target_bot:
                 # Only the fenced bot is held open; the target changed or its bot was replaced while this waited.
                 raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
             _validate_snapshot_policy_and_auth(
@@ -113,7 +112,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
                 runtime_paths,
                 config_lifecycle.app_state(request.app).runtime.agent_reply_memberships,
             )
-            await _require_external_trigger_runtime_ready(runtime, trigger_snapshot)
+            await _require_external_trigger_runtime_ready(target_bot, trigger_snapshot)
             await _require_owner_joined_target_room(target_bot, trigger_snapshot, config, runtime_paths)
 
             return await _claim_and_execute_trigger(
@@ -510,27 +509,24 @@ async def _release_event_id_best_effort(
 def _require_trigger_target(
     request: Request,
     snapshot: TriggerDeliverySnapshot,
-) -> tuple[ExternalTriggerRuntime, AgentBot]:
-    """Return the bound runtime and the running bot of the trigger's target, which posts the trigger and answers it."""
+) -> AgentBot:
+    """Return the running bot of the trigger's target, which posts the trigger and answers it."""
     runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
     if runtime is None or runtime.config_generation != snapshot.config_generation:
         raise HTTPException(status_code=503, detail="External trigger runtime is not available")
     target_bot = runtime.target_bot(snapshot.target.agent)
     if target_bot is None:
         raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
-    return runtime, target_bot
+    return target_bot
 
 
-async def _require_external_trigger_runtime_ready(
-    runtime: ExternalTriggerRuntime,
-    snapshot: TriggerDeliverySnapshot,
-) -> None:
-    """Require the target's current delivery readiness for one trigger."""
+async def _require_external_trigger_runtime_ready(target_bot: AgentBot, snapshot: TriggerDeliverySnapshot) -> None:
+    """Require the trigger's target, which posts and answers it, to be joined to the trigger's room now."""
     try:
-        is_trigger_ready = await runtime.is_trigger_snapshot_ready(snapshot)
+        joined_room_ids = await get_joined_rooms(cast("nio.AsyncClient", target_bot.client)) or ()
     except Exception as exc:
         raise HTTPException(status_code=503, detail="External trigger target runtime is not available") from exc
-    if not is_trigger_ready:
+    if snapshot.resolved_room_id not in joined_room_ids:
         raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
 
 

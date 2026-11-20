@@ -9,7 +9,6 @@ starts each owner of that data once and checks the state the upgrade must leave.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
@@ -25,7 +24,6 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.event_journal import ApprovalCardView, DeliveryStage
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, MessageReceivedContext, hook
-from mindroom.hooks.execution import emit
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.orchestration.config_warnings import warn_about_config_risks
 from mindroom.prompt_message_tags import render_msg_tag
@@ -39,7 +37,7 @@ from tests.conftest import (
 )
 from tests.identity_helpers import entity_ids
 from tests.scheduling_helpers import scheduling_bot
-from tests.test_hook_execution import _envelope, _message_received_context, _stewarded_registry
+from tests.test_hook_execution import _emit_message_as, _stewarded_registry
 from tests.test_legacy_approval_records import (  # noqa: F401 - recorded_journal is a pytest fixture
     _ROOM,
     _ROUTER,
@@ -63,7 +61,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.event_journal import MatrixDelivery
-    from mindroom.hooks import HookRegistryState
     from tests.test_legacy_approval_records import _Journal
 
 pytestmark = pytest.mark.asyncio
@@ -80,17 +77,6 @@ def _old_config(tmp_path: Path) -> Config:
         ),
         test_runtime_paths(tmp_path / "runtime"),
     )
-
-
-async def _emit_message(hooks: HookRegistryState, tmp_path: Path, agent_name: str, event_id: str) -> None:
-    """Emit one room message as the bot of that name does when its own copy arrives."""
-    envelope = replace(_envelope(agent_name=agent_name), source_event_id=event_id)
-    context = replace(
-        _message_received_context(tmp_path),
-        envelope=envelope,
-        _hook_registry_state=hooks.lifetime(agent_name),
-    )
-    await emit(hooks.registry, EVENT_MESSAGE_RECEIVED, context)
 
 
 def _old_relay(config: Config) -> nio.RoomMessageText:
@@ -242,7 +228,7 @@ async def test_an_upgraded_deployment_reaches_the_router_free_end_state(
         hooks = _stewarded_registry([once_per_message], {"router": 100, "general": 0, "helper": 0}, store)
         for event_id, arrival in (("$first", ("general", "helper", "router")), ("$second", ("helper", "router"))):
             for agent_name in arrival:
-                await _emit_message(hooks, tmp_path, agent_name, event_id)
+                await _emit_message_as(hooks, tmp_path, agent_name, event_id=event_id)
         assert calls == [("$first", "general"), ("$second", "helper")]
         assert len(alias_warnings) == 1
     finally:

@@ -384,7 +384,7 @@ class RoomReader:
         """Return the agents joined to the room that the caller may use there, in config order, with their workspaces.
 
         It leaves out an agent whose contact room this is, and, logging why, one without its account, with unresolved
-        grant rooms, or with unreadable contacts or stored tool settings. It answers 503 while the router's rooms are
+        grant rooms, or with unreadable contacts or stored tool settings. It answers 503 while the bots' rooms are
         unknown and an agent's access rules wait on them, or while the runtime has not applied the API's membership
         policy.
         """

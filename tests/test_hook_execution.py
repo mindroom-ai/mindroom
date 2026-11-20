@@ -806,11 +806,12 @@ async def _emit_message_as(
     tmp_path: Path,
     agent_name: str,
     skip_plugin_names: frozenset[str] = frozenset(),
+    event_id: str = "$event",
 ) -> None:
     """Emit the one room message as the bot of that name does when its own copy arrives."""
     context = replace(
         _message_received_context(tmp_path),
-        envelope=_envelope(agent_name=agent_name),
+        envelope=replace(_envelope(agent_name=agent_name), source_event_id=event_id),
         skip_plugin_names=skip_plugin_names,
         _hook_registry_state=runtime.lifetime(agent_name),
     )

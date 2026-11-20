@@ -39,23 +39,18 @@ _HISTORY_READ_FAILED = "Room history read failed; try again."
 _LOOKUP_TIMEOUT_SECONDS = 20
 
 
-def _client_in_room(bots: Mapping[str, AgentBot], room_id: str) -> nio.AsyncClient | None:
-    """Return the live client of the room's steward, None when no running bot is joined to the room."""
-    steward = room_steward(bots, room_id)
-    return None if steward is None else steward.client
-
-
 async def _read_in_room[T](
     bots: Mapping[str, AgentBot],
     room_id: str,
     read: Callable[[nio.AsyncClient], Awaitable[T]],
     failed: str,
 ) -> T:
-    """Return ``read`` made through the client ``_client_in_room`` picks, else answer 503 with ``failed``.
+    """Return ``read`` made through the client of the room's steward, else answer 503 with ``failed``.
 
     It answers 503 too when no running bot is in the room, or when ``read`` raises or outlasts the lookup timeout.
     """
-    client = _client_in_room(bots, room_id)
+    steward = room_steward(bots, room_id)
+    client = None if steward is None else steward.client
     if client is None:
         raise HTTPException(503, _NO_BOT_IN_ROOM)
     try:
