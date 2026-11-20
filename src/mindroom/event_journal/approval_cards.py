@@ -398,19 +398,7 @@ def _claim_membership(transaction: Transaction, principal_id: str, room_id: str,
     claim_active = membership_state.claim_active_membership_epoch
     if sender is not None and claim_active(transaction, sender, room_id=room_id) is None:
         return None
-    epoch = transaction.fetchone(
-        "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
-        (principal_id, room_id),
-    )
-    membership_epoch = 0 if epoch is None else int(epoch["membership_epoch"])
-    if not membership_state.claim_membership_epoch(
-        transaction,
-        principal_id,
-        room_id=room_id,
-        expected_membership_epoch=membership_epoch,
-    ):
-        return None
-    return membership_epoch
+    return claim_active(transaction, principal_id, room_id=room_id)
 
 
 def reserve_detached_card(

@@ -39,7 +39,7 @@ from . import (
     turn_rows,
 )
 from .identity import agent_of_principal, decode_thread_id, encode_thread_id
-from .membership_state import claim_membership_epoch, projection_generation
+from .membership_state import claim_membership_epoch, current_membership_epoch, projection_generation
 from .models import (
     TURN_BACKED_KINDS,
     AdmissionFacts,
@@ -637,19 +637,6 @@ def _project_walked(
             membership_epoch=membership_epoch,
             settle_redacted_arrival=False,
         )
-
-
-def current_membership_epoch(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-) -> int:
-    """Return the room's current membership epoch, starting at zero."""
-    row = transaction.fetchone(
-        "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
-        (principal_id, room_id),
-    )
-    return 0 if row is None else int(row["membership_epoch"])
 
 
 def ingestion_membership_position(
