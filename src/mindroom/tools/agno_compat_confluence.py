@@ -14,7 +14,7 @@ _PAGE_BATCH = 50
 class _V1Confluence(Server):
     """The v1 REST client of atlassian-python-api 5, answering the lookups Agno calls in the shape 4.x returned."""
 
-    def get_page_by_title(  # ty: ignore[invalid-method-override] - 4.x signature
+    def get_page_by_title(  # ty: ignore[incompatible-method-override] - 4.x signature
         self,
         space_key: str,
         title: str,
@@ -27,7 +27,7 @@ class _V1Confluence(Server):
         results = super().get_page_by_title(space_key, title, **params).get("results")
         return results[0] if results else None
 
-    def get_all_pages_from_space(  # ty: ignore[invalid-method-override] - 4.x signature
+    def get_all_pages_from_space(  # ty: ignore[incompatible-method-override] - 4.x signature
         self,
         space_key: str,
         status: str | None = None,

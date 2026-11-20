@@ -99,7 +99,7 @@ def arxiv_tools() -> type[ArxivTools]:
 
         def results(self, search: arxiv.Search, offset: int = 0) -> Iterator[arxiv.Result]:
             for result in super().results(search, offset):
-                result.download_pdf = functools.partial(download_pdf, result)  # ty: ignore[unresolved-attribute]
+                result.download_pdf = functools.partial(download_pdf, result)  # ty: ignore[missing-attribute]
                 yield result
 
     class MindRoomArxivTools(ArxivTools):
