@@ -1285,6 +1285,8 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
     assert kwargs["scheduled_for_text"] == "2030-01-02 14:00 UTC"
     assert kwargs["any_arguments_offered"] is True
     start.assert_called_once()
+    assert record.owner_id == context.client.user_id
+    assert start.call_args.kwargs["owner_id"] == context.client.user_id
     assert record.task_id in result
     assert "approve" in result.lower()
 

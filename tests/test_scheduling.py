@@ -2327,6 +2327,7 @@ async def test_persist_scheduled_task_state_omits_cron_description_for_one_time_
 async def test_schedule_task_persists_through_the_room_steward(tmp_path: Path) -> None:
     """A successful schedule is stored through the room's steward where the scheduling agent cannot write state."""
     client = AsyncMock()
+    client.user_id = "@mindroom_assistant:server"
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
     room_state: dict[str, dict[str, Any]] = {}
     client.room_get_state = AsyncMock(side_effect=lambda room_id: _room_state_response(room_id, room_state))
@@ -2348,7 +2349,7 @@ async def test_schedule_task_persists_through_the_room_steward(tmp_path: Path) -
         ),
         patch("mindroom.scheduling.tasks._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
-        patch.object(ScheduledTaskRuntime, "start_new_task"),
+        patch.object(ScheduledTaskRuntime, "start_new_task") as start,
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
     ):
         message = await schedule_task(
@@ -2376,6 +2377,8 @@ async def test_schedule_task_persists_through_the_room_steward(tmp_path: Path) -
     assert persisted.workflow.room_id == "!test:server"
     assert persisted.workflow.thread_id == "$thread"
     assert persisted.workflow.new_thread is False
+    assert persisted.owner_id == client.user_id
+    assert start.call_args.kwargs["owner_id"] == client.user_id
     listed = await list_scheduled_tasks(
         client=client,
         room_id="!test:server",
@@ -2709,7 +2712,7 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
     with (
         patch("mindroom.scheduling.tasks._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=AsyncMock(return_value=parse_result)),
-        patch("mindroom.scheduling.tasks._save_pending_scheduled_task", new=AsyncMock(return_value=None)),
+        patch("mindroom.scheduling.tasks.persist_scheduled_task_state", new=AsyncMock(return_value=None)),
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
     ):
         message = await schedule_task(
@@ -2769,7 +2772,7 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
             new=AsyncMock(return_value=[ids["assistant"], ids["writer"]]),
         ),
         patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=AsyncMock(return_value=parse_result)),
-        patch("mindroom.scheduling.tasks._save_pending_scheduled_task", new=AsyncMock()) as save_task,
+        patch("mindroom.scheduling.tasks.persist_scheduled_task_state", new=AsyncMock()) as save_task,
     ):
         runtime = _scheduling_runtime(
             client=client,

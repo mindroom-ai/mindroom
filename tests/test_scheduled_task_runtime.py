@@ -23,10 +23,10 @@ from mindroom.scheduling.executor import ScheduledWorkflowOutcome
 from mindroom.scheduling.tasks import (
     ScheduledTaskRecord,
     ScheduledWorkflow,
-    _save_pending_scheduled_task,
     cancel_all_scheduled_tasks,
     cancel_scheduled_task,
     get_scheduled_task,
+    persist_scheduled_task_state,
     save_edited_scheduled_task,
 )
 from tests.conftest import install_bots, make_matrix_client_mock, orchestrator_runtime_paths
@@ -90,13 +90,14 @@ def _runtime(runtime_paths: RuntimePaths, config: Config, bots: dict[str, AgentB
 
 async def _save_task(runtime: ScheduledTaskRuntime, client: nio.AsyncClient, workflow: ScheduledWorkflow) -> None:
     """Save a pending task as a scheduling command does, without starting its runner."""
-    await _save_pending_scheduled_task(
+    await persist_scheduled_task_state(
         client,
         ROOM_ID,
         TASK_ID,
         workflow,
-        runtime.config_provider(),
-        task_runtime=runtime,
+        config=runtime.config_provider(),
+        owner_id=client.user_id,
+        writers=runtime,
     )
 
 
@@ -626,15 +627,8 @@ async def test_a_task_is_written_by_the_room_steward_and_owned_by_the_bot_that_s
     workflow = _workflow(due=False)
 
     with patch.object(runtime, "_start_runner", return_value=True) as start:
-        owner_id = await _save_pending_scheduled_task(
-            agent.client,
-            ROOM_ID,
-            TASK_ID,
-            workflow,
-            config,
-            task_runtime=runtime,
-        )
-        runtime.start_new_task(TASK_ID, workflow, owner_id=owner_id)
+        await _save_task(runtime, agent.client, workflow)
+        runtime.start_new_task(TASK_ID, workflow, owner_id=ids["general"])
         restored = [await runtime.restore_room(bot, ROOM_ID) for bot in (agent, steward)]
 
     assert room.task()["content"]["owner"] == ids["general"]
@@ -655,15 +649,8 @@ async def test_an_edit_by_another_agent_keeps_the_owner_its_runner_and_who_fails
     workflow = _workflow(due=False)
 
     with patch.object(scheduling_runtime._TaskRunner, "run_once", _wait_forever):
-        owner_id = await _save_pending_scheduled_task(
-            owner.client,
-            ROOM_ID,
-            TASK_ID,
-            workflow,
-            config,
-            task_runtime=runtime,
-        )
-        runtime.start_new_task(TASK_ID, workflow, owner_id=owner_id)
+        await _save_task(runtime, owner.client, workflow)
+        runtime.start_new_task(TASK_ID, workflow, owner_id=ids["general"])
         existing = await get_scheduled_task(editor.client, ROOM_ID, TASK_ID, runtime_paths)
         assert existing is not None
         await save_edited_scheduled_task(
@@ -1057,15 +1044,8 @@ async def test_schedule_in_one_agent_room_fires_without_owner_account(tmp_path: 
     workflow = _workflow()
 
     with patch("mindroom.scheduling.executor.execute_scheduled_workflow", new=_delivered()) as execute:
-        owner_id = await _save_pending_scheduled_task(
-            agent.client,
-            ROOM_ID,
-            TASK_ID,
-            workflow,
-            config,
-            task_runtime=runtime,
-        )
-        runtime.start_new_task(TASK_ID, workflow, owner_id=owner_id)
+        await _save_task(runtime, agent.client, workflow)
+        runtime.start_new_task(TASK_ID, workflow, owner_id=ids["general"])
         await asyncio.wait_for(runtime._runners[TASK_ID][1], timeout=2)
 
     assert execute.await_args.args[0] is agent.client
@@ -1093,15 +1073,8 @@ async def test_unnamed_scheduled_prompt_is_routed_in_process(tmp_path: Path) -> 
         "mindroom.scheduling.executor.client_delivery.send_message_outcome",
         new=AsyncMock(return_value=SimpleNamespace(event_id="$trigger")),
     ) as send:
-        owner_id = await _save_pending_scheduled_task(
-            agent.client,
-            ROOM_ID,
-            TASK_ID,
-            workflow,
-            config,
-            task_runtime=runtime,
-        )
-        runtime.start_new_task(TASK_ID, workflow, owner_id=owner_id)
+        await _save_task(runtime, agent.client, workflow)
+        runtime.start_new_task(TASK_ID, workflow, owner_id=ids["general"])
         await asyncio.wait_for(runtime._runners[TASK_ID][1], timeout=2)
 
     send.assert_awaited_once()
