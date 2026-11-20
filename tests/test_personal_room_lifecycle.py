@@ -248,6 +248,21 @@ async def test_commands_require_exact_self_request_in_onboarding_room(coordinati
 
 
 @pytest.mark.asyncio
+async def test_an_ordinary_message_resolves_no_onboarding_room(
+    coordination: Coordination,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a configured command reads the onboarding rooms; every other message is refused without that read."""
+    resolve = Mock(wraps=personal_room_lifecycle.resolve_room_aliases)
+    monkeypatch.setattr(personal_room_lifecycle, "resolve_room_aliases", resolve)
+
+    assert not await coordination.lifecycle.handle_command(LOBBY, command("hello there"), "@alice:localhost")
+    resolve.assert_not_called()
+    assert await coordination.lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
+    assert resolve.called
+
+
+@pytest.mark.asyncio
 async def test_slash_form_runs_configured_bang_command(coordination: Coordination) -> None:
     """``/personal`` runs the configured ``!personal`` command; ``//personal`` stays conversation."""
     lifecycle = coordination.lifecycle
