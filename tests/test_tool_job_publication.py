@@ -421,6 +421,47 @@ async def test_a_shutdown_after_jobs_were_turned_off_clears_the_kept_jobs_too(tm
 
 
 @pytest.mark.asyncio
+async def test_a_shutdown_after_jobs_were_turned_off_clears_a_kept_job_an_earlier_process_listed(
+    tmp_path: Path,
+) -> None:
+    """A process that never listed a kept job it recovered still clears the listing an earlier process left of it."""
+    earlier = await tool_job_runtime(tmp_path, continues=tool_job_runtime_module._is_subagent_job)
+    owner = job_owner()
+
+    async def forever() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    adapter = completed_delegation_job().adapter
+    await start_job(
+        earlier,
+        "kept",
+        tool_name="delegate",
+        kind="delegation",
+        depth=0,
+        adapter=adapter,
+        owner=owner,
+        operation=forever,
+    )
+    await earlier.shutdown()
+    runtime = await tool_job_runtime(tmp_path, continues=tool_job_runtime_module._is_subagent_job)
+    bot = _bot(owner.recipient)
+    bot.client.rooms = {owner.room_id: MagicMock()}
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    coordinator.config_provider = lambda: Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=False))
+    try:
+        await runtime.recover()
+        assert [job.job_id for job in runtime.awaiting_continuation()] == ["kept"]
+        await coordinator.quiesce()
+        assert [job.status for job in runtime.retained_jobs()] == ["running"]
+        assert bot.client.room_put_state.await_count == 1
+        assert bot.client.room_put_state.await_args.kwargs["room_id"] == owner.room_id
+        assert bot.client.room_put_state.await_args.kwargs["content"] == {"jobs": [], "total": 0}
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_a_room_the_bot_left_gets_no_write() -> None:
     """The bot writes no state into a room it is no longer in."""
     bots = _bots("agent_a")

@@ -348,11 +348,12 @@ class ToolJobRuntimeCoordinator:
         if (runtime := self._runtime) is not None:
             await runtime.quiesce()
             # The jobs it ended leave the rooms' state now; the subagent jobs it kept for the next start to continue
-            # stay listed, unless the authored config turned jobs off for that start. Jobs turned off while MindRoom is
-            # down leave them listed until a start with jobs on, as a crash before a start with jobs off does.
+            # stay listed, unless the authored config turned jobs off for that start, when every job, published as
+            # ended, clears its room. Jobs turned off while MindRoom is down leave them listed until a start with jobs
+            # on, as a crash before a start with jobs off does.
             jobs = runtime.retained_jobs()
             if not self.config_provider().background_tool_jobs.enabled:
-                jobs = tuple(job for job in jobs if job.status in TERMINAL_STATUSES)
+                jobs = tuple(replace(job, status="interrupted") for job in jobs)
             await self._publisher.publish(self.bot_provider, jobs, awaited=runtime.awaited_job_ids())
 
     async def stop(self) -> None:
