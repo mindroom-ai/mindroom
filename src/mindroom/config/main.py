@@ -646,7 +646,7 @@ class Config(BaseModel):
         for agent_name, agent in self.agents.items():
             for entry in agent.tools if agent.include_default_tools else ():
                 default = defaults.get(entry.name)
-                if default is not None and default.authored_name != entry.authored_name:
+                if default is not None and len({*default.spellings, *entry.spellings}) > 1:
                     reject_unmergeable_spellings(entry, default, scope=f"agents.{agent_name}.tools and defaults.tools")
         return self
 

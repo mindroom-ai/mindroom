@@ -250,13 +250,13 @@ class ToolConfigEntry(BaseModel):
         default=False,
         description="Send a deferred tool as an ordinary tool on every request; requires defer",
     )
-    # The alias this entry was authored under, kept so two spellings of one toolkit are never read as one entry's layers.
-    _alias: str | None = PrivateAttr(default=None)
+    # Every name this entry's layer authored it under when one is an alias, so no spelling is read as another's layer.
+    _spellings: tuple[str, ...] = PrivateAttr(default=())
 
     @property
-    def authored_name(self) -> str:
-        """Return the name this entry was authored under, which may be an alias of ``name``."""
-        return self._alias or self.name
+    def spellings(self) -> tuple[str, ...]:
+        """Return every name this entry's layer authored it under, which may be aliases of ``name``."""
+        return self._spellings or (self.name,)
 
     @model_validator(mode="before")
     @classmethod
@@ -315,21 +315,24 @@ def validate_unique_tool_entries(
     kept: dict[str, ToolConfigEntry] = {}
     for entry in tools:
         name = canonical_tool_name(entry.name)
-        if name in kept:
-            reject_unmergeable_spellings(kept[name], entry, scope=f"{scope_name} tools")
-        elif name == entry.name:
+        first = kept.get(name)
+        if first is not None:
+            reject_unmergeable_spellings(first, entry, scope=f"{scope_name} tools")
+        spellings = (*(first.spellings if first is not None else ()), entry.name)
+        if spellings == (name,):
             kept[name] = entry
         else:
-            kept[name] = entry.model_copy(update={"name": name})
-            kept[name]._alias = entry.name
+            kept[name] = (first or entry).model_copy(update={"name": name})
+            kept[name]._spellings = spellings
     return list(kept.values())
 
 
 def reject_unmergeable_spellings(first: ToolConfigEntry, other: ToolConfigEntry, *, scope: str) -> None:
     """Fail unless two entries naming one toolkit by different names are plain and agree on lazy loading."""
     if first.overrides or other.overrides or (first.defer, first.initial) != (other.defer, other.initial):
+        mine, theirs = next((a, b) for a in first.spellings for b in other.spellings if a != b)
         msg = (
-            f"{scope} '{first.authored_name}' and '{other.authored_name}' both select {first.name}; "
+            f"{scope} '{mine}' and '{theirs}' both select {first.name}; "
             f"keep one entry named {first.name} and put its settings and lazy-loading flags there"
         )
         raise ValueError(msg)

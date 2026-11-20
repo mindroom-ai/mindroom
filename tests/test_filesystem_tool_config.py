@@ -127,6 +127,15 @@ def test_one_spelling_across_defaults_and_agent_inherits_as_any_tool_does() -> N
     assert _effective(config) == [("filesystem", {"exclude_tools": ["write_file"]}, True, False)]
 
 
+@pytest.mark.parametrize("default_tools", [["file", "coding"], ["coding", "file"]])
+def test_every_default_spelling_is_checked_against_the_agent_entry_in_either_order(default_tools: list[Any]) -> None:
+    """Two default spellings stay known after they become one entry, so their order never decides what loads."""
+    with pytest.raises(ValidationError, match="'file' and 'coding' both select filesystem"):
+        _layered(default_tools, [{"file": {"defer": True}}])
+    plain = _layered(default_tools, ["file", "shell"])
+    assert _effective(plain) == [("filesystem", {}, False, False)]
+
+
 def _load(runtime_paths: RuntimePaths, entry: object, *, layer: str) -> Config:
     data: dict[str, Any] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
