@@ -927,7 +927,7 @@ class TestMaybeGenerateThreadSummary:
             ("Trip plan", "Trip plan (forked)"),
             ("Trip plan (forked)", "Trip plan (forked)"),
             (None, "Prompt title (forked)"),
-            ("A" * 300, "A" * 80 + " (forked)"),
+            ("A" * 300, "Prompt title (forked)"),
         ],
         ids=["parent-title", "fork-of-a-fork", "untitled-parent", "longest-parent-title"],
     )
@@ -959,7 +959,8 @@ class TestMaybeGenerateThreadSummary:
         (sent,) = _sent_summaries(self.client)
         assert sent["summary"] == fork_title
         assert sent["message_count"] == 0
-        assert len(model.requests) == (parent_title is None)
+        # An untitled parent's fork, and one whose parent title is over the limits, title their prompt.
+        assert len(model.requests) == (parent_title is None or len(parent_title) > GENERATED_TITLE_MAX_LENGTH)
 
     @pytest.mark.parametrize("parent_title", ["Trip plan", None], ids=["parent-title", "untitled-parent"])
     async def test_a_batch_starting_a_fork_gets_only_its_parents_title(self, parent_title: str | None) -> None:

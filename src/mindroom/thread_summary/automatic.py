@@ -113,10 +113,11 @@ async def _provisional_title(
     model_name: str,
     room_instructions: Callable[[], Awaitable[str | None]],
 ) -> str | None:
-    """Return a new thread's first title: a fork's parent's current title without a model, else its prompt's, if any."""
+    """Return a new thread's first title: a fork's parent's short title without a model, else its prompt's, if any."""
     parent_thread_id = fork_parent_thread_id(history, thread_id)
     parent_state = None if parent_thread_id is None else await parent_summary(parent_thread_id)
-    title = None if parent_state is None else parent_state.summary
+    # A parent title over the short-title limits, such as a long pin, is not copied: the fork titles its prompt.
+    title = None if parent_state is None else _keepable_title(parent_state.summary, retitle=False)
     if title is None:
         if prompt_message is None:
             return None
