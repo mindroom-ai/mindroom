@@ -87,7 +87,8 @@ class _NamedWorker:
     """One worker a fleet started: the size it was started with and the start its last call ran in."""
 
     resource_profile: ScriptResourceProfileName | None
-    startup_count: int | None = None
+    # When the worker the last call ran in was created, and how often it had started.
+    start: tuple[float, int] | None = None
 
 
 @dataclass(eq=False, slots=True)
@@ -120,10 +121,12 @@ class _NamedWorkerFleet:
             started = self.workers.get(worker_key)
         if started is not None:
             if resource_profile not in (None, started.resource_profile):
-                msg = (
-                    f"Worker '{name}' already runs with resource_profile "
-                    f"{started.resource_profile or 'unset'}; omit resource_profile, or name another worker."
+                size = (
+                    f"resource_profile {started.resource_profile}"
+                    if started.resource_profile
+                    else "no resource_profile"
                 )
+                msg = f"Worker '{name}' was started with {size} in this reply; omit resource_profile, or name another worker."
                 raise NamedWorkerError(msg)
             resource_profile = started.resource_profile
         return replace(
@@ -135,10 +138,11 @@ class _NamedWorkerFleet:
 
     def header(self, name: str, handle: WorkerHandle) -> str:
         """Return the line a call's result starts with: its worker, and whether this call ran in a new start of it."""
+        start = (handle.created_at, handle.startup_count)
         with _lock:
             worker = self.workers[handle.worker_key]
-            started = worker.startup_count != handle.startup_count
-            worker.startup_count = handle.startup_count
+            started = worker.start != start
+            worker.start = start
         return f"[worker: {name}, started]" if started else f"[worker: {name}]"
 
     async def release(self) -> None:
@@ -273,8 +277,8 @@ def ensure_named_worker(
     """Start or reach the named worker ``spec`` describes, refusing to start one past the limits.
 
     A worker that already runs is reached without counting. Otherwise the workers the backend runs and those being
-    started count against the agent's limit for this requester and the backend's limit for everyone, and what a
-    stopped worker of this name left is removed first, so the new one starts empty with its full lifetime.
+    started count against the agent's limit for this requester and the backend's limit for everyone. The backend
+    replaces a stopped worker of this name with an empty one.
     """
     if not isinstance(backend, _NamedWorkerBackend):
         msg = "Named workers need the kubernetes worker backend."
@@ -288,8 +292,7 @@ def ensure_named_worker(
             if pinned_worker_kind(handle.worker_key) == "named"
         }
         existing = named.get(worker_key)
-        runs = existing is not None and existing.status in _LIVE_STATUSES
-        if not runs:
+        if existing is None or existing.status not in _LIVE_STATUSES:
             with _lock:
                 starting = set(_starting)
             live = {key for key, handle in named.items() if handle.status in _LIVE_STATUSES} | starting
@@ -307,16 +310,11 @@ def ensure_named_worker(
                     f"{backend.named_workers_max} named workers. Name one you started, or try again later."
                 )
                 raise NamedWorkerError(msg)
-            if existing is not None:
-                backend.retire_worker(worker_key)
         with _lock:
             if fleet.holders < 1:
                 msg = f"Cannot run in worker '{call.name}': its reply and that reply's background jobs have ended."
                 raise NamedWorkerError(msg)
-            worker = fleet.workers.setdefault(worker_key, _NamedWorker(spec.resource_profile))
-            if not runs:
-                # Whatever start the next handle names is new to this fleet's calls.
-                worker.startup_count = None
+            fleet.workers.setdefault(worker_key, _NamedWorker(spec.resource_profile))
             fleet.runtime_paths = call.runtime_paths
             _starting[worker_key] += 1
     try:

@@ -285,6 +285,11 @@ class KubernetesWorkerBackend:
         worker_id = self._worker_id(worker_key)
         state_subpath = self._state_subpath(worker_key)
         existing = self._resources.read_deployment(worker_id)
+        if existing is not None and int(existing.spec.replicas or 0) == 0 and pinned_worker_kind(worker_key) == "named":
+            # A stopped named worker is never restarted: the reply that names it gets an empty one with its full
+            # lifetime, where a restart would keep the old one's age and files.
+            self._retire_worker_locked(worker_key)
+            existing = None
         current_handle = self._handle_from_deployment(existing, now=timestamp) if existing is not None else None
         should_restart = current_handle is None or current_handle.status in {"idle", "failed"}
         lifecycle = prepare_worker_ensure_lifecycle(
@@ -568,7 +573,7 @@ class KubernetesWorkerBackend:
         pod: the removal then returns at once, and a failed one leaves the Deployment for the next pass. A subagent's
         own worker expires with the idle timeout. A named worker expires once no call has run in it for its own,
         shorter idle timeout, or once it reaches its maximum age whatever runs in it, and a stopped one is always
-        removed, because the reply that named it starts a new one instead.
+        removed, because its next start replaces it anyway.
         """
         named = pinned_worker_kind(handle.worker_key) == "named"
         expired = (
@@ -597,7 +602,8 @@ class KubernetesWorkerBackend:
         try:
             with os.scandir(self.storage_root.joinpath(*prefix_parts)) as entries:
                 directories = {entry.name for entry in entries if entry.is_dir(follow_symlinks=False)}
-        except FileNotFoundError:
+        except OSError:
+            # Without the listing nothing is known to be left behind, and the rest of the pass still runs.
             directories = set()
         deployed = {
             (deployment.metadata.annotations or {}).get(resources.ANNOTATION_STATE_SUBPATH, "").rpartition("/")[2]
@@ -617,9 +623,8 @@ class KubernetesWorkerBackend:
                 continue
             try:
                 # A start since the snapshot owns the directory again.
-                if self._resources.read_deployment(
-                    self._worker_id(worker_key),
-                ) is None and not retire_pinned_worker(self._retire_worker_locked, worker_key):
+                orphaned = self._resources.read_deployment(self._worker_id(worker_key)) is None
+                if orphaned and not retire_pinned_worker(self._retire_worker_locked, worker_key):
                     # A removal that keeps failing is tried again only after another grace period.
                     self._stateless_since[name] = now
             finally:

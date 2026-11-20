@@ -10919,7 +10919,7 @@ Errors:
 - `Named workers need the kubernetes worker backend and idle-worker cleanup, which the API server runs when MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS is above 0.` - use the Kubernetes worker backend, run the API server, and set the cleanup interval.
 - `Cannot start worker '<name>': <n> of the <n> named workers this agent may run for you are running.` - run the command in a worker that already runs, wait until an idle one is removed, or raise `extra_workers`.
 - `Cannot start worker '<name>': this deployment runs its limit of <n> named workers.` - try again later, or raise `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX`.
-- `Worker '<name>' already runs with resource_profile <profile>; omit resource_profile, or name another worker.` - a worker keeps the size it started with.
+- `Worker '<name>' was started with resource_profile <profile> in this reply; omit resource_profile, or name another worker.` - a name keeps the size its first call gave it.
 - `A named worker belongs to a reply in a conversation, and this call runs outside one, or after its reply and that reply's background jobs ended.` - the call came from a background script, an API request, or a job that outlived a restart.
 
 ### Per-workspace environment

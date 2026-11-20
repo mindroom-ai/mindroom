@@ -936,7 +936,11 @@ def _named_worker_call(
     """Return the named worker a shell call asks to run in, or None for the worker its agent's calls normally reach."""
     if stand_ins.tool_name != "shell":
         return None
-    arguments = inspect.signature(local).bind(*args, **_authored_arguments(kwargs)).arguments
+    try:
+        arguments = inspect.signature(local).bind(*args, **_authored_arguments(kwargs)).arguments
+    except TypeError:
+        # The worker's own validation answers a call its function cannot take, as for every other tool.
+        return None
     worker_target = stand_ins.worker_target
     context = get_tool_runtime_context()
     return named_worker_call(

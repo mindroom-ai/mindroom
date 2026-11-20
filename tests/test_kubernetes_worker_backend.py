@@ -4042,6 +4042,31 @@ def test_kubernetes_cleanup_removes_a_stopped_named_worker_before_it_expires(tmp
     assert subagent.worker_id in apps_api.deployments
 
 
+def test_kubernetes_backend_replaces_a_stopped_named_worker_instead_of_restarting_it(tmp_path: Path) -> None:
+    """The next start of a stopped named worker is an empty one with its full lifetime; a subagent's worker restarts."""
+    backend, _apps_api, _core_api = _named_backend(tmp_path)
+    subagent_key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32)
+    specs = {
+        "named": _named_spec(),
+        "subagent": _spec(subagent_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A),
+    }
+    leftovers = {}
+    for kind, spec in specs.items():
+        backend.ensure_worker(spec, now=0.0)
+        leftovers[kind] = backend.storage_root / backend._state_subpath(spec.worker_key) / "cache" / "left-behind"
+        leftovers[kind].parent.mkdir(parents=True, exist_ok=True)
+        leftovers[kind].write_text("from the first start", encoding="utf-8")
+        backend.record_failure(spec.worker_key, "pod was evicted", now=5.0)
+
+    restarted = {kind: backend.ensure_worker(spec, now=100.0) for kind, spec in specs.items()}
+
+    assert {handle.status for handle in restarted.values()} == {"ready"}
+    assert (restarted["named"].created_at, restarted["named"].startup_count) == (100.0, 1)
+    assert leftovers["named"].exists() is False
+    assert (restarted["subagent"].created_at, restarted["subagent"].startup_count) == (0.0, 2)
+    assert leftovers["subagent"].is_file()
+
+
 @pytest.mark.parametrize("pin", [subagent_worker_key, named_worker_key], ids=["subagent", "named"])
 def test_kubernetes_maintenance_removes_the_files_a_failed_removal_left_behind(
     tmp_path: Path,

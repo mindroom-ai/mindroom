@@ -247,7 +247,10 @@ def _run_in_worker(args: argparse.Namespace) -> int:
         outcome, saved_path = receipt.get("preview"), receipt.get("path")
     text = outcome if isinstance(outcome, str) else canonical_json(outcome)
     header, _, body = text.partition("\n")
-    if result.get("status") != "completed" or not header.startswith(f"[worker: {args.name}"):
+    if result.get("status") != "completed" or header not in (
+        f"[worker: {args.name}]",
+        f"[worker: {args.name}, started]",
+    ):
         # The call failed, or its shell ran it without a worker of that name.
         print(f"mindroom-agent: {text}", file=sys.stderr)
         return _EXIT_NOT_RUN

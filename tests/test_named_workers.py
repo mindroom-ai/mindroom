@@ -16,7 +16,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.message_target import MessageTarget
 from mindroom.response_turn import AttemptResolved, CompletedAttempt
-from mindroom.tool_jobs.resources import execution_resources
+from mindroom.tool_jobs.resources import ExecutionResourceReference, current_execution_resources, execution_resources
 from mindroom.tool_system import sandbox_proxy as sandbox_proxy_module
 from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.catalog import builtin_tool_registry
@@ -42,7 +42,7 @@ from mindroom.workers.named import (
 from mindroom.workers.runtime import idle_worker_cleanup_owner
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, make_conversation_reader_mock, make_relation_lookup
-from tests.test_response_turn import _collect_turn
+from tests.test_response_turn import _collect_turn, _ctx
 from tests.test_sandbox_proxy import _offered_entrypoint, _recording_client_class, _static_worker_manager_lease
 
 if TYPE_CHECKING:
@@ -72,6 +72,7 @@ class _FakeBackend:
         self.workers: dict[str, WorkerHandle] = {}
         self.specs: list[WorkerSpec] = []
         self.retired: list[str] = []
+        self.replaced: list[str] = []
         # Set to hold every start until the test releases it; each held start first releases ``entered``.
         self.hold_starts: threading.Event | None = None
         self.entered = threading.Semaphore(0)
@@ -91,6 +92,9 @@ class _FakeBackend:
         with self._lock:
             self.specs.append(spec)
             existing = self.workers.get(spec.worker_key)
+            if existing is not None and existing.status != "ready":
+                # A stopped named worker is replaced by a new one, as the Kubernetes backend does.
+                self.replaced.append(spec.worker_key)
             if existing is None or existing.status != "ready":
                 existing = WorkerHandle(
                     worker_id=f"worker-{len(self.specs)}",
@@ -227,7 +231,7 @@ async def test_a_call_that_asks_for_another_size_of_a_running_worker_is_refused(
     async with reply_named_workers(_TURN):
         _run(backend, _call(runtime_paths, "build", "small"))
 
-        with pytest.raises(NamedWorkerError, match="already runs with resource_profile small"):
+        with pytest.raises(NamedWorkerError, match="was started with resource_profile small in this reply"):
             _call(runtime_paths, "build", "large").worker_spec(WorkerSpec(_ALICE))
 
 
@@ -386,7 +390,7 @@ async def test_a_worker_that_crashed_is_replaced_by_a_new_one(
 
         replacement = _run(backend, call)
 
-        assert backend.retired == [crashed.worker_key]
+        assert backend.replaced == [crashed.worker_key]
         assert replacement.worker_key == crashed.worker_key
         assert replacement.worker_id != crashed.worker_id
         assert call.header(replacement) == "[worker: e2e-0, started]"
@@ -681,8 +685,8 @@ async def test_a_shell_call_after_its_worker_crashed_runs_in_a_new_one(
 
             assert await shell("true", worker="e2e-0") == "[worker: e2e-0, started]\nsandbox-result"
 
-    assert backend.retired[0] == crashed.worker_key
-    assert await _retired(backend) == [crashed.worker_key, crashed.worker_key]
+    assert backend.replaced == [crashed.worker_key]
+    assert await _retired(backend) == [crashed.worker_key]
 
 
 @pytest.mark.asyncio
@@ -773,4 +777,31 @@ async def test_a_response_turn_owns_the_named_workers_of_its_calls(
             _call(runtime_paths, "e2e-0")
 
     assert len(started) == 1
+    assert await _retired(backend) == started
+
+
+@pytest.mark.asyncio
+async def test_a_job_a_response_turn_started_keeps_the_turn_s_named_workers(
+    runtime_paths: RuntimePaths,
+    backend: _FakeBackend,
+) -> None:
+    """A turn that ends while a job it started still runs leaves its workers to that job."""
+    started: list[str] = []
+    jobs: list[ExecutionResourceReference] = []
+
+    async def attempt(_run_state: object, _continuation: object) -> AsyncGenerator[str | AttemptResolved]:
+        started.append(_run(backend, _call(runtime_paths, "e2e-0")).worker_key)
+        resources = current_execution_resources()
+        assert resources is not None
+        # A call the turn accepted as a background job holds the turn's resources until it ends.
+        jobs.append(resources.acquire())
+        yield AttemptResolved(CompletedAttempt(replayable_text="done", has_visible_content=True))
+
+    with tool_runtime_context(_tool_context(runtime_paths)):
+        await _collect_turn(attempt, ctx=_ctx(background_tool_jobs=True))
+        assert await _retired(backend) == []
+        assert _run(backend, _call(runtime_paths, "e2e-0")).worker_key == started[0]
+
+    await jobs[0].release()
+
     assert await _retired(backend) == started
