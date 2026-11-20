@@ -262,8 +262,8 @@ class ScheduledTaskRecord:
     created_at: datetime | None
     workflow: ScheduledWorkflow
     revision: str | None = None
-    # Matrix ID of the bot that runs the task, decided once when it was saved; None for a task saved before owners
-    # were stored.
+    # Matrix ID of the bot that runs the task. A record read from a room always has one: a task stored without an
+    # owner reads with its last writer (`_runtime_authored_task_content`). None only on a record built without a read.
     owner_id: str | None = None
 
 
@@ -481,29 +481,25 @@ def _parse_scheduled_task_record(
     )
 
 
-def _cancelled_task_content(
-    task_id: str,
-    existing_content: dict[str, object] | None,
-) -> dict[str, object]:
+def _cancelled_task_content(task_id: str, existing_content: dict[str, object]) -> dict[str, object]:
     """Build cancelled task state while preserving existing metadata where possible."""
     cancelled_content: dict[str, object] = {"status": "cancelled", "task_id": task_id}
 
-    if existing_content:
-        workflow = existing_content.get("workflow")
-        if isinstance(workflow, str):
-            cancelled_content["workflow"] = workflow
+    workflow = existing_content.get("workflow")
+    if isinstance(workflow, str):
+        cancelled_content["workflow"] = workflow
 
-        created_at = existing_content.get("created_at")
-        if isinstance(created_at, str) and created_at:
-            cancelled_content["created_at"] = created_at
+    created_at = existing_content.get("created_at")
+    if isinstance(created_at, str) and created_at:
+        cancelled_content["created_at"] = created_at
 
-        original_task_id = existing_content.get("task_id")
-        if isinstance(original_task_id, str) and original_task_id:
-            cancelled_content["task_id"] = original_task_id
+    original_task_id = existing_content.get("task_id")
+    if isinstance(original_task_id, str) and original_task_id:
+        cancelled_content["task_id"] = original_task_id
 
-        owner = existing_content.get("owner")
-        if isinstance(owner, str):
-            cancelled_content["owner"] = owner
+    owner = existing_content.get("owner")
+    if isinstance(owner, str):
+        cancelled_content["owner"] = owner
 
     cancelled_content["updated_at"] = datetime.now(UTC).isoformat()
     return cancelled_content
@@ -1641,8 +1637,7 @@ async def cancel_all_scheduled_tasks(
     """
     response = await _room_state_for_tasks(client, room_id)
     cancelled_count = 0
-    failed_count = 0
-    refusals: list[ScheduledTaskStateRefusedError | None] = []
+    failures: list[ScheduledTaskStateRefusedError | None] = []
     runtime_account_ids = persisted_bot_user_ids(runtime_paths)
 
     for event in response.events:
@@ -1664,18 +1659,17 @@ async def cancel_all_scheduled_tasks(
             logger.info("scheduled_task_cancelled", task_id=task_id)
         except Exception as error:
             logger.exception("scheduled_task_cancel_failed", task_id=task_id)
-            failed_count += 1
-            refusals.append(refused_for_power(error))
+            failures.append(refused_for_power(error))
     if cancelled_count == 0:
-        if (refusal := next(iter(refusals), None)) is not None and all(refusals):
+        if failures and (refusal := failures[0]) is not None and all(failures):
             raise refusal
-        if failed_count > 0:
-            msg = f"Failed to cancel {failed_count} scheduled task(s)"
+        if failures:
+            msg = f"Failed to cancel {len(failures)} scheduled task(s)"
             raise SchedulingError(msg)
         return "No scheduled tasks to cancel."
 
     result = f"✅ Cancelled {cancelled_count} scheduled task(s)"
-    if failed_count > 0:
-        result += f"\n⚠️ Failed to cancel {failed_count} task(s)"
+    if failures:
+        result += f"\n⚠️ Failed to cancel {len(failures)} task(s)"
 
     return result
