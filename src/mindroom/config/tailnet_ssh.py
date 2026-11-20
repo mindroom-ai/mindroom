@@ -4,8 +4,6 @@ import base64
 import binascii
 import re
 
-from cryptography.exceptions import UnsupportedAlgorithm
-from cryptography.hazmat.primitives.serialization import load_ssh_public_key
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.config.access import validate_concrete_matrix_user_ids
@@ -47,6 +45,10 @@ def normalize_public_key(line: str) -> str:
         raise ValueError(msg)
     if len(fields) < 2 or not _is_canonical_base64(fields[1]):
         raise ValueError(_NOT_A_KEY)
+    # Deferred: cryptography's SSH serialization loads bcrypt, which the slim config entry points must not.
+    from cryptography.exceptions import UnsupportedAlgorithm  # noqa: PLC0415
+    from cryptography.hazmat.primitives.serialization import load_ssh_public_key  # noqa: PLC0415
+
     try:
         load_ssh_public_key(f"{fields[0]} {fields[1]}".encode())
     except (ValueError, UnsupportedAlgorithm):
