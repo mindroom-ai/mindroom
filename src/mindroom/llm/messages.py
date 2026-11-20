@@ -372,15 +372,15 @@ def with_joined_system(messages: Sequence[Message]) -> list[Message]:
 
 _NO_ERROR_TEXT = "The tool call failed without an error message."
 # Providers show an empty result in their own way: Anthropic adds a note that the tool ran without output, OpenRouter's
-# Claude route shows ``...``, and most other routes show nothing.
-_NO_OUTPUT_TEXT = "The tool call succeeded with no output."
+# Claude route shows ``...``, and most other routes show nothing. "Text", since a result's media follows it separately.
+_NO_OUTPUT_TEXT = "The tool call succeeded with no text output."
 
 
 @dataclass(frozen=True, slots=True)
 class ToolResultView:
     """What a wire encodes of a tool message: the call it answers, the tool's name, its content, and whether it failed.
 
-    A result without content says the call succeeded with no output, and a failed result without error text says that
+    A result without content says the call succeeded with no text output, and a failed result without error text says that
     it failed, since Claude rejects a failed result with empty content; either way no wire leaves its call unanswered.
     """
 
