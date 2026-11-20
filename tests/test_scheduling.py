@@ -401,7 +401,7 @@ async def test_restore_starts_overdue_and_recurring_runners_without_firing(
         restored = await runtime.restore_room(bot, "!test:server")
 
     assert restored == 1
-    start.assert_called_once_with("general", "task_overdue", workflow)
+    start.assert_called_once_with("general", "task_overdue", workflow, handoff=False)
     execute.assert_not_called()
 
 

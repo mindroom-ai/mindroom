@@ -558,7 +558,7 @@ async def test_restore_by_a_bot_that_does_not_own_the_task_starts_no_runner(tmp_
         assert await runtime.restore_room(router, ROOM_ID) == 0
         assert await runtime.restore_room(agent, ROOM_ID) == 1
 
-    start.assert_called_once_with("general", TASK_ID, workflow)
+    start.assert_called_once_with("general", TASK_ID, workflow, handoff=False)
 
 
 class _SharedRoom:
@@ -838,7 +838,7 @@ async def test_restore_keeps_the_stored_owner_when_the_room_would_now_pick_anoth
         assert await runtime.restore_room(agent, ROOM_ID) == 1
 
     assert room.task()["content"]["owner"] == ids["general"]
-    start.assert_called_once_with("general", TASK_ID, workflow)
+    start.assert_called_once_with("general", TASK_ID, workflow, handoff=False)
 
 
 @pytest.mark.asyncio
@@ -981,6 +981,26 @@ async def test_a_ready_heir_of_a_later_restore_replaces_one_that_never_became_re
     execute.assert_awaited_once()
     assert execute.await_args.args[0] is bots["helper"].client
     assert room.task()["content"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_same_id_task_in_another_room_never_replaces_a_waiting_runner(tmp_path: Path) -> None:
+    """Only a legacy restore of the same room and task hands a waiting runner over; task IDs repeat across rooms."""
+    config, runtime_paths, _ids = _config_and_ids(tmp_path, "alpha", "helper")
+    bots = {name: scheduling_bot(make_matrix_client_mock(), agent_name=name) for name in ("alpha", "helper")}
+    bots["alpha"].first_sync_complete = False
+    runtime = _runtime(runtime_paths, config, bots)
+    other_room = _workflow(due=False).model_copy(update={"room_id": "!other:localhost"})
+
+    assert runtime._start_runner("alpha", TASK_ID, _workflow(due=False))
+    waiting = runtime._runners[TASK_ID]
+    assert not runtime._start_runner("helper", TASK_ID, other_room)
+    assert not runtime._start_runner("helper", TASK_ID, other_room, handoff=True)
+    assert not runtime._start_runner("helper", TASK_ID, _workflow(due=False))
+
+    assert runtime._runners[TASK_ID] is waiting
+    assert not waiting[1].done()
+    await runtime.stop()
 
 
 @pytest.mark.asyncio

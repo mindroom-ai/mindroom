@@ -90,18 +90,20 @@ class ScheduledTaskRuntime:
     _operation_ended: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _stopping: bool = field(default=False, init=False)
 
-    def _start_runner(self, owner: str, task_id: str, workflow: ScheduledWorkflow) -> bool:
+    def _start_runner(self, owner: str, task_id: str, workflow: ScheduledWorkflow, *, handoff: bool = False) -> bool:
         """Start one task's runner under its owner unless a runner for it already runs.
 
-        Only a task the router owned is ever started under another owner: a ready heir replaces the runner of an
-        heir that is not ready and never used its bot, which a later read of the room no longer elects.
+        Only a task the router owned is ever started under another owner: on a ``handoff`` restore of the same room, a
+        ready heir replaces the runner of an heir that is not ready and never used its bot, which a later read of the
+        room no longer elects.
         """
         if self._stopping:
             return False
         running = self._runners.get(task_id)
         if running is not None and not running[1].done():
             waiting, ready = self._ready_bot(running[0].owner) is None, self._ready_bot(owner) is not None
-            if running[0].owner == owner or running[0].used_owner or not (waiting and ready):
+            same_task = handoff and running[0].room_id == workflow.room_id
+            if running[0].owner == owner or running[0].used_owner or not (same_task and waiting and ready):
                 logger.debug("Scheduled task already running; skipping duplicate start", task_id=task_id)
                 return False
             running[1].cancel()
@@ -205,11 +207,18 @@ class ScheduledTaskRuntime:
                     continue
                 await self._fail_owner_removed_task(bot, room_id, task.task_id, owner_id)
                 continue
-            if (legacy or owner == bot.agent_name) and await self._restore_task(owner, client, task):
+            if (legacy or owner == bot.agent_name) and await self._restore_task(owner, client, task, handoff=legacy):
                 restored += 1
         return restored
 
-    async def _restore_task(self, owner: str, client: nio.AsyncClient, task: ScheduledTaskRecord) -> bool:
+    async def _restore_task(
+        self,
+        owner: str,
+        client: nio.AsyncClient,
+        task: ScheduledTaskRecord,
+        *,
+        handoff: bool = False,
+    ) -> bool:
         """Start one pending task's runner under its owner, through the restoring bot's client."""
         workflow = task.workflow
         if workflow.schedule_type == "cron" and not workflow.cron_schedule:
@@ -232,11 +241,11 @@ class ScheduledTaskRuntime:
                     logger.exception("Failed to mark ancient task as failed", task_id=task.task_id)
                     return False
                 # An edit or cancellation landed after the room was read: decide on what it left.
-                return current is not None and await self._restore_task(owner, client, current)
+                return current is not None and await self._restore_task(owner, client, current, handoff=handoff)
             if missed_by > 0:
                 # Its runner fires once the owner finished its first sync.
                 logger.warning("Restored missed one-time task", task_id=task.task_id, missed_by_seconds=missed_by)
-        return self._start_runner(owner, task.task_id, workflow)
+        return self._start_runner(owner, task.task_id, workflow, handoff=handoff)
 
     async def fail_removed(self, entity_names: set[str]) -> None:
         """Fail the running tasks of entities removed from the config, while their bots still have their clients.
