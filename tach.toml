@@ -3787,6 +3787,7 @@ depends_on = [
     "mindroom.config.schema_hints",
     "mindroom.config.knowledge_graph",
     "mindroom.config.egress_broker",
+    "mindroom.config.email_invites",
     "mindroom.providers.registry",
     "mindroom.config.resolution",
     "mindroom.tool_system.plugins",
@@ -4219,6 +4220,7 @@ visibility = [
     "mindroom.contacts.flow",
     "mindroom.custom_tools.matrix_user_writes",
     "mindroom.orchestration.tool_job_runtime",
+    "mindroom.email_invites.receiver",
 ]
 
 [[modules]]
@@ -4238,6 +4240,7 @@ visibility = [
 path = "mindroom.matrix.room_reconciliation"
 depends_on = ["mindroom.matrix.room_power"]
 visibility = [
+    "mindroom.email_invites.policy",
     "mindroom.external_triggers.executor",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
@@ -4252,6 +4255,7 @@ path = "mindroom.matrix.room_power"
 depends_on = []
 visibility = [
     "mindroom.call_transcripts.router_room",
+    "mindroom.email_invites.policy",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.personal_rooms",
     "mindroom.matrix.room_reconciliation",
@@ -4292,6 +4296,7 @@ visibility = [
     "mindroom.contacts.flow",
     "mindroom.matrix.room_accounts",
     "mindroom.room_tree.note",
+    "mindroom.email_invites.policy",
 ]
 
 [[modules]]
@@ -4428,6 +4433,42 @@ visibility = [
     "mindroom.commands.desktop_commands",
     "mindroom.custom_tools.desktop",
 ]
+
+[[modules]]
+path = "mindroom.email_invites"
+depends_on = []
+
+[[modules]]
+path = "mindroom.email_invites.store"
+depends_on = []
+
+[[modules]]
+path = "mindroom.email_invites.mail"
+depends_on = []
+
+[[modules]]
+path = "mindroom.email_invites.policy"
+depends_on = [
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.room_power",
+    "mindroom.matrix.room_reconciliation",
+    "mindroom.matrix.state",
+]
+
+[[modules]]
+path = "mindroom.email_invites.receiver"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.email_invites.policy",
+    "mindroom.email_invites.store",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.client_delivery",
+    "mindroom.mcp_gateway.admission",
+]
+
+[[modules]]
+path = "mindroom.config.email_invites"
+depends_on = ["mindroom.origins"]
 
 [[modules]]
 path = "mindroom.desktop.pairing"
@@ -5092,6 +5133,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.email_invites.receiver",
     "mindroom.agent_cli.cli_approval_waits",
     "mindroom.approval.continuation_runner",
     "mindroom.orchestration.server_state",

@@ -41,6 +41,7 @@ from mindroom.config.budgets import BudgetsConfig  # noqa: TC001
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile
 from mindroom.config.contacts import CONTACT_CONTROL_TOOLS
 from mindroom.config.egress_broker import EgressBrokerConfig
+from mindroom.config.email_invites import EmailInvitesConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.generated_agents import GeneratedAgentInfo, expand_generated_agents
 from mindroom.config.judgment import LLMJudgmentConfig
@@ -434,6 +435,10 @@ class Config(BaseModel):
     tool_approval: ToolApprovalConfig = Field(
         default_factory=ToolApprovalConfig,
         description="Tool-approval rules for agent-initiated tool calls",
+    )
+    email_invites: EmailInvitesConfig = Field(
+        default_factory=EmailInvitesConfig,
+        description="Invites to a room by email through the email_invite tool",
     )
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
     personal_agents: dict[str, PersonalAgentTemplateConfig] = Field(
