@@ -327,7 +327,7 @@ wheels = [
 
 [[package]]
 name = "anthropic"
-version = "1.17.0"
+version = "2.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -339,9 +339,9 @@ dependencies = [
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4e/66/4ec271f7607460005276bb09b0d1c749a9ed0cead35a488a8676f15ed6d5/anthropic-1.17.0.tar.gz", hash = "sha256:dcf77a74dde89a9fd12405fca798b012725a107f7c9488454234a74e275c2163", size = 1756371, upload-time = "2026-10-20T22:13:35.117Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bc/68/27309d33b66bf3546d0232cf369561314fda33bc0c4a9a47809dffea6776/anthropic-2.11.0.tar.gz", hash = "sha256:205711189d0bdbee78e5bb45b97944e7b42af3e2dce33ce8dacbf80f9492dc00", size = 2024863, upload-time = "2026-11-19T19:14:58.913Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/98/9d/b4d4e46ec05bf19bcfd46c1417337e7cf42b9ecb95c3c63f295e2e9fee4b/anthropic-1.17.0-py3-none-any.whl", hash = "sha256:ccb98b85e1a14f81cf1e2ba348393f341f342bad9e07e014f96c9b69f853aaa7", size = 2094718, upload-time = "2026-10-20T22:13:32.585Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/d7/409430e58fb341e00543a70dacf943333364ba506017f9c07b335a12e0f7/anthropic-2.11.0-py3-none-any.whl", hash = "sha256:9ee1e89ef947b2cedddcbe44694f3d58b3463473bdc7bb98e84942459ad4fefb", size = 2554684, upload-time = "2026-11-19T19:14:57.19Z" },
 ]
 
 [[package]]
@@ -4451,7 +4451,7 @@ requires-dist = [
     { name = "agentql", marker = "extra == 'agentql'" },
     { name = "agno", specifier = "==3.0.9" },
     { name = "aiohttp", specifier = ">=3.13.3" },
-    { name = "anthropic", specifier = ">=1.17,<2" },
+    { name = "anthropic", specifier = ">=2.11,<3" },
     { name = "anyio", specifier = ">=4.10" },
     { name = "apify-client", marker = "platform_machine != 'aarch64' and extra == 'apify'", specifier = ">=1.12.2,<3" },
     { name = "arxiv", marker = "extra == 'arxiv'", specifier = "<4" },
