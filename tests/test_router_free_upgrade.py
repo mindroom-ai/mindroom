@@ -232,17 +232,17 @@ async def test_an_upgraded_deployment_reaches_the_router_free_end_state(
         assert [delivery.stage for delivery in sent] == [DeliveryStage.FINAL]
 
         # The plugin hook that named the router runs once per message, whichever bots see the message.
-        calls: list[str] = []
+        calls: list[tuple[str, str]] = []
 
         @hook(EVENT_MESSAGE_RECEIVED, agents=(ROUTER_AGENT_NAME,))
         async def once_per_message(ctx: MessageReceivedContext) -> None:
-            calls.append(ctx.envelope.agent_name)
+            calls.append((ctx.envelope.source_event_id, ctx.envelope.agent_name))
 
         hooks = _stewarded_registry([once_per_message], {"router": 100, "general": 0, "helper": 0}, store)
         for event_id, arrival in (("$first", ("general", "helper", "router")), ("$second", ("helper", "router"))):
             for agent_name in arrival:
                 await _emit_message(hooks, tmp_path, agent_name, event_id)
-        assert calls == ["general", "helper"]
+        assert calls == [("$first", "general"), ("$second", "helper")]
         assert len(alias_warnings) == 1
     finally:
         await manager.shutdown()
