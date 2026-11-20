@@ -319,7 +319,7 @@ def _escape_unterminated_html_fragments(html_text: str) -> str:
 
 
 IMAGE_NOT_SENT_NOTE = "⚠️ Image not sent:"
-_LOADABLE_IMG_SRC = re.compile(r"(?i)mxc://[A-Za-z0-9.\-]+(:\d+)?/[^/\s]+|https?://\w[^/?#\s\[\]]*([/?#]\S*)?")
+_LOADABLE_IMG_SRC = re.compile(r"(?i)mxc://[A-Za-z0-9.\-]+(:\d+)?/[^/\s]+|https?://\w[\w.\-]*(:\d+)?([/?#]\S*)?")
 
 
 def _image_not_sent_note(attrs: list[tuple[str, str | None]]) -> str | None:

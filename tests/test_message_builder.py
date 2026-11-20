@@ -120,6 +120,9 @@ def test_nested_quote_list_div_keeps_inner_markdown_literal() -> None:
         ("![p](/home/user/plot.png)", "p"),
         ("![p](sandbox:/mnt/data/plot.png)", "p"),
         ('<img src="mxc://placeholder" alt="raw">', "raw"),
+        ("![a](mxc://?/id)", "a"),
+        ("![a](https://example.org:garbage/x)", "a"),
+        ("<hr>\n![logo](./logo.png)", "logo"),
     ],
 )
 def test_unloadable_image_becomes_a_note(markdown: str, alt: str) -> None:
@@ -138,6 +141,13 @@ def test_loadable_image_is_kept(markdown: str) -> None:
     html = markdown_to_html(markdown)
     assert "<img" in html
     assert "Image not sent" not in html
+
+
+def test_quoted_image_beside_its_code_span_copy_leaves_the_code() -> None:
+    """A real image and an identical code span in one quoted paragraph: no broken image, the code untouched."""
+    html = markdown_to_html("> ![a\n> b](bad) ![a\n> b](bad)\n> `![a\nb](bad)`")
+    assert "<code>![a b](bad)</code>" in html
+    assert "<img" not in html
 
 
 def test_image_syntax_in_code_stays_code() -> None:
