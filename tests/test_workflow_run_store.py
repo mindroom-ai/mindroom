@@ -553,6 +553,22 @@ def test_prune_removes_only_old_finished_runs(tmp_path: Path) -> None:
     assert store.prune("2026-11-05T00:00:00Z") == 0
 
 
+def test_prune_compares_instants_at_an_exact_second_cutoff(tmp_path: Path) -> None:
+    """A finish later in the cutoff's own second is newer than the cutoff, however its timestamp is written."""
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    finishes = {
+        _RUN_A: "2026-11-04T23:59:59.999999Z",
+        _RUN_B: "2026-11-05T00:00:00.500000Z",
+        _RUN_C: "2026-11-05T00:00:00Z",
+    }
+    for run_id, finished_at in finishes.items():
+        store.reserve_run(_run(run_id))
+        store.update_run(run_id, state=WorkflowRunState.COMPLETED, finished_at=finished_at)
+    assert store.prune("2026-11-05T00:00:00Z") == 1
+    assert sorted(run.run_id for run in store.list_runs()) == [_RUN_B, _RUN_C]
+    assert store.prune("2026-11-05T00:00:00.500001Z") == 2
+
+
 def test_log_returns_the_last_lines_in_order(tmp_path: Path) -> None:
     """The log is per run and reads back oldest first, capped to the newest lines."""
     store = WorkflowRunStore(tmp_path / "w.sqlite3")

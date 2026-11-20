@@ -9,6 +9,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, fields, replace
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
@@ -315,15 +316,22 @@ class WorkflowRunStore:
         return [row["text"] for row in reversed(rows)]
 
     def prune(self, finished_before: str) -> int:
-        """Delete finished runs that ended before *finished_before*, with all they own; return how many."""
-        where = f"state IN ({_TERMINAL_STATE_PLACEHOLDERS}) AND finished_at < ?"
-        params = (*_TERMINAL_STATE_VALUES, finished_before)
+        """Delete finished runs that ended before *finished_before*, with all they own; return how many.
+
+        The timestamps are compared as instants, because their text leaves out a zero fraction of a second.
+        """
+        cutoff = datetime.fromisoformat(finished_before)
         with self._write_transaction() as connection:
-            rows = connection.execute(f"SELECT run_id FROM workflow_runs WHERE {where}", params).fetchall()  # noqa: S608
-            connection.execute(f"DELETE FROM workflow_runs WHERE {where}", params)  # noqa: S608
-        for row in rows:
-            shutil.rmtree(self.directory / "results" / row["run_id"], ignore_errors=True)
-        return len(rows)
+            rows = connection.execute(
+                f"SELECT run_id, finished_at FROM workflow_runs "  # noqa: S608
+                f"WHERE state IN ({_TERMINAL_STATE_PLACEHOLDERS}) AND finished_at IS NOT NULL",
+                _TERMINAL_STATE_VALUES,
+            ).fetchall()
+            run_ids = [row["run_id"] for row in rows if datetime.fromisoformat(row["finished_at"]) < cutoff]
+            connection.executemany("DELETE FROM workflow_runs WHERE run_id = ?", [(run_id,) for run_id in run_ids])
+        for run_id in run_ids:
+            shutil.rmtree(self.directory / "results" / run_id, ignore_errors=True)
+        return len(run_ids)
 
     def _inline_result(self, run_id: str, seq: int, generation: int, result: object) -> tuple[object, str | None]:
         """Return the result to keep in the row and, when it was too large, the file that holds all of it.
