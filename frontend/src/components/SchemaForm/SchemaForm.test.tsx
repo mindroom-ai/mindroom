@@ -555,6 +555,29 @@ describe("SchemaFields", () => {
     ).toBeInTheDocument();
   });
 
+  it("reads freeform YAML to the values js-yaml 4 gave", () => {
+    const { lastValue } = renderFixture();
+    const editor = screen.getByRole("textbox", { name: "Settings YAML" });
+    const settingsAfter = (draft: string) => {
+      fireEvent.change(editor, { target: { value: draft } });
+      fireEvent.blur(editor);
+      return lastValue().settings;
+    };
+
+    expect(
+      settingsAfter(
+        "defaults: &d {timeout: 30}\nclient: {<<: *d, retries: 2}\n",
+      ),
+    ).toEqual({
+      defaults: { timeout: 30 },
+      client: { timeout: 30, retries: 2 },
+    });
+    // js-yaml 4.3 read neither underscore digits nor dates as anything but strings, and a binary integer as a number.
+    expect(settingsAfter("big: 1_000\nmask: 0b101\nday: 2026-01-01\n")).toEqual(
+      { big: "1_000", mask: 5, day: "2026-01-01" },
+    );
+  });
+
   it("stores an explicit empty string when the default is not empty", () => {
     const { lastValue } = renderFixture({ welcome: "Hi" });
     fireEvent.change(screen.getByLabelText("Welcome"), {

@@ -1,7 +1,15 @@
 // Leaf widgets for schema-driven config forms. Nothing here renders nested
 // schema nodes, so SchemaField.tsx can compose these without import cycles.
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
-import { dump, load, loadAll } from "js-yaml";
+import {
+  CORE_SCHEMA,
+  defineScalarTag,
+  dump,
+  intCoreTag,
+  load,
+  loadAll,
+  mergeTag,
+} from "js-yaml";
 import {
   ArrowDown,
   ArrowUp,
@@ -691,9 +699,31 @@ function dumpYaml(value: unknown): string {
   return value === undefined ? "" : dump(value);
 }
 
+const BINARY_INT = /^[-+]?0b[01]+$/;
+
+/** YAML 1.2 core integers plus the `0b101` binary form js-yaml 4 also read as a number. */
+const intTag = defineScalarTag("tag:yaml.org,2002:int", {
+  ...intCoreTag,
+  resolve: (source, isExplicit, tagName) => {
+    if (!BINARY_INT.test(source)) {
+      return intCoreTag.resolve(source, isExplicit, tagName);
+    }
+    const sign = source.startsWith("-") ? -1 : 1;
+    return sign * parseInt(source.replace(/^[-+]?0b/, ""), 2);
+  },
+});
+
+// js-yaml 5 loads with the bare YAML 1.2 core schema. Merge keys (`<<: *defaults`) and binary integers keep the
+// values js-yaml 4 gave them; dates stay the strings that were typed.
+const YAML_LOAD_OPTIONS = {
+  schema: CORE_SCHEMA.withTags(mergeTag, intTag),
+};
+
 /** Parse the editor's YAML; a draft with no document (blank or only comments) clears the value. */
 function loadYaml(draft: string): unknown {
-  return loadAll(draft).length === 0 ? undefined : load(draft);
+  return loadAll(draft, YAML_LOAD_OPTIONS).length === 0
+    ? undefined
+    : load(draft, YAML_LOAD_OPTIONS);
 }
 
 export function YamlEditor({
