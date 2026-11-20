@@ -108,7 +108,7 @@ class BotRoomLifecycleDeps:
     send_response: _SendRoomResponse
     change_membership: _ChangeRoomMembership
     admit_response: Callable[[], AbstractAsyncContextManager[None]]
-    # Refreshes the shared reply-membership index when it needs it, as an access check does.
+    # Runs the room setup that follows a configured or restored join.
     on_configured_room_joined: Callable[[str], Awaitable[None]]
     # Every successful join, configured, invited, or listed, so the bot restores the room's schedules.
     on_room_joined: Callable[[str], Awaitable[None]]
@@ -434,22 +434,16 @@ class BotRoomLifecycle:
         for room_id in desired_rooms:
             if room_id in current_rooms:
                 self._logger().debug("Already joined room", room_id=room_id)
-                if await self.deps.change_membership(room_id, "join"):
-                    await self._room_joined(room_id)
-                    await self.deps.on_configured_room_joined(room_id)
-                else:
-                    self._logger().warning(
-                        "Failed to reconcile joined room",
-                        room_id=room_id,
-                    )
-                continue
-
-            if await self._join_room_with_decrypt_notice_fence(room_id):
+                if not await self.deps.change_membership(room_id, "join"):
+                    self._logger().warning("Failed to reconcile joined room", room_id=room_id)
+                    continue
+            elif await self._join_room_with_decrypt_notice_fence(room_id):
                 self._logger().info("Joined room", room_id=room_id)
-                await self._room_joined(room_id)
-                await self.deps.on_configured_room_joined(room_id)
             else:
                 self._logger().warning("Failed to join room", room_id=room_id)
+                continue
+            await self._room_joined(room_id)
+            await self.deps.on_configured_room_joined(room_id)
         # Membership of a contact room with another deployment's agent can change while no live event reaches it.
         await reconcile_remote_contacts(
             self._config(),

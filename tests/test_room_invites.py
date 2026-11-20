@@ -642,6 +642,50 @@ async def test_agent_skips_rejoining_rooms_it_already_has(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("accepted", [True, False])
+async def test_only_an_accepted_configured_join_runs_room_setup(
+    accepted: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A joined room's reconcile and a new room's join run the room setup only once the membership change succeeds."""
+    joined_room, new_room = "!room1:localhost", "!room2:localhost"
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=[joined_room, new_room],
+    )
+    install_runtime_journal_support(bot)
+    bot.client = AsyncMock()
+    bot.client.rooms = {joined_room: MagicMock()}
+    change_membership = AsyncMock(return_value=accepted)
+    on_room_joined = AsyncMock()
+    on_configured_room_joined = AsyncMock()
+    bot._room_lifecycle.deps = replace(
+        bot._room_lifecycle.deps,
+        change_membership=change_membership,
+        on_room_joined=on_room_joined,
+        on_configured_room_joined=on_configured_room_joined,
+    )
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[joined_room]))
+
+    await bot._room_lifecycle.join_configured_rooms()
+
+    assert sorted(args for args, _ in change_membership.await_args_list) == [(joined_room, "join"), (new_room, "join")]
+    set_up = [joined_room, new_room] if accepted else []
+    assert sorted(room_id for (room_id,), _ in on_room_joined.await_args_list) == set_up
+    assert sorted(room_id for (room_id,), _ in on_configured_room_joined.await_args_list) == set_up
+
+
+@pytest.mark.asyncio
 async def test_startup_already_joined_reconciles_gateway_without_membership_http(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
