@@ -193,8 +193,9 @@ Simply present your findings naturally, as if you already knew the information.
 """
 
 OUTPUT_REDIRECT_PROMPT = (
-    "To save a tool's full supported output to a file in your workspace instead of returning it, pass "
-    "`mindroom_output_path: <relative-path>` and then inspect the saved file with filesystem, python, or shell tools. "
+    "To save a tool's full supported output, such as large output, to a file in your workspace instead of returning "
+    "it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with filesystem, python, or "
+    "shell tools. "
     "In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, "
     "`~` and `$HOME` point there too."
 )
