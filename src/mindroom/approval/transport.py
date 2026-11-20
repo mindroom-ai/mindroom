@@ -39,11 +39,6 @@ _UNAVAILABLE_NOTICE_APPROVAL_ID_KEY = "io.mindroom.approval_unavailable_id"
 _UNREADABLE = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
 
 
-def _sender_entity(sender_principal_id: str | None) -> str:
-    """Return the entity whose bot sends a card; a card without a sender is one the router sent before upgrade."""
-    return agent_of_principal(sender_principal_id) if sender_principal_id else ROUTER_AGENT_NAME
-
-
 def _approval_delivery_content(claimed: MatrixDelivery) -> dict[str, object]:
     """Return the exact physical payload used to send or reconcile a delivery."""
     content = dict(claimed.payload)
@@ -354,7 +349,9 @@ class ApprovalMatrixTransport:
 
     def sender_bot(self, sender_principal_id: str | None, room_id: str) -> _ApprovalTransportBot | None:
         """Return the running bot of a card's sender while its own client is joined to the card's room."""
-        return self._joined_bot(_sender_entity(sender_principal_id), room_id)
+        # LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
+        entity = agent_of_principal(sender_principal_id) if sender_principal_id else ROUTER_AGENT_NAME
+        return self._joined_bot(entity, room_id)
 
     def _joined_bot(self, entity_name: str, room_id: str) -> _ApprovalTransportBot | None:
         bot = self.bots().get(entity_name)
@@ -369,8 +366,10 @@ class ApprovalMatrixTransport:
         thread_id: str | None,
         reason: str,
     ) -> bool:
-        """Send one approval notice through the room's poster."""
-        bot = self.room_poster(room_id)
+        """Send one approval notice through the card's sender while it runs, else through the room's poster."""
+        cards = self.cards()
+        card = await cards.approvals.approval_card(room_id=room_id, card_event_id=approval_event_id) if cards else None
+        bot = (card and self.sender_bot(card.sender_principal_id, room_id)) or self.room_poster(room_id)
         if bot is None or bot.client is None:
             return False
         content = build_message_content(

@@ -672,6 +672,25 @@ async def test_approval_is_not_spent_once_the_asking_agent_left_the_room(
 
 
 @pytest.mark.asyncio
+async def test_approval_asked_for_after_the_agent_rejoined_is_spent_in_that_membership(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """An agent that left and rejoined before it asked spends the approval in the membership it asked in."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    asker = journal.principal(_AGENT + "@shared")
+    for membership in ("join", "leave", "join"):
+        await admit_room_membership(asker, _ROOM, membership)
+    try:
+        await _armed(manager)
+
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_approval_is_spent_while_the_asking_agent_stays_after_the_owner_account_left(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,

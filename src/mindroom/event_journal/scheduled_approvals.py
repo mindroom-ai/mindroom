@@ -181,13 +181,7 @@ def reserve(
         card=card,
     ):
         return False
-    ledger_epoch, sender_epoch = (
-        transaction.fetchone(
-            "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
-            (principal, binding.room_id),
-        )
-        for principal in (principal_id, card.sender_principal_id)
-    )
+    current_epoch, sender = membership_state.current_membership_epoch, card.sender_principal_id
     transaction.execute(
         """
         INSERT INTO scheduled_call_approvals (
@@ -209,10 +203,10 @@ def reserve(
             binding.arguments_json,
             binding.workflow_digest,
             binding.execute_at_ns,
-            0 if ledger_epoch is None else int(ledger_epoch["membership_epoch"]),
+            current_epoch(transaction, principal_id, binding.room_id),
             int(any_arguments_offered),
-            card.sender_principal_id,
-            0 if sender_epoch is None else int(sender_epoch["membership_epoch"]),
+            sender,
+            0 if sender is None else current_epoch(transaction, sender, binding.room_id),
         ),
     )
     return True

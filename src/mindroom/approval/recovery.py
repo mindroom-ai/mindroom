@@ -136,8 +136,11 @@ class ApprovalRecovery:
                 current,
             )
         manager = self.manager
-        # The bot of an owner the config no longer lists had its chance to edit its cards before it stopped.
-        removed = self.entity_configured is not None and not self.entity_configured(current.entity_name)
+        # The bot of an owner the config no longer lists had its chance to edit its cards before it stopped; one that
+        # can never start has no bot to edit them.
+        removed = (self.entity_configured is not None and not self.entity_configured(current.entity_name)) or (
+            self.entity_permanently_unavailable is not None and self.entity_permanently_unavailable(current.entity_name)
+        )
         current = await prepare_approval_failure(
             current,
             ApprovalFailure(ApprovalFailureKind.ERROR, reason),
@@ -161,18 +164,16 @@ class ApprovalRecovery:
         effects = await store.approvals.discard_unavailable_approval_continuation(current.approval_id)
         return effects is not None
 
-    async def _end_cards_without_sender(self) -> int:
-        """Expire every pending card the router sent before cards recorded their sender; return how many it found.
+    async def _end_cards_without_sender(self) -> None:
+        """Expire every pending card the router sent before cards recorded their sender.
 
         Each paused turn resumes as after a timeout; a later call finds only a card whose edit waits for a router bot.
         A router the config no longer starts never edits its card, which then retires unedited, keeping its pending look.
         """
-        if self.manager is None:
-            return 0
+        # LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
+        assert self.manager is not None
         absent = self.owner_absent is not None and self.owner_absent()
-        return len(
-            await self.manager.expire_cards(lambda card: card.sender_principal_id is None, _UPGRADE_REASON, absent),
-        )
+        await self.manager.expire_cards(lambda card: card.sender_principal_id is None, _UPGRADE_REASON, absent)
 
     def reset_startup_cleanup_gate(self) -> None:
         """Reset one-shot startup approval cleanup state."""

@@ -617,6 +617,28 @@ async def test_batch_binding_order_and_semantic_duplicates(journal_database: Cal
 
 
 @pytest.mark.asyncio
+async def test_redelivery_of_a_pending_long_text_edited_to_a_short_one_is_a_duplicate(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """A long text sent as a file and edited to a short one while it waits is still the event it was when redelivered."""
+    store = journal_database()
+    original = message("$long")
+    original.source["content"] = {"msgtype": "m.file", "body": "long.txt", "url": "mxc://example.org/long"}
+    batch = SyncBatch(uuid4(), 1, (original,))
+    principal = await principal_for(store, batch.stream_id)
+    await consume_one_ingestion_batch(Session(batch), principal, account_id=ACCOUNT)
+    await principal.revise_pending("$long", {"msgtype": "m.text", "body": "short"})
+
+    result = await consume_one_ingestion_batch(Session(replace(batch, sequence=2)), principal, account_id=ACCOUNT)
+
+    assert result.receipt_new
+    assert not result.semantic_event_new
+    [pending] = await principal.pending()
+    assert pending.source["content"] == {"msgtype": "m.text", "body": "short"}
+    await store.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("duplicate", [False, True])
 async def test_duplicate_cannot_answer_a_question_published_after_source(
     journal_database: Callable[[], EventJournalStore],

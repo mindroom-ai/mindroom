@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import time
 from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -823,15 +824,22 @@ async def test_pending_router_card_is_ended_once_at_upgrade(
         pending = await approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
         assert isinstance(pending, ApprovalCardView)
         assert await approvals.approval_card_sender(delivery_id=pending.delivery_id) == (None, _ROOM)
+        assert not pending.decided
 
-        assert await recovery._end_cards_without_sender() == 1
+        await recovery._end_cards_without_sender()
 
         card = await approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
         assert isinstance(card, ApprovalCardView)
         assert (card.decided, card.retired) == (True, retired)
         assert [delivery.stage for delivery in sent] == ([DeliveryStage.FINAL] if router_in_room else [])
         # A later startup finds the card again only while its edit still waits for a router bot.
-        assert await recovery._end_cards_without_sender() == (0 if retired else 1)
+        live = [card.delivery_id for card in await approvals.pending_approval_cards(room_id=_ROOM)]
+        assert live == ([] if retired else [pending.delivery_id])
+        await recovery._end_cards_without_sender()
+        card = await approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
+        assert isinstance(card, ApprovalCardView)
+        assert (card.decided, card.retired) == (True, retired)
+        assert [delivery.stage for delivery in sent] == ([DeliveryStage.FINAL] if router_in_room else [])
     finally:
         await manager.shutdown()
         await store.close()
@@ -867,8 +875,11 @@ async def test_grants_survive_upgrade(recorded_journal: Callable[[str], _Journal
 async def test_a_grant_given_before_upgrade_approves_the_agents_next_call(
     recorded_journal: Callable[[str], _Journal],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A timed grant given while the router and the agent were in different memberships still covers a new call."""
+    # The call comes while the recorded grant, given at 08:00:07 UTC on 2027-01-15 for ten minutes, is still live.
+    monkeypatch.setattr(time, "time_ns", lambda: 1_800_000_300_000_000_000)
     store = recorded_journal("13_timed_grants.sql").open()
 
     async def prepare(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:

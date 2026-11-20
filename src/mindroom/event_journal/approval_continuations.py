@@ -94,9 +94,9 @@ def failure_of_row(row: Row) -> ApprovalFailure | None:
     )
 
 
-def _unavailable_notice_delivery_id(approval_id: str, membership_epoch: int) -> str:
-    """Return one membership's delivery identity for an unavailable-owner notice."""
-    return f"approval-unavailable:{approval_id}:{membership_epoch}"
+def _unavailable_notice_prefix(approval_id: str) -> str:
+    """Return the delivery identity of an unavailable-owner notice, which the membership epoch completes."""
+    return f"approval-unavailable:{approval_id}:"
 
 
 def unavailable_notice(transaction: Transaction, _principal_id: str, approval_id: str) -> tuple[str, str, bool] | None:
@@ -104,7 +104,7 @@ def unavailable_notice(transaction: Transaction, _principal_id: str, approval_id
 
     The attempt an account began stands, whoever posts for the room now, until its history shows it was never sent.
     """
-    prefix = _unavailable_notice_delivery_id(approval_id, 0)[:-1]
+    prefix = _unavailable_notice_prefix(approval_id)
     row = transaction.fetchone(
         """
         SELECT principal_id, delivery_id, acknowledged_event_id FROM matrix_delivery_outbox
@@ -135,7 +135,7 @@ def enqueue_unavailable_notice(
     )
     if membership_epoch is None:
         return None
-    delivery_id = _unavailable_notice_delivery_id(approval_id, membership_epoch)
+    delivery_id = f"{_unavailable_notice_prefix(approval_id)}{membership_epoch}"
     transaction_id = outbox.enqueue(
         transaction,
         principal_id,

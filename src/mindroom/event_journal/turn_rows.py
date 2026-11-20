@@ -600,26 +600,26 @@ def turn_for_response_event(transaction: Transaction, agent_name: str, event_id:
     return None if not keys else _record(transaction, agent_name, keys.pop())
 
 
-def _source_row(transaction: Transaction, agent_name: str, event_id: str) -> tuple[_Source, str] | None:
+def _source_row(transaction: Transaction, agent_name: str, event_id: str) -> _Source | None:
     row = transaction.fetchone(
         f"SELECT {_SOURCE_COLUMNS} FROM turn_sources WHERE agent_name = ? AND event_id = ?",  # noqa: S608
         (agent_name, event_id),
     )
-    return None if row is None else (_source_from_row(row), str(row["turn_key"]))
+    return None if row is None else _source_from_row(row)
 
 
 def prepared_voice(transaction: Transaction, agent_name: str, source_event_id: str) -> PreparedVoiceSource | None:
     """Return one physical voice source's normalization checkpoint."""
     found = _source_row(transaction, agent_name, source_event_id)
-    if found is None or found[0].prepared_voice_json is None:
+    if found is None or found.prepared_voice_json is None:
         return None
-    return PreparedVoiceSource._from_raw(json.loads(found[0].prepared_voice_json))
+    return PreparedVoiceSource._from_raw(json.loads(found.prepared_voice_json))
 
 
 def visible_echo(transaction: Transaction, agent_name: str, source_event_id: str) -> str | None:
     """Return the echo published for one physical source."""
     found = _source_row(transaction, agent_name, source_event_id)
-    return None if found is None else found[0].visible_echo_event_id
+    return None if found is None else found.visible_echo_event_id
 
 
 # Row writes.
