@@ -210,51 +210,6 @@ async def test_matrix_message_send_defaults_to_current_conversation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_send_reports_an_image_replaced_by_a_note() -> None:
-    """The tool result tells the agent its made-up image link went out as a note, and what was sent."""
-    tool = MatrixMessageTools()
-    with (
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
-        ) as mock_send,
-        tool_runtime_context(_make_context()),
-    ):
-        payload = json.loads(await tool.matrix_message(action="send", message="Logo: ![logo](mxc://placeholder)"))
-
-    note = "\u26a0\ufe0f Image not sent: logo (no uploaded file)"
-    assert payload["status"] == "ok"
-    assert payload["sent_text"] == f"Logo: {note}" == mock_send.await_args.args[2]["body"]
-    assert "matrix_message(attachments=" in payload["note"]
-
-
-@pytest.mark.asyncio
-async def test_matrix_message_edit_notes_the_image_in_every_part_of_the_edit() -> None:
-    """The replacement, its formatted body, and the ``* …`` fallback all show the note, and the result says so."""
-    tool = MatrixMessageTools()
-    with (
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
-        ) as mock_edit,
-        tool_runtime_context(_make_context()),
-    ):
-        payload = json.loads(
-            await tool.matrix_message(action="edit", event_id="$evt", message="![logo](mxc://placeholder)"),
-        )
-
-    note = "\u26a0\ufe0f Image not sent: logo (no uploaded file)"
-    _client, _room, event_id, content, new_text = mock_edit.await_args.args[:5]
-    envelope = build_edit_event_content(event_id=event_id, new_content=content, new_text=new_text)
-    assert envelope["body"] == f"* {note}"
-    assert envelope["m.new_content"]["body"] == note
-    assert "<img" not in envelope["formatted_body"]
-    assert "<img" not in envelope["m.new_content"]["formatted_body"]
-    assert payload["sent_text"] == note
-    assert payload["note"].startswith("Edited (an image with no uploaded file")
-
-
-@pytest.mark.asyncio
 async def test_matrix_message_active_mentions_mark_trusted_human_relay() -> None:
     """Intentional mention dispatch should preserve a trusted human requester."""
     tool = MatrixMessageTools()

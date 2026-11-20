@@ -9,7 +9,6 @@ from urllib.parse import urlsplit
 
 from markdown_it import MarkdownIt
 from markdown_it.rules_block import StateBlock, heading, html_block
-from markdown_it.rules_inline import StateInline, image
 from markdown_it.token import Token
 from mdit_py_plugins.dollarmath import dollarmath_plugin
 from pygments import highlight
@@ -495,48 +494,6 @@ def _build_markdown_renderer() -> MarkdownIt:
 
 
 _MARKDOWN_RENDERER = _build_markdown_renderer()
-
-
-def _recording_image(state: StateInline, silent: bool) -> bool:
-    start = state.pos
-    if (found := image(state, silent)) and not silent:
-        state.env.setdefault("images", []).append((start, state.pos, state.tokens[-1]))
-    return found
-
-
-_IMAGE_SCANNER = _build_markdown_renderer()
-_IMAGE_SCANNER.inline.ruler.at("image", _recording_image)
-
-
-def _loadable(src: str) -> bool:
-    web_or_mxc = r"https?://([^/?#@]*@)?[^/?#@:\[\]]+([:/?#].*)?|mxc://[^/]+/[^/]+"
-    return re.fullmatch(web_or_mxc, src, re.IGNORECASE | re.DOTALL) is not None
-
-
-def replace_unsendable_images(text: str) -> str:
-    """Replace each image that is not ``mxc://server/media_id`` or ``http(s)://host`` with a note, where that is safe."""
-    if "![" not in text:
-        return text
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    env: dict[str, list[tuple[int, int, Token]]] = {}
-    bounds = [0, *(newline.end() for newline in re.finditer("\n", normalized)), len(normalized)]
-    edits: list[tuple[int, int, str]] = []
-    for block in _IMAGE_SCANNER.parse(normalized, env):
-        if block.type != "inline" or not block.map:
-            continue
-        first, last = bounds[block.map[0]], bounds[min(block.map[1], len(bounds) - 1)]
-        for start, end, token in env.get("images", []):
-            source = block.content[start:end]
-            mine = any(child is token for child in block.children or ())
-            # Only a source found exactly once in its own block's lines is surely the image, never code beside it.
-            if mine and not _loadable(str(token.attrs["src"])) and normalized.count(source, first, last) == 1:
-                at = normalized.index(source, first, last)
-                edits.append((at, at + len(source), token.content or "image"))
-    edits.sort()
-    assert all(edits[index][1] <= edits[index + 1][0] for index in range(len(edits) - 1)), edits
-    for start, end, alt in reversed(edits):
-        normalized = f"{normalized[:start]}\u26a0\ufe0f Image not sent: {alt} (no uploaded file){normalized[end:]}"
-    return normalized if edits else text
 
 
 def markdown_to_html(text: str) -> str:

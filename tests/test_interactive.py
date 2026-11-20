@@ -629,10 +629,3 @@ interactive"""
         assert '"value": "approve"' in prompt
         assert "Use the question_event_id and question_text" in prompt
         assert "\n```" not in prompt
-
-
-def test_agent_reply_text_notes_images_no_client_can_load() -> None:
-    """Every agent reply and matrix_message text is formatted here, so a made-up image link becomes a note."""
-    response = interactive.parse_and_format_interactive("Logo: ![logo](mxc://placeholder)", extract_mapping=True)
-
-    assert response.formatted_text == "Logo: \u26a0\ufe0f Image not sent: logo (no uploaded file)"

@@ -56,7 +56,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_NO_IMAGE_NOTE = "an image with no uploaded file went out as a note; send files via matrix_message(attachments=[...])"
 _DIRECT_INTERACTIVE_ERROR = "Interactive prompts are only supported in normal agent responses."
 _CONTACT_TEXT_ONLY_ERROR = "Error: contact rooms accept text only"
 
@@ -94,12 +93,11 @@ class _MessageSendState:
     newly_registered_attachment_ids: list[str] = field(default_factory=list)
 
 
-def _sent_fields(verdict: ContactVerdict | None, done: str, text: str | None = None, noted: str = "") -> dict[str, str]:
-    """Return the result fields that tell the agent what changed its text on the way out, and what went out."""
-    policy = "changed by the contact policy" if verdict is not None and verdict.rewritten else ""
-    sent = verdict.text if verdict is not None and verdict.rewritten else text
-    changes = "; ".join(change for change in (policy, noted) if change)
-    return {"note": f"{done} ({changes})", "sent_text": sent or ""} if changes else {}
+def _contact_policy_fields(verdict: ContactVerdict | None, done: str) -> dict[str, str]:
+    """Return the result fields that tell the agent the contact policy changed what went out, and to what."""
+    if verdict is None or not verdict.rewritten:
+        return {}
+    return {"note": f"{done} (changed by the contact policy)", "sent_text": verdict.text}
 
 
 def _policy_approved(verdict: ContactVerdict | None) -> AbstractContextManager[None]:
@@ -306,7 +304,7 @@ class MatrixMessageOperations:
                     ),
                 ),
             )
-        written = text = (message or "").strip() or None
+        text = (message or "").strip() or None
         if text is None and message_extras:
             return self._result("error", action="send", message="message_extras requires a non-empty message body.")
         if text is None and not attachments:
@@ -315,7 +313,6 @@ class MatrixMessageOperations:
             text = _format_direct_text(text)
             if text is None:
                 return self._result("error", action="send", room_id=room_id, message=_DIRECT_INTERACTIVE_ERROR)
-        noted = _NO_IMAGE_NOTE if text != written else ""
         contact_verdict = await self._contact_gate(
             context,
             action="send",
@@ -408,7 +405,7 @@ class MatrixMessageOperations:
                 return self._result("error", action="send", message=error, **asdict(state))
         if state.event_id is None and state.attachment_event_ids:
             state.event_id = state.attachment_event_ids[0]
-        return self._result("ok", action="send", **asdict(state), **_sent_fields(contact_verdict, "Sent", text, noted))
+        return self._result("ok", action="send", **asdict(state), **_contact_policy_fields(contact_verdict, "Sent"))
 
     async def _message_react(
         self,
@@ -451,7 +448,7 @@ class MatrixMessageOperations:
                 reacted_event_id=event_id,
                 reaction=reaction,
                 event_id=response.event_id,
-                **_sent_fields(contact_verdict, "Reacted"),
+                **_contact_policy_fields(contact_verdict, "Reacted"),
             )
         return self._result(
             "error",
@@ -585,7 +582,6 @@ class MatrixMessageOperations:
         formatted_text = _format_direct_text(new_text)
         if formatted_text is None:
             return self._result("error", action="edit", room_id=room_id, message=_DIRECT_INTERACTIVE_ERROR)
-        noted = _NO_IMAGE_NOTE if formatted_text != new_text else ""
         contact_verdict = await self._contact_gate(
             context,
             action="edit",
@@ -630,7 +626,7 @@ class MatrixMessageOperations:
             thread_id=thread_id,
             edited_event_id=event_id,
             event_id=delivered.event_id,
-            **_sent_fields(contact_verdict, "Edited", formatted_text, noted),
+            **_contact_policy_fields(contact_verdict, "Edited"),
         )
 
     async def dispatch_action(

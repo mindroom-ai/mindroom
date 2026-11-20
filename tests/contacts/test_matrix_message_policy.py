@@ -235,21 +235,6 @@ async def test_send_into_contact_room_follows_the_verdict(
 
 
 @pytest.mark.asyncio
-async def test_send_reports_both_the_image_note_and_the_contact_policy(tmp_path: Path) -> None:
-    """The policy checks the text with its image already noted, and the result names both changes."""
-    config, paths = _setup(tmp_path)
-    _contact(paths)
-    seen: list[str] = []
-    context = _context(config, paths, _recorder(seen, "rewrite"))
-
-    payload = await _call(context, message="Menu: ![menu](./menu.png)")
-
-    assert seen == ["Menu: \u26a0\ufe0f Image not sent: menu (no uploaded file)"]
-    assert payload["note"].startswith("Sent (changed by the contact policy; an image with no uploaded file")
-    assert payload["sent_text"] == "Dinner?" == _sent(context)[0]["body"]
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "call",
     [
