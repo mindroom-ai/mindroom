@@ -2609,6 +2609,7 @@ depends_on = [
     "mindroom.custom_tools.matrix_user_authority",
     "mindroom.custom_tools.matrix_user_reads",
     "mindroom.custom_tools.matrix_user_writes",
+    "mindroom.entity_resolution",
     "mindroom.matrix.user_masquerade",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.runtime_context",
@@ -2622,8 +2623,6 @@ depends_on = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.visible_body",
     "mindroom.tool_system.events",
-    "mindroom.entity_resolution",
-    "mindroom.tool_system.runtime_context",
 ]
 visibility = ["mindroom.custom_tools.matrix_user", "mindroom.custom_tools.matrix_user_writes"]
 

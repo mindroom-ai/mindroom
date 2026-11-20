@@ -137,14 +137,14 @@ def _with_event_marker(
 async def _resolve_event_content(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None,
-    trusted_sender_ids: Collection[str],
+    agent_sender_ids: Collection[str],
 ) -> tuple[dict[str, Any], bool]:
     """Return one event's canonical content plus whether resolving it changed anything."""
     preview_content = _normalized_content_dict(event_source.get("content", {}))
     resolved_content = await _resolve_canonical_content(preview_content, client)
     if resolved_content is not preview_content:
         resolved_content = _with_event_marker(_with_event_relation(resolved_content, preview_content), preview_content)
-    if event_source.get("sender") in trusted_sender_ids:
+    if isinstance(sender := event_source.get("sender"), str) and sender in agent_sender_ids:
         # An agent's fetched reply is read with its tool markers in its text, as a synced one is.
         resolved_content = tool_markers_in_text(resolved_content)
     return resolved_content, resolved_content is not preview_content
@@ -277,10 +277,10 @@ async def extract_edit_body(
 async def resolve_event_source_content(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None = None,
-    trusted_sender_ids: Collection[str] = (),
+    agent_sender_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Return an event source with canonical v2 sidecar content hydrated when available."""
-    resolved_content, content_changed = await _resolve_event_content(event_source, client, trusted_sender_ids)
+    resolved_content, content_changed = await _resolve_event_content(event_source, client, agent_sender_ids)
     if not content_changed:
         return event_source
 

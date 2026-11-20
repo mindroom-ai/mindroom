@@ -17,6 +17,7 @@ from pydantic import ValidationError
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
     ORIGINAL_SENDER_KEY,
@@ -30,6 +31,7 @@ from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.message_target import MessageTarget
+from mindroom.requester_identity import mindroom_user_id
 from mindroom.tool_system.events import tool_markers_out_of_text
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -59,12 +61,14 @@ def _make_context(
     threads: dict[str, str | None] | None = None,
     relations: object | None = None,
     aliases: dict[str, list[str]] | None = None,
+    mindroom_user: MindRoomUserConfig | None = None,
 ) -> ToolRuntimeContext:
     runtime_root = Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
             authorization={"aliases": aliases or {}},
+            mindroom_user=mindroom_user,
         ),
         test_runtime_paths(runtime_root),
     )
@@ -1201,10 +1205,15 @@ async def test_matrix_api_search_event_context_preserves_profile_info() -> None:
 
 @pytest.mark.asyncio
 async def test_matrix_api_search_snippets_show_an_agents_tool_calls_and_put_none_in_a_persons_message() -> None:
-    """A snippet is made from the reply as its agent built it, which Matrix holds without its tool marker lines."""
+    """A snippet is made from the reply as its agent built it, which Matrix holds without its tool marker lines.
+
+    A person may sign in to the internal user's account, and a homeserver may answer with a sender that is no ID.
+    """
     tool = MatrixApiTools()
-    ctx = _make_context()
+    ctx = _make_context(mindroom_user=MindRoomUserConfig())
     agent = entity_identity_registry(ctx.config, ctx.runtime_paths).current_ids["general"].full_id
+    internal_user = mindroom_user_id(ctx.config, ctx.runtime_paths)
+    assert internal_user is not None
 
     def reply(body: str, calls: int) -> tuple[dict[str, object], dict[str, object]]:
         built: dict[str, object] = {
@@ -1219,14 +1228,17 @@ async def test_matrix_api_search_snippets_show_an_agents_tool_calls_and_put_none
         }
         return built, tool_markers_out_of_text(built)
 
-    async def snippets(hit: dict[str, object], neighbour: dict[str, object], sender: str) -> list[object]:
+    async def snippets(hit: dict[str, object], neighbour: dict[str, object], sender: object) -> list[object]:
         ctx.client._send.return_value = _MatrixSearchResponse(
             count=1,
             next_batch=None,
             results=[
                 _search_result(
-                    result=_raw_event(sender=sender, content=hit),
-                    context={"events_before": [_raw_event(sender=sender, content=neighbour)], "events_after": []},
+                    result={**_raw_event(content=hit), "sender": sender},
+                    context={
+                        "events_before": [{**_raw_event(content=neighbour), "sender": sender}],
+                        "events_after": [],
+                    },
                 ),
             ],
         )
@@ -1240,7 +1252,8 @@ async def test_matrix_api_search_snippets_show_an_agents_tool_calls_and_put_none
 
     assert await snippets(held_hit, held_neighbour, agent) == ["The needle. 🔧 `shell` [1]", "🔧 `shell` [1]"]
     assert await snippets(hit, neighbour, agent) == ["The needle. 🔧 `shell` [1]", "🔧 `shell` [1]"]
-    assert await snippets(held_hit, held_neighbour, "@alice:localhost") == ["The needle.", ""]
+    for sender in ("@alice:localhost", internal_user, [agent], {"id": agent}):
+        assert await snippets(held_hit, held_neighbour, sender) == ["The needle.", ""]
 
 
 @pytest.mark.asyncio

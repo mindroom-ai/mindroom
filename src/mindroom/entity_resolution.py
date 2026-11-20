@@ -259,8 +259,8 @@ class EntityIdentityRegistry:
         return self.current_entity_name_for_user_id(user_id, include_router=include_router) is not None
 
     @property
-    def _internal_sender_ids(self) -> frozenset[str]:
-        """Return current Matrix IDs trusted as managed internal senders."""
+    def managed_user_ids(self) -> frozenset[str]:
+        """Return the current Matrix IDs of the configured entities: the router, the agents and the teams."""
         return frozenset(matrix_id.full_id for matrix_id in self.current_ids.values())
 
 
@@ -389,7 +389,7 @@ def _validate_internal_user_id_is_unique(
 
 def current_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
     """Return current runtime-owned Matrix IDs trusted as internal senders."""
-    sender_ids = set(entity_identity_registry(config, runtime_paths)._internal_sender_ids)
+    sender_ids = set(entity_identity_registry(config, runtime_paths).managed_user_ids)
     if internal_user_id := mindroom_user_id(config, runtime_paths):
         sender_ids.add(internal_user_id)
     return frozenset(sender_ids)

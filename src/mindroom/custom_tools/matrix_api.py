@@ -14,7 +14,7 @@ from mindroom.constants import ACTING_REQUESTER_KEY
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
-from mindroom.entity_resolution import current_internal_sender_ids
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.client_room_admin import room_admin_power_user
@@ -355,7 +355,7 @@ class MatrixApiTools(Toolkit):
         event_type = raw_event_dict.get("type")
         content = raw_event_dict.get("content")
         normalized_content = cls._copy_string_keyed_dict(content) or {}
-        if sender in agents:
+        if isinstance(sender, str) and sender in agents:
             # An agent's reply is read with its tool markers in its text, which Matrix holds without them.
             normalized_content = tool_markers_in_text(normalized_content)
         origin_server_ts = raw_event_dict.get("origin_server_ts")
@@ -1249,7 +1249,7 @@ class MatrixApiTools(Toolkit):
         if isinstance(response, _MatrixSearchResponse):
             normalized_results: list[dict[str, object]] = []
             include_context = event_context is not None
-            agents = current_internal_sender_ids(context.config, context.runtime_paths)
+            agents = entity_identity_registry(context.config, context.runtime_paths).managed_user_ids
             for raw_result in response.results:
                 event_payload = self._normalize_search_event_payload(raw_result.get("result"), agents)
                 rank = raw_result.get("rank")

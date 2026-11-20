@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, TypeIs
 import nio
 
 from mindroom.constants import STREAM_STATUS_KEY
-from mindroom.entity_resolution import current_internal_sender_ids
+from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.matrix.event_info import EventInfo, reply_to_event_id_from_content
 from mindroom.matrix.message_content import (
     VisibleRoomMessage,
@@ -242,12 +242,12 @@ async def resolve_visible_event_source(
 ) -> tuple[dict[str, Any], str]:
     """Resolve one event source plus its canonical visible body from runtime config."""
     normalized_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
-    trusted = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
-    resolved_event_source = await resolve_event_source_content(normalized_event_source, client, trusted)
+    agents = entity_identity_registry(config, runtime_paths).managed_user_ids
+    resolved_event_source = await resolve_event_source_content(normalized_event_source, client, agents)
     return resolved_event_source, visible_body_from_event_source(
         resolved_event_source,
         fallback_body,
-        trusted_sender_ids=trusted,
+        trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
     )
 
 

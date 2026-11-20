@@ -451,7 +451,15 @@ async def test_an_oversized_room_list_says_what_to_do(client: nio.AsyncClient, h
 
 
 # A page of ``ROOM``'s messages, leaving out what a call does not name.
-_messages = partial(read_messages, room_id=ROOM, event_id=None, thread_id=None, page_token=None, limit=None)
+_messages = partial(
+    read_messages,
+    room_id=ROOM,
+    agents=frozenset(),
+    event_id=None,
+    thread_id=None,
+    page_token=None,
+    limit=None,
+)
 
 
 def _encrypted_event(event_id: str, *, minute: int = 0, edits: str | None = None) -> dict[str, object]:
@@ -890,7 +898,7 @@ async def test_a_thread_reply_names_its_thread(client: nio.AsyncClient, homeserv
     )
 
     page = await _messages(client)
-    found = await search_messages(client, "tacos", room_id=None, page_token=None, limit=None)
+    found = await search_messages(client, "tacos", frozenset(), room_id=None, page_token=None, limit=None)
 
     assert page["messages"] == [
         message_line("$root", "Lunch? [thread: 1 reply]", sender=CAROL),
@@ -941,8 +949,8 @@ async def test_search_covers_joined_rooms_or_one_room(client: nio.AsyncClient, h
         next_batch="b1",
     )
 
-    everywhere = await search_messages(client, "budget", room_id=None, page_token=None, limit=None)
-    one_room = await search_messages(client, "budget", room_id=ROOM, page_token="b1", limit=80)  # noqa: S106
+    everywhere = await search_messages(client, "budget", frozenset(), room_id=None, page_token=None, limit=None)
+    one_room = await search_messages(client, "budget", frozenset(), room_id=ROOM, page_token="b1", limit=80)  # noqa: S106
 
     assert everywhere == {
         "messages": [
@@ -992,7 +1000,7 @@ async def test_search_shows_an_edits_new_text_and_skips_redactions(
         edit_of("$forged", "$plan", "budget cut", sender=mallory, minute=4, room_id=ROOM),
     )
 
-    result = await search_messages(client, "budget", room_id=None, page_token=None, limit=None)
+    result = await search_messages(client, "budget", frozenset(), room_id=None, page_token=None, limit=None)
 
     assert result == {
         "messages": [
@@ -1015,7 +1023,7 @@ async def test_search_keeps_an_edit_when_another_sender_edited_the_same_message(
         edit_of("$older", "$plan", "budget is due thursday", minute=3, room_id=ROOM),
     )
 
-    result = await search_messages(client, "budget", room_id=None, page_token=None, limit=None)
+    result = await search_messages(client, "budget", frozenset(), room_id=None, page_token=None, limit=None)
 
     assert result == {
         "messages": [
@@ -1039,7 +1047,7 @@ async def test_search_prefers_the_original_hit_over_its_edit_hit(
     hits = [original, fix]
     homeserver.answers[SEARCH_PATH] = search_answer(*(hits if original_first else hits[::-1]))
 
-    result = await search_messages(client, "budget", room_id=None, page_token=None, limit=None)
+    result = await search_messages(client, "budget", frozenset(), room_id=None, page_token=None, limit=None)
 
     assert result == {"messages": [f"{ROOM} | {message_line('$typo', 'budget is due friday [edited]')}"]}
 
