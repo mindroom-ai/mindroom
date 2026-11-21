@@ -85,8 +85,8 @@ async def reconcile_room_router_binding(
 
     Returns whether nothing is left to do. The binding keeps the name today's clients read: the privileged MindRoom
     account whose room state they trust. A binding naming another account stays, so two privileged stewards cannot
-    take turns overwriting it; a stale one only leaves voice echoes as standalone rows until a room admin clears it. A room whose power levels refuse the write
-    is done too, since retrying cannot help. Other failures leave it to the next trigger.
+    take turns overwriting it; a stale one only leaves voice echoes as standalone rows until a room admin clears it.
+    A room whose power levels refuse the write is done too. The steward retries transient failures in the background.
     """
     phase = "state_get"
     try:

@@ -41,7 +41,7 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
     The room's steward reads and writes with its own client; a bot that answers a command reads with its client
     and writes through ``put_state``, the steward's.
     None says the room refused the write for lack of power.
-    Failures leave the next trigger free to retry.
+    The steward retries transient failures in the background.
     """
     phase = "room_lock"
     try:

@@ -36,7 +36,7 @@ from mindroom.matrix.room_member_joins import (
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     import structlog
 
@@ -279,9 +279,6 @@ class StewardDuties:
     async def _reconcile_room_state(self, room_id: str, needed: set[str] | None = None, delay: int = 0) -> set[str]:
         """Return failed operations; run retries in order so they do not compete for nio's crypto lock."""
         runtime = self.deps.runtime
-        client = runtime.client
-        if not self._may_publish_room_state(room_id) or client is None or room_id not in client.rooms:
-            return set()
 
         def failure_level(timed_out: bool) -> int:
             if room_id in self._room_state_warned:
@@ -291,19 +288,27 @@ class StewardDuties:
             self._room_state_warned.add(room_id)
             return logging.WARNING
 
-        args = (client, runtime.config, runtime.runtime_paths, room_id)
-        may_claim = partial(self._may_publish_room_state, room_id)
-        checks = {
-            "accounts": partial(reconcile_room_accounts, *args),
-            "mode": partial(reconcile_room_thread_mode, *args),
-            "binding": partial(reconcile_room_router_binding, client, room_id, may_claim=may_claim),
-        }
+        def room_checks() -> dict[str, Callable[..., Awaitable[bool | None]]]:
+            client = runtime.client
+            if not self._may_publish_room_state(room_id) or client is None or room_id not in client.rooms:
+                return {}
+            args = (client, runtime.config, runtime.runtime_paths, room_id)
+            may_claim = partial(self._may_publish_room_state, room_id)
+            return {
+                "accounts": partial(reconcile_room_accounts, *args),
+                "mode": partial(reconcile_room_thread_mode, *args),
+                "binding": partial(reconcile_room_router_binding, client, room_id, may_claim=may_claim),
+            }
+
         if needed is not None:
             return {
                 check
                 for check in ("mode", "accounts", "binding")
-                if check in needed and await checks[check](failure_level=failure_level) is False
+                if check in needed
+                and (run := room_checks().get(check)) is not None
+                and await run(failure_level=failure_level) is False
             }
+        checks = room_checks()
         results = await asyncio.gather(*(check(failure_level=failure_level) for check in checks.values()))
         return {check for check, result in zip(checks, results, strict=True) if result is False}
 

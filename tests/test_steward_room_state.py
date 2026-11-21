@@ -1631,6 +1631,70 @@ async def test_ad_hoc_room_publishes_mixed_mode_on_its_first_retry(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["reload", "handover", "left"])
+async def test_retry_rechecks_room_inputs_after_a_slow_mode_turn(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    """An accounts retry must not use the config or eligibility from before the mode turn."""
+    config, _, ids, _, client = room_state
+    removed_member = ids["agent2"].full_id  # Still joined, for example for approval recovery.
+    duties = _owner_bot(room_state).steward_duties
+    runtime = duties.deps.runtime
+    clock = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    mode_paused = asyncio.Event()
+    release = asyncio.Event()
+    first = {EVENT_TYPE, ACCOUNTS_EVENT_TYPE}
+    write = client.room_put_state.side_effect
+
+    async def write_state(room_id: str, event_type: str, content: dict, **kwargs: object) -> object:
+        if event_type in first:
+            first.remove(event_type)
+            return nio.RoomPutStateError("Temporarily unavailable", "M_UNKNOWN")
+        if event_type == EVENT_TYPE and not mode_paused.is_set():
+            mode_paused.set()
+            await release.wait()
+        return await write(room_id, event_type, content, **kwargs)
+
+    client.room_put_state.side_effect = write_state
+    await duties._publish_room_state(ROOM_ID)
+    retry = duties._room_state_retries[ROOM_ID]
+    sweep = None
+    try:
+        for tick in (0, 1):
+            clock = tick
+            for _ in range(40):
+                await asyncio.sleep(0)
+        assert mode_paused.is_set()
+        if change == "reload":
+            runtime.config = config.model_copy(deep=True)
+            del runtime.config.agents["agent2"]
+            sweep = asyncio.create_task(reconcile_held_room_states(runtime.orchestrator))
+            for _ in range(50):
+                await asyncio.sleep(0)
+            assert _accounts(room_state) is not None
+            assert removed_member not in (_accounts(room_state) or ())
+        elif change == "handover":
+            runtime.orchestrator.room_steward.return_value = MagicMock(agent_name="agent1")
+        else:
+            del client.rooms[ROOM_ID]
+        release.set()
+        await retry
+        if sweep is not None:
+            await sweep
+            assert removed_member not in (_accounts(room_state) or ())
+        else:
+            assert client.joined_members.await_count == len(_writes(client, ACCOUNTS_EVENT_TYPE)) == 1
+        assert not duties._room_state_retries
+    finally:
+        release.set()
+        duties.stopping()
+        await asyncio.gather(retry, *([sweep] if sweep is not None else []), return_exceptions=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("lose_stewardship", [False, True])
 async def test_sweep_retries_failed_room_with_backoff(
     room_state: RoomState,
