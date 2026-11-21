@@ -509,12 +509,12 @@ class WorkflowEngine:
         )
         decision = partial(decide, digest=digest, attempt=run.attempt, dirty=dirty, rerun=rerun, cached=cached)
         action = decision(saved).action
-        if saved is not None and action == "return":
-            # A request the script sent twice never repeats work, not even failed work.
-            return _receipt(saved)
         if run.epoch != epoch or run.state not in _SERVED_RUN_STATES:
             msg = f"Run {run.run_id} takes no more calls from attempt {attempt.run_id}."
             raise SupersededAttemptError(msg)
+        if saved is not None and action == "return":
+            # A request the script sent twice never repeats work, not even failed work.
+            return _receipt(saved)
         if saved is not None and action == "reconcile":
             # Left unsettled by an attempt that ended: its handle says how it ended, before any rule may run it again.
             await asyncio.to_thread(self.settle_from_handle, saved, epoch)
@@ -613,13 +613,13 @@ class WorkflowEngine:
         return _receipt(node)
 
     async def node_receipt(self, attempt: ScriptRunRecord, node_id: str, *, wait: float) -> NodeReceipt:
-        """Return a node's receipt, held up to *wait* seconds until the node has ended."""
-        run = await self._current_run(attempt)
+        """Return a node's receipt, held up to *wait* seconds until the node has ended, while the attempt is served."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + wait
-        condition = self._condition(run.run_id)
-        async with condition:
-            while True:
+        while True:
+            # Asked again after each wait: the end of the attempt ends its calls too, and those are not its to read.
+            run = await self._current_run(attempt)
+            async with (condition := self._condition(run.run_id)):
                 node = self._node(run.run_id, node_id)
                 remaining = deadline - loop.time()
                 if node.state not in _UNSETTLED_NODE_STATES or remaining <= 0:

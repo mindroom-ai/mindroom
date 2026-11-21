@@ -337,6 +337,35 @@ async def test_attempt_the_run_no_longer_names_is_refused(stack: WorkflowStack) 
 
 
 @pytest.mark.asyncio
+async def test_request_that_was_let_in_before_its_attempt_was_replaced_gets_no_receipt(stack: WorkflowStack) -> None:
+    """A request is let in when it arrives and decided under the run's lock, where the next attempt may be by then.
+
+    Its key may be a call of that attempt already: the old script still gets the refusal, and no receipt of it.
+    """
+    old, let_in = stack.attempt, stack.store.get_run(stack.run_id)
+    await stack.result("@0", "tool", _APPEND)
+    await stack.end_attempt(ScriptRunState.FAILED)
+    await stack.resume(stack.run_id)
+    assert (await stack.submit("@0", "tool", _APPEND)).cached
+
+    with pytest.raises(SupersededAttemptError):
+        await stack.engine._admit(let_in, old, NodeRequest("@0", "tool", _APPEND, {}))
+
+
+@pytest.mark.asyncio
+async def test_read_that_waited_for_a_call_while_its_attempt_was_replaced_gets_no_receipt(stack: WorkflowStack) -> None:
+    """A read is held until its call has ended, which the end of its attempt does too: then it is no longer served."""
+    old, node = stack.attempt, _dispatched_node(stack)
+    read = asyncio.create_task(stack.engine.node_receipt(old, f"n{node.seq}", wait=SETTLE_TIMEOUT_SECONDS))
+    await asyncio.sleep(0.05)
+
+    await stack.end_attempt(ScriptRunState.FAILED)
+
+    with pytest.raises(SupersededAttemptError):
+        await read
+
+
+@pytest.mark.asyncio
 async def test_node_kind_this_release_cannot_run_is_refused_by_name(stack: WorkflowStack) -> None:
     """A script written for a later SDK gets a refusal it can read, and no node is saved."""
     with pytest.raises(WorkflowRunStoreError, match="cannot run a 'agent' call"):
