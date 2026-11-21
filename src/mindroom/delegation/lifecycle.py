@@ -604,6 +604,15 @@ def _bot_in_room(context: ToolRuntimeContext | None, agent_name: str) -> bool | 
     return context.room_id in bot.client.rooms if bot.first_sync_complete else None
 
 
+def _run_runs_agent(caller_name: str, agent_name: str, config: Config, context: ToolRuntimeContext | None) -> bool:
+    """Return whether a workflow run of the caller may run the agent now; raise while its bot cannot say yet."""
+    runs = workflow_runs_agent(caller_name, agent_name, config, _bot_in_room(context, agent_name))
+    if runs is None:
+        msg = f"The bot of '{agent_name}' is still starting. Try again in a moment."
+        raise DelegationPendingError(msg)
+    return runs
+
+
 def _target_refusal(
     caller_name: str,
     agent_name: str,
@@ -680,13 +689,9 @@ def authorize_delegation(  # noqa: PLR0911
         return f"Cannot delegate to '{agent_name}': requester authorization is unavailable."
     if active_config is None or agent_name not in active_config.agents:
         return f"Cannot delegate to '{agent_name}': that agent is not allowed to reply to you."
-    runs: bool | None = True
-    if grant == "workflow":
-        runs = workflow_runs_agent(caller_name, agent_name, active_config, _bot_in_room(runtime_context, agent_name))
-    if runs is None:
-        msg = f"The bot of '{agent_name}' is still starting. Try again in a moment."
-        raise DelegationPendingError(msg)
-    if not caller_grants_child(caller_name, agent_name, active_config, grant) or not runs:
+    if not caller_grants_child(caller_name, agent_name, active_config, grant) or (
+        grant == "workflow" and not _run_runs_agent(caller_name, agent_name, active_config, runtime_context)
+    ):
         return f"Cannot delegate to '{agent_name}': it is no longer an allowed target."
     # A workflow participant is the caller's own copy inside the caller's tool call, so the requester
     # the caller already serves, possibly only through a team's access, keeps that access. So does the copy of

@@ -621,7 +621,8 @@ class WorkflowStack:
             knowledge_refresh_scheduler=None,
             agent_bots={
                 name: SimpleNamespace(
-                    client=SimpleNamespace(rooms=rooms), first_sync_complete=name not in self.unsynced
+                    client=SimpleNamespace(rooms=rooms),
+                    first_sync_complete=name not in self.unsynced,
                 )
                 for name, rooms in self.bot_rooms.items()
             },
