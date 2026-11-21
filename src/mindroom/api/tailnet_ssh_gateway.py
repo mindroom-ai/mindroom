@@ -6,7 +6,6 @@ import asyncio
 import secrets
 import time
 from contextlib import asynccontextmanager
-from functools import partial
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
@@ -43,13 +42,6 @@ def active_tailnet_ssh_worker_keys(app: FastAPI) -> frozenset[str]:
     return frozenset() if status is None else ssh.active_worker_keys(status, monotonic=time.monotonic())
 
 
-def _read_config(api_app: FastAPI) -> tuple[Config, RuntimePaths]:
-    try:
-        return config_lifecycle.read_app_committed_runtime_config(api_app)
-    except (HTTPException, TypeError):
-        raise HTTPException(503, "MindRoom's configuration is not loaded.") from None
-
-
 async def _body[T: BaseModel](request: Request, model: type[T]) -> T:
     try:
         return model.model_validate_json(await request.body())
@@ -68,7 +60,11 @@ def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
         return await call_next(request)
 
-    read_config = partial(_read_config, api_app)
+    def read_config() -> tuple[Config, RuntimePaths]:
+        try:
+            return config_lifecycle.read_app_committed_runtime_config(api_app)
+        except (HTTPException, TypeError):
+            raise HTTPException(503, "MindRoom's configuration is not loaded.") from None
 
     def ready() -> tuple[Config, RuntimePaths, ssh.GatewayStatus]:
         status = config_lifecycle.app_state(api_app).tailnet_ssh_status

@@ -1,4 +1,4 @@
-"""Token-gated sshd lifecycle for dedicated workers, using the primary's read-only key projection."""
+"""Start sshd on dedicated workers from the primary's read-only key projection."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+from asyncio import create_subprocess_exec
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
@@ -34,15 +35,12 @@ class _Start(BaseModel):
 
 
 class _WorkerSsh:
-    """A runner's sshd, if a start has run one, and the lock its starts take turns under."""
-
     def __init__(self) -> None:
         self.lock = asyncio.Lock()
         self.sshd: asyncio.subprocess.Process | None = None
 
 
 def _worker_ssh(app: FastAPI) -> _WorkerSsh:
-    """Return this runner's SSH server state, created on first use."""
     try:
         return app.state.worker_ssh
     except AttributeError:
@@ -50,13 +48,7 @@ def _worker_ssh(app: FastAPI) -> _WorkerSsh:
         return state
 
 
-def _projection_dir(app: FastAPI) -> Path:
-    """Return where this worker mounts the files the primary writes for its sshd."""
-    return sandbox_startup_manifest_path(runner_dedicated_worker_root(app_runtime_paths(app))).parent / "ssh"
-
-
 def _admits_nobody(projection_dir: Path) -> bool:
-    """Return whether ``authorized_keys`` holds no key, or is not there. Blocking."""
     try:
         return not (projection_dir / "authorized_keys").read_text(encoding="utf-8").strip()
     except FileNotFoundError:
@@ -81,7 +73,7 @@ def _sshd_argv(projection_dir: Path) -> list[str]:
 
 
 def _store_launch(app: FastAPI, payload: ExecuteRequest) -> None:
-    """Prepare the session's shell as a terminal's and keep it where the session module reads it. Blocking."""
+    """Store the terminal launch for the SSH session module."""
     launch = prepare_terminal_launch(app, payload, None)
     if launch.cwd is None:
         raise TerminalError(400, "This shell has no workspace for an SSH session to start in.")
@@ -96,17 +88,7 @@ def _store_launch(app: FastAPI, payload: ExecuteRequest) -> None:
         os.close(directory_fd)
 
 
-async def _spawn(argv: list[str]) -> asyncio.subprocess.Process:
-    # Inherit stderr: sessions can outlive the listener and must not keep its reaper waiting on a pipe.
-    return await asyncio.create_subprocess_exec(
-        *argv,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.DEVNULL,
-    )
-
-
 async def _accepts(sshd: asyncio.subprocess.Process) -> bool:
-    """Return whether sshd accepts on its port within ``_START_SECONDS``; False at once when it has exited."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _START_SECONDS
     while sshd.returncode is None and loop.time() < deadline:
@@ -121,13 +103,19 @@ async def _accepts(sshd: asyncio.subprocess.Process) -> bool:
 
 
 async def _ensure_sshd(app: FastAPI, state: _WorkerSsh) -> None:
-    """Start sshd unless it runs, and return once its port accepts. The caller holds the lock."""
-    projection_dir = _projection_dir(app)
+    """Ensure sshd listens. The caller holds the lock."""
+    root = runner_dedicated_worker_root(app_runtime_paths(app))
+    projection_dir = sandbox_startup_manifest_path(root).parent / "ssh"
     if await asyncio.to_thread(_admits_nobody, projection_dir):
         raise HTTPException(409, "No SSH public keys are authorized.")
     if state.sshd is None or state.sshd.returncode is not None:
         try:
-            state.sshd = await _spawn(_sshd_argv(projection_dir))
+            # Inherit stderr so reaping sshd doesn't wait for a pipe held open by a session.
+            state.sshd = await create_subprocess_exec(
+                *_sshd_argv(projection_dir),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+            )
         except OSError:
             raise HTTPException(503, _START_FAILED) from None
     if not await _accepts(state.sshd):
@@ -153,7 +141,7 @@ async def stop_worker_ssh(app: FastAPI) -> None:
 
 @router.post("/start", dependencies=[Depends(validate_runner_token)])
 async def start(request: Request, payload: _Start) -> dict[str, int]:
-    """Keep the session's shell from a shell call's request, start sshd unless it runs, and name its port."""
+    """Refresh the session launch and return sshd's listening port."""
     try:
         await asyncio.to_thread(_store_launch, request.app, payload.request)
     except TerminalError as error:

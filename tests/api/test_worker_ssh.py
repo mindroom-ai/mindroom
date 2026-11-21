@@ -151,8 +151,8 @@ class _FakeSshd:
         self._monkeypatch = monkeypatch
         self._sockets = sockets
 
-    async def spawn(self, argv: list[str]) -> asyncio.subprocess.Process:
-        self.argvs.append(argv)
+    async def spawn(self, *argv: str, **_kwargs: object) -> asyncio.subprocess.Process:
+        self.argvs.append(list(argv))
         reserved = self._sockets.enter_context(socket.socket())
         reserved.bind(("127.0.0.1", 0))
         self.port = reserved.getsockname()[1]
@@ -185,7 +185,7 @@ def install_fake_sshd(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[...,
 
         def install(*program: str) -> _FakeSshd:
             fake = _FakeSshd(program, monkeypatch, sockets)
-            monkeypatch.setattr(worker_ssh, "_spawn", fake.spawn)
+            monkeypatch.setattr(worker_ssh, "create_subprocess_exec", fake.spawn)
             return fake
 
         yield install
@@ -373,15 +373,15 @@ async def test_shutdown_stops_the_sshd_of_a_start_cancelled_right_after_spawning
 ) -> None:
     """A start that is cancelled once sshd runs leaves no sshd the runner has lost track of."""
 
-    async def spawn_and_cancel(argv: list[str]) -> asyncio.subprocess.Process:
-        process = await fake_sshd.spawn(argv)
+    async def spawn_and_cancel(*argv: str, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await fake_sshd.spawn(*argv, **kwargs)
         task = asyncio.current_task()
         assert task is not None
         # Takes effect at the start's next await.
         task.cancel()
         return process
 
-    monkeypatch.setattr(worker_ssh, "_spawn", spawn_and_cancel)
+    monkeypatch.setattr(worker_ssh, "create_subprocess_exec", spawn_and_cancel)
     start = asyncio.create_task(client.post("/api/sandbox-runner/ssh/start", json=_BODY))
     with pytest.raises(asyncio.CancelledError):
         await start

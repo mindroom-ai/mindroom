@@ -1,4 +1,4 @@
-"""The root `tailnet_ssh` config section: who may sign in to their worker from the operator's tailnet, and with which keys."""
+"""Tailnet logins and SSH public keys keyed by Matrix user ID."""
 
 import base64
 import binascii
@@ -9,14 +9,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.schema_hints import dashboard_hint
 
-# OpenSSH key type names, such as ssh-ed25519, ecdsa-sha2-nistp256, or sk-ssh-ed25519@openssh.com.
 _KEY_TYPE_PATTERN = re.compile(r"(?:ssh|ecdsa|sk)-[A-Za-z0-9.@-]+")
 _PRIVATE_KEY_HEADER = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 _NOT_A_KEY = "Expected an SSH public key line from a .pub file."
 
 
 def _is_canonical_base64(token: str) -> bool:
-    """Return whether a key blob is padded base64 in OpenSSH's spelling; the loader skips characters OpenSSH refuses."""
+    # The SSH key loader accepts some blobs that OpenSSH refuses.
     try:
         return base64.b64encode(base64.b64decode(token, validate=True)).decode() == token
     except binascii.Error:
@@ -71,11 +70,12 @@ class TailnetSshConfig(BaseModel):
     @classmethod
     def _validate_logins(cls, value: dict[str, str]) -> dict[str, str]:
         validate_concrete_matrix_user_ids(list(value), field_name="tailnet_ssh.logins")
-        # A tagged device has an empty login, so an empty value would admit every tagged device.
-        if any(not login or login != login.strip() for login in value.values()):
+        # Tagged peers have empty logins. Never make one an allowed login.
+        logins = value.values()
+        if any(not login or login != login.strip() for login in logins):
             msg = "tailnet_ssh.logins needs nonempty logins with no surrounding whitespace."
             raise ValueError(msg)
-        if len(set(value.values())) != len(value):
+        if len(set(logins)) != len(value):
             msg = "tailnet_ssh.logins must map Matrix users to distinct logins."
             raise ValueError(msg)
         return value
