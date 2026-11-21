@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import nio
 from aiohttp import ClientError
@@ -205,7 +205,8 @@ async def find_route_event_id_via_room_messages(
             routed = route.get("event_ids") if isinstance(route, dict) else None
             own_type = event_source.get("type") if event_source.get("sender") == client.user_id else None
             if own_type == ROUTE_EVENT_TYPE and isinstance(routed, list) and sorted(map(str, routed)) == sources:
-                return event.event_id
+                # Only a nio.Event can supply the matching source above.
+                return cast("nio.Event", event).event_id
             if event_source.get("event_id") in sources:
                 break
             opaque = opaque or own_type == "m.room.encrypted"
