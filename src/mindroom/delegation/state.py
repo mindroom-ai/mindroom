@@ -185,6 +185,19 @@ class DelegationChild:
     # Unix seconds when each of the turn's tool calls that has not completed was first announced, across its pauses,
     # by call id; the caller's progress and the feed's row name it.
     tool_started_at: dict[str, float] = field(default_factory=dict)
+    # LEGACY_COMPAT: Delegation child snapshots stored before a workflow run could run agents.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `workflow_run_id`, `workflow_node_key` and `workflow_generation`.
+    # Last legacy release: v2026.11.444; the next, still unreleased, release writes all three.
+    # Handling: The defaults read such a child as a subagent of no run, which it was. They stay on the model for the
+    # reason above.
+    # Coverage: tests/test_workflow_targets.py::test_old_child_snapshot_reads_without_the_new_fields,
+    # tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did.
+    # The workflow run whose script runs this turn, with the node of that call and its generation; None for a
+    # subagent no run runs. Such a child is granted by its caller's `workflow` toolkit (`delegation_grant`).
+    workflow_run_id: str | None = None
+    workflow_node_key: str | None = None
+    workflow_generation: int | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> DelegationChild:

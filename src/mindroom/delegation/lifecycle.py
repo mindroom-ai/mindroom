@@ -81,7 +81,7 @@ logger = get_logger(__name__)
 
 MAX_DELEGATION_DEPTH = 3
 
-type _DelegationGrant = Literal["delegate", "dynamic_workflow"]
+type _DelegationGrant = Literal["delegate", "dynamic_workflow", "workflow"]
 
 
 @dataclass
@@ -545,7 +545,9 @@ async def observe_child_event(event: RunEvent) -> None:
 
 
 def delegation_grant(child: DelegationChild) -> _DelegationGrant:
-    """Name the caller permission that authorizes this child: its delegate allowlist or its workflow tool."""
+    """Name the caller permission that authorizes this child: its delegate allowlist, or the workflow tool it runs under."""
+    if child.workflow_run_id is not None:
+        return "workflow"
     return "dynamic_workflow" if child.persona is not None and child.persona.source_kind == "workflow" else "delegate"
 
 
@@ -570,13 +572,27 @@ def caller_grants_child(caller_name: str, agent_name: str, config: Config, grant
         return False
     if grant == "delegate":
         return agent_name in caller.delegate_to
-    # The workflow tool is built in, so the built-in tools decide whether the caller is offered it.
-    return agent_name == caller_name and "dynamic_workflow" in caller_toolkit_names(
-        caller_name,
-        config,
-        builtin_tool_registry(),
-        delegation_depth=0,
-    )
+    # The workflow tools are built in, so the built-in tools decide whether the caller is offered one. Which agents
+    # a `workflow` run may run depends on its room, which only `workflow_runs_agent` is asked with.
+    offered = grant in caller_toolkit_names(caller_name, config, builtin_tool_registry(), delegation_depth=0)
+    return offered and (grant == "workflow" or agent_name == caller_name)
+
+
+def workflow_runs_agent(caller_name: str, agent_name: str, config: Config, joined: bool | None) -> bool | None:
+    """Return whether a workflow run of the caller may run the agent, apart from the requester's access to that agent.
+
+    Itself and the agents it may delegate to, always. Any other agent while its bot is in the run's room, which
+    *joined* says: None while that bot's rooms are not known, which is then the answer.
+    """
+    caller = config.agents.get(caller_name)
+    return agent_name == caller_name or (caller is not None and agent_name in caller.delegate_to) or joined
+
+
+def _bot_in_room(context: ToolRuntimeContext | None, agent_name: str) -> bool:
+    """Return whether the agent's own bot, which knows the rooms it is in, is in the room of *context*."""
+    orchestrator = context.orchestrator if context is not None else None
+    client = getattr(orchestrator.agent_bots.get(agent_name), "client", None) if orchestrator is not None else None
+    return context is not None and client is not None and context.room_id in client.rooms
 
 
 def _target_refusal(
@@ -594,7 +610,8 @@ def _target_refusal(
         return None if agent_name == caller_name else self_only_refusal(agent_name)
     caller = config.agents.get(caller_name)
     allowed_targets = caller.delegate_to if caller is not None else []
-    if agent_name in allowed_targets:
+    if agent_name in allowed_targets or grant == "workflow":
+        # Which agents a workflow may run depends on the requester and the room, which `authorize_delegation` sees.
         return None
     return f"Cannot delegate to '{agent_name}'. Allowed subagents: {', '.join(allowed_targets)}."
 
@@ -654,11 +671,17 @@ def authorize_delegation(  # noqa: PLR0911
         return f"Cannot delegate to '{agent_name}': requester authorization is unavailable."
     if active_config is None or agent_name not in active_config.agents:
         return f"Cannot delegate to '{agent_name}': that agent is not allowed to reply to you."
-    if not caller_grants_child(caller_name, agent_name, active_config, grant):
+    if not caller_grants_child(caller_name, agent_name, active_config, grant) or (
+        grant == "workflow"
+        and not workflow_runs_agent(caller_name, agent_name, active_config, _bot_in_room(runtime_context, agent_name))
+    ):
         return f"Cannot delegate to '{agent_name}': it is no longer an allowed target."
     # A workflow participant is the caller's own copy inside the caller's tool call, so the requester
-    # the caller already serves, possibly only through a team's access, keeps that access.
-    if grant == "delegate" and not is_sender_allowed_for_responder(
+    # the caller already serves, possibly only through a team's access, keeps that access. So does the copy of
+    # itself that a workflow run's script runs; any other agent of a run must answer the requester, as a subagent.
+    if (
+        grant == "delegate" or (grant == "workflow" and agent_name != caller_name)
+    ) and not is_sender_allowed_for_responder(
         requester_id,
         agent_name,
         authorization_room_id,

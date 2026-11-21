@@ -16,7 +16,12 @@ from mindroom.custom_tools.job import JobTools
 from mindroom.custom_tools.workflow import continued_workflow_job, stopped_workflow_job
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.continuation import continued_subagent_job
-from mindroom.delegation.lifecycle import active_delegation_edges, caller_grants_child, delegation_grant
+from mindroom.delegation.lifecycle import (
+    active_delegation_edges,
+    caller_grants_child,
+    delegation_grant,
+    workflow_runs_agent,
+)
 from mindroom.delegation.recovery import interrupt_stopped_child
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
@@ -241,13 +246,23 @@ class ToolJobRuntimeCoordinator:
             return "denied"
         entities = _accessed_entities(config, owner.recipient, owner.agent_name)
         tools = config_plugins(config, self.runtime_paths).tools
+        runs: bool | None = True
         if job.kind == "delegation":
             child = delegation_child(job)
             child_name = child.child_agent_name
+            grant = delegation_grant(child)
+            if grant == "workflow":
+                # The agent of a run's call: one that is neither the caller nor in its `delegate_to` must be in the
+                # run's room, which its own bot knows once it has synced.
+                bot = self.bot_provider(child_name)
+                client = bot.client if bot is not None and bot.first_sync_complete else None
+                joined = owner.room_id in client.rooms if client is not None else None
+                runs = workflow_runs_agent(owner.agent_name, child_name, config, joined)
             if (
-                not caller_grants_child(owner.agent_name, child_name, config, delegation_grant(child))
+                not caller_grants_child(owner.agent_name, child_name, config, grant)
                 or child_name not in config.agents
                 or child.storage_bindings != freeze_delegation_storage(config, child.storage_bindings)
+                or runs is False
             ):
                 return "denied"
             entities.add(child_name)
@@ -269,7 +284,8 @@ class ToolJobRuntimeCoordinator:
             return "denied"
         if not _transport_allows_actor(config, owner.recipient, owner.agent_name):
             return "denied"
-        return self._requester_access(config, owner.requester_id, owner.room_id, entities)
+        access = self._requester_access(config, owner.requester_id, owner.room_id, entities)
+        return "pending" if runs is None and access == "allowed" else access
 
     def _requester_access(
         self,
