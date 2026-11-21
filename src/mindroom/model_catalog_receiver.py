@@ -248,7 +248,7 @@ class _Receiver:
             "version": 1,
             "request_id": request.request_id,
             "room_id": request.room_id,
-            "capabilities": ["model_selection"],
+            "capabilities": ["model_selection", "thread_model_on_root"],
             "agent_user_ids": list(scope.agent_user_ids),
             "catalog_revision": revision,
             "models": entries,

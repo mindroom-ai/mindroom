@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom import model_selection
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.commands.handler import handle_command
 from mindroom.commands.model_commands import handle_model_command
@@ -21,7 +22,12 @@ from mindroom.config.models import ModelConfig, ReasoningConfig
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import command_result_content_to_dict
-from mindroom.thread_models import resolve_thread_model_override, set_thread_model_override
+from mindroom.thread_models import (
+    _get_thread_model_override,
+    _store_path,
+    resolve_thread_model_override,
+    set_thread_model_override,
+)
 from mindroom.turn_model import ModelScope, TeamTurnModelSelection, resolve_team_turn_models, resolve_turn_model
 from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import make_test_command_handler_context
@@ -38,6 +44,53 @@ if TYPE_CHECKING:
 
 
 _LEVELS = ReasoningConfig(levels=["low", "high"], default="low")
+
+
+_ROOT_CHOICE = {
+    "version": 1,
+    "runtime_user_id": "@mindroom_helper:example.org",
+    "runtime_device_id": "DEVICE",
+    "model": "leveled@high",
+}
+
+
+def test_parse_thread_model_choice() -> None:
+    """A valid root choice names one runtime and preserves the model reference exactly."""
+    choice = model_selection.parse_thread_model_choice({"io.mindroom.thread_model": _ROOT_CHOICE})
+    assert choice is not None
+    assert (choice.runtime_user_id, choice.runtime_device_id, choice.model) == (
+        "@mindroom_helper:example.org",
+        "DEVICE",
+        "leveled@high",
+    )
+    assert model_selection.parse_thread_model_choice({}) is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        "leveled@high",
+        {"version": 1, "model": "leveled@high"},
+        {**_ROOT_CHOICE, "version": True},
+        {**_ROOT_CHOICE, "version": 1.0},
+        {**_ROOT_CHOICE, "version": 2},
+        {"version": 1, "runtime_user_id": "@helper:example.org", "model": "leveled@high"},
+        {**_ROOT_CHOICE, "runtime_device_id": "D" * 256},
+        {**_ROOT_CHOICE, "runtime_device_id": " DEVICE "},
+        {**_ROOT_CHOICE, "runtime_device_id": 1},
+        {**_ROOT_CHOICE, "runtime_user_id": 1},
+        {**_ROOT_CHOICE, "runtime_user_id": "a" * 1025},
+        {**_ROOT_CHOICE, "model": ["leveled@high"]},
+        {**_ROOT_CHOICE, "model": "a" * 1025},
+        {**_ROOT_CHOICE, "model": " leveled@high "},
+        {**_ROOT_CHOICE, "model": ""},
+        {**_ROOT_CHOICE, "operation": "reset"},
+    ],
+)
+def test_parse_thread_model_choice_ignores_invalid_metadata(raw: object) -> None:
+    """Malformed metadata cannot become a model pick or reject a conversation turn."""
+    assert model_selection.parse_thread_model_choice({"io.mindroom.thread_model": raw}) is None
 
 
 def _helper_override(paths: RuntimePaths, config: Config) -> str | None:
@@ -709,6 +762,7 @@ async def _model_command_reply(
     *,
     thread_model: str | None = None,
     picker_operation: str | None = None,
+    unavailable_store: bool = False,
 ) -> tuple[str, dict | None]:
     """Run USER's command through the handler and return its reply and the content recorded beside it.
 
@@ -724,6 +778,10 @@ async def _model_command_reply(
             entity_names=("helper",),
             config=config,
         )
+    if unavailable_store:
+        store = _store_path(paths)
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_text("not json", encoding="utf-8")
     content: dict[str, object] = {"body": body, "msgtype": "m.text"}
     if picker_operation is not None:
         content["io.mindroom.model_selection"] = {
@@ -759,6 +817,10 @@ async def _model_command_reply(
     )
     resets = body.endswith(("reset", "clear"))
     assert _helper_override(paths, config) == (None if resets else thread_model or "leveled@high")
+    if resets and not unavailable_store and thread_model is None:
+        record = _get_thread_model_override(paths, "$root")
+        assert record is not None
+        assert record["opening_model_consumed"] == "1"
     return results[0]
 
 
@@ -835,6 +897,26 @@ async def test_picker_reset_with_no_override_to_remove_is_still_acknowledged(tmp
             "override": None,
         },
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("picker_operation", [None, "reset"], ids=["typed", "picker"])
+async def test_failed_model_reset_reports_unavailable_storage(tmp_path: Path, picker_operation: str | None) -> None:
+    """Failing to read the store is not a successful empty reset."""
+    text, extra = await _model_command_reply(
+        tmp_path,
+        "!model reset",
+        picker_operation=picker_operation,
+        unavailable_store=True,
+    )
+    assert "storage is unavailable" in text
+    if picker_operation is None:
+        assert extra is None
+    else:
+        assert extra is not None
+        result = extra["io.mindroom.model_selection_result"]
+        assert result["status"] == "rejected"
+        assert "storage is unavailable" in result["error"]
 
 
 @pytest.mark.parametrize("args_text", ["default", "reset"])
