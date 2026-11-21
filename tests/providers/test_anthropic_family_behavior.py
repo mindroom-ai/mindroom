@@ -1797,6 +1797,7 @@ async def test_the_direct_endpoint_is_client_params_then_base_url_then_anthropic
     wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
     params = {"client_params": {"base_url": "https://params-gateway.example"}}
     own = {"base_url": "https://gateway.example/anthropic/"}
+    openrouter = {"base_url": "https://openrouter.ai/api/"}
     unset = (
         {"base_url": ""},
         {"base_url": None},
@@ -1809,7 +1810,7 @@ async def test_the_direct_endpoint_is_client_params_then_base_url_then_anthropic
                 ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k", extra_kwargs=extra_kwargs),
                 runtime_paths,
             )
-            for extra_kwargs in (None, params, own, {**own, **params}, *unset)
+            for extra_kwargs in (None, params, own, {**own, **params}, openrouter, *unset)
         ]
         for provider in providers:
             await claude_turn(replace(provider, http_client=wire.client), ModelRequest(messages=_user()))
@@ -1819,6 +1820,7 @@ async def test_the_direct_endpoint_is_client_params_then_base_url_then_anthropic
         ("params-gateway.example", "/v1/messages"),
         ("gateway.example", "/anthropic/v1/messages"),
         ("params-gateway.example", "/v1/messages"),
+        ("openrouter.ai", "/api/v1/messages"),
         *[("env-gateway.example", "/v1/messages")] * len(unset),
     ]
     assert [provider.identity.endpoint for provider in providers] == [
@@ -1826,11 +1828,12 @@ async def test_the_direct_endpoint_is_client_params_then_base_url_then_anthropic
         "https://params-gateway.example",
         "https://gateway.example/anthropic",
         "https://params-gateway.example",
+        "https://openrouter.ai/api",
         *["https://env-gateway.example"] * len(unset),
     ]
     assert providers[1].settings.client_params == params["client_params"]
-    # MindRoom adds its compaction trigger only on Anthropic's own endpoint.
     assert providers[2].capabilities.native_compaction is False
+    assert providers[4].capabilities.native_compaction is True
 
 
 def test_a_blank_exported_anthropic_base_url_keeps_the_direct_route_on_anthropics_api(

@@ -125,7 +125,7 @@ MindRoom supports automatic [OpenAI Responses compaction](https://developers.ope
 
 - **OpenAI**: GPT-5.3 Codex, GPT-5.4, and GPT-6 model families on the official Responses endpoint or the Codex login backend.
   An explicit `store: true`, background mode, an alternate OpenAI endpoint, or a custom context-management request keeps the model on text compaction.
-- **Claude**: direct Anthropic and Vertex AI Claude on Sonnet 4.6 and later, Opus 4.6 and later, Fable, and Mythos models.
+- **Claude**: direct Anthropic, [OpenRouter's Messages endpoint](models.md#claude-through-openrouter), and Vertex AI Claude on Sonnet 4.6 and later, Opus 4.6 and later, Fable, and Mythos models.
   This is a provider beta and needs a trigger of at least 50,000 tokens.
   An authored `compact_20260112` context-management policy keeps its own trigger and instructions, and `pause_after_compaction: true` is rejected because MindRoom needs the provider to continue its response.
 - Gemini, Chat Completions, and all other providers use text compaction.

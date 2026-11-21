@@ -545,6 +545,21 @@ Set `tool_call_probability` to `1` to call the shell tool on every turn or `0` t
 Set `chars_per_second` to `0` to stream without pacing delays for maximum throughput.
 Changing `seed` changes the response length, split point, and tool-call choice, which stay the same for a given conversation history.
 
+## Claude Through OpenRouter
+
+Use `provider: anthropic` with OpenRouter's Messages endpoint to use Claude [native compaction](history.md#native-compaction) through OpenRouter.
+The `provider: openrouter` route uses Chat Completions and keeps text compaction.
+
+```yaml
+models:
+  openrouter_claude:
+    provider: anthropic
+    id: claude-opus-5-5
+    extra_kwargs:
+      base_url: https://openrouter.ai/api
+      api_key: ${OPENROUTER_API_KEY}
+```
+
 ## Extra Kwargs
 
 `extra_kwargs` sets provider-specific options for the model's requests and API client.
