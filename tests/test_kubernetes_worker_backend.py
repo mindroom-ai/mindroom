@@ -4623,12 +4623,31 @@ def test_kubernetes_maintenance_reads_an_unreadable_manifest_again(
     assert named_root.exists() is False
 
 
-def test_kubernetes_maintenance_keeps_files_that_are_not_an_orphaned_pinned_workers(tmp_path: Path) -> None:
+def test_kubernetes_retirement_refuses_a_symbolic_link_marker(tmp_path: Path) -> None:
+    backend, apps, _core = _named_backend(tmp_path)
+    worker = backend.ensure_worker(_named_spec(), now=0.0)
+    root = backend.storage_root / backend._state_subpath(worker.worker_key)
+    outside = tmp_path / "not-worker-state.txt"
+    outside.write_text("keep", encoding="utf-8")
+    marker = root.with_name(f"{root.name}.retiring")
+    marker.symlink_to(outside)
+
+    with pytest.raises(WorkerBackendError, match="Failed to retire"):
+        backend.retire_worker(worker.worker_key)
+
+    assert outside.read_text(encoding="utf-8") == "keep"
+    assert marker.is_symlink()
+    assert root.is_dir()
+    assert worker.worker_id in apps.deployments
+
+
 def test_kubernetes_maintenance_keeps_a_script_worker_with_an_interrupted_retirement(tmp_path: Path) -> None:
     backend, apps, _core = _named_backend(tmp_path)
     normal_key = "v1:test:user_agent:@alice:example.test:watcher"
     key = script_worker_key_for_run(normal_key, f"script-{'c' * 32}")
-    worker = backend.ensure_worker(_spec(key, state_scope_worker_key=normal_key, private_agent_names=frozenset()), now=0.0)
+    worker = backend.ensure_worker(
+        _spec(key, state_scope_worker_key=normal_key, private_agent_names=frozenset()), now=0.0
+    )
     root = backend.storage_root / backend._state_subpath(key)
     root.with_name(f"{root.name}.retiring").write_text(key, encoding="utf-8")
     (root / ".runtime" / "startup_manifest.json").unlink()
@@ -4641,6 +4660,29 @@ def test_kubernetes_maintenance_keeps_a_script_worker_with_an_interrupted_retire
     assert not root.exists()
 
 
+def test_kubernetes_maintenance_removes_pinned_state_after_a_failed_auth_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend, apps, _core = _named_backend(tmp_path)
+    spec = _named_spec()
+    root = backend.storage_root / backend._state_subpath(spec.worker_key)
+
+    def fail_secret(**_kwargs: object) -> None:
+        msg = "could not create the Secret"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(backend._resources, "apply_auth_secret", fail_secret)
+    with pytest.raises(WorkerBackendError, match="could not create the Secret"):
+        backend.ensure_worker(spec, now=0.0)
+    assert root.is_dir()
+    assert not apps.deployments
+    backend.maintain_workers(now=1.0)
+    backend.maintain_workers(now=1.0 + kubernetes_backend_module._ORPHANED_STATE_GRACE_SECONDS)
+    assert not root.exists()
+
+
+def test_kubernetes_maintenance_keeps_files_that_are_not_an_orphaned_pinned_workers(tmp_path: Path) -> None:
     """Only a pinned worker's own files without a Deployment are removed; every other directory stays."""
     backend, apps_api, _core_api = _named_backend(tmp_path, named_worker_idle_timeout_seconds=10_000.0)
     grace = kubernetes_backend_module._ORPHANED_STATE_GRACE_SECONDS

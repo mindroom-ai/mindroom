@@ -1307,7 +1307,7 @@ class KubernetesResourceManager:
         resource_profile: str | None = None,
     ) -> dict[str, object]:
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
-        startup_manifest_hash = self._write_startup_manifest(
+        startup_manifest_hash = self.write_startup_manifest(
             worker_key=worker_key,
             state_subpath=state_subpath,
             tool_validation_snapshot=launch.tool_validation_snapshot,
@@ -1418,7 +1418,7 @@ class KubernetesResourceManager:
             tool_validation_snapshot=tool_validation_snapshot,
         )
 
-    def _write_startup_manifest(
+    def write_startup_manifest(
         self,
         *,
         worker_key: str,

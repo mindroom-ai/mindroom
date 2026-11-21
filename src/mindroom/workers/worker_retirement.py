@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import stat
+from uuid import uuid4
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -14,7 +15,14 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
-__all__ = ["open_worker_state_root", "read_worker_identity", "remove_directory_tree_at"]
+__all__ = [
+    "open_worker_state_root",
+    "open_workers_root",
+    "read_worker_identity",
+    "read_worker_marker",
+    "remove_directory_tree_at",
+    "write_worker_marker",
+]
 
 
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -50,11 +58,7 @@ def _open_directory_at(parent_fd: int, name: str) -> int:
 
 def _read_bounded_file(parent_fd: int, filename: str) -> bytes:
     _validate_segment(filename)
-    try:
-        identity_fd = os.open(filename, _IDENTITY_FILE_OPEN_FLAGS, dir_fd=parent_fd)
-    except FileNotFoundError as exc:
-        msg = "Worker identity metadata is missing."
-        raise ValueError(msg) from exc
+    identity_fd = os.open(filename, _IDENTITY_FILE_OPEN_FLAGS, dir_fd=parent_fd)
     try:
         metadata = os.fstat(identity_fd)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_IDENTITY_METADATA_BYTES:
@@ -119,11 +123,37 @@ def read_worker_identity(
                 msg = "Worker identity metadata is missing."
                 raise ValueError(msg) from exc
             descriptors.append(current_fd)
-        payload = _decode_identity(_read_bounded_file(current_fd, identity_path[-1]))
+        try:
+            payload = _decode_identity(_read_bounded_file(current_fd, identity_path[-1]))
+        except FileNotFoundError as exc:
+            msg = "Worker identity metadata is missing."
+            raise ValueError(msg) from exc
         return _identity_value(payload, identity_field_path)
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def read_worker_marker(workers_fd: int, filename: str) -> str | None:
+    """Read a bounded regular file beside a worker's state without following links."""
+    try:
+        return _read_bounded_file(workers_fd, filename).decode("utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def write_worker_marker(workers_fd: int, filename: str, key: str) -> None:
+    """Publish a marker beside the worker atomically, without opening the destination for writing."""
+    _validate_segment(filename)
+    temporary = f".retiring-{uuid4().hex}"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=workers_fd)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as marker:
+            marker.write(key)
+        os.replace(temporary, filename, src_dir_fd=workers_fd, dst_dir_fd=workers_fd)
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=workers_fd)
 
 
 def _require_current_directory(parent_fd: int, name: str, descriptor: int) -> None:
@@ -145,6 +175,7 @@ class _BoundWorkerStateRoot:
     worker_fd: int | None
     absent_root: Path | None = None
     absent_name: str | None = None
+    workers_fd: int | None = None
 
     @property
     def exists(self) -> bool:
@@ -198,6 +229,19 @@ def _remove_tree(parent_fd: int, name: str) -> None:
 
 
 @contextmanager
+def open_workers_root(trusted_root: Path, workers_subpath: tuple[str, ...]) -> Iterator[int]:
+    """Open the directory that contains worker state without following symlinks."""
+    descriptors = [os.open(trusted_root.expanduser(), _DIRECTORY_OPEN_FLAGS)]
+    try:
+        for segment in workers_subpath:
+            descriptors.append(_open_directory_at(descriptors[-1], segment))
+        yield descriptors[-1]
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+@contextmanager
 def open_worker_state_root(
     trusted_root: Path,
     *,
@@ -238,6 +282,7 @@ def open_worker_state_root(
                 worker_name,
                 None,
                 absent_name=worker_name,
+                workers_fd=worker_parent_fd,
             )
             return
         descriptors.append(worker_fd)
@@ -251,7 +296,7 @@ def open_worker_state_root(
                 msg = "Worker identity metadata does not match the retirement key."
                 raise ValueError(msg)
         _require_current_directory(worker_parent_fd, worker_name, worker_fd)
-        yield _BoundWorkerStateRoot(worker_parent_fd, worker_name, worker_fd)
+        yield _BoundWorkerStateRoot(worker_parent_fd, worker_name, worker_fd, workers_fd=worker_parent_fd)
     finally:
         for descriptor in reversed(descriptors):
             with suppress(OSError):
