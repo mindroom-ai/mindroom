@@ -46,7 +46,9 @@ func TestTsnetNodeNeedsAnAuthKeyBeforeStarting(t *testing.T) {
 
 func TestTsnetNodeStartsWithTrimmedEnrollmentKey(t *testing.T) {
 	t.Setenv("TS_NO_LOGS_NO_SUPPORT", "true")
-	t.Setenv("NO_PROXY", "*")
+	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		t.Setenv(name, "")
+	}
 	t.Setenv("TS_LOGS_DIR", t.TempDir())
 	const loginServer = "http://127.0.0.1:1"
 	dir, tags := t.TempDir(), []string{"tag:mindroom"}
