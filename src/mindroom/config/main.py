@@ -1566,8 +1566,13 @@ class Config(BaseModel):
             # Native functions beat MCP regardless of order. Stored settings can re-enable a declared function.
             for entry in entries[:shell_index]:
                 metadata = tools.entries[entry.name]
-                if metadata.mcp_server_id is None and SHELL_FUNCTION in (metadata.function_names or ()):
-                    msg = f"agents.{name}.tailnet_ssh: Toolkit {entry.name!r} can take precedence for {SHELL_FUNCTION}."
+                if metadata.mcp_server_id is not None:
+                    continue
+                if not metadata.function_names or SHELL_FUNCTION in metadata.function_names:
+                    msg = (
+                        f"agents.{name}.tailnet_ssh: Toolkit {entry.name!r} can take precedence for {SHELL_FUNCTION}. "
+                        "List 'shell' first."
+                    )
                     raise ToolConfigOverrideError(msg)
 
     def _validate_listen_tools(self, tools: ToolRegistry) -> None:

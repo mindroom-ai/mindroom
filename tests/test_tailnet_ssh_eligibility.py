@@ -12,7 +12,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from mindroom.config.main import Config
 from mindroom.config.tailnet_ssh import _normalize_public_key
 from mindroom.tool_system import plugins
-from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
+from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry, plugin_module_registrations
 from mindroom.workers.backends._dedicated_worker_common import tailnet_ssh_marked
 from mindroom.workers.runtime import build_worker_launch_config
 from tests.conftest import test_runtime_paths
@@ -154,6 +156,39 @@ def test_tailnet_ssh_requires_native_shell_to_win(
             _load(paths, data)
     else:
         assert _load(paths, data).agents["mine"].tailnet_ssh is opted_in
+
+
+@pytest.mark.parametrize("shell_first", [False, True])
+def test_tailnet_ssh_requires_shell_before_native_plugin_with_undeclared_functions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shell_first: bool,
+) -> None:
+    """An unknown native function set is safe only after shell, without building the plugin."""
+    with plugin_module_registrations("example_plugin") as entries:
+
+        @register_tool_with_metadata(
+            name="example_plugin",
+            display_name="Example plugin",
+            description="A plugin with no declared function names.",
+            category=ToolCategory.DEVELOPMENT,
+            file_access=ToolFileAccess.NONE,
+        )
+        def plugin_factory() -> type:
+            pytest.fail("Config validation must not build the plugin")
+
+    registry = ToolRegistry({**builtin_tool_registry().entries, **entries})
+    monkeypatch.setattr(plugins, "candidate_tool_registry", lambda *_: (registry, ()))
+    data = _data()
+    tools = ["shell", "example_plugin"] if shell_first else ["example_plugin", "shell"]
+    data["agents"]["mine"] = {"display_name": "Mine", "tools": tools, "tailnet_ssh": True}
+    paths = test_runtime_paths(tmp_path)
+
+    if shell_first:
+        assert _load(paths, data).agents["mine"].tailnet_ssh
+    else:
+        with pytest.raises(ValueError, match=r"mine.*tailnet_ssh.*example_plugin.*List 'shell' first"):
+            _load(paths, data)
 
 
 @pytest.mark.parametrize("tools", [["shell", "mcp_example"], ["mcp_example", "shell"]])

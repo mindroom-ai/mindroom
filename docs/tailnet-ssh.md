@@ -24,8 +24,8 @@ In `config.yaml`, `tailnet_ssh.logins` maps concrete Matrix user IDs to distinct
 `tailnet_ssh.authorized_keys` maps those IDs to lists of OpenSSH `.pub` lines, without key options or private keys.
 Both maps default to empty; each requester needs a login and at least one key, and tagged client devices are not admitted.
 Set the agent's `tailnet_ssh` boolean to `true` (default `false`) and make sure its `shell` tool runs on the worker.
-If a non-MCP toolkit declares `run_shell_command`, put `shell` before it in the agent's `tools` list or remove the toolkit.
-MindRoom refuses the opt-in otherwise, even if tool settings disable the conflicting function.
+MindRoom refuses the opt-in if any non-MCP toolkits listed before `shell` declare `run_shell_command` or do not declare their functions.
+List `shell` first in the agent's `tools` list, even if tool settings disable the conflicting function.
 MCP toolkits do not block this opt-in, regardless of their order.
 Merge these settings into your existing config and replace the sample login and public key:
 
