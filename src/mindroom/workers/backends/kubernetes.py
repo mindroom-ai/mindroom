@@ -703,9 +703,9 @@ class KubernetesWorkerBackend:
                         identity_path=_STATE_IDENTITY_PATH,
                         identity_field_path=_STATE_IDENTITY_FIELD_PATH,
                     )
-                if not isinstance(identity, str) or pinned_worker_kind(identity) is None:
-                    return None
                 worker_key = identity
+            if not isinstance(worker_key, str) or pinned_worker_kind(worker_key) is None:
+                return None
         except (TypeError, ValueError):
             return None
         return worker_key if self._state_subpath(worker_key).rpartition("/")[2] == name else None

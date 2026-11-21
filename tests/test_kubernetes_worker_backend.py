@@ -4624,6 +4624,23 @@ def test_kubernetes_maintenance_reads_an_unreadable_manifest_again(
 
 
 def test_kubernetes_maintenance_keeps_files_that_are_not_an_orphaned_pinned_workers(tmp_path: Path) -> None:
+def test_kubernetes_maintenance_keeps_a_script_worker_with_an_interrupted_retirement(tmp_path: Path) -> None:
+    backend, apps, _core = _named_backend(tmp_path)
+    normal_key = "v1:test:user_agent:@alice:example.test:watcher"
+    key = script_worker_key_for_run(normal_key, f"script-{'c' * 32}")
+    worker = backend.ensure_worker(_spec(key, state_scope_worker_key=normal_key, private_agent_names=frozenset()), now=0.0)
+    root = backend.storage_root / backend._state_subpath(key)
+    root.with_name(f"{root.name}.retiring").write_text(key, encoding="utf-8")
+    (root / ".runtime" / "startup_manifest.json").unlink()
+    del apps.deployments[worker.worker_id]
+
+    backend.maintain_workers(now=1.0)
+    backend.maintain_workers(now=1.0 + kubernetes_backend_module._ORPHANED_STATE_GRACE_SECONDS)
+    assert root.is_dir()
+    backend.retire_worker(key)
+    assert not root.exists()
+
+
     """Only a pinned worker's own files without a Deployment are removed; every other directory stays."""
     backend, apps_api, _core_api = _named_backend(tmp_path, named_worker_idle_timeout_seconds=10_000.0)
     grace = kubernetes_backend_module._ORPHANED_STATE_GRACE_SECONDS
