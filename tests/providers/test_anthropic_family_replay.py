@@ -20,7 +20,7 @@ from mindroom.history.native import restore_native_history
 from mindroom.history.types import ScopeSummary
 from mindroom.llm.media import File, Image
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, ToolSpec
+from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec
 from mindroom.llm.usage import TokenCounts
 from mindroom.providers.anthropic import prompt_cache
 from mindroom.providers.anthropic.native_compaction import native_replay_messages_for_route
@@ -346,6 +346,30 @@ async def test_image_over_the_per_image_limit_becomes_a_text_note_on_bedrock_and
         [note] = _notes(bodies[route])
         assert "per-image limit" in note
         assert "get_attachment without view" in note
+
+
+@pytest.mark.asyncio
+async def test_openrouter_messages_uses_the_partner_inline_media_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenRouter can route to Bedrock, so oversized images and documents are described rather than sent."""
+    monkeypatch.setattr(prompt_cache, "PARTNER_MAX_INLINE_IMAGE_BYTES", 200)
+    monkeypatch.setattr(prompt_cache, "BEDROCK_MAX_INLINE_MEDIA_BYTES", 1500)
+    turn = Message(
+        role="user",
+        content="Compare the chart and the document.",
+        images=[Image(content=_PNG, mime_type="image/png"), Image(content=_PNG + b"x" * 500, mime_type="image/png")],
+        files=[File(content=_PDF + b"x" * 1500, mime_type="application/pdf", filename="large.pdf")],
+    )
+    wire = Wire(sse_reply([_TEXT]))
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"base_url": "https://openrouter.ai/api/"})
+
+    blocks = _user_blocks(await _sent(provider, wire, [turn]))
+    assert [block["type"] for block in blocks] == ["text", "image", "text", "text"]
+    image_note, document_note = _notes(blocks)
+    assert "per-image limit" in image_note
+    assert "size limit" in document_note
 
 
 # --- Citations ------------------------------------------------------------------------------------------------
@@ -879,6 +903,36 @@ async def _recorded_reply(
     replay = native_settings(provider, threshold=threshold) if threshold is not None else None
     request = ModelRequest(messages=[_user("Hi")], native_compaction=replay)
     return _assistant(await claude_turn(provider, request))
+
+
+@pytest.mark.asyncio
+async def test_deferred_tool_sizing_ignores_searches_discarded_by_a_checkpoint(tmp_path: Path) -> None:
+    """Only a surviving search can make a deferred definition count, including for incremental tail sizing."""
+    wire = Wire(sse_reply([_TEXT]))
+    provider = route_provider("anthropic", tmp_path, wire)
+    checkpoint = await _recorded_reply(provider, wire, [_CHECKPOINT, _TEXT])
+    searching = Message(role="assistant", provider_data={"claude_blocks": [_TOOL_SEARCH, _TOOL_SEARCH_RESULT, _TEXT]})
+    prefix = (_user("Look up the weather."), searching, _user("Remember that."))
+    tail = (checkpoint, _user("What next?"))
+    clean = ModelRequest(
+        messages=tail,
+        native_compaction=native_settings(provider),
+        tools=(ToolSpec(name="get_weather", description="forecast " * 2000, parameters={}, strict=None),),
+        deferred_tools=DeferredTools(names=frozenset({"get_weather"})),
+    )
+    discarded = replace(clean, messages=(*prefix, *tail))
+    wire.replies[:] = [sse_reply([_TEXT]), sse_reply([_TEXT])]
+    await claude_turn(provider, clean)
+    await claude_turn(provider, discarded)
+
+    assert wire.body(-1) == wire.body(-2)
+    assert provider.request_tokens(discarded) == provider.request_tokens(clean)
+    rediscovered = replace(discarded, messages=(*discarded.messages, searching, _user("Thanks.")))
+    assert provider.request_tokens(rediscovered) > provider.request_tokens(clean) + 1000
+    assert provider.request_tokens(rediscovered, start=len(prefix)) > 1000
+    assert provider.request_tokens(rediscovered, start=len(prefix) + len(tail)) > 1000
+    searched_again = replace(rediscovered, messages=(*rediscovered.messages, searching, _user("Thanks again.")))
+    assert provider.request_tokens(searched_again, start=len(rediscovered.messages)) < 1000
 
 
 @pytest.mark.asyncio

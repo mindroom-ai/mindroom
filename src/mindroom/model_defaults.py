@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "ANTHROPIC_BASE_URL_DEFAULT",
+    "ANTHROPIC_OPENROUTER_BASE_URL",
     "AZURE_OPENAI_API_VERSION_DEFAULT",
     "CARTESIA_TTS",
     "CEREBRAS_HOST_DEFAULT",
@@ -102,6 +103,8 @@ _ANTHROPIC_FABLE = "claude-fable-5-2"
 _ANTHROPIC_OPUS = "claude-opus-5-5"
 _ANTHROPIC_SONNET = "claude-sonnet-5-5"
 _ANTHROPIC_HAIKU = "claude-haiku-5-5"
+# The context window Claude Code gives a model id without its ``[1m]`` suffix.
+_CLAUDE_CODE_CONTEXT_WINDOW = 200_000
 # Prefixes also cover newer point releases (claude-sonnet-5 matches claude-sonnet-5-5).
 CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES = (
     "claude-sonnet-4-6",
@@ -267,6 +270,8 @@ OPENAI_BASE_URL_DEFAULT = "https://api.openai.com/v1"
 # stable, checked 2026-10-27); Azure's later GA releases are the undated v1 API.
 AZURE_OPENAI_API_VERSION_DEFAULT = "2024-10-21"
 ANTHROPIC_BASE_URL_DEFAULT = "https://api.anthropic.com"
+# Messages endpoint root; the Anthropic SDK appends /v1.
+ANTHROPIC_OPENROUTER_BASE_URL = "https://openrouter.ai/api"
 DEEPSEEK_BASE_URL_DEFAULT = "https://api.deepseek.com"
 GROQ_HOST_DEFAULT = "https://api.groq.com"
 CEREBRAS_HOST_DEFAULT = "https://api.cerebras.ai"
@@ -311,6 +316,7 @@ CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "anthropic": ModelPreset("anthropic", _ANTHROPIC_SONNET, 1_000_000),
         "bedrock_claude": ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_OPUS, 1_000_000),
         "azure": ModelPreset("azure", _AZURE_OPENAI_DEFAULT_DEPLOYMENT),
+        "claude_code": ModelPreset("claude_code", _ANTHROPIC_SONNET, _CLAUDE_CODE_CONTEXT_WINDOW),
         "codex": ModelPreset("codex", _CODEX_GPT, _CODEX_CONTEXT_WINDOW, reasoning_effort="medium", display_name="Sol"),
         "kimi": ModelPreset("kimi", _KIMI, 1_048_576),
         "llama_cpp": ModelPreset("llama_cpp", LLAMA_CPP_GEMMA, 128_000),
@@ -362,6 +368,7 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
 # Extra named models that config init writes next to `models.default`.
 CONFIG_INIT_ADDITIONAL_MODELS: Mapping[str, tuple[tuple[str, ModelPreset], ...]] = MappingProxyType(
     {
+        "claude_code": (("haiku", ModelPreset("claude_code", _ANTHROPIC_HAIKU, _CLAUDE_CODE_CONTEXT_WINDOW)),),
         "codex": (
             (
                 "astra",
@@ -390,7 +397,7 @@ CONFIG_INIT_ADDITIONAL_MODELS: Mapping[str, tuple[tuple[str, ModelPreset], ...]]
 )
 
 # Additional model that config init assigns to the router and thread summaries (with their one-shot tags).
-CONFIG_INIT_HELPER_MODELS: Mapping[str, str] = MappingProxyType({"codex": "luna"})
+CONFIG_INIT_HELPER_MODELS: Mapping[str, str] = MappingProxyType({"claude_code": "haiku", "codex": "luna"})
 
 SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
     {

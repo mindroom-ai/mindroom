@@ -3019,7 +3019,7 @@ depends_on = [
     "mindroom.providers.claude_wire_blocks",
     "mindroom.providers.media_files",
 ]
-visibility = ["mindroom.providers.anthropic.messages"]
+visibility = ["mindroom.providers.anthropic.messages", "mindroom.providers.claude_code"]
 
 [[modules]]
 path = "mindroom.providers.cache_ladder"
@@ -5348,6 +5348,7 @@ depends_on = [
     "mindroom.matrix.provisioning_env",
     "mindroom.matrix.state",
     "mindroom.matrix.users",
+    "mindroom.providers.claude_code",
     "mindroom.providers.credentials",
     "mindroom.providers.key_checks",
     "mindroom.providers.names",
@@ -8407,7 +8408,6 @@ visibility = [
 [[modules]]
 path = "mindroom.history.conversation_text"
 depends_on = [
-    "mindroom.agent_loop",
     "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.history.interrupted_replay",
@@ -8470,7 +8470,7 @@ visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.par
 [[modules]]
 path = "mindroom.providers.tool_policy"
 depends_on = []
-visibility = ["mindroom.providers.gemini", "mindroom.providers.ollama.adapter", "mindroom.providers.openai"]
+visibility = ["mindroom.providers.claude_code", "mindroom.providers.gemini", "mindroom.providers.ollama.adapter", "mindroom.providers.openai"]
 
 # Owned provider adapters (stream-only, over mindroom.llm); the provider registry wires them in.
 [[modules]]
@@ -8479,6 +8479,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.settings",
+    "mindroom.providers.claude_code",
     "mindroom.providers.credentials",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.gemini",
@@ -8548,6 +8549,22 @@ visibility = ["mindroom.embeddings.ollama_embedder", "mindroom.memory.config", "
 [[modules]]
 path = "mindroom.providers.ollama.settings"
 depends_on = ["mindroom.providers.extra_kwargs"]
+
+# Claude on the user's own subscription, through the Claude Code CLI; the SDK loads when its model is built.
+[[modules]]
+path = "mindroom.providers.claude_code"
+depends_on = [
+    "mindroom.atomic_file",
+    "mindroom.llm",
+    "mindroom.path_confinement",
+    "mindroom.providers.anthropic.wire",
+    "mindroom.providers.assistant_turn",
+    "mindroom.providers.errors",
+    "mindroom.providers.extra_kwargs",
+    "mindroom.providers.identity",
+    "mindroom.providers.tool_policy",
+    "mindroom.tool_system.dependencies",
+]
 
 [[modules]]
 path = "mindroom.providers.synthetic_adapter"

@@ -138,7 +138,7 @@ chromadb = [
   "chromadb>=1.5.8",
 ]
 claude_agent = [
-  "claude-agent-sdk>=0.2.140",
+  "claude-agent-sdk>=0.2.181",
 ]
 clickup = [
   "requests",

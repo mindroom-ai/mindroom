@@ -16,6 +16,7 @@ The same model can have different IDs on different providers; check the [OpenAI]
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT login
 - `kimi` or `kimi_code` - Kimi models available through a local Kimi Code CLI login
+- `claude_code` - Claude models on your own Claude subscription, through a local Claude Code sign-in
 - `google` or `gemini` - Google Gemini models
 - `vertexai_claude` - Anthropic Claude models on Google Vertex AI
 - `ollama` - Local models via Ollama
@@ -154,14 +155,14 @@ models:
       base_url: http://localhost:8080/v1
 ```
 
-Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, as do downloads of media that tools return as URLs, OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
+MindRoom's own model clients, except `google`, `ollama`, and `synthetic`, verify an HTTPS endpoint's certificate against the operating system's trust store, as do downloads of media that tools return as URLs, OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
 Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces that store, so the file or directory must hold the public CAs too, for example the system CA bundle with the private CA appended.
 An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
 
 Azure, Bedrock, Codex, and Kimi examples are in their own sections below.
-Claude Fable 5.2 uses `claude-fable-5-2` on Anthropic and Vertex AI and `anthropic/claude-fable-5.2` on OpenRouter.
+Claude Fable 5.2 uses `claude-fable-5-2` on Anthropic and Vertex AI and `anthropic/claude-fable-5.2` on `provider: openrouter`.
 `bedrock_claude` calls Claude in Amazon Bedrock (the bedrock-mantle endpoint), which does not serve Fable 5.2, so it uses Fable 5.1 as `anthropic.claude-fable-5-1`.
-Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on OpenRouter.
+Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on `provider: openrouter`; [Claude through OpenRouter's Messages endpoint](#claude-through-openrouter) uses the Anthropic ids.
 For the direct DeepSeek API, use `deepseek-flash` for V4.1 Flash or `deepseek-v4-pro` for Pro; the older `deepseek-v4-flash` name is a [temporary compatibility route to V4.1 Flash](https://api-docs.deepseek.com/updates/#date-2026-09-10).
 OpenRouter serves the current V4.1 Flash release as `deepseek/deepseek-v4.1-flash-1017`.
 [GLM 5.3](https://docs.z.ai/guides/llm/glm-5.3) is available through the GLM Coding Plan endpoint shown above.
@@ -185,7 +186,7 @@ Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a b
 A model key written as `${NAME}`, such as `api_key: ${OPENROUTER_TEAM_API_KEY}`, is read from that environment variable (or `NAME_FILE`), so two models of one provider can use different accounts while the keys stay out of `config.yaml`; the whole value must be the reference.
 When the variable is unset and that key is the one the model uses, `mindroom config validate` and `mindroom doctor` name it and replies fail with an error naming it; a key saved in the dashboard that overrides it prevents both.
 A model that authenticates another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or Vertex AI for `google` and `gemini`) never receives the shared key.
-`codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
+`codex`, `kimi`, `claude_code`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 
 Shared API keys are read from these variables:
 
@@ -393,6 +394,61 @@ Kimi K3.1 Pro and K3 reason before replying by default, so responses include rea
 Setting `extra_kwargs.reasoning_effort` to `none` makes K3.1 Pro requests fail with HTTP 400, while K3 then answers with K2.8 Preview without reasoning.
 The adapter depends on the Kimi Code CLI login format and backend, so a Kimi Code update can require a MindRoom update.
 
+## Claude Models with a Claude Subscription
+
+Use `provider: claude_code` to run Claude on your own Claude Pro, Max, Team, or Enterprise subscription instead of the billed Anthropic API.
+MindRoom runs the Claude Code CLI you signed in to, and that CLI talks to Anthropic.
+The agent keeps MindRoom's tools, memory, history, and approvals; Claude Code's own tools, skills, memory files, and your user and project settings and hooks are off.
+Managed settings an administrator installed for Claude Code on the machine, such as `/etc/claude-code/managed-settings.json`, still apply, including any hooks they define.
+Use it for a personal deployment that runs as the subscriber: every reply the agent gives, to anyone who may talk to it, counts toward that one subscription's limits.
+No reply is billed to an API key, but that does not mean no extra charge: Claude Code follows your Claude account's extra-usage setting.
+With extra usage turned on, replies continue past the plan's included usage and Anthropic charges the account for them; turn it off in your Claude account's usage settings if you want a hard limit.
+
+Set it up as the user that runs MindRoom:
+
+1. Install [Claude Code](https://code.claude.com/docs/en/setup) 2.1.328 or later.
+2. Run `claude auth login` and sign in with the subscription.
+3. Install the Claude Agent SDK with `pip install 'mindroom[claude_agent]'`; MindRoom installs it on first use unless auto-install is off.
+
+`mindroom config init --provider claude_code` generates this config (see [CLI](../cli.md)):
+
+```yaml
+models:
+  default:
+    provider: claude_code
+    id: claude-sonnet-5-5
+    context_window: 200000
+  haiku:
+    provider: claude_code
+    id: claude-haiku-5-5
+    context_window: 200000
+
+router:
+  model: haiku
+
+defaults:
+  thread_summary_model: haiku
+```
+
+The `id` is any model ID or alias Claude Code takes for `--model`, such as `claude-opus-5-5` or `opus`, within what the plan includes.
+`extra_kwargs` accepts `cli_path`, the `claude` executable to run, and `effort`, one of `low`, `medium`, `high`, `xhigh`, or `max`.
+Without `cli_path`, MindRoom runs the `claude` on its `PATH`; set `cli_path` when the service's `PATH` does not include it.
+MindRoom's storage directory must allow executing files for this provider.
+MindRoom never reads Claude Code's credentials, ignores an authored `api_key`, and does not accept a token, endpoint, or headers for this provider.
+MindRoom removes inherited `ANTHROPIC_*`, `CLAUDE_CODE_*`, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`, and `CLAUDE_AUTO_BACKGROUND_TASKS` variables from Claude Code's environment (except settings MindRoom explicitly allows), so Claude Code never uses an `ANTHROPIC_API_KEY` exported for other models.
+The provider supports text and image input; the model is told when an audio, video, or file attachment was left out.
+Use [reasoning levels](#reasoning-levels) to select effort with a model reference like `opus@high`.
+These conversations do not appear in Claude Code's own session history.
+MindRoom runs at most 8 Claude Code processes at a time; while all 8 are answering, another reply is retried and fails if none finishes meanwhile.
+[`mindroom doctor`](../cli.md#doctor) starts Claude Code without sending it a prompt to check the installation and sign-in.
+
+A reply fails with a message that names the fix in these cases:
+
+- Claude Code or the Claude Agent SDK is missing, or Claude Code is older than 2.1.328: install the required dependency or run `claude update`.
+- Claude Code is not signed in to a Pro, Max, Team, or Enterprise plan: run `claude auth login` as the user that runs MindRoom.
+- `CLAUDE_CODE_STREAM_CLOSE_TIMEOUT` or `CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK` is set: unset it in MindRoom's environment because the SDK reads it directly.
+- The plan's usage limit is reached: the message gives the time the limit resets when Claude Code reports it.
+
 ## OpenRouter Provider Routing
 
 OpenRouter routes each request to one of several upstream providers serving the model, and upstream quality varies.
@@ -415,7 +471,7 @@ models:
 Provider slugs are in the `tag` field of `https://openrouter.ai/api/v1/models/<model-id>/endpoints`.
 Account-level OpenRouter settings (ignored providers, data-policy filters) still apply, so pinning an upstream your account excludes fails with `No endpoints found`.
 Verify a new pin with a direct API request and check the `provider` field in the response.
-MindRoom's `LLM usage` log line names the upstream that served each OpenRouter response in `served_provider`.
+For `provider: openrouter` (Chat Completions), MindRoom's `LLM usage` log line names the upstream in `served_provider`.
 
 ## Azure OpenAI
 
@@ -488,6 +544,29 @@ Set `tool_call_probability` to `1` to call the shell tool on every turn or `0` t
 Set `chars_per_second` to `0` to stream without pacing delays for maximum throughput.
 Changing `seed` changes the response length, split point, and tool-call choice, which stay the same for a given conversation history.
 
+## Claude Through OpenRouter
+
+Use `provider: anthropic` with OpenRouter's Messages endpoint and set `context_window` to enable planning for Claude [native compaction](history.md#native-compaction).
+Use Anthropic's ID (`claude-opus-5-5`), not OpenRouter's slug (`anthropic/claude-opus-5.5`), so MindRoom selects the correct Claude capabilities.
+Set `base_url` to `https://openrouter.ai/api` without `/v1` because the Anthropic SDK appends it.
+Always set a model-specific OpenRouter `api_key`; without it, MindRoom can send your shared Anthropic key to OpenRouter.
+Any `ANTHROPIC_CUSTOM_HEADERS` are also sent to OpenRouter, even with a model-specific key.
+Put OpenRouter routing fields (`provider`, `models`, and `fallbacks`) under `extra_kwargs.request_params.extra_body`.
+Do not change an existing thread's OpenRouter `provider.order` or `provider.only` pin to an upstream that cannot read earlier signed thinking: OpenRouter returns HTTP 400 in that case, while unpinned requests stay on a compatible upstream.
+This route uses the partner limits of 5 MiB per base64 image and 16 MB of inline media per request.
+The `provider: openrouter` route uses Chat Completions and keeps text compaction.
+
+```yaml
+models:
+  openrouter_claude:
+    provider: anthropic
+    id: claude-opus-5-5
+    context_window: 1000000
+    extra_kwargs:
+      base_url: https://openrouter.ai/api
+      api_key: ${OPENROUTER_API_KEY}
+```
+
 ## Extra Kwargs
 
 `extra_kwargs` sets provider-specific options for the model's requests and API client.
@@ -515,6 +594,7 @@ A null, empty, or whitespace-only `base_url`, `project_id`, `region`, `location`
 | `openai` with Responses | `api_key`, `base_url`, `cache_system_prompt`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `include`, `max_output_tokens`, `max_tool_calls`, `metadata`, `organization`, `parallel_tool_calls`, `reasoning`, `reasoning_effort`, `reasoning_summary`, `request_params`, `service_tier`, `store`, `strict_output`, `temperature`, `timeout`, `top_p`, `truncation`, `user`, `verbosity` |
 | `codex` | The Responses keys without `max_output_tokens` and `temperature`, which the Codex endpoint rejects, plus `codex_home`, `default_instructions`, `prompt_cache_key`, and `session_id` |
 | `anthropic` | `api_key`, `auth_token`, `base_url`, `betas`, `cache_system_prompt`, `client_params`, `context_management`, `default_headers`, `extended_cache_time`, `max_tokens`, `output_config`, `request_params`, `stop_sequences`, `temperature`, `thinking`, `timeout`, `top_k`, `top_p` |
+| `claude_code` | `api_key`, `cli_path`, `effort` |
 | `vertexai_claude` | The `anthropic` keys without `auth_token`, plus `project_id` and `region` |
 | `bedrock_claude` | The `anthropic` keys without `auth_token` and `base_url`, plus `aws_access_key`, `aws_profile`, `aws_region`, `aws_secret_key`, and `aws_session_token` |
 | `google`, `gemini` | `api_key`, `cached_content`, `client_params`, `frequency_penalty`, `generation_config`, `generative_model_kwargs`, `include_thoughts`, `location`, `logprobs`, `max_output_tokens`, `presence_penalty`, `project_id`, `safety_settings`, `search`, `seed`, `stop_sequences`, `temperature`, `thinking_budget`, `thinking_level`, `timeout`, `top_k`, `top_p`, `vertexai` |
@@ -671,6 +751,7 @@ MindRoom sends the level in the setting the provider reads, and the block wins o
 | `zai` | `reasoning_effort: L` | no `off` level |
 | `deepseek` | `reasoning_effort: L`, `use_thinking: true` | `use_thinking: false` |
 | `anthropic`, `vertexai_claude`, `bedrock_claude` | `output_config.effort: L`, and an authored `thinking: {type: disabled}` is dropped | `thinking: {type: disabled}`, and an authored `output_config.effort` is dropped |
+| `claude_code` | `effort: L` (no `minimal` level) | no `off` level |
 | `google` | `thinking_level: L` | `thinking_budget: 0` |
 | `ollama` | `think: L` | `think: false` |
 
@@ -678,7 +759,7 @@ Write `off` in quotes, as in `levels: ["off", low, high]` or `default: "off"`, b
 `groq`, `cerebras`, and `synthetic` take no level, so a `reasoning` block on them fails config load.
 Z.ai has no setting MindRoom can switch thinking off with, so listing `off` for a `zai` model fails config load too; set `extra_kwargs.extra_body.thinking` yourself on a separate model entry.
 MindRoom does not know which levels each model accepts, so list only levels the model supports; a level it rejects fails the reply with the provider's error, like a wrong `extra_kwargs` value.
-For example, Claude 5 models reject disabled thinking, so do not list `off` for them.
+Claude 5 models reject disabled thinking, so do not list `off` for them.
 `request_params` and `extra_body` still win over the block.
 
 To replace per-level entries such as `opus` and `opus_high`, add a `reasoning` block to `opus`, point references at `opus@high`, and delete `opus_high`.

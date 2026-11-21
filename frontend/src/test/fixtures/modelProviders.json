@@ -3,6 +3,7 @@
   "azure",
   "bedrock_claude",
   "cerebras",
+  "claude_code",
   "codex",
   "deepseek",
   "gemini",

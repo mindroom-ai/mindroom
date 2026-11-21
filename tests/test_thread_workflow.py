@@ -202,7 +202,7 @@ _NEEDS_ANSWER = {"workflow": "needs_you", "why": "question"}
         ({"resolved_ts": 5000}, {"approval_ts": 4000}, {"workflow": "done"}),
         ({"resolved_ts": 5000}, {"approval_ts": 6000}, _NEEDS_APPROVAL),
         ({"resolved_ts": 5000}, {"question_ts": 5000}, {"workflow": "done"}),
-        ({"resolved_ts": 5000}, {"question_ts": 6000}, _NEEDS_ANSWER),
+        ({"resolved_ts": 5000}, {"question_ts": 6000}, {"workflow": "done"}),
         ({}, {"question_ts": 10_000 - _QUESTION_WAITS_MS}, {"workflow": "needs_you", "why": "your_turn"}),
         ({}, {"question_ts": 10_001 - _QUESTION_WAITS_MS}, _NEEDS_ANSWER),
         ({"scheduled_task_count": 2, "next_scheduled_ts": 20_000}, {}, {"workflow": "later", "back_at": 20_000}),
@@ -212,12 +212,12 @@ _NEEDS_ANSWER = {"workflow": "needs_you", "why": "question"}
         ({"has_background_approval": True, "snoozed_until_ts": 20_000}, {}, _NEEDS_APPROVAL),
     ],
 )
-def test_thread_workflow_counts_only_what_was_asked_after_the_resolve(
+def test_thread_workflow_uses_status_and_request_timestamps(
     facts: dict[str, Any],
     kwargs: dict[str, Any],
     expected: dict[str, object],
 ) -> None:
-    """Approvals and questions count only after the resolve, and a question only for seven days."""
+    """Thread facts and the age of requests determine the workflow."""
     assert thread_workflow(facts, now=10_000, **{"replying": False, **kwargs}) == expected
 
 

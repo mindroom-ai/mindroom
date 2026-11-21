@@ -10,6 +10,7 @@ ROUTE_PROVIDERS = {
     "azure": "Azure",
     "bedrock_claude": "AwsBedrock",
     "cerebras": "Cerebras",
+    "claude_code": "Anthropic (Claude Code)",
     "codex": "OpenAI Codex",
     "deepseek": "DeepSeek",
     "google": "Google",

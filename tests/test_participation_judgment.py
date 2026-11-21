@@ -14,7 +14,6 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
-from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT
 from mindroom.attachments.storage import AttachmentRecord, format_attachment_annotation, format_attachments_prompt
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
@@ -26,7 +25,7 @@ from mindroom.hooks.enrichment import render_transient_context
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.llm.media import File, Image
-from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message
+from mindroom.llm.messages import MEDIA_FOLLOW_UP_TEXT, MEDIA_MSGTYPE_KEY, Message
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.participation import ParticipationGate
 from mindroom.participation_hook import participation_hook

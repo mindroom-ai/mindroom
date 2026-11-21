@@ -42,7 +42,7 @@ _ALTERNATIVE_AUTH_KWARGS: dict[str, tuple[str, ...]] = {
 }
 
 # Routes that authenticate without an API key and ignore a configured one.
-_KEYLESS_ROUTES = frozenset({"bedrock_claude", "codex", "kimi", "synthetic", "vertexai_claude"})
+_KEYLESS_ROUTES = frozenset({"bedrock_claude", "claude_code", "codex", "kimi", "synthetic", "vertexai_claude"})
 
 
 def dashboard_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | None:
