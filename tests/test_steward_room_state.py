@@ -1520,6 +1520,18 @@ async def test_the_router_owns_its_room_state_retry(room_state: RoomState) -> No
 
 
 @pytest.mark.asyncio
+async def test_router_stop_releases_a_retry_cancelled_before_it_starts(room_state: RoomState) -> None:
+    """Stopping before the retry coroutine gets its first step must still remove it from the registry."""
+    duties = _router_duties(room_state)
+    await _hang_a_room_state_retry(duties, room_state)
+    retry = duties._room_state_retries[ROOM_ID]
+    duties.stopping()
+    with pytest.raises(asyncio.CancelledError):
+        await retry
+    assert not duties._room_state_retries
+
+
+@pytest.mark.asyncio
 async def test_router_stop_cancels_its_room_state_tasks_without_waiting(room_state: RoomState) -> None:
     """A stopping router discards its publish and retry, so they leave its stop budget to the replies it drains."""
     config, paths, ids, _, client = room_state

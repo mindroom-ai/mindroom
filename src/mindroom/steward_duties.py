@@ -236,23 +236,26 @@ class StewardDuties:
             pass
         pending = self._room_state_retries.get(room_id)
         if pending is None or pending.done():
-            self._room_state_retries[room_id] = create_background_task(
+            retry = create_background_task(
                 self._retry_room_state(room_id),
                 name="steward_room_state_retry",
                 owner=self.deps.runtime,
             )
+            self._room_state_retries[room_id] = retry
+            retry.add_done_callback(lambda done: self._retire_room_state_retry(room_id, done))
+
+    def _retire_room_state_retry(self, room_id: str, task: asyncio.Task[None]) -> None:
+        if self._room_state_retries.get(room_id) is task:
+            del self._room_state_retries[room_id]
 
     async def _retry_room_state(self, room_id: str) -> None:
         """Retry a failed reconcile with capped exponential backoff while this bot stewards the room."""
         delay = 1
-        try:
-            while self.is_steward(room_id):
-                await asyncio.sleep(delay)
-                if await self._reconcile_room_state(room_id):
-                    return
-                delay = min(delay * 2, 60)
-        finally:
-            self._room_state_retries.pop(room_id, None)
+        while True:
+            await asyncio.sleep(delay)
+            if await self._reconcile_room_state(room_id):
+                return
+            delay = min(delay * 2, 60)
 
     def _may_publish_room_state(self, room_id: str) -> bool:
         """Recheck the election and hand work over to a different steward's next sync frame."""
