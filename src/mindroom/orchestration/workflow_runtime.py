@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.custom_tools.workflow import unfinished_workflow_jobs, workflow_limits
 from mindroom.logging_config import get_logger
@@ -16,6 +16,7 @@ from mindroom.workflow_runs.store import WorkflowRunStore
 
 if TYPE_CHECKING:
     from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
+    from mindroom.script_runs.models import ScriptRunRecord
     from mindroom.workflow_runs.engine import ResumeAccess
     from mindroom.workflow_runs.models import WorkflowRun
 
@@ -53,22 +54,22 @@ class WorkflowRuntimeLifecycle:
             logger.exception("workflow_maintenance_pass_failed")
 
     def _access(self, run: WorkflowRun) -> ResumeAccess:
-        """Return what the next attempt of an interrupted run starts with, from its owner's live runtime.
+        """Return what the next attempt of a run starts with, from its saved owner's live runtime.
 
-        The run's last attempt names the owner as the script runtime knows it, so its resolver answers: access that
-        cannot be checked while the owner's bot is not running is pending, and access that is gone is revoked.
+        The run saves its owner as its attempts do, so the script runtime's resolver answers for it, also before a
+        first attempt: access that cannot be checked while the owner's bot is not running is pending, and access
+        that is gone is revoked.
         """
-        resolver = self.script_runtime.resolver
+        resolver, owner = self.script_runtime.resolver, cast("ScriptRunRecord", run)
         try:
-            attempt = self.script_runtime.store.get_run(run.script_run_id or "")
-            authorized = resolver.is_authorized(attempt)
+            authorized = resolver.is_authorized(owner)
             if authorized is None:
                 return "pending"
             if authorized:
-                context = resolver.resolve(attempt, correlation_id=f"workflow:{run.run_id}")
+                context = resolver.resolve(owner, correlation_id=f"workflow:{run.run_id}")
                 return context, workflow_limits(context.config, run.agent_name)
         except ValueError:
-            # The attempt's record is gone, or names another owner than the run's: nothing confirms the access.
+            # The saved identity names another owner than the run's: nothing confirms the access.
             logger.warning("workflow_resume_owner_unresolved", run_id=run.run_id, exc_info=True)
         except RuntimeError:
             return "pending"

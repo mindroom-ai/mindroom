@@ -64,6 +64,7 @@ def _script_runtime(stack: WorkflowStack, pass_timeout_seconds: float = 30.0) ->
         retention_seconds=3600.0,
         pass_timeout_seconds=pass_timeout_seconds,
         runtime_paths=stack.context.runtime_paths,
+        resolver=stack.resolver,
     )
 
 
@@ -600,8 +601,8 @@ async def test_launch_is_idempotent_and_never_starts_an_ended_run(stack: Workflo
 
 
 @pytest.mark.asyncio
-async def test_engine_stopped_before_a_launch_runs_its_first_step_interrupts_the_run(tmp_path: Path) -> None:
-    """The stop itself ends the runs it was launching, so a launch task cancelled before it ran strands none."""
+async def test_engine_stopped_before_a_launch_runs_its_first_step_leaves_the_run_starting(tmp_path: Path) -> None:
+    """A stop ends no admitted run: the launch returns, and the run waits for the next primary to start it."""
     with workflow_stack(tmp_path) as stack:
         run = stack.reserve()
         launch = asyncio.create_task(stack.engine.launch(run.run_id, stack.context))
@@ -611,13 +612,9 @@ async def test_engine_stopped_before_a_launch_runs_its_first_step_interrupts_the
         await stack.engine.close()
         await asyncio.wait_for(launch, SETTLE_TIMEOUT_SECONDS)
 
-        stored = await stack.engine.wait(run.run_id)
+        stored = stack.store.get_run(run.run_id)
         assert stack.scripts.launched == []
-        assert (stored.state, stored.attempt, stored.error) == (
-            WorkflowRunState.INTERRUPTED,
-            0,
-            "MindRoom stopped while the run was starting.",
-        )
+        assert (stored.state, stored.attempt, stored.error) == (WorkflowRunState.STARTING, 0, None)
 
 
 @pytest.mark.asyncio

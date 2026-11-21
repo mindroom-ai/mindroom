@@ -66,7 +66,6 @@ _MAX_LABEL_CHARS = 80
 _ADMISSIONS = "admissions"
 _ERROR_TAIL_BYTES = 4096
 _NO_RETURN = "The script ended without returning from main(args)."
-_STOPPED_STARTING = "MindRoom stopped while the run was starting."
 _ABANDONED = "The call that waited was cancelled."
 _ATTEMPT_GONE = "The record of the run's attempt is gone."
 _CHANGED_WITHOUT_EDIT = (
@@ -153,11 +152,11 @@ class WorkflowEngine:
         """Start the next attempt of a reserved run; a script that cannot start ends the run failed with the reason.
 
         The engine owns a launch once it began: a caller that goes away leaves no process its run does not name, and
-        only the engine's stop ends a launch, which ends its run interrupted. An *automatic* launch that is refused
-        leaves the run as it is, for the next pass to try again.
+        only the engine's stop ends a launch, which leaves the run starting for the next primary. An *automatic*
+        launch that is refused leaves the run as it is, for the next pass to try again.
         """
         if self._closed:
-            return await asyncio.to_thread(self._stop_starting, run_id)
+            return self.store.get_run(run_id)
         launch = self._spawn(_ADMISSIONS, self._launch(run_id, context, limits or WorkflowLimits(), automatic))
         self._launching[launch] = run_id
         launch.add_done_callback(self._launching.pop)
@@ -167,18 +166,8 @@ class WorkflowEngine:
             caller = asyncio.current_task()
             if not launch.cancelled() or (caller is not None and caller.cancelling()):
                 raise
-            # The stopping engine ended the run and then the launch; the caller reads the run as any ended run.
+            # The stopping engine ended the launch; the run stays as it is, for the next primary to start.
             return self.store.get_run(run_id)
-
-    def _stop_starting(self, run_id: str) -> WorkflowRun:
-        """End a run that names no attempt yet as interrupted, for the engine's stop; any other run stays as it is."""
-        return self.store.update_run(
-            run_id,
-            when={WorkflowRunState.STARTING},
-            state=WorkflowRunState.INTERRUPTED,
-            error=_STOPPED_STARTING,
-            finished_at=utc_timestamp(),
-        )
 
     async def _launch(
         self,
@@ -387,8 +376,8 @@ class WorkflowEngine:
     async def _reconcile_run(self, run: WorkflowRun, access: ResumeAccess) -> bool:
         """End *run* if its attempt has ended, or start its next attempt; return whether one started."""
         if run.state is WorkflowRunState.STARTING:
-            if access is None or run.attempt == 0 or run.run_id in self._launching.values():
-                # Being launched, or still to be: a first attempt is its job's to start.
+            if access is None or run.run_id in self._launching.values():
+                # Being launched, or its own call or job's to launch.
                 return False
         else:
             try:
@@ -419,11 +408,8 @@ class WorkflowEngine:
         return (await self.launch(run.run_id, context, limits, automatic=True)).attempt > run.attempt
 
     async def close(self) -> None:
-        """Stop the engine's own tasks and start no more; unsettled nodes keep their handles for the next start."""
+        """Stop the engine's own tasks and start no more; what was starting or unsettled stays for the next start."""
         self._closed = True
-        # Before its launches stop, so a run one of them was starting ends here even if its task never ran a step.
-        stops = [asyncio.to_thread(self._stop_starting, run_id) for run_id in set(self._launching.values())]
-        await asyncio.gather(*stops, return_exceptions=True)
         tasks = [task for run_tasks in self._tasks.values() for task in run_tasks]
         self._tasks.clear()
         for task in tasks:

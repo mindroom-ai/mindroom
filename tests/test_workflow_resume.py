@@ -397,8 +397,8 @@ async def test_two_resumes_at_once_start_one_attempt(stack: WorkflowStack) -> No
 
 
 @pytest.mark.asyncio
-async def test_engine_that_stops_during_a_resume_leaves_the_run_interrupted(stack: WorkflowStack) -> None:
-    """A resume cut short by a stopping MindRoom ends as a start cut short does, and the run can be resumed again."""
+async def test_engine_that_stops_during_a_resume_leaves_the_run_starting(stack: WorkflowStack) -> None:
+    """A resume cut short by a stopping MindRoom stays accepted, as a start cut short does: the next primary starts it."""
     await stack.end_attempt(ScriptRunState.FAILED)
     stack.scripts.hold_launch = asyncio.Event()
     resuming = asyncio.create_task(stack.engine.resume(stack.context, stack.run_id))
@@ -407,7 +407,7 @@ async def test_engine_that_stops_during_a_resume_leaves_the_run_interrupted(stac
     await stack.engine.close()
 
     run = await resuming
-    assert (run.state, run.error) == (WorkflowRunState.INTERRUPTED, "MindRoom stopped while the run was starting.")
+    assert (run.state, run.error, run.attempt) == (WorkflowRunState.STARTING, None, 1)
 
 
 @pytest.mark.asyncio

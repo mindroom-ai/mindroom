@@ -258,10 +258,11 @@ async def test_crash_between_launch_and_naming_the_attempt_retires_it_and_launch
 @pytest.mark.asyncio
 async def test_intent_without_a_job_is_deleted(stack: WorkflowStack) -> None:
     """An intent a dead primary left counts toward the run limit for nobody: it goes, and a fresh one stays."""
-    left = stack.reserve(SCRIPT, origin_job_id="job-the-runtime-never-admitted")
+    never = "job-the-runtime-never-admitted"
+    left = stack.reserve(SCRIPT, origin_job_id=never, job_id=never)
 
     await stack.restart(kill=True)
-    fresh = stack.reserve(SCRIPT, origin_job_id="job-being-admitted-now")
+    fresh = stack.reserve(SCRIPT, origin_job_id="job-being-admitted-now", job_id="job-being-admitted-now")
     assert await stack.recover() == []
 
     with pytest.raises(WorkflowRunNotFoundError):
@@ -270,15 +271,82 @@ async def test_intent_without_a_job_is_deleted(stack: WorkflowStack) -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_with_no_job_left_is_ended_and_not_resumed(stack: WorkflowStack) -> None:
-    """A run nobody waits for after a restart, as one a subagent's call started, gets no attempt: it ends interrupted."""
+async def test_run_with_no_job_is_replayed_under_its_owner_and_keeps_its_report(stack: WorkflowStack) -> None:
+    """A run that a call started and waited for itself goes on too; with no caller left, its report can be read."""
     await stack.start(SCRIPT)
+    await stack.result("@0", "tool", _A)
 
     await stack.restart(kill=True)
+    assert await stack.recover() == [stack.run_id]
+
+    assert (await stack.submit("@0", "tool", _A)).cached
+    await stack.finish_attempt(result="the report")
+    status = json.loads(await stack.call("get_workflow", run_id=stack.run_id))
+    assert (status["status"], status["attempt"], status["result"]) == ("completed", 2, "the report")
+    assert stack.counting_tool.lines == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_run_with_no_job_that_no_longer_has_access_ends_interrupted(stack: WorkflowStack) -> None:
+    """The saved owner is checked as a job's requester is."""
+    await stack.start(SCRIPT)
+    await stack.restart(kill=True)
+    stack.access = "revoked"
+
     assert await stack.recover() == []
 
     run = stack.store.get_run(stack.run_id)
-    assert (run.state, run.error, run.attempt) == (WorkflowRunState.INTERRUPTED, RUNTIME_RESTARTED, 1)
+    assert (run.state, run.error, run.attempt) == (
+        WorkflowRunState.INTERRUPTED,
+        "The requester no longer has access.",
+        1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_with_no_job_that_never_got_an_attempt_is_launched_once(stack: WorkflowStack) -> None:
+    """A dead primary's reservation is an admitted run; one this primary just made is its own call's to launch."""
+    left = stack.reserve(SCRIPT)
+
+    await stack.restart(kill=True)
+    fresh = stack.reserve(SCRIPT)
+    assert await stack.recover() == [left.run_id]
+    assert await stack.maintain() == []
+
+    assert [stack.store.get_run(run.run_id).attempt for run in (left, fresh)] == [1, 0]
+    assert len(stack.scripts.launched) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [True, False])
+async def test_graceful_stop_while_the_first_attempt_starts_leaves_the_run_to_the_next_primary(
+    stack: WorkflowStack,
+    managed: bool,
+) -> None:
+    """A shutdown in the middle of a launch ends no admitted run: the next primary starts it, once."""
+    stack.scripts.hold_launch = asyncio.Event()
+    if managed:
+        handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+        stack.run_id = handle["run_id"]
+    else:
+        launching = asyncio.create_task(stack.start(SCRIPT))
+    await stack.until(lambda: len(stack.scripts.launched) == 1)
+
+    await stack.restart()
+    stopped = stack.store.get_run(stack.run_id)
+    resumed = await stack.recover()
+    if managed:
+        await stack.continue_jobs()
+    else:
+        await launching
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+
+    assert (stopped.state, stopped.error, stopped.finished_at) == (WorkflowRunState.STARTING, None, None)
+    assert resumed == ([] if managed else [stack.run_id])
+    assert (stack.store.get_run(stack.run_id).attempt, len(stack.scripts.launched)) == (1, 1)
+    await stack.finish_attempt(result="the report")
+    if managed:
+        assert await stack.collect(await _ended_job(stack, handle["job_id"])) == "the report"
 
 
 async def _interrupt(stack: WorkflowStack, reason: str) -> None:

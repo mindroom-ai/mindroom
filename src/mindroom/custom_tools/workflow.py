@@ -26,7 +26,13 @@ from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 from mindroom.workflow_runs.engine import WorkflowLimits
-from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRun, WorkflowRunState, new_workflow_run_id
+from mindroom.workflow_runs.models import (
+    TERMINAL_RUN_STATES,
+    WorkflowNodeState,
+    WorkflowRun,
+    WorkflowRunState,
+    new_workflow_run_id,
+)
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStoreError, owned_run
 
 if TYPE_CHECKING:
@@ -175,6 +181,9 @@ class WorkflowTools(Toolkit):
             ],
             "nodes": [_public_node(node) for node in listed if node.state in shown],
         }
+        if run.state in TERMINAL_RUN_STATES:
+            # The report, or why there is none, also for a run whose caller is gone.
+            status["result"] = _outcome_text(run)
         return json.dumps(status, indent=2)
 
     async def cancel_workflow(self, run_id: str) -> str:
@@ -245,7 +254,7 @@ class WorkflowTools(Toolkit):
                 return declined
             refused = None
             if function_name == _START:
-                run, _ = await self._reserve(engine, context, job_id, arguments)
+                run, _ = await self._reserve(engine, context, job_id, arguments, job_id=job_id)
                 begin: Callable[[], Awaitable[object]] = partial(engine.launch, run.run_id, context, self.limits)
                 refused = partial(asyncio.to_thread, engine.store.delete_intent, run.run_id)
             else:
@@ -277,8 +286,12 @@ class WorkflowTools(Toolkit):
         context: ToolRuntimeContext,
         origin: str | None,
         arguments: Mapping[str, Any],
+        job_id: str | None = None,
     ) -> tuple[WorkflowRun, bool]:
-        """Check one start and write its intent, or return the run *origin* reserved before; a refusal raises."""
+        """Check one start and write its intent, or return the run *origin* reserved before; a refusal raises.
+
+        *job_id* names the job the run is reserved for, which no call that waits for its run itself has.
+        """
         source, path, title = arguments.get("source"), arguments.get("path"), arguments.get("title")
         max_concurrent = arguments.get("max_concurrent", 16)
         if (source is None) == (path is None):
@@ -310,6 +323,7 @@ class WorkflowTools(Toolkit):
             resource_profile=arguments.get("resource_profile"),
             runtime_seconds_left=hours * 3600 if hours else None,
             origin_job_id=origin,
+            job_id=job_id,
         )
         store = engine.store
 

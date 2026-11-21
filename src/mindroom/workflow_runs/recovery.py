@@ -44,15 +44,20 @@ async def recover_runs(
     """Settle the runs whose attempts ended and return the runs that got their next attempt.
 
     Called after the script runtime recorded which attempts ended, with the IDs of the jobs the job runtime holds
-    unfinished. A run goes on only while its job is one of them, since nobody else receives its report: an intent
-    an earlier primary left without one is deleted, and an interrupted run without one ends as its attempt did.
+    unfinished. Every admitted run goes on under its saved owner, as *access* answers for it; its job only receives
+    the report. A run whose job has ended was stopped with it, and an intent whose job was never admitted is deleted.
     """
 
-    def has_job(run: WorkflowRun) -> bool:
-        return run.job_id in live_jobs or run.origin_job_id in live_jobs
+    def access_of(run: WorkflowRun) -> ResumeAccess:
+        first = run.state is WorkflowRunState.STARTING and run.attempt == 0
+        if run.job_id is None:
+            # A call that waits for its run itself launches what it reserved in this process.
+            return None if first and run.created_at >= engine.started_at else access(run)
+        # A first attempt is its job's to launch.
+        return None if first or run.job_id not in live_jobs else access(run)
 
     for run in await asyncio.to_thread(engine.store.list_runs, include_finished=False):
-        intent = run.state is WorkflowRunState.STARTING and run.attempt == 0
-        if intent and run.created_at < engine.started_at and not has_job(run):
+        intent = run.state is WorkflowRunState.STARTING and run.attempt == 0 and run.created_at < engine.started_at
+        if intent and run.job_id is not None and run.job_id not in live_jobs:
             await asyncio.to_thread(engine.store.delete_intent, run.run_id)
-    return await engine.reconcile(lambda run: access(run) if has_job(run) else None)
+    return await engine.reconcile(access_of)
