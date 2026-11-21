@@ -104,6 +104,7 @@ class AgentToolCallStep:
     kind: Literal["started", "continuation_required", "completed"]
     key: ToolKey
     call: ReportedCall
+    saved_output: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,7 +467,12 @@ async def _execute_agent_tool_call(
         if outcome.images or outcome.audios or outcome.videos or outcome.files:
             yield AgentToolCallMedia(outcome)
         kind = "continuation_required" if outcome.stop_after_call else "completed"
-        yield AgentToolCallStep(kind, binding.key, replace(call, result=outcome.content, is_error=outcome.is_error))
+        yield AgentToolCallStep(
+            kind,
+            binding.key,
+            replace(call, result=outcome.content, is_error=outcome.is_error),
+            outcome.saved_output,
+        )
 
 
 __all__ = [

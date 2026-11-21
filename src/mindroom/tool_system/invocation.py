@@ -30,7 +30,11 @@ from mindroom.failure_text import failure_text
 from mindroom.oauth.providers import is_oauth_connection_required_result
 from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, read_tool_value
 from mindroom.tool_system.context_bound_streams import closing_async_stream
-from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, normalize_output_path_argument
+from mindroom.tool_system.output_files import (
+    OUTPUT_PATH_ARGUMENT,
+    normalize_output_path_argument,
+    saved_output_envelope,
+)
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_model_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue, media_reference
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
@@ -354,10 +358,17 @@ async def execute_tool_call(
         value,
         stop_after_call=function.stop_after_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
         is_error=isinstance(value, ToolOutcome) and value.is_error,
+        saved_output=saved_output_envelope(result.value),
     )
 
 
-def tool_outcome(value: ToolValue, *, stop_after_call: bool, is_error: bool) -> ToolOutcome:
+def tool_outcome(
+    value: ToolValue,
+    *,
+    stop_after_call: bool,
+    is_error: bool,
+    saved_output: dict[str, object] | None = None,
+) -> ToolOutcome:
     """Return ``value``'s text and media as one call's outcome, which stops the run after it or fails as given."""
     return ToolOutcome(
         content=value.content,
@@ -367,6 +378,7 @@ def tool_outcome(value: ToolValue, *, stop_after_call: bool, is_error: bool) -> 
         files=value.files,
         stop_after_call=stop_after_call,
         is_error=is_error,
+        saved_output=saved_output,
     )
 
 

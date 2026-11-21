@@ -796,7 +796,16 @@ async def test_workers_run_prints_saved_output_from_its_named_worker(
     exit_code: int,
 ) -> None:
     """The CLI keeps the real exit status and saved output path after the runner auto-saves a result."""
+    from uuid import uuid4  # noqa: PLC0415
+
     from mindroom.agent_cli.main import main  # noqa: PLC0415
+    from mindroom.agent_cli.protocol import ToolCallOperation  # noqa: PLC0415
+    from mindroom.agent_cli.session import CliTurnOwner  # noqa: PLC0415
+    from mindroom.agent_cli.shell_contract import AgentCliShellEnv  # noqa: PLC0415
+    from mindroom.tool_system.output_files import ToolOutputFilePolicy  # noqa: PLC0415
+    from tests.conftest import live_turn_tools_for_test  # noqa: PLC0415
+    from tests.minimal_agent_fixtures import settled_receipt  # noqa: PLC0415
+    from tests.test_agent_tool_calls import _catalog, _toolkit  # noqa: PLC0415
 
     worker_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "runner.yaml",
@@ -819,14 +828,41 @@ async def test_workers_run_prints_saved_output_from_its_named_worker(
     assert "shard-output" in (tmp_path / receipt["path"]).read_text()
     _route_through(monkeypatch, backend, responder=lambda _url, _payload: {"ok": True, "result": saved})
     shell, _target = _shell(runtime_paths)
-    with tool_runtime_context(_tool_context(runtime_paths)):
-        async with reply_named_workers(_TURN):
-            outcome = await shell(command, worker="shard")
+
+    async def run_shell_command(args: list[str], worker: str) -> object:
+        """Send the command to the named worker through its ordinary shell proxy."""
+        return await shell(args, worker=worker)
+
+    async def authorize(_key: object, _args: object) -> None:
+        pass
+
+    catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)])
+    catalog.runtime_context = _tool_context(runtime_paths)
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, _TURN, "run"),
+        catalog=catalog,
+        authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(workspace_root=tmp_path, auto_save_threshold_bytes=32),
+    )
+    owner.shell_env = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
+    async with reply_named_workers(_TURN), owner._window("driver"):
+        queued = await owner.operation(
+            window="driver",
+            operation=ToolCallOperation(
+                operation="tools.call",
+                call_id=uuid4(),
+                toolkit="shell",
+                function="run_shell_command",
+                arguments={"args": command, "worker": "shard"},
+            ),
+        )
+        cli_receipt = await settled_receipt(owner, queued["call_id"])
+    await owner.close()
 
     class Client:
         def operation(self, payload: dict[str, Any]) -> dict[str, object]:
             assert payload["arguments"]["args"] == command
-            return {"status": "completed", "outcome": outcome}
+            return cli_receipt
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     assert main(["workers", "run", "shard", "--", *command]) == exit_code
