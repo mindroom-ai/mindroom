@@ -950,8 +950,8 @@ async def test_inherited_claude_settings_are_removed_only_from_the_child(
         "CLAUDE_CONFIG_DIR",
         *session_module._ISOLATION_ENV,
     }
-    launcher_name = "MINDROOM_CLAUDE_CODE_CLI"
-    parent_names = inherited | kept | {launcher_name}
+    launcher_names = {"MINDROOM_CLAUDE_CODE_CLI", "MINDROOM_CLAUDE_CODE_KEEP"}
+    parent_names = inherited | kept | launcher_names
     late_name = "ANTHROPIC_LATE_TEST_SETTING"
     monkeypatch.delenv(late_name, raising=False)
     open_process = session_module.ClaudeProcess.open
@@ -970,7 +970,7 @@ async def test_inherited_claude_settings_are_removed_only_from_the_child(
 
     [spawn] = cli.events("spawn")
     child_names = set(spawn["env_names"])
-    assert child_names.isdisjoint(inherited | {late_name, launcher_name})
+    assert child_names.isdisjoint(inherited | launcher_names | {late_name})
     assert child_names.issuperset(kept)
     assert spawn["trusted_env"] == {
         "DISABLE_AUTO_COMPACT": "1",
@@ -985,7 +985,7 @@ async def test_inherited_claude_settings_are_removed_only_from_the_child(
 async def test_launcher_does_not_leave_sigpipe_ignored(tmp_path: Path) -> None:
     launcher = session_module._prepare_launcher(tmp_path, "claude_code")
     script = 'while read -r key mask; do [ "$key" = SigIgn: ] && { echo "$mask"; break; }; done </proc/self/status'
-    env = {"MINDROOM_CLAUDE_CODE_CLI": "/bin/sh"}
+    env = {"MINDROOM_CLAUDE_CODE_CLI": "/bin/sh", "MINDROOM_CLAUDE_CODE_KEEP": ""}
     process = await asyncio.create_subprocess_exec(launcher, "-c", script, env=env, stdout=asyncio.subprocess.PIPE)
     stdout, _ = await process.communicate()
 
