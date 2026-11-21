@@ -146,7 +146,8 @@ It is the agent's own `run_shell_command` call with `worker` set, under the same
 mindroom-agent workers run NAME [--resource-profile small|standard|large] [--timeout SECONDS] [--tail LINES] -- COMMAND [ARG...]
 ```
 
-The command is everything after `--`: several arguments run as that exact argument list, and a single argument runs as a `bash -c` command line.
+The command is everything after `--`. Multiple arguments run as the exact argument list. A single argument runs as an executable unless it contains whitespace or shell syntax, in which case Bash interprets it as a command line.
+For shell builtins or syntax, pass Bash explicitly, for example `mindroom-agent workers run build -- bash -c 'cd src && pwd'`.
 The CLI waits until the command ends and prints the last `--tail` lines (default 100) of its output; for a failed command it prints stdout under `Output:` and stderr under `Stderr:`.
 `--timeout` (default 3600 seconds) stops the command, and `--resource-profile` sizes the worker when its name is first used.
 If the CLI loses the submission response or cannot read a running command’s receipt, it retries reading the receipt for up to a minute. It never submits the command twice.
