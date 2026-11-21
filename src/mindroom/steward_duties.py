@@ -227,11 +227,6 @@ class StewardDuties:
 
     async def _publish_room_state(self, room_id: str, *, bounded: bool = False) -> None:
         """Reconcile one held room and let transient failures retry without another trigger."""
-        steward = self.deps.runtime.orchestrator.room_steward(room_id)
-        if steward is not None and steward.agent_name != self.deps.hook_context.agent_name:
-            # The election names another bot, as after a power or membership change: it publishes after its next frame.
-            steward.steward_duties.mark_joined_for_room_state(room_id)
-            return
         try:
             async with asyncio.timeout(10 if bounded else None):
                 if await self._reconcile_room_state(room_id):
@@ -259,17 +254,27 @@ class StewardDuties:
         finally:
             self._room_state_retries.pop(room_id, None)
 
+    def _may_publish_room_state(self, room_id: str) -> bool:
+        """Recheck the election and hand work over to a different steward's next sync frame."""
+        steward = self.deps.runtime.orchestrator.room_steward(room_id)
+        if steward is None:
+            return False
+        if steward.agent_name == self.deps.hook_context.agent_name:
+            return True
+        steward.steward_duties.mark_joined_for_room_state(room_id)
+        return False
+
     async def _reconcile_room_state(self, room_id: str) -> bool:
         """Reconcile one stewarded room and return whether it needs no retry."""
         runtime = self.deps.runtime
         client = runtime.client
-        if client is None or room_id not in client.rooms or not self.is_steward(room_id):
+        if not self._may_publish_room_state(room_id) or client is None or room_id not in client.rooms:
             return True
         args = (client, runtime.config, runtime.runtime_paths, room_id)
         accounts, mode, binding = await asyncio.gather(
             reconcile_room_accounts(*args, roster_lock=self._room_roster_lock),
             reconcile_room_thread_mode(*args, roster_lock=self._room_roster_lock),
-            reconcile_room_router_binding(client, room_id),
+            reconcile_room_router_binding(client, room_id, may_claim=lambda: self._may_publish_room_state(room_id)),
         )
         return accounts and mode is not False and binding
 

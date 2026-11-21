@@ -15,6 +15,7 @@ from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.event_types import MINDROOM_ACCOUNTS_EVENT_TYPE, ROUTER_BINDING_EVENT_TYPE
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -72,7 +73,12 @@ async def reconcile_room_accounts(
         return False
 
 
-async def reconcile_room_router_binding(client: nio.AsyncClient, room_id: str) -> bool:
+async def reconcile_room_router_binding(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    may_claim: Callable[[], bool] | None = None,
+) -> bool:
     """Name this account, the room's steward, in the `io.mindroom.router` binding where no valid one exists.
 
     Returns whether nothing is left to do. The binding keeps the name today's clients read: the privileged MindRoom
@@ -94,6 +100,8 @@ async def reconcile_room_router_binding(client: nio.AsyncClient, room_id: str) -
                 # An unreadable binding may name another router, so only absent or malformed state is claimed.
                 logger.warning("room_router_binding_publish_failed", room_id=room_id, error=str(current))
                 return False
+            if may_claim is not None and not may_claim():
+                return True
             response = await client.room_put_state(
                 room_id,
                 ROUTER_BINDING_EVENT_TYPE,
@@ -108,7 +116,6 @@ async def reconcile_room_router_binding(client: nio.AsyncClient, room_id: str) -
             return True
     except TimeoutError:
         logger.warning("room_router_binding_publish_failed", room_id=room_id, error="TimeoutError")
-        return False
     except Exception:
         logger.warning("room_router_binding_publish_failed", room_id=room_id, exc_info=True)
-        return False
+    return False

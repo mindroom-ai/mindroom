@@ -403,6 +403,51 @@ async def test_router_publishes_its_binding_on_start_and_join(room_state: RoomSt
 
 
 @pytest.mark.asyncio
+async def test_binding_claim_follows_a_handover_during_accounts_read(room_state: RoomState) -> None:
+    """The old steward retains PUT permission but must leave the newly vacant binding to its successor."""
+    _, _, ids, events, client = room_state
+    outgoing = _owner_bot(room_state).steward_duties
+    runtime = outgoing.deps.runtime.orchestrator
+    successor = _router_duties(room_state)
+    successor.deps.runtime.orchestrator = runtime
+    successor.deps.hook_context.agent_name = "agent1"
+    next_client = AsyncMock(spec=nio.AsyncClient, user_id=ids["agent1"].full_id, rooms=client.rooms)
+    next_client.joined_members.side_effect = client.joined_members.side_effect
+    next_client.room_put_state.side_effect = client.room_put_state.side_effect
+    read = client.room_get_state_event.side_effect
+    next_client.room_get_state_event.side_effect = read
+    successor.deps.runtime.client = next_client
+
+    accounts_read = asyncio.Event()
+    handover = asyncio.Event()
+
+    async def outgoing_read(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == ACCOUNTS_EVENT_TYPE:
+            accounts_read.set()
+        if event_type in (ACCOUNTS_EVENT_TYPE, ROUTER_EVENT_TYPE):
+            await handover.wait()
+        return await read(room_id, event_type, state_key)
+
+    client.room_get_state_event.side_effect = outgoing_read
+    outgoing.mark_joined_for_room_state(ROOM_ID)
+    frame = _publish_joined_rooms(outgoing)
+    try:
+        await asyncio.wait_for(accounts_read.wait(), timeout=1)
+        runtime.room_steward.return_value = MagicMock(agent_name="agent1", steward_duties=successor)
+    finally:
+        handover.set()
+        await frame
+
+    handed_off = ROOM_ID in successor._joined_room_ids
+    successor.publish_joined_room_state(every_room=True)
+    (next_frame,) = successor._room_state_publishes
+    await next_frame
+    assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": next_client.user_id}
+    assert not _writes(client, ROUTER_EVENT_TYPE)
+    assert handed_off
+
+
+@pytest.mark.asyncio
 async def test_router_membership_callback_publishes_agent_join_and_leave(room_state: RoomState) -> None:
     """An account's leave and join update the thread mode and the accounts list, even without membership hooks."""
     config, paths, ids, events, client = room_state
