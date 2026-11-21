@@ -393,6 +393,7 @@ class FakeClaude:
         started["background"] = [os.environ.get(name) for name in background]
         trusted = (
             "DISABLE_AUTO_COMPACT",
+            "CLAUDE_CODE_ENTRYPOINT",
             "CLAUDE_CODE_SDK_READS_SESSION_STATE",
             "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS",
         )

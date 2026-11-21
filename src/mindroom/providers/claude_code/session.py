@@ -254,7 +254,7 @@ def _resolve_cli(cli_path: str | None, provider: str) -> Path:
             from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport  # noqa: PLC0415
 
             cli_path = SubprocessCLITransport("", ClaudeAgentOptions())._find_cli()
-        except (ImportError, AttributeError) as error:
+        except (ImportError, AttributeError, TypeError) as error:
             raise AuthenticationFailed(_NOT_FOUND, provider=provider) from error
     elif os.sep not in cli_path:
         cli_path = shutil.which(cli_path)
@@ -315,7 +315,7 @@ class _SessionRegistry:
         """
         if names := sorted(_SDK_PARENT_ENV.intersection(os.environ)):
             msg = f"Unset {', '.join(names)} in MindRoom's environment. The Claude Agent SDK reads these directly."
-            raise AuthenticationFailed(msg, provider=provider, status_code=401)
+            raise AuthenticationFailed(msg, provider=provider)
         freed = self._reserve(provider, replaces)
         starting = create_background_task(
             self._launch(freed, provider, storage_root, system, tools, options),

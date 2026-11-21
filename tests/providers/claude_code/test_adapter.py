@@ -7,7 +7,9 @@ import asyncio
 import base64
 import json
 import os
+import signal
 import stat
+import sys
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -926,6 +928,7 @@ async def test_parent_sdk_settings_are_refused_by_name_before_taking_a_process_s
         await cli.provider().preflight()
 
     assert "secret-setting-value" not in str(raised.value)
+    assert raised.value.status_code is None
     assert cli.events("spawn") == []
     assert not (cli.storage_root / "claude_code").exists()
 
@@ -973,10 +976,23 @@ async def test_inherited_claude_settings_are_removed_only_from_the_child(
     assert child_names.issuperset(kept)
     assert spawn["trusted_env"] == {
         "DISABLE_AUTO_COMPACT": "1",
+        "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
         "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
         "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "600000",
     }
     assert all(os.environ[name] == "inherited" for name in parent_names | {late_name})
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires /proc/self/status")
+async def test_launcher_does_not_leave_sigpipe_ignored(tmp_path: Path) -> None:
+    launcher = session_module._prepare_launcher(tmp_path, "claude_code")
+    script = 'while read -r key mask; do [ "$key" = SigIgn: ] && { echo "$mask"; break; }; done </proc/self/status'
+    env = {"MINDROOM_CLAUDE_CODE_CLI": "/bin/sh"}
+    process = await asyncio.create_subprocess_exec(launcher, "-c", script, env=env, stdout=asyncio.subprocess.PIPE)
+    stdout, _ = await process.communicate()
+
+    assert process.returncode == 0
+    assert not int(stdout, 16) & (1 << (signal.SIGPIPE - 1))
 
 
 async def test_two_starts_reuse_the_same_private_launcher(tmp_path: Path) -> None:
@@ -1066,7 +1082,7 @@ async def test_uses_sdk_discovery_when_claude_is_not_on_path(
     assert [entry["cli"] for entry in logs if entry["event"] == "claude_code_started"] == [str(cli.path)]
 
 
-@pytest.mark.parametrize("discovery", ["no executable", "missing method", "missing transport"])
+@pytest.mark.parametrize("discovery", ["no executable", "missing method", "missing transport", "changed signature"])
 async def test_unavailable_sdk_discovery_reports_not_found(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1081,6 +1097,8 @@ async def test_unavailable_sdk_discovery_reports_not_found(
         monkeypatch.delattr(subprocess_cli, "SubprocessCLITransport")
     elif discovery == "missing method":
         monkeypatch.delattr(subprocess_cli.SubprocessCLITransport, "_find_cli")
+    elif discovery == "changed signature":
+        monkeypatch.setattr(subprocess_cli.SubprocessCLITransport, "_find_cli", lambda _self, _options: None)
     else:
         monkeypatch.setattr(subprocess_cli.SubprocessCLITransport, "_find_cli", cli_not_found)
 
