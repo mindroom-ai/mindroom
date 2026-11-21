@@ -188,10 +188,16 @@ async def test_a_named_shell_call_gets_a_worker_after_approval_pauses_its_reply(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Approval executes the persisted command in a new fleet and retires it after the resumed reply."""
     from mindroom.tool_system.runtime_context import tool_runtime_context  # noqa: PLC0415
     from mindroom.workers import named  # noqa: PLC0415
     from mindroom.workers.runtime import idle_worker_cleanup_owner  # noqa: PLC0415
-    from tests.test_named_workers import _FakeBackend, _retired, _route_through, _static_worker_manager_lease  # noqa: PLC0415
+    from tests.test_named_workers import (  # noqa: PLC0415
+        _FakeBackend,
+        _retired,
+        _route_through,
+        _static_worker_manager_lease,
+    )
 
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -212,11 +218,11 @@ async def test_a_named_shell_call_gets_a_worker_after_approval_pauses_its_reply(
                         "tools": ["shell"],
                         "named_workers": 1,
                         "worker_scope": "user_agent",
-                    }
+                    },
                 },
                 "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
                 "tool_approval": {"rules": [{"match": "run_shell_command", "action": "require_approval"}]},
-            }
+            },
         ),
         paths,
     )
@@ -227,13 +233,19 @@ async def test_a_named_shell_call_gets_a_worker_after_approval_pauses_its_reply(
     backend = _FakeBackend()
     posts = _route_through(monkeypatch, backend)
     monkeypatch.setattr(
-        named, "lease_configured_primary_worker_manager", lambda _paths: _static_worker_manager_lease(backend)
+        named,
+        "lease_configured_primary_worker_manager",
+        lambda _paths: _static_worker_manager_lease(backend),
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
     execution = replace(runner.approvals._approval_execution, config=lambda: config, runtime_paths=paths)
     context = runner.deps.tool_runtime.build_context(
         MessageTarget(
-            identity.room_id, identity.thread_id, identity.resolved_thread_id, "$source", identity.session_id
+            identity.room_id,
+            identity.thread_id,
+            identity.resolved_thread_id,
+            "$source",
+            identity.session_id,
         ),
         user_id=identity.requester_id,
         active_model_name="default",
@@ -275,7 +287,7 @@ async def test_a_named_shell_call_gets_a_worker_after_approval_pauses_its_reply(
             quiet=False,
         )
     assert isinstance(result, CompletedApprovalRun)
-    assert len(backend.specs) == 1, model.requests[-1].messages
+    assert len(backend.specs) == 1, [msg.content for msg in model.requests[-1].messages if msg.role == "tool"]
     [spec] = backend.specs
     [(_, request)] = posts
     assert request["worker_key"] == spec.worker_key

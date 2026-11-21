@@ -931,7 +931,10 @@ def _call_proxy_sync(
             if isinstance(saved, dict) and saved.get("status") == "saved_to_file":
                 preview = saved.get("preview")
                 if isinstance(preview, str):
-                    return {**result, "mindroom_tool_output": {**saved, "preview": f"{named.header(worker_handle)}\n{preview}"}}
+                    return {
+                        **result,
+                        "mindroom_tool_output": {**saved, "preview": f"{named.header(worker_handle)}\n{preview}"},
+                    }
         return result
 
 

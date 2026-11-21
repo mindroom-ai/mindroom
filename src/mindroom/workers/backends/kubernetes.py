@@ -68,6 +68,7 @@ from mindroom.workers.worker_retirement import (
     open_workers_root,
     read_worker_identity,
     read_worker_marker,
+    require_worker_identity,
     write_worker_marker,
 )
 
@@ -533,18 +534,13 @@ class KubernetesWorkerBackend:
                 workers_fd = state.workers_fd
                 # A marker only bypasses the identity check if the earlier removal was for this exact key.
                 resumed = workers_fd is not None and read_worker_marker(workers_fd, marker) == worker_key
-                if (
-                    state.worker_fd is not None
-                    and not resumed
-                    and read_worker_identity(
+                if state.worker_fd is not None and not resumed:
+                    require_worker_identity(
                         state.worker_fd,
+                        worker_key,
                         identity_path=_STATE_IDENTITY_PATH,
                         identity_field_path=_STATE_IDENTITY_FIELD_PATH,
                     )
-                    != worker_key
-                ):
-                    msg = "Worker identity metadata does not match the retirement key."
-                    raise ValueError(msg)
                 self._invalidate_ready_worker(worker_key)
                 self._resources.delete_service(worker_id)
                 self._resources.delete_secret(worker_id)
@@ -668,25 +664,7 @@ class KubernetesWorkerBackend:
         began, or its startup manifest names a subagent's or a named worker's key; every other directory is kept.
         """
         prefix_parts = tuple(part for part in self.config.storage_subpath_prefix.strip().split("/") if part)
-        try:
-            with open_workers_root(self.storage_root, prefix_parts) as workers_fd, os.scandir(workers_fd) as entries:
-                directories = set()
-                markers = set()
-                names = set()
-                for entry in entries:
-                    names.add(entry.name)
-                    if entry.is_dir(follow_symlinks=False):
-                        directories.add(entry.name)
-                    elif entry.name.endswith(_RETIREMENT_MARKER_SUFFIX) and entry.is_file(follow_symlinks=False):
-                        markers.add(entry.name)
-                for marker in markers:
-                    if marker.removesuffix(_RETIREMENT_MARKER_SUFFIX) not in names:
-                        # The removal ended, but not before the process did.
-                        with suppress(OSError):
-                            os.unlink(marker, dir_fd=workers_fd)
-        except (OSError, ValueError):
-            # Without the listing nothing is known to be left behind, and the rest of the pass still runs.
-            directories = set()
+        directories = self._worker_directories_and_prune_finished_markers(prefix_parts)
         deployed = {
             (deployment.metadata.annotations or {}).get(resources.ANNOTATION_STATE_SUBPATH, "").rpartition("/")[2]
             for deployment in deployments
@@ -716,6 +694,23 @@ class KubernetesWorkerBackend:
                     self._stateless_since[name] = now
             finally:
                 worker_lock.release()
+
+    def _worker_directories_and_prune_finished_markers(self, prefix: tuple[str, ...]) -> set[str]:
+        """List worker trees and remove regular markers whose trees are already gone."""
+        try:
+            with open_workers_root(self.storage_root, prefix) as workers_fd, os.scandir(workers_fd) as entries:
+                by_name = {entry.name: entry for entry in entries}
+                for name, entry in by_name.items():
+                    if (
+                        name.endswith(_RETIREMENT_MARKER_SUFFIX)
+                        and name.removesuffix(_RETIREMENT_MARKER_SUFFIX) not in by_name
+                        and entry.is_file(follow_symlinks=False)
+                    ):
+                        with suppress(OSError):
+                            os.unlink(name, dir_fd=workers_fd)
+                return {name for name, entry in by_name.items() if entry.is_dir(follow_symlinks=False)}
+        except (OSError, ValueError):
+            return set()
 
     def _left_behind_worker_key(self, prefix_parts: tuple[str, ...], name: str) -> str | None:
         """Return the key of the worker whose removal left the directory ``name``, or None for any other directory.

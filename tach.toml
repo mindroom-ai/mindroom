@@ -1386,7 +1386,6 @@ depends_on = [
     "mindroom.turn_model",
     "mindroom.session_storage.lanes",
     "mindroom.delegation.cost",
-    "mindroom.workers",
 ]
 visibility = ["mindroom.approval.continuation_runner"]
 

@@ -6,10 +6,10 @@ import json
 import os
 import shutil
 import stat
-from uuid import uuid4
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
+from uuid import uuid4
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -21,6 +21,7 @@ __all__ = [
     "read_worker_identity",
     "read_worker_marker",
     "remove_directory_tree_at",
+    "require_worker_identity",
     "write_worker_marker",
 ]
 
@@ -132,6 +133,22 @@ def read_worker_identity(
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def require_worker_identity(
+    worker_fd: int,
+    worker_key: str,
+    *,
+    identity_path: tuple[str, ...],
+    identity_field_path: tuple[str, ...],
+) -> None:
+    """Require the exact worker key before touching an existing worker tree."""
+    if (
+        read_worker_identity(worker_fd, identity_path=identity_path, identity_field_path=identity_field_path)
+        != worker_key
+    ):
+        msg = "Worker identity metadata does not match the retirement key."
+        raise ValueError(msg)
 
 
 def read_worker_marker(workers_fd: int, filename: str) -> str | None:
@@ -287,14 +304,12 @@ def open_worker_state_root(
             return
         descriptors.append(worker_fd)
         if expected_worker_key is not None:
-            actual_worker_key = read_worker_identity(
+            require_worker_identity(
                 worker_fd,
+                expected_worker_key,
                 identity_path=identity_path,
                 identity_field_path=identity_field_path,
             )
-            if actual_worker_key != expected_worker_key:
-                msg = "Worker identity metadata does not match the retirement key."
-                raise ValueError(msg)
         _require_current_directory(worker_parent_fd, worker_name, worker_fd)
         yield _BoundWorkerStateRoot(worker_parent_fd, worker_name, worker_fd, workers_fd=worker_parent_fd)
     finally:

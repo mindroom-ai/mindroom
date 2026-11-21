@@ -469,7 +469,8 @@ def _recv_line(conn: socket.socket) -> bytes:
 def _parse_supervisor_response(line: bytes) -> ShellRunResult:
     if not line.strip():
         return ShellRunResult(
-            message="Error: Shell supervisor closed the connection unexpectedly.", execution_error=True
+            message="Error: Shell supervisor closed the connection unexpectedly.",
+            execution_error=True,
         )
     try:
         payload = json.loads(line)
@@ -484,7 +485,8 @@ def _parse_supervisor_response(line: bytes) -> ShellRunResult:
         or not isinstance(execution_error, bool)
     ):
         return ShellRunResult(
-            message="Error: Invalid shell supervisor response: invalid result fields.", execution_error=True
+            message="Error: Invalid shell supervisor response: invalid result fields.",
+            execution_error=True,
         )
     return ShellRunResult(
         message=message,

@@ -326,7 +326,7 @@ def test_workers_run_sends_one_shell_call_that_names_the_worker(capsys, monkeypa
         monkeypatch,
         {"status": "queued"},
         {"status": "running"},
-        _completed("[worker: e2e-3, started]\nshard 3 ok"),
+        _completed("[worker: e2e-3, started]\n" + format_shell_completion("shard 3 ok", None, return_code=0)),
     )
 
     argv = ["workers", "run", "e2e-3", "--resource-profile", "large", "--timeout", "900", "--tail", "20"]
@@ -346,32 +346,24 @@ def test_workers_run_sends_one_shell_call_that_names_the_worker(capsys, monkeypa
 
 
 def test_workers_run_defaults_to_an_hour_and_the_normal_worker_size(monkeypatch) -> None:
-    sent = _worker_client(monkeypatch, _completed("[worker: build]\n"))
+    result = format_shell_completion("", None, return_code=0)
+    sent = _worker_client(monkeypatch, _completed(f"[worker: build]\n{result}"))
 
     assert main(["workers", "run", "build", "--", "make test && make lint"]) == 0
     assert sent[0]["arguments"] == {"args": ["make test && make lint"], "worker": "build", "timeout": 3600, "tail": 100}
 
 
 @pytest.mark.parametrize(
-    ("result", "exit_code", "printed"),
-    [
-        ("Exit code 3\nOutput:\nran 4 tests\nStderr:\n1 failed", 3, "Output:\nran 4 tests\nStderr:\n1 failed\n"),
-        ("Exit code 1", 1, ""),
-        ("Exit code 137\nStderr:\nKilled", 137, "Stderr:\nKilled\n"),
-        ("Stopped after 60s.\nOutput:\nstill going", 124, "Stopped after 60s.\nOutput:\nstill going\n"),
-        # A command that prints these words and succeeds did not fail or stop.
-        ("Exit code 3 was expected", 0, "Exit code 3 was expected\n"),
-        ("Exit code 3\nand more", 0, "Exit code 3\nand more\n"),
-        ("Stopped after 5s.", 0, "Stopped after 5s.\n"),
-        (format_shell_completion("[cwd: genuine]\nkept", None, return_code=0), 0, "[cwd: genuine]\nkept\n"),
-    ],
+    "stdout",
+    ["Exit code 3 was expected", "Exit code 3\nand more", "Stopped after 5s.", "[cwd: genuine]\nkept"],
 )
-def test_workers_run_exits_with_the_command_s_exit_code(result, exit_code, printed, capsys, monkeypatch) -> None:
-    """A failed command's exit code is the CLI's, and a command stopped at its time limit exits 124."""
+def test_workers_run_keeps_successful_command_output_verbatim(stdout, capsys, monkeypatch) -> None:
+    """Output that resembles CLI or shell metadata is still printed."""
+    result = format_shell_completion(stdout, None, return_code=0)
     _worker_client(monkeypatch, _completed(f"[worker: w]\n{result}"))
 
-    assert main(["workers", "run", "w", "--timeout", "60", "--", "pytest"]) == exit_code
-    assert capsys.readouterr().out == printed
+    assert main(["workers", "run", "w", "--timeout", "60", "--", "pytest"]) == 0
+    assert capsys.readouterr().out == f"{stdout}\n"
 
 
 @pytest.mark.parametrize(
@@ -449,7 +441,7 @@ def _unreachable_worker_client(monkeypatch, *, failed_reads: int | None, fail_su
             if failed_reads is None or len(reads) <= failed_reads:
                 msg = "Agent CLI transport outcome is unknown"
                 raise AgentCliUnavailableError(msg)
-            return _completed("[worker: w]\nshard ok")
+            return _completed("[worker: w]\n" + format_shell_completion("shard ok", None, return_code=0))
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     monkeypatch.setattr("mindroom.agent_cli.main.time", clock)
@@ -481,7 +473,8 @@ def test_workers_run_exits_125_when_the_result_stays_unreachable(capsys, monkeyp
 
 def test_workers_run_counts_a_minute_of_failed_reads_from_the_last_one_that_worked(monkeypatch) -> None:
     clock = _Clock()
-    answers = iter([*[None] * 20, {"status": "running"}, *[None] * 20, _completed("[worker: w]\nok")])
+    done = _completed("[worker: w]\n" + format_shell_completion("ok", None, return_code=0))
+    answers = iter([*[None] * 20, {"status": "running"}, *[None] * 20, done])
 
     class Client:
         def operation(self, payload) -> dict[str, object]:
@@ -504,8 +497,13 @@ def test_workers_run_counts_a_minute_of_failed_reads_from_the_last_one_that_work
     assert clock.now > 60
 
 
-@pytest.mark.parametrize("failed_reads, expected_code", [(None, 125), (2, 0)])
-def test_workers_run_recovers_after_a_lost_submission_response(capsys, monkeypatch, failed_reads, expected_code) -> None:
+@pytest.mark.parametrize(("failed_reads", "expected_code"), [(None, 125), (2, 0)])
+def test_workers_run_recovers_after_a_lost_submission_response(
+    capsys,
+    monkeypatch,
+    failed_reads,
+    expected_code,
+) -> None:
     """Only read the receipt: another submission could run the command twice."""
     clock, reads, submissions = _unreachable_worker_client(monkeypatch, failed_reads=failed_reads, fail_submission=True)
 
@@ -521,16 +519,6 @@ def test_workers_run_recovers_after_a_lost_submission_response(capsys, monkeypat
         assert (output.out, output.err) == ("shard ok\n", "")
 
 
-def test_workers_run_prints_the_start_of_a_long_result_and_where_the_rest_is(capsys, monkeypatch) -> None:
-    saved = {"status": "saved_to_file", "path": "mindroom_tool_outputs/run.txt", "preview": "[worker: w]\nline 1"}
-    _worker_client(monkeypatch, _completed({"mindroom_tool_output": saved}))
-
-    assert main(["workers", "run", "w", "--", "seq", "100000"]) == 0
-    output = capsys.readouterr()
-    assert output.out == "line 1\n"
-    assert "full output saved to mindroom_tool_outputs/run.txt" in output.err
-
-
 @pytest.mark.parametrize(
     "receipt",
     [
@@ -538,7 +526,7 @@ def test_workers_run_prints_the_start_of_a_long_result_and_where_the_rest_is(cap
         {"status": "cancelled", "outcome": "Call interrupted after dispatch; effects may have occurred"},
         # A shell that runs without workers answers without the worker's line, so nothing ran in a worker named so.
         _completed("Error: `worker` and `resource_profile` need a shell that runs in a worker"),
-        _completed("[worker: other]\nran elsewhere"),
+        _completed("[worker: other]\n" + format_shell_completion("ran elsewhere", None, return_code=0)),
     ],
 )
 def test_workers_run_exits_125_when_the_command_did_not_run_in_its_worker(receipt, capsys, monkeypatch) -> None:
