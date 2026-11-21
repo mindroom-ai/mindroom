@@ -22,6 +22,7 @@ from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.script_runs.reasons import PLUGIN_TOOLS_CHANGED
 from mindroom.tool_jobs import runtime as tool_job_runtime
+from mindroom.tool_jobs.client_cancel import conversation_jobs
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.publication import _jobs_state_content
 from mindroom.workflow_runs import agent_nodes
@@ -445,6 +446,7 @@ async def test_node_jobs_are_in_no_list_no_room_state_and_no_follow_up(stack: Wo
     assert [job.status for job in live] == ["running"]
     assert _jobs_state_content(live) == {"jobs": [], "total": 0}
     assert await stack.jobs.list_jobs(owner=owner, depth=0) == []
+    assert conversation_jobs(stack.jobs, room_id=str(owner.room_id), thread_id=None) == []
     # The engine stops waiting, as a primary that dies does, and the job ends with nobody to acknowledge it.
     await stack.engine.close()
     gate.set()
