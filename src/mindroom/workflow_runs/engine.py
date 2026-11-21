@@ -379,7 +379,7 @@ class WorkflowEngine:
         """Return the run and its current nodes."""
         return self.store.get_run(run_id), self.store.nodes(run_id)
 
-    async def reconcile(self, access: Callable[[WorkflowRun], ResumeAccess] | None = None) -> list[str]:
+    async def reconcile(self, access: Callable[[WorkflowRun], ResumeAccess] = lambda _run: None) -> list[str]:
         """End each run whose attempt has ended, as that attempt and the script's report say.
 
         With *access*, a run that an infrastructure interruption stopped gets its next attempt instead, with what
@@ -388,7 +388,7 @@ class WorkflowEngine:
         resumed = []
         for run in await asyncio.to_thread(self.store.list_runs, include_finished=False):
             try:
-                if await self._reconcile_run(run, access(run) if access is not None else None):
+                if await self._reconcile_run(run, access):
                     resumed.append(run.run_id)
             except Exception:
                 logger.exception("workflow_run_reconcile_failed", run_id=run.run_id)
@@ -396,30 +396,31 @@ class WorkflowEngine:
 
     async def go_on(self, run_id: str, context: ToolRuntimeContext, limits: WorkflowLimits) -> None:
         """Start the attempt *run_id* waits for, for the job that was just continued and can cancel the run now."""
-        await self._reconcile_run(self.store.get_run(run_id), (context, limits))
+        await self._reconcile_run(self.store.get_run(run_id), lambda _run: (context, limits))
 
-    async def _reconcile_run(self, run: WorkflowRun, access: ResumeAccess) -> bool:
-        """End *run* if its attempt has ended, or start its next attempt; return whether one started."""
-        if access == "pending":
-            # Nothing is decided before the owner's access is: the run stays as the interruption left it.
-            return False
-        if run.state is WorkflowRunState.STARTING:
-            if access is None or run.run_id in self._launching.values():
-                # Being launched, or its own call or job's to launch.
-                return False
-        else:
+    async def _reconcile_run(self, run: WorkflowRun, access_of: Callable[[WorkflowRun], ResumeAccess]) -> bool:
+        """End *run* if its attempt has ended, or start its next attempt; return whether one started.
+
+        *access_of* is asked about the run as it is when the answer is used, not when a scan found it.
+        """
+        if run.state is not WorkflowRunState.STARTING:
             try:
                 attempt = await asyncio.to_thread(self.scripts.store.get_run, run.script_run_id or "")
             except ScriptRunNotFoundError:
                 attempt = None
             if attempt is not None and attempt.state not in TERMINAL_SCRIPT_RUN_STATES:
                 return False
-            state, error = _run_outcome(self.store.get_run(run.run_id), attempt)
+            current = self.store.get_run(run.run_id)
+            state, error = _run_outcome(current, attempt)
             interrupted = state is WorkflowRunState.INTERRUPTED and error in AUTO_RESUME_REASONS
             # The attempt's own process limit says nothing about a run that has working time left, or no limit.
             spent = error == MAX_RUNTIME_EXCEEDED and run.runtime_seconds_left == 0
+            access = access_of(current)
             if access is None or not interrupted or spent:
+                # What the attempt left is settled whatever the owner's access is: only a next attempt waits for it.
                 await self._end_run(run, state, error)
+                return False
+            if access == "pending":
                 return False
             # The attempt is over and the run is not: its nodes are settled, and it waits for its next attempt.
             waiting = await self._end_run(run, WorkflowRunState.STARTING, None, finished_at=None)
@@ -427,13 +428,17 @@ class WorkflowEngine:
                 # A resume took the run since this look began: the attempt it judged says nothing about that one.
                 return False
             run = waiting
-        return await self._relaunch(run, access)
-
-    async def _relaunch(self, run: WorkflowRun, access: ResumeAccess) -> bool:
-        """Start the next attempt of an interrupted run that waits for one, as *access* allows; return whether it started."""
-        if access is None or run.state is not WorkflowRunState.STARTING:
+        elif run.run_id in self._launching.values():
             return False
-        if isinstance(access, str):
+        return await self._relaunch(run, access_of)
+
+    async def _relaunch(self, run: WorkflowRun, access_of: Callable[[WorkflowRun], ResumeAccess]) -> bool:
+        """Start the next attempt of an interrupted run that waits for one, as its access allows; return whether it started."""
+        # Asked here, at the handoff: a job that was stopped or a resume that came since the look began is seen.
+        access = access_of(run := self.store.get_run(run.run_id))
+        if access is None or access == "pending" or run.state is not WorkflowRunState.STARTING:
+            return False
+        if access == "revoked":
             await self._end_run(run, WorkflowRunState.INTERRUPTED, _NO_ACCESS)
             return False
         context, limits = access
@@ -766,7 +771,7 @@ class WorkflowEngine:
                 # Only the run that reported: another run's ended attempt is the next pass's to judge.
                 run = await asyncio.to_thread(self.store.run_for_script, script_run_id)
                 if run is not None:
-                    await self._reconcile_run(run, None)
+                    await self._reconcile_run(run, lambda _run: None)
                 break
 
     async def _end_run(

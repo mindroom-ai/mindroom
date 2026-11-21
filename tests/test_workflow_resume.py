@@ -405,7 +405,7 @@ async def test_look_at_the_old_attempt_after_a_resume_took_the_run_leaves_the_re
     await stack.end_attempt(ScriptRunState.EXITED)
     await stack.engine.reopen(stack.run_id, stack.context)
 
-    assert not await stack.engine._reconcile_run(seen, stack.engine.owner_access(seen))
+    assert not await stack.engine._reconcile_run(seen, stack.engine.owner_access)
 
     run = stack.store.get_run(stack.run_id)
     assert (run.state, run.error, len(stack.scripts.launched)) == (WorkflowRunState.STARTING, None, 1)

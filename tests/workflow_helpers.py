@@ -13,6 +13,7 @@ import json
 import threading
 from contextlib import contextmanager
 from dataclasses import replace
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, Self
@@ -29,7 +30,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths
-from mindroom.custom_tools.workflow import WorkflowTools, unfinished_workflow_jobs
+from mindroom.custom_tools.workflow import WorkflowTools, workflow_job_standing
 from mindroom.message_target import MessageTarget
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker
 from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, RUN_ID_ENV, TOKEN_PATH_ENV
@@ -745,8 +746,8 @@ class WorkflowStack:
 
     async def maintain(self) -> list[str]:
         """Run the workflow pass that follows each pass of the script runtime."""
-        jobs = unfinished_workflow_jobs(self.context.runtime_paths)
-        return await recover_runs(self.engine, self._owner_access, *jobs)
+        standing = partial(workflow_job_standing, self.context.runtime_paths)
+        return await recover_runs(self.engine, self._owner_access, standing)
 
     async def continue_jobs(self) -> None:
         """Run the job coordinator's pass that continues the jobs a restart stopped, with the owner's access granted."""

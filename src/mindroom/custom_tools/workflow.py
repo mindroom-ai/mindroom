@@ -285,7 +285,8 @@ class WorkflowTools(Toolkit):
         if accepted is not None:
             return run, accepted
         engine.resumable(run.run_id, rerun)
-        if run.job_id in unfinished_workflow_jobs(context.runtime_paths)[0]:
+        delivered = ("absent", "stopped", "ended")
+        if run.job_id is not None and workflow_job_standing(context.runtime_paths, run.job_id) not in delivered:
             msg = f"Run {run.run_id} is still delivering its report. Try again in a moment."
             raise WorkflowRunStoreError(msg)
         edited = source is not None or path is not None
@@ -422,16 +423,24 @@ async def continued_workflow_job(job: BackgroundJob) -> JobSpec:
     return _run_job(engine, run, job.job_id, begin, resume=request)
 
 
-def unfinished_workflow_jobs(runtime_paths: RuntimePaths) -> tuple[frozenset[str], frozenset[str]]:
-    """Return the IDs of the workflow jobs the job runtime holds unfinished, and of those a restart stopped that wait.
+def workflow_job_standing(runtime_paths: RuntimePaths, job_id: str) -> str:
+    """Return what the job runtime knows of a run's job now: read when its run is judged, never ahead of that.
 
-    A job that waits has not been granted again and cannot cancel its run yet; `continued_workflow_job` goes on with it.
+    `unknown` while there is no job runtime to ask, `absent` when it holds no such job, `waiting` for a job a restart
+    stopped that is not granted again and cannot cancel its run yet, `stopping` once a cancel was requested, `live`
+    otherwise while unfinished. An ended job was `stopped` by a Stop or a denial, or `ended` in any other way.
     """
     runtime = get_background_runtime(runtime_paths)
-    jobs = runtime.retained_jobs() if runtime is not None else ()
-    waiting = runtime.awaiting_continuation() if runtime is not None else ()
-    unfinished = (job.job_id for job in jobs if job.kind == "workflow" and job.status not in TERMINAL_STATUSES)
-    return frozenset(unfinished), frozenset(job.job_id for job in waiting)
+    if runtime is None:
+        return "unknown"
+    job = next((job for job in runtime.retained_jobs() if job.job_id == job_id), None)
+    if job is None:
+        return "absent"
+    if job.status in TERMINAL_STATUSES:
+        return "stopped" if job.status in ("cancelled", "denied") else "ended"
+    if job.status == "cancel_requested":
+        return "stopping"
+    return "waiting" if any(waiting.job_id == job_id for waiting in runtime.awaiting_continuation()) else "live"
 
 
 def workflow_limits(config: Config, agent_name: str) -> WorkflowLimits:

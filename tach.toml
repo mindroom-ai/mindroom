@@ -2519,7 +2519,7 @@ expose = ["hold"]
 
 [[modules]]
 path = "mindroom.workflow_runs.recovery"
-depends_on = ["mindroom.workflow_runs.models"]
+depends_on = ["mindroom.workflow_runs.models", "mindroom.workflow_runs.store"]
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.recovery"]
