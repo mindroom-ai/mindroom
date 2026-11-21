@@ -44,7 +44,7 @@ def filter_and_sort_worker_handles(handles: list[WorkerHandle], include_idle: bo
 
 
 class WorkerBackendDefaults(Protocol):
-    """Shared defaults for backends without named workers or exact retirement."""
+    """Shared defaults for backends without named workers."""
 
     # Deployment-wide limit across all agents and requesters; zero disables named workers.
     named_workers_max: int = 0
@@ -57,10 +57,15 @@ class WorkerBackendDefaults(Protocol):
         """List existing named workers, running or stopped, that are not being removed."""
         return frozenset()
 
-    def retire_worker(self, _worker_key: str, /) -> None:
-        """Remove one exact worker and all backend-owned state, or refuse if unsupported."""
-        msg = "This worker backend does not support exact retirement."
-        raise WorkerBackendError(msg)
+
+@runtime_checkable
+class RetiringWorkerBackend(Protocol):
+    """Backend supporting exact worker retirement."""
+
+    cleanup_locator: str | None
+
+    def retire_worker(self, worker_key: str) -> None:
+        """Destructively retire one exact worker and its backend-owned state."""
 
 
 class WorkerBackend(WorkerBackendDefaults, Protocol):

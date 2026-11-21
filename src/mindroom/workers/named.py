@@ -29,7 +29,7 @@ from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
     worker_log_id,
 )
-from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend import RetiringWorkerBackend, WorkerBackendError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends.kubernetes_config import NAMED_WORKERS_MAX_ENV, configured_named_workers_max
 from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
@@ -326,6 +326,7 @@ def ensure_named_worker(
 
 
 def _retire_named_worker(backend: WorkerBackend, worker_key: str) -> None:
+    assert isinstance(backend, RetiringWorkerBackend)
     try:
         backend.retire_worker(worker_key)
     except WorkerBackendError:
