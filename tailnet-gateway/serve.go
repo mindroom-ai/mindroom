@@ -99,7 +99,7 @@ func (g *Gateway) wake(ctx context.Context, id, login, peer string) worker {
 	}
 	inTime, cancel := context.WithTimeout(ctx, workerTimeout)
 	defer cancel()
-	sshd, err := g.dial(inTime, net.JoinHostPort(host, strconv.Itoa(port)))
+	sshd, err := g.dial(inTime, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		return worker{}
 	}
@@ -113,8 +113,4 @@ func (g *Gateway) wake(ctx context.Context, id, login, peer string) worker {
 		return worker{}
 	}
 	return to
-}
-
-func dialWorker(ctx context.Context, address string) (net.Conn, error) {
-	return (&net.Dialer{}).DialContext(ctx, "tcp", address)
 }

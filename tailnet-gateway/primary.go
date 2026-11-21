@@ -24,10 +24,6 @@ type Link struct {
 	AllowedLogins []string `json:"allowed_logins"`
 }
 
-type RefusedError int
-
-func (e RefusedError) Error() string { return fmt.Sprintf("primary answered HTTP %d", int(e)) }
-
 type Primary struct {
 	baseURL, token string
 	client         *http.Client
@@ -62,7 +58,7 @@ func (p *Primary) call(ctx context.Context, timeout time.Duration, method, path 
 		return nil
 	}
 	if res.StatusCode != http.StatusOK {
-		return RefusedError(res.StatusCode)
+		return fmt.Errorf("primary answered HTTP %d", res.StatusCode)
 	}
 	answer, err := io.ReadAll(http.MaxBytesReader(nil, res.Body, maxAnswer))
 	if err != nil {

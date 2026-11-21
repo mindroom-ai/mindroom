@@ -160,7 +160,7 @@ func (f *fixtures) holdDials(t *testing.T) *heldDials {
 	over := make(chan struct{})
 	t.Cleanup(func() { close(over) })
 	dials := &heldDials{entered: make(chan struct{}, 16), cancelled: make(chan struct{}, 16)}
-	f.gateway.dial = func(ctx context.Context, address string) (net.Conn, error) {
+	f.gateway.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
 		dials.entered <- struct{}{}
 		select {
 		case <-ctx.Done():
@@ -438,8 +438,8 @@ func (c *deadlineConn) SetReadDeadline(at time.Time) error {
 
 func (f *fixtures) workerDeadlines(short time.Duration) <-chan time.Time {
 	deadlines := make(chan time.Time, 2)
-	f.gateway.dial = func(ctx context.Context, addr string) (net.Conn, error) {
-		conn, err := dialWorker(ctx, addr)
+	f.gateway.dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, err
 		}

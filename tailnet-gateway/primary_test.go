@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -249,8 +249,7 @@ func TestConnectRefusalCarriesStatusButNotResponseText(t *testing.T) {
 
 		_, _, err := NewPrimary(primary.URL, "gateway-secret").Connect(context.Background(), idA, "bas@github", "laptop")
 
-		var refused RefusedError
-		if !errors.As(err, &refused) || int(refused) != answer.code || strings.Contains(err.Error(), "gateway-secret") {
+		if want := fmt.Sprintf("primary answered HTTP %d", answer.code); err == nil || err.Error() != want {
 			t.Errorf("HTTP %d: err = %v, want only the refusal status", answer.code, err)
 		}
 	}
@@ -273,10 +272,8 @@ func TestConnectAnswerWithoutATargetIsAnError(t *testing.T) {
 
 		host, port, err := NewPrimary(primary.URL, "tok").Connect(context.Background(), idA, "bas@github", "laptop")
 
-		// A malformed success is not a refusal.
-		var refused RefusedError
-		if err == nil || errors.As(err, &refused) {
-			t.Errorf("answer %s: target = %q:%d, err = %v, want an error that is no RefusedError", body, host, port, err)
+		if err == nil || strings.HasPrefix(err.Error(), "primary answered HTTP ") {
+			t.Errorf("answer %s: target = %q:%d, err = %v, want a malformed answer error", body, host, port, err)
 		}
 	}
 }
@@ -287,9 +284,8 @@ func TestPrimaryThatDoesNotAnswerIsNotARefusal(t *testing.T) {
 
 	_, _, err := NewPrimary(primary.URL, "tok").Connect(context.Background(), idA, "bas@github", "laptop")
 
-	var refused RefusedError
-	if err == nil || errors.As(err, &refused) {
-		t.Fatalf("err = %v, want an error that is no RefusedError", err)
+	if err == nil || strings.HasPrefix(err.Error(), "primary answered HTTP ") {
+		t.Fatalf("err = %v, want a transport error", err)
 	}
 }
 

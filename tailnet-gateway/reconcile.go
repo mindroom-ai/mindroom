@@ -40,14 +40,14 @@ type Gateway struct {
 	stateDir string
 	now      func() time.Time
 	after    func(time.Duration) <-chan time.Time
-	dial     func(context.Context, string) (net.Conn, error)
+	dial     func(ctx context.Context, network, address string) (net.Conn, error)
 	mu       sync.Mutex
 	nodes    map[string]*linkNode
 }
 
 func NewGateway(p *Primary, f NodeFactory, stateDir string) *Gateway {
 	return &Gateway{primary: p, factory: f, stateDir: stateDir, now: time.Now, after: time.After,
-		dial: dialWorker, nodes: map[string]*linkNode{}}
+		dial: (&net.Dialer{}).DialContext, nodes: map[string]*linkNode{}}
 }
 
 func (g *Gateway) Run(ctx context.Context) {
