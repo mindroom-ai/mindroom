@@ -12,7 +12,6 @@ from kubernetes import client
 from kubernetes.config import load_incluster_config
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.api.tailnet_ssh_gateway import PORT_ENV
 from mindroom.config.main import load_config
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.tailnet_ssh.links import connect, desired_links
@@ -41,7 +40,7 @@ tailnet_ssh:
 
 def _banner(host: str, port: int) -> None:
     # The internal chart Service connects the gateway-labelled stand-in to this pod.
-    with socket.create_server(("", int(os.environ[PORT_ENV]))) as listener:
+    with socket.create_server(("", int(os.environ["MINDROOM_TAILNET_SSH_PORT"]))) as listener:
         listener.settimeout(120)
         with listener.accept()[0] as gateway, gateway.makefile("rb") as stream:
             gateway.settimeout(30)

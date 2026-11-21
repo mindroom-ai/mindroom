@@ -22,9 +22,9 @@ from mindroom.room_agent_access import room_execution_identity
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tailnet_ssh import links
 from mindroom.tailnet_ssh.links import (
-    ConnectRefused,
     GatewayStatus,
     StatusReport,
+    _ConnectRefused,
     active_worker_keys,
     connect,
     desired_links,
@@ -320,7 +320,7 @@ async def test_connect_refuses_replacement_between_wake_and_runner_lookup(
     monkeypatch.setattr(sandbox_proxy, "lease_worker_manager", lambda *_: manager)
     monkeypatch.setattr(links, "_start_sshd", start_sshd)
 
-    with pytest.raises(ConnectRefused, match="worker changed") as refused:
+    with pytest.raises(_ConnectRefused, match="worker changed") as refused:
         await _connect(config, paths, link.id)
 
     assert refused.value.status_code == 409
@@ -379,7 +379,7 @@ async def test_connect_without_ssh_endpoint_calls_no_runner(
     config.agents["mind"].tailnet_ssh = False
     manager = _wire_connect(monkeypatch, tmp_path, link, ssh=False)
 
-    with pytest.raises(ConnectRefused) as refused:
+    with pytest.raises(_ConnectRefused) as refused:
         await _connect(config, paths, link.id)
 
     assert refused.value.status_code == 409
@@ -399,10 +399,10 @@ async def test_connect_refuses_while_the_worker_is_not_ready(
     manager = _wire_connect(monkeypatch, tmp_path, link)
 
     manager.handles = [_handle(link.worker_key, tmp_path / "ssh", status="failed")]
-    with pytest.raises(ConnectRefused) as not_ready:
+    with pytest.raises(_ConnectRefused) as not_ready:
         await _connect(config, paths, link.id)
     manager.error = WorkerBackendError("image pull failed for registry.example/secret")
-    with pytest.raises(ConnectRefused) as failed:
+    with pytest.raises(_ConnectRefused) as failed:
         await _connect(config, paths, link.id)
 
     assert (not_ready.value.status_code, failed.value.status_code) == (503, 503)
@@ -428,7 +428,7 @@ async def test_connect_refuses_without_the_agents_own_shell(
     elif shell == "no_call":
         monkeypatch.setattr(links, "worker_call", lambda *_args, **_kwargs: None)
 
-    with pytest.raises(ConnectRefused) as refused:
+    with pytest.raises(_ConnectRefused) as refused:
         await _connect(config, paths, link.id)
 
     assert refused.value.status_code == 409
@@ -452,7 +452,7 @@ async def test_connect_refuses_when_sshds_files_cannot_be_written(
     (tmp_path / "blocked").write_text("")
     manager.handles = [_handle(link.worker_key, tmp_path / "blocked" / "ssh")]
 
-    with capture_logs() as logs, pytest.raises(ConnectRefused) as refused:
+    with capture_logs() as logs, pytest.raises(_ConnectRefused) as refused:
         await _connect(config, paths, link.id)
 
     assert refused.value.status_code == 503
@@ -521,7 +521,7 @@ async def test_runner_receives_the_shell_call_and_returns_generic_refusal(
         if status in {200, 204}:
             assert await _connect(config, paths, link.id) == ("10.0.0.5", 2222)
         else:
-            with pytest.raises(ConnectRefused) as refused:
+            with pytest.raises(_ConnectRefused) as refused:
                 await _connect(config, paths, link.id)
             assert (refused.value.status_code, refused.value.detail) == (503, "The worker's SSH server did not start.")
     finally:
@@ -543,7 +543,7 @@ async def test_an_unreachable_runner_refuses_the_connect(
     _wire_connect(monkeypatch, tmp_path, link, call=_worker_call(link.worker_key, "http://127.0.0.1:1/api"))
     monkeypatch.setattr(links, "_start_sshd", start_sshd)
 
-    with pytest.raises(ConnectRefused) as refused:
+    with pytest.raises(_ConnectRefused) as refused:
         await _connect(config, paths, link.id)
 
     assert refused.value.status_code == 503
@@ -582,7 +582,7 @@ async def test_list_and_connect_use_roomless_shell_authorization(
     assert read_links(paths).by_id(link.id) == link
     if decision != "allowed":
         manager = _manager(monkeypatch)
-        with pytest.raises(ConnectRefused, match="not authorized"):
+        with pytest.raises(_ConnectRefused, match="not authorized"):
             await connect(lambda: (config, paths), memberships, link.id, "alice@github", "laptop")
         assert manager.calls == []
 
@@ -701,7 +701,7 @@ async def test_shared_worker_admits_multiple_logins_and_reprojects_on_connect(
     access.users = [ALICE]
     assert desired_links(config, paths, memberships) == [row | {"allowed_logins": ["alice@github"]}]
     wakes = len(manager.specs)
-    with pytest.raises(ConnectRefused, match="not authorized"):
+    with pytest.raises(_ConnectRefused, match="not authorized"):
         await _connect(config, paths, link.id, "bob@github")
     assert len(manager.specs) == wakes
     assert SECOND_KEY in projected.read_text()
@@ -743,7 +743,7 @@ async def test_disabled_shell_routes_cannot_list_or_mask_a_working_shell(
     rows = desired_links(config, paths, AgentReplyMembershipIndex())
     if not working_route:
         assert rows == []
-        with pytest.raises(ConnectRefused, match="not authorized"):
+        with pytest.raises(_ConnectRefused, match="not authorized"):
             await _connect(config, paths, link.id)
         assert manager.calls == []
         return
@@ -778,7 +778,7 @@ async def test_malformed_stored_shell_settings_only_refuse_their_own_route(
     assert rows == [{"id": healthy.id, "hostname": healthy.hostname, "allowed_logins": ["alice@github"]}]
     assert any(log.get("agent") == "mine" and log.get("worker_key") == broken.worker_key for log in logs)
     assert "private-setting-value" not in str(logs)
-    with pytest.raises(ConnectRefused, match="not authorized"):
+    with pytest.raises(_ConnectRefused, match="not authorized"):
         await _connect(config, paths, broken.id)
     assert manager.specs == []
     assert await _connect(config, paths, healthy.id) == ("10.0.0.5", 2222)
@@ -804,7 +804,7 @@ async def test_unsupported_shell_placement_never_wakes(
     paths = replace(paths, process_env={**paths.process_env, **overrides})
     manager = _manager(monkeypatch)
     assert desired_links(config, paths, AgentReplyMembershipIndex()) == []
-    with pytest.raises(ConnectRefused, match="not authorized"):
+    with pytest.raises(_ConnectRefused, match="not authorized"):
         await _connect(config, paths, link.id)
     assert manager.calls == []
 

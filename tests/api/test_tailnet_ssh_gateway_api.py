@@ -26,11 +26,10 @@ from mindroom.api import main as api_main
 from mindroom.api import workers as workers_api
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.tailnet_ssh_gateway import (
-    DEFAULT_PORT,
-    PORT_ENV,
-    TOKEN_ENV,
+    _PORT_ENV,
+    _TOKEN_ENV,
+    _gateway_app,
     active_tailnet_ssh_worker_keys,
-    gateway_app,
     serve_tailnet_ssh_gateway_listener,
 )
 from mindroom.config.main import Config
@@ -49,7 +48,7 @@ from mindroom.runtime_env_policy import (
     worker_extra_env,
 )
 from mindroom.tailnet_ssh import links as link_service
-from mindroom.tailnet_ssh.links import ConnectRefused, GatewayStatus, StatusReport
+from mindroom.tailnet_ssh.links import GatewayStatus, StatusReport, _ConnectRefused
 from mindroom.tailnet_ssh.store import Link, read_links, update_links
 from mindroom.worker_computer.sessions import ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
@@ -140,7 +139,7 @@ def api_app(paths: RuntimePaths) -> FastAPI:
 @pytest.fixture
 def client(api_app: FastAPI) -> TestClient:
     """The gateway's view of the primary."""
-    return TestClient(gateway_app(api_app, "tok"))
+    return TestClient(_gateway_app(api_app, "tok"))
 
 
 def _stored_link(api_app: FastAPI) -> Link:
@@ -187,7 +186,7 @@ def test_a_request_without_the_token_learns_nothing_of_the_primary(api_app: Fast
 
 def test_listener_app_has_only_three_routes(api_app: FastAPI) -> None:
     """The listener serves the gateway's three routes: no docs, no schema, nothing of the primary API."""
-    app = gateway_app(api_app, "tok")
+    app = _gateway_app(api_app, "tok")
 
     assert {route.path for route in app.routes} == {"/links", "/status", "/links/{link_id}/connect"}  # type: ignore[attr-defined]
 
@@ -278,18 +277,18 @@ def test_connect_answers_endpoint_or_refusal_detail(
 ) -> None:
     """A connect answers where the worker's sshd listens, or the service's refusal with its status and detail."""
     calls: list[tuple[object, ...]] = []
-    outcome: tuple[str, int] | ConnectRefused = ("10.0.0.5", 2222)
+    outcome: tuple[str, int] | _ConnectRefused = ("10.0.0.5", 2222)
 
     async def connect(*args: object) -> tuple[str, int]:
         calls.append(args)
-        if isinstance(outcome, ConnectRefused):
+        if isinstance(outcome, _ConnectRefused):
             raise outcome
         return outcome
 
     monkeypatch.setattr(link_service, "connect", connect)
 
     admitted = client.post("/links/abc/connect", headers=AUTH, json=PEER)
-    outcome = ConnectRefused(409, "x")
+    outcome = _ConnectRefused(409, "x")
     refused = client.post("/links/abc/connect", headers=AUTH, json=PEER)
 
     assert (admitted.status_code, admitted.json()) == (200, {"host": "10.0.0.5", "port": 2222})
@@ -465,19 +464,19 @@ async def test_listener_is_off_without_token_and_refuses_the_api_port(
             log_level="INFO",
         )
 
-    async with listener(**{PORT_ENV: str(port)}):
+    async with listener(**{_PORT_ENV: str(port)}):
         assert _status(api_app) is None
         assert active_tailnet_ssh_worker_keys(api_app) == frozenset()
         with pytest.raises(ConnectionRefusedError):
             socket.create_connection(("127.0.0.1", port), timeout=1).close()
 
-    for taken in ({PORT_ENV: str(api_port)}, {PORT_ENV: str(port), "MINDROOM_SCRIPT_GATEWAY_PORT": str(port)}):
-        with pytest.raises(ValueError, match=PORT_ENV):
-            async with listener(**{TOKEN_ENV: "tok"}, **taken):
+    for taken in ({_PORT_ENV: str(api_port)}, {_PORT_ENV: str(port), "MINDROOM_SCRIPT_GATEWAY_PORT": str(port)}):
+        with pytest.raises(ValueError, match=_PORT_ENV):
+            async with listener(**{_TOKEN_ENV: "tok"}, **taken):
                 pass
         assert _status(api_app) is None
 
-    async with listener(**{TOKEN_ENV: "tok", PORT_ENV: str(port)}):
+    async with listener(**{_TOKEN_ENV: "tok", _PORT_ENV: str(port)}):
         assert _status(api_app) == GatewayStatus()
         async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
             assert (await http.get("/links")).status_code == 401
@@ -505,7 +504,7 @@ async def test_listener_port_defaults_to_8769(
     monkeypatch.setattr(tailnet_ssh_gateway, "serve_listener", serve_listener)
 
     async with serve_tailnet_ssh_gateway_listener(
-        _paths(tmp_path, **{TOKEN_ENV: "tok"}),
+        _paths(tmp_path, **{_TOKEN_ENV: "tok"}),
         host="10.1.2.3",
         api_port=8765,
         api_app=api_app,
@@ -513,7 +512,6 @@ async def test_listener_port_defaults_to_8769(
     ):
         pass
 
-    assert DEFAULT_PORT == 8769
     assert served == [
         {
             "name": "tailnet_ssh_gateway_listener",
@@ -526,7 +524,7 @@ async def test_listener_port_defaults_to_8769(
     ]
 
 
-@pytest.mark.parametrize("name", [TOKEN_ENV, "TAILNET_SSH_GATEWAY_TOKEN", "TAILNET_SSH_AUTH_KEY", "TS_AUTHKEY"])
+@pytest.mark.parametrize("name", [_TOKEN_ENV, "TAILNET_SSH_GATEWAY_TOKEN", "TAILNET_SSH_AUTH_KEY", "TS_AUTHKEY"])
 def test_gateway_secrets_never_reach_a_worker_env(name: str) -> None:
     """No worker's startup manifest, runtime env, or extra env carries the gateway's token, nor does a tool's env.
 

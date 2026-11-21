@@ -24,9 +24,9 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-TOKEN_ENV = "MINDROOM_TAILNET_SSH_GATEWAY_TOKEN"  # noqa: S105 - the variable's name
-PORT_ENV = "MINDROOM_TAILNET_SSH_PORT"
-DEFAULT_PORT = 8769
+_TOKEN_ENV = "MINDROOM_TAILNET_SSH_GATEWAY_TOKEN"  # noqa: S105 - the variable's name
+_PORT_ENV = "MINDROOM_TAILNET_SSH_PORT"
+_DEFAULT_PORT = 8769
 
 
 class _Peer(BaseModel):
@@ -49,7 +49,7 @@ async def _body[T: BaseModel](request: Request, model: type[T]) -> T:
         raise HTTPException(422, "Invalid gateway request body.") from None
 
 
-def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
+def _gateway_app(api_app: FastAPI, token: str) -> FastAPI:
     """Build the gateway listener; check config before parsing requested bodies."""
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
     authorization = f"Bearer {token}".encode()
@@ -105,19 +105,19 @@ async def serve_tailnet_ssh_gateway_listener(
     log_level: str,
 ) -> AsyncIterator[None]:
     """Run the separate listener only when configured with a gateway token."""
-    token = (runtime_paths.env_value(TOKEN_ENV) or "").strip()
+    token = (runtime_paths.env_value(_TOKEN_ENV) or "").strip()
     if not token:
         yield
         return
-    port = listener_port(runtime_paths, PORT_ENV) or DEFAULT_PORT
+    port = listener_port(runtime_paths, _PORT_ENV) or _DEFAULT_PORT
     if port in (api_port, listener_port(runtime_paths, SCRIPT_GATEWAY_PORT_ENV)):
-        msg = f"{PORT_ENV} must differ from the API's port and from {SCRIPT_GATEWAY_PORT_ENV}, not {port}."
+        msg = f"{_PORT_ENV} must differ from the API's port and from {SCRIPT_GATEWAY_PORT_ENV}, not {port}."
         raise ValueError(msg)
     state = config_lifecycle.app_state(api_app)
     state.tailnet_ssh_status = ssh.GatewayStatus()
     try:
         async with serve_listener(
-            gateway_app(api_app, token),
+            _gateway_app(api_app, token),
             name="tailnet_ssh_gateway_listener",
             host=host,
             port=port,

@@ -64,7 +64,7 @@ class GatewayStatus:
     report: tuple[float, frozenset[str]] = (0.0, frozenset())
 
 
-class ConnectRefused(HTTPException):
+class _ConnectRefused(HTTPException):
     """An SSH connect was refused; the gateway receives only its safe detail."""
 
 
@@ -155,11 +155,11 @@ def _shell_call(stand_ins: WorkerStandIns, worker_key: str) -> WorkerCall:
     try:
         call = worker_call(stand_ins, SHELL_FUNCTION, start=False, include_execution_env=False)
     except (RuntimeError, OSError):
-        raise ConnectRefused(503, "The agent's worker is unavailable.") from None
+        raise _ConnectRefused(503, "The agent's worker is unavailable.") from None
     if call is None:
-        raise ConnectRefused(409, _NO_SHELL)
+        raise _ConnectRefused(409, _NO_SHELL)
     if call.request.worker_key != worker_key:
-        raise ConnectRefused(409, "This agent's shell runs in another worker.")
+        raise _ConnectRefused(409, "This agent's shell runs in another worker.")
     return call
 
 
@@ -172,15 +172,15 @@ def _admit(  # noqa: C901 - keep the before/after wake and projection checks tog
     config, paths = read_config()
     link = read_links(paths).by_id(link_id)
     if link is None:
-        raise ConnectRefused(404, "No such link.")
+        raise _ConnectRefused(404, "No such link.")
     key = link.worker_key
     routes = _roster(config, paths, memberships).get(key, {})
     target = routes.get(peer_login)
     if target is None:
-        raise ConnectRefused(403, "This login is not authorized for this link.")
+        raise _ConnectRefused(403, "This login is not authorized for this link.")
     try:
         if (lease := lease_configured_primary_worker_manager(paths)) is None:
-            raise ConnectRefused(503, "A dedicated worker backend is required.")
+            raise _ConnectRefused(503, "A dedicated worker backend is required.")
         with lease as manager:
             # Use a stable workspace for this worker, independent of the connecting peer.
             launch_target = next(iter(routes.values()))
@@ -190,15 +190,15 @@ def _admit(  # noqa: C901 - keep the before/after wake and projection checks tog
             # The toolkit prepares the workspace before ensure_worker plans its mounts.
             terminals = agent_terminals(identity.agent_name, config, paths, identity, create=True)
             if terminals is None:
-                raise ConnectRefused(409, _NO_SHELL)
+                raise _ConnectRefused(409, _NO_SHELL)
             ready = manager.ensure_worker(WorkerSpec(key, private_agent_names=target.private_agent_names))
     except (WorkerBackendError, OSError):
-        raise ConnectRefused(503, "The worker did not start.") from None
+        raise _ConnectRefused(503, "The worker did not start.") from None
     if ready.status != "ready":
-        raise ConnectRefused(503, "The worker is not ready.")
+        raise _ConnectRefused(503, "The worker is not ready.")
     endpoint = ready.ssh_endpoint
     if ready.worker_key != key or endpoint is None:
-        raise ConnectRefused(409, "This worker has no marked SSH endpoint.")
+        raise _ConnectRefused(409, "This worker has no marked SSH endpoint.")
 
     # Don't build against an already stale snapshot or hold the ledger lock across a worker touch.
     snapshot, snapshot_paths = read_config()
@@ -208,21 +208,21 @@ def _admit(  # noqa: C901 - keep the before/after wake and projection checks tog
     with update_links(paths) as book:
         current, current_paths = read_config()
         if current_paths != paths or book.by_id(link_id) != link:
-            raise ConnectRefused(409, "The worker runtime changed during wake.")
+            raise _ConnectRefused(409, "The worker runtime changed during wake.")
         routes = _roster(current, paths, memberships).get(key, {})
         if (current_target := routes.get(peer_login)) is None:
-            raise ConnectRefused(403, "This login is not authorized for this link.")
+            raise _ConnectRefused(403, "This login is not authorized for this link.")
         if (
             call is None
             or current is not config
             or current_target != target
             or next(iter(routes.values())) != launch_target
         ):
-            raise ConnectRefused(409, "This link's shell route changed during wake.")
+            raise _ConnectRefused(409, "This link's shell route changed during wake.")
         handle = call.handle
         # Touching the worker changes its last-use timestamp, not its generation or addresses.
         if handle is None or replace(handle, last_used_at=ready.last_used_at) != ready:
-            raise ConnectRefused(409, "This link's worker changed during wake.")
+            raise _ConnectRefused(409, "This link's worker changed during wake.")
         try:
             write_projection(
                 endpoint.projection_dir,
@@ -236,7 +236,7 @@ def _admit(  # noqa: C901 - keep the before/after wake and projection checks tog
             )
         except OSError as error:
             logger.warning("tailnet_ssh_projection_not_written", link_id=link_id, error=str(error))
-            raise ConnectRefused(503, "The worker's SSH files could not be written.") from None
+            raise _ConnectRefused(503, "The worker's SSH files could not be written.") from None
     return endpoint, call
 
 
@@ -252,9 +252,9 @@ async def _start_sshd(call: WorkerCall) -> None:
             ) as response,
         ):
             if response.status not in {200, 204}:
-                raise ConnectRefused(503, "The worker's SSH server did not start.")
+                raise _ConnectRefused(503, "The worker's SSH server did not start.")
     except (aiohttp.ClientError, TimeoutError) as error:
-        raise ConnectRefused(503, f"The worker's SSH server is unreachable: {type(error).__name__}") from None
+        raise _ConnectRefused(503, f"The worker's SSH server is unreachable: {type(error).__name__}") from None
 
 
 async def connect(
@@ -271,7 +271,7 @@ async def connect(
         loop = asyncio.get_running_loop()
         endpoint, call = await loop.run_in_executor(_CONNECT_EXECUTOR, copy_context().run, _admit, *args)
         await _start_sshd(call)
-    except ConnectRefused as refused:
+    except _ConnectRefused as refused:
         logger.info("tailnet_ssh_connect_refused", **peer, status_code=refused.status_code)
         raise
     logger.info("tailnet_ssh_connect", **peer)

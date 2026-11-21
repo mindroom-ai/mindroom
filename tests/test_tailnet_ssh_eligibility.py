@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from mindroom.config.main import Config
-from mindroom.config.tailnet_ssh import normalize_public_key
+from mindroom.config.tailnet_ssh import _normalize_public_key
 from mindroom.workers.backends._dedicated_worker_common import tailnet_ssh_marked
 from mindroom.workers.runtime import build_worker_launch_config
 from tests.conftest import test_runtime_paths
@@ -46,28 +46,28 @@ def _public_key() -> str:
 def test_normalize_public_key_shapes() -> None:
     """One public key line is kept; options, private keys, empty lines, and junk are refused with a sentence."""
     key = _public_key()
-    assert normalize_public_key(f"  {key} me@host\r\n") == f"{key} me@host"
-    assert normalize_public_key(key) == key
+    assert _normalize_public_key(f"  {key} me@host\r\n") == f"{key} me@host"
+    assert _normalize_public_key(key) == key
     with pytest.raises(ValueError, match="option"):
-        normalize_public_key(f'command="x" {key}')
+        _normalize_public_key(f'command="x" {key}')
     with pytest.raises(ValueError, match="private key"):
-        normalize_public_key("-----BEGIN OPENSSH PRIVATE KEY-----")
+        _normalize_public_key("-----BEGIN OPENSSH PRIVATE KEY-----")
     with pytest.raises(ValueError, match="private key"):
-        normalize_public_key("-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----")
+        _normalize_public_key("-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----")
     # Only the armor line marks a private key; a comment may say anything.
-    assert normalize_public_key(f"{key} PRIVATE KEY backup") == f"{key} PRIVATE KEY backup"
+    assert _normalize_public_key(f"{key} PRIVATE KEY backup") == f"{key} PRIVATE KEY backup"
     # OpenSSH decodes the blob strictly, so a character outside base64 makes the key unusable.
     key_type, blob = key.split()
     with pytest.raises(ValueError, match=r"Expected an SSH public key"):
-        normalize_public_key(f"{key_type} {blob[:20]}!{blob[20:]}")
+        _normalize_public_key(f"{key_type} {blob[:20]}!{blob[20:]}")
     with pytest.raises(ValueError, match=r"Expected an SSH public key"):
-        normalize_public_key(f"{key_type} {blob[:-1]}")
+        _normalize_public_key(f"{key_type} {blob[:-1]}")
     with pytest.raises(ValueError, match=r"\."):
-        normalize_public_key("")
+        _normalize_public_key("")
     with pytest.raises(ValueError, match=r"\."):
-        normalize_public_key("ssh-ed25519 AAAAnotakey me@host")
+        _normalize_public_key("ssh-ed25519 AAAAnotakey me@host")
     with pytest.raises(ValueError, match=r"\."):
-        normalize_public_key(f'{key} me\ncommand="x" {key}')
+        _normalize_public_key(f'{key} me\ncommand="x" {key}')
 
 
 def test_config_authorized_keys_are_normalized_and_keyed_by_concrete_ids(tmp_path: Path) -> None:

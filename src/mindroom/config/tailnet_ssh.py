@@ -22,7 +22,7 @@ def _is_canonical_base64(token: str) -> bool:
         return False
 
 
-def normalize_public_key(line: str) -> str:
+def _normalize_public_key(line: str) -> str:
     """Normalize one OpenSSH public key line; the primary sets its own key options."""
     text = line.strip()
     if _PRIVATE_KEY_HEADER.match(text):
@@ -84,4 +84,4 @@ class TailnetSshConfig(BaseModel):
     @classmethod
     def _validate_authorized_keys(cls, value: dict[str, list[str]]) -> dict[str, list[str]]:
         validate_concrete_matrix_user_ids(list(value), field_name="tailnet_ssh.authorized_keys")
-        return {user_id: [normalize_public_key(line) for line in lines] for user_id, lines in value.items()}
+        return {user_id: [_normalize_public_key(line) for line in lines] for user_id, lines in value.items()}
