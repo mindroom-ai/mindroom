@@ -35,7 +35,7 @@ __all__ = ["ClaudeCodeProvider"]
 class ClaudeCodeProvider:
     """A Claude model that the user's signed-in Claude Code answers for.
 
-    ``cli_path`` is the configured executable or the one found on PATH, or None for SDK discovery. ``scope`` names
+    ``cli_path`` is the configured executable or the one found on PATH, or None when there is neither. ``scope`` names
     the conversation whose requests may continue one another's idle Claude Code process, or is None outside one.
     """
 
