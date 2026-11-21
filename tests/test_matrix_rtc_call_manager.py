@@ -6308,6 +6308,32 @@ async def test_key_whose_send_raised_is_never_applied_once_superseded(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_inbound_key_aliasing_the_agents_identity_is_dropped() -> None:
+    """An admitted device whose ``user_id:device_id`` string equals ours cannot install a key as us."""
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, FakeKeyTransport(), [1_000])
+    user, _, server = BOT_USER.partition(":")
+    alias = _member(user, f"{server}:{BOT_DEVICE}")
+    assert f"{alias.user_id}:{alias.device_id}" == f"{BOT_USER}:{BOT_DEVICE}"
+    await session.start([_member("@alice:example.org", "ALICEDEV"), alias])
+    bridge.frame_keys.clear()
+
+    accepted = session.on_key_received(
+        ReceivedFrameKey(
+            user_id=alias.user_id,
+            claimed_device_id=alias.device_id,
+            key_base64="QUFBQUFBQUFBQUFBQUFBQQ==",
+            key_index=2,
+            received_at_ms=1_500,
+        ),
+    )
+
+    assert accepted is True
+    assert bridge.frame_keys == []
+    await session.stop()
+
+
+@pytest.mark.asyncio
 async def test_key_generation_orders_activation_across_index_wrap(monkeypatch: pytest.MonkeyPatch) -> None:
     """After 256 rotations index 0 is the newest key, and the old index-255 key cannot come back."""
     timers: list[asyncio.Event] = []

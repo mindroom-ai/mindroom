@@ -300,6 +300,10 @@ class CallSession:
         if member is None:
             return False
         participant_identity = f"{member.user_id}:{member.device_id}"
+        if participant_identity == self._local_identity:
+            # A colon in a server or device ID can make another device's identity read as ours.
+            logger.warning("call_frame_key_aliases_own_identity", room_id=self.room_id, user_id=member.user_id)
+            return True
         inbound = self._key_manager.receive(
             received,
             participant_identity=participant_identity,
