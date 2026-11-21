@@ -181,7 +181,14 @@ def test_anthropic_frontier_presets_use_current_models() -> None:
 
 def test_native_compaction_covers_current_claude_models() -> None:
     """Every current Claude default must take the native compaction path."""
-    for model_id in ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-2", "claude-opus-5", "claude-sonnet-5"):
+    for model_id in (
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-2",
+        "claude-opus-5",
+        "claude-sonnet-5",
+    ):
         assert model_id.startswith(model_defaults.CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES)
 
 
