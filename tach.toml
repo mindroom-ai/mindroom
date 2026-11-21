@@ -3786,8 +3786,6 @@ path = "mindroom.config.main"
 depends_on = [
     "mindroom.agent_cli.shell_contract",
     "mindroom.tool_system.agent_tools",
-    "mindroom.tool_system.filters",
-    "mindroom.tool_system.metadata",
     "mindroom.config.contacts",
     "mindroom.config.judgment",
     "mindroom.agent_policy",

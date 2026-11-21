@@ -125,19 +125,25 @@ def test_empty_tailnet_ssh_section_is_left_out_of_authored_config(tmp_path: Path
     [
         (["shell", "example_tool"], True, False),
         (["example_tool", "shell"], True, True),
+        pytest.param(
+            [{"example_tool": {"enable_run_shell_command": False}}, "shell"],
+            True,
+            True,
+            id="authored-disable-can-be-overridden-by-stored-all",
+        ),
         (["example_tool", "shell"], False, False),
     ],
 )
 def test_tailnet_ssh_requires_native_shell_to_win(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    tools: list[str],
+    tools: list[str | dict[str, dict[str, bool]]],
     opted_in: bool,
     refused: bool,
 ) -> None:
-    """Only the first declared owner of the shell function matters to an opted-in agent."""
+    """Only earlier native declarations matter, even if authored settings disable them."""
     entries = dict(builtin_tool_registry().entries)
-    entries["example_tool"] = replace(entries["calculator"], name="example_tool", function_names=("run_shell_command",))
+    entries["example_tool"] = replace(entries["shell"], name="example_tool")
     monkeypatch.setattr(plugins, "candidate_tool_registry", lambda *_: (ToolRegistry(entries), ()))
     data = _data()
     data["agents"]["mine"] = {"display_name": "Mine", "tools": tools, "tailnet_ssh": opted_in}
@@ -150,41 +156,19 @@ def test_tailnet_ssh_requires_native_shell_to_win(
         assert _load(paths, data).agents["mine"].tailnet_ssh is opted_in
 
 
-@pytest.mark.parametrize(
-    ("prefix", "server_filters", "assignment", "refused"),
-    [
-        ("run", {}, "mcp_example", True),
-        ("run", {}, {"mcp_example": {"include_tools": []}}, True),
-        ("run", {}, {"mcp_example": {"exclude_tools": ["shell_command"]}}, False),
-        ("other", {}, "mcp_example", False),
-        ("run", {"exclude_tools": ["shell_command"]}, "mcp_example", False),
-    ],
-)
-def test_tailnet_ssh_refuses_a_possible_mcp_collision(
-    tmp_path: Path,
-    prefix: str,
-    server_filters: dict[str, list[str]],
-    assignment: str | dict[str, dict[str, list[str]]],
-    refused: bool,
-) -> None:
-    """Config validation uses namespace and filters without asking the server for its functions."""
+@pytest.mark.parametrize("tools", [["shell", "mcp_example"], ["mcp_example", "shell"]])
+def test_tailnet_ssh_allows_a_possible_mcp_collision(tmp_path: Path, tools: list[str]) -> None:
+    """A remote shell_command would never shadow the native run_shell_command."""
     data = _data()
     data["mcp_servers"] = {
         "example": {
             "transport": "streamable-http",
             "url": "https://example.org/mcp",
-            "tool_prefix": prefix,
-            **server_filters,
+            "tool_prefix": "run",
         },
     }
-    data["agents"]["mine"] = {"display_name": "Mine", "tools": ["shell", assignment], "tailnet_ssh": True}
-    paths = test_runtime_paths(tmp_path)
-
-    if refused:
-        with pytest.raises(ValueError, match=r"mine.*tailnet_ssh.*mcp_example.*run_shell_command"):
-            _load(paths, data)
-    else:
-        assert _load(paths, data).agents["mine"].tailnet_ssh
+    data["agents"]["mine"] = {"display_name": "Mine", "tools": tools, "tailnet_ssh": True}
+    assert _load(test_runtime_paths(tmp_path), data).agents["mine"].tailnet_ssh
 
 
 def test_personal_agent_template_accepts_tailnet_ssh(tmp_path: Path) -> None:

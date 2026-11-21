@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import cache
 from itertools import pairwise
 from pathlib import Path
@@ -148,7 +148,7 @@ from mindroom.matrix_identifiers import (
     managed_space_alias_localpart,
     server_emoji_alias_localpart,
 )
-from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id, resolved_mcp_tool_prefix
+from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
 from mindroom.room_reply_modes import resolve_room_reply_mode_override
@@ -1555,8 +1555,6 @@ class Config(BaseModel):
         # why-lazy: config loads before the runtime tool registry and its dependencies.
         from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
         from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
-        from mindroom.tool_system.filters import tool_name_allowed  # noqa: PLC0415
-        from mindroom.tool_system.metadata import offered_functions  # noqa: PLC0415
 
         for name, agent in self.agents.items():
             if not agent.tailnet_ssh:
@@ -1565,30 +1563,10 @@ class Config(BaseModel):
             shell_index = next((i for i, entry in enumerate(entries) if entry.name == "shell"), None)
             if shell_index is None:
                 continue
-            for i, entry in enumerate(entries):
-                if i == shell_index:
-                    continue
+            # Native functions beat MCP regardless of order. Stored settings can re-enable a declared function.
+            for entry in entries[:shell_index]:
                 metadata = tools.entries[entry.name]
-                overrides = entry.tool_config_overrides
-                function = SHELL_FUNCTION
-                if (server_id := metadata.mcp_server_id) is not None:
-                    # MCP catalogs are live, but the namespace and remote name filters are authored.
-                    server = self.mcp_servers[server_id]
-                    function = SHELL_FUNCTION.removeprefix(f"{resolved_mcp_tool_prefix(server_id, server)}_")
-                    if function == SHELL_FUNCTION or not tool_name_allowed(
-                        function,
-                        include=server.include_tools or None,
-                        exclude=server.exclude_tools,
-                    ):
-                        continue
-                    # MCP treats an empty assignment allowlist as unrestricted.
-                    overrides = {**overrides, "include_tools": overrides.get("include_tools") or None}
-                elif metadata.function_names and (i > shell_index or function not in metadata.function_names):
-                    continue
-                # Check the possible function, not defaults which stored settings can change.
-                possible = replace(metadata, function_names=(function,), config_fields=None)
-                functions, _ = offered_functions(possible, overrides)
-                if functions:
+                if metadata.mcp_server_id is None and SHELL_FUNCTION in (metadata.function_names or ()):
                     msg = f"agents.{name}.tailnet_ssh: Toolkit {entry.name!r} can take precedence for {SHELL_FUNCTION}."
                     raise ToolConfigOverrideError(msg)
 
