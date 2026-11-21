@@ -480,6 +480,61 @@ async def test_binding_claim_follows_a_handover_during_accounts_read(room_state:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("binding", ["writable", "absent", "stopped", "unjoined", "underpowered"])
+async def test_roster_follows_the_binding_after_steward_handover(room_state: RoomState, binding: str) -> None:
+    """The steward refreshes the trusted roster through its author when that bot can still write it."""
+    _, _, ids, events, bound_client = room_state
+    owner = _owner_bot(room_state)
+    runtime = owner.steward_duties.deps.runtime.orchestrator
+    bound_id, steward_id, joining_id = (ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1", "agent2"))
+    bound_room = bound_client.rooms[ROOM_ID]
+    bound_room.power_levels.users[bound_id] = 50
+    events["m.room.member", joining_id] = {"membership": "leave"}
+    await reconcile_held_room_states(runtime)
+    initial_roster = sorted([bound_id, steward_id])
+    assert _accounts(room_state) == initial_roster
+    assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": bound_id}
+    bound_client.room_put_state.reset_mock()
+
+    steward_room = nio.MatrixRoom(ROOM_ID, steward_id)
+    steward_room.power_levels.users[steward_id] = 100
+    steward_client = AsyncMock(spec=nio.AsyncClient, user_id=steward_id, rooms={ROOM_ID: steward_room})
+    steward_client.joined_members.side_effect = bound_client.joined_members.side_effect
+    steward_client.room_get_state_event.side_effect = bound_client.room_get_state_event.side_effect
+    steward_client.room_put_state.side_effect = bound_client.room_put_state.side_effect
+    duties = _router_duties(room_state)
+    duties.deps.hook_context.agent_name = "agent1"
+    duties.deps.runtime.client = steward_client
+    duties.deps.runtime.orchestrator = runtime
+    steward = MagicMock(client=steward_client, agent_name="agent1", running=True, steward_duties=duties)
+    runtime.agent_bots["agent1"] = steward
+    runtime.room_steward.return_value = steward
+    owner.running = binding != "stopped"
+    if binding == "absent":
+        del events[ROUTER_EVENT_TYPE, ""]
+    elif binding == "unjoined":
+        del bound_client.rooms[ROOM_ID]
+    elif binding == "underpowered":
+        bound_room.power_levels.users[bound_id] = 0
+
+    events["m.room.member", joining_id] = {"membership": "join"}
+    await duties.member_event(steward_room, _membership_event(joining_id, "join", "leave"))
+
+    expected_client = bound_client if binding == "writable" else steward_client
+    expected_id = expected_client.user_id
+    expected_roster = {"accounts": sorted([*initial_roster, joining_id])}
+    assert events[ACCOUNTS_EVENT_TYPE, expected_id] == expected_roster
+    assert _writes(expected_client, ACCOUNTS_EVENT_TYPE) == [
+        call(ROOM_ID, ACCOUNTS_EVENT_TYPE, expected_roster, state_key=expected_id),
+    ]
+    other_client = steward_client if binding == "writable" else bound_client
+    assert not _writes(other_client, ACCOUNTS_EVENT_TYPE)
+    assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": steward_id if binding == "absent" else bound_id}
+    assert len(_writes(steward_client, ROUTER_EVENT_TYPE)) == (binding == "absent")
+    assert not _writes(bound_client, ROUTER_EVENT_TYPE)
+
+
+@pytest.mark.asyncio
 async def test_router_membership_callback_publishes_agent_join_and_leave(room_state: RoomState) -> None:
     """An account's leave and join update the thread mode and the accounts list, even without membership hooks."""
     config, paths, ids, events, client = room_state
