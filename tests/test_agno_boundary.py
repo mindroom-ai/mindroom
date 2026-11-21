@@ -72,7 +72,6 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_gmail_tools.py",
         "test_google_tool_wrappers.py",
         "test_init.py",
-        "test_invite_router_tool.py",
         "test_issue_154_logging_integration.py",
         "test_knowledge_readers.py",
         "test_knowledge_resumable_refresh.py",

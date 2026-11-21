@@ -46,6 +46,7 @@ ALICE_TOKEN = "gho-alice-access"  # noqa: S105
 SHARED_TOKEN = "ghp-shared-token"  # noqa: S105
 ALICE_PAT = "github_pat_alice-personal"
 DEFAULT_ACCEPT = "application/vnd.github+json"
+RAW_ACCEPT = "application/vnd.github.raw+json"
 ENCRYPTION_KEY = base64.b64encode(bytes(32)).decode()
 
 type Handler = Callable[[httpx.Request], httpx.Response | Awaitable[httpx.Response]]
@@ -375,13 +376,63 @@ def test_a_diff_answers_with_text(app: FastAPI, client: TestClient, paths: Runti
     assert github.requests[0].headers["accept"] == "application/vnd.github.diff"
 
 
-def test_an_error_answer_to_a_diff_request_is_json(
+@pytest.mark.parametrize("text", ['{"café": true}\n', "", "\ufeffx"])
+def test_a_raw_answer_is_utf8_text(
     app: FastAPI,
     client: TestClient,
     paths: RuntimePaths,
     github: GitHubPeer,
+    text: str,
 ) -> None:
-    """The answer's own media type decides the body, so GitHub's JSON error to a diff request is an object."""
+    """The raw accept is forwarded, and even JSON-shaped or empty file contents come back as text."""
+    connect(paths, ALICE)
+    github.handler = lambda _request: httpx.Response(200, content=text.encode(), headers={"content-type": RAW_ACCEPT})
+
+    response = ask(client, session(app, ALICE), "/repos/octo/hello/git/blobs/abc123", accept=RAW_ACCEPT)
+
+    assert (response.status_code, response.json()) == (200, {"status": 200, "body": text, "headers": {}})
+    [sent] = github.requests
+    assert sent.headers["accept"] == RAW_ACCEPT
+
+
+@pytest.mark.parametrize(
+    ("upstream_status", "expected"),
+    [
+        (200, (502, {"error": "github_response_not_text"})),
+        (403, (200, {"status": 403, "body": "hello\ufffd", "headers": {}})),
+    ],
+)
+def test_invalid_utf8_is_refused_only_for_a_successful_raw_answer(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    upstream_status: int,
+    expected: tuple[int, dict[str, object]],
+) -> None:
+    """A binary blob is refused, but GitHub errors keep the normal decoding rules."""
+    connect(paths, ALICE)
+    github.handler = lambda _request: httpx.Response(upstream_status, content=b"hello\xff")
+
+    with capture_logs() as logs:
+        response = ask(client, session(app, ALICE), "/repos/octo/hello/git/blobs/abc123", accept=RAW_ACCEPT)
+
+    assert (response.status_code, response.json()) == expected
+    event = "github_request_not_text"
+    warnings = [entry for entry in logs if entry["event"] == event]
+    warning = {"event": event, "method": "GET", "path": "/repos/{owner}/{repo}/git", "log_level": "warning"}
+    assert warnings == ([warning] if upstream_status == 200 else [])
+
+
+@pytest.mark.parametrize("accept", ["application/vnd.github.diff", RAW_ACCEPT])
+def test_a_json_error_answer_is_an_object_even_when_the_client_requests_text(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    accept: str,
+) -> None:
+    """The answer's own media type decides the body for GitHub errors."""
     connect(paths, ALICE)
     github.handler = lambda _request: httpx.Response(
         404,
@@ -389,9 +440,10 @@ def test_an_error_answer_to_a_diff_request_is_json(
         headers={"content-type": "application/json; charset=utf-8"},
     )
 
-    response = ask(client, session(app, ALICE), "/repos/octo/hello/pulls/7", accept="application/vnd.github.diff")
+    response = ask(client, session(app, ALICE), "/repos/octo/hello/pulls/7", accept=accept)
 
-    assert response.json()["body"] == {"message": "Not Found"}
+    assert response.status_code == 200
+    assert response.json() == {"status": 404, "body": {"message": "Not Found"}, "headers": {}}
 
 
 @pytest.mark.parametrize(
@@ -785,12 +837,10 @@ def test_an_oversized_answer_is_refused(
     client: TestClient,
     paths: RuntimePaths,
     github: GitHubPeer,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An answer over the size cap is refused rather than relayed."""
+    """An answer over the default 10 MiB cap is refused rather than relayed."""
     connect(paths, ALICE)
-    monkeypatch.setattr(github_requests, "_MAX_RESPONSE_BYTES", 1024)
-    github.handler = lambda _request: httpx.Response(200, content=b"x" * 1025)
+    github.handler = lambda _request: httpx.Response(200, content=b"x" * (10 * 1024 * 1024 + 1))
 
     response = ask(client, session(app, ALICE))
 
@@ -979,6 +1029,23 @@ def test_other_methods_accepts_and_fields_are_refused(
     response = ask(client, session(app, ALICE), **fields)
 
     assert response.status_code == 422
+    assert github.requests == []
+
+
+@pytest.mark.parametrize("max_bytes", [0, 10 * 1024 * 1024 + 1, True, 4.0])
+def test_an_invalid_max_bytes_is_refused(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    max_bytes: object,
+) -> None:
+    """The cap must be an integer between 1 and the default response limit."""
+    connect(paths, ALICE)
+
+    response = ask(client, session(app, ALICE), max_bytes=max_bytes)
+
+    assert (response.status_code, response.json()) == (422, {"error": "github_request_invalid"})
     assert github.requests == []
 
 
@@ -1551,6 +1618,39 @@ class CountedStream(httpx.AsyncByteStream):
         for chunk in self.chunks:
             self.read += 1
             yield chunk
+
+
+def test_a_response_over_max_bytes_stops_reading_early(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """A smaller cap stops the read on the first chunk past it, without draining the stream."""
+    connect(paths, ALICE)
+    body = CountedStream(b"ab", b"cd", b"e", b"fg")
+    github.handler = lambda _request: httpx.Response(200, stream=body)
+
+    response = ask(client, session(app, ALICE), max_bytes=4)
+
+    assert (response.status_code, response.json()) == (502, {"error": "github_response_too_large"})
+    assert body.read == 3
+
+
+def test_a_response_at_max_bytes_is_relayed(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """A JSON answer at the byte cap is still decoded as JSON."""
+    connect(paths, ALICE)
+    body = CountedStream(b'{"x":', b"1}")
+    github.handler = lambda _request: httpx.Response(200, stream=body, headers={"content-type": "application/json"})
+
+    response = ask(client, session(app, ALICE), max_bytes=7)
+
+    assert (response.status_code, response.json()) == (200, {"status": 200, "body": {"x": 1}, "headers": {}})
 
 
 @pytest.mark.parametrize("status_code", [401, 403, 404, 500])

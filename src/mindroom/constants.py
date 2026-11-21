@@ -21,12 +21,12 @@ from mindroom.providers.names import provider_route
 
 # Agent names
 ROUTER_AGENT_NAME = "router"
-ROUTER_DISPLAY_NAME = "RouterAgent"
+ROUTER_DISPLAY_NAME = "MindRoom"
 AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 # "_shared" is the requester-store directory part for `user` scope in CredentialsManager.for_primary_runtime_scope.
 RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user", "_shared"})
 VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
-# Event ID of the voice message a visible router echo transcribes, so clients can fold the echo into it.
+# Event ID of the voice message a transcript echo transcribes, so clients can fold the echo into it.
 VOICE_SOURCE_EVENT_ID_KEY = "com.mindroom.voice_source_event_id"
 CONFIG_CONFIRMATION_REACTION_KEY = "com.mindroom.config_confirmation_reaction"
 DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"
@@ -1063,6 +1063,26 @@ PER_FIRE_THREAD_ROOT_EVENT_ID_KEY = "com.mindroom.per_fire_thread_root_event_id"
 SCHEDULED_HISTORY_LIMIT_KEY = "com.mindroom.history_limit"
 SCHEDULED_MODEL_KEY = "com.mindroom.scheduled_model"
 SILENT_SCHEDULE_EVENT_TYPE = "io.mindroom.scheduled.trigger"
+# The hidden event a room's steward sends to the responder it selected for a message that names nobody.
+# Its content holds, under this same key, the responder's Matrix ID as `entity`, the person's events it routes as
+# `event_ids` (the answer replies to the last), and the thread the answer belongs in as `thread_id`.
+ROUTE_EVENT_TYPE = "io.mindroom.route"
+# In a route's content: whether its `body`, the steward's prompt for the turn, holds the steward's own message tags.
+ROUTE_PROMPT_STRUCTURED_KEY = "io.mindroom.route_prompt_structured"
+# In a route handed to its responder: the long-text file of a route whose prompt is too long for one event.
+ROUTE_PROMPT_FILE_KEY = "io.mindroom.route_prompt_file"
+# In a route's content: the turn is too long to read, and its responder posts ROUTE_TOO_LARGE_NOTICE instead of a reply.
+ROUTE_TOO_LARGE_KEY = "io.mindroom.route_too_large"
+ROUTE_TOO_LARGE_NOTICE = "Your message is too long for me to read."
+# In a waiting message's content and its route's: the sender's edit its text is, as [origin_server_ts, event ID].
+ROUTE_REVISION_KEY = "io.mindroom.route_revision"
+# What a read appends to the body of a message whose long-text file, or later edit, it could not read.
+UNREADABLE_SIDECAR_NOTICE = "[The rest of this message could not be loaded.]"
+UNREADABLE_EDIT_NOTICE = "[A later edit of this message could not be read.]"
+# In a route's content: the steward's transcript of each voice message it routes, by event ID.
+ROUTE_VOICE_TRANSCRIPTS_KEY = "io.mindroom.voice_transcripts"
+# Transcripts over this many encoded bytes are left to the responder's own checkpoint.
+ROUTE_VOICE_TRANSCRIPTS_LIMIT = 16 * 1024
 # Room state holding one scheduled task, keyed by its task ID.
 SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 SILENT_SCHEDULE_NO_REPLY_TOKEN = "NO_REPLY"  # noqa: S105 - Public no-report marker, not a credential.

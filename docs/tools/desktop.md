@@ -55,7 +55,7 @@ To drive the user's signed-in browser, also configure the [`browser`](web-scrapi
 
 ## 2. Pair the Computer
 
-1. In a private Matrix room containing only you and one Desktop-enabled agent, plus the router when it serves the command, send `!desktop setup`.
+1. In a private Matrix room containing only you and one Desktop-enabled agent, plus the router account if it is in the room, send `!desktop setup`.
    The reply contains setup data for the macOS app, an equivalent `mindroom desktop setup` command, and a short-lived pairing code.
    The pairing code is a secret, so MindRoom refuses `!desktop` when any other member or pending invite is in the room or when it cannot confirm the room's membership.
 2. In the macOS app, paste the reply's JSON setup data into **Computer access** and follow the [Computer Access steps](../installation/macos-app.md#computer-access).
@@ -457,7 +457,7 @@ Adding `run_shell` to the set adds a chat confirmation before the request is sen
 ### `!desktop`
 
 Manage your Desktop pairing for one Desktop-enabled agent.
-Run these commands in a private Matrix room containing only you and one Desktop-enabled agent, plus the router when it serves the command:
+Run these commands in a private Matrix room containing only you and one Desktop-enabled agent, plus the router account if it is in the room:
 
 ```text
 !desktop setup

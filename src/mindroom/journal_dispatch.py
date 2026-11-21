@@ -23,7 +23,24 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.constants import SILENT_SCHEDULE_EVENT_TYPE, SOURCE_KIND_KEY
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    ROUTE_EVENT_TYPE,
+    ROUTE_PROMPT_FILE_KEY,
+    ROUTE_PROMPT_STRUCTURED_KEY,
+    ROUTE_REVISION_KEY,
+    ROUTE_TOO_LARGE_KEY,
+    ROUTE_VOICE_TRANSCRIPTS_KEY,
+    SCHEDULED_HISTORY_LIMIT_KEY,
+    SCHEDULED_MODEL_KEY,
+    SILENT_SCHEDULE_EVENT_TYPE,
+    SOURCE_KIND_KEY,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
+)
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
@@ -39,6 +56,7 @@ from mindroom.matrix.journal_ingress import (
     parse_journal_event,
 )
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent
+from mindroom.matrix.message_builder import build_message_content
 from mindroom.pending_event_worker import PendingEventWorker
 from mindroom.runtime_shutdown import GENERIC_SHUTDOWN
 
@@ -106,7 +124,7 @@ class JournalDispatcher:
     store: DispatchView
     callbacks: JournalCallbacks
     room_for_id: Callable[[str], nio.MatrixRoom]
-    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False
+    sender_is_managed: Callable[[str], bool] = lambda _sender: False
     runtime_generation: str = "unmanaged"
     # Replaying a turn needs the agent fleet up, so the orchestrator releases
     # turn-backed replay separately from the rest of startup. Until it does,
@@ -451,6 +469,26 @@ def _completing(
     return run
 
 
+# The relay context a route carries for its responder. Any other content of a route is dropped.
+# What ties a route too long for one event to the file that holds all of it.
+_LONG_TEXT_FILE_KEYS = ("io.mindroom.long_text", "url", "file")
+_ROUTE_CONTEXT_KEYS = (
+    SOURCE_KIND_KEY,
+    ORIGINAL_SENDER_KEY,
+    ATTACHMENT_IDS_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
+    SCHEDULED_HISTORY_LIMIT_KEY,
+    SCHEDULED_MODEL_KEY,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
+    ROUTE_VOICE_TRANSCRIPTS_KEY,
+    ROUTE_PROMPT_STRUCTURED_KEY,
+    ROUTE_REVISION_KEY,
+    ROUTE_TOO_LARGE_KEY,
+)
+
+
 def _scheduled_trigger_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFormatted:
     """Validate and normalize one silent schedule trigger as a text message."""
     if event.type != SILENT_SCHEDULE_EVENT_TYPE:
@@ -471,6 +509,11 @@ def _scheduled_trigger_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFor
         msg = "Schedule trigger body is not a nonempty string"
         raise ValueError(msg)
 
+    return _as_message(event, content)
+
+
+def _as_message(event: nio.UnknownEvent, content: dict[str, Any]) -> nio.RoomMessageFormatted:
+    """Return one internal event as the text message its turn runs from, keeping its identity and crypto state."""
     source = {
         **event.source,
         "type": "m.room.message",
@@ -478,7 +521,7 @@ def _scheduled_trigger_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFor
     }
     message = nio.Event.parse_event(source)
     if not isinstance(message, nio.RoomMessageFormatted) or message.event_id != event.event_id:
-        msg = f"Schedule trigger {event.event_id!r} did not normalize as itself"
+        msg = f"Internal event {event.event_id!r} did not normalize as itself"
         raise JournalCorruptionError(msg)
     message.decrypted = event.decrypted
     message.verified = event.verified
@@ -487,29 +530,61 @@ def _scheduled_trigger_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFor
     return message
 
 
-async def _run_scheduled_trigger(
-    dispatcher: JournalDispatcher,
-    room: nio.MatrixRoom,
-    event: nio.UnknownEvent,
-) -> bool:
-    """Run a valid schedule trigger through the existing message callback."""
-    if not dispatcher.schedule_trigger_sender_is_managed(event.sender):
-        logger.warning(
-            "schedule_trigger_invalid",
-            event_id=event.event_id,
-            room_id=room.room_id,
-        )
-        return True
-    try:
-        message = _scheduled_trigger_as_message(event)
-    except (TypeError, ValueError, JournalCorruptionError):
-        logger.exception(
-            "schedule_trigger_invalid",
-            event_id=event.event_id,
-            room_id=room.room_id,
-        )
-        return True
-    return _turn_settles(await dispatcher.callbacks.on_message(room, message))
+def _route_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFormatted:
+    """Validate one route and return it as the mention its responder answers, in reply to the last event it names."""
+    content = event.source.get("content")
+    route = content.get(ROUTE_EVENT_TYPE) if isinstance(content, dict) else None
+    if event.type != ROUTE_EVENT_TYPE or not isinstance(content, dict) or not isinstance(route, dict):
+        msg = "Route has the wrong event type or names nothing"
+        raise ValueError(msg)
+    entity, event_ids, thread_id = route.get("entity"), route.get("event_ids"), route.get("thread_id")
+    if (
+        not isinstance(entity, str)
+        or not isinstance(event_ids, list)
+        or not event_ids
+        or not all(isinstance(event_id, str) for event_id in event_ids)
+        or not isinstance(thread_id, str | None)
+    ):
+        msg = "Route does not name its responder, the person's events and its thread"
+        raise TypeError(msg)
+    body = content.get("body")
+    message = _as_message(
+        event,
+        build_message_content(
+            # A route carries its steward's prompt for the turn: all of it, or a preview beside its long-text file,
+            # which the responder reads as the route's own and no reader of a message's text resolves.
+            body if isinstance(body, str) else "",
+            mentioned_user_ids=[entity],
+            thread_event_id=thread_id,
+            reply_to_event_id=event_ids[-1],
+            extra_content={key: content[key] for key in _ROUTE_CONTEXT_KEYS if key in content}
+            | {ROUTE_PROMPT_FILE_KEY: {key: content[key] for key in _LONG_TEXT_FILE_KEYS if key in content}},
+        ),
+    )
+    # What makes a message a route stands outside its content, which any message could carry: only this dispatch
+    # of a route event writes it.
+    message.source[ROUTE_EVENT_TYPE] = event_ids
+    return message
+
+
+def _run_internal_event(
+    name: str,
+    as_message: Callable[[nio.UnknownEvent], nio.RoomMessageFormatted],
+) -> Callable[[JournalDispatcher, nio.MatrixRoom, nio.UnknownEvent], Awaitable[bool]]:
+    """Run a valid internal event of a managed account through the existing message callback."""
+
+    async def run(dispatcher: JournalDispatcher, room: nio.MatrixRoom, event: nio.UnknownEvent) -> bool:
+        if not dispatcher.sender_is_managed(event.sender):
+            logger.warning(f"{name}_invalid", event_id=event.event_id, room_id=room.room_id)
+            return True
+        try:
+            message = as_message(event)
+        except (TypeError, ValueError, JournalCorruptionError):
+            logger.exception(f"{name}_invalid", event_id=event.event_id, room_id=room.room_id)
+            return True
+        return _turn_settles(await dispatcher.callbacks.on_message(room, message))
+
+    return run
 
 
 async def _run_rtc_event(
@@ -527,7 +602,11 @@ async def _run_rtc_event(
 _BINDINGS: dict[EventKind, _Binding] = {
     EventKind.MESSAGE: _Binding(TEXTUAL_MESSAGE_EVENT_TYPE, _turn_backed(lambda c: c.on_message)),
     EventKind.MEDIA: _Binding(MATRIX_MEDIA_EVENT_TYPES, _turn_backed(lambda c: c.on_media)),
-    EventKind.SCHEDULE_TRIGGER: _Binding(nio.UnknownEvent, _run_scheduled_trigger),
+    EventKind.SCHEDULE_TRIGGER: _Binding(
+        nio.UnknownEvent,
+        _run_internal_event("schedule_trigger", _scheduled_trigger_as_message),
+    ),
+    EventKind.ROUTE: _Binding(nio.UnknownEvent, _run_internal_event("route", _route_as_message)),
     EventKind.REACTION: _Binding(nio.ReactionEvent, _turn_backed(lambda c: c.on_reaction)),
     EventKind.APPROVAL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_approval)),
     EventKind.JOB_CANCEL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_job_cancel)),

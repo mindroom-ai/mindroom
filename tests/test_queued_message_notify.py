@@ -2090,6 +2090,7 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
                 new=AsyncMock(return_value=case.dispatch),
             ),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
+            patch("mindroom.turn_policy.TurnPolicy.aims_command_at_me", new=AsyncMock(return_value=False)),
         ):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
@@ -2210,9 +2211,13 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
             ),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
-                new=AsyncMock(return_value=DispatchPlan(kind="route", router_message="route this")),
+                new=AsyncMock(return_value=DispatchPlan(kind="route")),
             ),
-            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_route,
+            patch(
+                "mindroom.turns.dispatch.execute_router_relay",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_route,
         ):
             await dispatch_test_turn(
                 bot._turn_dispatcher,

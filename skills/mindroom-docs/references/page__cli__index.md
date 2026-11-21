@@ -1097,7 +1097,7 @@ Existing Matrix avatars are kept unless you pass `--force`.
 
  Sync room and root-space avatars to Matrix.
 
- Uses the router account that `mindroom run` initialized.
+ Uses the owner account that `mindroom run` initialized.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --force            Replace existing Matrix room and root-space avatars.                │

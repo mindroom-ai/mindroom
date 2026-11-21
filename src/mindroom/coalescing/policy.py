@@ -99,6 +99,7 @@ def source_or_event_allows_room_scope_batching(
 
 def queue_kind(pending_event: PendingEvent) -> QueueKind:
     """Return the dispatch behavior for one resolved pending event."""
-    if source_kind_bypasses_coalescing(pending_event.facts.source_kind):
+    # A route is a whole turn its steward selected, whatever its kind: it shares a turn with nothing.
+    if source_kind_bypasses_coalescing(pending_event.facts.source_kind) or pending_event.facts.routed_event_ids:
         return QueueKind.BYPASS
     return QueueKind.NORMAL

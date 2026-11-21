@@ -12,6 +12,7 @@ import nio
 import pytest
 
 from mindroom.approval.inbound import parse_approval_response_event
+from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.response import plan_approval_calls, publish_generation
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
@@ -50,7 +51,12 @@ from tests.approval_card_helpers import (
     wait_for_pending_card,
 )
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import approval_manager_for_test, handle_card_response_for_test, test_runtime_paths
+from tests.conftest import (
+    approval_manager_for_test,
+    approval_transport_for_test,
+    handle_card_response_for_test,
+    test_runtime_paths,
+)
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
 
@@ -58,7 +64,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
+    from mindroom.approval.manager import ApprovalActionResult
 
 
 @pytest.mark.asyncio
@@ -513,7 +519,7 @@ async def test_republished_receipt_aliases_remain_terminal(
     journal = journal_database()
     manager = _manager(journal, tmp_path)
     monkeypatch.setattr(manager, "_ensure_deadline_sweep", lambda: None)
-    manager.transport.transport_device_id = lambda: "original-device"
+    manager.transport.sender_device_id = AsyncMock(return_value="original-device")
     owner = journal.principal("router@shared")
     try:
         first = await _card(journal, manager, "first")
@@ -525,11 +531,14 @@ async def test_republished_receipt_aliases_remain_terminal(
 
         manager.transport.send_approval_delivery = lose_acknowledgement
         old_event_id = await _card(journal, manager, "subsequent")
-        manager.transport.transport_device_id = lambda: "replacement-device"
+        manager.transport.sender_device_id = AsyncMock(return_value="replacement-device")
         manager.transport.resolve_approval_delivery = AsyncMock(return_value=None)
         manager.transport.send_approval_delivery = AsyncMock(return_value="$replacement-receipt")
         assert (
-            await manager._worker().flush(delivery_id="card-subsequent", stage=DeliveryStage.INITIAL)
+            await (await manager._worker("card-subsequent")).flush(
+                delivery_id="card-subsequent",
+                stage=DeliveryStage.INITIAL,
+            )
             == "$replacement-receipt"
         )
         if retire_before_reply:
@@ -541,7 +550,8 @@ async def test_republished_receipt_aliases_remain_terminal(
                 {
                     "event_id": event_id,
                     "room_id": room_id,
-                    "sender": "@other:test" if event_id == "$untrusted-receipt" else "@router:test",
+                    # The account of the receipt's sender, whose journal principal is "agent@code".
+                    "sender": "@other:test" if event_id == "$untrusted-receipt" else "code",
                     "origin_server_ts": 1000,
                     "type": "io.mindroom.tool_approval",
                     "content": {
@@ -557,7 +567,7 @@ async def test_republished_receipt_aliases_remain_terminal(
             approval_room_ids=frozenset({"!room:test"}),
             client=MagicMock(user_id="@router:test", room_get_event=AsyncMock(side_effect=get_event)),
         )
-        transport = ApprovalMatrixTransport(bot_provider=lambda name: router if name == "router" else None)
+        transport = approval_transport_for_test(lambda name: router if name == "router" else None, cards=owner)
         manager.transport.resolve_approval_action_delivery = transport.resolve_approval_action_delivery
         for event_id in ("$untrusted-receipt", "$unknown-delivery"):
             result = await handle_card_response_for_test(
@@ -665,7 +675,7 @@ async def test_automatic_receipt_recovery_retires_only_acknowledged_payload(
     """A failed receipt send survives recovery and leaves an approval-only tombstone."""
     journal = journal_database()
     manager = _manager(journal, tmp_path)
-    manager.transport.transport_device_id = lambda: "test-device"
+    manager.transport.sender_device_id = AsyncMock(return_value="test-device")
     delivered: list[MatrixDelivery] = []
     try:
         first = await _card(journal, manager, "first")
@@ -691,7 +701,7 @@ async def test_automatic_receipt_recovery_retires_only_acknowledged_payload(
         return "$receipt-deferred"
 
     manager.transport.send_approval_delivery = recover_send
-    manager.transport.transport_device_id = lambda: recovery_device
+    manager.transport.sender_device_id = AsyncMock(side_effect=lambda _delivery_id: recovery_device)
 
     async def no_receipt_in_history(_delivery: MatrixDelivery) -> str | None:
         return None
@@ -730,7 +740,7 @@ async def test_transport_refused_arguments_cannot_receive_automatic_approval(
         first = await _card(journal, manager, "first")
         await _approve(manager, first)
 
-        async def refuse_arguments(_room: str, _thread: str | None, content: dict) -> dict:
+        async def refuse_arguments(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:
             return {**content, "approvable": False}
 
         manager.transport.prepare_approval_event = refuse_arguments
@@ -1080,6 +1090,71 @@ async def test_revocation_ack_waits_for_original_edit_and_recovers_after_restart
 
 
 @pytest.mark.asyncio
+async def test_revocation_edit_goes_out_after_restart_through_the_account_that_sent_the_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revocation left unsent is sent after a restart by the account whose card gave the grant, not another one."""
+    journal = EventJournalStore.open_sqlite(tmp_path / "revoked.db")
+    manager = _manager(journal, tmp_path)
+    fake_send = manager.transport.send_approval_delivery
+
+    async def send(delivery: MatrixDelivery) -> str:
+        if delivery.delivery_id.startswith("approval-grant-revoked:"):
+            msg = "Matrix temporarily unavailable"
+            raise TimeoutError(msg)
+        return await fake_send(delivery)
+
+    manager.transport.send_approval_delivery = send
+    manager.transport.sender_device_id = AsyncMock(return_value="agent-device")
+    try:
+        card = await _card(journal, manager, "first")
+        await _approve(manager, card)
+        grant = await manager.cards.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=card)
+        assert grant is not None
+        await manager.handle_grant_revocation(
+            room_id="!room:test",
+            sender_id="@human:test",
+            card_event_id=card,
+            grant_id=grant.grant_id,
+            authorize_responder=lambda _agent: True,
+            before_consume=None,
+        )
+    finally:
+        await manager.shutdown()
+    bots = {}
+    for name in ("other", "agent"):
+        client = MagicMock(spec=nio.AsyncClient, user_id=f"@{name}:test", device_id=f"{name}-device")
+        client.rooms = {"!room:test": MagicMock()}
+        bots[name] = MagicMock(agent_name=name, running=True, client=client)
+    sent: list[tuple[nio.AsyncClient, dict]] = []
+
+    async def send_event(
+        client: nio.AsyncClient,
+        room_id: str,
+        _type: str,
+        content: dict,
+        **_options: object,
+    ) -> object:
+        sent.append((client, content))
+        return nio.RoomSendResponse("$revoked", room_id)
+
+    monkeypatch.setattr("mindroom.approval.transport.send_room_event_result", send_event)
+    cards = journal.principal("router@shared")
+    transport = ApprovalMatrixTransport(bots=lambda: bots, room_poster=lambda _room_id: None, cards=lambda: cards)
+    manager = ApprovalManager(test_runtime_paths(tmp_path), transport=transport, cards=cards)
+    try:
+        assert (await manager.recover_cards_on_startup()).complete
+
+        [(client, content)] = sent
+        assert client is bots["agent"].client
+        assert content["m.new_content"]["auto_approval"]["revoked_at"] is not None
+    finally:
+        await manager.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
 async def test_matching_card_does_not_advertise_a_revoke_target_it_does_not_own(tmp_path: Path) -> None:
     """Only the origin card can revoke; automatic decisions still retain audit references."""
     journal = EventJournalStore.open_sqlite(tmp_path / "origin.db")
@@ -1187,6 +1262,10 @@ async def test_grant_maintenance_releases_inactive_payload_but_keeps_identity(
         else:
             await admit_room_membership(journal.principal(terminal), "!room:test", "leave")
         await manager.recover_cards_on_startup()
+        if terminal == "router@shared":
+            # The owner account leaving the room ends no grant that an agent's card began.
+            assert '"command": "first"' in await _grant_payload(journal, grant.grant_id)
+            return
         assert await _grant_payload(journal, grant.grant_id) == ""
         assert await owner.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=card) == grant
         assert (
@@ -1408,7 +1487,7 @@ async def _card(
 
 
 def _manager(journal: EventJournalStore, tmp_path: Path) -> ApprovalManager:
-    async def prepare(_room: str, _thread: str | None, content: dict) -> dict:
+    async def prepare(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:
         return content
 
     async def send(delivery: MatrixDelivery) -> str:
@@ -1419,7 +1498,7 @@ def _manager(journal: EventJournalStore, tmp_path: Path) -> ApprovalManager:
         cards=journal.principal("router@shared"),
         prepare_approval_event=prepare,
         send_approval_delivery=send,
-        transport_sender_id=lambda: "@router:test",
+        sender_bot=lambda _entity_name, _room_id: object(),
         responder_principal_id=lambda entity_name: journal_principal_id("agent", entity_name),
     )
 
@@ -1732,7 +1811,7 @@ async def _stop(tasks: list[asyncio.Task[BackgroundApprovalDecision]]) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "ineligible",
-    [None, "room-level conversation", "tool's own confirmation", "another approver", "unknown responder"],
+    [None, "room-level conversation", "tool's own confirmation", "another approver"],
 )
 async def test_job_card_offers_timed_approval_when_a_paused_reply_card_would(
     journal_database: Callable[[], EventJournalStore],
@@ -1742,8 +1821,6 @@ async def test_job_card_offers_timed_approval_when_a_paused_reply_card_would(
     """A job's card offers the same options under the same conditions, scoped to the same conversation."""
     journal = journal_database()
     manager = _manager(journal, tmp_path)
-    if ineligible == "unknown responder":
-        manager.transport.responder_principal_id = lambda _entity_name: None
     call = {
         "room-level conversation": {"thread": None},
         "tool's own confirmation": {"operation": None},
@@ -2040,7 +2117,7 @@ async def test_a_click_on_a_card_whose_membership_is_fenced_is_not_consumed(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """While the router's membership of the room is fenced for departure, its cards decide nothing."""
+    """While the membership of the account that sent a card is fenced for departure, the card decides nothing."""
     journal = journal_database()
     manager = _manager(journal, tmp_path)
     try:
@@ -2048,7 +2125,7 @@ async def test_a_click_on_a_card_whose_membership_is_fenced_is_not_consumed(
         await journal.backend.write(
             lambda transaction: transaction.execute(
                 "UPDATE room_membership SET departure_fenced = 1 WHERE principal_id = ? AND room_id = ?",
-                ("router@shared", "!room:test"),
+                ("agent@code", "!room:test"),
             ),
         )
         view = await journal.principal("router@shared").approvals.approval_card(

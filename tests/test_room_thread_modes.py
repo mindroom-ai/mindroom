@@ -83,6 +83,12 @@ def _thread_mode_context(tmp_path: Path, client: AsyncMock) -> CommandHandlerCon
     )
 
 
+@pytest.fixture
+def thread_mode_published(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the room take the thread mode state, which these tests do not look at."""
+    monkeypatch.setattr("mindroom.room_modes.reconcile_room_thread_mode", AsyncMock(return_value=True))
+
+
 def _thread_mode_event(sender: str, body: str) -> _ThreadModeEvent:
     return _ThreadModeEvent(
         sender=sender,
@@ -350,6 +356,7 @@ async def test_thread_mode_command_requires_room_admin_for_set(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("thread_mode_published")
 async def test_thread_mode_command_admin_sets_runtime_override_without_config_write(tmp_path: Path) -> None:
     """Room admins should set a durable runtime override without touching config.yaml."""
     client = AsyncMock()
@@ -375,6 +382,7 @@ async def test_thread_mode_command_admin_sets_runtime_override_without_config_wr
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("thread_mode_published")
 async def test_thread_mode_command_accepts_admin_sender_for_bridged_requester(tmp_path: Path) -> None:
     """The Matrix sender's room admin power must authorize a bridged requester's command."""
     client = AsyncMock()
@@ -394,6 +402,7 @@ async def test_thread_mode_command_accepts_admin_sender_for_bridged_requester(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("thread_mode_published")
 async def test_thread_mode_command_admin_reset_clears_runtime_override(tmp_path: Path) -> None:
     """Room admins should reset the runtime override back to static config behavior."""
     client = AsyncMock()

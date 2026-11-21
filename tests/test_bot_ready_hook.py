@@ -20,7 +20,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.constants import ROUTER_AGENT_NAME, SOURCE_KIND_KEY
 from mindroom.event_journal import (
     AdmissionFacts,
     IngestionBatchAdmission,
@@ -36,15 +36,19 @@ from mindroom.hooks import (
     AgentLifecycleContext,
     HookRegistry,
     hook,
+    service_bot_ready_emission,
 )
 from mindroom.matrix.durable_ingestion import validate_ingestion_batch
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_invited_room
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.matrix_rtc.call_manager import CallManager
+from mindroom.orchestration.runtime import sync_forever_with_restart
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.room_steward import membership_observers
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, ShutdownBudget
 from mindroom.tool_system.plugins import config_plugins
+from tests.access_schema_support import joined_members_response, refresh_memberships
 from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -106,15 +110,24 @@ def _router_bot_with_orchestrator(tmp_path: Path) -> tuple[AgentBot, ReadyRuntim
     bot = _agent_bot(tmp_path, agent_name="router")
     orchestrator = cast("ReadyRuntime", bot.orchestrator)
     membership_sync = orchestrator.agent_reply_membership_sync
-    membership_sync.invalidate = MagicMock(wraps=membership_sync.invalidate)  # type: ignore[method-assign]
+    membership_sync._invalidate_observer = MagicMock(  # type: ignore[method-assign]
+        wraps=membership_sync._invalidate_observer,
+    )
     orchestrator.refresh_agent_reply_memberships = AsyncMock()
     orchestrator.handle_bot_ready = AsyncMock()
     return bot, orchestrator
 
 
+def _open_observer(bot: AgentBot) -> None:
+    """Let the bot's account observe room members, as after the first settled frame of its receive loop."""
+    membership_sync = bot.orchestrator.agent_reply_membership_sync
+    membership_sync.observer_loop_started(bot.config, bot.matrix_id.full_id)
+    membership_sync.observer_frame_settled(bot.matrix_id.full_id)
+
+
 def _invalidations(orchestrator: ReadyRuntime) -> MagicMock:
-    """Return the observed grant invalidations of a runtime from `_router_bot_with_orchestrator`."""
-    return cast("MagicMock", orchestrator.agent_reply_membership_sync.invalidate)
+    """Return the observed invalidations of a bot's own rooms in a runtime from `_router_bot_with_orchestrator`."""
+    return cast("MagicMock", orchestrator.agent_reply_membership_sync._invalidate_observer)
 
 
 async def _router_with_call_manager(tmp_path: Path) -> tuple[AgentBot, MagicMock]:
@@ -387,36 +400,248 @@ async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> No
     assert [request.args for request in call_manager.reconcile_joined_rooms.await_args_list] == [(), ()]
 
 
-def test_router_sync_loop_start_revokes_room_backed_grants(tmp_path: Path) -> None:
-    """A reconnect generation must fail closed before its first response arrives."""
-    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
-
-    bot.mark_sync_loop_started()
-
-    _invalidations(orchestrator).assert_called_once_with(bot.config, reason="sync_loop_started")
-
-
 @pytest.mark.asyncio
-async def test_router_first_response_refreshes_room_backed_grants(tmp_path: Path) -> None:
-    """The first successful response in each receive generation rebuilds grants.
+async def test_bot_observes_room_members_only_while_its_receive_loop_has_caught_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh picks a bot only between a receive loop's first settled frame and that loop's end.
 
-    Startup publishes semantic callbacks on the router's ready signal, so the
-    rebuild must finish before that signal.
+    A failed loop's bot is still running and synced once, yet during the retry sleep and until the next loop
+    catches up nothing applies its room's membership changes.
     """
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.running = True
+    bot.prepare_for_sync_shutdown = AsyncMock()  # type: ignore[method-assign]
+    observers: dict[str, list[str]] = {}
+    original_sleep = asyncio.sleep
+
+    def observe(moment: str) -> None:
+        observers[moment] = [client.user_id for client in membership_observers({bot.agent_name: bot})[0]]
+
+    async def receive() -> None:
+        loop = 1 if "loop 1 start" not in observers else 2
+        observe(f"loop {loop} start")
+        with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+            await _complete_frame(bot)
+        observe(f"loop {loop} settled")
+        if loop == 1:
+            message = "transport disconnected"
+            raise OSError(message)
+        bot.running = False
+
+    async def retry_sleep(delay: float) -> None:
+        if delay == 17:
+            observe("retry sleep")
+        else:
+            await original_sleep(delay)
+
+    monkeypatch.setattr(bot, "sync_forever", receive)
+    monkeypatch.setattr("mindroom.orchestration.runtime.retry_delay_seconds", lambda *_args, **_kwargs: 17)
+    monkeypatch.setattr("mindroom.orchestration.runtime.asyncio.sleep", retry_sleep)
+
+    await asyncio.wait_for(sync_forever_with_restart(bot, max_retries=2), 5)
+
+    own_id = [bot.matrix_id.full_id]
+    assert observers == {
+        "loop 1 start": [],
+        "loop 1 settled": own_id,
+        "retry sleep": [],
+        "loop 2 start": [],
+        "loop 2 settled": own_id,
+    }
+    # Only the loop that was open loses its rooms: no start, catch-up or second close invalidates anything.
+    assert [invalidation.kwargs["reason"] for invalidation in _invalidations(orchestrator).call_args_list] == [
+        "sync_failure",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_receive_loop_child_exit_fences_grants_before_the_sibling_is_drained(tmp_path: Path) -> None:
+    """When the source or the pump ends, the account's grants are revoked before the other one's cleanup is awaited."""
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    room_id, member = "!dm:localhost", "@alice:localhost"
+    client = bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.device_id = "DEVICE"
+    client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[room_id]))
+    client.joined_members = AsyncMock(return_value=joined_members_response(room_id, client.user_id, member))
+    index = orchestrator.agent_reply_memberships
+    in_cleanup, release = asyncio.Event(), asyncio.Event()
+
+    async def failing_source() -> None:
+        message = "transport disconnected"
+        raise OSError(message)
+
+    async def held_pump(*_args: object, **_kwargs: object) -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            in_cleanup.set()
+            await release.wait()
+
+    bot._ingestion_session = MagicMock(run=failing_source)
     bot.mark_sync_loop_started()
-    call_order: list[str] = []
-    orchestrator.refresh_agent_reply_memberships.side_effect = lambda: call_order.append("refresh")
-    orchestrator.handle_bot_ready.side_effect = lambda _bot: call_order.append("ready")
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        await _complete_frame(bot)
+    await refresh_memberships(index, bot.config, bot.runtime_paths, client)
+    assert index.is_current_room_member(member, room_id, bot.config, bot.runtime_paths)
+
+    with patch("mindroom.bot.run_ingestion_pump", held_pump):
+        receive_loop = asyncio.create_task(bot.sync_forever())
+        try:
+            await asyncio.wait_for(in_cleanup.wait(), 5)
+
+            assert not receive_loop.done()
+            assert not index.is_current_room_member(member, room_id, bot.config, bot.runtime_paths)
+            assert membership_observers({bot.agent_name: bot})[0] == []
+            # A frame the draining pump still completes must not reopen the closed loop.
+            with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+                await _complete_frame(bot)
+            assert membership_observers({bot.agent_name: bot})[0] == []
+        finally:
+            release.set()
+        with pytest.raises(OSError, match="transport disconnected"):
+            await asyncio.wait_for(receive_loop, 5)
+
+
+@pytest.mark.asyncio
+async def test_a_bot_that_starts_running_withdraws_proven_absence_before_its_started_hooks(tmp_path: Path) -> None:
+    """From the moment a bot runs, its rooms are in no census: a room no row covers waits, with no other refresh."""
+    bot = _agent_bot(tmp_path)
+    index = bot.orchestrator.agent_reply_memberships
+    covered, uncovered, member = "!covered:localhost", "!dm:localhost", "@alice:localhost"
+    other = make_matrix_client_mock(user_id="@mindroom_other:localhost")
+    other.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[covered]))
+    other.joined_members = AsyncMock(return_value=joined_members_response(covered, other.user_id, member))
+    await refresh_memberships(index, bot.config, bot.runtime_paths, other)
+    assert not index.grants_pending(bot.config, joined_rooms=[], current_room_id=uncovered)
+    epoch = index._epoch
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    in_started_hook, release = asyncio.Event(), asyncio.Event()
+
+    async def held_started_hook(*_args: object, **_kwargs: object) -> None:
+        in_started_hook.set()
+        await release.wait()
 
     with (
-        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch.object(bot, "_open_owned_matrix_client", AsyncMock(return_value=bot.client)),
+        patch.object(bot, "refresh_presence", AsyncMock()),
+        patch.object(bot, "_emit_agent_lifecycle_event", held_started_hook),
     ):
-        await _complete_frame(bot)
+        starting = asyncio.create_task(bot.start())
+        try:
+            await asyncio.wait_for(in_started_hook.wait(), 5)
 
-    orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
-    assert call_order == ["refresh", "ready"]
+            assert bot.running
+            assert index.grants_pending(bot.config, joined_rooms=[], current_room_id=uncovered)
+            # Nothing was revoked and no refresh in flight was voided.
+            assert index._epoch == epoch
+            assert index.is_current_room_member(member, covered, bot.config, bot.runtime_paths)
+        finally:
+            release.set()
+            await asyncio.wait_for(starting, 5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["armed", "open"])
+@pytest.mark.parametrize("entry", ["process_shutdown", "stop"])
+async def test_shutdown_entry_closes_the_bots_observation_before_any_teardown(
+    tmp_path: Path,
+    state: str,
+    entry: str,
+) -> None:
+    """The process shutdown latch and a direct stop close the account at once: a suspended frame opens nothing."""
+    bot, _orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.running = True
+    bot.mark_sync_loop_started()
+    in_frame, release_frame, in_stop_hook, release_stop_hook = (asyncio.Event() for _ in range(4))
+    stopping: asyncio.Task[None] | None = None
+
+    async def held_room_update(_rooms: object) -> None:
+        in_frame.set()
+        await release_frame.wait()
+
+    async def held_stop_hook(*_args: object, **_kwargs: object) -> None:
+        in_stop_hook.set()
+        await release_stop_hook.wait()
+
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        if state == "open":
+            await _complete_frame(bot)
+        with patch.object(bot._room_lifecycle, "observe_trusted_sync_rooms", held_room_update):
+            frame = asyncio.create_task(_complete_frame(bot))
+            try:
+                await asyncio.wait_for(in_frame.wait(), 5)
+                if entry == "process_shutdown":
+                    bot.begin_process_shutdown()
+                else:
+                    with patch.object(bot, "_emit_agent_lifecycle_event", held_stop_hook):
+                        stopping = asyncio.create_task(bot.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN))
+                        await asyncio.wait_for(in_stop_hook.wait(), 5)
+
+                assert membership_observers({bot.agent_name: bot})[0] == []
+                release_frame.set()
+                await asyncio.wait_for(frame, 5)
+                assert membership_observers({bot.agent_name: bot})[0] == []
+            finally:
+                release_frame.set()
+                release_stop_hook.set()
+                await asyncio.wait_for(asyncio.gather(frame, *filter(None, [stopping]), return_exceptions=True), 5)
+
+
+@pytest.mark.asyncio
+async def test_quiesced_ingestion_ends_the_bots_observation_before_its_drain(tmp_path: Path) -> None:
+    """A bot being stopped or replaced stops observing, and its rooms fail closed, before its ingestion drains."""
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.running = True
+    bot.mark_sync_loop_started()
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        await _complete_frame(bot)
+    assert membership_observers({bot.agent_name: bot})[0] == [bot.client]
+    _invalidations(orchestrator).reset_mock()
+    draining = asyncio.Event()
+    drained: list[tuple[bool, int]] = []
+
+    async def drain() -> None:
+        drained.append((bot.observes_room_members, _invalidations(orchestrator).call_count))
+        draining.set()
+
+    bot._ingestion_session = MagicMock(quiesce=drain)
+
+    await bot.quiesce_matrix_ingestion()
+
+    assert drained == [(False, 1)]
+    _invalidations(orchestrator).assert_called_once_with(bot.config, bot.matrix_id.full_id, reason="observer_stopping")
+    assert membership_observers({bot.agent_name: bot})[0] == []
+
+
+@pytest.mark.asyncio
+async def test_second_bots_frame_completes_while_the_refresh_another_frame_asked_for_is_open(tmp_path: Path) -> None:
+    """A frame asks for the grant rebuild and goes on: no bot's frame waits for another account's Matrix reads."""
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    other = _agent_bot(tmp_path, agent_name="other", orchestrator=orchestrator)
+    answered = asyncio.Event()
+    orchestrator.refresh_agent_reply_memberships.side_effect = answered.wait
+    completed: list[str] = []
+
+    try:
+        with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+            for frame_bot in (bot, other):
+                frame_bot.client = make_matrix_client_mock(user_id=frame_bot.agent_user.user_id)
+                frame_bot.mark_sync_loop_started()
+                await asyncio.wait_for(_complete_frame(frame_bot), SETTLE_TIMEOUT_SECONDS)
+                completed.append(frame_bot.agent_name)
+                await asyncio.sleep(0)
+
+        assert completed == ["router", "other"]
+        orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
+        assert orchestrator.handle_bot_ready.await_count == 2
+    finally:
+        answered.set()
+        await asyncio.wait_for(orchestrator.agent_reply_membership_sync.close(), SETTLE_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -425,8 +650,7 @@ async def test_router_limited_sync_invalidates_then_rebuilds_room_backed_grants(
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.mark_sync_loop_started()
-    _invalidations(orchestrator).reset_mock()
-    orchestrator.refresh_agent_reply_memberships.reset_mock()
+    _open_observer(bot)
     admission = _history_loss_admission("!project:localhost")
     bot._before_ingestion_admission(admission, TimelineEventProvenance.LIVE)
 
@@ -435,18 +659,28 @@ async def test_router_limited_sync_invalidates_then_rebuilds_room_backed_grants(
     ):
         await _complete_frame(bot)
 
-    _invalidations(orchestrator).assert_called_once_with(bot.config, reason="uncertain_sync_response")
+    _invalidations(orchestrator).assert_called_once_with(
+        bot.config,
+        bot.matrix_id.full_id,
+        reason="uncertain_sync_response",
+    )
+    await asyncio.sleep(0)  # the frame asked for the refresh, which runs in a task of its own
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
 
 
 def test_router_limited_sync_invalidates_before_timeline_admission(tmp_path: Path) -> None:
     """The Matrix client's pre-admission hook must fail room grants closed immediately."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    _open_observer(bot)
     admission = _history_loss_admission("!project:localhost")
 
     bot._before_ingestion_admission(admission, TimelineEventProvenance.LIVE)
 
-    _invalidations(orchestrator).assert_called_once_with(bot.config, reason="uncertain_sync_response")
+    _invalidations(orchestrator).assert_called_once_with(
+        bot.config,
+        bot.matrix_id.full_id,
+        reason="uncertain_sync_response",
+    )
 
 
 @pytest.mark.asyncio
@@ -472,7 +706,7 @@ async def test_router_departure_revokes_grant_before_timeline_admission(
         ],
         room_id=room_id,
     )
-    await bot._runtime_view.agent_reply_memberships.refresh(bot.config, bot.runtime_paths, client)
+    await refresh_memberships(bot._runtime_view.agent_reply_memberships, bot.config, bot.runtime_paths, client)
     departure = _validated_reported_membership_admission(
         bot,
         room_id,
@@ -502,20 +736,6 @@ async def test_router_departure_revokes_grant_before_timeline_admission(
 
 
 @pytest.mark.asyncio
-async def test_failed_membership_refresh_is_backed_off_between_sync_responses(tmp_path: Path) -> None:
-    """An unavailable grant room must not cause one Matrix API refresh for every incoming message."""
-    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
-    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
-    bot._runtime_view.agent_reply_memberships.invalidate(bot.config, reason="test")
-
-    with patch("mindroom.agent_reply_membership_sync.time.monotonic", return_value=100.0):
-        await bot._router.refresh_memberships_if_needed()
-        await bot._router.refresh_memberships_if_needed()
-
-    orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
-
-
-@pytest.mark.asyncio
 async def test_router_authoritative_departure_revokes_grant_before_membership_fence(
     tmp_path: Path,
 ) -> None:
@@ -526,7 +746,7 @@ async def test_router_authoritative_departure_revokes_grant_before_membership_fe
     client = _grant_room_client(bot, room_id, sender_id)
     bot.client = client
     index = bot._runtime_view.agent_reply_memberships
-    await index.refresh(bot.config, bot.runtime_paths, client)
+    await refresh_memberships(index, bot.config, bot.runtime_paths, client)
     assert index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
     admission = _validated_reported_membership_admission(
         bot,
@@ -562,7 +782,7 @@ async def test_router_leave_then_rejoin_in_one_sync_requires_grant_refresh(tmp_p
     client = _grant_room_client(bot, room_id, sender_id)
     bot.client = client
     index = bot._runtime_view.agent_reply_memberships
-    await index.refresh(bot.config, bot.runtime_paths, client)
+    await refresh_memberships(index, bot.config, bot.runtime_paths, client)
 
     departure = _validated_reported_membership_admission(
         bot,
@@ -599,7 +819,7 @@ async def test_router_final_invite_revokes_grant_before_timeline_admission(
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     client = _grant_room_client(bot, room_id, sender_id)
     index = bot._runtime_view.agent_reply_memberships
-    await index.refresh(bot.config, bot.runtime_paths, client)
+    await refresh_memberships(index, bot.config, bot.runtime_paths, client)
     admission = _validated_reported_membership_admission(
         bot,
         room_id,
@@ -627,7 +847,7 @@ async def test_grant_user_revocation_waits_for_durable_live_admission(
     bot, call_manager = await _router_with_call_manager(tmp_path)
     client = _grant_room_client(bot, grant_room_id, sender_id)
     index = bot._runtime_view.agent_reply_memberships
-    await index.refresh(bot.config, bot.runtime_paths, client)
+    await refresh_memberships(index, bot.config, bot.runtime_paths, client)
     member_event = _member_event(
         "$membership",
         user_id=sender_id,
@@ -669,7 +889,7 @@ async def test_grant_user_join_waits_for_durable_timeline_admission(
     bot, call_manager = await _router_with_call_manager(tmp_path)
     client = _grant_room_client(bot, room_id)
     index = bot._runtime_view.agent_reply_memberships
-    await index.refresh(bot.config, bot.runtime_paths, client)
+    await refresh_memberships(index, bot.config, bot.runtime_paths, client)
     member_event = _member_event("$join", user_id=sender_id, membership="join", ts=1)
     admission = _validated_timeline_admission(
         bot,
@@ -764,7 +984,7 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
     bot, call_manager = await _router_with_call_manager(tmp_path)
     client = _grant_room_client(bot, room_id)
     index = bot._runtime_view.agent_reply_memberships
-    await index.refresh(bot.config, bot.runtime_paths, client)
+    await refresh_memberships(index, bot.config, bot.runtime_paths, client)
     join_event = _member_event("$join", user_id=sender_id, membership="join", ts=1)
     revoke_event = _member_event("$revoke", user_id=sender_id, membership=membership, ts=2)
     join_admission = _validated_timeline_admission(
@@ -1330,3 +1550,70 @@ async def test_bot_ready_context_includes_joined_rooms_from_first_sync(tmp_path:
     assert len(captured_ctx) == 1
     assert captured_ctx[0].rooms == ("!room:localhost",)
     assert captured_ctx[0].joined_room_ids == ("!room:localhost", "!joined:localhost")
+
+
+def _two_bot_runtime(tmp_path: Path) -> tuple[ReadyRuntime, AgentBot, AgentBot]:
+    """Return a runtime with no owner account and two agents' bots, each with its own joined rooms."""
+    code = _agent_bot(tmp_path)
+    orchestrator = cast("ReadyRuntime", code.orchestrator)
+    general = _agent_bot(tmp_path, agent_name="general", orchestrator=orchestrator)
+    for bot, joined in ((code, "!code-only:localhost"), (general, "!general-only:localhost")):
+        bot.client = AsyncMock()
+        bot.client.rooms = {"!room:localhost": MagicMock(), joined: MagicMock()}
+    return orchestrator, code, general
+
+
+async def _emit_service_bot_ready(orchestrator: ReadyRuntime) -> None:
+    """Capture and emit the runtime's one service bot:ready, which a hook listens for."""
+    emission = service_bot_ready_emission(orchestrator)
+    assert emission is not None
+    await emission()
+
+
+@pytest.mark.asyncio
+async def test_service_bot_ready_fires_once_per_start(tmp_path: Path) -> None:
+    """A service-scoped bot:ready hook runs on the runtime's one emission, and on no bot's own bot:ready."""
+    orchestrator, code, general = _two_bot_runtime(tmp_path)
+    calls: list[tuple[str, str]] = []
+
+    @hook(EVENT_BOT_READY, agents=(ROUTER_AGENT_NAME,))
+    async def once_per_process(ctx: AgentLifecycleContext) -> None:
+        calls.append(("service", ctx.entity_name))
+
+    @hook(EVENT_BOT_READY)
+    async def per_bot(ctx: AgentLifecycleContext) -> None:
+        calls.append(("agent", ctx.entity_name))
+
+    orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+        [_plugin("test-plugin", [once_per_process, per_bot])],
+    )
+
+    await code._emit_agent_lifecycle_event(EVENT_BOT_READY)
+    await _emit_service_bot_ready(orchestrator)
+    await general._emit_agent_lifecycle_event(EVENT_BOT_READY)
+
+    assert calls == [("agent", "code"), ("service", ROUTER_AGENT_NAME), ("agent", "general")]
+
+
+@pytest.mark.asyncio
+async def test_service_context_lists_union_of_joined_rooms(tmp_path: Path) -> None:
+    """The service bot:ready names the router entity, every configured room, and only the rooms a bot is in."""
+    orchestrator, code, _general = _two_bot_runtime(tmp_path)
+    # A configured room given by its ID that no bot has joined is configured, not joined.
+    orchestrator.config.agents["code"].rooms.append("!unjoined:localhost")
+    code.rooms.append("!unjoined:localhost")
+    captured: list[AgentLifecycleContext] = []
+
+    @hook(EVENT_BOT_READY, scope="service")
+    async def on_ready(ctx: AgentLifecycleContext) -> None:
+        captured.append(ctx)
+
+    orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
+
+    await _emit_service_bot_ready(orchestrator)
+
+    [ctx] = captured
+    assert (ctx.entity_name, ctx.entity_type) == (ROUTER_AGENT_NAME, "router")
+    assert ctx.rooms == ("!room:localhost", "!unjoined:localhost")
+    assert ctx.joined_room_ids == ("!room:localhost", "!code-only:localhost", "!general-only:localhost")
+    assert ctx.is_active()

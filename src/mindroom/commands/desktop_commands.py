@@ -24,9 +24,13 @@ from mindroom.desktop.pairing import (
     create_desktop_pairing,
 )
 from mindroom.desktop.protocol import DesktopSetupDescriptor
+from mindroom.entity_resolution import entity_identity_registry
+from mindroom.matrix.room_membership import cached_member_ids, room_has_only
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -51,6 +55,19 @@ def chat_pairing_desktop_error(config: Config, agent_name: str) -> str | None:
     if "desktop" not in config.resolve_agent(agent_name).tools.tool_names:
         return f"Agent '{agent_name}' does not declare the Desktop tool."
     return None
+
+
+def desktop_room_agent(config: Config, runtime_paths: RuntimePaths, room: nio.MatrixRoom, requester: str) -> str | None:
+    """Return the Desktop agent of a room that holds only the requester, that agent and accounts that answer nobody.
+
+    A MindRoom account that is no agent or team answers nobody, so it is no party to the room.
+    """
+    registry = entity_identity_registry(config, runtime_paths)
+    others = cached_member_ids(room) - {requester}
+    names = [registry.current_entity_name_for_user_id(user_id) for user_id in others]
+    answering = [name for name in names if name in config.agents or name in config.teams]
+    alone = None not in names and len(answering) == 1 and room_has_only(config, room, {requester, *others})
+    return answering[0] if alone and chat_pairing_desktop_error(config, answering[0]) is None else None
 
 
 def _validate_desktop_scope(scope: DesktopCommandScope) -> None:
@@ -222,4 +239,4 @@ def handle_desktop_command(args_text: str, *, scope: DesktopCommandScope) -> str
     return response
 
 
-__all__ = ["DesktopCommandScope", "chat_pairing_desktop_error", "handle_desktop_command"]
+__all__ = ["DesktopCommandScope", "chat_pairing_desktop_error", "desktop_room_agent", "handle_desktop_command"]

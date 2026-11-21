@@ -32,6 +32,7 @@ from mindroom.hooks import (
 from mindroom.inbound_turn_normalizer import (
     DispatchPayload,
     DispatchPayloadWithAttachmentsRequest,
+    TextNormalizationRequest,
     _VoiceNormalizationResult,
 )
 from mindroom.ingress_validation import IngressValidator
@@ -627,7 +628,17 @@ class TestAgentBot(AgentBotTestBase):
         release_preview_normalization = asyncio.Event()
         dispatches: list[list[str]] = []
 
-        async def prepare_file_sidecar_text_event(_event: nio.RoomMessageFile) -> PreparedIngress:
+        typed = PreparedIngress(
+            sender="@user:localhost",
+            event_id="$typed",
+            body="typed second",
+            source=text_event.source,
+            server_timestamp=1234567891,
+        )
+
+        async def resolve_text_event(request: TextNormalizationRequest) -> PreparedIngress:
+            if request.event.event_id != sidecar_event.event_id:
+                return typed
             preview_normalization_started.set()
             await release_preview_normalization.wait()
             return prepared_sidecar
@@ -643,23 +654,9 @@ class TestAgentBot(AgentBotTestBase):
         replace_turn_deps(bot, coalescing_gate=bot._coalescing_gate)
         bot._turn_ingress.deps.resolver.coalescing_thread_id = AsyncMock(return_value="$thread-root")
 
-        with (
-            patch(
-                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_file_sidecar_text_event",
-                new=AsyncMock(side_effect=prepare_file_sidecar_text_event),
-            ),
-            patch(
-                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
-                new=AsyncMock(
-                    return_value=PreparedIngress(
-                        sender="@user:localhost",
-                        event_id="$typed",
-                        body="typed second",
-                        source=text_event.source,
-                        server_timestamp=1234567891,
-                    ),
-                ),
-            ),
+        with patch(
+            "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
+            new=AsyncMock(side_effect=resolve_text_event),
         ):
             sidecar_task = asyncio.create_task(bot._turn_ingress.handle_media_event(room, sidecar_event))
             # The later text arrives while the sidecar's preview normalization blocks.

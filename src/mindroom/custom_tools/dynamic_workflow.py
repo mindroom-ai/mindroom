@@ -96,7 +96,6 @@ _WORKFLOW_RESTRICTED_TOOLS = frozenset(
         "delegate",
         "dynamic_tools",
         "dynamic_workflow",
-        "invite_router",
         "memory",
         "self_config",
         "skill_manage",

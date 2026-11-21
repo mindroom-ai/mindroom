@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Protocol, TypeIs, cast
 
 import nio
 
-from mindroom.constants import SILENT_SCHEDULE_EVENT_TYPE
+from mindroom.constants import ROUTE_EVENT_TYPE, ROUTE_REVISION_KEY, SILENT_SCHEDULE_EVENT_TYPE
 from mindroom.event_journal import (
     EventClass,
     EventKind,
@@ -42,6 +42,8 @@ _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 _BACKGROUND_JOB_CANCEL_EVENT_TYPE = "io.mindroom.background_job_cancel"
 _SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
 _RTC_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE})
+# Kinds only an account MindRoom manages may send; anyone else's is settled without work.
+_MANAGED_SENDER_KINDS = frozenset({EventKind.SCHEDULE_TRIGGER, EventKind.ROUTE})
 # Kinds whose events carry conversation content, and so update the projection.
 _PROJECTED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.REDACTION})
 # Kinds a person sends to ask for something, the only ones the agent-authored marker demotes to context.
@@ -87,6 +89,11 @@ def _is_silent_schedule_trigger(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
     return isinstance(event, nio.UnknownEvent) and event.type == SILENT_SCHEDULE_EVENT_TYPE
 
 
+def _is_route(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
+    """Return whether one event is a steward's hidden route to the responder it selected."""
+    return isinstance(event, nio.UnknownEvent) and event.type == ROUTE_EVENT_TYPE
+
+
 def _is_rtc_event(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
     """Return whether one event is a supported MatrixRTC room event."""
     return isinstance(event, nio.UnknownEvent) and event.type in _RTC_EVENT_TYPES
@@ -115,6 +122,7 @@ _KIND_RULES: tuple[tuple[Callable[[nio.Event], bool], EventKind], ...] = (
     # still enumerated dropped emotes a second time, one layer further in.
     (lambda event: isinstance(event, nio.RoomMessage), EventKind.MESSAGE),
     (_is_silent_schedule_trigger, EventKind.SCHEDULE_TRIGGER),
+    (_is_route, EventKind.ROUTE),
     (_is_rtc_event, EventKind.RTC),
     (_is_tool_approval_response, EventKind.APPROVAL),
     (_is_background_job_cancel, EventKind.JOB_CANCEL),
@@ -240,7 +248,10 @@ def _inbound_event(
     event_class: EventClass,
 ) -> InboundEvent:
     """Return the admission view of one timeline event."""
-    content = event.source.get("content")
+    content, source = event.source.get("content"), _event_source(event)
+    if kind is not EventKind.ROUTE and isinstance(stored := source.get("content"), dict):
+        # Which edit a waiting message's text is, only its journal row's revision says: its sender's word is dropped.
+        source["content"] = {key: value for key, value in stored.items() if key != ROUTE_REVISION_KEY}
     return InboundEvent(
         event_id=event.event_id,
         room_id=room_id,
@@ -249,7 +260,7 @@ def _inbound_event(
         event_class=event_class,
         sender=event.sender,
         origin_server_ts=event.server_timestamp,
-        source=_event_source(event),
+        source=source,
     )
 
 
@@ -304,7 +315,7 @@ def _ingested_kind(parsed: nio.Event, sender_is_managed: Callable[[str], bool]) 
         # Nio's schema accepts an empty target, which deletes nothing and which batch validation would reject.
         return None
     kind = _event_kind(parsed)
-    if kind is EventKind.SCHEDULE_TRIGGER and not sender_is_managed(parsed.sender):
+    if kind in _MANAGED_SENDER_KINDS and not sender_is_managed(parsed.sender):
         return None
     if kind is None and isinstance(parsed, nio.RoomMemberEvent):
         return EventKind.ROOM_LIFECYCLE
@@ -356,6 +367,11 @@ def parse_journal_event(stored: JournalEvent) -> nio.Event:
     """Rebuild one typed nio event from its stored replay payload."""
     source = dict(stored.source)
     security_metadata = source.pop(_SECURITY_METADATA_KEY, None)
+    # What marks a message as a route is written only by the dispatch of a route event, so no stored event keeps a
+    # mark of its own: not beside its content, and not in the content of anything but a route.
+    source.pop(ROUTE_EVENT_TYPE, None)
+    if stored.kind is not EventKind.ROUTE and isinstance(content := source.get("content"), dict):
+        source["content"] = {key: value for key, value in content.items() if key != ROUTE_EVENT_TYPE}
     event = parse_matrix_media_event_source(source) if stored.kind is EventKind.MEDIA else nio.Event.parse_event(source)
     if not isinstance(event, nio.Event) or event.event_id != stored.event_id:
         msg = f"Journal event {stored.event_id!r} does not replay as itself"

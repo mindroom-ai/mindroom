@@ -39,6 +39,11 @@ if TYPE_CHECKING:
     from mindroom.orchestration.config_updates import ConfigUpdatePlan
 
 
+def _config_that_starts_the_owner() -> Config:
+    """Return a config whose reload from the default one starts the owner account, so it waits for replies."""
+    return Config(server_emoji={"enabled": True})
+
+
 def test_replacement_drain_state_tracks_wait_warning_and_force() -> None:
     """Replacement-drain helpers should model wait, warning, and force transitions."""
     state = _ReplacementDrainState()
@@ -228,7 +233,7 @@ async def test_reload_drains_active_responses_before_applying(
     gate = ResponseAdmissionGate()
     assert gate.admit()
     current_config = Config()
-    new_config = Config(defaults={"enable_streaming": False})
+    new_config = _config_that_starts_the_owner()
     load_config_mock = MagicMock(return_value=published_config_load(new_config))
     lifecycle = make_config_reload_lifecycle(
         test_runtime_paths(tmp_path),
@@ -251,7 +256,8 @@ async def test_reload_drains_active_responses_before_applying(
     assert gate.closed is False
 
 
-_AGENT1_YAML = "models:\n  default: {provider: openai, id: test-model}\nagents:\n  agent1:\n    display_name: Agent 1\n"
+# The emoji room gives the owner account a duty, so the runtimes below keep their `router` bot.
+_AGENT1_YAML = "server_emoji: {enabled: true}\nmodels:\n  default: {provider: openai, id: test-model}\nagents:\n  agent1:\n    display_name: Agent 1\n"
 
 
 @pytest.mark.asyncio
@@ -391,7 +397,7 @@ async def test_reload_does_not_hold_config_lock_while_draining_responses(
     gate = ResponseAdmissionGate()
     assert gate.admit()
     current_config = Config()
-    new_config = Config(defaults={"enable_streaming": False})
+    new_config = _config_that_starts_the_owner()
     load_started = threading.Event()
 
     def observed_load_config() -> ConfigLoad:
@@ -642,7 +648,7 @@ async def test_new_request_during_drain_keeps_waiting_for_idle(
     gate = ResponseAdmissionGate()
     assert gate.admit()
     current_config = Config()
-    new_config = Config(defaults={"enable_streaming": False})
+    new_config = _config_that_starts_the_owner()
     load_config_mock = MagicMock(return_value=published_config_load(new_config))
     lifecycle = make_config_reload_lifecycle(
         test_runtime_paths(tmp_path),
@@ -778,7 +784,7 @@ async def test_cancel_clears_queued_reload(
     busy_gate = ResponseAdmissionGate()
     assert busy_gate.admit()
     current_config = Config()
-    new_config = Config(defaults={"enable_streaming": False})
+    new_config = _config_that_starts_the_owner()
     load_config_mock = MagicMock(return_value=published_config_load(new_config))
     lifecycle = make_config_reload_lifecycle(
         test_runtime_paths(tmp_path),
@@ -814,7 +820,7 @@ async def test_config_load_stays_open_then_apply_waits_for_active_responses(
     gate = ResponseAdmissionGate()
     assert gate.admit()
     current_config = Config()
-    new_config = Config(defaults={"enable_streaming": False})
+    new_config = _config_that_starts_the_owner()
 
     def blocked_load() -> ConfigLoad:
         load_started.set()
@@ -1113,8 +1119,9 @@ async def test_update_config_plugin_changes_restart_all_bots(
 ) -> None:
     """Plugin entry changes restart every kept bot and never a removed one."""
     agents = {"agent1": AgentConfig(display_name="Agent 1"), "agent2": AgentConfig(display_name="Agent 2")}
-    current_config = Config(agents={**agents, "gone": AgentConfig(display_name="Gone")})
-    new_config = Config(agents=agents, plugins=["plugins/demo"])
+    emoji_room = {"enabled": True}
+    current_config = Config(agents={**agents, "gone": AgentConfig(display_name="Gone")}, server_emoji=emoji_room)
+    new_config = Config(agents=agents, plugins=["plugins/demo"], server_emoji=emoji_room)
     monkeypatch.setattr(
         "mindroom.orchestration.config_lifecycle.plugin_change_paths",
         lambda *_args: ("plugins/demo",),

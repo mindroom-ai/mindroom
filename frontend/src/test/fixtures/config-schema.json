@@ -1192,7 +1192,7 @@
             "notes_model": null,
             "languages": []
           },
-          "description": "Transcripts of calls between people in rooms with the router"
+          "description": "Transcripts of calls between people in rooms with a MindRoom account"
         }
       },
       "title": "CallsConfig",
@@ -5064,7 +5064,7 @@
         },
         "reply_mode": {
           "default": "auto",
-          "description": "'auto' lets the router and the room's only agent or team answer a message that mentions no one; 'mentions' answers only messages that mention an agent or team, and follow-ups in threads an agent or team already replied in or is still answering",
+          "description": "'auto' lets the best-fitting or the room's only agent or team answer a message that mentions no one; 'mentions' answers only messages that mention an agent or team, and follow-ups in threads an agent or team already replied in or is still answering",
           "enum": [
             "auto",
             "mentions"
@@ -5127,7 +5127,7 @@
     },
     "RouterConfig": {
       "additionalProperties": false,
-      "description": "Configuration for the router system.",
+      "description": "Configuration for routing and for the MindRoom owner account.",
       "properties": {
         "model": {
           "default": "default",
@@ -5160,10 +5160,13 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            {
+              "type": "null"
             }
           ],
-          "default": true,
-          "description": "true accepts every room invite to the router, false accepts none, and a list accepts only invites from matching inviter Matrix IDs or glob patterns",
+          "default": null,
+          "description": "Deprecated and ignored: the MindRoom owner account accepts no room invites",
           "title": "Accept Invites"
         },
         "access": {
@@ -5708,7 +5711,7 @@
         },
         "visible_router_echo": {
           "default": true,
-          "description": "Show router voice progress, or direct fallback text when transcription is disabled",
+          "description": "Post the transcript of a voice message before the reply",
           "title": "Visible Router Echo",
           "type": "boolean"
         },
@@ -6382,7 +6385,7 @@
       "default": {
         "model": "default",
         "judgment": null,
-        "accept_invites": true,
+        "accept_invites": null,
         "access": null
       },
       "description": "Router configuration"

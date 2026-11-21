@@ -17,11 +17,12 @@ from nio.durable import RecordKind, SyncBatch, SyncRecord
 from nio.durable.codec import restore_event
 from nio.durable.model import CryptoEvidence, OwnMembership
 
-from mindroom.constants import AGENT_AUTHORED_KEY, STREAM_STATUS_KEY
+from mindroom.constants import AGENT_AUTHORED_KEY, ROUTE_REVISION_KEY, STREAM_STATUS_KEY
 from mindroom.event_journal import (
     AdmissionFacts,
     DeliveryProjectionPendingError,
     EventJournalStore,
+    EventKind,
     InboundEvent,
     IngestionBatchAdmission,
     IngestionBatchIntegrityError,
@@ -299,7 +300,7 @@ async def test_pump_wakes_the_dispatcher_within_the_recheck_interval_after_batch
     journal_store: EventJournalStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A departing router fails an agent's paused approval without waking it; the agent's next syncs lead to a wake.
+    """A departing card sender fails an agent's paused approval without waking it; its next syncs lead to a wake.
 
     The syncs arrive before the recheck is due and then stop, so only the scheduled wake can find the source.
     """
@@ -308,7 +309,7 @@ async def test_pump_wakes_the_dispatcher_within_the_recheck_interval_after_batch
     router = journal_store.principal("router@shared")
     await approvals.admit_sources(alice)
     await paused_for_approval(alice, replace(approvals.continuation(state="waiting"), runtime_generation="runtime-a"))
-    await approvals.remember_card(router)
+    await approvals.remember_card(router, event_journal_store_tests.CARD_SENDER)
     stream = uuid4()
     consumer = await alice.load_or_create_ingestion_consumer(new_generation=uuid4())
     await alice.bind_ingestion_stream(generation=consumer.generation, stream_id=stream)
@@ -330,7 +331,7 @@ async def test_pump_wakes_the_dispatcher_within_the_recheck_interval_after_batch
     try:
         await asyncio.wait_for(scanned.wait(), 1)
         assert handed == []
-        await admit_room_membership(router, ROOM, "leave")
+        await admit_room_membership(journal_store.principal(event_journal_store_tests.CARD_SENDER), ROOM, "leave")
         started = asyncio.get_running_loop().time()
         pump = asyncio.create_task(
             durable_ingestion.run_ingestion_pump(
@@ -614,6 +615,56 @@ async def test_batch_binding_order_and_semantic_duplicates(journal_database: Cal
     assert len(await principal.pending()) == 1
     with pytest.raises(IngestionBatchSequenceError):
         await consume_one_ingestion_batch(Session(batch), principal, account_id=ACCOUNT)
+
+
+@pytest.mark.asyncio
+async def test_redelivery_of_a_pending_long_text_edited_to_a_short_one_is_a_duplicate(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """A long text sent as a file and edited to a short one while it waits is still the event it was when redelivered.
+
+    It replays as the text it now is, and its row keeps the kind it was admitted as, settled too.
+    """
+    store = journal_database()
+    original = message("$long")
+    original.source["content"] = {"msgtype": "m.file", "body": "long.txt", "url": "mxc://example.org/long"}
+    batch = SyncBatch(uuid4(), 1, (original,))
+    principal = await principal_for(store, batch.stream_id)
+    await consume_one_ingestion_batch(Session(batch), principal, account_id=ACCOUNT)
+    short = {"msgtype": "m.text", "body": "short", ROUTE_REVISION_KEY: [11, "$edit"]}
+    await principal.revise_pending("$long", short)
+
+    result = await consume_one_ingestion_batch(Session(replace(batch, sequence=2)), principal, account_id=ACCOUNT)
+
+    assert result.receipt_new
+    assert not result.semantic_event_new
+    [pending] = await principal.pending()
+    assert (pending.kind, pending.source["content"]) == (EventKind.MESSAGE, short)
+    await principal.settle("$long")
+    result = await consume_one_ingestion_batch(Session(replace(batch, sequence=3)), principal, account_id=ACCOUNT)
+    assert not result.semantic_event_new
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_redelivery_of_an_unedited_text_as_an_image_is_refused(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """Only an edit a waiting message took changes what it replays as: a batch that contradicts its kind is refused."""
+    store = journal_database()
+    batch = SyncBatch(uuid4(), 1, (message("$text"),))
+    principal = await principal_for(store, batch.stream_id)
+    await consume_one_ingestion_batch(Session(batch), principal, account_id=ACCOUNT)
+    image = message("$text")
+    image.source["content"] = {"msgtype": "m.image", "body": "cat.png", "url": "mxc://example.org/cat"}
+
+    contradiction = Session(SyncBatch(batch.stream_id, 2, (image,)))
+    with pytest.raises(IngestionBatchIntegrityError):
+        await consume_one_ingestion_batch(contradiction, principal, account_id=ACCOUNT)
+
+    [pending] = await principal.pending()
+    assert (pending.kind, pending.source["content"]["body"]) == (EventKind.MESSAGE, "hello")
+    await store.close()
 
 
 @pytest.mark.asyncio

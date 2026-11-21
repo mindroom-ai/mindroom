@@ -234,9 +234,13 @@ class ApprovalStore(PrincipalRows):
             grant_id=grant_id,
         )
 
-    async def retire_approval_card(self, *, delivery_id: str) -> bool:
+    async def retire_approval_card(self, *, delivery_id: str, without_edit: bool = False) -> bool:
         """Retire a decided request card once Matrix acknowledged or refused for good its terminal edit."""
-        return await self._write(approval_cards.retire, delivery_id=delivery_id)
+        return await self._write(approval_cards.retire, delivery_id=delivery_id, without_edit=without_edit)
+
+    async def approval_card_sender(self, *, delivery_id: str) -> tuple[str | None, str] | None:
+        """Return a card's sender principal, None for a card the router sent before upgrade, with its room."""
+        return await self._read(approval_cards.sender_of, delivery_id=delivery_id)
 
     async def remember_terminal_approval_alias(self, *, room_id: str, card_event_id: str, delivery_id: str) -> None:
         """Remember a transport-verified copy of an automatic receipt as another event of that receipt."""
@@ -387,7 +391,7 @@ class ApprovalStore(PrincipalRows):
 
         Returns the work its commit left for afterwards, or ``None`` when the run is not ready to finish.
         """
-        return await self._write(_finish_approval_continuation, approval_id)
+        return await self._write(_finish_approval_continuation, approval_id, owner_available=True)
 
     async def enqueue_unavailable_approval_notice(
         self,
@@ -406,21 +410,16 @@ class ApprovalStore(PrincipalRows):
             payload=payload,
         )
 
-    async def discard_unavailable_approval_continuation(
-        self,
-        approval_id: str,
-        *,
-        notice_principal_id: str,
-    ) -> tuple[PostCommitEffect, ...] | None:
+    async def unavailable_notice(self, approval_id: str) -> tuple[str, str, bool] | None:
+        """Return the principal and delivery of one approval's unavailable-owner notice and whether it is acknowledged."""
+        return await self._read(approval_continuations.unavailable_notice, approval_id)
+
+    async def discard_unavailable_approval_continuation(self, approval_id: str) -> tuple[PostCommitEffect, ...] | None:
         """Release sources after permanent owner loss and visible card cleanup, ending the reply the approval paused.
 
         Returns the work its commit left for afterwards, or ``None`` when the run may not be discarded.
         """
-        return await self._write(
-            _discard_unavailable_approval_continuation,
-            approval_id,
-            notice_principal_id=notice_principal_id,
-        )
+        return await self._write(_finish_approval_continuation, approval_id, owner_available=False)
 
     @property
     def signals(self) -> ApprovalSignals:
@@ -565,50 +564,22 @@ def _finish_approval_continuation(
     transaction: Transaction,
     principal_id: str,
     approval_id: str,
-) -> tuple[PostCommitEffect, ...] | None:
-    """Settle a paused run whose FINAL delivery ended, and end its reply."""
-    return _end_approval(
-        transaction,
-        principal_id,
-        approval_id,
-        may_end=lambda: approval_continuations.may_finish(
-            transaction,
-            principal_id,
-            approval_id=approval_id,
-        ),
-        end=lambda finishing: replies.approval_finished(
-            transaction,
-            principal_id,
-            finishing,
-            owner_available=True,
-        ),
-    )
-
-
-def _discard_unavailable_approval_continuation(
-    transaction: Transaction,
-    principal_id: str,
-    approval_id: str,
     *,
-    notice_principal_id: str,
+    owner_available: bool,
 ) -> tuple[PostCommitEffect, ...] | None:
-    """Release a run whose owner is permanently gone, ending the reply it paused."""
-    # The owner that could settle the reply is gone; the notice is what the room sees.
+    """End a paused run and its reply: settled after its FINAL delivery, or discarded when its owner is permanently gone."""
+    # Without an owner to settle the reply, the notice is what the room sees.
+    may_end = approval_continuations.may_finish if owner_available else approval_continuations.may_discard_unavailable
     return _end_approval(
         transaction,
         principal_id,
         approval_id,
-        may_end=lambda: approval_continuations.may_discard_unavailable(
+        may_end=lambda: may_end(transaction, principal_id, approval_id=approval_id),
+        end=lambda ending: replies.approval_finished(
             transaction,
             principal_id,
-            approval_id=approval_id,
-            notice_principal_id=notice_principal_id,
-        ),
-        end=lambda discarded: replies.approval_finished(
-            transaction,
-            principal_id,
-            discarded,
-            owner_available=False,
+            ending,
+            owner_available=owner_available,
         ),
     )
 

@@ -95,7 +95,12 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
-from tests.scheduling_helpers import joined_member_state, run_once_task, scheduled_task_runtime, serve_full_room_state
+from tests.scheduling_helpers import (
+    joined_member_state,
+    run_once_task,
+    scheduled_task_runtime,
+    scheduling_bot,
+)
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 from tests.test_tool_hooks import _plugin
@@ -131,7 +136,7 @@ _OTHER_ARGUMENTS: dict[str, object] = {"channel": "U999", "text": "Other"}
 
 
 def _manager(journal: EventJournalStore, tmp_path: Path, sent: list[MatrixDelivery]) -> ApprovalManager:
-    async def prepare(_room: str, _thread: str | None, content: dict) -> dict:
+    async def prepare(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:
         return content
 
     async def send(delivery: MatrixDelivery) -> str:
@@ -143,7 +148,7 @@ def _manager(journal: EventJournalStore, tmp_path: Path, sent: list[MatrixDelive
         cards=journal.principal("router@shared"),
         prepare_approval_event=prepare,
         send_approval_delivery=send,
-        transport_sender_id=lambda: "@router:test",
+        sender_bot=lambda _entity_name, _room_id: object(),
     )
 
 
@@ -642,20 +647,65 @@ async def test_cancelling_the_task_denies_its_pending_card(
 
 
 @pytest.mark.asyncio
-async def test_new_room_tenure_does_not_inherit_the_approval(
+@pytest.mark.parametrize("returns", [False, True], ids=["left", "left-and-rejoined"])
+async def test_approval_is_not_spent_once_the_asking_agent_left_the_room(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    returns: bool,
+) -> None:
+    """An approval the agent asked for in one membership of the room is not spent after that membership ended."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    manager.transport.responder_principal_id = lambda entity_name: entity_name + "@shared"
+    asker = journal.principal(_AGENT + "@shared")
+    await admit_room_membership(asker, _ROOM, "join")
+    try:
+        await _armed(manager)
+
+        await admit_room_membership(asker, _ROOM, "leave")
+        if returns:
+            await admit_room_membership(asker, _ROOM, "join")
+
+        assert await _claim(manager) == "left_room"
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_approval_asked_for_after_the_agent_rejoined_is_spent_in_that_membership(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """Leaving and rejoining the room voids an approval given under the old membership."""
+    """An agent that left and rejoined before it asked spends the approval in the membership it asked in."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
+    asker = journal.principal(_AGENT + "@shared")
+    for membership in ("join", "leave", "join"):
+        await admit_room_membership(asker, _ROOM, membership)
     try:
         await _armed(manager)
-        cards = journal.principal("router@shared")
-        await admit_room_membership(cards, _ROOM, "leave")
-        await admit_room_membership(cards, _ROOM, "join")
 
-        assert await _claim(manager) == "left_room"
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_approval_is_spent_while_the_asking_agent_stays_after_the_owner_account_left(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """The owner account leaving the room does not void an approval an agent that stays there asked for."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    manager.transport.responder_principal_id = lambda entity_name: entity_name + "@shared"
+    await admit_room_membership(journal.principal(_AGENT + "@shared"), _ROOM, "join")
+    try:
+        await _armed(manager)
+
+        await admit_room_membership(journal.principal("router@shared"), _ROOM, "leave")
+
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
     finally:
         await manager.shutdown()
 
@@ -1052,7 +1102,6 @@ def _gated_config(match: str = "post_slack_message") -> Config:
 def _tool_context(config: Config, *, thread_id: str | None = "$thread") -> ToolRuntimeContext:
     context = _make_context(config)
     client = context.client
-    serve_full_room_state(client, "!room:localhost")
     client.room_put_state = AsyncMock(
         return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$state"}, room_id="!room:localhost"),
     )
@@ -1206,7 +1255,7 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
         target=MessageTarget.resolve(room_id="!room:localhost", thread_id="$thread", reply_to_event_id="$answered"),
     )
     request = AsyncMock(return_value=True)
-    task_runtime = scheduled_task_runtime(runtime_paths_for(config), config=config)
+    task_runtime = scheduled_task_runtime(runtime_paths_for(config), scheduling_bot(context.client), config=config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request),
@@ -1253,6 +1302,8 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
     assert kwargs["scheduled_for_text"] == "2030-01-02 14:00 UTC"
     assert kwargs["any_arguments_offered"] is True
     start.assert_called_once()
+    assert record.owner_id == context.client.user_id
+    assert start.call_args.kwargs["owner_id"] == context.client.user_id
     assert record.task_id in result
     assert "approve" in result.lower()
 
@@ -1503,7 +1554,7 @@ async def test_no_task_is_published_when_its_card_cannot_be_posted(
         else AsyncMock(return_value=request_outcome)
     )
     withdraw = AsyncMock()
-    task_runtime = scheduled_task_runtime(context.runtime_paths, config=context.config)
+    task_runtime = scheduled_task_runtime(context.runtime_paths, scheduling_bot(context.client), config=context.config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
@@ -1548,7 +1599,7 @@ async def test_card_is_withdrawn_when_its_task_cannot_be_published() -> None:
     context.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
     request = AsyncMock(return_value=True)
     withdraw = AsyncMock()
-    task_runtime = scheduled_task_runtime(context.runtime_paths, config=context.config)
+    task_runtime = scheduled_task_runtime(context.runtime_paths, scheduling_bot(context.client), config=context.config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
@@ -1569,7 +1620,7 @@ async def test_a_published_call_keeps_its_approval_when_its_runner_cannot_start(
     context = _tool_context(_gated_config())
     request = AsyncMock(return_value=True)
     withdraw = AsyncMock()
-    task_runtime = scheduled_task_runtime(context.runtime_paths, config=context.config)
+    task_runtime = scheduled_task_runtime(context.runtime_paths, scheduling_bot(context.client), config=context.config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),

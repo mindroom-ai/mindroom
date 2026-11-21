@@ -27,7 +27,7 @@ from tests.conftest import (
     make_thread_reply_lookup,
     thread_reply_client,
 )
-from tests.matrix_state_helpers import save_matrix_state
+from tests.matrix_state_helpers import persist_owner_account, save_matrix_state
 from tests.test_generated_agents import OWNER, _created, _load, _personal, _with_template
 
 if TYPE_CHECKING:
@@ -562,6 +562,7 @@ async def test_every_manager_function_refuses_a_requester_who_cannot_own_trigger
     config = _config(admin_users=["@bridgebot:example.org", "@trigger-admin:example.org"])
     config.bot_accounts = ["@bridgebot:example.org", "@alias-bot:example.org"]
     config.authorization.aliases = {"@trigger-admin:example.org": ["@alias-bot:example.org"]}
+    persist_owner_account(_runtime_paths(tmp_path))
     tool = ExternalTriggerManagerTools()
     with tool_runtime_context(_context(tmp_path, config=config)):
         assert _payload(await tool.create_trigger("owned", public_key=_PUBLIC_KEY))["status"] == "ok"

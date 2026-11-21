@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 
 import nio
 from fastapi import HTTPException
 
 from mindroom.api.app_state import ensure_app_state
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.joined_members import read_joined_members
 from mindroom.room_agent_access import admit_room_agent, room_execution_identity
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
@@ -39,14 +39,24 @@ async def _authorize_computer(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    client: nio.AsyncClient,
+    client: Callable[[], nio.AsyncClient | None],
     memberships: AgentReplyMembershipIndex,
     refresh_memberships: Callable[[], Awaitable[None]],
 ) -> ComputerTarget:
-    """Require exact live room membership, responder access, and ordinary browser routing."""
+    """Require exact live room membership, responder access, and ordinary browser routing.
+
+    ``client`` returns the target agent's own client while its bot runs, which reads the room's members.
+    """
 
     async def joined_members() -> frozenset[str]:
-        response = await read_joined_members(client, room_id)
+        own = client()
+        if own is None:
+            raise ComputerError(503, "Computer authorization runtime is unavailable.")
+        try:
+            response = await read_joined_members(own, room_id)
+        except nio.LocalProtocolError:
+            # The bot closed this client as it stopped; the next request reads through its replacement.
+            response = None
         if not isinstance(response, nio.JoinedMembersResponse):
             raise ComputerError(503, "Authoritative room membership is unavailable.")
         return frozenset(member.user_id for member in response.members)
@@ -146,21 +156,22 @@ class ComputerRuntimeCoordinator:
         if not self.runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV):
             self.unbind()
             return
-        router_bot = bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or router_bot.client is None or not router_bot.running:
+        if not any(bot.running for bot in bots.values()):
             self.unbind()
             return
 
+        def agent_client(agent_user_id: str) -> nio.AsyncClient | None:
+            clients = (bot.client for bot in bots.values() if bot.running and bot.client is not None)
+            return next((client for client in clients if client.user_id == agent_user_id), None)
+
         async def authorize(requester_id: str, room_id: str, agent_user_id: str) -> ComputerTarget:
-            if router_bot.client is None or not router_bot.running:
-                raise ComputerError(503, "Computer authorization runtime is unavailable.")
             return await _authorize_computer(
                 requester_id,
                 room_id,
                 agent_user_id,
                 config=config,
                 runtime_paths=self.runtime_paths,
-                client=router_bot.client,
+                client=partial(agent_client, agent_user_id),
                 memberships=self.agent_reply_memberships,
                 refresh_memberships=self.refresh_agent_reply_memberships_when_needed,
             )

@@ -36,8 +36,15 @@ A message starting with `/` that is not a command, such as a file path like `/ho
 
 ## Command Handling
 
-The router answers commands, in the main room and in threads, even in rooms with a single agent.
-The exception is `/desktop`, which a private agent may answer itself when the room contains only you and that agent; see [`/desktop`](https://docs.mindroom.chat/tools/desktop/#desktop) for its room requirements.
+The agent or team a command is aimed at answers it.
+A command that mentions agents or teams, such as `@code !model`, is answered by the one among them with the lowest Matrix ID.
+The mention is a mention pill from your Matrix client; a typed `@name` that is no pill before a command makes the message ordinary conversation.
+A command in a thread with one agent is answered by that agent.
+Any other command is answered by the agent or team in the room with the lowest Matrix ID, whatever the room's reply mode.
+The first MindRoom account that sees a command saves who answers it, and only that agent or team answers.
+`/desktop` has its own room requirements; see [`/desktop`](https://docs.mindroom.chat/tools/desktop/#desktop).
+A command that changes room state, such as `/thread_mode`, `/auto_approve` or `/encrypt confirm`, answers `I need moderator rights in this room to ...` and changes nothing when no MindRoom account in the room may send state events.
+To grant the rights, open the room's member list in your Matrix client, select an agent that is already joined, and set its role to Moderator.
 
 Commands follow the same [authorization](https://docs.mindroom.chat/authorization/) rules as ordinary messages.
 "Room admin" means a Matrix room administrator, while "platform administrator" means a user listed in `administrators`.
@@ -93,11 +100,12 @@ Shown values are redacted like `config_manager` output; see [Access, Redaction, 
 ### Configuration Confirmations
 
 `/config set` validates the change against the full configuration and replies with an error ending in `Changes were NOT applied.` when it is invalid.
-A valid change gets a preview of the current and new values from the router, with ✅ and ❌ reactions.
+A valid change gets a preview of the current and new values, with ✅ and ❌ reactions.
 Only the user who requested the change can confirm or cancel it, and that user must still be a platform administrator.
 Unconfirmed changes expire after 24 hours.
 
-Pending changes usually survive a MindRoom restart; if one cannot, such as a secret value, the confirmation asks you to run `/config set` again.
+The agent or team that answered `/config set` keeps the pending change on the MindRoom host, not in the room, and it alone acts on the reactions.
+Pending changes survive a MindRoom restart, except a secret value, which is never saved: its confirmation asks you to run `/config set` again.
 
 On confirmation, the change is saved to `config.yaml` and applies to new agent interactions, except [event journal](https://docs.mindroom.chat/deployment/storage/#event-journal) changes, which apply after MindRoom restarts.
 If `config.yaml` changes while a confirmed change is being saved, for example through a dashboard save, the change is refused with `Changes were NOT applied.`; run `/config set` again.

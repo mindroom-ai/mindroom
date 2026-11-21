@@ -155,6 +155,9 @@ _APPROVAL_CARDS_TABLE = """
         -- Whether an approval can be honored: its arguments were reviewable when it was prepared.
         approvable INTEGER NOT NULL CHECK (approvable IN (0, 1)),
         retired INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0, 1)),
+        -- The principal whose account sends and edits the card; NULL for
+        -- a card the router sent before cards recorded their sender.
+        sender_principal_id TEXT,
         PRIMARY KEY (principal_id, delivery_id)
     )
 """
@@ -219,6 +222,10 @@ _SCHEDULED_CALL_APPROVALS_TABLE = """
         workflow_digest TEXT NOT NULL,
         execute_at_ns BIGINT NOT NULL,
         membership_epoch BIGINT NOT NULL,
+        -- The account that asked and its membership epoch then; NULL in a
+        -- row stored before askers were recorded.
+        sender_principal_id TEXT,
+        sender_epoch BIGINT,
         -- Whether its card offered approval for any arguments.
         any_arguments_offered INTEGER NOT NULL CHECK (any_arguments_offered IN (0, 1)),
         armed_at_ns BIGINT,
@@ -575,6 +582,19 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS room_event_claims (
+        -- One saved owner per room event and purpose, such as the steward
+        -- that runs a member hook. It has no principal: every bot of the
+        -- install reads the same row, and the first writer wins.
+        room_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (room_id, event_id, purpose)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS journal_identity (
         -- Stable database identity checked against the install's journal
         -- binding before opening its turn, delivery, and recovery state.
@@ -631,6 +651,7 @@ _TABLES = (
         discovery_event_id TEXT,
         prepared_voice_json TEXT,
         visible_echo_event_id TEXT,
+        -- Unused since the answering agent posts a voice transcript once; kept so no migration rewrites the table.
         visible_echo_is_fallback BOOLEAN,
         PRIMARY KEY (agent_name, event_id),
         UNIQUE (agent_name, turn_key, ordinal),

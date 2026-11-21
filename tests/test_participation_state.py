@@ -104,3 +104,23 @@ async def test_deliberate_decline_is_distinct_from_failure() -> None:
     assert not await gate.check(decide)
     assert gate.is_silent
     assert gate.is_declined
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("action", "ran"), [("respond", True), ("stay_silent", False)])
+async def test_only_an_approval_runs_its_callback_before_the_turn_may_become_visible(action: str, ran: bool) -> None:
+    """What must precede a reply runs once the turn decides to answer, before anything waiting on it wakes."""
+    decided_at_callback: list[bool] = []
+    gate = ParticipationGate()
+
+    async def on_approved() -> None:
+        decided_at_callback.append(gate.decided.is_set())
+
+    gate.on_approved = on_approved
+
+    async def decide() -> ParticipationDecision:
+        return ParticipationDecision(action=action, reason="Decided.")
+
+    assert await gate.check(decide) is ran
+    assert await gate.check(decide) is ran
+    assert decided_at_callback == ([False] if ran else [])

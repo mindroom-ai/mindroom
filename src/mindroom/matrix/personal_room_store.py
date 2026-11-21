@@ -29,6 +29,13 @@ class PersonalRoomAdoption(BaseModel):
 
     creator_user_id: str
     agent_user_id: str
+    # LEGACY_COMPAT: personal-room adoption records that name the router account.
+    # Legacy format: `adoption.router_user_id`, the router an operator attested as a member of an imported room.
+    # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
+    #   writes it; replacement: unreleased, a personal room needs no owner account, so new records omit the field.
+    # Handling: the field still loads; a named ID must be the persisted owner account, which then stays a
+    #   permitted member and keeps the room at cleanup.
+    # Coverage: tests/test_personal_rooms.py::test_adoption_record_naming_router_still_loads
     router_user_id: str | None = None
     expected_history_visibility: Literal["invited", "joined", "shared"] = "invited"
     additional_user_ids: list[str] = Field(default_factory=list)
@@ -57,6 +64,8 @@ class PersonalRoomRecord(BaseModel):
     welcome_completed: bool = False
     welcome_device_id: str | None = None
     confirmation_content: dict[str, Any] | None = None
+    # The account that sends the confirmation; absent in older records, which the owner account sent.
+    confirmation_user_id: str | None = None
     confirmation_device_id: str | None = None
     confirmation_event_id: str | None = None
     avatar_done: bool = False
@@ -175,16 +184,6 @@ def retained_personal_rooms(runtime_paths: RuntimePaths, agent_name: str, *, use
             if record.adoption is not None and record.adoption.router_user_id == user_id
         )
     return {record.room_id for record in records if record.room_id is not None}
-
-
-def personal_room_excludes_router(runtime_paths: RuntimePaths, room_id: str, router_user_id: str) -> bool:
-    """Return whether an adopted personal room leaves the router out of its attested members, so its check removes it."""
-    return any(
-        record.room_id == room_id
-        and record.adoption is not None
-        and router_user_id not in {record.adoption.router_user_id, *record.adoption.additional_user_ids}
-        for record in _every_agents_personal_room_records(runtime_paths)
-    )
 
 
 def is_personal_room(runtime_paths: RuntimePaths, room_id: str) -> bool:

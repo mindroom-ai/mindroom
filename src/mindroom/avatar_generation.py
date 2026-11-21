@@ -115,7 +115,6 @@ def _get_avatar_path(
 def _managed_avatar_targets(config: Config) -> list[tuple[str, str]]:
     """Return every managed avatar target for the active config."""
     targets = [("agents", agent_name) for agent_name in config.agents]
-    targets.append(("agents", "router"))
     targets.extend(("teams", team_name) for team_name in config.teams)
     targets.extend(("rooms", room_name) for room_name in config.managed_room_keys())
     if config.matrix_space.enabled:
@@ -352,9 +351,9 @@ async def set_room_avatars_in_matrix(runtime_paths: constants.RuntimePaths, *, f
     try:
         client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
     except ValueError as exc:
-        msg = f"Router account unavailable for avatar sync: {exc}"
+        msg = f"MindRoom owner account unavailable for avatar sync: {exc}"
         raise AvatarSyncError(msg) from exc
-    console.print("[green]✓ Using router account[/green]")
+    console.print("[green]✓ Using the MindRoom owner account[/green]")
 
     config = _load_validated_config(runtime_paths)
     # An explicit sync retries stock downloads that failed recently instead of waiting out the retry window.
@@ -408,15 +407,6 @@ def _build_avatar_generation_targets(
                     role=agent_config.role or "AI assistant",
                 ),
             )
-
-    if ("agents", "router") in missing_targets:
-        targets.append(
-            _AvatarTarget(
-                entity_type="agents",
-                entity_name="router",
-                role="Intelligent routing and agent or team selection",
-            ),
-        )
 
     for team_name, team_config in config.teams.items():
         if ("teams", team_name) in missing_targets:

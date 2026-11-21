@@ -64,7 +64,7 @@ async def read_profile(request: Request, room: _Room, room_id: str, agent_user_i
     model_name, _source = resolve_inherited_model(config, runtime_paths, workspace.name, room_id)
     registry = config_plugins(config, runtime_paths).tools
     tools: list[_ProfileTool] = []
-    for entry in resolve_agent_tools(config, workspace.name, registry).candidates(matrix_room_tools=True):
+    for entry in resolve_agent_tools(config, workspace.name, registry).candidates():
         metadata = registry.get(entry.name)
         if metadata is None:  # A preset or a toolkit MindRoom adds without a registry entry.
             continue

@@ -10,7 +10,7 @@ The path from a Matrix message to a delivered response; [Bot Runtime](bot-runtim
 ```text
 Matrix sync callback
   -> matrix/durable_ingestion.py                           (validate owned Nio work, commit its sequence and effects, then acknowledge)
-  -> bot.py (AgentBot runtime shell, for agents, teams, and the router)
+  -> bot.py (AgentBot runtime shell, for agents, teams, and the owner account)
   -> journal_dispatch.py + pending_event_worker.py         (fan admitted events out to callbacks; unsettled work is woken again)
   -> turns/ingress.py (owns one event to gate admission: onboarding command -> approval reply -> precheck -> claim -> normalize -> resolve -> admit)
        -> ingress_validation.py                                  (classify provenance once, dedup, echo drop; commands exit before batching)
@@ -42,6 +42,7 @@ Matrix sync callback
 | `atomic_file.py` | Shared atomic byte publication and cleanup relative to an opened directory |
 | `delivery_replay.py` | Durable per-scope claims for inbound deliveries: event ids, Matrix thread roots, and nonces, each scope in its own file under its own lock; external triggers also split their old shared file through it |
 | `orchestrator.py` | MultiAgentOrchestrator - composition root: wires the fleet, services, and reload lifecycle, and applies reload plans |
+| `room_steward.py` | The steward rule: which running, joined bot does a room's shared invisible work (highest power, ties to the lowest Matrix ID), which one posts where no agent answers, which one has a given Matrix ID, and which bot, while its receive loop has caught up, observes a room's members for reply access |
 | `integrations.py` | The built-in integration registry, the one place core wires an integration's runtime: each integration's public routes, its binding to the live bots and the shutdown drain of what it bound, final-reply mirroring, config checks, and created-agent tool edits |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: the process's one config load (published to the embedded API), queueing, response drain, and update-plan dispatch |
@@ -50,7 +51,7 @@ Matrix sync callback
 | `api/config_lifecycle.py` | The dashboard API's published config snapshots: loads, commits published atomically with the file write, and the strict and last-good per-request readers |
 | `orchestration/config_updates.py` | The config update plan: the one decision of what a reload restarts, starts, removes, and re-authorizes |
 | `orchestration/entity_fleet.py` | The one owner of every managed bot's lifecycle: start, background retry, restart stop, removal, and process shutdown |
-| `orchestration/rooms.py` | Managed room setup through the router: room creation, policy, invitations, root Space, server emoji room, and bot memberships |
+| `orchestration/rooms.py` | Managed room setup through the owner account: room creation, policy, invitations, root Space, server emoji room, and bot memberships |
 | `orchestration/accounts.py` | Managed Matrix accounts: the internal user's and each configured entity's, localpart collisions checked before any is created, then the identity registry validated |
 | `orchestration/storage_preparation.py` | Every startup migration, in the one order they depend on, before anything reads the storage root |
 | `orchestration/turn_recovery.py` | When each bot replays the turn-journal work it left pending: once the bots its turns need completed their first sync |
@@ -59,17 +60,16 @@ Matrix sync callback
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `event_loop_stall.py` | Native-thread event-loop stall detector that logs the blocking stack |
 | `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
-| `bot.py` | AgentBot runtime shell of every agent, team, and the router: Matrix lifecycle, sync callbacks, and room behavior |
+| `bot.py` | AgentBot runtime shell of every agent, team, and the owner account: Matrix lifecycle, sync callbacks, and room behavior |
 | `bot_runtime_view.py` | One bot generation's runtime state: its run phase and admission fence, and the runtime's shared config, gate, and membership index read through its orchestrator |
-| `bot_room_lifecycle.py` | One bot's room joins and leaves: configured and invited rooms, durable pending invites, following rooms listed under a room, cleanup of rooms it no longer keeps, the router's welcome, and an entity's notice in a managed room |
+| `bot_room_lifecycle.py` | One bot's room joins and leaves: configured and invited rooms, durable pending invites, following rooms listed under a room, cleanup of rooms it no longer keeps, the owner account's welcome in configured rooms, and an entity's notice in a managed room |
 | `turns/ingress.py` | TurnIngress - owns one inbound text or media event from its Matrix callback to gate admission, including onboarding commands, approval replies, edits, and commands that bypass the gate |
 | `turns/dispatch.py` | TurnDispatcher - owns one turn from the coalescing gate's exit to its recorded outcome: prepare, decide, execute, record |
 | `turns/interactive_selection.py` | Admits an answer to an interactive question behind earlier ingress and runs its response after the gate |
 | `turns/queued_notice.py` | The queued notice and approval-wait reaction that text, media, and voice ingress share |
 | `voice/ingress.py` | VoiceIngress - fixes a voice message's conversation, then readies it behind its sender's lane |
-| `voice/readiness.py` | Voice preparation and checkpointing, gated on the router's visible echo |
-| `router/duties.py` | What only the router bot does: keep room-backed reply grants current from its sync, set up and welcome the rooms it joins, clean orphaned bot accounts, and emit room-membership hooks |
-| `router/relay.py` | Router relay delivery: target readiness, handoff metadata, and visible delivery |
+| `voice/readiness.py` | Voice preparation: transcription and its durable per-bot checkpoint |
+| `steward_duties.py` | What a room's steward does for the room: publish its thread mode and MindRoom accounts, on its own triggers, on a handover and in the startup and reload sweep, and emit room-membership hooks under a per-event claim taken for the steward elected then; `runs_room_hooks` says which bot runs an emission's room-scoped hooks; also the owner account's orphaned-account cleanup and welcome in configured rooms |
 | `ingress_validation.py` | Ingress boundary validation: classify each event's provenance once against the entity registry, handled-id dedup, reply access at the first gate and again under the admission fence |
 | `turns/facts.py` | One inbound event's classified provenance (`IngressFacts`), the turn origin derived from it, and the one command rule |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
@@ -78,7 +78,8 @@ Matrix sync callback
 | `coalescing/ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
 | `coalescing/gate.py` | Live message coalescing gate; ordinary text dispatches immediately, adaptive text waits for its quiet window, and media waits for attachments and a trailing caption |
 | `coalescing/batch.py` | Coalesced dispatch batch construction |
-| `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
+| `router/relay.py` | Routing as a room's steward: responder selection with its fallback, responder readiness, relay metadata, and the hidden `io.mindroom.route` event |
+| `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns; only the room's steward routes |
 | `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
 | `participation_hook.py` | The reply's participation check as a pre-request loop hook: the configured judgment backend on a projection with tool calls and files as placeholders, or a decision request on the reply's exact messages, ending the run when it stays silent |
 | `judgment/` | Backend-independent boolean and choice questions, minimized context, shared execution limits, the bounded HTTP client, and LLM, System One, and OpenAI Decisions adapters |
@@ -116,7 +117,7 @@ Matrix sync callback
 | `event_journal/legacy_turn_rows.py` | One-time conversion of `turn_records` blobs, journal redaction tombstones, and the pre-journal JSON ledger into turn rows |
 | `event_journal/legacy_approval_failures.py` | One-time conversion of the free-text failure reasons failing approval continuations stored into their failure kind and detail |
 | `event_journal/scheduled_approvals.py` | Stored scheduled tool calls and their one-shot approvals: binding, fire-time arming, withdrawal, claim with its receipt, and outcome |
-| `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
+| `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish; silent schedule triggers and hidden routes run as messages |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions, and the `reaction:received` hooks for reactions no built-in consumer took |
@@ -239,7 +240,7 @@ Matrix sync callback
 | `custom_tools/job.py` | Reserved job discovery and control tool |
 | `orchestration/server_state.py` | Each entity's runtime origin, worker computer, and role, published per room as state so MindRoom Chat finds its server and shows what the entity does |
 | `orchestration/services.py` | `RuntimeService`, the sync-and-stop shape of the long-running services that follow the active config |
-| `orchestration/call_transcripts_runtime.py` | The call transcript service in the runtime: the router it reads and posts through, the loop that checks calls every 15 seconds (while call transcripts are off, only holding calls to the one-day limit), the service the API routes reach, and the agent call in a room, read through the agent answering calls there |
+| `orchestration/call_transcripts_runtime.py` | The call transcript service in the runtime: the steward it reads each room through and the poster it posts through, the loop that checks calls every 15 seconds (while call transcripts are off, only holding calls to the one-day limit), the service the API routes reach, and the agent call in a room, read through the agent answering calls there |
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, follow-ups, and retention |
 | `orchestration/script_runtime.py` | Background script lifecycle: startup recovery of preserved runs, reload revocation, maintenance passes, the published worker lease, and when script tools are served |
 | `custom_tools/script.py` | `script` agent tool: start, inspect, cancel, and list the requester's background scripts |
@@ -340,20 +341,20 @@ Matrix sync callback
 | `tool_system/plugins.py` | Plugin generations: loading, publishing, and disposing them, candidate validation in a separate module namespace, and `config_plugins`, one config's tools, hooks, skill roots, and OAuth providers from one published generation |
 | `tool_system/registry.py` | `ToolRegistry`, the tools one config can build (built-ins, its loaded plugins' tools, its MCP servers, and the tools of plugins that failed to load as unavailable), the built-in tools, and the registration scope plugin modules register into |
 | `plugin_api.py` | The supported import surface for plugin code, re-exporting entry points from the modules that own them |
-| `entity_directory.py` | `entity_directory`, the router and configured agents and teams with prepared Matrix accounts by user ID, with each one's kind, display name, and agent tool names, for plugins |
+| `entity_directory.py` | `entity_directory`, the owner account and configured agents and teams with prepared Matrix accounts by user ID, with each one's kind, display name, and agent tool names, for plugins |
 | `plugin_context.py` | `PluginContext`, a plugin's own settings, state directory, and config for its routes and tools, which fails closed once a reload disables the plugin |
 | `plugin_lifecycle.py` | `PluginLifespans` runs the `lifespan` of each plugin the primary publishes, starting a reload's new lifespans before it closes the replaced plugins' websockets and stops the old ones, and stopping them all at shutdown |
 | `plugin_testing.py` | The supported kit for a plugin's own tests: loads one plugin as startup does, serves its routes with real client sessions, and runs its tools and hooks behind the turn's admission decision, over stand-in rooms; MindRoom never imports it |
 | `headless.py` | `run_turn` and `validate_config`: one configured agent's turn from another Python program, without Matrix or `mindroom run`, after refusing what needs a running MindRoom; a bound `workdir` replaces the tools' workspace |
 | `plugin_http.py` | The supported import surface for plugin HTTP routes: client-session sign-in for HTTP and websocket routes, room-membership checks, room reads for routes and streams, and room admins' mode changes (`RoomReader`, `RoomPower`, `RoomModes`, `RoomHistory`, `client_rooms`, `stream_room_reader`), the agents a caller may use in a room with their workspaces (`AgentWorkspace`), posting as the router (`RoomMessenger`), administrator checks, the caller's own OAuth access token on an agent that keeps each person's connections apart (`client_user_oauth_access_token`), the route's `PluginContext`, and the URLs of the plugin's own hosts and the chat's origins for its pages (`plugin_origin_url`, `client_origins`) |
-| `orchestration/plugin_http_runtime.py` | Live room reads for plugin HTTP routes: a running bot in the room answers each read, the router first, and concurrent membership callers for one room share a lookup |
+| `orchestration/plugin_http_runtime.py` | Live room reads for plugin HTTP routes: the room's steward answers each read, and concurrent membership callers for one room share a lookup |
 | `matrix/history_visibility.py` | Where a joined member's view of a room's history begins under its history visibility, walking back from their member event to the join or invite that began their membership |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
 | `scheduling/tasks.py` | Cron and natural-language task scheduling |
 | `scheduling/runtime.py` | The one owner of scheduled-task runners and of when each runner may use its task's owner bot |
 | `scheduling/recurring_schedule.py` | Durable checkpoints for recurring task timers and their pending Matrix trigger |
-| `scheduling/ownership.py` | Which bot runs a scheduled task, decided once at save time from the room's full state |
+| `scheduling/ownership.py` | Which agent or team takes over a stored scheduled task the router owned, read from the room's full state |
 | `scheduling/errors.py` | `SchedulingError`, the one failure a scheduling operation reports, with subtypes for a missing task and failed task storage, which chat, the scheduler tool, and the schedules API each render |
 | `scheduling/scheduled_tool_calls.py` | Resolving a scheduled call on the agent's own live tools and running it once by task ID with its approval |
 | `scheduling/executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
@@ -376,7 +377,7 @@ Matrix sync callback
 | `providers/cache_ladder.py` | The Claude prompt-cache ladder primitives (breakpoint markers, message rungs, the tools marker) shared by the Claude adapter and the OpenRouter Claude ladder |
 | `providers/anthropic/native_compaction.py` | Claude native compaction: the compaction edit, the checkpoint replay projection, and the checkpoint recorded on each response |
 | `model_catalog.py` | Allowlisted model metadata, Matrix icon upload/cache, and catalog revision |
-| `model_catalog_receiver.py` | Router discovery admission, authenticated responses, and scope/lifetime checks |
+| `model_catalog_receiver.py` | Model discovery admission on the owner account's device, authenticated responses, and scope/lifetime checks |
 | `model_selection.py` | Structured model request/result values and frozen acknowledgement metadata |
 | `model_selection_scope.py` | Current joined membership and readable-root eligibility for model selection |
 | `ai_runtime.py` | The queued-message notice a reply's loop appends after a tool batch, its mid-turn judgment, whether the request a model answered told it to pause, and the empty-response notice |
@@ -466,8 +467,8 @@ Matrix sync callback
 | `credentials/policy.py` | Each credential service's placement per worker scope, and whether workers may receive it by grant or lease |
 | `credentials/environment.py` | Credentials the environment declares (provider keys, bootstrap values, seeds), read by the primary under its saved ones |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
-| `matrix/room_thread_mode.py` | Router-owned effective room thread-mode state for client view selection |
-| `matrix/room_accounts.py` | Router-owned room state listing the joined MindRoom accounts, so clients recognize agents by any user name |
+| `matrix/room_thread_mode.py` | The effective room thread-mode state a room's steward publishes for client view selection |
+| `matrix/room_accounts.py` | The room state a room's steward publishes listing the joined MindRoom accounts, so clients recognize agents by any user name |
 | `matrix/state.py` | `matrix_state.yaml` accounts, rooms, space, and server emoji room, changed only through `update_matrix_state` |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
 | `matrix/server_features.py` | The unstable features a homeserver lists in `/_matrix/client/versions` |
@@ -506,7 +507,7 @@ Matrix sync callback
 | `call_transcripts/service.py` | The rules of a call between people: who is in it, who may join or act on it, Pause, speech and its limits, its end, and each call's one task posting its row, its transcript message and the row's edits for the end and that message; and a call with an agent read as a live call, after any call between people in its room |
 | `call_transcripts/store.py` | The SQLite store of live and recently ended calls between people, their lines until the transcript message is posted, what each call's row was last edited to say, who paused each call, and when each person's app last checked in to each call |
 | `call_transcripts/wav.py` | The duration of an uploaded stretch of speech, read from its 16-bit PCM mono WAV header |
-| `call_transcripts/router_room.py` | The router's side of calls between people: who is in a room, who may post there, display names, the row, its edits and the transcript message it posts, each at most once per call, and the request that the router title the row's thread from the notes |
+| `call_transcripts/call_room.py` | MindRoom's side of calls between people, read through each room's steward and posted through its poster: who is in a room, who may post there, display names, the row, its edits and the transcript message, each at most once per call, and the request that the poster title the row's thread from the notes |
 | `call_transcripts/routes.py` | `/api/call-transcripts/v1` for MindRoom Chat with client sessions: join and heartbeat, leave, Pause, speech read into memory only, and the live call with the lines added since the last poll; 404 while call transcripts are off, except the live call in a room an agent answers calls in |
 | `call_transcripts/transcriber.py` | Speech-to-text of one stretch of a call through `transcribe_speech`, recording its usage |
 | `call_transcripts/notes.py` | A finished call's notes from `calls.transcripts.notes_model`: what it was about, decisions, action items, and open questions |
@@ -669,11 +670,11 @@ Matrix sync callback
 | `custom_tools/stop_reply.py` | Agent tool that stops another agent's reply with a 🛑 reaction relaying the caller's requester |
 | `custom_tools/shared_directories.py` | Agent tool that creates shared directories, invites agents at once on behalf of a user who may use them or as pending invitations otherwise, and accepts or declines invitations through the invited agent |
 | `shared_directories/` | The primary-only membership ledger and storage of shared directories, the paths agents see, and the share roots `filesystem` accepts |
-| `custom_tools/thread_move.py` | Copies a thread into another room as a new thread: per-entity re-posts, mention-guarded router relays, tag copy, and the moved notice in the source thread |
+| `custom_tools/thread_move.py` | Copies a thread into another room as a new thread: per-entity re-posts, mention-guarded attributed copies, tag copy, and the moved notice in the source thread |
 | `custom_tools/computer_announcement.py` | Tool hook that shows a chat_ui agent's worker computer in MindRoom Chat on its first worker browser call in a conversation |
 | `tools/react.py` | Tool-catalog registration for the reaction-only tool |
 | `tools/chat_ui.py` | Tool-catalog registration and discovery metadata for Chat UI actions |
-| `voice/visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
+| `voice/visible_voice_echo.py` | The answering agent posts a voice message's transcript once, before its reply |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
 | `slack/` | Native Slack: the minimal Web API client, personal and project tools, events, and agent reply mirroring |
 | `slack/api.py` | Minimal async Slack Web API client over `httpx`, with Slack error and rate-limit mapping, parsing of conversation, message, permalink, and user targets, and message permalinks |

@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 import nio
 
-from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import create_background_task
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME, SKIP_MENTIONS_KEY
@@ -26,7 +24,7 @@ from mindroom.contacts.parties import agent_party
 from mindroom.contacts.store import contact_room_ids, remove_kept_contacts
 from mindroom.managed_room_notice import managed_room_join_notice
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, edit_message_outcome
-from mindroom.matrix.client_room_admin import get_joined_rooms, is_canonical_parent, names_canonical_parent
+from mindroom.matrix.client_room_admin import get_joined_rooms, names_canonical_parent
 from mindroom.matrix.invited_rooms_store import (
     forget_invited_room,
     invited_rooms_path,
@@ -40,14 +38,13 @@ from mindroom.matrix.invited_rooms_store import (
     update_pending_room_invites,
 )
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.matrix.personal_room_store import personal_room_ids
 from mindroom.matrix.rooms import leave_non_dm_rooms
-from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
 from mindroom.thread_summary.notices import send_welcome_thread_summary
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
@@ -111,11 +108,12 @@ class BotRoomLifecycleDeps:
     send_response: _SendRoomResponse
     change_membership: _ChangeRoomMembership
     admit_response: Callable[[], AbstractAsyncContextManager[None]]
-    # Refreshes the shared reply-membership index when it needs it, as an access check does.
-    refresh_memberships: Callable[[], Awaitable[None]]
+    # Runs the room setup that follows a configured or restored join.
     on_configured_room_joined: Callable[[str], Awaitable[None]]
     # Every successful join, configured, invited, or listed, so the bot restores the room's schedules.
     on_room_joined: Callable[[str], Awaitable[None]]
+    # Publishes the entity's server state in a room it is in without a membership command.
+    publish_server_state: Callable[[str], Awaitable[None]]
     get_conversation_reader: Callable[[], ConversationReader]
     # Every running agent's bot by name, which a contact request from another deployment needs to post its notice.
     get_agent_bot: Callable[[str], AgentBot | None]
@@ -126,7 +124,6 @@ class _SentWelcome:
     """A welcome this process sent, which it edits as the room's agents change."""
 
     event_id: str
-    visible_to_sender_id: str | None
     text: str
 
 
@@ -168,14 +165,6 @@ class BotRoomLifecycle:
 
     def _logger(self) -> structlog.stdlib.BoundLogger:
         return self.deps.get_logger()
-
-    def _room_for_welcome(self, room_id: str) -> nio.MatrixRoom:
-        rooms = self._client().rooms
-        if isinstance(rooms, Mapping):
-            cached_room = rooms.get(room_id)
-            if isinstance(cached_room, nio.MatrixRoom):
-                return cached_room
-        return nio.MatrixRoom(room_id=room_id, own_user_id=self.deps.agent_user.user_id)
 
     def _should_accept_invite(self) -> bool:
         """Return whether this entity should accept one inbound room invite."""
@@ -407,21 +396,6 @@ class BotRoomLifecycle:
         if self._should_persist_invited_rooms():
             await asyncio.to_thread(remember_invited_room, self._invited_rooms_file_path(), room_id)
 
-    async def _send_invite_welcome(self, room_id: str, sender: str) -> None:
-        """Finish router welcome delivery or leave the invite retryable."""
-        if self.deps.agent_name != ROUTER_AGENT_NAME:
-            return
-        # A personal room is a private conversation with its own agent, which greets the owner itself.
-        if any(room_id in personal_room_ids(self.deps.runtime_paths, name) for name in self._config().agents):
-            return
-        # A room under a chat room continues that room's conversation, whose people already know the router.
-        if await _is_under_a_chat_room(self._client(), room_id):
-            return
-        if await self.send_welcome_message_if_empty(room_id, sender):
-            return
-        msg = f"Failed to complete welcome message for {room_id}"
-        raise RuntimeError(msg)
-
     async def _send_managed_room_notice(self, room: nio.MatrixRoom, sender: str) -> None:
         """Tell the room once that its configuration does not let this agent answer there."""
         notice = managed_room_join_notice(
@@ -449,27 +423,27 @@ class BotRoomLifecycle:
         current_rooms = set(joined_rooms or ())
         desired_rooms = set(self.deps.get_configured_rooms())
         desired_rooms.update(self.deps.get_retained_room_ids())
-        desired_rooms.update(invited_rooms)
+        if self._should_accept_invite():
+            desired_rooms.update(invited_rooms)
+        # A room saved for an account that accepts no invite is never joined; one it is in is restored as joined.
+        for room_id in sorted(invited_rooms & current_rooms - desired_rooms):
+            await self.deps.publish_server_state(room_id)
+            await self._room_joined(room_id)
+            await self.deps.on_configured_room_joined(room_id)
 
         for room_id in desired_rooms:
             if room_id in current_rooms:
                 self._logger().debug("Already joined room", room_id=room_id)
-                if await self.deps.change_membership(room_id, "join"):
-                    await self._room_joined(room_id)
-                    await self.deps.on_configured_room_joined(room_id)
-                else:
-                    self._logger().warning(
-                        "Failed to reconcile joined room",
-                        room_id=room_id,
-                    )
-                continue
-
-            if await self._join_room_with_decrypt_notice_fence(room_id):
+                if not await self.deps.change_membership(room_id, "join"):
+                    self._logger().warning("Failed to reconcile joined room", room_id=room_id)
+                    continue
+            elif await self._join_room_with_decrypt_notice_fence(room_id):
                 self._logger().info("Joined room", room_id=room_id)
-                await self._room_joined(room_id)
-                await self.deps.on_configured_room_joined(room_id)
             else:
                 self._logger().warning("Failed to join room", room_id=room_id)
+                continue
+            await self._room_joined(room_id)
+            await self.deps.on_configured_room_joined(room_id)
         # Membership of a contact room with another deployment's agent can change while no live event reaches it.
         await reconcile_remote_contacts(
             self._config(),
@@ -562,6 +536,9 @@ class BotRoomLifecycle:
         A room that one of the rooms this bot stays in lists, as this bot would follow it, is not returned but kept as
         followed from then on.
         """
+        if self.deps.agent_name == ROUTER_AGENT_NAME:
+            # The owner account stays in every room it joined: it administers rooms no configuration lists.
+            return []
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
         if joined_rooms is None:
@@ -577,10 +554,6 @@ class BotRoomLifecycle:
             configured_rooms.update(
                 await asyncio.to_thread(contact_room_ids, config, self.deps.runtime_paths, self.deps.agent_name),
             )
-        if self.deps.agent_name == ROUTER_AGENT_NAME:
-            # The router maintains the root Space and the server emoji room outside the configured rooms.
-            state = matrix_state_for_runtime(self.deps.runtime_paths)
-            configured_rooms.update(room_id for room_id in (state.space_room_id, state.server_emoji_room_id) if room_id)
 
         leaving, parent_ids = current_rooms - configured_rooms, current_rooms & configured_rooms
         # A room kept this way can list others in turn, so the rooms it lists are checked against it next.
@@ -589,26 +562,10 @@ class BotRoomLifecycle:
             leaving -= parent_ids
         return list(leaving)
 
-    async def send_welcome_message_if_empty(
-        self,
-        room_id: str,
-        visible_to_sender_id: str | None = None,
-    ) -> bool:
-        """Send the router welcome message only when the room has no other history."""
-        if visible_to_sender_id is None:
-            if room_id in self.invited_room_ids() and room_id not in self.deps.get_configured_rooms():
-                self._logger().debug("Skipping requester-less welcome in an ad-hoc room", room_id=room_id)
-                return True
-            return await self._send_welcome_message_if_empty_admitted(room_id, None)
-        async with self.deps.admit_response():
-            return await self._send_welcome_message_if_empty_admitted(room_id, visible_to_sender_id)
-
-    async def _send_welcome_message_if_empty_admitted(
-        self,
-        room_id: str,
-        visible_to_sender_id: str | None,
-    ) -> bool:
-        """Check room history and deliver a welcome inside the caller's admission slot."""
+    async def send_welcome_message_if_empty(self, room_id: str) -> bool:
+        """Send the owner account's welcome in a configured room that has no other history."""
+        if room_id not in self.deps.get_configured_rooms():
+            return True
         async with self._lock_for_room(self._welcome_locks, room_id):
             if room_id in self._welcomed_room_ids:
                 self._logger().debug("Welcome message already handled", room_id=room_id)
@@ -625,17 +582,7 @@ class BotRoomLifecycle:
                 return False
 
             if not response.chunk:
-                if visible_to_sender_id is not None and not await self._inviter_has_reply_access(
-                    room_id,
-                    visible_to_sender_id,
-                ):
-                    self._logger().debug(
-                        "invite_welcome_suppressed_by_reply_permissions",
-                        user_id=visible_to_sender_id,
-                        room_id=room_id,
-                    )
-                    return True
-                return await self._deliver_welcome(room_id, visible_to_sender_id)
+                return await self._deliver_welcome(room_id)
 
             if len(response.chunk) != 1:
                 return True
@@ -650,39 +597,10 @@ class BotRoomLifecycle:
                 self._logger().debug("Welcome message already sent", room_id=room_id)
             return True
 
-    async def _inviter_has_reply_access(self, room_id: str, sender: str) -> bool:
-        """Return whether an inviter may talk to the router in a room, reading the room's members again before a denial.
-
-        The router learns a room's members from its own sync after joining, which the invitation's welcome can precede.
-        """
-        memberships = self.deps.runtime.agent_reply_memberships
-
-        def allowed() -> bool:
-            return is_sender_allowed_for_agent_reply_in_room(
-                sender,
-                self.deps.agent_name,
-                self._config(),
-                room_id,
-                self.deps.runtime_paths,
-                memberships,
-            )
-
-        return allowed() or await memberships.refresh_reading_room(room_id, self.deps.refresh_memberships, allowed)
-
-    async def _welcome_text(self, room_id: str, visible_to_sender_id: str | None) -> str:
-        return await generate_welcome_message_for_room(
-            self._client(),
-            self._room_for_welcome(room_id),
-            visible_to_sender_id,
-            self._config(),
-            self.deps.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
-        )
-
-    async def _deliver_welcome(self, room_id: str, visible_to_sender_id: str | None) -> bool:
+    async def _deliver_welcome(self, room_id: str) -> bool:
         """Generate and deliver one welcome after its caller owns the send boundary."""
         self._logger().info("Room is empty, sending welcome message", room_id=room_id)
-        welcome_msg = await self._welcome_text(room_id, visible_to_sender_id)
+        welcome_msg = generate_welcome_message_for_room(room_id, self._config(), self.deps.runtime_paths)
         target = MessageTarget.resolve(
             room_id=room_id,
             thread_id=None,
@@ -698,7 +616,7 @@ class BotRoomLifecycle:
             self._logger().warning("Welcome message delivery failed", room_id=room_id)
             return False
         self._welcomed_room_ids.add(room_id)
-        self._sent_welcomes[room_id] = _SentWelcome(event_id, visible_to_sender_id, welcome_msg)
+        self._sent_welcomes[room_id] = _SentWelcome(event_id, welcome_msg)
         self._logger().info("Welcome message sent", room_id=room_id)
         try:
             await send_welcome_thread_summary(
@@ -714,14 +632,14 @@ class BotRoomLifecycle:
     async def refresh_welcome(self, room_id: str) -> None:
         """Edit the welcome this process sent in a room to list the agents there now, such as ones that joined after it.
 
-        It lists whom the welcome's requester may address now, so an access reload waits for it, as for the welcome.
-        A welcome sent before a restart stays as it was.
+        It waits for an access reload, as any visible send does.
+        A welcome sent before a restart stays as it was, as does one in a room the config no longer names.
         """
         async with self.deps.admit_response(), self._lock_for_room(self._welcome_locks, room_id):
             sent = self._sent_welcomes.get(room_id)
-            if sent is None:
+            if sent is None or room_id not in self.deps.get_configured_rooms():
                 return
-            text = await self._welcome_text(room_id, sent.visible_to_sender_id)
+            text = generate_welcome_message_for_room(room_id, self._config(), self.deps.runtime_paths)
             if text == sent.text:
                 return
             content = format_message_with_mentions(
@@ -807,7 +725,6 @@ class BotRoomLifecycle:
 
             self._logger().info("Joined room", room_id=room.room_id)
             await self._remember_invited_room(room.room_id)
-            await self._send_invite_welcome(room.room_id, sender)
             if not joined:
                 await self._send_managed_room_notice(room, sender)
             await self._room_joined(room.room_id)
@@ -851,6 +768,8 @@ class BotRoomLifecycle:
         if event.source["content"].get("via"):
             self._follow_listed_rooms(room.room_id)
             return
+        if self.deps.agent_name == ROUTER_AGENT_NAME:
+            return  # The owner account stays in every room it joined.
         create_background_task(
             self._leave_unlisted_room(room.room_id, event.state_key),
             name=f"unlisted_room_leave_{self.deps.agent_name}",
@@ -969,16 +888,3 @@ async def _listed_rooms(client: nio.AsyncClient, room_id: str) -> dict[str, str]
         if event["type"] == "m.space.child" and event["state_key"].startswith("!") and event["content"].get("via"):
             listed[event["state_key"]] = event["sender"]
     return listed
-
-
-async def _is_under_a_chat_room(client: nio.AsyncClient, room_id: str) -> bool:
-    """Return whether a room names a room that is not a Space as its canonical parent; an unreadable one counts as none."""
-    response = await client.room_get_state(room_id)
-    if not isinstance(response, nio.RoomGetStateResponse):
-        return False
-    for event in response.events:
-        if event["type"] == "m.space.parent" and is_canonical_parent(event["content"]):
-            create = await client.room_get_state_event(event["state_key"], "m.room.create")
-            if isinstance(create, nio.RoomGetStateEventResponse) and create.content.get("type") != "m.space":
-                return True
-    return False

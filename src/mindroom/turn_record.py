@@ -122,15 +122,6 @@ class SourceEventMetadata:
 SourceEventRevision = tuple[int, str]
 
 
-@dataclass(frozen=True)
-class SourceVisibleEcho:
-    """The visible echo published for one voice source, and how its replacement ended."""
-
-    event_id: str
-    # None until a replacement lands; True when a fallback replaced it, False for a transcript.
-    is_fallback: bool | None = None
-
-
 class RevisionSnapshotChangedError(RuntimeError):
     """A stale request must retain its callback and retry canonical preparation."""
 
@@ -169,7 +160,7 @@ class TurnRecord:
     # The immutable identity of the stored turn this value was read from, if any.
     turn_key: str | None = None
     # The echo published for each voice source, a publication fact apart from the turn's answer.
-    visible_echoes: Mapping[str, SourceVisibleEcho] | None = None
+    visible_echoes: Mapping[str, str] | None = None
 
     @classmethod
     def create(
@@ -193,7 +184,7 @@ class TurnRecord:
         history_scope: HistoryScope | None = None,
         conversation_target: MessageTarget | None = None,
         turn_key: str | None = None,
-        visible_echoes: Mapping[str, SourceVisibleEcho] | None = None,
+        visible_echoes: Mapping[str, str] | None = None,
     ) -> TurnRecord:
         """Create a canonical record from permissive runtime inputs."""
         sources = canonical_source_event_ids(source_event_ids)
@@ -305,7 +296,7 @@ class _TurnRecordChanges(typing.TypedDict, total=False):
     history_scope: HistoryScope | None
     conversation_target: MessageTarget | None
     turn_key: str | None
-    visible_echoes: Mapping[str, SourceVisibleEcho] | None
+    visible_echoes: Mapping[str, str] | None
 
 
 def canonicalize_turn_record(

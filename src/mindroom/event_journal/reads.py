@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .identity import agent_of_principal, decode_thread_id, encode_thread_id
-from .membership_state import claim_membership_epoch
+from .membership_state import claim_membership_epoch, projection_generation
 from .models import (
     ConversationCursor,
     ConversationPage,
@@ -148,7 +148,7 @@ def read_conversation(
     refresh_pending: list[RefreshRequest] = []
     for row in rows:
         if row["content_json"] is None:
-            refresh_pending.append(_refresh_request(row))
+            refresh_pending.append(_refresh_request(transaction, principal_id, row))
             continue
         messages.append(_visible_message(row))
     next_cursor = (
@@ -217,7 +217,7 @@ def read_room_after(
     kept = _rows_within_content_budget(sizes[:limit])
     rows = _load_rows(transaction, principal_id, room_id=room_id, sized=sizes[:kept])
     rows = rows[: _rows_within_decoded_budget(rows)]
-    pending = tuple(_refresh_request(row) for row in rows if row["content_json"] is None)
+    pending = tuple(_refresh_request(transaction, principal_id, row) for row in rows if row["content_json"] is None)
     first_pending = next((index for index, row in enumerate(rows) if row["content_json"] is None), len(rows))
     messages = tuple(_visible_message(row) for row in rows[:first_pending])
     return RoomPage(
@@ -811,6 +811,7 @@ def mark_conversation_hydrated(
     complete: bool,
     attempted_policy_rank: int,
     expected_membership_epoch: int,
+    expected_projection_generation: int,
 ) -> bool:
     """Publish a completed hydration, unless membership moved under it.
 
@@ -831,6 +832,7 @@ def mark_conversation_hydrated(
         principal_id,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
+        expected_projection_generation=expected_projection_generation,
     ):
         return False
     publish_conversation_hydration(
@@ -913,7 +915,7 @@ def _visible_message(row: Row) -> VisibleMessage:
     )
 
 
-def _refresh_request(row: Row) -> RefreshRequest:
+def _refresh_request(transaction: Transaction, principal_id: str, row: Row) -> RefreshRequest:
     return RefreshRequest(
         room_id=row["room_id"],
         thread_id=decode_thread_id(row["thread_id"]),
@@ -921,4 +923,5 @@ def _refresh_request(row: Row) -> RefreshRequest:
         revision_event_id=row["revision_event_id"],
         refresh_token=int(row["refresh_token"]),
         membership_epoch=int(row["membership_epoch"]),
+        projection_generation=projection_generation(transaction, principal_id, row["room_id"]),
     )

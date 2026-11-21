@@ -45,8 +45,8 @@ class TestSetPresenceStatus:
 class TestBuildAgentStatusMessage:
     """Test the build_agent_status_message function."""
 
-    def test_router_agent_status(self) -> None:
-        """Test building status message for router agent."""
+    def test_owner_account_status_names_only_its_model(self) -> None:
+        """The owner account answers nobody, so its status carries no role line."""
         config = Config(
             router={"model": "gpt-6-astra"},
             models={"gpt-6-astra": ModelConfig(provider="openai", id="gpt-6-astra")},
@@ -54,8 +54,7 @@ class TestBuildAgentStatusMessage:
 
         status = build_agent_status_message(ROUTER_AGENT_NAME, config, builtin_tool_registry())
 
-        assert "🤖 Model: openai/gpt-6-astra" in status
-        assert "📍 Routes messages to appropriate agents or teams" in status
+        assert status == "🤖 Model: openai/gpt-6-astra"
 
     def test_regular_agent_status_with_tools(self) -> None:
         """Test building status message for regular agent with tools."""

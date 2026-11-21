@@ -11,13 +11,13 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from mindroom.api.config_lifecycle import app_state, read_committed_runtime_config
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_name
 from mindroom.matrix.media import MatrixMediaUpstreamError, fetch_matrix_thumbnail, matrix_profile_avatar_uri
 from mindroom.matrix.rooms import filter_non_dm_rooms
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.users import create_agent_http_client
+from mindroom.room_steward import room_steward
 
 router = APIRouter(prefix="/api/matrix", tags=["matrix"])
 _AVATAR_HEADERS = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
@@ -126,7 +126,7 @@ def _room_avatar_target(
     config: Config,
     requested_room: str,
     runtime_paths: constants.RuntimePaths,
-) -> tuple[str, tuple[str, ...]]:
+) -> str:
     configured_rooms = sorted(config.get_all_configured_rooms())
     resolved_rooms = resolve_room_aliases(configured_rooms, runtime_paths=runtime_paths)
     matching_room_ids = {
@@ -141,17 +141,7 @@ def _room_avatar_target(
     if not room_id.startswith("!"):
         raise HTTPException(404, "Room avatar is not available", headers=_AVATAR_HEADERS)
 
-    candidates = [
-        entity_id
-        for entity_id in _matrix_entities(config)
-        if room_id
-        in resolve_room_aliases(
-            get_rooms_for_entity(entity_id, config),
-            runtime_paths=runtime_paths,
-        )
-    ]
-    candidates.append(ROUTER_AGENT_NAME)
-    return room_id, tuple(dict.fromkeys(candidates))
+    return room_id
 
 
 @router.get("/agents/{agent_id}/avatar")
@@ -181,39 +171,27 @@ async def get_agent_avatar(agent_id: str, request: Request) -> Response:
 
 @router.get("/rooms/avatar")
 async def get_room_avatar(room_id: str, request: Request) -> Response:
-    """Serve the current thumbnail for one configured room reference."""
+    """Serve the current thumbnail for one configured room reference, read through the room's steward."""
     config, runtime_paths = read_committed_runtime_config(request)
-    resolved_room_id, candidates = _room_avatar_target(config, room_id, runtime_paths)
-    saw_upstream_error = False
+    resolved_room_id = _room_avatar_target(config, room_id, runtime_paths)
+    steward = room_steward(app_state(request.app).room_bots or {}, resolved_room_id)
+    client = None if steward is None else steward.client
+    if client is None:
+        raise HTTPException(404, "Room avatar is not available", headers=_AVATAR_HEADERS)
     try:
         async with asyncio.timeout(5):
-            for candidate in candidates:
-                try:
-                    client = create_agent_http_client(candidate, runtime_paths)
-                except ValueError:
-                    continue
-                try:
-                    state = await client.room_get_state_event(resolved_room_id, "m.room.avatar")
-                    if isinstance(state, nio.RoomGetStateEventResponse):
-                        if not isinstance(state.content, dict):
-                            saw_upstream_error = True
-                            continue
-                        thumbnail = await fetch_matrix_thumbnail(client, state.content.get("url"))
-                        if thumbnail is None:
-                            raise HTTPException(404, "Room avatar is not available", headers=_AVATAR_HEADERS)
-                        return _avatar_response(thumbnail)
-                    if isinstance(state, nio.RoomGetStateEventError) and state.status_code == "M_NOT_FOUND":
-                        raise HTTPException(404, "Room avatar is not available", headers=_AVATAR_HEADERS)
-                    if not isinstance(state, nio.RoomGetStateEventError) or state.status_code != "M_FORBIDDEN":
-                        saw_upstream_error = True
-                finally:
-                    await client.close()
-    except (ClientError, MatrixMediaUpstreamError, TimeoutError) as exc:
+            state = await client.room_get_state_event(resolved_room_id, "m.room.avatar")
+            if isinstance(state, nio.RoomGetStateEventError) and state.status_code in {"M_NOT_FOUND", "M_FORBIDDEN"}:
+                raise HTTPException(404, "Room avatar is not available", headers=_AVATAR_HEADERS)
+            if not isinstance(state, nio.RoomGetStateEventResponse) or not isinstance(state.content, dict):
+                raise HTTPException(502, "Room avatar is temporarily unavailable", headers=_AVATAR_HEADERS)
+            thumbnail = await fetch_matrix_thumbnail(client, state.content.get("url"))
+    # A client its bot closed as it stopped raises LocalProtocolError; the next request reads through its replacement.
+    except (ClientError, MatrixMediaUpstreamError, TimeoutError, nio.LocalProtocolError) as exc:
         raise HTTPException(502, "Room avatar is temporarily unavailable", headers=_AVATAR_HEADERS) from exc
-
-    if saw_upstream_error:
-        raise HTTPException(502, "Room avatar is temporarily unavailable", headers=_AVATAR_HEADERS)
-    raise HTTPException(404, "Room avatar is not available", headers=_AVATAR_HEADERS)
+    if thumbnail is None:
+        raise HTTPException(404, "Room avatar is not available", headers=_AVATAR_HEADERS)
+    return _avatar_response(thumbnail)
 
 
 @router.get("/agents/rooms")

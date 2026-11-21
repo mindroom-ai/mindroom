@@ -41,12 +41,35 @@ def claim_active_membership_epoch(
     return None if departure_fenced else epoch
 
 
+def current_membership_epoch(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+) -> int:
+    """Return the room's current membership epoch, starting at zero."""
+    row = transaction.fetchone(
+        "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
+    )
+    return 0 if row is None else int(row["membership_epoch"])
+
+
+def projection_generation(transaction: Transaction, principal_id: str, room_id: str) -> int:
+    """Return how often this principal left the room; each departure dropped what it had projected there."""
+    row = transaction.fetchone(
+        "SELECT membership_epoch FROM matrix_ingestion_membership WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
+    )
+    return 0 if row is None else int(row["membership_epoch"])
+
+
 def claim_membership_epoch(
     transaction: Transaction,
     principal_id: str,
     *,
     room_id: str,
     expected_membership_epoch: int,
+    expected_projection_generation: int | None = None,
 ) -> bool:
     """Materialize and claim the expected active room membership for one write.
 
@@ -61,4 +84,8 @@ def claim_membership_epoch(
     giving the first departure a durable row to fence against.
     """
     current_epoch, departure_fenced = _claim_membership_row(transaction, principal_id, room_id)
+    # The owner account's epoch never advances, so a history walk also claims the projection it started under.
+    generation = expected_projection_generation
+    if generation is not None and generation != projection_generation(transaction, principal_id, room_id):
+        return False
     return current_epoch == expected_membership_epoch and not departure_fenced

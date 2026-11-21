@@ -19,7 +19,6 @@ import pytest
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
-from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import client_session_store
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.config.agent import AgentConfig, RoomConfig
@@ -56,6 +55,7 @@ class _Room:
     client: AsyncMock
     router: SimpleNamespace
     app: FastAPI
+    agent: SimpleNamespace
 
     async def reader(self, user_id: str = ALICE) -> RoomReader:
         token = client_session_store(self.app).create(user_id).token
@@ -64,7 +64,7 @@ class _Room:
         )
         return await require_room_reader(request, ROOM_ID)
 
-    def thread_mode_command(self, args_text: str) -> Coroutine[Any, Any, str]:
+    def thread_mode_command(self, args_text: str, put_state: AsyncMock | None = None) -> Coroutine[Any, Any, str]:
         """Alice's `!thread_mode` command, as the router answers it."""
         return handle_thread_mode_command(
             args_text,
@@ -74,6 +74,7 @@ class _Room:
             room_id=ROOM_ID,
             requester_user_id=ALICE,
             sender_user_id=ALICE,
+            put_state=put_state,
         )
 
     def stored(self) -> tuple[str | None, str | None]:
@@ -145,10 +146,10 @@ def room(tmp_path: Path) -> _Room:
     client.room_put_state.side_effect = write_event
     router = SimpleNamespace(client=client, running=True, config=config, runtime_paths=paths)
     app = FastAPI()
-    # An agent's bot in the room still answers room reads while the router is stopped.
-    bind_room_members(app, {ROUTER_AGENT_NAME: router, "agent1": SimpleNamespace(client=client, running=True)})  # type: ignore[dict-item]
-    ensure_app_state(app).embedded = SimpleNamespace(agent_bot={ROUTER_AGENT_NAME: router}.get)  # type: ignore[assignment]
-    return _Room(config, paths, events, client, router, app)
+    # An agent's bot in the room is its steward while the router is stopped.
+    agent = SimpleNamespace(client=client, running=True, config=config, runtime_paths=paths)
+    bind_room_members(app, {ROUTER_AGENT_NAME: router, "agent1": agent})  # type: ignore[dict-item]
+    return _Room(config, paths, events, client, router, app, agent)
 
 
 @pytest.mark.asyncio
@@ -206,9 +207,7 @@ async def test_one_call_changes_both_modes(room: _Room) -> None:
     [
         ("member", (403, "Only room admins change the room's modes.")),
         ("unreadable", (503, "Room state read failed; try again.")),
-        ("router_stopped", (503, "The router is not running in this room.")),
-        ("router_missing", (503, "The router is not running in this room.")),
-        ("router_absent", (503, "The router is not running in this room.")),
+        ("no_agent_running", (503, "No running MindRoom bot is in this room.")),
     ],
 )
 async def test_a_refused_change_writes_and_publishes_nothing(
@@ -216,23 +215,15 @@ async def test_a_refused_change_writes_and_publishes_nothing(
     case: str,
     expected: tuple[int, str],
 ) -> None:
-    """A member without admin power gets 403, and an unreadable power read or a router not running in the room 503.
-
-    A router that runs but is not in the room could not republish the thread mode, as in a direct message with one
-    agent, where that agent's bot still answers the membership and power reads.
-    """
+    """A member without admin power gets 403, and an unreadable power read or a room with no running agent 503."""
     reader = await room.reader(BOB if case == "member" else ALICE)
     if case == "unreadable":
         room.client.room_get_state.side_effect = None
         room.client.room_get_state.return_value = nio.RoomGetStateError("unavailable")
-    if case == "router_stopped":
-        room.router.running = False
-    if case == "router_missing":
-        ensure_app_state(room.app).embedded = SimpleNamespace(agent_bot=lambda _name: None)  # type: ignore[assignment]
-        with pytest.raises(HTTPException, match=r"^503: The router is not running in this room\.$"):
+    if case == "no_agent_running":
+        room.router.running = room.agent.running = False
+        with pytest.raises(HTTPException, match=r"^503: No MindRoom agent is running; try again\.$"):
             reader.modes()
-    if case == "router_absent":
-        room.router.client = AsyncMock(spec=nio.AsyncClient, rooms={})
     with pytest.raises(HTTPException) as refused:
         await reader.set_modes(thread="room", reply="mentions")
     assert (refused.value.status_code, refused.value.detail) == expected
@@ -241,10 +232,37 @@ async def test_a_refused_change_writes_and_publishes_nothing(
 
 
 @pytest.mark.asyncio
-async def test_a_change_the_router_cannot_publish_is_saved_and_answers_503(room: _Room) -> None:
-    """When the homeserver refuses the state write, the thread mode stays saved and the route says it is not published."""
+@pytest.mark.parametrize("mode", ["thread", "reply"])
+async def test_room_mode_refusal_is_403_moderator_rights(room: _Room, mode: str) -> None:
+    """With no owner account running, the agent is the steward: a room that refuses its write changes nothing, 403."""
+    room.router.running = False
     room.client.room_put_state.side_effect = None
     room.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    reader = await room.reader()
+    with pytest.raises(HTTPException) as refused:
+        await (reader.set_modes(thread="room") if mode == "thread" else reader.set_modes(thread="room", reply="auto"))
+    assert (refused.value.status_code, refused.value.detail) == (
+        403,
+        f"I need moderator rights in this room to change the {mode} mode.",
+    )
+    assert room.stored() == (None, None)
+    assert room.published() is None
+    assert REPLY_SETTING not in room.events
+
+
+@pytest.mark.asyncio
+async def test_an_agent_publishes_the_thread_mode_while_the_router_is_stopped(room: _Room) -> None:
+    """The room's steward publishes the change, whichever account that is."""
+    room.router.running = False
+    await (await room.reader()).set_modes(thread="room")
+    assert (room.stored(), room.published()) == (("room", None), {"mode": "room"})
+
+
+@pytest.mark.asyncio
+async def test_a_change_the_steward_cannot_publish_is_saved_and_answers_503(room: _Room) -> None:
+    """When the state write fails for another reason than power, the thread mode stays saved and the route says so."""
+    room.client.room_put_state.side_effect = None
+    room.client.room_put_state.return_value = nio.RoomPutStateError("down", "M_UNKNOWN")
     reader = await room.reader()
     with pytest.raises(HTTPException) as unpublished:
         await reader.set_modes(thread="room")
@@ -257,10 +275,10 @@ async def test_a_change_the_router_cannot_publish_is_saved_and_answers_503(room:
 
 
 @pytest.mark.asyncio
-async def test_a_reply_mode_the_room_refuses_changes_nothing(room: _Room) -> None:
-    """When the homeserver refuses the reply mode setting, the route answers 503 before it touches the thread mode."""
+async def test_a_reply_mode_the_room_does_not_take_changes_nothing(room: _Room) -> None:
+    """When the reply mode write fails for another reason than power, the route answers 503 before the thread mode."""
     room.client.room_put_state.side_effect = None
-    room.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    room.client.room_put_state.return_value = nio.RoomPutStateError("down", "M_UNKNOWN")
     reader = await room.reader()
     with pytest.raises(HTTPException) as refused:
         await reader.set_modes(thread="room", reply="mentions")
@@ -273,17 +291,14 @@ async def test_a_reply_mode_the_room_refuses_changes_nothing(room: _Room) -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_thread_mode_command_the_router_cannot_publish_says_so(room: _Room) -> None:
-    """`!thread_mode` keeps the override when the state write is refused, and its answer says the view may lag."""
-    room.client.room_put_state.side_effect = None
-    room.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
-    assert await room.thread_mode_command("room") == (
-        "⚠️ This room now uses `room` thread mode for future agent replies.\n\n"
-        "Use `/thread_mode reset` to restore configured modes.\n\n"
-        "Clients may still show the old thread mode in this room because publishing the new one failed. "
-        "Run the command again to retry."
+async def test_a_thread_mode_command_the_room_refuses_changes_nothing(room: _Room) -> None:
+    """`!thread_mode` keeps the old mode when the state write is refused, and its answer asks for the rights."""
+    refused = AsyncMock(return_value=None)
+    assert (
+        await room.thread_mode_command("room", refused)
+        == "I need moderator rights in this room to change the thread mode."
     )
-    assert room.stored() == ("room", None)
+    assert room.stored() == (None, None)
     assert room.published() is None
 
 

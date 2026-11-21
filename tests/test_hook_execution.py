@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import replace
+from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -16,14 +17,16 @@ from structlog.testing import capture_logs
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.hooks import (
+    EVENT_BOT_READY,
     EVENT_MESSAGE_BEFORE_RESPONSE,
     EVENT_MESSAGE_ENRICH,
     EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
     EVENT_MESSAGE_RECEIVED,
     EVENT_REACTION_RECEIVED,
     EVENT_SYSTEM_ENRICH,
+    AgentLifecycleContext,
     BeforeResponseContext,
     CustomEventContext,
     EnrichmentItem,
@@ -46,7 +49,9 @@ from mindroom.hooks import (
 from mindroom.hooks.execution import emit, emit_collect, emit_final_response_transform, emit_transform
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.room_steward import room_steward
 from mindroom.session_ids import create_session_id
+from mindroom.steward_duties import runs_room_hooks
 from mindroom.tool_system.runtime_context import emit_custom_event, tool_runtime_context
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -62,6 +67,8 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.event_journal import EventJournalStore
 
 
 def _config(tmp_path: Path) -> Config:
@@ -763,3 +770,241 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
         state_key="$thread",
     )
     client.room_resolve_alias.assert_awaited_once_with("#todo-room:localhost")
+
+
+_STEWARD_ROOM = "!room:localhost"
+
+
+def _stewarded_registry(
+    callbacks: list[object],
+    powers: dict[str, int],
+    journal_store: EventJournalStore,
+) -> HookRegistryState:
+    """Compile hooks for a runtime whose running bots in the room hold ``powers``, by entity name."""
+    levels = SimpleNamespace(get_user_level=lambda user_id: powers[user_id.split(":")[0].removeprefix("@")])
+    bots = {
+        name: SimpleNamespace(
+            agent_name=name,
+            running=True,
+            client=SimpleNamespace(
+                user_id=f"@{name}:localhost",
+                rooms={_STEWARD_ROOM: SimpleNamespace(power_levels=levels)},
+            ),
+        )
+        for name in powers
+    }
+    orchestrator = SimpleNamespace(
+        room_steward=lambda room_id: room_steward(bots, room_id),
+        event_journal_store=lambda: journal_store,
+    )
+    registry = HookRegistry.from_plugins([_plugin("scoped", callbacks)])
+    return HookRegistryState(registry, room_hook_owner=partial(runs_room_hooks, orchestrator))
+
+
+async def _emit_message_as(
+    runtime: HookRegistryState,
+    tmp_path: Path,
+    agent_name: str,
+    skip_plugin_names: frozenset[str] = frozenset(),
+    event_id: str = "$event",
+) -> None:
+    """Emit the one room message as the bot of that name does when its own copy arrives."""
+    context = replace(
+        _message_received_context(tmp_path),
+        envelope=replace(_envelope(agent_name=agent_name), source_event_id=event_id),
+        skip_plugin_names=skip_plugin_names,
+        _hook_registry_state=runtime.lifetime(agent_name),
+    )
+    await emit(runtime.registry, EVENT_MESSAGE_RECEIVED, context)
+
+
+def _recording_hook(scope: str, calls: list[str]) -> object:
+    @hook(EVENT_MESSAGE_RECEIVED, scope=scope)
+    async def record(ctx: MessageReceivedContext) -> None:
+        calls.append(ctx.envelope.agent_name)
+
+    return record
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arrival", [("code", "router", "research"), ("research", "router", "code")])
+async def test_room_scope_runs_once_with_three_bots_in_room(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    arrival: tuple[str, ...],
+) -> None:
+    """Three bots emit one message in either order, and its room-scoped hook runs on the first emission only."""
+    calls: list[str] = []
+    registry = _stewarded_registry(
+        [_recording_hook("room", calls)],
+        {"router": 100, "code": 0, "research": 0},
+        journal_store,
+    )
+
+    for agent_name in arrival:
+        await _emit_message_as(registry, tmp_path, agent_name)
+
+    assert calls == [arrival[0]]
+    assert await journal_store.room_event_owner(_STEWARD_ROOM, "$event", "hook:message:received") == arrival[0]
+
+
+@pytest.mark.asyncio
+async def test_room_scope_runs_on_another_bot_when_the_steward_denies_the_sender(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """A steward whose own access denies the sender never emits the event, and the bots that admit them run it once."""
+    calls: list[str] = []
+
+    @hook(EVENT_REACTION_RECEIVED, scope="room")
+    async def on_reaction(ctx: ReactionReceivedContext) -> None:
+        calls.append(f"reaction:{ctx.event_id}")
+
+    registry = _stewarded_registry(
+        [_recording_hook("room", calls), on_reaction],
+        {"router": 100, "code": 0, "research": 0},
+        journal_store,
+    )
+
+    for agent_name in ("code", "research"):
+        await _emit_message_as(registry, tmp_path, agent_name)
+        reaction = ReactionReceivedContext(
+            event_name=EVENT_REACTION_RECEIVED,
+            config=_config(tmp_path),
+            runtime_paths=runtime_paths_for(_config(tmp_path)),
+            correlation_id="corr-reaction",
+            room_id=_STEWARD_ROOM,
+            event_id="$reaction",
+            sender_id="@user:localhost",
+            reaction_key="👍",
+            target_event_id="$event",
+            thread_id=None,
+            _hook_registry_state=registry.lifetime(agent_name),
+        )
+        await emit(registry.registry, EVENT_REACTION_RECEIVED, reaction)
+
+    assert calls == ["code", "reaction:$reaction"]
+
+
+@pytest.mark.asyncio
+async def test_room_scope_claims_only_for_an_emission_with_a_matching_hook(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """An emission whose room-scoped hooks are all filtered out takes no claim, so a later bot's emission runs them."""
+    calls: list[str] = []
+    registry = _stewarded_registry([_recording_hook("room", calls)], {"research": 0, "code": 0}, journal_store)
+
+    await _emit_message_as(registry, tmp_path, "research", skip_plugin_names=frozenset({"scoped"}))
+    assert await journal_store.room_event_owner(_STEWARD_ROOM, "$event", "hook:message:received") is None
+    await _emit_message_as(registry, tmp_path, "code")
+
+    assert calls == ["code"]
+
+
+@pytest.mark.asyncio
+async def test_router_alias_runs_once_per_message_in_a_room_without_owner(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """A hook still filtered to the router runs once per message where no owner account is, on the first agent."""
+    calls: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED, agents=(ROUTER_AGENT_NAME,))
+    async def aliased(ctx: MessageReceivedContext) -> None:
+        calls.append(ctx.envelope.agent_name)
+
+    registry = _stewarded_registry([aliased], {"research": 0, "code": 0}, journal_store)
+
+    for agent_name in ("research", "code"):
+        await _emit_message_as(registry, tmp_path, agent_name)
+
+    assert calls == ["research"]
+
+
+@pytest.mark.asyncio
+async def test_room_scope_runs_once_when_steward_changes_between_emissions(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """The first emission keeps the claim, so a bot that becomes steward later does not run the hook again or instead."""
+    calls: list[str] = []
+    powers = {"research": 0, "code": 0}
+    registry = _stewarded_registry([_recording_hook("room", calls)], powers, journal_store)
+
+    await _emit_message_as(registry, tmp_path, "research")
+    powers["code"] = 100
+    await _emit_message_as(registry, tmp_path, "code")
+
+    assert calls == ["research"]
+
+
+@pytest.mark.asyncio
+async def test_room_scope_on_an_event_without_a_matrix_event_runs_for_the_steward_only(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """An event one bot emits for itself runs its room-scoped hooks only when that bot is the room's steward."""
+
+    @hook(EVENT_MESSAGE_ENRICH, scope="room")
+    async def enrich(ctx: MessageEnrichContext) -> None:
+        ctx.add_metadata("steward", "ran")
+
+    registry = _stewarded_registry([enrich], {"research": 0, "code": 0}, journal_store)
+
+    async def items_as(agent_name: str) -> list[str]:
+        context = replace(_message_enrich_context(tmp_path), _hook_registry_state=registry.lifetime(agent_name))
+        return [item.key for item in await emit_collect(registry.registry, EVENT_MESSAGE_ENRICH, context)]
+
+    assert (await items_as("research"), await items_as("code")) == ([], ["steward"])
+    assert await journal_store.room_event_owner(_STEWARD_ROOM, "$event", "hook:message:enrich") is None
+
+
+@pytest.mark.asyncio
+async def test_agent_scope_still_runs_per_bot(tmp_path: Path, journal_store: EventJournalStore) -> None:
+    """A hook that names no scope runs on every bot's emission, as before."""
+    calls: list[str] = []
+    registry = _stewarded_registry(
+        [_recording_hook("agent", calls)],
+        {"router": 100, "code": 0, "research": 0},
+        journal_store,
+    )
+
+    for agent_name in ("code", "router", "research"):
+        await _emit_message_as(registry, tmp_path, agent_name)
+
+    assert calls == ["code", "router", "research"]
+
+
+@pytest.mark.asyncio
+async def test_service_scope_skipped_on_per_bot_ready(tmp_path: Path) -> None:
+    """A bot's own bot:ready skips service-scoped hooks, and the runtime's own runs them and nothing else."""
+    calls: list[str] = []
+
+    @hook(EVENT_BOT_READY, scope="service")
+    async def once_per_process(ctx: AgentLifecycleContext) -> None:
+        calls.append(f"service:{ctx.entity_name}")
+
+    @hook(EVENT_BOT_READY)
+    async def per_bot(ctx: AgentLifecycleContext) -> None:
+        calls.append(f"agent:{ctx.entity_name}")
+
+    registry = HookRegistry.from_plugins([_plugin("scoped", [once_per_process, per_bot])])
+    config = _config(tmp_path)
+
+    def ready(entity_name: str) -> AgentLifecycleContext:
+        return AgentLifecycleContext(
+            event_name=EVENT_BOT_READY,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            correlation_id="corr-ready",
+            entity_name=entity_name,
+            entity_type="agent",
+            rooms=(),
+            matrix_user_id=f"@{entity_name}:localhost",
+        )
+
+    await emit(registry, EVENT_BOT_READY, ready("code"))
+    await emit(registry, EVENT_BOT_READY, ready("router"), service=True)
+
+    assert calls == ["agent:code", "service:router"]

@@ -19,6 +19,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import (
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
+    ROUTE_EVENT_TYPE,
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     resolve_runtime_paths,
@@ -33,6 +34,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_hi
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.router.relay import execute_router_relay
+from mindroom.routing_judgment import ResponderSelection
 from mindroom.session_ids import create_session_id
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.turn_record import TurnRecord
@@ -451,7 +453,7 @@ class TestRouterHandoffThreadMode:
         room_mode_config: Config,
         router_user: AgentMatrixUser,
     ) -> None:
-        """Router should send handoff in-room when the suggested agent is room-mode."""
+        """A route to a room-mode agent names no thread, so that agent answers in the room, and carries the text."""
         bot = _agent_bot(config=room_mode_config, agent_user=router_user)
         bot.client = AsyncMock()
         captured_content: dict[str, object] = {}
@@ -467,7 +469,10 @@ class TestRouterHandoffThreadMode:
         assert _entity_thread_mode(bot.config, ROUTER_AGENT_NAME, room_id=room.room_id) == "thread"
 
         with (
-            patch("mindroom.router.relay.suggest_responder_for_message", AsyncMock(return_value="assistant")),
+            patch(
+                "mindroom.router.relay.suggest_responder_for_message",
+                AsyncMock(return_value=ResponderSelection("assistant")),
+            ),
             patch("mindroom.delivery_gateway.send_message_outcome", side_effect=mock_send),
             patch(
                 "mindroom.matrix.conversation_reads.ConversationReader.latest_thread_event_id",
@@ -483,7 +488,12 @@ class TestRouterHandoffThreadMode:
                 requester_user_id="@user:localhost",
             )
         mock_get_latest.assert_not_called()
-        assert captured_content["m.relates_to"] == {"io.mindroom.in_reply_to": {"event_id": "$user_event"}}
+        assert captured_content[ROUTE_EVENT_TYPE] == {
+            "entity": "@mindroom_assistant:localhost",
+            "event_ids": ["$user_event"],
+        }
+        # An agent that answers in the room reads no conversation, so its route brings the person's text.
+        assert captured_content["body"] == "Help me"
 
     @pytest.mark.asyncio
     async def test_router_handoff_uses_suggested_thread_mode(
@@ -491,7 +501,7 @@ class TestRouterHandoffThreadMode:
         room_mode_config: Config,
         router_user: AgentMatrixUser,
     ) -> None:
-        """Router should keep thread replies when the suggested agent is thread-mode."""
+        """A route to a thread-mode agent names the thread its answer belongs in."""
         bot = _agent_bot(config=room_mode_config, agent_user=router_user)
         bot.client = AsyncMock()
         captured_content: dict[str, object] = {}
@@ -504,7 +514,10 @@ class TestRouterHandoffThreadMode:
         room = _matrix_room("!room:localhost")
 
         with (
-            patch("mindroom.router.relay.suggest_responder_for_message", AsyncMock(return_value="coder")),
+            patch(
+                "mindroom.router.relay.suggest_responder_for_message",
+                AsyncMock(return_value=ResponderSelection("coder")),
+            ),
             patch("mindroom.delivery_gateway.send_message_outcome", side_effect=mock_send),
             patch(
                 "mindroom.matrix.conversation_reads.ConversationReader.latest_thread_event_id",
@@ -520,10 +533,14 @@ class TestRouterHandoffThreadMode:
                 "$thread_root",
                 requester_user_id="@user:localhost",
             )
-        mock_get_latest.assert_awaited_once()
-        assert "m.relates_to" in captured_content
-        assert isinstance(captured_content["m.relates_to"], dict)
-        assert captured_content["m.relates_to"].get("rel_type") == "m.thread"
+        mock_get_latest.assert_not_called()
+        assert captured_content[ROUTE_EVENT_TYPE] == {
+            "entity": "@mindroom_coder:localhost",
+            "event_ids": ["$user_event"],
+            "thread_id": "$thread_root",
+        }
+        # The route carries the steward's prompt for the turn, whatever the thread shows its responder.
+        assert captured_content["body"] == "Help me"
 
 
 class TestCreateSessionIdWithNoneThread:

@@ -141,7 +141,6 @@ agents:
       they ask.
 router:
   model: luna
-  accept_invites: true
 mindroom_user:
   username: mindroom_user
   display_name: MindRoomUser

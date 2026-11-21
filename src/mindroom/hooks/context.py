@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Literal
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.tool_system.events import tool_args_chat_preview
 from mindroom.tool_system.plugin_identity import plugin_state_root
@@ -43,19 +45,21 @@ class _UnsetType:
 _UNSET = _UnsetType()
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
     from typing import Protocol
 
     import nio
     import structlog
 
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
+    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling.tasks import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.turn_origin import TurnOrigin
@@ -119,7 +123,7 @@ class HookBindings:
 
 @dataclass
 class HookContextSupport:
-    """Own a bot's hook capabilities: its own live client first, and the router's for what that client cannot do."""
+    """Own a bot's hook capabilities: its own live client first, and each room's poster or steward for what that cannot do."""
 
     runtime: SupportsClientConfigOrchestrator
     runtime_paths: RuntimePaths
@@ -187,38 +191,30 @@ class HookContextSupport:
             sender=sender,
         )
 
-    def _router(self) -> HookContextSupport | None:
-        """Return the router's hook support, or None for the router itself, which never asks for its own."""
-        return None if self.agent_name == ROUTER_AGENT_NAME else self.runtime.orchestrator.router_hook_context()
-
     def message_sender(self) -> HookMessageSender | None:
-        """Return the sender bound into hook contexts: this bot's own while it has a client, as the router always does."""
-        if self.runtime.client is not None or self.agent_name == ROUTER_AGENT_NAME:
+        """Return the sender bound into hook contexts: this bot's own while it has a client, else each room's poster."""
+        if self.runtime.client is not None:
             return self.send_message
-        router = self._router()
-        return None if router is None else router.send_message
+        return _room_poster_sender(self.runtime.orchestrator)
 
-    def room_state_querier(self) -> HookRoomStateQuerier | None:
-        """Return the room-state querier bound into hook contexts."""
-        router = self._router()
+    def room_state_querier(self) -> HookRoomStateQuerier:
+        """Return the room-state querier bound into hook contexts: this bot's own client, else the room's steward."""
         return chain_hook_room_state_queriers(
             _client_room_state_querier(self.runtime.client),
-            None if router is None else _client_room_state_querier(router.runtime.client),
+            _steward_state_querier(self.runtime.orchestrator),
         )
 
-    def room_state_putter(self) -> HookRoomStatePutter | None:
-        """Return the room-state putter bound into hook contexts."""
-        router = self._router()
+    def room_state_putter(self) -> HookRoomStatePutter:
+        """Return the room-state putter bound into hook contexts: this bot's own client, else the room's steward."""
         return chain_hook_room_state_putters(
             _client_room_state_putter(self.runtime.client),
-            None if router is None else _client_room_state_putter(router.runtime.client),
+            _steward_state_putter(self.runtime.orchestrator),
         )
 
     def matrix_admin(self) -> HookMatrixAdmin | None:
-        """Return the Matrix admin helper bound into hook contexts, which only the router's client backs."""
+        """Return the Matrix admin helper bound into hook contexts, which only the owner account's client backs."""
         if self.agent_name != ROUTER_AGENT_NAME:
-            router = self._router()
-            return None if router is None else router.matrix_admin()
+            return _owner_matrix_admin(self.runtime.orchestrator)
         if self.runtime.client is None:
             return None
         # Imported on first use so the tool-registry import chain stays free
@@ -248,6 +244,65 @@ class HookContextSupport:
             runtime_paths=self.runtime_paths,
             correlation_id=correlation_id,
         )
+
+
+def _as_room_bot[T](
+    pick: Callable[[str], AgentBot | None],
+    capability: Callable[[AgentBot, nio.AsyncClient], Callable[..., Awaitable[T]]],
+    refused: T,
+) -> Callable[..., Awaitable[T]]:
+    """Return one capability of the bot ``pick`` names for each call's room, which a reload waits for.
+
+    A room with no such bot, or with one that is stopping or closed its client, gives ``refused``.
+    """
+
+    async def call(room_id: str, *args: Any, **options: Any) -> T:  # noqa: ANN401
+        # Imported on first use: the slim plugin-API import path must not pull nio.
+        import nio  # noqa: PLC0415
+
+        bot = pick(room_id)
+        if bot is None:
+            return refused
+        try:
+            async with bot.admission_fence():
+                return refused if bot.client is None else await capability(bot, bot.client)(room_id, *args, **options)
+        except (ResponseAdmissionRefusedError, nio.LocalProtocolError):
+            return refused
+
+    return call
+
+
+def _room_poster_sender(orchestrator: OrchestratorRuntime) -> HookMessageSender:
+    """Return a sender that sends each message as the poster of its room."""
+    return _as_room_bot(orchestrator.room_poster, lambda poster, _client: poster.hook_context.send_message, None)
+
+
+def _steward_state_querier(orchestrator: OrchestratorRuntime) -> HookRoomStateQuerier:
+    return _as_room_bot(orchestrator.room_steward, lambda _bot, client: build_hook_room_state_querier(client), None)
+
+
+def _steward_state_putter(orchestrator: OrchestratorRuntime) -> HookRoomStatePutter:
+    return _as_room_bot(orchestrator.room_steward, lambda _bot, client: build_hook_room_state_putter(client), False)
+
+
+def _owner_matrix_admin(orchestrator: OrchestratorRuntime) -> HookMatrixAdmin | None:
+    """Return the owner account's Matrix admin helper while that account runs, None in a runtime without one."""
+    owner = orchestrator.agent_bots.get(ROUTER_AGENT_NAME)
+    return None if owner is None else owner.hook_context.matrix_admin()
+
+
+def service_hook_bindings(orchestrator: OrchestratorRuntime, registry_state: HookRegistrySource) -> HookBindings:
+    """Return the bindings of a runtime's own hooks: each room's poster sends, and its steward reads and writes state."""
+    started = (bot.hook_context.runtime.runtime_started_at for bot in orchestrator.agent_bots.values())
+    return HookBindings(
+        registry=registry_state.registry,
+        registry_state=registry_state,
+        message_sender=_room_poster_sender(orchestrator),
+        matrix_admin=_owner_matrix_admin(orchestrator),
+        room_state_querier=_steward_state_querier(orchestrator),
+        room_state_putter=_steward_state_putter(orchestrator),
+        runtime_started_at=min(started, default=time.time()),
+    )
 
 
 def _client_room_state_querier(client: nio.AsyncClient | None) -> HookRoomStateQuerier | None:
@@ -469,6 +524,8 @@ class MessageReceivedContext(HookContext):
     envelope: MessageEnvelope
     skip_plugin_names: frozenset[str] = field(default_factory=frozenset)
     suppress: bool = False
+    # Whether the envelope is a steward's hidden route of a person's message, which ran the room's hooks as it arrived.
+    _routed: bool = field(default=False, kw_only=True, repr=False, compare=False)
 
 
 @dataclass(slots=True)

@@ -25,7 +25,6 @@ from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.approval.tool_approval import (
-    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     NO_APPROVER_REASON,
     BackgroundScriptToolOrigin,
     ToolApprovalDecision,
@@ -3771,18 +3770,11 @@ async def test_live_resolver_approves_without_a_card_inside_the_requesters_auto_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("has_approver", "router_in_room", "reason"),
-    [(False, True, NO_APPROVER_REASON), (True, False, DEFAULT_ROUTER_MANAGED_ROOM_REASON)],
-)
 async def test_live_resolver_denies_a_call_no_one_can_answer_without_a_card(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    has_approver: bool,
-    router_in_room: bool,
-    reason: str,
 ) -> None:
-    """A script call no one may approve, or one in a room without the router, is denied as every approval kind is."""
+    """A script call no one may approve is denied as every approval kind is."""
     runtime_paths = _runtime_paths(tmp_path)
     run = _run(runtime_paths)
     approvals = SimpleNamespace(request_background_approval=AsyncMock())
@@ -3791,9 +3783,9 @@ async def test_live_resolver_denies_a_call_no_one_can_answer_without_a_card(
     resolver.approval_provider = lambda: approvals
     monkeypatch.setattr(
         "mindroom.orchestration.script_runtime.resolve_tool_approval_approver",
-        lambda *_args: run.owner_user_id if has_approver else None,
+        lambda *_args: None,
     )
-    initialize_approval_store_for_test(runtime_paths, router_missing=lambda _room_id: not router_in_room)
+    initialize_approval_store_for_test(runtime_paths)
 
     decision = await resolver.request_approval(
         origin=_origin(),
@@ -3803,7 +3795,7 @@ async def test_live_resolver_denies_a_call_no_one_can_answer_without_a_card(
         timeout_seconds=30.0,
     )
 
-    assert decision == ToolApprovalDecision(approved=False, reason=reason)
+    assert decision == ToolApprovalDecision(approved=False, reason=NO_APPROVER_REASON)
     approvals.request_background_approval.assert_not_awaited()
 
 

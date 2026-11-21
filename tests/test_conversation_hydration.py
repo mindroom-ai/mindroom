@@ -25,6 +25,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    UNREADABLE_EDIT_NOTICE,
 )
 from mindroom.event_journal import EventClass, EventKind, HistoryRecoveryState, HydrationPolicy, ProjectedEvent, reads
 from mindroom.execution_preparation import _get_unseen_messages_for_sender
@@ -32,7 +33,6 @@ from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import (
     _MESSAGES_PAGE_LIMIT,
-    _UNREADABLE_EDIT_NOTICE,
     HYDRATED_PROMPT_WINDOW_MESSAGES,
     ConversationHydrator,
     ConversationReadError,
@@ -904,7 +904,7 @@ class TestThreadHydrationBounds:
 
     @pytest.mark.parametrize(
         ("ceiling", "expected"),
-        [(3, f"root\n\n{_UNREADABLE_EDIT_NOTICE}"), (4, "root edited")],
+        [(3, f"root\n\n{UNREADABLE_EDIT_NOTICE}"), (4, "root edited")],
         ids=["edits_past_ceiling", "edit_before_ceiling"],
     )
     async def test_others_edits_filling_the_root_edit_fetch_do_not_pass_the_root_off_as_unedited(
@@ -2768,7 +2768,7 @@ class TestPointRefetch:
 
     @pytest.mark.parametrize(
         ("ceiling", "expected"),
-        [(3, f"first\n\n{_UNREADABLE_EDIT_NOTICE}"), (5, "second")],
+        [(3, f"first\n\n{UNREADABLE_EDIT_NOTICE}"), (5, "second")],
         ids=["edits_past_ceiling", "edit_before_ceiling"],
     )
     async def test_others_relations_filling_the_walk_do_not_pass_the_original_off_as_unedited(
@@ -3189,7 +3189,7 @@ class TestEncryptedRelations:
         assert await hydrator(alice, client).refresh(
             (await refreshes(alice))[0],
         )
-        assert await bodies(alice) == [f"first\n\n{_UNREADABLE_EDIT_NOTICE}"]
+        assert await bodies(alice) == [f"first\n\n{UNREADABLE_EDIT_NOTICE}"]
         assert await refreshes(alice) == ()
 
     async def test_an_unreadable_edit_older_than_the_winning_one_adds_no_notice(
@@ -3379,7 +3379,7 @@ class TestRepliesWithToolCalls:
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
         read_as = built if sender == AGENT else held
         assert [m.content for m in page.messages] == [
-            {**read_as, "body": f"{read_as['body']}\n\n{_UNREADABLE_EDIT_NOTICE}"},
+            {**read_as, "body": f"{read_as['body']}\n\n{UNREADABLE_EDIT_NOTICE}"},
         ]
 
     async def test_a_hydrated_thread_holds_each_reply_of_an_agent_as_it_was_built(self, alice: PrincipalStore) -> None:

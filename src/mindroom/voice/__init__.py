@@ -1,1 +1,1 @@
-"""Matrix voice messages: inbound transcription, readiness, the router's visible echo, and OpenAI Realtime speech."""
+"""Matrix voice messages: inbound transcription, readiness, the visible transcript, and OpenAI Realtime speech."""

@@ -205,9 +205,9 @@ A request is delivered only when all of these hold:
 - The trigger exists, is enabled, and `external_trigger_policy.enabled` is true.
 - The owner is still allowed to talk to the target agent in the target room.
 - The owner, or one of the owner's `authorization.aliases`, is currently joined to the target room; bot accounts do not count.
-- The router and the target agent or team are running and joined to the target room.
+- The target agent or team is running and joined to the target room.
 
-The triggered turn runs on behalf of the trigger owner, not the router.
+The triggered turn runs on behalf of the trigger owner.
 For a private agent (`private.per`), the trigger wakes the owner's private instance, so a trigger created by `@alice:example.org` uses Alice's private state.
 An administrator's trigger for a private agent wakes the administrator's private state.
 
@@ -226,7 +226,7 @@ A successful request returns `202` with `accepted: true`, the `event_id`, and th
 | `413` | `External trigger body exceeds configured limit` | Shrink the body or raise `max_body_bytes`. |
 | `422` | `External trigger kind is not allowed` | `kind` is not in the trigger's `allowed_kinds`; other `422` responses list invalid body fields. |
 | `429` | `External trigger replay limit reached` | Too many recent events for one trigger; wait for older entries to expire. |
-| `503` | `External trigger target runtime is not available` | The router or target bot is not running or not joined to the room yet; retry later. A room without the router needs the agent to call [`invite_router`](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing) first. |
+| `503` | `External trigger target runtime is not available` | The target bot is not running or not joined to the room yet, or it changed while the request waited for a reload; retry later. |
 
 ## Watcher Behavior
 

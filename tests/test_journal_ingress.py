@@ -15,7 +15,13 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.constants import (
+    ACTING_REQUESTER_KEY,
     AGENT_AUTHORED_KEY,
+    HOOK_SOURCE_KEY,
+    ORIGINAL_SENDER_KEY,
+    ROUTE_EVENT_TYPE,
+    ROUTE_PROMPT_FILE_KEY,
+    ROUTE_REVISION_KEY,
     SILENT_SCHEDULE_EVENT_TYPE,
     SOURCE_KIND_KEY,
     STREAM_STATUS_CANCELLED,
@@ -28,7 +34,11 @@ from mindroom.constants import (
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
-from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.dispatch_source import (
+    SCHEDULED_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+)
 from mindroom.event_journal import (
     ApprovalDecisionMetadata,
     EventClass,
@@ -55,12 +65,12 @@ from mindroom.pending_event_worker import _BATCH_SIZE, _MAX_RETRY_DELAY_SECONDS,
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
 from tests.approval_card_helpers import resolve_card_event
 from tests.approval_continuation_helpers import claim_continuation
-from tests.conftest import SETTLE_TIMEOUT_SECONDS, request_envelope
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, parsed_route, request_envelope
 from tests.journal_helpers import admit_dispatch_event
 from tests.journal_membership_helpers import admit_room_membership, room_membership_admission
 from tests.reply_span_helpers import paused_for_approval
+from tests.test_event_journal_store import CARD_SENDER, corrupt
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
-from tests.test_event_journal_store import corrupt
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sized
@@ -130,6 +140,27 @@ def schedule_trigger_event(
     )
     assert isinstance(event, nio.UnknownEvent)
     return event
+
+
+def route_event(
+    event_id: str,
+    *,
+    sender: str = BOT,
+    route: object = None,
+    extra_content: dict[str, Any] | None = None,
+) -> nio.UnknownEvent:
+    """Return a parsed route: the hidden event a room's steward sends to the responder it selected."""
+    return parsed_route(
+        {
+            ROUTE_EVENT_TYPE: {"entity": BOT, "event_ids": ["$question"]} if route is None else route,
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            ORIGINAL_SENDER_KEY: ALICE,
+            **(extra_content or {}),
+        },
+        sender=sender,
+        event_id=event_id,
+        origin_server_ts=1_000,
+    )
 
 
 def bot_event(event_id: str, body: str = "the answer", *, ts: int = 1_100) -> nio.Event:
@@ -1684,6 +1715,30 @@ class TestPendingEventWorker:
         await worker.drain_once()
 
         assert runs == 1
+
+    async def test_a_pending_message_replays_as_its_sender_edited_it(self, alice: PrincipalStore) -> None:
+        """A waiting message keeps the content its settled edit gave it, and a settled one keeps none."""
+        # A long text waits as the file it was sent as, and is a text message once edited to a short one.
+        await alice.admit(_inbound_event(ROOM, image_event("$waiting"), EventKind.MEDIA, EventClass.ACTIONABLE))
+        await self._admit(alice, text_event("$answered", "May.", ts=1_001))
+        await alice.settle("$answered")
+
+        # The content a waiting message takes names the edit it is (``ROUTE_REVISION_KEY``), which marks it revised.
+        short = {"body": "July, not June.", "msgtype": "m.text", ROUTE_REVISION_KEY: [1_002, "$edit"]}
+        for event_id in ("$waiting", "$answered", "$unknown"):
+            await alice.revise_pending(event_id, short)
+
+        [waiting] = await alice.pending()
+        assert waiting.event_id == "$waiting"
+        assert waiting.kind is EventKind.MESSAGE
+        assert waiting.source["content"] == short
+        assert waiting.source["sender"] == ALICE
+        answered = await alice.load_event("$answered")
+        assert answered is not None
+        assert answered.source == {}
+        # An edit to a long text, whose file was not read, waits as the file event it is.
+        await alice.revise_pending("$waiting", {**short, "body": "July, and", "msgtype": "m.file"})
+        assert [event.kind for event in await alice.pending()] == [EventKind.MEDIA]
 
     async def test_a_failed_event_stays_pending(self, alice: PrincipalStore) -> None:
         """A failed event stays pending."""
@@ -4442,7 +4497,7 @@ class TestInFlightTurnsAreNotReread:
         finally:
             await dispatcher.stop()
 
-    async def test_a_source_a_departing_router_frees_still_runs_before_later_work_in_its_room(
+    async def test_a_source_a_departing_card_sender_frees_still_runs_before_later_work_in_its_room(
         self,
         journal_store: EventJournalStore,
         alice: PrincipalStore,
@@ -4450,7 +4505,7 @@ class TestInFlightTurnsAreNotReread:
     ) -> None:
         """A room's callbacks run in receipt order, also when an older one becomes runnable silently.
 
-        A router that leaves fails the paused replies its cards held, in its
+        A card's sender that leaves fails the paused replies its cards held, in its
         own transaction: the responder's source becomes runnable with no
         admission and no owner to hand it back. The room's lane is already past
         it, behind a turn still in flight, so the next message in the room ran
@@ -4468,7 +4523,7 @@ class TestInFlightTurnsAreNotReread:
             alice,
             replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation="live"),
         )
-        await _ApprovalContinuations.remember_card(journal_store.principal("router@shared"))
+        await _ApprovalContinuations.remember_card(journal_store.principal("router@shared"), CARD_SENDER)
         worker = PendingEventWorker(store=alice, handle=handle, runtime_generation="live")
         stop_following = journal_store.approval_signals.follow_paused_replies(
             "agent@alice",
@@ -4480,7 +4535,7 @@ class TestInFlightTurnsAreNotReread:
             await _dispatch_worker_pass(worker)
             assert handled == ["$busy"]
 
-            await admit_room_membership(journal_store.principal("router@shared"), ROOM, "leave")
+            await admit_room_membership(journal_store.principal(CARD_SENDER), ROOM, "leave")
             await self._admit(alice, text_event("$new", ts=3_000))
             await _dispatch_worker_pass(worker)
             # The room already admitted a later receipt, so the revisit is paced once.
@@ -4518,7 +4573,7 @@ class TestInFlightTurnsAreNotReread:
             alice,
             replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation="live"),
         )
-        await _ApprovalContinuations.remember_card(journal_store.principal("router@shared"))
+        await _ApprovalContinuations.remember_card(journal_store.principal("router@shared"), CARD_SENDER)
         worker = PendingEventWorker(store=alice, handle=handle, runtime_generation="live")
         stop_following = journal_store.approval_signals.follow_paused_replies(
             "agent@alice",
@@ -4540,12 +4595,12 @@ class TestInFlightTurnsAreNotReread:
             await _dispatch_worker_pass(worker)
             assert handled == ["$busy"]
 
-            router = journal_store.principal("router@shared")
-            departure = await room_membership_admission(router, ROOM, "leave")
+            sender = journal_store.principal(CARD_SENDER)
+            departure = await room_membership_admission(sender, ROOM, "leave")
             assert departure is not None
             writes.apply = apply_then_wait
             batch = asyncio.gather(
-                router.admit_ingestion_batch(departure),
+                sender.admit_ingestion_batch(departure),
                 self._admit(alice, text_event("$new", ts=3_000)),
             )
             await _eventually(committed.is_set)
@@ -4941,7 +4996,7 @@ class TestAdmittedWorkReachesItsCallback:
                 on_job_cancel=AsyncMock(),
             ),
             room_for_id=lambda _room_id: room(),
-            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+            sender_is_managed=lambda sender: sender == BOT,
         )
 
     async def _deliver(
@@ -5446,3 +5501,177 @@ class TestScheduleTriggerDispatch:
         assert [entry["event_id"] for entry in invalid] == [event.event_id]
         assert "private-body-marker" not in str(logs)
         assert not await alice.is_pending(event.event_id)
+
+
+class TestRouteDispatch:
+    """A route runs as the mention its responder answers, in reply to the person's own event."""
+
+    @staticmethod
+    async def _delivered(
+        store: PrincipalStore,
+        event: nio.Event,
+        *,
+        kind: EventKind = EventKind.ROUTE,
+    ) -> list[nio.Event]:
+        """Admit one event as sync does and return what reached the message callback."""
+        handled: list[nio.Event] = []
+
+        async def on_message(_room: nio.MatrixRoom, message: nio.Event) -> TurnDispatchOutcome:
+            handled.append(message)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        dispatcher = TestAdmittedWorkReachesItsCallback._dispatcher(store, on_message)
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=event.source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+            security_metadata=(
+                {"decrypted": True, "verified": False, "sender_key": "sender-key", "session_id": "session-id"}
+                if event.decrypted
+                else None
+            ),
+            sender_is_managed=lambda sender: sender.startswith("@mindroom_"),
+        )
+        if views is not None:
+            assert views[0].kind is kind
+            assert (views[1] is None) is (kind is EventKind.ROUTE)
+            await store.admit(*views)
+        await dispatcher.drain_once()
+        assert not await store.is_pending(event.event_id)
+        return handled
+
+    async def test_a_route_from_a_room_s_thread_reaches_its_responder_as_a_reply_to_the_person_s_event(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The responder answers the event the route names, in the thread it names, and reads no text for people.
+
+        Only the relay context a responder reads comes along: a route cannot make its message a hook's, a
+        finished reply, or one written for somebody else.
+        """
+        event = route_event(
+            "$route",
+            route={"entity": BOT, "event_ids": ["$earlier", "$question"], "thread_id": "$root", "unknown": "dropped"},
+            extra_content={
+                "com.example.unknown": 4,
+                ACTING_REQUESTER_KEY: "@mallory:example.org",
+                HOOK_SOURCE_KEY: "plugin/hook",
+                STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
+                "m.mentions": {"user_ids": ["@mallory:example.org"]},
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$other"}},
+                "url": "mxc://example.org/prompt",
+                ROUTE_REVISION_KEY: [1_000_001, "$edit"],
+            },
+        )
+
+        [delivered] = await self._delivered(alice, event)
+
+        assert isinstance(delivered, nio.RoomMessageFormatted)
+        assert delivered.event_id == "$route"
+        assert delivered.sender == BOT
+        assert delivered.source["type"] == "m.room.message"
+        assert delivered.source["content"] == {
+            "msgtype": "m.text",
+            # This route carries no prompt, so its responder starts no turn for it.
+            "body": "",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "",
+            "m.mentions": {"user_ids": [BOT]},
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$root",
+                "is_falling_back": False,
+                "m.in_reply_to": {"event_id": "$question"},
+            },
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            ORIGINAL_SENDER_KEY: ALICE,
+            # What names a long prompt's file is set apart: the message's own text is not read from it.
+            ROUTE_PROMPT_FILE_KEY: {"url": "mxc://example.org/prompt"},
+            # A route's own word on which edit its prompt is stays: its steward wrote it.
+            ROUTE_REVISION_KEY: [1_000_001, "$edit"],
+        }
+        # What makes the message a route is outside its content, where only this dispatch writes.
+        assert delivered.source[ROUTE_EVENT_TYPE] == ["$earlier", "$question"]
+
+    async def test_a_message_that_carries_the_mark_of_a_route_reaches_its_callback_without_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only the dispatch of a route event marks a message as a route: a managed account's own mark is dropped."""
+        event = text_event("$message", "an ordinary message")
+        event.sender = event.source["sender"] = "@mindroom_other:example.org"
+        event.source[ROUTE_EVENT_TYPE] = ["$question"]
+        event.source["content"][ROUTE_EVENT_TYPE] = {"entity": BOT, "event_ids": ["$question"]}
+
+        [delivered] = await self._delivered(alice, event, kind=EventKind.MESSAGE)
+
+        assert delivered.body == "an ordinary message"
+        assert ROUTE_EVENT_TYPE not in delivered.source
+        assert ROUTE_EVENT_TYPE not in delivered.source["content"]
+
+    async def test_a_message_that_says_which_edit_its_text_is_reaches_its_callback_without_that(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only the edit a waiting message took is written there, by this process: its sender's own word is dropped."""
+        event = text_event("$message", "an ordinary message")
+        event.source["content"][ROUTE_REVISION_KEY] = [9_007_199_254_740_991, "$future"]
+
+        [delivered] = await self._delivered(alice, event, kind=EventKind.MESSAGE)
+
+        assert delivered.source["content"]["body"] == "an ordinary message"
+        assert ROUTE_REVISION_KEY not in delivered.source["content"]
+
+    async def test_a_route_outside_a_thread_carries_the_prompt_its_scheduled_task_relays(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A relayed scheduled task has no visible message to read, so its route carries the prompt."""
+        event = route_event("$route", extra_content={"body": "Summarize the queue"})
+
+        [delivered] = await self._delivered(alice, event)
+
+        assert isinstance(delivered, nio.RoomMessageFormatted)
+        assert delivered.body == "Summarize the queue"
+        assert delivered.source["content"]["m.relates_to"] == {"io.mindroom.in_reply_to": {"event_id": "$question"}}
+
+    async def test_a_route_from_an_encrypted_room_keeps_its_decryption_state(self, alice: PrincipalStore) -> None:
+        """A route decrypted from an encrypted room replays as the same trusted event."""
+        event = route_event("$route-encrypted")
+        event.decrypted = True
+
+        [delivered] = await self._delivered(alice, event)
+
+        assert delivered.event_id == "$route-encrypted"
+        assert delivered.decrypted is True
+        assert delivered.verified is False
+        assert delivered.sender_key == "sender-key"
+        assert delivered.session_id == "session-id"
+
+    async def test_a_route_from_an_account_mindroom_does_not_manage_is_ignored(self, alice: PrincipalStore) -> None:
+        """A person cannot make an agent answer by sending a route of their own."""
+        assert await self._delivered(alice, route_event("$route-human", sender=ALICE)) == []
+
+    @pytest.mark.parametrize(
+        "route",
+        [
+            "not an object",
+            {"entity": BOT},
+            {"entity": BOT, "event_ids": []},
+            {"entity": BOT, "event_ids": ["$question", 7]},
+            {"entity": BOT, "event_id": "$question"},
+            {"entity": 7, "event_ids": ["$question"]},
+            {"entity": BOT, "event_ids": ["$question"], "thread_id": 7},
+        ],
+    )
+    async def test_a_malformed_route_settles_without_reaching_a_responder(
+        self,
+        alice: PrincipalStore,
+        route: object,
+    ) -> None:
+        """A route that names no responder or no event is dropped, and later work still runs."""
+        with capture_logs() as logs:
+            assert await self._delivered(alice, route_event("$route-malformed", route=route)) == []
+
+        assert [entry["event_id"] for entry in logs if entry["event"] == "route_invalid"] == ["$route-malformed"]

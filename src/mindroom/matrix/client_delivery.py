@@ -87,15 +87,18 @@ _ENCRYPTION_DISABLED_REASONS = frozenset(
 )
 
 
-def _refuses_encryption(response: nio.RoomSendError) -> bool:
-    """Return whether the homeserver refused an encrypted event because it refuses encryption.
+def says_encryption_is_disabled(reason: str) -> bool:
+    """Return whether an `M_FORBIDDEN` reason is the one a homeserver that refuses encryption gives.
 
     Matrix has no errcode for this, so only the exact disabled-encryption reason counts. Any other refusal, such
     as one a membership or power-level change can lift, stays retryable, even when a user or room ID in its
     reason happens to contain "encryption". Tuwunel prefixes the errcode to the reason (`M_FORBIDDEN: ...`).
     """
-    reason = (response.message or "").strip().removeprefix("M_FORBIDDEN:").strip().rstrip(".").lower()
-    return response.status_code == "M_FORBIDDEN" and reason in _ENCRYPTION_DISABLED_REASONS
+    return reason.strip().removeprefix("M_FORBIDDEN:").strip().rstrip(".").lower() in _ENCRYPTION_DISABLED_REASONS
+
+
+def _refuses_encryption(response: nio.RoomSendError) -> bool:
+    return response.status_code == "M_FORBIDDEN" and says_encryption_is_disabled(response.message or "")
 
 
 def _sanitized_delivery_error_message(error: Exception) -> str:
@@ -965,6 +968,7 @@ __all__ = [
     "edit_message_result",
     "prepare_message_content",
     "resolve_room_encryption_outcome",
+    "says_encryption_is_disabled",
     "send_audio_message",
     "send_file_message",
     "send_file_message_outcome",

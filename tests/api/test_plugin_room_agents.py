@@ -104,6 +104,7 @@ class _Room:
         self.ids = {name: matrix_id.full_id for name, matrix_id in entity_ids(config, paths).items()}
         members = [ALICE, BOB, CAROL, self.ids[ROUTER_AGENT_NAME], *(self.ids[name] for name in joined)]
         self.client = SimpleNamespace(
+            user_id=self.ids[ROUTER_AGENT_NAME],
             rooms={ROOM: nio.MatrixRoom(ROOM, self.ids[ROUTER_AGENT_NAME])},
             joined_members=AsyncMock(return_value=joined_members_response(ROOM, *members)),
             joined_rooms=AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])),
@@ -127,9 +128,11 @@ class _Room:
             config_lifecycle.ApiSnapshot(1, self.paths, runtime_config=self.config),
         )
         bind_embedded_runtime(self.app, self.runtime.embedded_runtime())
-        # Another running bot in the room answers room reads while the router is down.
-        bots = {ROUTER_AGENT_NAME: self.router, "other": SimpleNamespace(client=self.client, running=True)}
-        bind_room_members(self.app, bots)  # type: ignore[arg-type]
+        # Another running bot in the room answers room reads while the router is down; each agent's own bot runs too.
+        self.other = SimpleNamespace(client=self.client, running=True, config=config)
+        self.bots = {ROUTER_AGENT_NAME: self.router, "other": self.other}
+        bind_room_members(self.app, self.bots)  # type: ignore[arg-type]
+        self.apply(config)
 
     def serve(self, config: Config) -> None:
         """Serve ``config`` from the API, as a config save does."""
@@ -138,7 +141,11 @@ class _Room:
 
     def apply(self, config: Config) -> None:
         """Run ``config`` in the runtime, as a reload does once the API serves it."""
-        self.runtime.config = self.router.config = config
+        self.runtime.config = config
+        for name in config.agents:
+            self.bots.setdefault(name, SimpleNamespace(client=self.client, running=True))
+        for bot in self.bots.values():
+            bot.config = config
 
     def refreshes(self) -> int:
         """How many grant refreshes the router's client has served."""
@@ -176,7 +183,8 @@ def _room(
     **env: str,
 ) -> _Room:
     """A room with ``agents``, all of them joined unless ``joined`` names some, under a runtime ``env`` changes."""
-    return _Room(Config(agents=agents), _paths(tmp_path, **env), joined or tuple(agents))
+    config = Config(agents=agents, server_emoji={"enabled": True})
+    return _Room(config, _paths(tmp_path, **env), joined or tuple(agents))
 
 
 async def _status(read: Awaitable[object]) -> tuple[int, object]:
@@ -736,12 +744,37 @@ async def test_a_config_save_that_removes_access_shows_on_the_next_request(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_a_room_without_a_running_router_answers_503(tmp_path: Path) -> None:
-    """The access check refreshes grants through the router, so without it nobody is admitted or refused."""
+async def test_agent_access_answers_without_the_owner_account_and_503_without_any_bot(tmp_path: Path) -> None:
+    """Any running bot serves the access check; with none running nobody is admitted or refused."""
     room = _room(tmp_path, _agents())
+    reader = await room._reader(ALICE)
+    listed = [agent.name for agent in await reader.agents()]
     room.router.running = False
+    assert [agent.name for agent in await reader.agents()] == listed != []
 
-    assert await _status(room.agents(ALICE)) == (503, "Agent access is unavailable; try again.")
+    for bot in room.bots.values():
+        bot.running = False
+    assert await _status(reader.agents()) == (503, "Agent access is unavailable; try again.")
+
+
+@pytest.mark.asyncio
+async def test_an_agent_opens_no_workspace_before_or_without_its_own_running_bot(tmp_path: Path) -> None:
+    """A saved grant opens nothing until the agent's own bot runs it; a stopped agent opens nothing while others run."""
+    room = _room(tmp_path, _agents())
+    agents = _agents()
+    agents["coder"].access = ResponderAccessConfig(users=[ALICE, BOB, CAROL])
+    saved = Config(agents=agents)
+    room.serve(saved)
+
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["notes"]
+    assert await _status(room.agent(CAROL, room.ids["coder"])) == (503, "Agent access is unavailable; try again.")
+
+    room.apply(saved)
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["coder", "notes"]
+
+    room.bots["coder"].running = False
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["notes"]
+    assert await _status(room.agent(CAROL, room.ids["coder"])) == (503, "Agent access is unavailable; try again.")
 
 
 @pytest.mark.asyncio
@@ -926,3 +959,24 @@ async def test_a_refresh_a_request_starts_while_the_router_backs_off_runs_the_ru
     assert room.refreshes() == 2
     assert not room.runtime.agent_reply_memberships.needs_refresh(room.config)
     assert sorted(room.router.follow_ups) == ["invites", "reconcile_calls", "revoke_calls", "turns"]
+
+
+@pytest.mark.asyncio
+async def test_a_bot_replaced_while_power_is_read_decides_by_its_replacement(tmp_path: Path) -> None:
+    """A replacement bot that denies the requester while the room's power is read opens no workspace."""
+    agents = _agents()
+    agents["coder"].access = ResponderAccessConfig(users=[ALICE, BOB, CAROL])
+    room = _room(tmp_path, agents)
+    denying = _agents()
+    denying["coder"].access = ResponderAccessConfig(users=[ALICE, BOB])
+    read_power = room.client.room_get_state.side_effect
+
+    async def power_while_replaced(*args: object, **kwargs: object) -> object:
+        room.bots["coder"] = SimpleNamespace(client=room.client, running=True, config=Config(agents=denying))
+        return room.client.room_get_state.return_value if read_power is None else await read_power(*args, **kwargs)
+
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["coder", "notes"]
+    room.client.room_get_state.side_effect = power_while_replaced
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["notes"]
+    room.bots["coder"].config = room.config
+    assert await _status(room.agent(CAROL, room.ids["coder"])) == (503, "Agent access is unavailable; try again.")

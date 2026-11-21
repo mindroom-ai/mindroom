@@ -263,7 +263,7 @@ Gemini API docs call `gemini-nano-banana-2.1` Nano Banana 2.1, while Vertex AI d
 **MultiAgentOrchestrator** (`orchestrator.py`) is the heart of the system - it boots every configured entity (router, agents, teams), provisions Matrix users, and keeps sync loops alive with hot-reload support when `config.yaml` changes.
 
 **Entity types**:
-- `router`: Built-in traffic director that greets rooms and decides which agent or team should answer
+- `router`: The owner account: administers configured rooms, never answers; room stewards route
 - **Agents**: Single-specialty actors defined under `agents:` in `config.yaml`
 - **Teams**: Collaborative bundles of agents that coordinate or parallelize work
 

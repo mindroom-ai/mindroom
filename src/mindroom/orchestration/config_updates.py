@@ -124,16 +124,18 @@ _TEAM_LIVE_FIELDS = frozenset(
 class ConfigUpdatePlan:
     """Everything one config reload changes, decided in one place.
 
-    ``restart``, ``start``, and ``remove`` are disjoint: an entity whose bot
+    ``restart``, ``start``, ``remove``, and ``stop`` are disjoint: an entity whose bot
     exists and stays configured may restart, a configured entity without a bot
     starts, and a bot whose entity is no longer configured is removed, never
-    restarted, so its removal still finds the bot it must stop.
+    restarted, so its removal still finds the bot it must stop. The owner account
+    the config no longer needs only stops: it keeps its account and its rooms.
     """
 
     new_config: Config
     restart: frozenset[str] = frozenset()
     start: frozenset[str] = frozenset()
     remove: frozenset[str] = frozenset()
+    stop: frozenset[str] = frozenset()
     reconcile_rooms: frozenset[str] = frozenset()
     live_updated: frozenset[str] = frozenset()
     plugin_changes: tuple[str, ...] = ()
@@ -146,9 +148,8 @@ class ConfigUpdatePlan:
     reply_authorization_changed: bool = False
     # A continuing agent's responder access changed, so background scripts it runs must be re-authorized.
     responder_access_changed: bool = False
-    # Room-membership grant inputs changed, so every room-backed grant is revoked until the router refreshes.
+    # Room-membership grant inputs changed, so every room-backed grant is revoked until each room's observer refreshes.
     reply_membership_policy_changed: bool = False
-    router_invite_policy_changed: bool = False
 
     @property
     def requires_response_drain(self) -> bool:
@@ -158,13 +159,13 @@ class ConfigUpdatePlan:
         replaces config that responses read live, so it can publish while they run.
         """
         return self.reply_authorization_changed or bool(
-            self.restart or self.start or self.remove or self.reconcile_rooms,
+            self.restart or self.start or self.remove or self.stop or self.reconcile_rooms,
         )
 
 
 def configured_entity_names(config: Config) -> list[str]:
-    """Return configured entity names with the router first."""
-    return [ROUTER_AGENT_NAME, *config.agents.keys(), *config.teams.keys()]
+    """Return configured entity names, the owner account first when the config needs one."""
+    return [*([ROUTER_AGENT_NAME] if config.needs_owner_account() else ()), *config.agents, *config.teams]
 
 
 def plugin_change_paths(current_config: Config, new_config: Config) -> tuple[str, ...]:
@@ -387,7 +388,6 @@ def _reply_authorization_inputs_changed(config: Config, new_config: Config) -> b
         or config.room_defaults != new_config.room_defaults
         or config.rooms != new_config.rooms
         or config.router.access != new_config.router.access
-        or config.router.accept_invites != new_config.router.accept_invites
         or config.personal_rooms != new_config.personal_rooms
         or config.external_trigger_policy != new_config.external_trigger_policy
     )
@@ -512,7 +512,8 @@ def build_config_update_plan(
 
     restart &= kept_entities
     start = configured_entities - existing_entities
-    remove = existing_entities - configured_entities
+    stop = (existing_entities - configured_entities) & {ROUTER_AGENT_NAME}
+    remove = existing_entities - configured_entities - stop
     if start:
         logger.info("new_entities_will_start", entities=sorted(start))
     if remove:
@@ -523,6 +524,7 @@ def build_config_update_plan(
         restart=frozenset(restart),
         start=frozenset(start),
         remove=frozenset(remove),
+        stop=frozenset(stop),
         reconcile_rooms=frozenset(
             _entities_with_room_changes(
                 current_config,
@@ -543,5 +545,4 @@ def build_config_update_plan(
         reply_authorization_changed=_reply_authorization_inputs_changed(current_config, new_config),
         responder_access_changed=_responder_access_changed(current_config, new_config),
         reply_membership_policy_changed=agent_reply_membership_policy_changed(current_config, new_config),
-        router_invite_policy_changed=current_config.router.accept_invites != new_config.router.accept_invites,
     )

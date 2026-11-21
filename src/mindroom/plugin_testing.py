@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
+from functools import partial
 from itertools import count
 from pathlib import Path
 from types import MappingProxyType
@@ -31,9 +32,9 @@ from mindroom.api.plugin_routes import mount_plugin_routes
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.config.main import Config
 from mindroom.config.tool_aliases import canonical_tool_name
-from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.constants import resolve_runtime_paths
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.entity_resolution import current_entity_id, persist_offline_entity_accounts
+from mindroom.entity_resolution import persist_offline_entity_accounts, prepared_entity_names_by_user_id
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -71,6 +72,7 @@ from mindroom.mcp_gateway.tools import may_need_approval
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
+from mindroom.room_steward import membership_observers
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import toolkit_function
@@ -130,7 +132,7 @@ class SentMessage:
 
 @dataclass(frozen=True)
 class Room:
-    """A room as the plugin's tests set it up, which MindRoom's router is joined to, and what was sent to it."""
+    """A room as the plugin's tests set it up, which MindRoom reads, and what was sent to it."""
 
     room_id: str
     members: Mapping[str, str | None]
@@ -138,15 +140,15 @@ class Room:
     power_levels: dict[str, Any] | None = None
     """The content of the room's ``m.room.power_levels``; None for a room without one."""
     direct: bool = False
-    """Whether its members joined it as a direct message; the room has no name, so one member alone with the router counts too."""
+    """Whether its members joined it as a direct message; the room has no name, so one of at most two members counts too."""
     history_visibility: str = "shared"
     key: str | None = None
     """The room key an agent's ``rooms`` or an ``access`` rule names this room by."""
     sent: list[SentMessage] = field(default_factory=list)
 
 
-def _state_events(room: Room, joined: Mapping[str, str | None]) -> list[dict[str, Any]]:
-    """Return the room's state as a homeserver lists it, each of the ``joined`` joined since the epoch."""
+def _state_events(room: Room) -> list[dict[str, Any]]:
+    """Return the room's state as a homeserver lists it, each member joined since the epoch."""
     events: list[tuple[str, str, Mapping[str, Any]]] = [
         ("m.room.history_visibility", "", {"history_visibility": room.history_visibility}),
     ]
@@ -154,7 +156,7 @@ def _state_events(room: Room, joined: Mapping[str, str | None]) -> list[dict[str
         events.append(("m.room.power_levels", "", room.power_levels))
     events.extend(
         ("m.room.member", user, {"membership": "join", "displayname": name, "is_direct": room.direct})
-        for user, name in joined.items()
+        for user, name in room.members.items()
     )
     return [
         {"type": kind, "state_key": key, "content": content, "origin_server_ts": 0} for kind, key, content in events
@@ -206,48 +208,30 @@ class LoadedPlugin:
         self.config = config
         self.runtime_paths = runtime_paths
         self._portal = portal
-        # The router is joined to every room, as the bot whose client reads it live is.
-        router_id = current_entity_id(ROUTER_AGENT_NAME, runtime_paths).full_id
-        self._router_member = {router_id: config.entity_display_name(ROUTER_AGENT_NAME)}
         self._rooms: dict[str, Room] = {}
+        self._entity_names = prepared_entity_names_by_user_id(config, runtime_paths)
         self._event_ids = count(1)
         self._tokens: dict[str, list[str]] = {}
         self._memberships = AgentReplyMembershipIndex()
         # Agents keep whether a room is direct for minutes, by their user ID and the room's.
         self._direct_user = f"@plugin-testing-{uuid4().hex}:localhost"
-        self._client = cast(
-            "nio.AsyncClient",
-            _StandIn(
-                "Matrix client",
-                rooms=self._rooms,
-                joined_rooms=self._joined_rooms,
-                joined_members=self._joined_members,
-                room_get_state=self._room_get_state,
-                room_get_state_event=self._room_get_state_event,
-            ),
-        )
-        router = _StandIn(
-            "router",
-            running=True,
-            client=self._client,
-            config=config,
-            runtime_paths=runtime_paths,
-            hook_context=_StandIn("router hooks", send_message=self._send),
-        )
+        # The running bots: a reader of the kit's own, in every room and a member of none, and each agent, team or
+        # owner account a room lists among its members, in the rooms that list it.
+        self._bots: dict[str, AgentBot] = {}
+        self._client = self._bot_client("", f"@plugin-testing-reader-{uuid4().hex}:localhost")
         self._app = FastAPI()
         state = ensure_app_state(self._app)
         state.api_state = ApiState(threading.Lock(), ApiSnapshot(1, runtime_paths, runtime_config=config))
-        bots = {ROUTER_AGENT_NAME: router}
         state.embedded = cast(
             "EmbeddedRuntime",
             _StandIn(
                 "MindRoom runtime",
-                agent_bot=bots.get,
+                agent_bot=self._bots.get,
                 agent_reply_memberships=self._memberships,
                 refresh_agent_reply_memberships_when_needed=self._refresh_memberships_when_needed,
             ),
         )
-        bind_room_members(self._app, cast("Mapping[str, AgentBot]", bots))
+        bind_room_members(self._app, self._bots)
         state.room_direct = self._room_direct
         mount_plugin_routes(self._app)
 
@@ -261,19 +245,55 @@ class LoadedPlugin:
         history_visibility: str = "shared",
         key: str | None = None,
     ) -> Room:
-        """Add a room the router is joined to, with ``members`` joined by display name, and return it.
+        """Add a room MindRoom reads, with ``members`` joined by display name, and return it.
 
         ``key`` names the room as an agent's ``rooms`` or an ``access`` rule does. Adding a room again replaces it, as
-        a membership change would. A room never added is one no MindRoom bot is in.
+        a membership change would. A room never added is one no MindRoom bot is in. An agent, a team, or the owner
+        account is a member, and its bot in the room, only when ``members`` lists its Matrix ID.
         """
         levels = dict(power_levels) if power_levels is not None else None
         room = Room(room_id, MappingProxyType(dict(members)), levels, direct, history_visibility, key)
         self._rooms[room_id] = room
+        for user_id, name in {self._client.user_id: "", **self._entity_names}.items():
+            if name == "" or user_id in members:
+                self._bot_client(name, user_id).rooms[room_id] = nio.MatrixRoom(room_id, user_id)
+            elif name in self._bots:
+                self._bot_client(name, user_id).rooms.pop(room_id, None)
         if key is not None:
             update_matrix_state(self.runtime_paths, lambda state: state.add_room(key, room_id, "", key))
-        # The next decision reads every room again, as membership events make the router do live.
+        # The next decision reads every room again, as membership events make the bots do live.
         self._memberships.invalidate(self.config, reason="plugin_testing_room_added")
         return room
+
+    def _bot_client(self, name: str, user_id: str) -> nio.AsyncClient:
+        """Return the client of the stand-in for the running bot of that entity name, which reads the rooms it is in."""
+        if name not in self._bots:
+            rooms: dict[str, nio.MatrixRoom] = {}
+
+            async def joined_rooms() -> nio.JoinedRoomsResponse:
+                return nio.JoinedRoomsResponse(list(rooms))
+
+            client = _StandIn(
+                "Matrix client",
+                user_id=user_id,
+                rooms=rooms,
+                joined_rooms=joined_rooms,
+                joined_members=self._joined_members,
+                room_get_state=self._room_get_state,
+                room_get_state_event=self._room_get_state_event,
+            )
+            bot = _StandIn(
+                "bot",
+                running=True,
+                observes_room_members=True,
+                client=client,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                hook_context=_StandIn("bot hooks", send_message=self._send),
+                admission_fence=nullcontext,
+            )
+            self._bots[name] = cast("AgentBot", bot)
+        return cast("nio.AsyncClient", self._bots[name].client)
 
     def client(self, user_id: str | None = None) -> TestClient:
         """Return a test client of the plugin's routes, signed in as ``user_id`` with a client session when given."""
@@ -413,7 +433,7 @@ class LoadedPlugin:
         if not is_human_requester_id(sender, self.config, self.runtime_paths):
             msg = f"mindroom.plugin_testing sends messages from people, not from {sender}"
             raise ValueError(msg)
-        await self._memberships.refresh(self.config, self.runtime_paths, self._client)
+        await self._memberships.refresh(self.config, self.runtime_paths, partial(membership_observers, self._bots))
         room = self._rooms.get(room_id)
         if (
             room is None
@@ -474,20 +494,14 @@ class LoadedPlugin:
     async def _refresh_memberships_when_needed(self) -> None:
         """Refresh the membership index from the rooms when it needs it, as the runtime does for an access check."""
         if self._memberships.needs_refresh(self.config):
-            await self._memberships.refresh(self.config, self.runtime_paths, self._client)
-
-    def _joined(self, room: Room) -> dict[str, str | None]:
-        return {**self._router_member, **room.members}
-
-    async def _joined_rooms(self) -> nio.JoinedRoomsResponse:
-        return nio.JoinedRoomsResponse(list(self._rooms))
+            await self._memberships.refresh(self.config, self.runtime_paths, partial(membership_observers, self._bots))
 
     async def _joined_members(self, room_id: str) -> nio.JoinedMembersResponse | nio.JoinedMembersError:
         room = self._rooms.get(room_id)
         if room is None:
             return nio.JoinedMembersError("Not in this room", "M_FORBIDDEN")
         return nio.JoinedMembersResponse(
-            [nio.RoomMember(user, name or "", "") for user, name in self._joined(room).items()],
+            [nio.RoomMember(user, name or "", "") for user, name in room.members.items()],
             room_id,
         )
 
@@ -495,7 +509,7 @@ class LoadedPlugin:
         room = self._rooms.get(room_id)
         if room is None:
             return nio.RoomGetStateError("Not in this room", "M_FORBIDDEN")
-        return nio.RoomGetStateResponse(_state_events(room, self._joined(room)), room_id)
+        return nio.RoomGetStateResponse(_state_events(room), room_id)
 
     async def _room_get_state_event(
         self,
@@ -504,7 +518,7 @@ class LoadedPlugin:
         state_key: str = "",
     ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
         room = self._rooms.get(room_id)
-        for event in _state_events(room, self._joined(room)) if room is not None else []:
+        for event in _state_events(room) if room is not None else []:
             if (event["type"], event["state_key"]) == (event_type, state_key):
                 return nio.RoomGetStateEventResponse(event["content"], event_type, state_key, room_id)
         return nio.RoomGetStateEventError("Not found", "M_NOT_FOUND")
@@ -512,7 +526,7 @@ class LoadedPlugin:
     async def _room_direct(self, room_id: str) -> bool:
         """Answer as running agents do, through a client of this load's own, whose answers no other load shares."""
         room = nio.MatrixRoom(room_id, self._direct_user)
-        for user, name in self._joined(self._rooms[room_id]).items():
+        for user, name in self._rooms[room_id].members.items():
             room.add_member(user, name, None)
         client = _StandIn(
             "Matrix client",

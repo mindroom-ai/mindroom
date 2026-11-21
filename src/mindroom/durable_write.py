@@ -113,15 +113,16 @@ def write_json_file_durable(
 def load_cached_override_records(
     path: Path,
     is_valid: Callable[[str, dict[object, object]], bool],
+    only: str | None = None,
 ) -> dict[str, OverrideRecord]:
-    """Load validated override records, caching parsed data by file mtime."""
+    """Load validated override records, or just the ``only`` one, caching parsed data by file mtime."""
     try:
         mtime_ns = path.stat().st_mtime_ns
     except OSError:
         return {}
     cached = _override_load_cache.get(path)
     if cached is not None and cached[0] == mtime_ns:
-        return _copy_override_records(cached[1])
+        return _copy_override_records(cached[1], only)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
@@ -134,12 +135,13 @@ def load_cached_override_records(
         if isinstance(record_id, str) and isinstance(record, dict) and is_valid(record_id, record)
     }
     _override_load_cache[path] = (mtime_ns, records)
-    return _copy_override_records(records)
+    return _copy_override_records(records, only)
 
 
-def _copy_override_records(records: dict[str, OverrideRecord]) -> dict[str, OverrideRecord]:
+def _copy_override_records(records: dict[str, OverrideRecord], only: str | None) -> dict[str, OverrideRecord]:
     """Return mutable records without exposing the cache's nested dictionaries."""
-    return {record_id: record.copy() for record_id, record in records.items()}
+    wanted = records if only is None else records.keys() & {only}
+    return {record_id: records[record_id].copy() for record_id in wanted}
 
 
 def write_bounded_override_records(

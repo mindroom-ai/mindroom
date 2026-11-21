@@ -1,4 +1,4 @@
-"""Matrix runtime shell for agents, teams, and the router."""
+"""Matrix runtime shell for agents, teams, and the owner account."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState, RunPhase
 from mindroom.config.resolution import entity_timezone
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
-from mindroom.email_invites.receiver import register_email_invite_receiver
+from mindroom.email_invites.receiver import register_email_invite_receiver, revoke_orphaned_sends
 from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.legacy_turn_rows import legacy_responses_file_path
 from mindroom.hooks import (
@@ -112,7 +112,7 @@ from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
 from .room_reply_modes import observe_room_settings_event, refresh_room_reply_mode
-from .router.duties import RouterDuties, RouterDutiesDeps
+from .steward_duties import StewardDuties, StewardDutiesDeps, room_state_response_as_steward
 from .thread_tags import THREAD_TAGS_EVENT_TYPE
 from .tool_jobs.client_cancel import cancel_room_jobs, cancel_stopped_reply_jobs, handle_job_cancel_event
 from .tool_jobs.follow_ups import follow_up_event
@@ -126,7 +126,7 @@ from .user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from .visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
 from .voice.ingress import VoiceIngress, VoiceIngressDeps
 from .voice.readiness import VoiceReadiness
-from .voice.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
+from .voice.visible_voice_echo import VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
@@ -220,7 +220,7 @@ def create_bot_for_entity(
     agent_user: AgentMatrixUser,
     orchestrator: OrchestratorRuntime,
 ) -> AgentBot:
-    """Create the bot for one configured entity, the router, a team, or an agent, in its configured rooms.
+    """Create the bot for one configured entity, the owner account, a team, or an agent, in its configured rooms.
 
     Raises:
         ValueError: The published config does not configure the entity.
@@ -235,7 +235,7 @@ def create_bot_for_entity(
 
 
 class AgentBot:
-    """Matrix lifecycle shell for one configured agent or router entity."""
+    """Matrix lifecycle shell for one configured agent, team, or the owner account."""
 
     # Construction inputs
     agent_user: AgentMatrixUser
@@ -270,7 +270,6 @@ class AgentBot:
     _delivery_gateway: DeliveryGateway
     _response_runner: ResponseRunner
     _turn_store: TurnStore
-    _visible_voice_echo: VisibleVoiceEchoLifecycle
     _tool_runtime_support: ToolRuntimeSupport
     _post_response_effects_support: PostResponseEffectsSupport
     _ingress_hook_runner: IngressHookRunner
@@ -280,10 +279,11 @@ class AgentBot:
     _call_manager: CallManager | None
     _calls_full_reconcile_pending: bool
     _call_rooms_reconcile_pending: set[str]
-    _router: RouterDuties | None
+    steward_duties: StewardDuties
     _interactive_selections: InteractiveSelections
     _voice_ingress: VoiceIngress
     _turn_dispatcher: TurnDispatcher
+    _visible_voice_echo: VisibleVoiceEchoLifecycle
     _turn_ingress: TurnIngress
     _room_lifecycle: BotRoomLifecycle
     _decryption_diagnostics: DecryptionDiagnostics
@@ -327,7 +327,7 @@ class AgentBot:
         )
         self._ingestion_session = None
         # This generation's view of the runtime's hook registry; its stop ends it, so hooks it bound turn inactive.
-        self._hook_registry_state = orchestrator.hook_registry_state.lifetime()
+        self._hook_registry_state = orchestrator.hook_registry_state.lifetime(self.agent_name)
         self._runtime_view = BotRuntimeState(orchestrator=orchestrator)
         self._sync_continuity_store = SyncContinuityStore(self.storage_path, self.agent_name)
         self._call_manager: CallManager | None = None
@@ -364,6 +364,9 @@ class AgentBot:
             self._lookup_personal_room_target,
             orchestrator.config_reload,
             self._report_personal_room_membership_change,
+            lambda room_id: self.steward_duties.is_steward(room_id),
+            lambda room, sender: None if (bot := orchestrator.room_poster(room, sender)) is None else bot.client,
+            lambda: orchestrator.running_entity_client(ROUTER_AGENT_NAME),
         )
         self._room_lifecycle = BotRoomLifecycle(
             BotRoomLifecycleDeps(
@@ -379,9 +382,9 @@ class AgentBot:
                 send_response=send_room_lifecycle_response,
                 change_membership=self.change_local_membership,
                 admit_response=self._runtime_view.admission_fence,
-                refresh_memberships=orchestrator.refresh_agent_reply_memberships_when_needed,
                 on_configured_room_joined=self._post_join_room_setup,
                 on_room_joined=self._restore_joined_room,
+                publish_server_state=self._publish_server_state,
                 get_conversation_reader=lambda: self._conversation_reader,
                 get_agent_bot=lambda name: self.orchestrator.agent_bots.get(name),
             ),
@@ -477,20 +480,15 @@ class AgentBot:
             conversation_reader=self._conversation_reader,
             logger=self.logger,
         )
-        self._router = (
-            None
-            if self.agent_name != ROUTER_AGENT_NAME
-            else RouterDuties(
-                RouterDutiesDeps(
-                    runtime=self._runtime_view,
-                    logger=self.logger,
-                    matrix_id=runtime_matrix_id,
-                    hook_context=self._hook_context_support,
-                    journal=principal,
-                    room_lifecycle=self._room_lifecycle,
-                    personal_rooms=self._personal_room_lifecycle,
-                ),
-            )
+        self.steward_duties = StewardDuties(
+            StewardDutiesDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                hook_context=self._hook_context_support,
+                journal=principal,
+                room_lifecycle=self._room_lifecycle,
+                personal_rooms=self._personal_room_lifecycle,
+            ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(
             runtime=self._runtime_view,
@@ -537,9 +535,7 @@ class AgentBot:
             ),
             room_for_id=self._room_for_journal_event,
             # Resolved late: the ingress validator, which owns the trust rule, is built after the dispatcher.
-            schedule_trigger_sender_is_managed=lambda sender: (
-                self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender)
-            ),
+            sender_is_managed=lambda sender: self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender),
             runtime_generation=self._approval_runtime_generation,
         )
         self._turn_store = TurnStore(
@@ -668,15 +664,11 @@ class AgentBot:
             ),
         )
         self._visible_voice_echo = VisibleVoiceEchoLifecycle(
-            VisibleVoiceEchoDeps(
-                runtime=self._runtime_view,
-                logger=self.logger,
-                agent_name=self.agent_name,
-                delivery_gateway=self._delivery_gateway,
-                turn_store=self._turn_store,
-                router_turn_records=self._journal_store.turn_records(ROUTER_AGENT_NAME),
-                ingress=self._ingress_validator,
-            ),
+            runtime=self._runtime_view,
+            agent_name=self.agent_name,
+            delivery_gateway=self._delivery_gateway,
+            turn_store=self._turn_store,
+            journal=self._journal_store,
         )
         self._visible_responses = VisibleResponseReconciler(
             VisibleResponseReconcilerDeps(
@@ -694,7 +686,6 @@ class AgentBot:
                 runtime=self._runtime_view,
                 logger=self.logger,
                 runtime_paths=self.runtime_paths,
-                agent_name=self.agent_name,
                 normalizer=self._inbound_turn_normalizer,
                 turn_policy=self._turn_policy,
                 turn_store=self._turn_store,
@@ -739,7 +730,6 @@ class AgentBot:
                 readiness=VoiceReadiness(
                     normalizer=self._inbound_turn_normalizer,
                     turn_store=self._turn_store,
-                    visible_echo=self._visible_voice_echo,
                     logger=self.logger,
                 ),
                 turn_policy=self._turn_policy,
@@ -765,6 +755,7 @@ class AgentBot:
                 visible_responses=self._visible_responses,
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
                 selections=self._interactive_selections,
+                visible_voice_echo=self._visible_voice_echo,
             ),
         )
         self._coalescing_gate = CoalescingGate(
@@ -828,12 +819,13 @@ class AgentBot:
         )
 
     async def _recover_config_confirmation_setup(self, room_id: str, preview_event_id: str) -> bool:
-        """Recover Matrix-backed config setup without coupling turn control to commands."""
+        """Recover config preview setup without coupling turn control to commands."""
         if self.client is None:
             msg = "Matrix client is not ready for config confirmation recovery"
             raise RuntimeError(msg)
         return await config_confirmation.recover_confirmation_setup(
             self.client,
+            self.runtime_paths,
             room_id,
             preview_event_id,
         )
@@ -1088,15 +1080,10 @@ class AgentBot:
         )
         await emit(self.hook_registry, event_name, context)
 
-    async def join_configured_rooms(self) -> None:
-        """Join all rooms this agent is configured for."""
-        await self._room_lifecycle.join_configured_rooms()
-
     async def _post_join_room_setup(self, room_id: str) -> None:
         """Run room setup that should happen after configured joins and across restarts."""
         self._request_call_reconciliation(room_id)
-        if self._router is not None:
-            await self._router.room_joined(room_id)
+        await self.steward_duties.room_joined(room_id)
 
     async def _restore_joined_room(self, room_id: str) -> None:
         """Hand a joined room's schedules this bot owns and the room's thread snoozes to the runtime."""
@@ -1104,7 +1091,8 @@ class AgentBot:
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
 
     async def _reread_reply_mode(self, client: nio.AsyncClient, room_id: str) -> None:
-        await refresh_room_reply_mode(client, self.runtime_paths, room_id, force=True)
+        put_state = partial(room_state_response_as_steward, self.orchestrator.room_steward)
+        await refresh_room_reply_mode(client, self.runtime_paths, room_id, force=True, put_state=put_state)
 
     def _on_room_state_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Take a live thread tag or room settings state event from sync; never raise into nio's callback loop."""
@@ -1150,9 +1138,13 @@ class AgentBot:
                 subscribe_awaited_rooms=lambda: subscribe_sliding_rooms(session, self.config, self.rooms),
                 is_authorized=is_authorized,
             )
-        if changed and target_membership == "join" and self.client is not None:
-            await publish_server_state(self.client, room_id, self._server_state_content(self.config))
+        if changed and target_membership == "join":
+            await self._publish_server_state(room_id)
         return changed
+
+    async def _publish_server_state(self, room_id: str) -> None:
+        if self.client is not None:
+            await publish_server_state(self.client, room_id, self._server_state_content(self.config))
 
     def _server_state_content(self, config: Config) -> dict[str, object]:
         """Return the server state this entity publishes under ``config``."""
@@ -1173,10 +1165,6 @@ class AgentBot:
         if client is None or content == self._server_state_content(previous_config):
             return
         await asyncio.gather(*(publish_server_state(client, room_id, content) for room_id in sorted(client.rooms)))
-
-    async def leave_unconfigured_rooms(self) -> None:
-        """Leave any rooms this agent is no longer configured for."""
-        await self._room_lifecycle.leave_unconfigured_rooms()
 
     async def refresh_presence(self) -> None:
         """Set presence status with model information."""
@@ -1204,13 +1192,18 @@ class AgentBot:
         self._deferred_stop_required = False
         self._deferred_stop_phase = None
         self._request_call_reconciliation()
-        self.invalidate_agent_reply_memberships(reason="sync_loop_started")
+        self.orchestrator.agent_reply_membership_sync.observer_loop_started(self.config, self.matrix_id.full_id)
         mark_matrix_sync_loop_started(self.agent_name)
 
     def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
-        """Fail room-backed reply grants closed when the router's sync can no longer vouch for them."""
-        if self._router is not None:
-            self._router.invalidate_memberships(reason=reason)
+        """End this account's observation of room members; the grants of the rooms it observed fail closed."""
+        membership_sync = self.orchestrator.agent_reply_membership_sync
+        membership_sync.observer_closed(self.config, self.matrix_id.full_id, reason=reason)
+
+    @property
+    def observes_room_members(self) -> bool:
+        """Return whether this bot's receive loop has caught up, so its account observes room members."""
+        return self.orchestrator.agent_reply_membership_sync.observer_is_open(self.matrix_id.full_id)
 
     @property
     def call_manager(self) -> CallManager | None:
@@ -1284,27 +1277,10 @@ class AgentBot:
     async def _recover_unacknowledged_matrix_deliveries(self) -> bool:
         """Resend answers this bot could not confirm reaching Matrix.
 
-        After the first sync response, not before it. A send into an encrypted
-        room is refused until sync has rebuilt the local room and device state,
-        so recovery run at startup would spend its retry budget failing and
-        leave every encrypted room's owed answer unsent -- exactly the rooms
-        this matters in.
-
-        The first response is not always enough, though. It can arrive while a
-        room is still unrecovered, and nio refuses ordinary sends into one. So
-        the pass runs after every sync response, not once.
-
-        It asks the outbox rather than tracking whether anything is owed. A
-        flag would have to be armed from every path that can leave a row
-        unacknowledged -- a pass that raised before reporting, a live send the
-        homeserver refused, a claim that never came back -- and the answer a
-        user is waiting for would be lost by whichever path nobody remembered.
-        The outbox already knows, the query is one probe of a partial index,
-        and it sends nothing when nothing is owed.
-
-        Resending is safe: each delivery carries the transaction ID its first
-        attempt used, so one the homeserver already accepted collapses back
-        onto the same event.
+        It runs only after a sync response, since a send into an encrypted room is refused before one.
+        It runs after every later response too, since a room can still be unrecovered at the first.
+        It asks the outbox what is owed rather than tracking it, so no failure path can lose an answer.
+        Each resend carries its first attempt's transaction ID, so an accepted one collapses onto its event.
         """
         try:
             # A deletion history recovery learned ended replies too: their spans stop and what they owe follows.
@@ -1378,16 +1354,21 @@ class AgentBot:
     async def _run_sync_response_side_effects(
         self,
         *,
+        receipt_new: bool,
         first_sync_response: bool,
     ) -> None:
-        """Run side effects that do not own raw sync checkpoint safety.
+        """Run side effects that do not own raw sync checkpoint safety; only a new frame opens the observer.
 
-        Only the grant refresh is awaited, because sources the first frame releases must find reply grants rebuilt or
-        failed closed, and it waits at most 10 s. Nothing else here decides what a source may do, so the rest runs in
-        background tasks and holds neither dispatch nor this frame's acknowledgement.
+        Nothing here decides what a source may do, so hooks and room state run in background tasks and hold neither
+        dispatch nor this frame's acknowledgement.
         """
-        if self._router is not None:
-            await self._router.refresh_memberships_if_needed()
+        orchestrator = self.orchestrator
+        membership_sync = orchestrator.agent_reply_membership_sync
+        opened = receipt_new and membership_sync.observer_frame_settled(self.matrix_id.full_id)
+        membership_sync.request_refresh(
+            orchestrator.config,
+            orchestrator.refresh_agent_reply_memberships,
+        )
         self._schedule_delivery_recovery()
         self._schedule_handled_turn_cleanup()
         if first_sync_response:
@@ -1397,22 +1378,32 @@ class AgentBot:
                 name=f"bot_ready_hooks_{self.agent_name}",
                 owner=self._runtime_view,
             )
+            if self.client is not None:
+                create_background_task(
+                    revoke_orphaned_sends(self.client, self.runtime_paths, self.config),
+                    name=f"email_invite_orphans_{self.agent_name}",
+                    owner=self._runtime_view,
+                )
         self._personal_room_lifecycle.schedule_reconciliation()
 
         if self._first_sync_done and not self._orchestrator_ready_handled:
             await self.orchestrator.handle_bot_ready(self)
             self._orchestrator_ready_handled = True
-        if self._router is not None:
-            self._router.publish_joined_room_state()
+        self.steward_duties.publish_joined_room_state(every_room=opened)
 
     def _before_ingestion_admission(
         self,
         admission: IngestionRecordAdmission,
         timeline_provenance: nio.TimelineEventProvenance | None,
     ) -> None:
-        """Revoke uncertain control-room grants before admitting more work."""
-        if self._router is not None:
-            self._router.before_ingestion_admission(admission, timeline_provenance)
+        """Revoke the grants of rooms this bot's sync is no longer sure of before admitting more work."""
+        self.orchestrator.agent_reply_membership_sync.pre_admit_ingestion(
+            self.config,
+            self.runtime_paths,
+            admission,
+            timeline_provenance,
+            observer_user_id=self.matrix_id.full_id,
+        )
 
     async def _after_ingestion_admission(
         self,
@@ -1433,10 +1424,15 @@ class AgentBot:
         }
         if facts.receipt_new and (admission.projected is not None or member_activity):
             self.orchestrator.observe_room_activity(event.room_id)
-        if live_member and self._router is not None:
+        if live_member:
             parsed = nio.RoomMemberEvent.from_dict(dict(event.source))
             assert isinstance(parsed, nio.RoomMemberEvent)
-            await self._router.live_membership_transition(event.room_id, parsed)
+            await self.orchestrator.agent_reply_membership_sync.apply_live_transition(
+                self.config,
+                event.room_id,
+                parsed,
+                control_user_id=self.matrix_id.full_id,
+            )
 
     async def _apply_ingestion_membership(self, admission: IngestionRecordAdmission) -> None:
         """Reconcile app state only while this admitted membership is still current."""
@@ -1456,8 +1452,8 @@ class AgentBot:
             )
             if joined:
                 self._request_call_reconciliation(room_id)
-        if joined and admission.previous_membership != "join" and self._router is not None:
-            self._router.mark_joined_for_room_state(room_id)
+        if joined != (admission.previous_membership == "join"):
+            self.steward_duties.mark_joined_for_room_state(room_id)
         if not joined and admission.previous_membership == "join":
             await self._reply_runtime.departed(room_id)
             if (runtime := get_background_runtime(self.runtime_paths)) is not None:
@@ -1467,14 +1463,9 @@ class AgentBot:
             await self._room_lifecycle.on_contact_room_left(room_id)
 
     async def ensure_rooms(self) -> None:
-        """Ensure agent is in the correct rooms based on configuration.
-
-        This consolidates room management into a single method that:
-        1. Joins configured rooms
-        2. Leaves unconfigured rooms
-        """
-        await self.join_configured_rooms()
-        await self.leave_unconfigured_rooms()
+        """Join the rooms this entity belongs in and leave the ones it no longer does."""
+        await self._room_lifecycle.join_configured_rooms()
+        await self._room_lifecycle.leave_unconfigured_rooms()
         if self._ingestion_session is not None:
             await subscribe_sliding_rooms(self._ingestion_session, self.config, self.rooms)
 
@@ -1526,11 +1517,7 @@ class AgentBot:
             await call_manager.on_room_event(room, event)
 
     async def _on_ingestion_frame_completion(self, receipt_new: bool) -> None:
-        """Publish one fully settled source frame to the bot runtime.
-
-        A completion an earlier process already admitted is replayed after a restart before any new
-        response arrives, so it does not complete this generation's first sync.
-        """
+        """Publish one fully settled source frame; a replayed completion is no first sync of this generation."""
         first_sync_response = receipt_new and not self._first_sync_done
         self._mark_sync_progress()
         if not self._accepting_work:
@@ -1540,6 +1527,7 @@ class AgentBot:
             await self._room_lifecycle.observe_trusted_sync_rooms(client.rooms)
         self._first_sync_done = self._first_sync_done or receipt_new
         await self._run_sync_response_side_effects(
+            receipt_new=receipt_new,
             first_sync_response=first_sync_response,
         )
         call_manager = self._call_manager
@@ -1655,6 +1643,10 @@ class AgentBot:
                 self._on_room_state_event,  # ty: ignore[invalid-argument-type]
                 nio.UnknownEvent,
             )
+            client.add_event_callback(
+                self.steward_duties.power_levels_event,  # ty: ignore[invalid-argument-type]
+                nio.PowerLevelsEvent,
+            )
             await self._register_call_manager_callbacks(client)
             register_desktop_pairing_receiver(
                 self.config,
@@ -1665,10 +1657,10 @@ class AgentBot:
             )
             register_model_catalog_receiver(
                 client=client,
-                agent_name=self.agent_name,
                 runtime_paths=self.runtime_paths,
                 config_getter=lambda: self.config,
                 membership_index=self._runtime_view.agent_reply_memberships,
+                answers_in_room=lambda room_id: self.orchestrator.room_poster(room_id) is self,
                 callback_wrapper=partial(_create_best_effort_task_wrapper, owner=self._runtime_view),
             )
             await register_email_invite_receiver(
@@ -1680,9 +1672,10 @@ class AgentBot:
             )
             await self.refresh_presence()
             self.running = True
+            # A running bot that does not observe yet may be in rooms no room list names: none stays proven absent.
+            self._runtime_view.agent_reply_memberships.forget_joined_rooms()
 
-            if self._router is not None:
-                await self._router.started(client)
+            await self.steward_duties.started(client)
 
             # Note: Room joining is deferred until after invitations are handled
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
@@ -1778,6 +1771,7 @@ class AgentBot:
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> None:
         """Stop the agent bot."""
+        self.invalidate_agent_reply_memberships(reason="observer_stopping")
         if shutdown_intent.stop_reason == "shutdown":
             self.begin_process_shutdown()
         elif shutdown_intent.config_reload:
@@ -1934,7 +1928,8 @@ class AgentBot:
             failures.append(error)
 
     def begin_process_shutdown(self) -> None:
-        """Close response and callback admission before any shutdown teardown yields."""
+        """Close response and callback admission, and this account's observation, before any teardown yields."""
+        self.invalidate_agent_reply_memberships(reason="observer_stopping")
         self._runtime_view.begin_process_shutdown()
         self._delivery_recovery_wake.set()
         self._journal_dispatcher.begin_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
@@ -1954,6 +1949,7 @@ class AgentBot:
                 resulting_action="drain_then_cancel_response_runtime",
             )
         self._runtime_view.begin_draining()
+        self.invalidate_agent_reply_memberships(reason="observer_stopping")
         self._delivery_recovery_wake.set()
         if shutdown_intent.stop_reason == "shutdown":
             self.begin_process_shutdown()
@@ -1966,8 +1962,7 @@ class AgentBot:
         if shutdown_budget is None:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)
             self._sync_shutdown_budget = shutdown_budget
-        if self._router is not None:
-            self._router.stopping()
+        self.steward_duties.stopping()
         if self._bot_ready_hooks_task is not None:
             # Waiting for an observer hook would spend the budget the replies drained below need to finish.
             self._bot_ready_hooks_task.cancel()
@@ -2036,6 +2031,7 @@ class AgentBot:
     async def quiesce_matrix_ingestion(self) -> None:
         """Bound source drain; unacknowledged input survives later cancellation."""
         self._runtime_view.quiesce_ingestion()
+        self.invalidate_agent_reply_memberships(reason="observer_stopping")
         session = self._ingestion_session
         if session is not None:
             try:
@@ -2080,10 +2076,14 @@ class AgentBot:
         )
         tasks = (runner, pump)
         try:
-            done, pending = await asyncio.wait(
-                tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            try:
+                done, pending = await asyncio.wait(
+                    tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                # A child ended or this loop was cancelled: its account stops observing before any cleanup is awaited.
+                self.invalidate_agent_reply_memberships(reason="receive_loop_ended")
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
@@ -2135,14 +2135,13 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.RoomMemberEvent,
     ) -> None:
-        """Forward one live room member event to the call manager, the personal-room and contact lifecycles, and the router's hooks."""
+        """Forward one live room member event to the call manager, the personal-room and contact lifecycles, and the steward duties."""
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_room_membership_event(room, event)
         await self._personal_room_lifecycle.member_event(room, event)
         await self._room_lifecycle.on_contact_member(room.room_id, event)
-        if self._router is not None:
-            await self._router.member_event(room, event)
+        await self.steward_duties.member_event(room, event)
 
     def _lookup_personal_room_target(self, agent_name: str) -> PersonalRoomTarget | None:
         """Project a connected fleet member into its service and sync readiness."""
@@ -2152,14 +2151,13 @@ class AgentBot:
         return PersonalRoomTarget(target.personal_rooms, target.first_sync_complete)
 
     def personal_room_target_ready(self) -> None:
-        """Let the router onboard a user at once because their own agent finished its first sync."""
+        """Onboard a user at once where this bot observes onboarding, because their own agent finished its first sync."""
         self._personal_room_lifecycle.target_ready()
 
     def _report_personal_room_membership_change(self, room_id: str, event_id: str) -> None:
-        """Forward a room's membership event to the router, which owns personal-room retries."""
-        router = self.orchestrator.agent_bots.get(ROUTER_AGENT_NAME)
-        if router is not None:
-            router.personal_room_membership_changed(room_id, event_id)
+        """Forward a room's membership event to every bot; the one that observes onboarding owns personal-room retries."""
+        for bot in self.orchestrator.agent_bots.values():
+            bot.personal_room_membership_changed(room_id, event_id)
 
     def personal_room_membership_changed(self, room_id: str, event_id: str) -> None:
         """Retry at once onboarding that the personal room's imported roster blocked, as its membership changed."""

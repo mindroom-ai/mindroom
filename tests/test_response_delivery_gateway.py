@@ -26,6 +26,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, _LargeMessageStrategy
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
+    ROUTE_EVENT_TYPE,
+    SILENT_SCHEDULE_EVENT_TYPE,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
 )
 from mindroom.delivery_gateway import (
@@ -68,6 +70,7 @@ from mindroom.matrix.large_messages import (
     calculate_event_size,
     fit_reasoning_to_ordinary_event,
 )
+from mindroom.matrix.room_history_reads import UnresolvedOpaqueRoomHistoryError
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import NoteKind, Presentation, Segment, note_segment
 from mindroom.reply_scope import current_span, initial_write
@@ -4338,3 +4341,133 @@ async def test_compaction_lifecycle_success_edits_notice_with_html_body(tmp_path
     assert sent_content["formatted_body"] == (
         "<em>\U0001f4e6 Compacted 12 runs: 30,000 → 12,000 / 100,000 history budget</em>"
     )
+
+
+def _history_event(event_id: str, event_type: str, *, sender: str = "@alice:localhost", **content: object) -> nio.Event:
+    """Return one event of a room's history as a `/messages` page holds it."""
+    source = {"event_id": event_id, "sender": sender, "type": event_type, "origin_server_ts": 1, "content": content}
+    return nio.UnknownEvent(source, event_type)
+
+
+def _own_route(event_id: str, *routed: str) -> nio.Event:
+    route = {"entity": "@other:localhost", "event_ids": list(routed)}
+    return _history_event(event_id, ROUTE_EVENT_TYPE, sender=_AGENT_USER_ID, **{ROUTE_EVENT_TYPE: route})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uploads", [True, False])
+async def test_a_route_too_long_for_one_event_is_sent_with_its_file_or_not_at_all(
+    tmp_path: Path,
+    uploads: bool,
+) -> None:
+    """A route's prompt, such as a long scheduled one, reaches its responder whole: it is never sent cut short."""
+    gateway = _gateway(tmp_path)
+    client = gateway.deps.runtime.client
+    uploaded = nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/route"})
+    client.upload.return_value = (uploaded if uploads else nio.UploadError("unavailable"), None)
+    client.room_send.return_value = nio.RoomSendResponse(event_id="$route", room_id=_ROOM_ID)
+    route = {"entity": "@other:localhost", "event_ids": ["$question"]}
+
+    sent = await gateway.send_route(_ROOM_ID, {ROUTE_EVENT_TYPE: route, "body": "Poll the queue. " * 5_000})
+
+    if not uploads:
+        assert sent is None
+        client.room_send.assert_not_awaited()
+        return
+    assert sent == "$route"
+    wire = client.room_send.await_args.kwargs
+    assert wire["message_type"] == ROUTE_EVENT_TYPE
+    assert wire["content"][ROUTE_EVENT_TYPE] == route
+    assert wire["content"]["url"] == "mxc://localhost/route"
+    assert "io.mindroom.long_text" in wire["content"]
+
+
+def _history(gateway: DeliveryGateway, *pages: list[nio.Event]) -> AsyncMock:
+    """Serve the room's history newest first, one `/messages` page per list, each but the last with a next page."""
+    responses = [
+        nio.RoomMessagesResponse(_ROOM_ID, page, "", f"page-{index}" if index < len(pages) else None)
+        for index, page in enumerate(pages, start=1)
+    ]
+    gateway.deps.runtime.client.room_messages = AsyncMock(side_effect=responses)
+    return gateway.deps.runtime.client.room_messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("readable_route", [False, True])
+async def test_an_unreadable_event_of_its_own_may_be_the_route_a_steward_sent(
+    tmp_path: Path,
+    readable_route: bool,
+) -> None:
+    """A route the steward can read is adopted; without one, its own ciphertext since the message may hide it."""
+    gateway = _gateway(tmp_path)
+    own_ciphertext = _history_event("$opaque", "m.room.encrypted", sender=_AGENT_USER_ID, ciphertext="opaque")
+    route = [_own_route("$route", "$question")] if readable_route else []
+    _history(gateway, [own_ciphertext, *route, _history_event("$question", "m.room.message", body="who can help?")])
+
+    if readable_route:
+        assert await gateway.sent_route(_ROOM_ID, ["$question"]) == "$route"
+    else:
+        with pytest.raises(UnresolvedOpaqueRoomHistoryError, match="cannot read"):
+            await gateway.sent_route(_ROOM_ID, ["$question"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("newest_first", "routed"),
+    [
+        # The steward's own encrypted schedule trigger is the message it routes.
+        (["$fire"], ["$fire"]),
+        # Its ciphertext stands between the messages of a batch, so it predates the complete batch.
+        (["$second", "$opaque", "$first"], ["$first", "$second"]),
+    ],
+    ids=["own-trigger", "inside-batch"],
+)
+async def test_own_ciphertext_no_newer_than_the_routed_messages_is_no_route(
+    tmp_path: Path,
+    newest_first: list[str],
+    routed: list[str],
+) -> None:
+    """A route follows every message it names, so the lookup ends at the newest of them with no route sent."""
+    gateway = _gateway(tmp_path)
+    own = {"$fire", "$opaque"}
+    page = [
+        _history_event(event_id, "m.room.encrypted", sender=_AGENT_USER_ID, ciphertext="opaque")
+        if event_id in own
+        else _history_event(event_id, "m.room.message", body="who can help?")
+        for event_id in newest_first
+    ]
+    older = [_history_event("$older", "m.room.message", body="earlier")]
+    requests = _history(gateway, page, older)
+
+    assert await gateway.sent_route(_ROOM_ID, routed) is None
+    assert requests.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_route_lookup_ends_at_its_route_or_at_the_message_it_routes(tmp_path: Path) -> None:
+    """The lookup reads no page past the route it finds, nor past the routed message, a silent trigger included."""
+    gateway = _gateway(tmp_path)
+    older = [_history_event(f"$older-{index}", "m.room.message", body="earlier") for index in range(3)]
+    # An own event older than the routed message is never its route, readable or not.
+    older_ciphertext = _history_event("$old-opaque", "m.room.encrypted", sender=_AGENT_USER_ID, ciphertext="opaque")
+
+    requests = _history(gateway, [_own_route("$route", "$question")], [older[0]], [older[1]])
+    assert await gateway.sent_route(_ROOM_ID, ["$question"]) == "$route"
+    assert requests.await_count == 1
+
+    trigger = _history_event("$trigger", SILENT_SCHEDULE_EVENT_TYPE, sender="@other:localhost", body="poll")
+    requests = _history(gateway, [_own_route("$unrelated", "$other"), trigger, older_ciphertext], [older[0]])
+    assert await gateway.sent_route(_ROOM_ID, ["$trigger"]) is None
+    assert requests.await_count == 1
+    assert SILENT_SCHEDULE_EVENT_TYPE in requests.await_args.kwargs["message_filter"]["types"]
+
+
+@pytest.mark.asyncio
+async def test_a_route_lookup_gives_up_at_its_page_bound(tmp_path: Path) -> None:
+    """A room whose recent history holds neither the route nor the routed message is read for ten pages, no more."""
+    gateway = _gateway(tmp_path)
+    pages = [[_history_event(f"$unrelated-{index}", "m.room.message", body="chatter")] for index in range(15)]
+    requests = _history(gateway, *pages)
+
+    assert await gateway.sent_route(_ROOM_ID, ["$question"]) is None
+    assert requests.await_count == 10
