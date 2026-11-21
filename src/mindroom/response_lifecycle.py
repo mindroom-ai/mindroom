@@ -59,6 +59,7 @@ from mindroom.tool_jobs.control import ReplyToolCalls, pending_human_messages_co
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
+    from contextlib import AbstractAsyncContextManager
 
     from structlog.stdlib import BoundLogger
 
@@ -477,13 +478,11 @@ class ResponseLifecycleCoordinator:
         return tuple(approval_id for approval_id, key in self._approval_holds.items() if key == lifecycle_key)
 
     def _has_active_response_for_thread_key(self, lifecycle_key: ResponseLifecycleKey) -> bool:
-        if lifecycle_key in self._lock_only_owners:
-            return False
         queued_signal = self._thread_queued_signals.get(lifecycle_key)
         if queued_signal is not None and queued_signal.has_active_response_turn():
             return True
         lifecycle_lock = self._response_lifecycle_locks.get(lifecycle_key)
-        return lifecycle_lock.locked() if lifecycle_lock is not None else False
+        return lifecycle_lock is not None and lifecycle_lock.locked() and lifecycle_key not in self._lock_only_owners
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target already has an active turn."""
@@ -652,9 +651,8 @@ class ResponseLifecycleCoordinator:
         signal_queued_message: bool,
     ) -> str | None:
         existing_turn = queued_signal.begin_response_turn()
-        if not signal_queued_message or response_envelope.target.lifecycle_key in self._lock_only_owners:
-            return None
-        if not (existing_turn or lifecycle_lock.locked()):
+        lock_signals = lifecycle_lock.locked() and response_envelope.target.lifecycle_key not in self._lock_only_owners
+        if not signal_queued_message or not (existing_turn or lock_signals):
             return None
         if not self._is_news(response_envelope):
             return None
@@ -741,21 +739,27 @@ class ResponseLifecycleCoordinator:
         self._consume_queued_human_notice(notice=notice, queued_signal=queued_signal)
         queued_signal.finish_response_turn()
 
-    async def _run_lock_only[T](self, target: MessageTarget, op: Callable[[MessageTarget], Awaitable[T]]) -> T:
+    async def run_lock_only[T](
+        self,
+        target: MessageTarget,
+        admit: Callable[[], AbstractAsyncContextManager[None]],
+        op: Callable[[], Awaitable[T]],
+    ) -> T:
+        """Serialize non-reply work without occupying admission while an approval is paused."""
         key, lock = target.lifecycle_key, self._response_lifecycle_lock(target)
         self._lock_only_users[key] += 1
         try:
             while True:
-                async with lock:
-                    if key not in self._approval_holds.values():
-                        self._lock_only_owners.add(key)
-                        try:
-                            return await op(target)
-                        finally:
-                            self._lock_only_owners.remove(key)
-                    released = self._approval_released
-                # An approval resumes under this lock, so wait outside it.
-                await released.wait()
+                while key in self._approval_holds.values():
+                    await self._approval_released.wait()
+                async with admit(), lock:
+                    if key in self._approval_holds.values():
+                        continue  # The preceding reply paused; release admission and the lock before waiting.
+                    self._lock_only_owners.add(key)
+                    try:
+                        return await op()
+                    finally:
+                        self._lock_only_owners.remove(key)
         finally:
             self._lock_only_users[key] -= 1
             if not self._lock_only_users[key]:
@@ -770,12 +774,9 @@ class ResponseLifecycleCoordinator:
         locked_operation: Callable[[MessageTarget], Awaitable[_LockedResponseResult]],
         signal_queued_message: bool = True,
         mid_turn_gate: MidTurnGate | None = None,
-        lock_only: bool = False,
     ) -> _LockedResponseResult:
         """Run one locked response operation with shared queued-message bookkeeping."""
         self._assert_target_matches_envelope(target, response_envelope)
-        if lock_only:
-            return await self._run_lock_only(target, locked_operation)
         reservation = _current_response_lifecycle_reservation.get()
         lifecycle_lock, queued_signal, notice = self._start_response_turn(
             target=target,

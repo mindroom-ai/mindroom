@@ -1024,7 +1024,9 @@ class AgentBot:
         self._journal_dispatcher.wake()
 
     async def admit_compaction(self, target: MessageTarget, requester_id: str) -> bool:
-        """Give this target a durable fold, except in contact rooms, where the flag suffices."""
+        """Give a joined target a durable fold, except in contact rooms, where the flag suffices."""
+        if self.client is None or target.room_id not in self.client.rooms:
+            return False
         if contact_room(self.config, self.runtime_paths, target.room_id, self.agent_name) is not None:
             return False
         origin = target.reply_to_event_id

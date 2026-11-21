@@ -52,6 +52,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.matrix.guarded_rooms import allowed_send, guarded_room
 from mindroom.matrix.presence import should_use_streaming
+from mindroom.message_target import MessageTarget
 from mindroom.mid_turn import MidTurnMode
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
@@ -169,7 +170,6 @@ if TYPE_CHECKING:
     from mindroom.hooks import EnrichmentItem, MessageEnvelope
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.message_target import MessageTarget
     from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.reply_turn.inbox import InboxResponses
@@ -543,7 +543,6 @@ class ResponseRunner:
         response_kind: str,
         locked_operation: Callable[[MessageTarget], Awaitable[SourceFate]],
         signal_queued_message: bool = True,
-        lock_only: bool = False,
     ) -> SourceFate:
         """Admit one response, then run it under its conversation's lock; return what it did with its sources."""
         gate = self.deps.runtime.response_admission_gate
@@ -591,9 +590,7 @@ class ResponseRunner:
                         target=request.response_envelope.target,
                         response_envelope=request.response_envelope,
                         pipeline_timing=request.pipeline_timing,
-                        mid_turn_gate=None
-                        if lock_only
-                        else _mid_turn_for_request(
+                        mid_turn_gate=_mid_turn_for_request(
                             request,
                             self.deps.runtime.config,
                             self.deps.runtime_paths,
@@ -606,7 +603,6 @@ class ResponseRunner:
                             locked_operation=locked_operation,
                         ),
                         signal_queued_message=signal_queued_message and not request.quiet,
-                        lock_only=lock_only,
                     )
                     handle = current_span()
                     if handle is not None and not handle.exited:
@@ -833,25 +829,37 @@ class ResponseRunner:
             await self.deps.settle_ignored_sources((event.event_id,))
 
     async def _run_compaction(self, event: JournalEvent) -> None:
-        key = follow_up_key(event, self.deps.agent_name)
-        origin = str(event.source["origin_event_id"])
-        envelope = follow_up_envelope(key, follow_up_id=event.event_id, sender_id=self.deps.matrix_full_id, prompt="")
-        request = ResponseRequest((), "", envelope, ResponseSources((event.event_id,), (event.event_id,)))
-
-        async def fold(target: MessageTarget) -> SourceFate:
-            await self._fold_compaction(target, key.requester_id, origin)
-            return Owned()
-
-        await self._run_locked_response_lifecycle(
-            request,
-            response_kind="compaction",
-            locked_operation=fold,
-            signal_queued_message=False,
-            lock_only=True,
-        )
+        try:
+            target = MessageTarget.resolve(event.room_id, event.thread_id, str(event.source["origin_event_id"]))
+            fold = partial(self._fold_compaction, target, str(event.source["requester_id"]), event.event_id)
+            await self.lifecycle_coordinator.run_lock_only(target, self.deps.runtime.admission_fence, fold)
+        except ResponseAdmissionRefusedError:
+            raise  # Replacement must replay the pending source.
+        except Exception:
+            self.deps.logger.exception("manual_compaction_preparation_failed", source=event.event_id)
         await self.deps.settle_ignored_sources((event.event_id,))
 
-    async def _fold_compaction(self, target: MessageTarget, requester_id: str, origin: str) -> None:
+    async def _compaction_epoch(self, target: MessageTarget, origin: str, source_id: str) -> int | None:
+        store, room = self.deps.replies.store, target.room_id
+        if await store.room_history_recovery(room) is not None:
+            return None
+        # Seeing the command fences sync lag; a current hydration marker fences history from before a rejoin.
+        try:
+            async with asyncio.timeout(3):
+                while (owner := await store.admitted_membership_owner(origin)) is None:  # noqa: ASYNC110
+                    await asyncio.sleep(0.05)
+        except TimeoutError:
+            return None
+        epoch = await store.membership_epoch(room)
+        if owner != (room, epoch) or owner != await store.admitted_membership_owner(source_id):
+            return None
+        return (
+            epoch if await store.conversation_is_hydrated(room_id=room, thread_id=target.resolved_thread_id) else None
+        )
+
+    async def _fold_compaction(self, target: MessageTarget, requester_id: str, source_id: str) -> None:
+        origin = target.reply_to_event_id
+        assert origin is not None
         config, paths = self.deps.runtime.config, self.deps.runtime_paths
         scope = self.deps.state_writer.history_scope()
         identity = self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester_id)
@@ -862,18 +870,11 @@ class ResponseRunner:
             execution_identity=identity,
         ):
             return
-        store = self.deps.replies.store
-        if await store.room_history_recovery(target.room_id) is not None:
-            return
-        # The command owner's journal can be ahead of ours, including earlier redactions.
-        try:
-            async with asyncio.timeout(3):
-                while await store.load_event(origin) is None:  # noqa: ASYNC110 — another bot admits the origin
-                    await asyncio.sleep(0.05)
-        except TimeoutError:
+        store, room, thread = self.deps.replies.store, target.room_id, target.resolved_thread_id
+        if (epoch := await self._compaction_epoch(target, origin, source_id)) is None:
             return
         budget = TurnBudget(self.deps.runtime.orchestrator.budgets, requester_id, log_fallback=False)
-        plan = resolve_manual_compaction_plan(scope, config, paths, target.room_id, target.resolved_thread_id, budget)
+        plan = resolve_manual_compaction_plan(scope, config, paths, room, thread, budget)
         if isinstance(plan, str):
             return
         model_name, inputs = plan
@@ -882,11 +883,9 @@ class ResponseRunner:
             return
         redactions = partial(self.deps.redacted_history_events, target)
         await remove_history_of_redacted_events(context.storage, session, redactions)
-        if await store.room_history_recovery(target.room_id) is not None:
+        if await store.room_history_recovery(room) is not None or epoch != await store.membership_epoch(room):
             return
-        model = await run_blocking_until_complete(
-            lambda: provider_registry.build_model_provider(config, paths, model_name, execution_identity=identity),
-        )
+        build = partial(provider_registry.build_model_provider, config, paths, model_name, execution_identity=identity)
         tool_context = self.deps.tool_runtime.build_turn_context(
             target,
             user_id=requester_id,
@@ -895,7 +894,10 @@ class ResponseRunner:
         )
         lifecycle = MatrixCompactionLifecycle(self.deps.delivery_gateway, target, origin)
         with tool_runtime_context(tool_context):
-            await compact_scope_now(context, inputs, model, lifecycle, config, paths)
+            empty = await compact_scope_now(context, inputs, build, lifecycle, config, paths)
+        if empty:
+            notice = SendTextRequest(target, "Nothing to compact.", extra_content={"msgtype": "m.notice"})
+            await self.deps.delivery_gateway.send_text(notice)
 
     async def _follow_up_due(self, request: ResponseRequest) -> bool:
         """Decide under the conversation lock whether a follow-up still has jobs to report.

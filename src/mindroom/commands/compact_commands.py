@@ -135,6 +135,9 @@ async def _compact(
     if unavailable is not None:
         return f"❌ `{name}` cannot compact its context because {unavailable}."
     assert budget.requester_id is not None
-    if admit_compaction is not None and await admit_compaction(name, target, budget.requester_id):
-        return f"✅ `{name}` is compacting now."
+    try:
+        if admit_compaction is not None and await admit_compaction(name, target, budget.requester_id):
+            return f"✅ `{name}` is compacting now."
+    except Exception:
+        logger.exception("compact_admission_failed", responder=name, **target.log_context)
     return f"✅ `{name}` compacts its context before its next reply in this {'room' if room_mode else 'thread'}."

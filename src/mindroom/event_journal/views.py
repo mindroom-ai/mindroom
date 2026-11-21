@@ -143,6 +143,10 @@ class DispatchView(ReplayView):
         """Return one admitted event."""
         return await self._read(journal.load, event_id)
 
+    async def admitted_membership_owner(self, event_id: str) -> tuple[str, int] | None:
+        """Return the room and membership epoch that admitted this event."""
+        return await self._read(journal.admitted_membership_owner, event_id)
+
     async def claim_semantic_consumer(
         self,
         event_id: str,
