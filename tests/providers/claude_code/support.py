@@ -13,9 +13,10 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ToolSpec
 from mindroom.providers.claude_code.adapter import ClaudeCodeProvider, build_provider
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 if TYPE_CHECKING:
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.constants import RuntimePaths
 
 _FAKE = Path(__file__).with_name("fake_claude.py")
 LOOKUP = ToolSpec(
@@ -23,6 +24,16 @@ LOOKUP = ToolSpec(
     description="Look up a marker by key.",
     parameters={"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
     strict=None,
+)
+# One invented conversation, whose requests may continue one another's idle process.
+CONVERSATION = ToolExecutionIdentity(
+    channel="matrix",
+    agent_name="code",
+    requester_id="@alice:invented.example",
+    room_id="!room:invented.example",
+    thread_id="$thread",
+    resolved_thread_id="$thread",
+    session_id="session-1",
 )
 
 
@@ -41,6 +52,19 @@ class FakeCli:
         entries = [json.loads(line) for line in self.log.read_text().splitlines()]
         return [entry for entry in entries if entry["event"] == event]
 
+    @property
+    def runtime_paths(self) -> RuntimePaths:
+        """The runtime whose storage this executable's processes start under."""
+        return resolve_runtime_paths(
+            config_path=self.storage_root.parent / "config.yaml",
+            storage_path=self.storage_root,
+        )
+
+    def directories(self) -> list[Path]:
+        """Return the directories the route keeps for its processes."""
+        root = self.storage_root / "claude_code"
+        return sorted(root.iterdir()) if root.exists() else []
+
     def provider(
         self,
         *,
@@ -53,15 +77,12 @@ class FakeCli:
             id="claude-invented-1",
             extra_kwargs={"cli_path": str(self.path), **extra_kwargs},
         )
-        runtime_paths = resolve_runtime_paths(
-            config_path=self.storage_root.parent / "config.yaml",
-            storage_path=self.storage_root,
-        )
-        return build_provider(model_config, runtime_paths, execution_identity=execution_identity)
+        return build_provider(model_config, self.runtime_paths, execution_identity=execution_identity)
 
 
 def fake_cli(tmp_path: Path, *processes: dict[str, Any]) -> FakeCli:
     """Write a ``claude`` executable that plays ``processes``, one per start."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     scenario = tmp_path / "scenario.json"
     scenario.write_text(json.dumps({"processes": list(processes)}))
     log = tmp_path / "claude.jsonl"

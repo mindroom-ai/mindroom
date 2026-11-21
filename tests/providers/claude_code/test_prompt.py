@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+from mindroom.llm.errors import ProviderError
 from mindroom.llm.media import File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ToolSpec
@@ -15,6 +16,7 @@ from mindroom.providers.claude_code.prompt import (
     CONTINUE_TEXT,
     Emitted,
     decide,
+    emitted,
     rebuild_input,
     short_name,
     tool_names,
@@ -57,10 +59,17 @@ def test_a_name_claude_code_cannot_take_gets_a_stable_hash_suffix() -> None:
 
 
 def test_tool_names_map_each_offered_name_back_to_its_tool() -> None:
-    names = tool_names([_spec("lookup"), _spec("b" * 90)])
+    names = tool_names([_spec("lookup"), _spec("b" * 90)], _PROVIDER)
 
     assert names["lookup"] == "lookup"
     assert names[short_name("b" * 90)] == "b" * 90
+
+
+def test_two_tools_claude_code_would_call_by_one_name_are_refused() -> None:
+    hashed = short_name("web.search")
+
+    with pytest.raises(ProviderError, match=f"web.search and {hashed} by one name"):
+        tool_names([_spec("web.search"), _spec(hashed)], _PROVIDER)
 
 
 # --- rebuilding a conversation ----------------------------------------------------------------------------------------
@@ -133,11 +142,51 @@ def test_images_stay_real_blocks_in_a_rebuilt_conversation() -> None:
     assert blocks.index(images[0]) < len(blocks) - 1
 
 
+def test_a_tool_results_images_stay_real_blocks_in_a_rebuilt_conversation() -> None:
+    _system, blocks = rebuild_input(
+        [
+            Message(role="user", content="Take a screenshot."),
+            Message(role="assistant", tool_calls=[_call("call-1", "screenshot", "{}")]),
+            Message(
+                role="tool",
+                content="Captured.",
+                tool_call_id="call-1",
+                tool_name="screenshot",
+                images=[Image(content=_PNG, format="png")],
+            ),
+        ],
+        _PROVIDER,
+    )
+
+    kinds = [block["type"] for block in blocks]
+    assert kinds == ["text", "image", "text"]
+    assert str(blocks[0]["text"]).endswith('"output": "Captured."}\n</tool-result>')
+    assert str(blocks[2]["text"]).endswith(CONTINUE_TEXT)
+
+
+def test_a_user_message_of_several_blocks_reaches_claude_code_whole_in_a_new_process_and_a_live_one() -> None:
+    answer = Message(role="assistant", content="Ready.")
+    asked = Message(
+        role="user",
+        content=[{"type": "text", "text": "First part."}, {"type": "text", "text": "Second part."}],
+        images=[Image(content=_PNG, format="png")],
+    )
+
+    _system, cold = rebuild_input([Message(role="user", content="Hi"), answer, asked], _PROVIDER)
+    warm = decide(emitted("Ready.", []), [answer, asked], _PROVIDER)
+
+    assert warm is not None
+    assert [block["type"] for block in warm.blocks] == ["text", "image"]
+    assert warm.blocks[0]["text"] == "First part.\nSecond part."
+    assert cold[-1] == warm.blocks[-1]
+    assert str(cold[-2]["text"]).endswith("</conversation-checkpoint>\nFirst part.\nSecond part.")
+
+
 # --- continuing a live session ----------------------------------------------------------------------------------------
 
 
 def _parked(*ids: str) -> Emitted:
-    return Emitted(content=None, tool_call_ids=ids)
+    return emitted(None, [_call(call_id) for call_id in ids])
 
 
 def test_a_parked_turn_continues_with_one_result_per_waiting_call() -> None:
@@ -232,19 +281,40 @@ def test_a_parked_turn_rebuilds_when_the_request_does_not_answer_it_exactly(tail
     assert decide(_parked("t1", "t2"), [answered, *tail], _PROVIDER) is None
 
 
-def test_a_parked_turn_rebuilds_when_its_assistant_message_was_rewritten() -> None:
-    tail = [
-        Message(role="assistant", tool_calls=[_call("t1"), _call("other")]),
-        Message(role="tool", content="one", tool_call_id="t1"),
-        Message(role="tool", content="two", tool_call_id="other"),
-    ]
+@pytest.mark.parametrize(
+    "answered",
+    [
+        pytest.param(Message(role="assistant", tool_calls=[_call("t1"), _call("other")]), id="another call id"),
+        pytest.param(Message(role="assistant", tool_calls=[_call("t2"), _call("t1")]), id="another order"),
+        pytest.param(
+            Message(role="assistant", content="Edited.", tool_calls=[_call("t1"), _call("t2")]),
+            id="the same ids under another text",
+        ),
+        pytest.param(
+            Message(role="assistant", tool_calls=[_call("t1"), _call("t2", name="delete")]),
+            id="the same id for another tool",
+        ),
+        pytest.param(
+            Message(role="assistant", tool_calls=[_call("t1"), _call("t2", arguments='{"key": "b"}')]),
+            id="the same id with other arguments",
+        ),
+    ],
+)
+def test_a_parked_turn_rebuilds_when_its_assistant_message_was_rewritten(answered: Message) -> None:
+    results = [Message(role="tool", content="x", tool_call_id=call["id"]) for call in answered.tool_calls or ()]
 
-    assert decide(_parked("t1", "t2"), tail, _PROVIDER) is None
+    assert decide(_parked("t1", "t2"), [answered, *results], _PROVIDER) is None
+
+
+def test_a_parked_turn_continues_when_only_the_spelling_of_its_arguments_changed() -> None:
+    answered = Message(role="assistant", tool_calls=[_call("t1", arguments='{ "key":"a" }')])
+
+    assert decide(_parked("t1"), [answered, Message(role="tool", content="x", tool_call_id="t1")], _PROVIDER)
 
 
 def test_an_idle_session_continues_with_the_new_user_messages() -> None:
     resume = decide(
-        Emitted(content="It is LILAC-HERON.", tool_call_ids=()),
+        emitted("It is LILAC-HERON.", []),
         [Message(role="assistant", content="It is LILAC-HERON."), Message(role="user", content="And for b?")],
         _PROVIDER,
     )
@@ -273,4 +343,4 @@ def test_an_idle_session_continues_with_the_new_user_messages() -> None:
     ],
 )
 def test_an_idle_session_rebuilds_when_the_request_does_not_follow_its_answer(tail: list[Message]) -> None:
-    assert decide(Emitted(content="It is LILAC-HERON.", tool_call_ids=()), tail, _PROVIDER) is None
+    assert decide(emitted("It is LILAC-HERON.", []), tail, _PROVIDER) is None

@@ -6,7 +6,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-import pytest_asyncio
 
 from mindroom.agent_loop.model_loop import (
     EMPTY_REQUEST,
@@ -18,8 +17,8 @@ from mindroom.agent_loop.model_loop import (
     run_model_loop,
 )
 from mindroom.agent_loop.tools import PreparedTools
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.events import ToolCompleted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
@@ -30,7 +29,6 @@ from tests.agent_loop.helpers import context, spec, toolkit
 from tests.providers.claude_code.support import call, fake_cli
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.agent_loop.model_loop import LoopEvent
@@ -49,12 +47,6 @@ _TOOL_TURN = [
 ]
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def _no_processes_left() -> AsyncIterator[None]:
-    yield
-    await SESSIONS.close_all()
-
-
 def lookup(key: str) -> str:
     """Look up a marker by key.
 
@@ -68,11 +60,7 @@ def lookup(key: str) -> str:
 async def _run(cli: FakeCli, hooks: LoopHooks = NO_HOOKS) -> tuple[list[LoopEvent], RunRecord, list[Message]]:
     model = {"provider": "claude_code", "id": "claude-invented-1", "extra_kwargs": {"cli_path": str(cli.path)}}
     config = Config.model_validate({"models": {"default": model}})
-    runtime_paths = resolve_runtime_paths(
-        config_path=cli.storage_root.parent / "config.yaml",
-        storage_path=cli.storage_root,
-    )
-    agent = spec(build_model_provider(config, runtime_paths), toolkit(lookup))
+    agent = spec(build_model_provider(config, cli.runtime_paths), toolkit(lookup))
     messages = [Message(role="system", content="You are Code."), Message(role="user", content="Markers for a, b, c?")]
     record = RunRecord(run_id="run-1", agent_id="code", metrics=RunMetrics())
     events = [
@@ -132,13 +120,11 @@ async def test_history_rewritten_mid_turn_rebuilds_a_new_process_from_mindrooms_
     assert events[-1] == LoopEnded(paused=False)
     assert record.content == "Looking.\n\nLILAC-HERON+LEMON-IBIS"
     assert len(cli.events("spawn")) == 2
-    # The parked process never got a result: it rests until its time to live passes, and the new process read the
-    # results as history.
+    # The parked process never got a result and was closed, and the new process read the results as history.
+    await wait_for_background_tasks(owner=SESSIONS)
     assert cli.events("tool_result") == []
-    assert sorted(session.emitted.tool_call_ids for session in SESSIONS.resting.values() if session.emitted) == [
-        (),
-        ("toolu_a", "toolu_b"),
-    ]
+    assert SESSIONS.resting == {}
+    assert len(cli.events("exit")) == 2
     history = cli.events("user")[1]["content"][0]["text"]
     assert "Summary: the user wants the markers for a, b and c." in history
     assert '"output": "LILAC-HERON"' in history

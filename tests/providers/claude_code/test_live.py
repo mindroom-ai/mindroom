@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -21,14 +22,15 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import RunMetrics
-from mindroom.providers.claude_code.session import SESSIONS
+from mindroom.providers.claude_code import session as session_module
 from mindroom.providers.registry import build_model_provider
 from tests.agent_loop.helpers import context, spec, toolkit
+from tests.providers.claude_code.support import CONVERSATION
 
 pytestmark = [
     pytest.mark.asyncio,
     pytest.mark.skipif(
-        not os.environ.get("MINDROOM_CLAUDE_CODE_LIVE_TEST"),
+        os.environ.get("MINDROOM_CLAUDE_CODE_LIVE_TEST") != "1",
         reason="set MINDROOM_CLAUDE_CODE_LIVE_TEST=1 to spend a few requests of the signed-in Claude subscription",
     ),
 ]
@@ -71,18 +73,23 @@ def _transcripts() -> set[Path]:
 @pytest.mark.timeout(180)
 async def test_a_tool_turn_runs_on_the_signed_in_subscription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert shutil.which("claude"), "the live test needs `claude` on PATH"
-    # A key or token in the environment would be used instead of the subscription, and the route refuses it.
-    for variable in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
-        monkeypatch.delenv(variable, raising=False)
     _calls.clear()
     transcripts = _transcripts()
+    started = []
+    start = session_module.start
+
+    async def counted(**kwargs: Any) -> session_module.LiveSession:  # noqa: ANN401 - whatever ``start`` takes
+        started.append(kwargs["model"])
+        return await start(**kwargs)
+
+    monkeypatch.setattr(session_module, "start", counted)
     config = Config.model_validate({"models": {"default": {"provider": "claude_code", "id": "claude-haiku-5-5"}}})
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data")
-    agent = spec(build_model_provider(config, runtime_paths), toolkit(lookup, confirm))
+    agent = spec(build_model_provider(config, runtime_paths, execution_identity=CONVERSATION), toolkit(lookup, confirm))
     messages = [Message(role="system", content="You are a test assistant."), Message(role="user", content=_PROMPT)]
-    record = RunRecord(run_id="run-1", agent_id="code", metrics=RunMetrics())
 
-    try:
+    async def turn(run_id: str) -> RunRecord:
+        record = RunRecord(run_id=run_id, agent_id="code", metrics=RunMetrics())
         events = [
             event
             async for event in run_model_loop(
@@ -96,19 +103,23 @@ async def test_a_tool_turn_runs_on_the_signed_in_subscription(tmp_path: Path, mo
                 request_template=EMPTY_REQUEST,
             )
         ]
-        # One process served every request of the turn, and it now rests idle.
-        assert len(SESSIONS.live) == 1
-    finally:
-        await SESSIONS.close_all()
+        assert events[-1] == LoopEnded(paused=False)
+        return record
 
-    assert events[-1] == LoopEnded(paused=False)
-    assert "COPPER-OTTER" in (record.content or "")
+    first = await turn("run-1")
+    answers = [message for message in messages if message.role == "assistant"]
+    messages.append(Message(role="user", content="Reply with only the word DONE."))
+    second = await turn("run-2")
+
+    assert "COPPER-OTTER" in (first.content or "")
+    assert "DONE" in (second.content or "")
     assert sorted(_calls, key=str) == [
         ("confirm", ["LEMON-IBIS", "LILAC-HERON"]),
         ("lookup", "a"),
         ("lookup", "b"),
     ]
-    answers = [message for message in messages if message.role == "assistant"]
+    # One process served every request of the tool turn, parked on its calls, and then the next user message, idle.
+    assert started == ["claude-haiku-5-5"]
     assert len(answers) >= 3
     # The requests after the first continue the same Claude Code turn, so they read its prompt from the cache.
     assert answers[-1].metrics.tokens.cache_read_tokens > 0

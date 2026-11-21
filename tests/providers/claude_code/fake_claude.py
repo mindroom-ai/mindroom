@@ -6,25 +6,35 @@ per line. Every value in a scenario is invented.
 
 A scenario is ``{"processes": [process, ...]}``; a process past the last scripted one replays the last. A process is::
 
-    {"version": "2.1.328", "account": {...}, "extra_tools": [...], "mcp_status": "connected",
+    {"version": "2.1.328", "account": {...}, "mcp_status": "connected", "status": [...], "init": {...},
      "turns": [[step, ...], ...]}
 
-with one turn per user message it receives. A step is one model message::
+with one turn per user message it receives. ``status`` replaces the MCP servers it reports before its first turn,
+and ``init`` replaces fields of the message that starts each turn: a null field is left out, and a null ``init``
+sends no such message. A step is one model message::
 
     {"thinking": "...", "text": "...", "tools": [{"id": "toolu_a", "name": "lookup", "input": {...}}],
      "usage": {...}, "stop_reason": "end_turn", "call_before_stop": false, "result_before_stop": false,
-     "omit_tool_use_id": false, "error": "rate_limit"}
+     "omit_tool_use_id": false, "error": "rate_limit", "start_text": false, "complete_only": false,
+     "abandon": false, "cancel": false, "repeat": "toolu_a"}
 
 whose text may hold ``{toolu_a}`` for the text an earlier tool call returned and whose first tool call can start,
 or also finish, before the message ends, or one of ``{"rate_limit": {...}}``,
-``{"result": {...}}`` to end the turn with those result fields, and ``{"exit": 1}`` to die. A step with ``error`` is
-the placeholder message Claude Code writes for a request that failed.
+``{"result": {...}}`` to end the turn with those result fields, ``{"exit": 1}`` to die, and
+``{"die_after_result": true}`` to die once the turn has ended. A step with ``error`` is the placeholder message
+Claude Code writes for a request that failed. ``start_text`` puts the first half of the text in the event that
+starts its block, and ``complete_only`` sends the message whole, without streaming it and without running its
+tools. A tool with ``"mcp": {"name": ..., "input": ...}`` reaches the tool server as that other call, and one with
+``"hidden": true`` reaches it without the model having made it. ``abandon`` starts each tool call and goes on
+without its result, ``cancel`` also cancels it, and ``repeat`` calls the tool of that id once more after the
+message's calls returned.
 """
 # ruff: noqa: D102
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -46,6 +56,7 @@ class FakeClaude:
         self.results: dict[str, str] = {}
         self.usage = dict.fromkeys(DEFAULT_USAGE, 0)
         self.messages = 0
+        self.rpc_id = 10
         self.queued: list[dict[str, Any]] = []
 
     def log(self, event: str, **fields: object) -> None:
@@ -104,6 +115,13 @@ class FakeClaude:
                 "account": self.process.get("account", {"subscriptionType": "Claude Max", "apiProvider": "firstParty"}),
                 "claude_code_version": self.process.get("version", "2.1.328"),
             }
+        elif request["subtype"] == "mcp_status":
+            if self.tools is None:
+                self.connect_tools()
+            assert self.tools is not None
+            names = [{"name": tool.rpartition("__")[2]} for tool in self.tools]
+            servers = [{"name": server, "status": self.status(), "tools": names} for server in self.servers()]
+            response = {"mcpServers": self.process.get("status", servers)}
         else:
             self.log(request["subtype"])
         self.send(
@@ -112,6 +130,9 @@ class FakeClaude:
                 "response": {"subtype": "success", "request_id": message["request_id"], "response": response},
             },
         )
+
+    def status(self) -> str:
+        return self.process.get("mcp_status", "connected")
 
     def servers(self) -> list[str]:
         if "--mcp-config" not in self.args:
@@ -138,30 +159,38 @@ class FakeClaude:
         if self.tools is None:
             self.connect_tools()
         assert self.tools is not None
-        self.emit(
-            "system",
-            subtype="init",
-            cwd=str(Path.cwd()),
-            tools=[*self.tools, *self.process.get("extra_tools", [])],
-            mcp_servers=[
-                {"name": server, "status": self.process.get("mcp_status", "connected"), "source": "sdk"}
-                for server in self.servers()
-            ],
-            model="claude-invented-1",
-            permissionMode="dontAsk",
-            apiKeySource="none",
-            claude_code_version=self.process.get("version", "2.1.328"),
-        )
+        changed = self.process.get("init", {})
+        if changed is None:
+            return
+        fields = {
+            "cwd": str(Path.cwd()),
+            "tools": self.tools,
+            "mcp_servers": [{"name": server, "status": self.status(), "source": "sdk"} for server in self.servers()],
+            "model": "claude-invented-1",
+            "permissionMode": "dontAsk",
+            "apiKeySource": "none",
+            "claude_code_version": self.process.get("version", "2.1.328"),
+            **changed,
+        }
+        self.emit("system", subtype="init", **{key: value for key, value in fields.items() if value is not None})
 
     def text_of(self, template: str) -> str:
         for call_id, result in self.results.items():
             template = template.replace("{" + call_id + "}", result)
         return template
 
-    def block(self, message: dict[str, Any], index: int, block: dict[str, Any], deltas: list[dict[str, Any]]) -> None:
+    def block(
+        self,
+        message: dict[str, Any],
+        index: int,
+        block: dict[str, Any],
+        deltas: list[dict[str, Any]],
+        start: dict[str, Any] | None = None,
+    ) -> None:
         """Stream one content block as Claude Code does: its start, its pieces, the complete message, its stop."""
         empty = {"thinking": {"thinking": ""}, "text": {"text": ""}, "tool_use": {"input": {}}}[block["type"]]
-        self.stream_event({"type": "content_block_start", "index": index, "content_block": {**block, **empty}})
+        started = {**block, **empty, **(start or {})}
+        self.stream_event({"type": "content_block_start", "index": index, "content_block": started})
         for delta in deltas:
             self.stream_event({"type": "content_block_delta", "index": index, "delta": delta})
         self.emit("assistant", message={**message, "content": [block]}, parent_tool_use_id=None)
@@ -170,9 +199,18 @@ class FakeClaude:
     def start_call(self, call: dict[str, Any], *, with_id: bool) -> str:
         """Call one MindRoom tool through its MCP server and return the id of the request that carries the call."""
         meta = {"claudecode/toolUseId": call["id"], "progressToken": self.messages} if with_id else {}
-        params = {"name": call["name"], "arguments": call.get("input", {}), "_meta": meta}
-        message = {"jsonrpc": "2.0", "id": 10 + len(self.results), "method": "tools/call", "params": params}
+        sent = {**call, **call.get("mcp", {})}
+        params = {"name": sent["name"], "arguments": sent.get("input", {}), "_meta": meta}
+        self.rpc_id += 1
+        message = {"jsonrpc": "2.0", "id": self.rpc_id, "method": "tools/call", "params": params}
         return self.start({"subtype": "mcp_message", "server_name": "mindroom", "message": message})
+
+    def abandon_call(self, call: dict[str, Any], *, with_id: bool, cancel: bool) -> None:
+        """Start one tool call and go on without its result, as Claude Code does when the call takes it too long."""
+        self.start_call(call, with_id=with_id)
+        if cancel:
+            self.mcp("mindroom", "notifications/cancelled", {"requestId": self.rpc_id, "reason": "timeout"}, None)
+        self.results[call["id"]] = "(no result)"
 
     def finish_call(self, call: dict[str, Any], request_id: str) -> None:
         """Wait for one tool call's result and echo it as Claude Code does."""
@@ -203,6 +241,16 @@ class FakeClaude:
             synthetic = {**message, "model": "<synthetic>", "content": [{"type": "text", "text": text}]}
             self.emit("assistant", message=synthetic, parent_tool_use_id=None, error=error)
             return text
+        if step.get("complete_only"):
+            blocks = [{"type": "text", "text": text}] if text else []
+            blocks += [
+                {"type": "tool_use", "id": call["id"], "name": f"mcp__mindroom__{call['name']}", "input": call["input"]}
+                for call in step.get("tools", [])
+            ]
+            for block in blocks:
+                whole = {**message, "content": [block], "usage": usage}
+                self.emit("assistant", message=whole, parent_tool_use_id=None)
+            return text
         self.stream_event({"type": "message_start", "message": message})
         index = 0
         if thinking := step.get("thinking"):
@@ -213,10 +261,13 @@ class FakeClaude:
         if text:
             half = len(text) // 2
             deltas = [{"type": "text_delta", "text": piece} for piece in (text[:half], text[half:])]
-            self.block(message, index, {"type": "text", "text": text}, deltas)
+            start = {"text": text[:half]} if step.get("start_text") else None
+            self.block(message, index, {"type": "text", "text": text}, deltas[1:] if start else deltas, start)
             index += 1
         calls = step.get("tools", [])
         for call in calls:
+            if call.get("hidden"):
+                continue
             block = {
                 "type": "tool_use",
                 "id": call["id"],
@@ -226,6 +277,11 @@ class FakeClaude:
             partial = {"type": "input_json_delta", "partial_json": json.dumps(block["input"])}
             self.block(message, index, block, [partial])
             index += 1
+        self.run_calls(step, calls, usage)
+        return text
+
+    def run_calls(self, step: dict[str, Any], calls: list[dict[str, Any]], usage: dict[str, int]) -> None:
+        """End one streamed model message and bring its tool calls to the tool server."""
         with_id = not step.get("omit_tool_use_id")
         stop_reason = step.get("stop_reason", "tool_use" if calls else "end_turn")
         # Claude Code can start a call before the model message that made it has ended.
@@ -239,8 +295,13 @@ class FakeClaude:
         for call, request_id in early:
             self.finish_call(call, request_id)
         for call in calls[1 if step.get("call_before_stop") else 0 :]:
-            self.finish_call(call, self.start_call(call, with_id=with_id))
-        return text
+            if step.get("abandon") or step.get("cancel"):
+                self.abandon_call(call, with_id=with_id, cancel=bool(step.get("cancel")))
+            else:
+                self.finish_call(call, self.start_call(call, with_id=with_id))
+        for call in calls:
+            if call["id"] == step.get("repeat"):
+                self.finish_call(call, self.start_call(call, with_id=with_id))
 
     def turn(self, user: dict[str, Any]) -> None:
         """Answer one user message with the next scripted turn."""
@@ -249,10 +310,13 @@ class FakeClaude:
         steps = next(self.turns, [{"text": "(unscripted turn)"}])
         text = ""
         result: dict[str, Any] = {}
+        dies = False
         for step in steps:
             if "exit" in step:
                 self.log("exit")
                 sys.exit(step["exit"])
+            elif "die_after_result" in step:
+                dies = True
             elif "rate_limit" in step:
                 self.emit("rate_limit_event", rate_limit_info=step["rate_limit"])
             elif "result" in step:
@@ -273,6 +337,10 @@ class FakeClaude:
                 **result,
             },
         )
+        self.log("turn_end")
+        if dies:
+            self.log("exit")
+            sys.exit(0)
 
     def run(self) -> None:
         system_prompt = ""
@@ -280,7 +348,8 @@ class FakeClaude:
             system_prompt = Path(self.args[self.args.index("--system-prompt-file") + 1]).read_text()
         elif "--system-prompt" in self.args:
             system_prompt = self.args[self.args.index("--system-prompt") + 1]
-        self.log("spawn", args=self.args, cwd=str(Path.cwd()), system_prompt=system_prompt)
+        timeout = os.environ.get("MCP_TOOL_TIMEOUT")
+        self.log("spawn", args=self.args, cwd=str(Path.cwd()), system_prompt=system_prompt, tool_timeout=timeout)
         while (message := self.queued.pop(0) if self.queued else self.read()) is not None:
             if message.get("type") == "control_request":
                 self.answer(message)
