@@ -115,9 +115,12 @@ class Harness:
             callback_wrapper=lambda callback: callback,
         )
 
-    async def first_sync(self, *room_ids: str) -> None:
-        """Run what the account does once its first sync says which rooms it is joined to."""
-        self.client.rooms = dict.fromkeys(room_ids, MagicMock(encrypted=False))
+    async def first_sync(self, *room_ids: str, power: int = 50, encrypted: bool = False) -> None:
+        """Run what the account does once its first sync lists its rooms, where posting takes power level 50."""
+        self.client.rooms = {room_id: nio.MatrixRoom(room_id, self.account_id, encrypted) for room_id in room_ids}
+        for room in self.client.rooms.values():
+            room.power_levels.users[self.account_id] = power
+            room.power_levels.events["m.room.encrypted" if encrypted else "m.room.message"] = 50
         await revoke_orphaned_sends(self.client, self.paths, self.config)
 
     def sent_invite(self) -> tuple[store.EmailInvite, str]:
@@ -510,6 +513,23 @@ async def test_an_account_outside_the_room_leaves_a_removed_entitys_send_to_one_
     assert harness.notices == []
     await harness.start()
     await harness.first_sync(ROOM)
+    assert harness.row(retired.id).revoked is True
+    assert len(harness.notices) == 1
+
+
+@pytest.mark.parametrize("encrypted", [False, True], ids=["plain room", "encrypted room"])
+@pytest.mark.asyncio
+async def test_an_account_that_may_not_post_leaves_a_removed_entitys_send_to_one_that_may(
+    harness: Harness,
+    encrypted: bool,
+) -> None:
+    """An account below the level its notice's event type takes claims nothing, so the one that may post still does."""
+    retired = _left_sending_by_a_removed_entity(harness)
+
+    await harness.first_sync(ROOM, power=0, encrypted=encrypted)
+
+    assert harness.row(retired.id).revoked is False
+    await harness.first_sync(ROOM, encrypted=encrypted)
     assert harness.row(retired.id).revoked is True
     assert len(harness.notices) == 1
 

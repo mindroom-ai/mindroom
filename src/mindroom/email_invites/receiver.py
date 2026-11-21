@@ -174,9 +174,17 @@ async def register_email_invite_receiver(
 async def revoke_orphaned_sends(client: nio.AsyncClient, runtime_paths: RuntimePaths, config: Config) -> None:
     """Revoke, with its one notice, each link a crash left sending for an entity that is no longer configured.
 
-    No receiver starts for a removed or renamed entity, so an account revokes its links in the rooms that account's
-    first sync lists, where it can post the notice. A configured entity's links are left to its own receiver.
+    No receiver starts for a removed or renamed entity, so an account revokes its links in the rooms its first sync
+    lists whose power levels let it post the notice. A configured entity's links are left to its own receiver.
     """
     configured = (ROUTER_AGENT_NAME, *config.agents, *config.teams)
-    orphans = store.abandon_sending(runtime_paths, configured=configured, rooms=client.rooms)
+    rooms = [
+        room_id
+        for room_id, room in client.rooms.items()
+        if room.power_levels.can_user_send_message(
+            client.user_id,
+            "m.room.encrypted" if room.encrypted else "m.room.message",
+        )
+    ]
+    orphans = store.abandon_sending(runtime_paths, configured=configured, rooms=rooms)
     await _Receiver(client, "", runtime_paths, lambda: config).abandoned(orphans)
