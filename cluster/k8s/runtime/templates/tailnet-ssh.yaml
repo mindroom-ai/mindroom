@@ -4,7 +4,7 @@
 {{- $name := printf "%s-tailnet-ssh" (include "mindroom-runtime.fullname" . | trunc 43 | trimSuffix "-") -}}
 {{- $workerNamespace := include "mindroom-runtime.workerNamespace" . -}}
 {{- $existing := lookup "v1" "Secret" .Release.Namespace $name -}}
-{{- $gatewayLabels := dict "app.kubernetes.io/name" (include "mindroom-runtime.name" .) "app.kubernetes.io/instance" .Release.Name "app.kubernetes.io/component" "tailnet-ssh" -}}
+{{- $gatewayLabels := merge (dict "app.kubernetes.io/component" "tailnet-ssh") (pick (include "mindroom-runtime.labels" . | fromYaml) "app.kubernetes.io/name" "app.kubernetes.io/instance") -}}
 {{- $workerLabels := merge (dict "mindroom.ai/tailnet-ssh" "true") (include "mindroom-runtime.workerPodLabels" . | fromYaml) -}}
 {{- $primaryLabels := include "mindroom-runtime.selectorLabels" . | fromYaml -}}
 {{- $gateway := dict "podSelector" (dict "matchLabels" $gatewayLabels) -}}
@@ -68,15 +68,9 @@ spec:
         - name: tailnet-gateway
           image: {{ printf "%s:%s" $ssh.image.repository ($ssh.image.tag | default .Chart.AppVersion) | quote }}
           env:
-            - name: TAILNET_SSH_PRIMARY_URL
-              value: {{ printf "http://%s.%s.svc.cluster.local:%v" $name .Release.Namespace $ssh.port | quote }}
-            - name: TAILNET_SSH_GATEWAY_TOKEN
-              valueFrom:
-                secretKeyRef: {name: {{ $name }}, key: token}
-            - name: TAILNET_SSH_AUTH_KEY
-              valueFrom:
-                secretKeyRef: {name: {{ $ssh.authKeySecret | trim | quote }}, key: auth-key}
-            - {name: TAILNET_SSH_STATE_DIR, value: /state}
+            - {name: TAILNET_SSH_PRIMARY_URL, value: {{ printf "http://%s.%s.svc.cluster.local:%v" $name .Release.Namespace $ssh.port | quote }}}
+            - {name: TAILNET_SSH_GATEWAY_TOKEN, valueFrom: {secretKeyRef: {name: {{ $name }}, key: token}}}
+            - {name: TAILNET_SSH_AUTH_KEY, valueFrom: {secretKeyRef: {name: {{ $ssh.authKeySecret | trim | quote }}, key: auth-key}}}
             {{- range $key, $value := dict "TAILNET_SSH_LOGIN_SERVER" $ssh.loginServer "TAILNET_SSH_TAGS" (join "," $ssh.tags) "HTTPS_PROXY" $ssh.httpsProxy }}
             {{- with $value }}
             - {name: {{ $key }}, value: {{ . | quote }}}

@@ -12,14 +12,12 @@ import threading
 from typing import TYPE_CHECKING, Any
 
 import pytest
-import yaml
 
 from cluster.k8s.kind import smoke_tailnet_ssh_worker as smoke
 from cluster.k8s.kind import tailnet_ssh_gateway_stand_in as stand_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 _KUBECTL = ["kubectl", "--context", "kind-test"]
 _PRIMARY = {
@@ -38,7 +36,10 @@ _PRIMARY = {
     "volumeMounts": [{"name": "storage", "mountPath": "/app/agent_data"}],
 }
 _DEPLOYMENT = {
+    "kind": "Deployment",
+    "metadata": {"name": smoke._RELEASE},
     "spec": {
+        "replicas": 0,
         "template": {
             "metadata": {"labels": {"app.kubernetes.io/component": "runtime"}},
             "spec": {
@@ -63,6 +64,8 @@ _GATEWAY_CONTAINER = {
     "volumeMounts": [{"name": "state", "mountPath": "/state"}],
 }
 _GATEWAY = {
+    "kind": "Deployment",
+    "metadata": {"name": f"{smoke._RELEASE}-tailnet-ssh"},
     "spec": {
         "template": {
             "metadata": {"labels": {"app.kubernetes.io/component": "tailnet-ssh"}},
@@ -83,17 +86,16 @@ class _Tools:
     def __init__(self, *, provider_ids: tuple[str | None, ...] = ("kind://docker/test/node",)) -> None:
         self.commands: list[list[str]] = []
         self.namespace_exists = False
+        self.applied: list[dict[str, Any]] = []
         self._provider_ids = provider_ids
 
-    def run(self, command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def run(self, command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         self.commands.append(command)
+        if isinstance(body := kwargs.get("input"), str):
+            self.applied.extend(json.loads(body)["items"])
         return subprocess.CompletedProcess(command, 0, stdout=self._answer(command), stderr="")
 
     def _answer(self, command: list[str]) -> str:
-        if command[0] == "helm":
-            return "chart"
-        if "--dry-run=client" in command:
-            return json.dumps(_GATEWAY)
         match command[3:5]:
             case ["get", "nodes"]:
                 nodes = [
@@ -102,10 +104,6 @@ class _Tools:
                 return json.dumps({"items": nodes})
             case ["create", "namespace"] if self.namespace_exists:
                 raise subprocess.CalledProcessError(1, command, stderr="AlreadyExists")
-            case ["get", "deployment"]:
-                return json.dumps(_DEPLOYMENT)
-            case ["get", "pod"]:
-                return "Succeeded"
         return ""
 
     def namespaces(self, verb: str) -> list[str]:
@@ -115,8 +113,7 @@ class _Tools:
 
 def _run_smoke(monkeypatch: pytest.MonkeyPatch, tools: _Tools) -> int:
     monkeypatch.setenv("TAILNET_SSH_SMOKE_CONTEXT", "kind-test")
-    # The probe's pod has ended when first asked, so a smoke that asks again fails instead of waiting.
-    monkeypatch.setenv("TAILNET_SSH_SMOKE_TIMEOUT_SECONDS", "0")
+    monkeypatch.setattr(smoke, "_render", lambda _namespace, _image: [_DEPLOYMENT, _GATEWAY])
     monkeypatch.setattr(smoke, "run_command", tools.run)
     monkeypatch.setattr(smoke.subprocess, "run", tools.run)
     return smoke.main()
@@ -171,37 +168,24 @@ def test_the_run_deletes_only_the_namespace_it_created_in_the_context_it_names(m
     assert all(created in command for command in kubectl if command[3] != "get" or command[4] != "nodes")
 
 
-def test_the_charts_gateway_is_read_and_never_applied(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The chart is applied without the gateway's Deployment, which is only read: no gateway joins a tailnet."""
+def test_the_charts_gateway_is_never_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Apply the chart once: keep the primary's owner Deployment, never apply the real gateway Deployment."""
     tools = _Tools()
 
     assert _run_smoke(monkeypatch, tools) == 0
-    chart, gateway, pods = [command[4:] for command in tools.commands if command[3] == "apply"]
-    [namespace] = tools.namespaces("create")
-    assert chart == ["-l", "app.kubernetes.io/component!=tailnet-ssh", "-n", namespace, "-f", "-"]
-    assert gateway == [
-        "--dry-run=client",
-        "-o",
-        "json",
-        "-l",
-        "app.kubernetes.io/component=tailnet-ssh",
-        "-n",
-        namespace,
-        "-f",
-        "-",
-    ]
-    assert pods == ["-n", namespace, "-f", "-"]
+    assert [doc for doc in tools.applied if doc["kind"] == "Deployment"] == [_DEPLOYMENT]
+    assert {doc["metadata"]["name"] for doc in tools.applied if doc["kind"] == "Pod"} == {
+        "tailnet-ssh-worker-probe",
+        "tailnet-ssh-gateway-stand-in",
+    }
 
 
 def test_the_probe_runs_in_the_charts_primary_pod_with_only_its_command_replaced() -> None:
     """The probe's access and environment are the chart's: its pod is the Deployment's, minus what serves the API."""
-    manifests = smoke._pod_manifests(_DEPLOYMENT, _GATEWAY, "smoke")
+    manifests = smoke._manifest([_DEPLOYMENT, _GATEWAY])
 
-    source, pod, _gateway = manifests["items"]
+    _deployment, pod, _gateway = manifests["items"]
     [probe] = pod["spec"]["containers"]
-    assert source["data"] == {
-        path.name: path.read_text(encoding="utf-8") for path in (smoke._PROBE, smoke._GATEWAY_STAND_IN)
-    }
     assert pod["metadata"]["labels"] == {"app.kubernetes.io/component": "runtime"}
     assert pod["spec"]["serviceAccountName"] == "primary"
     assert pod["spec"]["securityContext"] == {"fsGroup": 1000}
@@ -210,22 +194,22 @@ def test_the_probe_runs_in_the_charts_primary_pod_with_only_its_command_replaced
         "name": "mindroom",
         "image": "mindroom:test",
         "imagePullPolicy": "IfNotPresent",
-        "command": ["python", "/smoke/tailnet_ssh_worker_probe.py"],
+        "command": ["python", "-c", smoke._PROBE.read_text(encoding="utf-8")],
         # The gateway's Service routes to the port named tailnet-ssh.
         "ports": _PRIMARY["ports"],
         "env": _PRIMARY["env"],
         "envFrom": _PRIMARY["envFrom"],
         "securityContext": _PRIMARY["securityContext"],
-        "volumeMounts": [*_PRIMARY["volumeMounts"], {"name": "smoke", "mountPath": "/smoke", "readOnly": True}],
+        "volumeMounts": _PRIMARY["volumeMounts"],
     }
-    assert pod["spec"]["volumes"][-1] == {"name": "smoke", "configMap": {"name": source["metadata"]["name"]}}
+    assert pod["spec"]["volumes"] == _DEPLOYMENT["spec"]["template"]["spec"]["volumes"]
 
 
 def test_the_gateways_stand_in_is_the_charts_gateway_pod_running_the_primarys_image() -> None:
     """The stand-in has the gateway's labels, by which the chart's policies admit it, and its address of the primary."""
-    manifests = smoke._pod_manifests(_DEPLOYMENT, _GATEWAY, "smoke")
+    manifests = smoke._manifest([_DEPLOYMENT, _GATEWAY])
 
-    source, _probe, pod = manifests["items"]
+    _deployment, _probe, pod = manifests["items"]
     assert pod["metadata"]["labels"] == {"app.kubernetes.io/component": "tailnet-ssh"}
     assert pod["spec"] == {
         "automountServiceAccountToken": False,
@@ -237,14 +221,13 @@ def test_the_gateways_stand_in_is_the_charts_gateway_pod_running_the_primarys_im
                 # The gateway's image is not in kind, and the primary's has Python.
                 "image": "mindroom:test",
                 "imagePullPolicy": "IfNotPresent",
-                "command": ["python", "/smoke/tailnet_ssh_gateway_stand_in.py"],
+                "command": ["python", "-c", smoke._GATEWAY_STAND_IN.read_text(encoding="utf-8")],
                 "env": [_GATEWAY_CONTAINER["env"][0]],
                 "securityContext": {"readOnlyRootFilesystem": True},
-                "volumeMounts": [{"name": "smoke", "mountPath": "/smoke", "readOnly": True}],
             },
         ],
         # Not the claim that holds the gateway's node keys.
-        "volumes": [{"name": "smoke", "configMap": {"name": source["metadata"]["name"]}}],
+        "volumes": [],
     }
 
 
@@ -294,7 +277,6 @@ def test_the_stand_in_raises_when_it_cannot_reach_the_worker(monkeypatch: pytest
     """A worker port that never answers fails the stand-in rather than returning a banner."""
     primary_port, told = _serve_once(f"127.0.0.1 {_unused_port()}\n".encode())
     monkeypatch.setenv("TAILNET_SSH_PRIMARY_URL", f"http://127.0.0.1:{primary_port}")
-    monkeypatch.setattr(stand_in, "_WORKER_SECONDS", 0)
 
     with pytest.raises(ConnectionRefusedError):
         stand_in.main()
@@ -302,27 +284,19 @@ def test_the_stand_in_raises_when_it_cannot_reach_the_worker(monkeypatch: pytest
     assert told() == b""
 
 
-def test_the_runtime_chart_renders_a_kubernetes_primary_from_the_smokes_values(tmp_path: Path) -> None:
-    """The chart takes the smoke's values and renders the primary's access, with a Deployment that runs no pod."""
-    helm = shutil.which("helm")
-    if helm is None:
+def test_the_runtime_chart_renders_a_kubernetes_primary_from_the_smokes_values() -> None:
+    """Render the chart and build the exact manifest the smoke would apply."""
+    if shutil.which("helm") is None:
         pytest.skip("helm is required for rendered chart checks")
-    values = tmp_path / "values.json"
-    values.write_text(json.dumps(smoke._chart_values("ghcr.io/mindroom-ai/mindroom:latest")), encoding="utf-8")
-    rendered = subprocess.run(
-        [helm, "template", smoke._RELEASE, smoke._CHART, "--namespace", "smoke", "--values", str(values)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    docs: list[dict[str, Any]] = [doc for doc in yaml.safe_load_all(rendered.stdout) if isinstance(doc, dict)]
-
-    kinds = {doc["kind"] for doc in docs}
-    assert {"Role", "RoleBinding", "ServiceAccount", "PersistentVolumeClaim"} <= kinds
-    assert "StatefulSet" not in kinds
-    # The label the smoke leaves out of what it applies is on the gateway's Deployment and on nothing else.
-    key, _, value = smoke._GATEWAY_SELECTOR.partition("=")
-    [gateway] = [doc for doc in docs if doc["metadata"].get("labels", {}).get(key) == value]
+    image = "ghcr.io/mindroom-ai/mindroom:latest"
+    docs = smoke._render("smoke", image)
+    [gateway] = [
+        doc for doc in docs if doc["kind"] == "Deployment" and doc["metadata"]["name"].endswith("-tailnet-ssh")
+    ]
+    key, value = "app.kubernetes.io/component", "tailnet-ssh"
+    items = smoke._manifest(docs)["items"]
+    assert {"Role", "RoleBinding", "ServiceAccount", "PersistentVolumeClaim"} <= {doc["kind"] for doc in items}
+    assert gateway not in items
     assert gateway["kind"] == "Deployment"
     assert gateway["spec"]["template"]["metadata"]["labels"][key] == value
     names = {(doc["kind"], doc["metadata"]["name"]) for doc in docs}

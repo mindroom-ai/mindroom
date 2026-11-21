@@ -124,12 +124,8 @@ jobs:
       - name: Smoke platform images
         run: python -m scripts.smoke_platform_images
 
-      # The Kubernetes worker backend against a real API server: the worker Service's merge patch, and sshd in a worker pod.
-      - name: Smoke tailnet SSH on a Kubernetes worker
-        run: python -m cluster.k8s.kind.smoke_tailnet_ssh_worker
-        env:
-          MINDROOM_IMAGE: ghcr.io/mindroom-ai/mindroom:latest
-          TAILNET_SSH_SMOKE_CONTEXT: kind-mindroom
+      - name: Smoke Shell-reach SSH and Service patches in kind
+        run: uv run --no-project --with pyyaml python -m cluster.k8s.kind.smoke_tailnet_ssh_worker
 
       - name: Install platform chart
         run: bash cluster/k8s/kind/install_platform.sh

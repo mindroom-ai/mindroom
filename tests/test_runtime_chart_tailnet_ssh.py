@@ -183,7 +183,6 @@ def test_gateway_env_points_at_primary() -> None:
             "name": "TAILNET_SSH_AUTH_KEY",
             "valueFrom": {"secretKeyRef": {"name": "tailnet-key", "key": "auth-key"}},
         },
-        "TAILNET_SSH_STATE_DIR": {"name": "TAILNET_SSH_STATE_DIR", "value": "/state"},
     }
     service = _resource(docs, "Service", NAME)
     assert service["spec"]["type"] == "ClusterIP"
