@@ -431,10 +431,17 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
         logger.warning("github_request_failed", method=payload.method, path=kind, error_type=type(exc).__name__)
         return _error(502, "github_unreachable")
     logger.info("github_request", method=payload.method, path=kind, status=response.status_code, redirects=redirects)
-    return _request_answer(response, body, accept=payload.accept)
+    return _request_answer(response, body, accept=payload.accept, method=payload.method, path=kind)
 
 
-def _request_answer(response: httpx.Response, body: bytes, *, accept: str) -> dict[str, object] | JSONResponse:
+def _request_answer(
+    response: httpx.Response,
+    body: bytes,
+    *,
+    accept: str,
+    method: str,
+    path: str,
+) -> dict[str, object] | JSONResponse:
     """Relay the upstream response, requiring strict UTF-8 for successful raw answers."""
     try:
         answer = (
@@ -443,6 +450,7 @@ def _request_answer(response: httpx.Response, body: bytes, *, accept: str) -> di
             else _answer_body(body, response.headers.get("content-type", ""))
         )
     except UnicodeDecodeError:
+        logger.warning("github_request_not_text", method=method, path=path)
         return _error(502, "github_response_not_text")
     return {
         "status": response.status_code,

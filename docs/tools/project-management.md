@@ -86,6 +86,7 @@ The plugin then calls `POST /api/github/request` with `{"method": ..., "path": .
 `max_bytes` is optional: set it to an integer from 1 to 10,485,760 to cap the streamed response body, or omit it to use the 10 MiB default.
 The answer is HTTP 200 with `{"status", "body", "headers"}` holding GitHub's own status, its JSON or text, and its `x-ratelimit-remaining`, `x-ratelimit-reset`, `retry-after`, and `x-github-request-id` headers.
 A successful answer to `application/vnd.github.raw+json` has a text `body` decoded as strict UTF-8, even when the contents are valid JSON.
+Use this raw media type for file contents (`/contents` or `/git/blobs`); with it, other endpoints return successful JSON responses as strings.
 GitHub refusing a saved token comes back as its own 401 in that answer, and the token stays saved until the user removes or replaces it.
 The route follows up to 3 redirects that stay on `https://api.github.com`, so a renamed or transferred repository's old name still works; any other redirect, and a 301 or 302 answer to a write, comes back as GitHub's redirect status.
 The route answers 409 `{"error": "github_not_connected"}` while the user has neither a saved token nor a usable GitHub App connection (which also needs the GitHub App client saved), 400 for any other path or one longer than 4096 characters, 503 `{"error": "github_token_unreadable"}` when the saved token could not be read, 503 `{"error": "github_connection_unavailable"}` when the App connection could not be read or refreshed and a retry may help, and 502 when GitHub is unreachable.

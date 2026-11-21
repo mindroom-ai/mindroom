@@ -414,9 +414,14 @@ def test_invalid_utf8_is_refused_only_for_a_successful_raw_answer(
     connect(paths, ALICE)
     github.handler = lambda _request: httpx.Response(upstream_status, content=b"hello\xff")
 
-    response = ask(client, session(app, ALICE), "/repos/octo/hello/git/blobs/abc123", accept=RAW_ACCEPT)
+    with capture_logs() as logs:
+        response = ask(client, session(app, ALICE), "/repos/octo/hello/git/blobs/abc123", accept=RAW_ACCEPT)
 
     assert (response.status_code, response.json()) == expected
+    event = "github_request_not_text"
+    warnings = [entry for entry in logs if entry["event"] == event]
+    warning = {"event": event, "method": "GET", "path": "/repos/{owner}/{repo}/git", "log_level": "warning"}
+    assert warnings == ([warning] if upstream_status == 200 else [])
 
 
 @pytest.mark.parametrize("accept", ["application/vnd.github.diff", RAW_ACCEPT])
