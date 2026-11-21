@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
@@ -15,6 +16,7 @@ from livekit import rtc
 from livekit.plugins.openai.realtime import GPTLiveSession
 from structlog.testing import capture_logs
 
+from mindroom.matrix_rtc import live_voice_agent
 from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
 from mindroom.matrix_rtc.voice_agent import (
     CallAgentResponse,
@@ -44,6 +46,11 @@ class _ProviderSocket:
     def feed(self, event: dict[str, Any]) -> None:
         """Deliver a raw provider event through the SDK's receive loop."""
         self.incoming.put_nowait(aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, json.dumps(event), ""))
+
+    def content_close(self) -> None:
+        """Follow the provider's close event with the graceful WebSocket close frame."""
+        self.feed({"type": "session.closed", "reason": "content", "usage": {"seconds": 3}})
+        self.incoming.put_nowait(aiohttp.WSMessage(aiohttp.WSMsgType.CLOSE, 1000, ""))
 
     async def receive(self) -> aiohttp.WSMessage:
         """Wait until the test or handshake produces another server event."""
@@ -473,6 +480,180 @@ async def test_live_sdk_disconnect_returns_control_without_reusing_delegations(
         17.5 if service_closed else 12.5,
         service_closed,
     )
+
+
+@pytest.mark.asyncio
+async def test_live_sdk_recovers_content_close_with_history_and_drops_old_delegation(provider: _ProviderHTTP) -> None:
+    """Keep the call and history, but invalidate delegation work before the SDK handles the close."""
+    delegates: asyncio.Queue[asyncio.Task[None]] = asyncio.Queue()
+    cancelled = asyncio.Event()
+    cancelled_at_close: list[bool] = []
+    terminated: list[bool] = []
+
+    async def respond(_prompt: str, _on_tools: Callable[[list[str]], None] | None) -> CallAgentResponse:
+        if cancelled.is_set():
+            return CallAgentResponse("The new request is complete.")
+        task = asyncio.current_task()
+        assert task is not None
+        delegates.put_nowait(task)
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.Event().wait()
+        cancelled.set()
+        return CallAgentResponse("Obsolete commentary.")
+
+    options = LiveVoiceAgentOptions(
+        get_instructions=AsyncMock(return_value="Delegate requests."),
+        model="gpt-live-1",
+        api_key="test-key",
+        voice="marin",
+        respond=respond,
+        greeting_instructions="Say hello once.",
+        on_session_terminated=terminated.append,
+    )
+    bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
+    bridge._room = SimpleNamespace(disconnect=AsyncMock())
+    try:
+        await bridge.start_agent(options)
+        agent_session = bridge._session
+        provider_session = cast("Agent", bridge._live_agent).duplex_session
+        greeting = await provider.socket.next_event("session.commentary.append")
+        assert "Say hello once." in greeting["content"]
+        provider.socket.feed({"type": "session.input_transcript.delta", "delta": "Is the blue kite ready?"})
+        provider.socket.feed({"type": "session.output_transcript.delta", "delta": "I can check."})
+        delegation = {"type": "session.delegation.created", "delegation": {"id": "check-kite", "target": "client"}}
+        provider.socket.feed(delegation)
+        pending = await asyncio.wait_for(delegates.get(), 2)
+
+        def on_server_event(event: dict[str, Any]) -> None:
+            if event.get("reason") == "content":
+                cancelled_at_close.append(pending.cancelling() > 0)
+
+        provider_session.on("openai_server_event_received", on_server_event)
+        provider.socket.content_close()
+        await asyncio.wait_for(provider.socket.closed_event.wait(), 2)
+        assert terminated == []
+        await asyncio.wait_for(provider.connected_again.wait(), 2)
+        second = provider.sockets[1]
+        start = await second.next_event("session.start")
+        assert bridge._session is agent_session
+        assert cast("Agent", bridge._live_agent).duplex_session is provider_session
+        assert start["session"]["input"] == [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Is the blue kite ready?"}]},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "I can check."}]},
+        ]
+        assert cancelled_at_close == [True]
+        await asyncio.wait_for(cancelled.wait(), 2)
+
+        # A fresh delegation can reuse the ID, but neither old commentary nor a second greeting may be queued.
+        second.feed(delegation)
+        reply = await second.next_event("session.commentary.append")
+        assert reply["delegation_id"] == "check-kite"
+        assert reply["content"] == "The new request is complete."
+    finally:
+        await asyncio.wait_for(bridge.aclose(), 3)
+
+    assert [event for event in second.sent if event["type"] == "session.commentary.append"] == [reply]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("elapsed", [299, 301], ids=["within-window", "outside-window"])
+async def test_live_sdk_caps_repeated_content_closes(
+    provider: _ProviderHTTP,
+    monkeypatch: pytest.MonkeyPatch,
+    elapsed: int,
+) -> None:
+    """A second moderation close ends the call only inside the recovery window."""
+    now = 0.0
+    monkeypatch.setattr(live_voice_agent, "time", SimpleNamespace(time=time.time, monotonic=lambda: now))
+    terminated: list[bool] = []
+    notices: list[str] = []
+    options = LiveVoiceAgentOptions(
+        get_instructions=AsyncMock(return_value="Delegate requests."),
+        model="gpt-live-1",
+        api_key="test-key",
+        voice="marin",
+        respond=AsyncMock(),
+        on_session_error=notices.append,
+        on_session_terminated=terminated.append,
+    )
+    bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
+    bridge._room = SimpleNamespace(disconnect=AsyncMock())
+    with capture_logs() as logs:
+        try:
+            await bridge.start_agent(options)
+            await provider.socket.next_event("session.start")
+            provider.socket.content_close()
+            await asyncio.wait_for(provider.socket.closed_event.wait(), 2)
+            assert terminated == []
+            await asyncio.wait_for(provider.connected_again.wait(), 2)
+            second = provider.sockets[1]
+            await second.next_event("session.start")
+            provider.connected_again.clear()
+
+            now += elapsed
+            second.content_close()
+            await asyncio.wait_for(second.closed_event.wait(), 2)
+            if elapsed < 300:
+                assert terminated == [False]
+                assert len(provider.sockets) == 2
+                (notice,) = notices
+                assert "moderation closed the voice session again" in notice
+                assert "call ended" in notice
+                assert "rejoin to start a new call" in notice
+            else:
+                await asyncio.wait_for(provider.connected_again.wait(), 2)
+                await provider.sockets[2].next_event("session.start")
+                assert terminated == []
+                assert notices == []
+        finally:
+            await asyncio.wait_for(bridge.aclose(), 3)
+
+    closes = [(entry["reason"], entry["action"]) for entry in logs if entry["event"] == "call_live_session_closed"]
+    if elapsed < 300:
+        assert closes == [("content", "recovering"), ("content", "ending")]
+    else:
+        assert closes == [("content", "recovering"), ("content", "recovering"), ("close_requested", "ending")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["code", "type"])
+async def test_live_sdk_reports_content_filter_once_and_preserves_other_notices(
+    provider: _ProviderHTTP,
+    field: str,
+) -> None:
+    """Only the wrapped moderation error is suppressed; the next provider error still gets a notice."""
+    notices: list[str] = []
+    error_seen = asyncio.Event()
+    options = LiveVoiceAgentOptions(
+        get_instructions=AsyncMock(return_value="Delegate requests."),
+        model="gpt-live-1",
+        api_key="test-key",
+        voice="marin",
+        respond=AsyncMock(),
+        on_session_error=notices.append,
+    )
+    bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
+    bridge._room = SimpleNamespace(disconnect=AsyncMock())
+    try:
+        await bridge.start_agent(options)
+        await provider.socket.next_event("session.start")
+        session = bridge._session
+        assert session is not None
+        session.on("error", lambda _event: error_seen.set())
+        provider.socket.feed({"type": "error", "error": {field: "content_filter", "message": "Example payload."}})
+        await asyncio.wait_for(error_seen.wait(), 2)
+        (notice,) = notices
+        assert "moderation stopped that reply" in notice
+        assert "call continues" in notice
+        assert "Example payload." not in notice
+
+        error_seen.clear()
+        provider.socket.feed({"type": "error", "error": {"code": "invalid_event", "message": "Example payload."}})
+        await asyncio.wait_for(error_seen.wait(), 2)
+        assert len(notices) == 2
+        assert "the OpenAI Realtime voice model failed" in notices[1]
+    finally:
+        await asyncio.wait_for(bridge.aclose(), 3)
 
 
 @pytest.mark.asyncio

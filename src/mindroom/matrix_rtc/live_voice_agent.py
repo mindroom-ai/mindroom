@@ -21,15 +21,23 @@ from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
-    from livekit.agents import Agent
+    from livekit.agents import Agent, ErrorEvent
     from livekit.agents.llm import ChatContext, RealtimeSessionReconnectedEvent
     from livekit.plugins.openai.realtime import GPTLiveDelegation, GPTLiveSession
 
 logger = get_logger(__name__)
 _DELEGATION_ERROR = "Voice call error: the agent could not complete the delegated request. Please try again."
 _EMPTY_DELEGATION_RESPONSE = "No response is available from the agent for this request."
+_CONTENT_CLOSE_RECOVERY_WINDOW_SECONDS = 5 * 60
+_MODERATION_NOTICE = (
+    "Voice call notice: the voice model's moderation stopped that reply. The call continues; try rephrasing."
+)
+_MODERATION_ENDED_NOTICE = (
+    "Voice call notice: moderation closed the voice session again, so the call ended. "
+    "Leave and rejoin to start a new call."
+)
 
 
 def _commentary_chunks(text: str) -> Iterator[str]:
@@ -201,7 +209,11 @@ class _LiveDelegationRunner:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
 
-def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agent:  # noqa: C901 - SDK class is defined lazily
+def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
+    options: LiveVoiceAgentOptions,
+    instructions: str,
+    suppress_wrapped_error: Callable[[], None],
+) -> Agent:
     """Load the optional SDK only when a Live call starts."""
     from livekit.agents import Agent  # noqa: PLC0415
     from livekit.plugins.openai.realtime import GPTLiveSession  # noqa: PLC0415
@@ -212,6 +224,7 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
             self._delegations: _LiveDelegationRunner | None = None
             self._live_session: GPTLiveSession | None = None
             self._provider_close_task: asyncio.Task[None] | None = None
+            self._last_recovered_content_close: float | None = None
             self._exiting = False
             self._exit_task: asyncio.Task[None] | None = None
             self._voice_started_at = time.time()
@@ -243,13 +256,42 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
                 self._delegations.on_client_event(event)
 
         def _on_server_event(self, event: dict[str, Any]) -> None:
-            if event.get("type") == "session.commentary.appended" and self._delegations is not None:
+            event_type = event.get("type")
+            if event_type == "session.commentary.appended" and self._delegations is not None:
                 self._delegations.on_commentary_acked(event)
-            if event.get("type") == "session.started":
+            if event_type == "session.started":
                 self._voice_started_at = time.time()
-            if event.get("type") in {"session.usage.updated", "session.closed"}:
+            if event_type in {"session.usage.updated", "session.closed"}:
                 self._capture_usage(event)
-            if event.get("type") != "session.closed" or self._provider_close_task is not None or self._exiting:
+            if event_type == "session.closed":
+                self._on_provider_close(event.get("reason"))
+            elif event_type == "error" and not self._exiting and self._provider_close_task is None:
+                error = event.get("error")
+                if (
+                    options.on_session_error is not None
+                    and isinstance(error, dict)
+                    and "content_filter" in (error.get("code"), error.get("type"))
+                ):
+                    suppress_wrapped_error()
+                    options.on_session_error(_MODERATION_NOTICE)
+
+        def _on_provider_close(self, reason: object) -> None:
+            if reason not in ("close_requested", "expired", "content", "remote_hangup", "connection_lost"):
+                reason = "unknown"
+            ending = self._provider_close_task is not None or self._exiting
+            if not ending and reason == "content":
+                now = time.monotonic()
+                previous = self._last_recovered_content_close
+                if previous is None or now - previous >= _CONTENT_CLOSE_RECOVERY_WINDOW_SECONDS:
+                    logger.info("call_live_session_closed", reason=reason, action="recovering")
+                    self._last_recovered_content_close = now
+                    # Fence off the moderated delegation now; the SDK reconnects with its own history.
+                    if self._delegations is not None:
+                        self._delegations.on_reconnected()
+                    return
+
+            logger.info("call_live_session_closed", reason=reason, action="ending")
+            if ending:
                 return
             if self._delegations is not None:
                 self._delegations.stop()
@@ -258,8 +300,11 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
                 # server close. Close its queue before that loop resumes so
                 # old delegation commentary cannot enter a fresh session.
                 self._provider_close_task = asyncio.create_task(self._live_session.aclose())
+            retryable = reason != "content"
+            if not retryable and options.on_session_error is not None:
+                options.on_session_error(_MODERATION_ENDED_NOTICE)
             if options.on_session_terminated is not None:
-                options.on_session_terminated(True)
+                options.on_session_terminated(retryable)
 
         def _capture_usage(self, event: dict[str, Any]) -> None:
             session_id = self._live_session.session_id if self._live_session is not None else None
@@ -320,6 +365,21 @@ class LiveVoiceBridge(RealtimeVoiceBridge):
     def __init__(self, *, local_identity: str, e2ee_enabled: bool) -> None:
         super().__init__(local_identity=local_identity, e2ee_enabled=e2ee_enabled)
         self._live_agent: Agent | None = None
+        self._suppress_wrapped_error = False
+
+    def _mark_moderation_error(self) -> None:
+        # The SDK emits the wrapped error synchronously after the raw event and drops its code.
+        self._suppress_wrapped_error = True
+        asyncio.get_running_loop().call_soon(self._clear_moderation_error)
+
+    def _clear_moderation_error(self) -> None:
+        self._suppress_wrapped_error = False
+
+    def _describe_session_error(self, event: ErrorEvent) -> str | None:
+        if self._suppress_wrapped_error and event.error.type == "realtime_model_error" and event.error.recoverable:
+            self._clear_moderation_error()
+            return None
+        return super()._describe_session_error(event)
 
     async def start_agent(self, options: CallVoiceAgentOptions) -> None:
         """Start GPT-Live with the same authorized media path as other calls."""
@@ -342,13 +402,13 @@ class LiveVoiceBridge(RealtimeVoiceBridge):
             base_url=OPENAI_BASE_URL_DEFAULT,
             voice=options.voice,
             delegation="client",
-            # CallManager retries with a fresh provider queue and the same
-            # agent history. SDK retries can replay connection-scoped IDs.
+            # CallManager retries transport failures with a fresh provider queue.
+            # The SDK can still reconnect after a graceful moderation close.
             conn_options=APIConnectOptions(max_retry=0),
         )
         self._owned_speech_resource_closers += (model.aclose,)
         session = AgentSession(llm=model)
-        self._live_agent = _build_live_agent(options, instructions)
+        self._live_agent = _build_live_agent(options, instructions, self._mark_moderation_error)
         await self._start_session(session, self._live_agent, options, rtc_module=rtc, room_io_module=room_io)
         if options.greeting_instructions:
             session.generate_reply(instructions=options.greeting_instructions)
