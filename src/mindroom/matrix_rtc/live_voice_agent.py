@@ -31,9 +31,8 @@ logger = get_logger(__name__)
 _DELEGATION_ERROR = "Voice call error: the agent could not complete the delegated request. Please try again."
 _EMPTY_DELEGATION_RESPONSE = "No response is available from the agent for this request."
 _CONTENT_CLOSE_RECOVERY_WINDOW_SECONDS = 5 * 60
-_MODERATION_NOTICE = (
-    "Voice call notice: the voice model's moderation stopped that reply. The call continues; try rephrasing."
-)
+_CONTENT_CLOSE_RECOVERY_TIMEOUT_SECONDS = 10
+_MODERATION_NOTICE = "Voice call notice: the voice model's moderation stopped that reply. Try rephrasing."
 _MODERATION_ENDED_NOTICE = (
     "Voice call notice: moderation closed the voice session again, so the call ended. "
     "Leave and rejoin to start a new call."
@@ -190,6 +189,11 @@ class _LiveDelegationRunner:
                 traceback_frames=exception_frames(error),
             )
 
+    @property
+    def has_unsent_commentary(self) -> bool:
+        """Return whether the SDK could send queued delegated commentary after reconnecting."""
+        return bool(self._unsent_chunks)
+
     def on_reconnected(self) -> None:
         """Invalidate connection-scoped IDs and cancel their unfinished work."""
         self._generation += 1
@@ -225,6 +229,7 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             self._live_session: GPTLiveSession | None = None
             self._provider_close_task: asyncio.Task[None] | None = None
             self._last_recovered_content_close: float | None = None
+            self._recovery_deadline: asyncio.TimerHandle | None = None
             self._exiting = False
             self._exit_task: asyncio.Task[None] | None = None
             self._voice_started_at = time.time()
@@ -244,7 +249,8 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             session.on("openai_client_event_queued", self._on_client_event)
 
         def _on_delegation(self, event: GPTLiveDelegation) -> None:
-            if self._delegations is not None:
+            # The closed socket cannot start more work while we wait for the replacement.
+            if self._delegations is not None and self._recovery_deadline is None:
                 self._delegations.submit(event, self.chat_ctx)
 
         def _on_reconnected(self, _event: RealtimeSessionReconnectedEvent) -> None:
@@ -260,6 +266,7 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             if event_type == "session.commentary.appended" and self._delegations is not None:
                 self._delegations.on_commentary_acked(event)
             if event_type == "session.started":
+                self._cancel_recovery_deadline()
                 self._voice_started_at = time.time()
             if event_type in {"session.usage.updated", "session.closed"}:
                 self._capture_usage(event)
@@ -279,28 +286,45 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             if reason not in ("close_requested", "expired", "content", "remote_hangup", "connection_lost"):
                 reason = "unknown"
             ending = self._provider_close_task is not None or self._exiting
-            if not ending and reason == "content":
+            delegations = self._delegations
+            retryable = True
+            # The SDK's send queue survives reconnect; fall back to a fresh call when it holds old commentary.
+            if not ending and reason == "content" and (delegations is None or not delegations.has_unsent_commentary):
                 now = time.monotonic()
                 previous = self._last_recovered_content_close
                 if previous is None or now - previous >= _CONTENT_CLOSE_RECOVERY_WINDOW_SECONDS:
                     logger.info("call_live_session_closed", reason=reason, action="recovering")
                     self._last_recovered_content_close = now
                     # Fence off the moderated delegation now; the SDK reconnects with its own history.
-                    if self._delegations is not None:
-                        self._delegations.on_reconnected()
+                    if delegations is not None:
+                        delegations.on_reconnected()
+                    self._recovery_deadline = asyncio.get_running_loop().call_later(
+                        _CONTENT_CLOSE_RECOVERY_TIMEOUT_SECONDS,
+                        self._on_recovery_timeout,
+                    )
                     return
+                retryable = False
 
             logger.info("call_live_session_closed", reason=reason, action="ending")
-            if ending:
-                return
+            if not ending:
+                self._end_provider_session(retryable=retryable)
+
+        def _cancel_recovery_deadline(self) -> None:
+            if self._recovery_deadline is not None:
+                self._recovery_deadline.cancel()
+                self._recovery_deadline = None
+
+        def _on_recovery_timeout(self) -> None:
+            logger.warning("call_live_session_recovery_timed_out")
+            self._end_provider_session(retryable=True)
+
+        def _end_provider_session(self, *, retryable: bool) -> None:
+            self._cancel_recovery_deadline()
             if self._delegations is not None:
                 self._delegations.stop()
             if self._live_session is not None:
-                # Even with max_retry=0, the SDK reconnects after a graceful
-                # server close. Close its queue before that loop resumes so
-                # old delegation commentary cannot enter a fresh session.
+                # Close the queue before the SDK can reconnect, even with max_retry=0.
                 self._provider_close_task = asyncio.create_task(self._live_session.aclose())
-            retryable = reason != "content"
             if not retryable and options.on_session_error is not None:
                 options.on_session_error(_MODERATION_ENDED_NOTICE)
             if options.on_session_terminated is not None:
@@ -335,6 +359,7 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
 
         async def on_exit(self) -> None:
             self._exiting = True
+            self._cancel_recovery_deadline()
             if self._exit_task is None:
                 self._exit_task = asyncio.create_task(self._close())
             await wait_for_future_until_complete(self._exit_task)
