@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -79,8 +80,6 @@ from tests.threading_helpers import seed_hydrated_conversation
 from tests.turn_dispatch_helpers import dispatch_test_turn, make_test_turn
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.tool_function import ToolFunction
@@ -297,8 +296,8 @@ def test_old_opening_pick_cannot_reapply_after_eviction(tmp_path: Path, monkeypa
     assert resolve_thread_model_override(paths, "$newer", config=config).active == {"test_agent": "large"}
 
 
-def test_noop_reset_does_not_create_a_model_record(tmp_path: Path) -> None:
-    """No-op resets do not reserve a slot or create a receipt before the opening pick."""
+def test_noop_store_clear_without_consuming_opening_does_not_create_a_record(tmp_path: Path) -> None:
+    """A store-only clear does not reserve a slot or mark an opening consumed."""
     config = _config_with_models(tmp_path)
     paths = runtime_paths_for(config)
     assert not clear_thread_model_override(paths, THREAD_ID, entity_names=("test_agent",), config=config)
@@ -353,30 +352,65 @@ def test_copy_thread_model_override_copies_once_and_never_overwrites(tmp_path: P
     assert entity_models(reset_first) == {"model:test_agent": "large", "model:router": "large"}
 
 
-@pytest.mark.parametrize("damage", ["unreadable", "corrupt"])
-def test_copy_thread_model_override_leaves_a_store_it_cannot_read_alone(tmp_path: Path, damage: str) -> None:
-    """A fork's copy never replaces a store it cannot read, which would drop every thread's selections."""
+@pytest.mark.parametrize("mutation", ["set", "clear", "opening", "fork"])
+def test_thread_model_writes_preserve_records_after_read_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    """A read failure cannot poison the cache or authorize replacing other threads' records."""
     config = _config_with_models(tmp_path)
-    runtime_paths = test_runtime_paths(tmp_path)
+    paths = runtime_paths_for(config)
+    names = ("test_agent",)
     set_thread_model_override(
-        runtime_paths,
+        paths,
         thread_id=THREAD_ID,
         model_name="large",
-        entity_names=("test_agent",),
+        entity_names=names,
         config=config,
+        consume_opening=True,
     )
-    path = _store_path(runtime_paths)
-    if damage == "corrupt":
-        path.write_text(path.read_text(encoding="utf-8")[:-2], encoding="utf-8")
-    before = path.read_bytes()
-    if damage == "unreadable":
-        path.chmod(0)
-    try:
-        copy_thread_model_override(runtime_paths, THREAD_ID, "$fork-root:localhost")
-    finally:
-        path.chmod(0o600)
+    store = _store_path(paths)
+    before = store.read_bytes()
+    read_text = Path.read_text
+    unreadable = True
 
-    assert path.read_bytes() == before
+    def read(path: Path, encoding: str | None = None, errors: str | None = None, newline: str | None = None) -> str:
+        if path == store and unreadable:
+            raise PermissionError
+        return read_text(path, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    assert _get_thread_model_override(paths, THREAD_ID) is None
+    unreadable = False
+    assert _stored_model(paths, THREAD_ID) == "large"  # Unchanged mtime; a failed read must not be cached.
+
+    def change_other_thread() -> None:
+        if mutation == "set":
+            set_thread_model_override(paths, thread_id="$new", model_name="default", entity_names=names, config=config)
+        elif mutation == "clear":
+            clear_thread_model_override(paths, "$new", entity_names=names, config=config, consume_opening=True)
+        elif mutation == "opening":
+            thread_models.apply_root_thread_model(
+                paths,
+                thread_id="$new",
+                root_timestamp_ms=datetime.now(UTC).timestamp() * 1000,
+                model_name="default",
+                entity_names=names,
+            )
+        else:
+            copy_thread_model_override(paths, THREAD_ID, "$new")
+
+    unreadable = True  # Even a warm cache cannot make the existing file safe to replace.
+    with pytest.raises(OSError, match="Could not read the override store"):
+        change_other_thread()
+    assert store.read_bytes() == before
+    unreadable = False
+    change_other_thread()
+    records = json.loads(store.read_bytes())
+    assert records[THREAD_ID] == json.loads(before)[THREAD_ID]
+    assert records[THREAD_ID]["opening_model_consumed"] == "1"
+    assert "$new" in records
 
 
 _FORK_ID = "$fork-root:localhost"
@@ -590,6 +624,47 @@ async def test_typed_model_command_consumes_a_delayed_opening_pick(
     for entity, model in (("code", expected), (ROUTER_AGENT_NAME, "default")):
         scope = ModelScope(entity=entity, room_id=ROOM_ID, thread_id=prepared.target.resolved_thread_id)
         assert resolve_turn_model(config, deps.runtime_paths, scope, None).model_name == model
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_opening_pick_reports_unavailable_storage_without_running_a_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real opening reply reports failure rather than answering on an unselected model."""
+    bot = _fork_bot(tmp_path)
+    bot.config.agents["code"].access = ResponderAccessConfig(users=["@user:localhost"])
+    bot.config.agents["code"].memory_backend = "none"
+    room = _matrix_room(ROOM_ID, bot.matrix_id.full_id, user_ids=(bot.matrix_id.full_id, "@user:localhost"))
+    client = _join_model_test_bot(bot, room)
+    unique_room_send_responses(client)
+    store = _store_path(runtime_paths_for(bot.config))
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text("not json", encoding="utf-8")
+    fallback = ScriptedModel([answer("This would hide the failed choice")])
+    install_model_providers(monkeypatch, {"default": fallback})
+    opening = _conversation_event(
+        bot,
+        "$opening",
+        "First prompt",
+        **{
+            THREAD_MODEL_CONTENT_KEY: {
+                "version": 1,
+                "runtime_user_id": client.user_id,
+                "runtime_device_id": client.device_id,
+                "model": "large",
+            },
+        },
+    )
+    await dispatch_test_turn(bot._turn_dispatcher, room, opening, opening.sender)
+    await drain_coalescing(bot)
+
+    assert any(
+        "storage is unavailable" in call.kwargs["content"].get("body", "") for call in client.room_send.await_args_list
+    )
+    assert not fallback.requests
+    assert store.read_text(encoding="utf-8") == "not json"
 
 
 @pytest.mark.asyncio
@@ -882,37 +957,24 @@ async def test_a_delayed_responder_never_copies_the_parent_model_again(
     assert _fork_model(first) == "default"
 
 
-def test_store_ignores_corrupt_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A corrupt store file should read as empty and be replaced on write."""
+def test_corrupt_store_reads_as_empty_but_refuses_a_write(tmp_path: Path) -> None:
+    """Broken JSON is not an empty store a mutation can replace."""
     config = _config_with_models(tmp_path)
-    runtime_paths = test_runtime_paths(tmp_path)
-    path = _store_path(runtime_paths)
+    paths = runtime_paths_for(config)
+    path = _store_path(paths)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("not json", encoding="utf-8")
 
-    parse_calls = 0
-    real_loads = json.loads
-
-    def tracked_loads(payload: str) -> object:
-        nonlocal parse_calls
-        parse_calls += 1
-        return real_loads(payload)
-
-    monkeypatch.setattr("mindroom.durable_write.json.loads", tracked_loads)
-
-    assert _stored_model(runtime_paths, THREAD_ID) is None
-    assert _stored_model(runtime_paths, THREAD_ID) is None
-    assert parse_calls == 1
-
-    set_thread_model_override(
-        runtime_paths,
-        thread_id=THREAD_ID,
-        model_name="large",
-        entity_names=("test_agent",),
-        config=config,
-    )
-    assert _stored_model(runtime_paths, THREAD_ID) == "large"
-    assert parse_calls == 2
+    assert _stored_model(paths, THREAD_ID) is None
+    with pytest.raises(OSError, match="Could not read the override store"):
+        set_thread_model_override(
+            paths,
+            thread_id=THREAD_ID,
+            model_name="large",
+            entity_names=("test_agent",),
+            config=config,
+        )
+    assert path.read_text(encoding="utf-8") == "not json"
 
 
 def test_store_prunes_oldest_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -22,7 +22,12 @@ from mindroom.config.models import ModelConfig, ReasoningConfig
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import command_result_content_to_dict
-from mindroom.thread_models import resolve_thread_model_override, set_thread_model_override
+from mindroom.thread_models import (
+    _get_thread_model_override,
+    _store_path,
+    resolve_thread_model_override,
+    set_thread_model_override,
+)
 from mindroom.turn_model import ModelScope, TeamTurnModelSelection, resolve_team_turn_models, resolve_turn_model
 from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import make_test_command_handler_context
@@ -757,6 +762,7 @@ async def _model_command_reply(
     *,
     thread_model: str | None = None,
     picker_operation: str | None = None,
+    unavailable_store: bool = False,
 ) -> tuple[str, dict | None]:
     """Run USER's command through the handler and return its reply and the content recorded beside it.
 
@@ -772,6 +778,10 @@ async def _model_command_reply(
             entity_names=("helper",),
             config=config,
         )
+    if unavailable_store:
+        store = _store_path(paths)
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_text("not json", encoding="utf-8")
     content: dict[str, object] = {"body": body, "msgtype": "m.text"}
     if picker_operation is not None:
         content["io.mindroom.model_selection"] = {
@@ -807,6 +817,10 @@ async def _model_command_reply(
     )
     resets = body.endswith(("reset", "clear"))
     assert _helper_override(paths, config) == (None if resets else thread_model or "leveled@high")
+    if resets and not unavailable_store and thread_model is None:
+        record = _get_thread_model_override(paths, "$root")
+        assert record is not None
+        assert record["opening_model_consumed"] == "1"
     return results[0]
 
 
@@ -883,6 +897,26 @@ async def test_picker_reset_with_no_override_to_remove_is_still_acknowledged(tmp
             "override": None,
         },
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("picker_operation", [None, "reset"], ids=["typed", "picker"])
+async def test_failed_model_reset_reports_unavailable_storage(tmp_path: Path, picker_operation: str | None) -> None:
+    """Failing to read the store is not a successful empty reset."""
+    text, extra = await _model_command_reply(
+        tmp_path,
+        "!model reset",
+        picker_operation=picker_operation,
+        unavailable_store=True,
+    )
+    assert "storage is unavailable" in text
+    if picker_operation is None:
+        assert extra is None
+    else:
+        assert extra is not None
+        result = extra["io.mindroom.model_selection_result"]
+        assert result["status"] == "rejected"
+        assert "storage is unavailable" in result["error"]
 
 
 @pytest.mark.parametrize("args_text", ["default", "reset"])

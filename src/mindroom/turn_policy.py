@@ -92,6 +92,7 @@ class PreparedDispatch:
     stopped_reply: bool = False
     scheduled_history_budget: ScheduledHistoryBudget | None = None
     scheduled_model: str | None = None
+    opening_model_storage_failed: bool = False
 
     def __post_init__(self) -> None:
         """Require the prepared envelope and dispatch target to describe the same delivery."""

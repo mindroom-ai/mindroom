@@ -56,7 +56,7 @@ from mindroom.response_payload_preparation import (
 from mindroom.response_sources import ResponseSources
 from mindroom.router.relay import execute_router_relay
 from mindroom.teams.formation import TeamIntent, select_ad_hoc_team_mode
-from mindroom.thread_models import apply_root_thread_model, copy_thread_model_override
+from mindroom.thread_models import THREAD_MODEL_STORAGE_ERROR, apply_root_thread_model, copy_thread_model_override
 from mindroom.thread_summary.automatic import maybe_generate_prompt_summary
 from mindroom.thread_summary.schedule import first_reply_reaches_first_threshold
 from mindroom.thread_utils import mentions_another_participant
@@ -395,6 +395,15 @@ class TurnDispatcher:
                 )
                 if dispatch_timing is not None:
                     dispatch_timing.mark("dispatch_plan_ready")
+                plan = (
+                    replace(
+                        plan,
+                        kind="respond",
+                        response_action=ResponseAction(kind="reject", rejection_message=THREAD_MODEL_STORAGE_ERROR),
+                    )
+                    if prepared.dispatch.opening_model_storage_failed and plan.kind != "ignore"
+                    else plan
+                )
                 # Only a turn this agent or its team answers; a routed one gets its title from its responder.
                 if plan.response_action is not None and plan.response_action.kind in {"individual", "team"}:
                     self._queue_prompt_summary(prepared)
@@ -942,8 +951,14 @@ class TurnDispatcher:
             extract_context_start,
             path=context_path,
         )
-        _apply_root_thread_model(self.deps, turn, target.resolved_thread_id, context.thread_history)
-        _inherit_fork_thread_models(self.deps, turn, target.resolved_thread_id, context.thread_history)
+        opening_model_storage_failed = False
+        try:
+            _apply_root_thread_model(self.deps, turn, target.resolved_thread_id, context.thread_history)
+        except OSError:
+            opening_model_storage_failed = True
+            self.deps.logger.exception("Opening model storage failed", thread_id=target.resolved_thread_id)
+        else:
+            _inherit_fork_thread_models(self.deps, turn, target.resolved_thread_id, context.thread_history)
         envelope_start = time.monotonic()
         envelope = self.deps.resolver.build_envelope(
             event=event,
@@ -996,6 +1011,7 @@ class TurnDispatcher:
             stopped_reply=turn.stopped_reply,
             scheduled_history_budget=_scheduled_history_budget_for_dispatch(event, origin.intent),
             scheduled_model=_scheduled_model_for_dispatch(event, origin.intent),
+            opening_model_storage_failed=opening_model_storage_failed,
         )
 
     async def _execute_response_action(
