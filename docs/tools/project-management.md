@@ -85,11 +85,11 @@ A user's saves and removals run one at a time, so a `DELETE` sent while a `PUT` 
 The plugin then calls `POST /api/github/request` with `{"method": ..., "path": ..., "body": ..., "accept": ..., "max_bytes": ...}`, where `method` is `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`, `path` is `/graphql` or under `/repos/<owner>/<repo>` with an optional query, `body` is optional JSON, and `accept` is `application/vnd.github+json` (the default), `application/vnd.github.full+json`, `application/vnd.github.diff`, or `application/vnd.github.raw+json`.
 `max_bytes` is optional: set it to an integer from 1 to 10,485,760 to cap the streamed response body, or omit it to use the 10 MiB default.
 The answer is HTTP 200 with `{"status", "body", "headers"}` holding GitHub's own status, its JSON or text, and its `x-ratelimit-remaining`, `x-ratelimit-reset`, `retry-after`, and `x-github-request-id` headers.
-When the request uses `application/vnd.github.raw+json`, `body` is always a text string decoded as strict UTF-8, even when the contents are valid JSON.
+A successful answer to `application/vnd.github.raw+json` has a text `body` decoded as strict UTF-8, even when the contents are valid JSON.
 GitHub refusing a saved token comes back as its own 401 in that answer, and the token stays saved until the user removes or replaces it.
 The route follows up to 3 redirects that stay on `https://api.github.com`, so a renamed or transferred repository's old name still works; any other redirect, and a 301 or 302 answer to a write, comes back as GitHub's redirect status.
 The route answers 409 `{"error": "github_not_connected"}` while the user has neither a saved token nor a usable GitHub App connection (which also needs the GitHub App client saved), 400 for any other path or one longer than 4096 characters, 503 `{"error": "github_token_unreadable"}` when the saved token could not be read, 503 `{"error": "github_connection_unavailable"}` when the App connection could not be read or refreshed and a retry may help, and 502 when GitHub is unreachable.
-A body larger than the cap answers 502 `{"error": "github_response_too_large"}`; a raw body that is not valid UTF-8 answers 502 `{"error": "github_response_not_text"}`.
+A body larger than the cap answers 502 `{"error": "github_response_too_large"}`; a successful raw answer whose body is not valid UTF-8 answers 502 `{"error": "github_response_not_text"}`.
 A saved token the store cannot read or decrypt, or whose token or login no longer has the shape a save checks, counts as unreadable.
 A store path that is not a plain file or directory, such as a link or a FIFO, reads as no token saved.
 `GET /api/github/status` answers both 503s too, the App one only when no saved token answers for the user.

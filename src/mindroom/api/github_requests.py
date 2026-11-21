@@ -126,7 +126,7 @@ class GitHubRequest(BaseModel):
         "application/vnd.github.diff",
         "application/vnd.github.raw+json",
     ] = _DEFAULT_ACCEPT
-    max_bytes: int | None = Field(default=None, ge=1, le=_MAX_RESPONSE_BYTES)
+    max_bytes: int = Field(default=_MAX_RESPONSE_BYTES, ge=1, le=_MAX_RESPONSE_BYTES, strict=True)
 
 
 class GitHubToken(BaseModel):
@@ -421,7 +421,7 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
                 async with client.stream(method, url, headers=headers | typed, content=content) as response:
                     hop = _redirect(response, method, content) if redirects < _MAX_REDIRECTS else None
                     if hop is None:
-                        body = await _bounded_body(response, payload.max_bytes or _MAX_RESPONSE_BYTES)
+                        body = await _bounded_body(response, payload.max_bytes)
                         if body is None:
                             logger.warning("github_request_too_large", method=payload.method, path=kind)
                             return _error(502, "github_response_too_large")
@@ -435,11 +435,11 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
 
 
 def _request_answer(response: httpx.Response, body: bytes, *, accept: str) -> dict[str, object] | JSONResponse:
-    """Relay the upstream response, requiring strict UTF-8 when the client requested raw contents."""
+    """Relay the upstream response, requiring strict UTF-8 for successful raw answers."""
     try:
         answer = (
             body.decode("utf-8")
-            if accept == "application/vnd.github.raw+json"
+            if response.is_success and accept == "application/vnd.github.raw+json"
             else _answer_body(body, response.headers.get("content-type", ""))
         )
     except UnicodeDecodeError:

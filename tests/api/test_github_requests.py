@@ -376,7 +376,7 @@ def test_a_diff_answers_with_text(app: FastAPI, client: TestClient, paths: Runti
     assert github.requests[0].headers["accept"] == "application/vnd.github.diff"
 
 
-@pytest.mark.parametrize("text", ['{"café": true}\n', ""])
+@pytest.mark.parametrize("text", ['{"café": true}\n', "", "\ufeffx"])
 def test_a_raw_answer_is_utf8_text(
     app: FastAPI,
     client: TestClient,
@@ -395,28 +395,39 @@ def test_a_raw_answer_is_utf8_text(
     assert sent.headers["accept"] == RAW_ACCEPT
 
 
-def test_a_raw_answer_with_invalid_utf8_is_refused(
+@pytest.mark.parametrize(
+    ("upstream_status", "expected"),
+    [
+        (200, (502, {"error": "github_response_not_text"})),
+        (403, (200, {"status": 403, "body": "hello\ufffd", "headers": {}})),
+    ],
+)
+def test_invalid_utf8_is_refused_only_for_a_successful_raw_answer(
     app: FastAPI,
     client: TestClient,
     paths: RuntimePaths,
     github: GitHubPeer,
+    upstream_status: int,
+    expected: tuple[int, dict[str, object]],
 ) -> None:
-    """A binary blob is not relayed as lossy text."""
+    """A binary blob is refused, but GitHub errors keep the normal decoding rules."""
     connect(paths, ALICE)
-    github.handler = lambda _request: httpx.Response(200, content=b"hello\xff")
+    github.handler = lambda _request: httpx.Response(upstream_status, content=b"hello\xff")
 
     response = ask(client, session(app, ALICE), "/repos/octo/hello/git/blobs/abc123", accept=RAW_ACCEPT)
 
-    assert (response.status_code, response.json()) == (502, {"error": "github_response_not_text"})
+    assert (response.status_code, response.json()) == expected
 
 
-def test_an_error_answer_to_a_diff_request_is_json(
+@pytest.mark.parametrize("accept", ["application/vnd.github.diff", RAW_ACCEPT])
+def test_a_json_error_answer_is_an_object_even_when_the_client_requests_text(
     app: FastAPI,
     client: TestClient,
     paths: RuntimePaths,
     github: GitHubPeer,
+    accept: str,
 ) -> None:
-    """The answer's own media type decides the body, so GitHub's JSON error to a diff request is an object."""
+    """The answer's own media type decides the body for GitHub errors."""
     connect(paths, ALICE)
     github.handler = lambda _request: httpx.Response(
         404,
@@ -424,9 +435,10 @@ def test_an_error_answer_to_a_diff_request_is_json(
         headers={"content-type": "application/json; charset=utf-8"},
     )
 
-    response = ask(client, session(app, ALICE), "/repos/octo/hello/pulls/7", accept="application/vnd.github.diff")
+    response = ask(client, session(app, ALICE), "/repos/octo/hello/pulls/7", accept=accept)
 
-    assert response.json()["body"] == {"message": "Not Found"}
+    assert response.status_code == 200
+    assert response.json() == {"status": 404, "body": {"message": "Not Found"}, "headers": {}}
 
 
 @pytest.mark.parametrize(
@@ -820,12 +832,10 @@ def test_an_oversized_answer_is_refused(
     client: TestClient,
     paths: RuntimePaths,
     github: GitHubPeer,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An answer over the size cap is refused rather than relayed."""
+    """An answer over the default 10 MiB cap is refused rather than relayed."""
     connect(paths, ALICE)
-    monkeypatch.setattr(github_requests, "_MAX_RESPONSE_BYTES", 1024)
-    github.handler = lambda _request: httpx.Response(200, content=b"x" * 1025)
+    github.handler = lambda _request: httpx.Response(200, content=b"x" * (10 * 1024 * 1024 + 1))
 
     response = ask(client, session(app, ALICE))
 
@@ -1017,15 +1027,15 @@ def test_other_methods_accepts_and_fields_are_refused(
     assert github.requests == []
 
 
-@pytest.mark.parametrize("max_bytes", [0, 10 * 1024 * 1024 + 1])
-def test_an_out_of_range_max_bytes_is_refused(
+@pytest.mark.parametrize("max_bytes", [0, 10 * 1024 * 1024 + 1, True, 4.0])
+def test_an_invalid_max_bytes_is_refused(
     app: FastAPI,
     client: TestClient,
     paths: RuntimePaths,
     github: GitHubPeer,
-    max_bytes: int,
+    max_bytes: object,
 ) -> None:
-    """The cap must be positive and cannot exceed the default response limit."""
+    """The cap must be an integer between 1 and the default response limit."""
     connect(paths, ALICE)
 
     response = ask(client, session(app, ALICE), max_bytes=max_bytes)
