@@ -161,14 +161,17 @@ def _save_pending_change(
     """Save one checkpoint, or forget its preview given None, and drop the previews nobody decided in time."""
     path = _store_path(runtime_paths)
     records: dict[str, Any] = load_cached_override_records(path, _is_stored_change)
-    for stale in [key for key, record in records.items() if _PendingConfigChange.from_dict(record).is_expired()]:
-        del records[stale]
+    expired_ids = [key for key, record in records.items() if _PendingConfigChange.from_dict(record).is_expired()]
+    for event_id in expired_ids:
+        del records[event_id]
     if checkpoint is None:
         records.pop(preview_event_id, None)
     else:
         records[preview_event_id] = checkpoint.to_dict()
     write_override_records(path, records)
     # Memory follows the store: a write that fails leaves the change, and a value only memory holds, in place.
+    for event_id in expired_ids:
+        _pending_changes.pop(event_id, None)
     if checkpoint is None:
         _pending_changes.pop(preview_event_id, None)
     else:
