@@ -15,6 +15,7 @@ import pytest_asyncio
 from mindroom.approval import manager as approval_manager
 from mindroom.delegation.background import delegation_child
 from mindroom.event_journal import BackgroundApprovalDecision
+from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
@@ -186,6 +187,37 @@ async def test_agent_that_cannot_be_continued_before_any_tool_call_runs_again(st
     assert await stack.result("@0", "agent", _PROMPT) == "second try"
     assert (_node(stack).generation, stack.node_job("@0").job_id != first) == (2, True)
     assert [job.status for job in _node_jobs(stack) if job.job_id == first] == ["interrupted"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_append", [False, True])
+async def test_replay_that_reaches_the_call_before_its_job_was_continued_waits_for_that_decision(
+    stack: WorkflowStack,
+    after_append: bool,
+) -> None:
+    """The replay attaches to no job that still waits to be continued: how that job goes on decides the call.
+
+    So a job that then cannot be continued ends the call as it would have before the replay: a turn that called no
+    tool runs again as the next agent, and one that had is indeterminate. The run does not fail for the order.
+    """
+    await _working(stack, after_append=after_append)
+    await stack.restart()
+    stack.child_script(answer("second try"))
+    assert await stack.recover() == [stack.run_id]
+
+    with pytest.raises(ScriptRuntimeUnavailableError, match="has not been continued yet"):
+        await stack.submit("@0", "agent", _PROMPT)
+    assert _node(stack).state is WorkflowNodeState.RUNNING
+    await stack.continue_agents(joined=False)
+
+    if after_append:
+        with pytest.raises(NodeFailed) as stopped:
+            await stack.result("@0", "agent", _PROMPT)
+        assert (stopped.value.kind, _node(stack).generation) == ("indeterminate", 1)
+    else:
+        assert await stack.result("@0", "agent", _PROMPT) == "second try"
+        assert _node(stack).generation == 2
+    assert stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING
 
 
 @pytest.mark.asyncio

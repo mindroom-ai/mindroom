@@ -84,6 +84,7 @@ _CHARGE_SECONDS = 60.0
 _INTERRUPTED: dict[str, object] = {"kind": "interrupted", "message": "The call was interrupted before its tool ran."}
 _NO_AGENTS = "A workflow runs agents as background tool jobs. Set background_tool_jobs.enabled: true."
 _NAME_LABELS = 'name="{name}" only labels the node. Use agent="{name}" to run that agent.'
+_NOT_CONTINUED_YET = "The agent of this call has not been continued yet after a restart. Try again in a moment."
 _RUN_ENDED = "The run ended before the agent did."
 # How long a waiter sleeps before it reads the store again, with or without a wake.
 _RECHECK_SECONDS = 1.0
@@ -744,6 +745,14 @@ class WorkflowEngine:
         if runtime is None and not stop:
             # Nobody can say how the job stands: the script's SDK asks again.
             raise ScriptRuntimeUnavailableError(_NO_AGENTS)
+        if (
+            runtime is not None
+            and not stop
+            and any(job.job_id == job_id for job in runtime.jobs.awaiting_continuation())
+        ):
+            # A restart stopped the job, and whether it goes on is not decided: until then it is neither live nor
+            # ended, and the call must not attach to a job that may yet end without having done anything.
+            raise ScriptRuntimeUnavailableError(_NOT_CONTINUED_YET)
         jobs = runtime.jobs.retained_jobs() if runtime is not None else ()
         if runtime is None or any(job.job_id == job_id and job.status not in TERMINAL_STATUSES for job in jobs):
             if not stop:

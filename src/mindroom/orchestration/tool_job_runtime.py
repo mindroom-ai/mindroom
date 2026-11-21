@@ -433,7 +433,8 @@ class ToolJobRuntimeCoordinator:
         jobs = runtime.awaiting_continuation()
         waiting = {job.job_id for job in jobs}
         self._unresolved_since = {job_id: at for job_id, at in self._unresolved_since.items() if job_id in waiting}
-        for job in jobs:
+        # A run's agents before the run: its replay then finds each of them continued or ended.
+        for job in sorted(jobs, key=lambda job: job.kind == "workflow"):
             try:
                 await self._continue_stopped_job(runtime, job)
             except Exception:
