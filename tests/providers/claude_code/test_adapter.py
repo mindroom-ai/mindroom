@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import json
 import os
 import shutil
@@ -754,6 +755,29 @@ async def test_a_runtime_directory_that_was_cleaned_away_is_replaced_by_a_new_pr
     assert list(cleaned.iterdir()) == []
     assert cli.events("spawn")[1]["cwd"] == str(home() / "cwd")
     assert cli.events("spawn")[1]["prompt_modes"] == [0o600, 0o700]
+
+
+@pytest.mark.asyncio
+async def test_a_directory_someone_else_made_under_the_old_name_is_neither_used_nor_removed(tmp_path: Path) -> None:
+    cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]}, {"turns": [text_turn("Hello.")]})
+    provider = cli.provider()
+    await complete(provider, ModelRequest(messages=[_SYSTEM, user("Hi")]))
+    cleaned = home()
+    shutil.rmtree(cleaned)
+    (cleaned / "cwd").mkdir(parents=True)
+
+    await complete(provider, ModelRequest(messages=[_SYSTEM, user("Hi again")]))
+    session_module._remove_homes()
+
+    assert cli.events("spawn")[1]["cwd"] != str(cleaned / "cwd")
+    assert (cleaned / "cwd").is_dir()
+
+
+def test_starts_preparing_at_once_share_one_private_directory() -> None:
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        homes = set(pool.map(lambda _: session_module._home(), range(32)))
+
+    assert len(homes) == 1
 
 
 @pytest.fixture

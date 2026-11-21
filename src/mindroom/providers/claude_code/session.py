@@ -9,9 +9,12 @@ MindRoom's history stays the only record of a conversation: no process is resume
 from __future__ import annotations
 
 import asyncio
+import atexit
 import os
 import re
+import shutil
 import tempfile
+import threading
 from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
@@ -56,9 +59,11 @@ _MIN_VERSION = (2, 1, 328)
 # The request metadata Claude Code sends with an MCP tool call: the id of the ``tool_use`` block that made the call.
 _TOOL_USE_ID_META = "claudecode/toolUseId"
 SERVER_NAME = "mindroom"
-# This runtime's private directories, which go when MindRoom exits; the last one is in use. Every process runs in its
-# empty ``cwd``, where no project file or setting reaches it, and its system prompt lies beside that while it starts.
-_HOMES: list[tempfile.TemporaryDirectory[str]] = []
+# This runtime's private directories with the device and inode each had when made, so a directory someone else made
+# under the same name is neither used nor removed; the last one is in use. Every process runs in its empty ``cwd``,
+# where no project file or setting reaches it, and its system prompt lies beside that while it starts.
+_HOMES: list[tuple[Path, tuple[int, int]]] = []
+_HOMES_LOCK = threading.Lock()
 _PARKED_TTL_SECONDS = 30 * 60.0
 _IDLE_TTL_SECONDS = 5 * 60.0
 # A process takes a few hundred megabytes. One that answers a request is never closed to make room for another.
@@ -325,13 +330,36 @@ async def _refuse_unless_ready(client: ClaudeSDKClient, offered: list[str], prov
         await asyncio.sleep(0.05)
 
 
+def _identity(path: Path) -> tuple[int, int]:
+    info = path.lstat()
+    return info.st_dev, info.st_ino
+
+
+def _home() -> Path:
+    """Return this runtime's private directory, made anew when a cleaner of temporary files removed the last one."""
+    with _HOMES_LOCK:
+        if _HOMES:
+            home, identity = _HOMES[-1]
+            with suppress(OSError):
+                if _identity(home) == identity and (home / "cwd").is_dir():
+                    return home
+        home = Path(tempfile.mkdtemp(prefix="mindroom-claude-code-"))
+        (home / "cwd").mkdir()
+        _HOMES.append((home, _identity(home)))
+        return home
+
+
+@atexit.register
+def _remove_homes() -> None:
+    for home, identity in _HOMES:
+        with suppress(OSError):
+            if _identity(home) == identity:
+                shutil.rmtree(home, ignore_errors=True)
+
+
 def _prepare(system: str) -> tuple[Path, Path | None]:
     """Return the processes' working directory and the file that holds ``system``, which only this user can read."""
-    if not _HOMES or not Path(_HOMES[-1].name, "cwd").is_dir():
-        # A cleaner of temporary files removed the last one, whose name someone else could have taken since.
-        _HOMES.append(tempfile.TemporaryDirectory(prefix="mindroom-claude-code-", ignore_cleanup_errors=True))
-        Path(_HOMES[-1].name, "cwd").mkdir()
-    home = Path(_HOMES[-1].name)
+    home = _home()
     if not system:
         return home / "cwd", None
     # A system prompt is too long for a command line.

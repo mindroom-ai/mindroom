@@ -85,7 +85,7 @@ def left_behind() -> list[str]:
 
 def home() -> Path:
     """Return the private directory of the route's processes."""
-    return Path(session._HOMES[-1].name)
+    return session._HOMES[-1][0]
 
 
 def fake_cli(tmp_path: Path, *processes: dict[str, Any]) -> FakeCli:

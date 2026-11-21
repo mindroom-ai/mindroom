@@ -6,7 +6,7 @@ import asyncio
 import ipaddress
 import os
 import tempfile
-from collections import Counter
+from collections import ChainMap, Counter
 from collections.abc import Mapping
 from dataclasses import replace
 from functools import partial
@@ -618,9 +618,9 @@ def _check_claude_code(config: Config, runtime_paths: RuntimePaths) -> tuple[int
 
     passed = failed = warnings = 0
     checked: set[str | None] = set()
-    # Doctor reports a missing Claude Agent SDK; it installs nothing.
-    process_env = {**runtime_paths.process_env, "MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"}
-    checked_paths = replace(runtime_paths, process_env=process_env)
+    # Doctor reports a missing Claude Agent SDK; it installs nothing. The overlay reads no other value.
+    no_install = ChainMap({"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"}, runtime_paths.process_env)  # ty: ignore[invalid-argument-type]
+    checked_paths = replace(runtime_paths, process_env=no_install)
     for model_config in config.models.values():
         if provider_route(model_config.provider) != "claude_code":
             continue
