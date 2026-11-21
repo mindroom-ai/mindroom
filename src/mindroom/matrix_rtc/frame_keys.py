@@ -111,7 +111,9 @@ class FrameKeyManager:
         if any_left:
             return self._rotate(members_by_share, now_ms)
         if joined:
-            if now_ms - self._key_created_ms < _KEY_ROTATION_GRACE_PERIOD_MS:
+            # A device this key already targeted but did not reach gets it again, however late.
+            retry_only = all(_share(member) in self._exposed_to for member in joined)
+            if retry_only or now_ms - self._key_created_ms < _KEY_ROTATION_GRACE_PERIOD_MS:
                 activation_ms = self._key_activation_ms
                 return _KeyDistribution(
                     key=self._key,

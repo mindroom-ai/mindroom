@@ -104,6 +104,27 @@ def test_joiner_during_pending_rotation_keeps_remaining_activation_delay() -> No
     assert shared.apply_after_ms == 500
 
 
+def test_undelivered_member_after_grace_gets_the_same_key_again() -> None:
+    """A retry to a device the key already targeted re-sends it; only a genuine late joiner rotates."""
+    manager = _manager()
+    alice = _member("@alice:example.org")
+    bob = _member("@bob:example.org")
+    first = manager.update_memberships([alice, bob], now_ms=0)
+    assert first is not None
+    manager.mark_distributed(first, (alice,), now_ms=0)
+
+    retry = manager.update_memberships([alice, bob], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 1)
+    assert retry is not None
+    assert retry.key == first.key
+    assert retry.targets == (bob,)
+    manager.mark_distributed(retry, now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 1)
+
+    charlie = _member("@charlie:example.org")
+    joined = manager.update_memberships([alice, bob, charlie], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 2)
+    assert joined is not None
+    assert joined.key_index == 1
+
+
 def test_rotated_key_activates_one_delay_after_its_first_completed_send() -> None:
     """A slow or failed rotation send cannot let a re-share switch to the key early."""
     manager = _manager()

@@ -6028,6 +6028,59 @@ async def test_rapid_roster_changes_preserve_key_activation_deadline(
 
 
 @pytest.mark.asyncio
+async def test_retry_during_slow_partial_leave_rotation_keeps_that_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device the leave rotation missed gets the same key again; the rotation still activates."""
+    release_delays = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def controlled_sleep(_seconds: float) -> None:
+        await release_delays.wait()
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", controlled_sleep)
+    clock = [0]
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+    charlie = _member("@charlie:example.org", "CHARLIEDEV")
+
+    class SlowPartialRotationTransport(FakeKeyTransport):
+        async def send_key(
+            self,
+            *,
+            room_id: str,
+            key_base64: str,
+            key_index: int,
+            targets: list[CallMember],
+        ) -> list[CallMember]:
+            await super().send_key(room_id=room_id, key_base64=key_base64, key_index=key_index, targets=targets)
+            if key_index == 1 and bob in targets and len(targets) > 1:
+                clock[0] += 10_500
+                return [member for member in targets if member != bob]
+            return targets
+
+    transport = SlowPartialRotationTransport()
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, transport, clock)
+
+    session._members = [alice, bob, charlie]
+    await session._distribute_keys()
+    clock[0] = 1_000
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    # The delivery retry (or an inbound-key wakeup) runs before the rotation activates.
+    await session._distribute_keys()
+
+    assert [sent["key_index"] for sent in transport.sent] == [0, 1, 1]
+    assert transport.sent[2]["targets"] == [bob]
+    release_delays.set()
+    for _ in range(5):
+        await real_sleep(0)
+    assert {key_index for _, _, key_index in bridge.frame_keys} == {0, 1}
+    await session.stop()
+
+
+@pytest.mark.asyncio
 async def test_wall_clock_jump_cannot_shorten_the_rotation_delay(monkeypatch: pytest.MonkeyPatch) -> None:
     """The activation deadline runs on monotonic time, so a forward clock correction changes nothing."""
     release_delays = asyncio.Event()
