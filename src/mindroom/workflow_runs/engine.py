@@ -670,6 +670,13 @@ class WorkflowEngine:
                 refused = replace(node, **end, ended_at=utc_timestamp())
                 await asyncio.to_thread(partial(self.store.put_node, refused, run.epoch, dirty_after=True))
             return _receipt(cast("WorkflowNode", self.store.get_node(run.run_id, node.key)))
+        except Exception:
+            # The start failed in some other way. A node that names its job already is settled from that job, which
+            # ran nothing if it never started; the request itself fails, and the script's SDK sends it again.
+            saved = self.store.get_node(run.run_id, node.key)
+            if saved is not None and saved.generation == node.generation and saved.handle is not None:
+                self._spawn(run.run_id, self._run_agent_node(run, saved, run.epoch, timeout))
+            raise
         self._restate(run.run_id)
         self._spawn(run.run_id, self._run_agent_node(run, node, run.epoch, timeout))
         return _receipt(node)

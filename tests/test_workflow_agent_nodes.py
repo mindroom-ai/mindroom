@@ -22,7 +22,7 @@ from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.publication import _jobs_state_content
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
-from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
+from mindroom.workflow_runs.models import DispatchHandle, WorkflowNodeState, WorkflowRunState
 from tests.delegation_helpers import offered_tools
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.scripted_agent_helpers import raising
@@ -189,6 +189,57 @@ async def test_job_that_ended_between_two_attempts_is_copied_and_not_run_again(s
 
     assert (receipt.state, receipt.result, receipt.cached) == ("completed", "meanwhile", True)
     assert (stack.node_job("@0").consumed, len(_node_jobs(stack))) == (True, 1)
+
+
+@pytest.mark.asyncio
+async def test_job_that_was_never_started_ends_its_call_as_safe_to_run_again(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The node names its job before the job starts: when the start then fails, nothing ran, and the call says so."""
+    start = stack.jobs.start
+
+    async def failing_start(*_args: object, **_options: object) -> None:
+        msg = "The journal is gone."
+        raise OSError(msg)
+
+    monkeypatch.setattr(stack.jobs, "start", failing_start)
+    with pytest.raises(OSError, match="The journal is gone"):
+        await stack.submit("@0", "agent", _PROMPT)
+    monkeypatch.setattr(stack.jobs, "start", start)
+
+    with pytest.raises(NodeFailed) as stopped:
+        await stack.result("@0", "agent", _PROMPT)
+
+    node = _node(stack)
+    assert (stopped.value.kind, node.state, node.handle and node.handle.dispatched) == (
+        "interrupted",
+        WorkflowNodeState.FAILED,
+        False,
+    )
+    assert _node_jobs(stack) == []
+    await stack.end_attempt(ScriptRunState.FAILED)
+    await stack.resume(stack.run_id)
+    stack.child_script(answer("second try"))
+    assert await stack.result("@0", "agent", _PROMPT) == "second try"
+
+
+@pytest.mark.asyncio
+async def test_job_that_was_started_and_is_gone_leaves_its_call_indeterminate(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job that started and that the job runtime no longer holds may have done anything: it is not run again."""
+    _hanging(stack)
+    await stack.submit("@0", "agent", _PROMPT)
+    assert _node(stack).handle == DispatchHandle("job", stack.node_job("@0").job_id, dispatched=True)
+    await _replayed(stack)
+    monkeypatch.setattr(stack.jobs, "retained_jobs", lambda: ())
+
+    receipt = await stack.submit("@0", "agent", _PROMPT)
+
+    assert (receipt.state, receipt.error and receipt.error["kind"]) == ("failed", "indeterminate")
+    assert (_node(stack).state, _node(stack).generation) == (WorkflowNodeState.INDETERMINATE, 1)
 
 
 @pytest.mark.asyncio
