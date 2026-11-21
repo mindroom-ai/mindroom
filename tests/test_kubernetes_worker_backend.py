@@ -4686,6 +4686,52 @@ def test_kubernetes_maintenance_removes_pinned_state_after_a_failed_auth_secret(
     assert not root.exists()
 
 
+@pytest.mark.parametrize("leftovers", ["legacy-credentials", "partial-manifest", "interrupted-retirement"])
+def test_kubernetes_pinned_start_recovers_without_a_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    leftovers: str,
+) -> None:
+    """Only an interrupted retirement discards a pinned worker's files before a replacement starts."""
+    backend, apps, _core = _named_backend(tmp_path)
+    spec = _spec(
+        subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32),
+        state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A,
+    )
+    root = backend.storage_root / backend._state_subpath(spec.worker_key)
+    manifest = root / ".runtime" / "startup_manifest.json"
+    if leftovers == "partial-manifest":
+
+        def fail_once(**_kwargs: object) -> str:
+            manifest.parent.mkdir(parents=True)
+            msg = "No space left on device"
+            raise OSError(msg)
+
+        with monkeypatch.context() as failing:
+            failing.setattr(backend._resources, "write_startup_manifest", fail_once)
+            with pytest.raises(WorkerBackendError, match="No space left"):
+                backend.ensure_worker(spec, now=0.0)
+    elif leftovers == "interrupted-retirement":
+        worker = backend.ensure_worker(spec, now=0.0)
+        with monkeypatch.context() as interrupted:
+            interrupted.setattr(worker_retirement_module, "_remove_tree", _remove_only_the_manifest(root))
+            with pytest.raises(WorkerBackendError):
+                backend.retire_worker(worker.worker_key)
+    else:
+        (root / ".credentials").mkdir(parents=True)
+
+    assert not manifest.exists()
+    stale = root / "old-cache"
+    stale.write_text("old state", encoding="utf-8")
+    handle = backend.ensure_worker(spec, now=1.0)
+
+    assert handle.status == "ready"
+    assert handle.worker_id in apps.deployments
+    assert manifest.is_file()
+    assert stale.exists() is (leftovers != "interrupted-retirement")
+    assert not root.with_name(f"{root.name}.retiring").exists()
+
+
 def test_kubernetes_maintenance_keeps_files_that_are_not_an_orphaned_pinned_workers(tmp_path: Path) -> None:
     """Only a pinned worker's own files without a Deployment are removed; every other directory stays."""
     backend, apps_api, _core_api = _named_backend(tmp_path, named_worker_idle_timeout_seconds=10_000.0)

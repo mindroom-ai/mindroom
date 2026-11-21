@@ -325,21 +325,7 @@ class KubernetesWorkerBackend:
         auth_secret_applied = False
         try:
             if existing is None and pinned_worker_kind(worker_key) is not None:
-                # An interrupted start must leave an identity for maintenance before it creates credentials.
-                prefix, _, name = state_subpath.rpartition("/")
-                with open_worker_state_root(
-                    self.storage_root,
-                    workers_subpath=tuple(prefix.split("/")) if prefix else (),
-                    worker_name=name,
-                    expected_worker_key=worker_key,
-                    identity_path=_STATE_IDENTITY_PATH,
-                    identity_field_path=_STATE_IDENTITY_FIELD_PATH,
-                ):
-                    self._resources.write_startup_manifest(
-                        worker_key=worker_key,
-                        state_subpath=state_subpath,
-                        tool_validation_snapshot=launch.tool_validation_snapshot,
-                    )
+                self._prepare_pinned_state(worker_key, state_subpath, launch)
             # kubelet resolves the read-only mirror subPath when the pod starts, so the
             # primary validates and creates the worker's credential directories first.
             get_runtime_credentials_manager(self.runtime_paths).for_worker(worker_key)
@@ -562,6 +548,39 @@ class KubernetesWorkerBackend:
         except (OSError, RecursionError, TypeError, ValueError, self._resources.api_exception) as exc:
             msg = f"Failed to retire Kubernetes worker '{worker_log_id(worker_key)}': {exc}"
             raise WorkerBackendError(msg) from exc
+
+    def _prepare_pinned_state(self, worker_key: str, state_subpath: str, launch: WorkerLaunchConfig) -> None:
+        """Finish an interrupted retirement, then record ownership before provisioning credentials."""
+        prefix, _, name = state_subpath.rpartition("/")
+        with open_worker_state_root(
+            self.storage_root,
+            workers_subpath=tuple(prefix.split("/")) if prefix else (),
+            worker_name=name,
+        ) as state:
+            if state.worker_fd is not None:
+                # A legacy failed start can leave state without a manifest. A conflicting key is never reusable.
+                require_worker_identity(
+                    state.worker_fd,
+                    worker_key,
+                    identity_path=_STATE_IDENTITY_PATH,
+                    identity_field_path=_STATE_IDENTITY_FIELD_PATH,
+                    allow_missing=True,
+                )
+            retiring = (
+                state.workers_fd is not None
+                and read_worker_marker(
+                    state.workers_fd,
+                    name + _RETIREMENT_MARKER_SUFFIX,
+                )
+                == worker_key
+            )
+        if retiring:
+            self._retire_worker_locked(worker_key)
+        self._resources.write_startup_manifest(
+            worker_key=worker_key,
+            state_subpath=state_subpath,
+            tool_validation_snapshot=launch.tool_validation_snapshot,
+        )
 
     def _require_retirement_deployment(self, worker_id: str, worker_key: str, state_subpath: str) -> None:
         """Refuse a retirement whose Deployment belongs to another worker or state."""

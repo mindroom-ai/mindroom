@@ -104,6 +104,10 @@ def _identity_value(payload: dict[str, object], field_path: tuple[str, ...]) -> 
     return value
 
 
+class _MissingWorkerIdentityError(ValueError):
+    """The identity file or one of its parent directories is absent."""
+
+
 def read_worker_identity(
     worker_fd: int,
     *,
@@ -122,13 +126,13 @@ def read_worker_identity(
                 current_fd = _open_directory_at(current_fd, segment)
             except FileNotFoundError as exc:
                 msg = "Worker identity metadata is missing."
-                raise ValueError(msg) from exc
+                raise _MissingWorkerIdentityError(msg) from exc
             descriptors.append(current_fd)
         try:
             payload = _decode_identity(_read_bounded_file(current_fd, identity_path[-1]))
         except FileNotFoundError as exc:
             msg = "Worker identity metadata is missing."
-            raise ValueError(msg) from exc
+            raise _MissingWorkerIdentityError(msg) from exc
         return _identity_value(payload, identity_field_path)
     finally:
         for descriptor in reversed(descriptors):
@@ -141,12 +145,16 @@ def require_worker_identity(
     *,
     identity_path: tuple[str, ...],
     identity_field_path: tuple[str, ...],
+    allow_missing: bool = False,
 ) -> None:
-    """Require the exact worker key before touching an existing worker tree."""
-    if (
-        read_worker_identity(worker_fd, identity_path=identity_path, identity_field_path=identity_field_path)
-        != worker_key
-    ):
+    """Check the identity, optionally allowing a manifest that has not been written yet."""
+    try:
+        identity = read_worker_identity(worker_fd, identity_path=identity_path, identity_field_path=identity_field_path)
+    except _MissingWorkerIdentityError:
+        if allow_missing:
+            return
+        raise
+    if identity != worker_key:
         msg = "Worker identity metadata does not match the retirement key."
         raise ValueError(msg)
 
