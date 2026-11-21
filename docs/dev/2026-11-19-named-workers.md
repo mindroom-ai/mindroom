@@ -55,11 +55,12 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
 - **Maintenance retries a failed removal from the worker's files.**
   A removal deletes the Deployment before the files, because the pod must be gone first, so a failure in between left files no pass found.
   A worker directory that no Deployment names for a grace period, and whose startup manifest names a pinned key that maps to that directory, is removed under the worker's lock.
-  A removal first writes a marker beside the directory that names the worker's key, because deleting the files can stop after the manifest is gone; a later pass, also of a restarted primary, finishes a marked removal without the manifest.
+  A removal uses a marker beside the directory that names the worker's key, because deleting the files can stop after the manifest is gone; a later pass, also of a restarted primary, finishes a marked removal without the manifest. If space or quota prevents writing a new marker, removal still goes ahead.
   Pinned workers record their startup identity before provisioning credentials, so maintenance can find even an early failed start.
   Retirement markers are read and written relative to the validated workers directory without following symlinks.
   A manifest that cannot be read is read again after the grace period.
   An orphan sweep only trusts manifests and markers for subagent and named workers. A script worker’s run retries its own removal.
+  After a subagent worker's Deployment disappears for any reason (including operator deletion), its directory is removed once the sweep has seen it absent for five minutes and no dependent ReplicaSet or non-terminal pod remains; that costs a cold start and caches, not workspace data.
 - **The worker protocol moves to 9 with an unchanged wire schema**, as 8 did, because a runner must map a `named=` key to its normal key.
 
 ## Rejected alternatives

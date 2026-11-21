@@ -236,7 +236,7 @@ A reply that pauses for a [tool approval](../tool-approval.md) gives up its name
 
 A named worker counts against `named_workers` for its requester, and against `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` for the whole deployment, from the call that starts it until it is removed, so also while it starts, sits idle, or has failed.
 Set `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX=0` to disable named workers for the whole deployment.
-A call that would start one more than either limit allows fails instead of waiting; calls to workers the reply already started always go through.
+A call that would start one more than either limit allows fails instead of waiting. Reusing a worker this reply started does not recheck the limits while the worker is starting or its Kubernetes Deployment exists and is not being removed. If idle cleanup removes it, starting it again is subject to both limits.
 Only calls of a reply in a Matrix conversation can name a worker, so [background scripts](background-scripts.md) and [OpenAI-compatible API](../openai-api.md) requests cannot.
 [Approved egress](../deployment/approved-egress.md#requesting-access) grants do not reach named workers.
 
