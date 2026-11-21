@@ -96,28 +96,51 @@ async def test_bridge_e2ee_uses_matrix_compatible_hkdf(monkeypatch: pytest.Monke
     assert derived.hex() == "4086b4641064e1ae8b63d4eb83ad3e7e"
 
 
+_OWN = "@bot:example.org:BOTDEV"
+_ALICE = "@alice:example.org:ALICEDEV"
+
+
 class _FakeCryptor:
-    def __init__(self, participant_identity: str, track_sid: str) -> None:
+    def __init__(self, participant_identity: str, track_sid: str, log: list[tuple[object, ...]]) -> None:
         self.participant_identity = participant_identity
         self.track_sid = track_sid
+        # LiveKit creates every sender cryptor on key index 0.
+        self.key_index = 0
         self.key_indices: list[int] = []
+        self._log = log
 
     def set_key_index(self, key_index: int) -> None:
+        self.key_index = key_index
         self.key_indices.append(key_index)
+        self._log.append(("index", self.track_sid, key_index))
 
 
 class _FakeE2EERoom:
-    """A LiveKit room whose E2EE manager records keys and sender key indices."""
+    """A LiveKit room whose E2EE manager keeps per-identity key slots and sender key indices."""
 
     def __init__(self) -> None:
         self.local_participant = MagicMock()
         self.cryptors: list[_FakeCryptor] = []
-        self.keys: list[tuple[str, bytes, int]] = []
+        self.slots: dict[tuple[str, int], bytes] = {}
+        self.log: list[tuple[object, ...]] = []
         self.listeners: dict[str, list[Callable[..., object]]] = {}
         self.e2ee_manager = SimpleNamespace(
-            key_provider=SimpleNamespace(set_key=lambda *args: self.keys.append(args)),
+            key_provider=SimpleNamespace(set_key=self._set_key),
             frame_cryptors=lambda: list(self.cryptors),
         )
+
+    def _set_key(self, identity: str, key: bytes, key_index: int) -> None:
+        self.slots[identity, key_index] = key
+        self.log.append(("key", identity, key_index))
+
+    def new_cryptor(self, identity: str, track_sid: str) -> _FakeCryptor:
+        cryptor = _FakeCryptor(identity, track_sid, self.log)
+        self.cryptors.append(cryptor)
+        return cryptor
+
+    def key_used_by(self, cryptor: _FakeCryptor) -> bytes | None:
+        """The secret the native sender encrypts its next frame with."""
+        return self.slots.get((cryptor.participant_identity, cryptor.key_index))
 
     def on(self, event: str, callback: Callable[..., object]) -> Callable[..., object]:
         self.listeners.setdefault(event, []).append(callback)
@@ -131,10 +154,14 @@ class _FakeE2EERoom:
         return
 
 
-async def _connected_e2ee_bridge(monkeypatch: pytest.MonkeyPatch) -> tuple[RealtimeVoiceBridge, _FakeE2EERoom]:
+async def _connected_e2ee_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    e2ee_enabled: bool = True,
+) -> tuple[RealtimeVoiceBridge, _FakeE2EERoom]:
     room = _FakeE2EERoom()
     monkeypatch.setattr("livekit.rtc.Room", lambda: room)
-    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=True)
+    bridge = RealtimeVoiceBridge(local_identity=_OWN, e2ee_enabled=e2ee_enabled)
     await bridge.connect(SfuGrant(url="wss://sfu.example.org", jwt="jwt"))
     return bridge, room
 
@@ -143,41 +170,82 @@ async def _connected_e2ee_bridge(monkeypatch: pytest.MonkeyPatch) -> tuple[Realt
 async def test_own_frame_key_switches_only_our_outgoing_cryptors(monkeypatch: pytest.MonkeyPatch) -> None:
     """LiveKit keeps a sender on its old key index until told, so our own key must move it."""
     bridge, room = await _connected_e2ee_bridge(monkeypatch)
-    ours = _FakeCryptor("@bot:example.org:BOTDEV", "TR_AUDIO")
-    alices = _FakeCryptor("@alice:example.org:ALICEDEV", "TR_ALICE")
-    room.cryptors = [ours, alices]
+    ours = room.new_cryptor(_OWN, "TR_AUDIO")
+    alices = room.new_cryptor(_ALICE, "TR_ALICE")
 
-    bridge.set_frame_key("@alice:example.org:ALICEDEV", b"A" * 16, 3)
+    bridge.set_frame_key(_ALICE, b"A" * 16, 3)
     assert ours.key_indices == []
     assert alices.key_indices == []
+    assert room.slots == {(_ALICE, 3): b"A" * 16}
 
-    bridge.set_frame_key("@bot:example.org:BOTDEV", b"B" * 16, 1)
+    bridge.set_frame_key(_OWN, b"B" * 16, 1)
 
     assert ours.key_indices == [1]
     assert alices.key_indices == []
-    assert room.keys == [
-        ("@alice:example.org:ALICEDEV", b"A" * 16, 3),
-        ("@bot:example.org:BOTDEV", b"B" * 16, 1),
+    assert room.key_used_by(ours) == b"B" * 16
+
+
+@pytest.mark.asyncio
+async def test_own_key_is_stored_before_every_own_sender_moves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No sender switches to an index whose slot does not hold the key yet."""
+    bridge, room = await _connected_e2ee_bridge(monkeypatch)
+    room.new_cryptor(_OWN, "TR_AUDIO")
+    room.new_cryptor(_OWN, "TR_SECOND")
+    room.new_cryptor(_ALICE, "TR_ALICE")
+
+    bridge.set_frame_key(_OWN, b"B" * 16, 2)
+
+    assert room.log == [
+        ("key", _OWN, 0),
+        ("key", _OWN, 2),
+        ("index", "TR_AUDIO", 2),
+        ("index", "TR_SECOND", 2),
     ]
 
 
 @pytest.mark.asyncio
+async def test_own_rotations_move_a_published_track_each_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every activated own key moves the senders again, including a wrap back to index 0."""
+    bridge, room = await _connected_e2ee_bridge(monkeypatch)
+    ours = room.new_cryptor(_OWN, "TR_AUDIO")
+
+    bridge.set_frame_key(_OWN, b"1" * 16, 1)
+    bridge.set_frame_key(_OWN, b"2" * 16, 2)
+    bridge.set_frame_key(_OWN, b"0" * 16, 0)
+
+    assert ours.key_indices == [1, 2, 0]
+    assert room.key_used_by(ours) == b"0" * 16
+    later = room.new_cryptor(_OWN, "TR_LATER")
+    room.emit("local_track_published", MagicMock(), MagicMock())
+    assert later.key_indices == [0]
+    assert room.key_used_by(later) == b"0" * 16
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("event", ["local_track_published", "local_track_republished"])
-async def test_track_published_after_rotation_starts_on_current_own_index(
+async def test_new_sender_never_encrypts_with_a_retired_own_key(
     monkeypatch: pytest.MonkeyPatch,
     event: str,
 ) -> None:
-    """LiveKit starts every new sender at index 0, so a later track gets our current index."""
-    bridge, room = await _connected_e2ee_bridge(monkeypatch)
-    alices = _FakeCryptor("@alice:example.org:ALICEDEV", "TR_ALICE")
-    room.cryptors = [alices]
-    bridge.set_frame_key("@bot:example.org:BOTDEV", b"B" * 16, 2)
+    """A sender LiveKit creates on index 0 after a rotation cannot use the key a departed device knows.
 
-    later = _FakeCryptor("@bot:example.org:BOTDEV", "TR_LATER")
-    room.cryptors.append(later)
+    LiveKit enables a (re)published track before its event reaches Python, so frames sent in
+    that window use slot 0. That slot must already hold the active key, not the retired one.
+    """
+    bridge, room = await _connected_e2ee_bridge(monkeypatch)
+    alices = room.new_cryptor(_ALICE, "TR_ALICE")
+    bridge.set_frame_key(_OWN, b"0" * 16, 0)
+    bridge.set_frame_key(_OWN, b"2" * 16, 2)
+
+    later = room.new_cryptor(_OWN, "TR_LATER")
+    # Before the event is delivered: still on index 0, which must not hold the retired key.
+    assert later.key_index == 0
+    assert room.key_used_by(later) == b"2" * 16
+
     room.emit(event, MagicMock(), MagicMock())
 
     assert later.key_indices == [2]
+    assert room.key_used_by(later) == b"2" * 16
     assert alices.key_indices == []
 
 
@@ -185,11 +253,23 @@ async def test_track_published_after_rotation_starts_on_current_own_index(
 async def test_track_published_before_own_key_keeps_livekit_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """With no own key installed yet there is no index to apply."""
     _bridge, room = await _connected_e2ee_bridge(monkeypatch)
-    ours = _FakeCryptor("@bot:example.org:BOTDEV", "TR_AUDIO")
-    room.cryptors = [ours]
+    ours = room.new_cryptor(_OWN, "TR_AUDIO")
 
     room.emit("local_track_published", MagicMock(), MagicMock())
 
+    assert ours.key_indices == []
+
+
+@pytest.mark.asyncio
+async def test_unencrypted_call_registers_no_key_listeners(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without E2EE the bridge neither listens for publishes nor touches keys or cryptors."""
+    bridge, room = await _connected_e2ee_bridge(monkeypatch, e2ee_enabled=False)
+    ours = room.new_cryptor(_OWN, "TR_AUDIO")
+
+    bridge.set_frame_key(_OWN, b"B" * 16, 1)
+
+    assert room.listeners == {}
+    assert room.slots == {}
     assert ours.key_indices == []
 
 

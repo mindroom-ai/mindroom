@@ -510,7 +510,10 @@ class RealtimeVoiceBridge:
         room = rtc.Room()
         self._room = room
         if self._e2ee_enabled:
-            # LiveKit starts every new sender (a reconnect republishes ours) at key index 0.
+            # LiveKit starts every new sender (a full reconnect republishes ours) on key index 0 and
+            # enables it before this event reaches Python. Moving it here lets callers decode it;
+            # set_frame_key keeps our slot 0 on the active key, so frames sent before the event
+            # cannot use a retired key that a departed device still holds.
             room.on("local_track_published", self._apply_own_key_index)
             room.on("local_track_republished", self._apply_own_key_index)
         connect_task = asyncio.create_task(
@@ -546,8 +549,13 @@ class RealtimeVoiceBridge:
         """Install a media frame key for one participant (or ourselves)."""
         if self._room is None or not self._e2ee_enabled:
             return
-        self._room.e2ee_manager.key_provider.set_key(participant_identity, key, key_index)
-        if participant_identity == self._local_identity:
+        key_provider = self._room.e2ee_manager.key_provider
+        own_key = participant_identity == self._local_identity
+        if own_key and key_index != 0:
+            # New senders start on slot 0: give it the active key, never the retired one.
+            key_provider.set_key(participant_identity, key, 0)
+        key_provider.set_key(participant_identity, key, key_index)
+        if own_key:
             # set_key only stores the key: our senders keep encrypting with their old index until told.
             self._own_key_index = key_index
             self._apply_own_key_index()
