@@ -27,13 +27,17 @@ _ROOM_CALL_SCOPE = "m.room"
 DEFAULT_MEMBERSHIP_EXPIRES_MS = 4 * 60 * 60 * 1000
 
 
-def _preferred_livekit_service_url(content: dict[str, Any]) -> str | None:
+def _preferred_livekit_service_url(content: dict[str, Any], *, uses_multi_sfu: bool) -> str | None:
     """Return the selected first preferred LiveKit focus URL."""
     foci = content.get("foci_preferred")
     if not isinstance(foci, list) or not foci:
         return None
     focus = foci[0]
     if not isinstance(focus, dict) or focus.get("type") != "livekit":
+        return None
+    # Deliberately refuse direct WebSocket transports in multi_sfu mode:
+    # the service URL cannot prove where these members actually publish.
+    if uses_multi_sfu and "url" in focus:
         return None
     candidate = focus.get("livekit_service_url")
     return candidate if isinstance(candidate, str) and candidate else None
@@ -48,7 +52,7 @@ def _is_supported_room_call_session(content: dict[str, Any]) -> bool:
         and content.get("scope") in (None, _ROOM_CALL_SCOPE)
         and isinstance(focus_active, dict)
         and focus_active.get("type") == "livekit"
-        and focus_active.get("focus_selection") == "oldest_membership"
+        and focus_active.get("focus_selection") in ("oldest_membership", "multi_sfu")
     )
 
 
@@ -61,6 +65,7 @@ class CallMember:
     created_ts: int
     expires_ms: int
     livekit_service_url: str | None = None
+    uses_multi_sfu: bool = False
 
     def is_expired(self, now_ms: int) -> bool:
         """Whether the membership state event has outlived its validity window."""
@@ -124,12 +129,14 @@ def parse_membership_event(event_source: dict[str, Any]) -> CallMember | None:
     expires = content.get("expires")
     if not isinstance(expires, int) or isinstance(expires, bool):
         expires = DEFAULT_MEMBERSHIP_EXPIRES_MS
+    uses_multi_sfu = content["focus_active"]["focus_selection"] == "multi_sfu"
     return CallMember(
         user_id=sender,
         device_id=device_id,
         created_ts=created_ts,
         expires_ms=expires,
-        livekit_service_url=_preferred_livekit_service_url(content),
+        livekit_service_url=_preferred_livekit_service_url(content, uses_multi_sfu=uses_multi_sfu),
+        uses_multi_sfu=uses_multi_sfu,
     )
 
 
@@ -170,26 +177,17 @@ def parse_key_to_device_content(
     room_id: str,
     received_at_ms: int,
 ) -> ReceivedFrameKey | None:
-    """Parse ``io.element.call.encryption_keys`` to-device content.
-
-    Mirrors the validation in matrix-js-sdk's ``ToDeviceKeyTransport``: the
-    room must match and the key entry and claimed device must be present.
-    """
+    """Parse SDK 41 or 45 ``io.element.call.encryption_keys`` to-device content."""
     if content.get("room_id") != room_id:
         return None
-    keys = content.get("keys")
-    if not isinstance(keys, dict):
+    # The member ID is advisory; key ownership comes from the authenticated Matrix device.
+    member_id = content.get("member_id")
+    if member_id is not None and not isinstance(member_id, str):
         return None
-    key = keys.get("key")
-    index = keys.get("index")
-    if (
-        not isinstance(key, str)
-        or not key
-        or not isinstance(index, int)
-        or isinstance(index, bool)
-        or not 0 <= index < 256
-    ):
+    media_key = _parse_media_key(content.get("media_key")) or _parse_media_key(content.get("keys"))
+    if media_key is None:
         return None
+    key, index = media_key
     member = content.get("member")
     if not isinstance(member, dict):
         return None
@@ -203,3 +201,20 @@ def parse_key_to_device_content(
         key_index=index,
         received_at_ms=received_at_ms,
     )
+
+
+def _parse_media_key(entry: object) -> tuple[str, int] | None:
+    """Validate a modern or legacy media key entry."""
+    if not isinstance(entry, dict):
+        return None
+    key = entry.get("key")
+    index = entry.get("index")
+    if (
+        not isinstance(key, str)
+        or not key
+        or not isinstance(index, int)
+        or isinstance(index, bool)
+        or not 0 <= index < 256
+    ):
+        return None
+    return key, index

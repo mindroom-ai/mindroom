@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
@@ -35,7 +35,13 @@ from mindroom.matrix.olm_to_device import authenticated_sender_is_current
 from mindroom.matrix.personal_room_store import personal_room_ids
 from mindroom.matrix.room_membership import cached_joined_member_ids
 from mindroom.matrix_rtc.audio_process import ProcessLiveVoiceBridge, prewarm_call_audio_process
-from mindroom.matrix_rtc.call_backends import fetch_sfu_grant, resolve_livekit_service, resolve_voice_backend
+from mindroom.matrix_rtc.call_backends import (
+    discover_trusted_service,
+    fetch_sfu_grant,
+    publishes_on_service,
+    resolve_livekit_service,
+    resolve_voice_backend,
+)
 from mindroom.matrix_rtc.call_origin import (
     AGENT_CALL_STATE_EVENT_TYPE,
     CALL_BRIEF_TOKEN_BUDGET,
@@ -136,6 +142,9 @@ _STABLE_CALL_SESSION_MS = 60_000
 # does, loses its membership and publishes a new one when it runs again; leaving would drop its frame keys.
 _ROSTER_GAP_GRACE_MS = 60_000
 _RECONCILE_MIN_INTERVAL_S = 1.0
+# How long SDK 45 members are judged against one fresh well-known read, so that a roster on another
+# service cannot force a network read per event.
+_FOCUS_REFRESH_COOLDOWN_MS = 30_000
 # A room-state read holds the room's call lock, and nio retries a lost connection without limit; giving up
 # lets the reconcile retry, and lets a call held through an empty roster reach its deadline.
 _STATE_FETCH_TIMEOUT_S = 10.0
@@ -307,6 +316,8 @@ class _RoomCall:
     joining_requester: str | None = None
     pending_keys: dict[tuple[str, str, int], _PendingFrameKey] = field(default_factory=dict)
     logical_call: _LogicalCallState | None = None
+    #: The service the latest roster's SDK 45 members were judged against, the only one its join may resolve to.
+    judged_service: str | None = None
     retry_task: asyncio.Task[None] | None = None
     #: Set while the reconcile retry backoff is in force, including at zero attempts.
     retry_attempts: int | None = None
@@ -495,6 +506,8 @@ class CallManager:
         self._admission_fence = admission_fence
         self._key_transport = ToDeviceFrameKeyTransport(client)
         self._rooms: dict[str, _RoomCall] = {}
+        #: When a mismatched SDK 45 roster last read the well-known afresh, and the service it named.
+        self._refreshed_focus: tuple[int, str | None] | None = None
         # Rooms the bot left, which fence late events until it rejoins.
         self._departed_rooms: set[str] = set()
         # Locks outlive records: a leave discards a room's record while holding the room's lock.
@@ -812,12 +825,24 @@ class CallManager:
                         # and retry even if no further call event arrives.
                         self._schedule_reconcile_retry(room, room_call)
                         return
-                    members = state.members
-                    self._schedule_expiry_reconcile(room, room_call, members)
+                    self._schedule_expiry_reconcile(room, room_call, state.members)
+                    try:
+                        members, vetoed = await self._admit_roster(room_call, state.members)
+                    except _CALL_NETWORK_ERRORS as error:
+                        # As when the room state cannot be read: nothing is decided, so look again.
+                        logger.warning(
+                            "call_service_discovery_failed",
+                            room_id=room_id,
+                            agent=self._agent_name,
+                            error=str(error),
+                        )
+                        self._schedule_reconcile_retry(room, room_call)
+                        return
                     await self._apply_reconciled_members(
                         room,
                         room_call,
                         members,
+                        vetoed=vetoed,
                         retrying=retrying,
                         agent_call_events=state.agent_call_events,
                         joined_user_ids=state.joined_user_ids,
@@ -835,11 +860,16 @@ class CallManager:
         room_call: _RoomCall,
         members: list[CallMember],
         *,
+        vetoed: bool = False,
         retrying: bool = False,
         agent_call_events: tuple[dict[str, Any], ...],
         joined_user_ids: AbstractSet[str],
     ) -> None:
-        """Apply one authoritative room/call roster to the active session."""
+        """Apply one authoritative room/call roster to the active session, staying out of a vetoed one."""
+        if vetoed:
+            # A backoff left pending would keep a later roster waiting for a retry that no longer joins.
+            room_call.clear_reconcile_retry()
+            await room_call.stop_session()
         if not members and self._hold_through_roster_gap(room, room_call, joined_user_ids):
             return
         if not members or not self._members_are_authorized(members, room.room_id):
@@ -864,6 +894,8 @@ class CallManager:
             await self._update_session_members(room, room_call, session, members)
             return
         await room_call.stop_session()
+        if vetoed:
+            return
         await self._join_populated(
             room,
             room_call,
@@ -872,6 +904,69 @@ class CallManager:
             retrying=retrying,
             agent_call_events=agent_call_events,
         )
+
+    async def _admit_roster(self, room_call: _RoomCall, roster: list[CallMember]) -> tuple[list[CallMember], bool]:
+        """Split a room-state roster into the roster the call is decided on and the SDK 45 veto.
+
+        One invariant covers rosters that mix SDK 41 (``oldest_membership``) and SDK 45 (``multi_sfu``) members:
+
+        1. A ``multi_sfu`` member whose first transport is the trusted service becomes an ``oldest_membership``
+           member on that service: it requests, is authorized, anchors the call and gets keys as one.
+        2. The rest of the manager, written for SDK 41, decides on that roster alone. It holds no other
+           ``multi_sfu`` member, so a roster of SDK 41 members is decided exactly as before SDK 45 support.
+        3. Any other current ``multi_sfu`` member, this agent's other devices included, vetoes the roster. A veto
+           only keeps the agent out: no connection, no keys, no bridge update. It holds no state, so it creates
+           no block, clears neither a block nor the logical call, and schedules no retry.
+        4. The trusted service is the running session's, else the configured one, else the one the well-known
+           names, read afresh at most once per cooldown when a member is not on it. A join resolves no other.
+        """
+        room_call.judged_service = None
+        if not any(member.uses_multi_sfu for member in roster):
+            return roster, False
+        session = room_call.session
+        trusted_url = session.deps.livekit_service_url if session is not None else await self._trusted_service(roster)
+        room_call.judged_service = trusted_url
+        members: list[CallMember] = []
+        vetoed = False
+        for member in roster:
+            if not member.uses_multi_sfu:
+                members.append(member)
+            elif not publishes_on_service(member, trusted_url):
+                vetoed = True
+                logger.warning(
+                    "call_focus_not_trusted",
+                    user_id=member.user_id,
+                    device_id=member.device_id,
+                    advertised_url=member.livekit_service_url,
+                )
+            elif member.user_id != self._client.user_id:
+                members.append(replace(member, livekit_service_url=trusted_url))
+        return members, vetoed
+
+    async def _trusted_service(self, roster: list[CallMember]) -> str | None:
+        """Return the service a roster with SDK 45 members is judged against while no session pins one."""
+        configured_url = self._config.calls.livekit_service_url
+        if configured_url is not None:
+            return configured_url
+        now_ms = self._clock_ms()
+        if self._refreshed_focus is not None and 0 <= now_ms - self._refreshed_focus[0] < _FOCUS_REFRESH_COOLDOWN_MS:
+            # With no second read this soon, an anchor elsewhere leaves nothing trusted: a veto, never a block.
+            trusted_url = self._refreshed_focus[1]
+            anchor = min(roster, key=lambda member: member.created_ts)
+            return trusted_url if publishes_on_service(anchor, trusted_url) else None
+        try:
+            trusted_url, refreshed = await discover_trusted_service(
+                roster,
+                user_id=self._client.user_id,
+                ssl_verify=self._ssl_verify,
+            )
+        except ValueError as error:
+            # A join skips a call whose well-known cannot be read; here no service is trusted until the cooldown ends.
+            logger.warning("call_service_discovery_failed", agent=self._agent_name, error=str(error))
+            trusted_url, refreshed = None, True
+        if refreshed:
+            self._refreshed_focus = (now_ms, trusted_url)
+        return trusted_url
 
     async def _join_populated(
         self,
@@ -1080,7 +1175,9 @@ class CallManager:
         return True
 
     async def _fetch_room_call_state(self, room_id: str) -> _RoomCallState | None:
-        """Current, unexpired call members in the room, excluding ourselves, and its agent-call state.
+        """Current, unexpired call members in the room, and its agent-call state.
+
+        Of this agent's own account, only its other devices that publish as ``multi_sfu`` are kept, for the veto.
 
         Returns ``None`` when the room state could not be read, so callers can
         distinguish "the call is empty" from a transient homeserver error.
@@ -1110,7 +1207,9 @@ class CallManager:
                 continue
             if member.user_id not in joined_user_ids:
                 continue
-            if member.user_id == self._client.user_id:
+            if member.user_id == self._client.user_id and (
+                not member.uses_multi_sfu or member.device_id == self._client.device_id
+            ):
                 continue
             members.append(member)
         agent_call_events = tuple(
@@ -1142,7 +1241,7 @@ class CallManager:
             service = await resolve_livekit_service(
                 members,
                 user_id=self._client.user_id,
-                configured_url=self._config.calls.livekit_service_url,
+                configured_url=room_call.judged_service or self._config.calls.livekit_service_url,
                 ssl_verify=self._ssl_verify,
             )
         except _CALL_NETWORK_ERRORS as error:
