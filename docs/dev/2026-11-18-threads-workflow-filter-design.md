@@ -29,7 +29,7 @@ The client derives the inputs from events it holds in memory.
 - Background jobs come from `io.mindroom.background_jobs` state that an agent published under its own user ID: a job with status `awaiting_approval` is a background approval, any other listed job is a running job (`threadBackgroundJobs.ts:12-27`).
 - A reply in progress is read from the thread's ten newest loaded events, each as its newest edit shows it, with a server check for replies the client did not see arrive (`useThreadStreamingState.ts:73-137`, `streamingReplies.ts`).
 - A pending approval and a pending question are read from the thread's newest 40 messages and all loaded approval cards (`src/app/threads/cross-room/threadSignals.ts:293-344`).
-  A question counts only in a thread the person takes part in (`threadSignalsReader.ts:72-74`), stops counting after seven days (`QUESTION_WAITS_MS`), and both stop counting once the thread was resolved after they were asked.
+  A question counts only in a thread the person takes part in (`threadSignalsReader.ts:72-74`) and stops counting after seven days (`QUESTION_WAITS_MS`); decisions 7 and 8 describe how resolution affects the two signals.
 
 The backend can read the same state in one request per room since #4137 (`MindRoomAsyncClient.room_get_state`, `src/mindroom/matrix/client_session.py:120`).
 Thread tags and scheduled tasks already have parsers for its events (`parse_thread_tag_state_key` and `parse_thread_tag_record`, `src/mindroom/thread_tags.py:411-458`; `task_records_with_writers`, `src/mindroom/scheduling/tasks.py:531-556`); the jobs state has only its writer (`src/mindroom/tool_jobs/publication.py:48-57`), whose shape a reader follows.
@@ -49,8 +49,8 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
    `all` returns every row, resolved ones included, labelled `done`; there is no `done` filter.
 3. **The group is the Threads page's combination of the two client rules, in this order.**
    A pending approval card for the requester, or a background approval in an unresolved thread, is `needs_you` with `approval`.
-   A pending question is `needs_you` with `question`.
-   Then `classifyThreadWorkflow` decides: resolved is `done`, an active snooze is `later`, a reply in progress or a background job is `working`, a pending scheduled task is `later`, and the rest is `needs_you` with `your_turn`.
+   A resolved thread is `done`; otherwise a pending question is `needs_you` with `question`.
+   Then `classifyThreadWorkflow` decides: an active snooze is `later`, a reply in progress or a background job is `working`, a pending scheduled task is `later`, and the rest is `needs_you` with `your_turn`.
    The port is one pure function in `src/mindroom/thread_workflow.py`, and both repositories run the same case file against their implementation (decision 9).
 4. **`needs_you` is wider than the Threads page's Needs you group.**
    The page's group is the rows whose `why` is `approval` or `question`.
@@ -78,7 +78,7 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
    Divergence: a card of another runtime's agent is not seen.
    Known limit: a card is timed by when this runtime queued it, the client by its event's timestamp; a card whose first send failed and that was published after a resolve is `done` here and Needs you in MindRoom Chat.
 8. **A pending question is read from the root's bundled latest reply, which costs no request.**
-   It counts when all of these hold: the requester started the thread; the bundled `io.mindroom.latest_reply` is from a MindRoom account of this runtime; its content as its newest same-sender edit shows it carries an `io.mindroom.interactive` prompt with question text and at least one option keyed by its reaction, not only by number (the client's `readInteractiveQuestion`); it does not name another person as its acting requester (`com.mindroom.acting_requester`, read from the newest edit first, as a streamed reply carries it there), as the client skips a question asked of someone else; it was asked less than seven days ago; and the thread was not resolved since.
+   It counts when all of these hold: the requester started the thread; the bundled `io.mindroom.latest_reply` is from a MindRoom account of this runtime; its content as its newest same-sender edit shows it carries an `io.mindroom.interactive` prompt with question text and at least one option keyed by its reaction, not only by number (the client's `readInteractiveQuestion`); it does not name another person as its acting requester (`com.mindroom.acting_requester`, read from the newest edit first, as a streamed reply carries it there), as the client skips a question asked of someone else; it was asked less than seven days ago; and the thread is unresolved.
    The client instead scans the newest 40 messages; the bundle agrees with it whenever the question is still the thread's newest event apart from title notices, which is the case until someone answers.
    Divergences, each of which turns a `question` row into the row its other facts give, most often `your_turn`:
    - a room that is encrypted, or a homeserver without the bundle, yields no question;
@@ -135,7 +135,7 @@ The estimate for the backend is about 190 product lines, above the 100 to 150 th
 
 ## Testing
 
-- The case file runs in both repositories and covers each rule's precedence: an approval or a question ahead of resolved, snoozed and working; a background approval in a resolved thread; a snooze that ends exactly now; working ahead of scheduled; a later thread with and without a known return time; an expired snooze with a scheduled run.
+- The case file runs in both repositories and covers each rule's precedence: a pending approval ahead of resolved, snoozed and working; a question ahead of snoozed and working; a question or background approval in a resolved thread; a snooze that ends exactly now; working ahead of scheduled; a later thread with and without a known return time; an expired snooze with a scheduled run.
 - Backend tool tests through `matrix_room` with a served room state: each filter returns only its group; a resolved, a snoozed, a scheduled and a working thread get the right label; an approval older than the resolve and a question older than seven days do not count; a failed state read is an error.
 - `room_id="all"`: a room the requester is not in contributes nothing, also when the agent is in it; rows carry `room_id`; rows waiting on an approval come first; `page_token` is refused; a failing room is named and the others are returned.
 - Live check on a fresh throwaway deployment with the backend from the worktree: snooze one thread, resolve one, schedule one, leave a question open in one, and compare the tool's answer with the Threads page.

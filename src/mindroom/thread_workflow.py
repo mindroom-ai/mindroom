@@ -39,10 +39,10 @@ def classify_thread_workflow(status: Mapping[str, Any], now: int) -> dict[str, o
     """Group a thread by the case file's status keys (absent: false, 0 or unknown), with `why` or known `back_at`."""
     if status.get("pending_approval") or (status.get("has_background_approval") and not status.get("is_resolved")):
         return {"workflow": "needs_you", "why": "approval"}
-    if status.get("pending_question"):
-        return {"workflow": "needs_you", "why": "question"}
     if status.get("is_resolved"):
         return {"workflow": "done"}
+    if status.get("pending_question"):
+        return {"workflow": "needs_you", "why": "question"}
     if (snoozed_until_ts := status.get("snoozed_until_ts")) is not None and snoozed_until_ts > now:
         return {"workflow": "later", "back_at": snoozed_until_ts}
     if status.get("is_streaming") or status.get("has_background_job"):
@@ -149,7 +149,10 @@ def thread_workflow(
     approval_ts: int | None = None,
     question_ts: int | None = None,
 ) -> dict[str, object]:
-    """Label one thread from its `room_thread_facts` entry; a request older than the resolve counts as answered."""
+    """Label one thread from its `room_thread_facts` entry.
+
+    In a resolved thread, questions count as answered and only approvals newer than the resolve can still wait.
+    """
     resolved_ts = facts.get("resolved_ts")
     cutoff = float("-inf") if resolved_ts is None else resolved_ts
     status = {
@@ -157,7 +160,7 @@ def thread_workflow(
         "is_resolved": resolved_ts is not None,
         "is_streaming": replying,
         "pending_approval": approval_ts is not None and approval_ts > cutoff,
-        "pending_question": question_ts is not None and question_ts > max(cutoff, now - _QUESTION_WAITS_MS),
+        "pending_question": resolved_ts is None and question_ts is not None and question_ts > now - _QUESTION_WAITS_MS,
     }
     return classify_thread_workflow(status, now)
 
