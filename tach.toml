@@ -4334,7 +4334,6 @@ visibility = [
     "mindroom.custom_tools.matrix_api",
     "mindroom.contacts.federation",
     "mindroom.contacts.flow",
-    "mindroom.matrix.room_accounts",
     "mindroom.room_tree.note",
     "mindroom.email_invites.policy",
     "mindroom.custom_tools.email_invite",

@@ -1957,7 +1957,6 @@ class AgentBot:
         self._runtime_view.begin_draining()
         self.invalidate_agent_reply_memberships(reason="observer_stopping")
         self._delivery_recovery_wake.set()
-        await self.orchestrator.room_state.release(self)
         if shutdown_intent.stop_reason == "shutdown":
             self.begin_process_shutdown()
             if self.client is not None:
@@ -1972,6 +1971,7 @@ class AgentBot:
         if self._bot_ready_hooks_task is not None:
             # Waiting for an observer hook would spend the budget the replies drained below need to finish.
             self._bot_ready_hooks_task.cancel()
+        await self.orchestrator.room_state.release(self)
         await self._personal_room_lifecycle.cancel_reconciliation(timeout_seconds=shutdown_budget.remaining_seconds())
         background_tasks_completed = await wait_for_background_tasks(
             timeout=shutdown_budget.remaining_seconds(),
