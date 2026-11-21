@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom import model_selection
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.commands.handler import handle_command
 from mindroom.commands.model_commands import handle_model_command
@@ -38,6 +39,40 @@ if TYPE_CHECKING:
 
 
 _LEVELS = ReasoningConfig(levels=["low", "high"], default="low")
+
+
+_ROOT_CHOICE = {"version": 1, "runtime_user_id": "@mindroom_helper:example.org", "model": "leveled@high"}
+
+
+def test_parse_thread_model_choice() -> None:
+    """A valid root choice names one runtime and preserves the model reference exactly."""
+    choice = model_selection.parse_thread_model_choice({"io.mindroom.thread_model": _ROOT_CHOICE})
+    assert choice is not None
+    assert (choice.runtime_user_id, choice.model) == ("@mindroom_helper:example.org", "leveled@high")
+    assert model_selection.parse_thread_model_choice({}) is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        "leveled@high",
+        {"version": 1, "model": "leveled@high"},
+        {**_ROOT_CHOICE, "version": True},
+        {**_ROOT_CHOICE, "version": 1.0},
+        {**_ROOT_CHOICE, "version": 2},
+        {**_ROOT_CHOICE, "runtime_user_id": 1},
+        {**_ROOT_CHOICE, "runtime_user_id": "a" * 1025},
+        {**_ROOT_CHOICE, "model": ["leveled@high"]},
+        {**_ROOT_CHOICE, "model": "a" * 1025},
+        {**_ROOT_CHOICE, "model": " leveled@high "},
+        {**_ROOT_CHOICE, "model": ""},
+        {**_ROOT_CHOICE, "operation": "reset"},
+    ],
+)
+def test_parse_thread_model_choice_ignores_invalid_metadata(raw: object) -> None:
+    """Malformed metadata cannot become a model pick or reject a conversation turn."""
+    assert model_selection.parse_thread_model_choice({"io.mindroom.thread_model": raw}) is None
 
 
 def _helper_override(paths: RuntimePaths, config: Config) -> str | None:
