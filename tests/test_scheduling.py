@@ -764,7 +764,7 @@ async def test_run_once_task_executes_latest_state_workflow_and_marks_it_complet
     record = _record("task_once_updated", updated_workflow)
 
     with (
-        patch("mindroom.scheduling.runtime.get_scheduled_task", return_value=record),
+        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
         patch(
             "mindroom.scheduling.executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
