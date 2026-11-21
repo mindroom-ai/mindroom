@@ -5547,6 +5547,10 @@ class TestRouteDispatch:
             {"route": {"entity": 7, "event_ids": ["$question"]}},
             {"route": {"entity": BOT, "event_ids": ["$question"], "thread_id": 7}},
             pytest.param({"extra_content": {ROUTE_VOICE_TRANSCRIPTS_KEY: ["x"]}}, id="voice-transcripts-not-an-object"),
+            pytest.param(
+                {"extra_content": {"body": "Answer the question", ROUTE_VOICE_TRANSCRIPTS_KEY: {"$question": 7}}},
+                id="voice-transcript-not-a-string",
+            ),
         ],
     )
     async def test_a_malformed_route_settles_without_reaching_a_responder(
