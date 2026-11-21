@@ -326,7 +326,7 @@ def test_workers_run_sends_one_shell_call_that_names_the_worker(capsys, monkeypa
         monkeypatch,
         {"status": "queued"},
         {"status": "running"},
-        _completed("[worker: e2e-3, started]\n[cwd: /workspace]\nshard 3 ok"),
+        _completed("[worker: e2e-3, started]\nshard 3 ok"),
     )
 
     argv = ["workers", "run", "e2e-3", "--resource-profile", "large", "--timeout", "900", "--tail", "20"]
@@ -363,11 +363,12 @@ def test_workers_run_defaults_to_an_hour_and_the_normal_worker_size(monkeypatch)
         ("Exit code 3 was expected", 0, "Exit code 3 was expected\n"),
         ("Exit code 3\nand more", 0, "Exit code 3\nand more\n"),
         ("Stopped after 5s.", 0, "Stopped after 5s.\n"),
+        (format_shell_completion("[cwd: genuine]\nkept", None, return_code=0), 0, "[cwd: genuine]\nkept\n"),
     ],
 )
 def test_workers_run_exits_with_the_command_s_exit_code(result, exit_code, printed, capsys, monkeypatch) -> None:
     """A failed command's exit code is the CLI's, and a command stopped at its time limit exits 124."""
-    _worker_client(monkeypatch, _completed(f"[worker: w]\n[cwd: /workspace]\n{result}"))
+    _worker_client(monkeypatch, _completed(f"[worker: w]\n{result}"))
 
     assert main(["workers", "run", "w", "--timeout", "60", "--", "pytest"]) == exit_code
     assert capsys.readouterr().out == printed
@@ -391,7 +392,7 @@ def test_workers_run_reads_a_failure_as_the_shell_words_it(
 ) -> None:
     """The shell's own wording of a failed command gives the exit code; a command a signal killed exits 128 + signal."""
     result = format_shell_completion(stdout, stderr, return_code=return_code)
-    _worker_client(monkeypatch, _completed(f"[worker: w]\n[cwd: /workspace]\n{result}"))
+    _worker_client(monkeypatch, _completed(f"[worker: w]\n{result}"))
 
     assert main(["workers", "run", "w", "--", "pytest"]) == exit_code
     streams = result.partition("\n")[2]
@@ -409,7 +410,7 @@ def test_workers_run_reads_a_stop_at_the_time_limit_as_the_shell_words_it(
 ) -> None:
     """The shell's own wording of a command stopped at its time limit makes the CLI exit 124."""
     result = format_shell_timeout(stdout, stderr, timeout=timeout)
-    _worker_client(monkeypatch, _completed(f"[worker: w]\n[cwd: /workspace]\n{result}"))
+    _worker_client(monkeypatch, _completed(f"[worker: w]\n{result}"))
 
     assert main(["workers", "run", "w", "--timeout", str(timeout), "--", "sleep", "9999"]) == 124
     assert capsys.readouterr().out == f"{result}\n"
@@ -448,7 +449,7 @@ def _unreachable_worker_client(monkeypatch, *, failed_reads: int | None, fail_su
             if failed_reads is None or len(reads) <= failed_reads:
                 msg = "Agent CLI transport outcome is unknown"
                 raise AgentCliUnavailableError(msg)
-            return _completed("[worker: w]\n[cwd: /workspace]\nshard ok")
+            return _completed("[worker: w]\nshard ok")
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     monkeypatch.setattr("mindroom.agent_cli.main.time", clock)

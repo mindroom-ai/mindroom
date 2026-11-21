@@ -283,8 +283,6 @@ def _run_in_worker(args: argparse.Namespace) -> int:
         # The call failed, or its shell ran it without a worker of that name.
         print(f"mindroom-agent: {text}", file=sys.stderr)
         return _EXIT_NOT_RUN
-    if body.startswith("[cwd: "):
-        body = body.partition("\n")[2]
     failed = _FAILED_COMMAND.match(body)
     output = body[failed.end() :] if failed is not None else body
     if output:
