@@ -765,7 +765,7 @@ If using `tailnetSsh.httpsProxy`, admit it with `extraEgress`; do not use the wo
 
 Keep the gateway PVC across restarts. Replace an expired key in the Secret and restart the gateway for new enrollments; rotating the key does not move existing nodes to another tailnet.
 Reassigning a sole-user agent hands over its workspace. Disable SSH and let revocation finish before moving workers to another backend, tenant or namespace. A reused hostname gets a fresh host key.
-See the [single-tailnet design and operating limits](../../../docs/baspowers/specs/2026-11-19-tailnet-ssh-design.md#single-tailnet-v1-2026-11-21).
+See [Tailnet SSH](../../../docs/tailnet-ssh.md) for the MindRoom config example, eligibility, hostname rules, and revocation.
 
 ## Matrix Managed Account Authentication
 
