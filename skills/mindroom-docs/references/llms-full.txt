@@ -24065,6 +24065,7 @@ The gateway policy allows DNS, internal endpoints, and outbound TCP 443 to publi
 
 The gateway enrolls one node per eligible worker, even before it has started, so there is no need to run a tool first.
 Find the worker's node in the tailnet control plane and use its actual MagicDNS hostname.
+For `user` and `user_agent` workers, the hostname is derived from a key containing the Matrix user ID and can expose it to the operator's tailnet.
 The operator can derive its public host key from the Ed25519 key for that worker in the primary's `tracking/tailnet_ssh.json`; share only the public key and pin it to the hostname in `~/.ssh/known_hosts`.
 
 ```bash
@@ -24073,7 +24074,8 @@ ssh -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519_mind
 
 Connect from a device signed in as the configured tailnet login, using port `22`, not the internal `2222`.
 Use a client timeout long enough for startup; the gateway may report `MindRoom: waking worker` while it waits.
-Active sessions normally keep the worker from idling out.
+Active sessions normally keep the worker from idling out. With idle cleanup enabled, set the worker idle timeout to at least 150 seconds (the default is 1,800 seconds).
+The gateway waits 75 seconds before counting a connection and reports every 30 seconds; leave extra time for slow startup or delayed reports.
 Password authentication and forwarding are disabled; do not use clients that forward credentials or trust and execute code from the worker.
 
 ## Revoke access
@@ -24092,7 +24094,7 @@ Removal does not clear the worker's `authorized_keys`; the next admitted gateway
   If access depends on room membership, retry after membership has resolved; check gateway logs and the tailnet control plane for enrollment or policy problems.
 - **Node visible but SSH closes or stalls:** Check that the tailnet policy permits TCP `22` from the client and the gateway can reach the primary and worker endpoints.
   On Docker, a wildcard or non-IP publish host can leave the link listed without a worker SSH endpoint.
-  After repeated attempts, wait a minute before retrying; the gateway limits new connections per worker.
+  After repeated attempts, wait a minute before retrying; the per-worker connection limit is shared by all tailnet logins for that worker.
 - **`Permission denied (publickey)`:** Use the private key matching a configured `.pub` line for the worker; check the SSH username is `mindroom`.
 
 # Agent Keys
