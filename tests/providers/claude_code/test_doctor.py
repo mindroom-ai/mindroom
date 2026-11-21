@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.cli.doctor import _check_single_provider
 from mindroom.config.main import Config
-from mindroom.providers.claude_code import adapter
+from mindroom.tool_system import dependencies
 from tests.providers.claude_code.support import fake_cli, left_behind, text_turn
 
 if TYPE_CHECKING:
@@ -103,17 +103,17 @@ def test_doctor_fails_a_model_with_a_wrong_setting_and_goes_on_to_the_next(
     assert "effort must be one of" in capsys.readouterr().out.replace("\n", " ")
 
 
-def test_doctor_fails_when_the_claude_agent_sdk_is_missing(
+def test_doctor_reports_a_missing_claude_agent_sdk_and_installs_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    def missing(*_args: object) -> None:
-        msg = "Install it with: pip install 'mindroom[claude_agent]'"
-        raise ImportError(msg)
-
-    monkeypatch.setattr(adapter, "ensure_optional_deps", missing)
+    installed: list[object] = []
+    monkeypatch.delenv("MINDROOM_NO_AUTO_INSTALL_TOOLS", raising=False)
+    monkeypatch.setattr(dependencies, "check_deps_installed", lambda _dependencies: False)
+    monkeypatch.setattr(dependencies, "_install_optional_extras", lambda extras: installed.append(extras) or True)
 
     assert _check(fake_cli(tmp_path, {})) == (0, 1, 0)
 
+    assert installed == []
     assert "mindroom[claude_agent]" in capsys.readouterr().out.replace("\n", " ")

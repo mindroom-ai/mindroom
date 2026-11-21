@@ -8,6 +8,7 @@ import os
 import tempfile
 from collections import Counter
 from collections.abc import Mapping
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -617,11 +618,14 @@ def _check_claude_code(config: Config, runtime_paths: RuntimePaths) -> tuple[int
 
     passed = failed = warnings = 0
     checked: set[str | None] = set()
+    # Doctor reports a missing Claude Agent SDK; it installs nothing.
+    process_env = {**runtime_paths.process_env, "MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"}
+    checked_paths = replace(runtime_paths, process_env=process_env)
     for model_config in config.models.values():
         if provider_route(model_config.provider) != "claude_code":
             continue
         try:
-            provider = build_provider(model_config, runtime_paths, execution_identity=None)
+            provider = build_provider(model_config, checked_paths, execution_identity=None)
             if provider.cli_path in checked:
                 continue
             checked.add(provider.cli_path)
