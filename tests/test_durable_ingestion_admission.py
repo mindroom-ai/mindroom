@@ -658,10 +658,9 @@ async def test_redelivery_of_an_unedited_text_as_an_image_is_refused(
     image = message("$text")
     image.source["content"] = {"msgtype": "m.image", "body": "cat.png", "url": "mxc://example.org/cat"}
 
+    contradiction = Session(SyncBatch(batch.stream_id, 2, (image,)))
     with pytest.raises(IngestionBatchIntegrityError):
-        await consume_one_ingestion_batch(
-            Session(SyncBatch(batch.stream_id, 2, (image,))), principal, account_id=ACCOUNT
-        )
+        await consume_one_ingestion_batch(contradiction, principal, account_id=ACCOUNT)
 
     [pending] = await principal.pending()
     assert (pending.kind, pending.source["content"]["body"]) == (EventKind.MESSAGE, "hello")
