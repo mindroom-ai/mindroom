@@ -25,7 +25,7 @@ logger = get_logger(__name__)
 _LOCKS: WeakValueDictionary[tuple[Path, str], asyncio.Lock] = WeakValueDictionary()
 
 
-async def reconcile_room_accounts(  # noqa: C901 - one lock covers both writers' comparisons and writes
+async def reconcile_room_accounts(
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -34,54 +34,63 @@ async def reconcile_room_accounts(  # noqa: C901 - one lock covers both writers'
     get_alternate_clients: Callable[[], Mapping[str, nio.AsyncClient]] = dict,
     failure_level: Callable[[bool], int] = lambda _: logging.WARNING,
 ) -> bool:
-    """Refresh the room roster using its bound account when eligible, otherwise the steward."""
+    """Refresh the room roster using its bound account when eligible, otherwise the steward.
+
+    The state key is the writer's own user ID.
+    A forbidden write needs no retry until the room changes.
+    """
     phase = "room_lock"
+
+    async def _write_roster(writer: nio.AsyncClient, deadline: asyncio.Timeout) -> bool | None:
+        nonlocal phase
+        deadline.reschedule(asyncio.get_running_loop().time() + 10)
+        event_type = MINDROOM_ACCOUNTS_EVENT_TYPE
+        phase = "joined_members"
+        try:
+            response = await read_joined_members(writer, room_id)
+        except nio.LocalProtocolError as exc:
+            response = exc
+        if isinstance(response, nio.JoinedMembersResponse):
+            members = {member.user_id for member in response.members}
+            accounts = members & prepared_entity_names_by_user_id(config, runtime_paths).keys()
+            content = {"accounts": sorted(accounts)}
+            phase = "state_get"
+            current = await writer.room_get_state_event(room_id, event_type, writer.user_id)
+            if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
+                return True
+            if writer is not client and get_alternate_clients().get(writer.user_id) is not writer:
+                logger.debug("room_accounts_writer_no_longer_eligible", room_id=room_id, user_id=writer.user_id)
+                return None
+            phase = "state_put"
+            response = await writer.room_put_state(room_id, event_type, content, state_key=writer.user_id)
+            if isinstance(response, nio.RoomPutStateResponse):
+                return True
+        forbidden = isinstance(response, nio.ErrorResponse) and response.status_code == "M_FORBIDDEN"
+        members_read = phase == "joined_members"
+        level = logging.DEBUG if forbidden and not (members_read and writer is client) else failure_level(False)
+        diagnostic = "matrix_room_members_fetch_failed" if members_read else "room_accounts_publish_failed"
+        logger.log(level, diagnostic, room_id=room_id, error=str(response))
+        return None if forbidden else False
+
     try:
-        # Bound lock waits too; the lock prevents an older comparison from overwriting a newer roster.
-        async with asyncio.timeout(10), _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
-            writers = [client]
-            if get_alternate_clients():
-                phase = "binding_get"
-                reply = await client.room_get_state_event(room_id, ROUTER_BINDING_EVENT_TYPE, state_key="")
-                if isinstance(reply, nio.RoomGetStateEventResponse):
-                    bound = reply.content.get("user_id") if isinstance(reply.content, dict) else None
-                    if isinstance(bound, str) and (alternate := get_alternate_clients().get(bound)) is not None:
-                        writers.insert(0, alternate)
-                elif not (
-                    isinstance(reply, nio.RoomGetStateEventError)
-                    and reply.status_code in {"M_NOT_FOUND", "M_FORBIDDEN"}
-                ):
-                    logger.log(failure_level(False), "room_accounts_publish_failed", room_id=room_id, error=str(reply))
-                    return False
-            event_type = MINDROOM_ACCOUNTS_EVENT_TYPE
-            for writer in writers:
-                phase = "joined_members"
-                diagnostic = "matrix_room_members_fetch_failed"
-                try:
-                    response = await read_joined_members(writer, room_id)
-                except nio.LocalProtocolError as exc:
-                    response = exc
-                if isinstance(response, nio.JoinedMembersResponse):
-                    members = {member.user_id for member in response.members}
-                    accounts = members & prepared_entity_names_by_user_id(config, runtime_paths).keys()
-                    content = {"accounts": sorted(accounts)}
-                    phase = "state_get"
-                    current = await writer.room_get_state_event(room_id, event_type, writer.user_id)
-                    if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
-                        return True
-                    if writer is not client and get_alternate_clients().get(writer.user_id) is not writer:
-                        continue
-                    phase = "state_put"
-                    diagnostic = "room_accounts_publish_failed"
-                    response = await writer.room_put_state(room_id, event_type, content, state_key=writer.user_id)
-                    if isinstance(response, nio.RoomPutStateResponse):
-                        return True
-                forbidden = isinstance(response, nio.ErrorResponse) and response.status_code == "M_FORBIDDEN"
-                level = logging.DEBUG if forbidden else failure_level(False)
-                logger.log(level, diagnostic, room_id=room_id, error=str(response))
-                if not forbidden:
-                    return False
-            return True
+        # Bound lock and binding waits, then renew the deadline per writer without releasing the room lock.
+        lock = _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock())
+        async with asyncio.timeout(10) as deadline, lock:
+            lookup = bool(get_alternate_clients())
+            phase = "binding_get" if lookup else phase
+            reply = (
+                await client.room_get_state_event(room_id, ROUTER_BINDING_EVENT_TYPE, state_key="") if lookup else None
+            )
+            skip = isinstance(reply, nio.RoomGetStateEventError) and reply.status_code in {"M_NOT_FOUND", "M_FORBIDDEN"}
+            if lookup and not isinstance(reply, nio.RoomGetStateEventResponse) and not skip:
+                logger.log(failure_level(False), "room_accounts_publish_failed", room_id=room_id, error=str(reply))
+                return False
+            binding = reply.content if isinstance(reply, nio.RoomGetStateEventResponse) else None
+            bound = binding.get("user_id") if isinstance(binding, dict) else None
+            alternate = get_alternate_clients().get(bound) if isinstance(bound, str) else None
+            if alternate is not None and (result := await _write_roster(alternate, deadline)) is not None:
+                return result
+            return (await _write_roster(client, deadline)) is not False
     except Exception as exc:
         timed_out = isinstance(exc, TimeoutError)
         detail = {"error": "TimeoutError", "phase": phase} if timed_out else {"exc_info": True}
