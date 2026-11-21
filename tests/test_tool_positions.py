@@ -8,6 +8,7 @@ two works on the reply with its markers in its text, exactly as before.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
@@ -79,6 +80,8 @@ from tests.tool_position_helpers import _CASES, _SENT_CASES, _SHELL, _TRACE_KEY,
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.event_journal import EventJournalStore, ProjectedEvent
+    from mindroom.judgment.state import JudgmentMessage
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -562,6 +565,64 @@ async def test_a_reply_of_calls_alone_by_an_agent_this_runtime_does_not_run_leav
 
     assert await judged(built) == (MidTurnOutcome.WAIT, 1)
     assert await judged(held) == (MidTurnOutcome.WAIT, 1)
+
+
+@pytest.mark.asyncio
+async def test_a_reply_stored_as_matrix_holds_it_is_read_with_its_markers_in_its_text(
+    runtime: ToolRuntimeContext,
+    journal_store: EventJournalStore,
+) -> None:
+    """A receiver on the release before this one stored an upgraded agent's reply as Matrix holds it.
+
+    After its own upgrade it reads that row as it reads every other. A reply of calls alone would otherwise be text
+    no judge can read, and one such row drops all the conversation before the turn.
+    """
+    config, paths = runtime.config, runtime.runtime_paths
+    held = tool_markers_out_of_text(_sent(_case("a reply of calls alone")))
+    assert held["body"] == ""
+
+    def synced(event_id: str, ts: int, sender: str, content: dict[str, Any]) -> ProjectedEvent:
+        """Return the row this release's sync stores for one event of the thread."""
+        views = ingestion_timeline_views(
+            room_id=_ROOM,
+            source={**_event(content, event_id, sender), "origin_server_ts": ts},
+            self_sender="@mindroom_other:localhost",
+            provenance=nio.TimelineEventProvenance.LIVE,
+        )
+        assert views is not None
+        assert views[1] is not None
+        return replace(views[1], thread_id="$root")
+
+    async def judged(principal: str, reply: ProjectedEvent) -> tuple[JudgmentMessage, ...] | None:
+        """Return the conversation a judge reads before the turn that answers the message after ``reply``."""
+        store = journal_store.principal(principal)
+        events = (
+            synced("$root", 1, _PERSON, {"msgtype": "m.text", "body": "Count the walruses."}),
+            reply,
+            synced("$next", 3, _PERSON, {"msgtype": "m.text", "body": "Now count the seals."}),
+        )
+        assert await store.install_hydrated_conversation(
+            room_id=_ROOM,
+            thread_id="$root",
+            events=events,
+            complete=True,
+            expected_membership_epoch=await store.membership_epoch(_ROOM),
+        )
+        page = await store.read_conversation(room_id=_ROOM, thread_id="$root", limit=10)
+        return conversation_context_before_sources(
+            projected_thread_history(page, complete=True),
+            source_event_ids=("$next",),
+            thread_id="$root",
+            config=config,
+            runtime_paths=paths,
+        )
+
+    by_this_release = synced("$reply", 2, _AGENT, held)
+    assert by_this_release.content["body"] != ""
+    read = await judged("this release", by_this_release)
+    assert read is not None
+    assert "shell" in read[1].text
+    assert await judged("the release before", replace(by_this_release, content=held)) == read
 
 
 @pytest.mark.asyncio

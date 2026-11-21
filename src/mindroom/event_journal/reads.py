@@ -11,6 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from mindroom.matrix_identifiers import has_agent_username
+from mindroom.tool_system.events import tool_markers_in_text
+
 from .identity import agent_of_principal, decode_thread_id, encode_thread_id
 from .membership_state import claim_membership_epoch, projection_generation
 from .models import (
@@ -903,6 +906,10 @@ def revoke_room_hydration(transaction: Transaction, principal_id: str, *, room_i
 
 
 def _visible_message(row: Row) -> VisibleMessage:
+    content = decode_content(row["content_json"])
+    if has_agent_username(row["sender"]):
+        # A row stored by the release before tool markers left the text holds an upgraded agent's reply without them.
+        content = tool_markers_in_text(content)
     return VisibleMessage(
         logical_event_id=row["logical_event_id"],
         room_id=row["room_id"],
@@ -911,7 +918,7 @@ def _visible_message(row: Row) -> VisibleMessage:
         created_ts=int(row["created_ts"]),
         revision_event_id=row["revision_event_id"],
         revision_ts=int(row["revision_ts"]),
-        content=decode_content(row["content_json"]),
+        content=content,
     )
 
 
