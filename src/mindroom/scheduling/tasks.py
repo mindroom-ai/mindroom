@@ -970,6 +970,9 @@ def _extract_mentioned_agents_from_text(
 ) -> list[MatrixID]:
     """Extract valid agent mentions from scheduling text."""
     mentioned_user_ids = parse_mentions_in_text(full_text, config, runtime_paths)[1]
+    # Text without mentions does not need prepared Matrix accounts.
+    if not mentioned_user_ids:
+        return []
     registry = entity_identity_registry(config, runtime_paths)
     return [
         MatrixID.parse(user_id)
