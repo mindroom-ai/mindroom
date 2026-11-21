@@ -2172,6 +2172,27 @@ def test_kubernetes_backend_availability_uses_runtime_env_values(tmp_path: Path)
     assert configured_primary_worker_manager_identity(runtime_paths) is not None
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["MINDROOM_TAILNET_SSH_GATEWAY_TOKEN", "TAILNET_SSH_GATEWAY_TOKEN", "TAILNET_SSH_AUTH_KEY", "TS_AUTHKEY"],
+)
+def test_kubernetes_worker_config_rejects_tailnet_secrets_in_extra_env(tmp_path: Path, name: str) -> None:
+    """The Kubernetes extra-env option cannot pass a tailnet secret to the worker pod."""
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "test-image",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "test-pvc",
+            "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({name: "test-only"}),
+        },
+    )
+
+    with pytest.raises(WorkerBackendError, match=rf"reserved env vars: {name}") as error:
+        KubernetesWorkerBackendConfig.from_runtime(paths)
+    assert "test-only" not in str(error.value)
+
+
 def test_kubernetes_backend_config_resource_envs_override_defaults(tmp_path: Path) -> None:
     """Resource request/limit env vars override the built-in defaults."""
     config_dir = tmp_path / "cfg"

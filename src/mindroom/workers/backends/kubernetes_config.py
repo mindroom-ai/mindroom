@@ -24,6 +24,7 @@ from mindroom.private_storage.private_instance_identity_store import (
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    TAILNET_SSH_SECRET_ENV_NAMES,
     WORKER_BACKEND_ENV,
     WORKER_COMPUTER_ENABLED_ENV,
     credentials_encryption_key_value,
@@ -485,7 +486,10 @@ class KubernetesWorkerBackendConfig:
     image_pull_secrets: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        """Reject storage prefixes that are not strict relative descendants, and the label only MindRoom may set."""
+        """Validate worker settings, including those that must stay under MindRoom's control."""
+        if reserved_names := TAILNET_SSH_SECRET_ENV_NAMES.intersection(self.extra_env):
+            msg = f"{_EXTRA_ENV_JSON_ENV} cannot set reserved env vars: {', '.join(sorted(reserved_names))}."
+            raise WorkerBackendError(msg)
         if self.worker_port == WORKER_SSH_PORT:
             msg = f"{_PORT_ENV} cannot be {WORKER_SSH_PORT}; that port is reserved for SSH."
             raise WorkerBackendError(msg)
