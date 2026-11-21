@@ -41,15 +41,15 @@ from mindroom.llm.usage import TokenCounts
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix_rtc import focus as rtc_focus
 from mindroom.matrix_rtc.call_backends import (
     _resolve_speech_service,
     fetch_sfu_grant,
-    publishes_on_service,
     resolve_livekit_service,
     resolve_voice_backend,
+    same_multi_sfu_service,
 )
 from mindroom.matrix_rtc.call_manager import (
-    _FOCUS_REFRESH_COOLDOWN_MS,
     _LIVE_VOICE_INSTRUCTIONS,
     _MAX_PENDING_KEYS_PER_ROOM,
     _PENDING_KEY_TTL_MS,
@@ -296,6 +296,23 @@ def _sdk_45_member_event(
             "foci_preferred": [{"type": "livekit", "livekit_service_url": service_url, "livekit_alias": ROOM_ID}],
         },
     }
+
+
+def _caller_event(
+    sdk: int,
+    device: str,
+    created_ts: int,
+    service_url: str = SERVICE_URL,
+    *,
+    user: str = "@alice:example.org",
+) -> dict:
+    """Build one membership as SDK 41 or SDK 45 publishes it, so SDK 41 can serve as a test's control."""
+    if sdk == 45:
+        return _sdk_45_member_event(device, created_ts, service_url, user=user)
+    return _remote_member_event(user, device, created_ts=created_ts, livekit_service_url=service_url)
+
+
+_BOTH_SDKS = pytest.mark.parametrize("sdk", [41, 45], ids=["sdk-41-control", "sdk-45"])
 
 
 def _room_member_event(user: str = "@alice:example.org", membership: str = "join") -> dict:
@@ -1057,28 +1074,36 @@ async def test_key_from_a_vetoed_sdk_45_device_prompts_the_recheck_that_admits_i
 
 
 @pytest.mark.asyncio
-async def test_sdk_41_anchor_on_another_service_blocks_a_call_beside_a_trusted_sdk_45_device(tmp_path: Path) -> None:
-    """A trusted SDK 45 device vetoes nothing, so the anchor's untrusted focus ends in the block it always got."""
+async def test_trusted_sdk_45_device_beside_an_sdk_41_anchor_on_another_service_is_vetoed_not_blocked(
+    tmp_path: Path,
+) -> None:
+    """A device off its anchor's service vetoes the roster; the anchor is judged only once it stands alone."""
     client = _client()
     manager = _manager(client, FakeBridge(), tmp_path, clock_ms=lambda: 2_000)
     anchor = _remote_member_event(created_ts=1_000, livekit_service_url=FOREIGN_SERVICE_URL)
     modern = _sdk_45_member_event("ALICESECOND", 1_001)
+    room = _room()
 
     try:
-        await _reconcile_roster(manager, client, _room(), anchor, modern)
-
+        await _reconcile_roster(manager, client, room, anchor, modern)
         state = _call_state(manager)
         assert state.session is None
-        assert state.logical_call is not None
-        assert state.logical_call.join_blocked
+        assert state.logical_call is None
+        assert state.retry_task is None
+
+        await _reconcile_roster(manager, client, room, anchor)
+
+        logical_call = _call_state(manager).logical_call
+        assert logical_call is not None
+        assert logical_call.join_blocked
         client.get_openid_token.assert_not_awaited()
     finally:
         await manager.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_veto_leaves_the_one_caller_rule_to_end_a_call_that_a_second_user_joined(tmp_path: Path) -> None:
-    """The one-caller rule still clears the call of a roster that is also vetoed."""
+async def test_vetoed_roster_is_not_acted_on_even_when_a_second_user_joined(tmp_path: Path) -> None:
+    """A veto stops media and decides nothing else; the one-caller rule ends the call once the veto lifts."""
     client = _client()
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path, clock_ms=lambda: 2_000)
@@ -1089,12 +1114,15 @@ async def test_veto_leaves_the_one_caller_rule_to_end_a_call_that_a_second_user_
 
     try:
         await _reconcile_roster(manager, client, room, legacy)
-        assert _call_state(manager).logical_call is not None
+        logical_call = _call_state(manager).logical_call
+        assert logical_call is not None
 
         await _reconcile_roster(manager, client, room, legacy, second_user, foreign)
-
         assert bridge.closed
         assert _call_state(manager).session is None
+        assert _call_state(manager).logical_call is logical_call
+
+        await _reconcile_roster(manager, client, room, legacy, second_user)
         assert _call_state(manager).logical_call is None
     finally:
         await manager.shutdown()
@@ -1140,37 +1168,6 @@ async def test_veto_cancels_a_join_retry_and_the_call_joins_once_the_foreign_dev
         await _reconcile_roster(manager, client, room, legacy)
         assert _call_state(manager).session is not None
         assert bridges[-1].connected_grant == GRANT
-    finally:
-        await manager.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_unchanged_foreign_sdk_45_roster_rereads_the_well_known_once_per_cooldown(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A mismatch checks the well-known for a move once, then roster events reuse that answer for the cooldown."""
-    read_well_known = _serve_well_known(monkeypatch, [SERVICE_URL])
-    client = _client()
-    clock = [2_000]
-    manager = _manager(client, FakeBridge(), tmp_path, _discovering_config(), clock_ms=lambda: clock[0])
-    room = _room()
-    foreign = _sdk_45_member_event("ALICEDEV", 1_000, FOREIGN_SERVICE_URL)
-
-    try:
-        for _ in range(3):
-            await _reconcile_roster(manager, client, room, foreign)
-            assert _call_state(manager).session is None
-            assert _call_state(manager).retry_task is None
-        # The first read fills the empty memory, and one more looks for a move.
-        assert read_well_known.await_count == 2
-
-        clock[0] += _FOCUS_REFRESH_COOLDOWN_MS
-        await _reconcile_roster(manager, client, room, foreign)
-
-        assert read_well_known.await_count == 3
-        assert _call_state(manager).session is None
-        client.get_openid_token.assert_not_awaited()
     finally:
         await manager.shutdown()
 
@@ -1256,60 +1253,350 @@ async def test_manager_joins_the_moved_service_once_a_stale_sdk_45_companion_lea
 
 
 @pytest.mark.asyncio
-async def test_well_known_move_inside_the_cooldown_vetoes_instead_of_blocking_the_sdk_41_anchor(
+@_BOTH_SDKS
+async def test_unchanged_roster_on_a_foreign_service_reads_the_well_known_for_its_first_join_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    sdk: int,
 ) -> None:
-    """While the cooldown withholds a fresh read, an anchor off the remembered service is not refused for good."""
-    well_known = [SERVICE_URL]
-    read_well_known = _serve_well_known(monkeypatch, well_known)
+    """The refused join's block stops further reads for an SDK 45 caller exactly as for an SDK 41 caller."""
+    read_well_known = _serve_well_known(monkeypatch, [SERVICE_URL])
     client = _client()
     manager = _manager(client, FakeBridge(), tmp_path, _discovering_config(), clock_ms=lambda: 2_000)
     room = _room()
-    anchor = _remote_member_event(created_ts=1_100, livekit_service_url=MOVED_SERVICE_URL)
-    companion = _sdk_45_member_event("ALICESECOND", 1_101, SERVICE_URL)
+    foreign = _caller_event(sdk, "ALICEDEV", 1_000, FOREIGN_SERVICE_URL)
 
     try:
-        await _reconcile_roster(manager, client, room, _sdk_45_member_event("ALICEDEV", 1_000, FOREIGN_SERVICE_URL))
-        await _reconcile_roster(manager, client, room)
+        for _ in range(3):
+            await _reconcile_roster(manager, client, room, foreign)
+            assert _call_state(manager).session is None
+            assert _call_state(manager).retry_task is None
+
+        # The first read fills the empty memory, and one more looks for a move before the join is refused.
         assert read_well_known.await_count == 2
-        well_known.append(MOVED_SERVICE_URL)
-
-        await _reconcile_roster(manager, client, room, anchor, companion)
-        state = _call_state(manager)
-        assert state.session is None
-        assert state.logical_call is not None
-        assert not state.logical_call.join_blocked
-        assert read_well_known.await_count == 2
-
-        await _reconcile_roster(manager, client, room, anchor)
-
-        session = _call_state(manager).session
-        assert session is not None
-        assert session.deps.livekit_service_url == MOVED_SERVICE_URL
+        client.get_openid_token.assert_not_awaited()
     finally:
         await manager.shutdown()
 
 
 @pytest.mark.asyncio
+@_BOTH_SDKS
+async def test_lone_caller_on_a_foreign_service_keeps_the_agent_out_until_they_leave(tmp_path: Path, sdk: int) -> None:
+    """A lone caller anchors its own call, so SDK 45 on a foreign service is blocked exactly as SDK 41 is.
+
+    Correcting the focus of the same membership does not lift the block; the caller has to leave the call first.
+    """
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: 2_000)
+    room = _room()
+    foreign = _caller_event(sdk, "ALICEDEV", 1_000, FOREIGN_SERVICE_URL)
+
+    try:
+        for roster in ([foreign], [foreign], [_caller_event(sdk, "ALICEDEV", 1_000)]):
+            await _reconcile_roster(manager, client, room, *roster)
+            state = _call_state(manager)
+            assert state.session is None
+            assert state.retry_task is None
+            assert state.expiry_handle is not None
+            assert state.logical_call is not None
+            assert state.logical_call.join_blocked
+        client.get_openid_token.assert_not_awaited()
+
+        await _reconcile_roster(manager, client, room)
+        await _reconcile_roster(manager, client, room, _caller_event(sdk, "ALICEDEV", 1_500))
+
+        assert _call_state(manager).session is not None
+        assert bridge.connected_grant == GRANT
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_the_agents_own_foreign_device_alone_arms_no_timer_and_starts_nothing(tmp_path: Path) -> None:
+    """With no caller there is no call: the agent's other device leaves no timer, retry or logical call behind."""
+    client = _client()
+    manager = _manager(client, FakeBridge(), tmp_path, clock_ms=lambda: 2_000)
+    sibling = _sdk_45_member_event("BOTSECOND", 1_000, FOREIGN_SERVICE_URL, user=BOT_USER)
+
+    try:
+        await _reconcile_roster(manager, client, _room(), sibling)
+
+        state = _call_state(manager)
+        assert state.session is None
+        assert state.logical_call is None
+        assert state.retry_task is None
+        assert state.expiry_handle is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sibling_url", [SERVICE_URL, FOREIGN_SERVICE_URL], ids=["trusted", "foreign"])
+async def test_the_agents_own_device_ends_a_held_roster_gap_only_from_a_foreign_service(
+    tmp_path: Path,
+    sibling_url: str,
+) -> None:
+    """A lapsed caller's session is held as before, unless the agent's other device publishes off its service."""
+    joined_ts = int(time.time() * 1000)
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    room = _room()
+    lapsed = {**_remote_member_event(created_ts=joined_ts), "content": {}}
+    sibling = _sdk_45_member_event("BOTSECOND", joined_ts, sibling_url, user=BOT_USER)
+
+    try:
+        await _reconcile_roster(manager, client, room, _remote_member_event(created_ts=joined_ts))
+        session = _call_state(manager).session
+        assert session is not None
+
+        client.room_get_state.return_value = nio.RoomGetStateResponse(
+            [lapsed, sibling, _room_member_event(), _room_member_event(BOT_USER)],
+            ROOM_ID,
+        )
+        await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+
+        if sibling_url == SERVICE_URL:
+            assert _call_state(manager).session is session
+            assert bridge.roster_vacated
+            assert not bridge.closed
+        else:
+            assert _call_state(manager).session is None
+            assert _call_state(manager).logical_call is None
+            assert bridge.closed
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@_BOTH_SDKS
+async def test_a_brief_foreign_focus_by_the_only_caller_keeps_the_calls_agent_session(tmp_path: Path, sdk: int) -> None:
+    """The conversation of a caller who strays to a foreign focus and returns continues under either SDK."""
+    client = _client()
+    bridges: list[FakeBridge] = []
+    manager = _manager(
+        client,
+        FakeBridge(),
+        tmp_path,
+        bridge_factory=_bridge_per_session(bridges),
+        clock_ms=lambda: 2_000,
+    )
+    room = _room()
+    caller = _caller_event(sdk, "ALICEDEV", 1_000)
+
+    try:
+        await _reconcile_roster(manager, client, room, caller)
+        logical_call = _call_state(manager).logical_call
+        assert logical_call is not None
+        agent_session_id = logical_call.agent_session_id
+
+        await _reconcile_roster(manager, client, room, _caller_event(sdk, "ALICEDEV", 1_000, FOREIGN_SERVICE_URL))
+        # SDK 41 follows the call's anchor whatever it prefers; an SDK 45 member publishes where it says.
+        assert (_call_state(manager).session is None) is (sdk == 45)
+
+        await _reconcile_roster(manager, client, room, caller)
+
+        assert _call_state(manager).session is not None
+        assert _call_state(manager).logical_call is logical_call
+        assert logical_call.agent_session_id == agent_session_id
+        assert [bridge.closed for bridge in bridges] == ([True, False] if sdk == 45 else [False])
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@_BOTH_SDKS
+async def test_replacement_caller_on_a_retired_service_is_refused_under_either_sdk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sdk: int,
+) -> None:
+    """A new requester is judged afresh; the service the replaced caller's session ran on is no pin for it."""
+    well_known = [SERVICE_URL]
+    _serve_well_known(monkeypatch, well_known)
+    config = _discovering_config()
+    _set_helper_access(config, users=["@alice:example.org", "@bob:example.org"])
+    client = _client()
+    bridges: list[FakeBridge] = []
+    manager = _manager(
+        client,
+        FakeBridge(),
+        tmp_path,
+        config,
+        bridge_factory=_bridge_per_session(bridges),
+        clock_ms=lambda: 2_000,
+    )
+    room = _room()
+
+    try:
+        await _reconcile_roster(manager, client, room, _remote_member_event(created_ts=1_000))
+        assert [bridge.connected_grant for bridge in bridges] == [GRANT]
+        # The remembered discovery ages out while the call runs, and the well-known moves.
+        discovered = rtc_focus._discovered_service_urls
+        for key, (url, _read_at) in list(discovered.items()):
+            discovered[key] = (url, time.monotonic() - 601)
+        well_known.append(MOVED_SERVICE_URL)
+
+        await _reconcile_roster(
+            manager,
+            client,
+            room,
+            _caller_event(sdk, "BOBDEV", 1_100, SERVICE_URL, user="@bob:example.org"),
+        )
+
+        state = _call_state(manager)
+        assert state.session is None
+        assert state.logical_call is not None
+        assert state.logical_call.requester_id == "@bob:example.org"
+        assert state.logical_call.join_blocked
+        assert [bridge.closed for bridge in bridges] == [True]
+        assert client.get_openid_token.await_count == 1
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@_BOTH_SDKS
+async def test_terminally_closed_call_reads_no_well_known_during_an_outage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sdk: int,
+) -> None:
+    """A call that is closed for good needs no service, so a discovery outage makes it retry nothing."""
+    _serve_well_known(monkeypatch, [SERVICE_URL])
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, _discovering_config(), clock_ms=lambda: 2_000)
+    room = _room()
+    caller = _caller_event(sdk, "ALICEDEV", 1_000)
+
+    try:
+        await _reconcile_roster(manager, client, room, caller)
+        assert bridge.agent_options is not None
+        assert bridge.agent_options.on_session_terminated is not None
+        bridge.agent_options.on_session_terminated(False)
+        await asyncio.gather(*list(manager._background_tasks))
+        discover = AsyncMock(side_effect=httpx.ConnectError("offline"))
+        monkeypatch.setattr("mindroom.matrix_rtc.call_backends.discover_livekit_service_url", discover)
+
+        await _reconcile_roster(manager, client, room, caller)
+
+        state = _call_state(manager)
+        assert state.session is None
+        assert state.retry_task is None
+        assert state.logical_call is not None
+        assert state.logical_call.join_blocked
+        discover.assert_not_awaited()
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sibling_present", [False, True], ids=["sdk-41-control", "older-sibling-on-retired-service"])
+async def test_the_agents_older_device_on_a_retired_service_never_blocks_a_caller_on_the_moved_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sibling_present: bool,
+) -> None:
+    """The agent's own device is never the anchor: it vetoes while it is off the caller's service, and no more."""
+    well_known = [SERVICE_URL]
+    read_well_known = _serve_well_known(monkeypatch, well_known)
+    client = _client()
+    manager = _manager(
+        client,
+        FakeBridge(),
+        tmp_path,
+        _discovering_config(),
+        bridge_factory=_bridge_per_session([]),
+        clock_ms=lambda: 2_000,
+    )
+    room = _room()
+    caller = _remote_member_event(created_ts=1_100, livekit_service_url=MOVED_SERVICE_URL)
+    sibling = _sdk_45_member_event("BOTSECOND", 900, SERVICE_URL, user=BOT_USER)
+
+    try:
+        await _reconcile_roster(manager, client, room, _remote_member_event(created_ts=1_000))
+        await _reconcile_roster(manager, client, room)
+        well_known.append(MOVED_SERVICE_URL)
+
+        if sibling_present:
+            await _reconcile_roster(manager, client, room, caller, sibling)
+            state = _call_state(manager)
+            assert state.session is None
+            assert state.logical_call is None
+            assert state.retry_task is None
+            assert read_well_known.await_count == 1
+
+        await _reconcile_roster(manager, client, room, caller)
+
+        session = _call_state(manager).session
+        assert session is not None
+        assert session.deps.livekit_service_url == MOVED_SERVICE_URL
+        assert read_well_known.await_count == 2
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_sdk_45_device", [False, True], ids=["sdk-41-control", "with-sdk-45-device"])
+async def test_trusted_sdk_45_device_leaves_the_sdk_41_anchors_spelling_check_as_it_was(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_sdk_45_device: bool,
+) -> None:
+    """An SDK 41 anchor is still compared by the SDK 41 rule, so a respelled well-known is read again and joined."""
+    respelled = "HTTPS://RTC.EXAMPLE.ORG:443"
+    well_known = [SERVICE_URL]
+    read_well_known = _serve_well_known(monkeypatch, well_known)
+    client = _client()
+    manager = _manager(
+        client,
+        FakeBridge(),
+        tmp_path,
+        _discovering_config(),
+        bridge_factory=_bridge_per_session([]),
+        clock_ms=lambda: 2_000,
+    )
+    room = _room()
+    roster = [_remote_member_event(created_ts=1_100, livekit_service_url=respelled)]
+    if with_sdk_45_device:
+        roster.append(_sdk_45_member_event("ALICESECOND", 1_101, SERVICE_URL))
+
+    try:
+        await _reconcile_roster(manager, client, room, _remote_member_event(created_ts=1_000))
+        await _reconcile_roster(manager, client, room)
+        well_known.append(respelled)
+
+        await _reconcile_roster(manager, client, room, *roster)
+
+        assert _call_state(manager).session is not None
+        assert read_well_known.await_count == 2
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@_BOTH_SDKS
 @pytest.mark.parametrize(
     ("error", "retries"),
     [(httpx.ConnectError("offline"), True), (ValueError("not JSON"), False)],
     ids=["outage", "unreadable"],
 )
-async def test_manager_treats_a_failed_discovery_for_an_sdk_45_caller_as_main_does(
+async def test_failed_discovery_is_handled_alike_for_a_caller_of_either_sdk(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    sdk: int,
     error: Exception,
     retries: bool,
 ) -> None:
-    """A well-known outage is retried and an unreadable well-known is not, as for an SDK 41 caller."""
+    """A well-known outage is retried; an unreadable well-known blocks the call, which then reads nothing more."""
     discover = AsyncMock(side_effect=error)
     monkeypatch.setattr("mindroom.matrix_rtc.call_backends.discover_livekit_service_url", discover)
     client = _client()
     manager = _manager(client, FakeBridge(), tmp_path, _discovering_config(), clock_ms=lambda: 2_000)
     room = _room()
-    caller = _sdk_45_member_event("ALICEDEV", 1_000)
+    caller = _caller_event(sdk, "ALICEDEV", 1_000)
 
     try:
         await _reconcile_roster(manager, client, room, caller)
@@ -1317,7 +1604,6 @@ async def test_manager_treats_a_failed_discovery_for_an_sdk_45_caller_as_main_do
         assert _call_state(manager).session is None
         assert (_call_state(manager).retry_task is not None) is retries
         if not retries:
-            # The unreadable answer stands for the cooldown, so the next roster event reads nothing.
             await _reconcile_roster(manager, client, room, caller)
             assert discover.await_count == 1
     finally:
@@ -5411,13 +5697,17 @@ async def test_sdk_41_focus_decisions_are_unchanged_by_sdk_45_support(
 
 
 @pytest.mark.asyncio
-async def test_manager_refuses_an_sdk_41_default_port_spelling_as_before(tmp_path: Path) -> None:
-    """An SDK 41 caller whose focus differs only by an uppercase scheme with its default port is still refused."""
+@_BOTH_SDKS
+async def test_manager_refuses_an_anchors_default_port_spelling_as_before(tmp_path: Path, sdk: int) -> None:
+    """A call's anchor whose focus differs only by an uppercase scheme with its default port is still refused.
+
+    The spelling equivalence serves only to compare an SDK 45 member with its anchor, never to trust an anchor.
+    """
     config = _config()
     config.calls.livekit_service_url = f"{SERVICE_URL}/p"
     client = _client()
     manager = _manager(client, FakeBridge(), tmp_path, config, clock_ms=lambda: 2_000)
-    caller = _remote_member_event(created_ts=1_000, livekit_service_url="HTTPS://RTC.EXAMPLE.ORG:443/p/")
+    caller = _caller_event(sdk, "ALICEDEV", 1_000, "HTTPS://RTC.EXAMPLE.ORG:443/p/")
 
     try:
         await _reconcile_roster(manager, client, _room(), caller)
@@ -5448,9 +5738,7 @@ def test_sdk_45_member_publishes_on_an_equivalently_spelled_service_only(
     publishes: bool,
 ) -> None:
     """Scheme case and a default port are spelling; a malformed or missing URL matches nothing, itself included."""
-    member = replace(_member("@alice:example.org", "ALICEDEV", livekit_service_url=advertised), uses_multi_sfu=True)
-
-    assert publishes_on_service(member, trusted) is publishes
+    assert same_multi_sfu_service(advertised, trusted) is publishes
 
 
 @pytest.mark.asyncio

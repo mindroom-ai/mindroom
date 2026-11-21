@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING, cast
 
 import httpx
@@ -165,39 +164,6 @@ async def resolve_livekit_service(
     return advertised_focus
 
 
-async def discover_trusted_service(
-    roster: list[CallMember],
-    *,
-    user_id: str,
-    ssl_verify: bool,
-) -> tuple[str | None, bool]:
-    """Discover the service ``multi_sfu`` members are judged against, and whether a mismatch read it afresh.
-
-    The oldest member's focus counts too, as ``resolve_livekit_service`` reads again before it refuses that one.
-    """
-    discover = partial(
-        discover_livekit_service_url,
-        MatrixID.parse(user_id).domain,
-        ssl_verify=ssl_verify,
-        allow_private_networks=True,
-    )
-    oldest_member = min(roster, key=lambda member: member.created_ts)
-    judged = [member for member in roster if member.uses_multi_sfu or member is oldest_member]
-    trusted_url = await discover()
-    refreshed = not all(publishes_on_service(member, trusted_url) for member in judged)
-    if refreshed:
-        trusted_url = await discover(max_age_s=0)
-    # A discovered service is joined only over HTTPS.
-    https = (_multi_sfu_focus(trusted_url) or "").startswith("https://")
-    return (trusted_url if https else None), refreshed
-
-
-def publishes_on_service(member: CallMember, service_url: str | None) -> bool:
-    """Return whether a member's first transport is this authorization service, however it is spelled."""
-    focus = _multi_sfu_focus(member.livekit_service_url)
-    return focus is not None and focus == _multi_sfu_focus(service_url)
-
-
 async def fetch_sfu_grant(client: nio.AsyncClient, room_id: str, service_url: str, *, ssl_verify: bool) -> SfuGrant:
     """Exchange the bot's OpenID token for a grant to join the room's call on the SFU."""
     response = await client.get_openid_token(client.user_id)
@@ -237,8 +203,16 @@ def _normalized_service_url(url: str) -> str | None:
     return str(parsed).rstrip("/")
 
 
+def same_multi_sfu_service(url: str | None, other_url: str | None) -> bool:
+    """Return whether a ``multi_sfu`` member's service URL names the same service as another URL.
+
+    Scheme case and a default port are spelling. A missing or malformed URL names nothing, itself included.
+    """
+    focus = _multi_sfu_focus(url)
+    return focus is not None and focus == _multi_sfu_focus(other_url)
+
+
 def _multi_sfu_focus(url: str | None) -> str | None:
-    """Normalize a ``multi_sfu`` focus: scheme case and a default port are spelling, a malformed URL is no focus."""
     try:
         parsed = httpx.URL(url or "")
         # Reading the host raises on malformed IDNA that parsing accepted.
