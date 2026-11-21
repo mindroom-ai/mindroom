@@ -23,9 +23,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing, ReasoningConfig
-from mindroom.constants import AI_RUN_METADATA_KEY, FORK_CONTENT_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import AI_RUN_METADATA_KEY, FORK_CONTENT_KEY
 from mindroom.custom_tools.thread_model import ThreadModelTools
-from mindroom.entity_resolution import entity_identity_registry
 from mindroom.llm.runs import RunStatus
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
@@ -254,9 +253,11 @@ async def _dispatch_fork_turn(
         },
     )
     if pick is not None:
+        _join_model_test_bot(bot, room)
         event.source["content"][THREAD_MODEL_CONTENT_KEY] = {
             "version": 1,
             "runtime_user_id": bot.matrix_id.full_id,
+            "runtime_device_id": "TESTDEVICE",
             "model": pick,
         }
     fork_root = make_visible_message(
@@ -315,6 +316,16 @@ async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispat
     assert _fork_model(bot) == inherited
 
 
+def _join_model_test_bot(bot: AgentBot, room: nio.MatrixRoom, device_id: str = "TESTDEVICE") -> AsyncMock:
+    """Attach a logged-in client so the real room-poster election sees this bot."""
+    client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
+    client.device_id = device_id
+    client.rooms[room.room_id] = room
+    bot.client = client
+    bot.running = True
+    return client
+
+
 def _conversation_event(bot: AgentBot, event_id: str, body: str, **content: object) -> nio.RoomMessageText:
     """Build one human prompt aimed at the bot, with optional composer metadata."""
     return nio.RoomMessageText.from_dict(
@@ -345,11 +356,9 @@ async def test_opening_pick_drives_the_reply_model_and_stays_in_its_thread(
     bot.config.agents["code"].memory_backend = "none"
     bot.config.router.access = ResponderAccessConfig(users=["@someone_else:localhost"], current_room_members=False)
     paths = runtime_paths_for(bot.config)
-    catalog_account = entity_identity_registry(bot.config, paths).current_id(ROUTER_AGENT_NAME).full_id
-    client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
-    room = _matrix_room(ROOM_ID, client.user_id, user_ids=(client.user_id, catalog_account, "@user:localhost"))
-    client.rooms[ROOM_ID] = room
-    bot.client = client
+    catalog_account = bot.matrix_id.full_id
+    room = _matrix_room(ROOM_ID, catalog_account, user_ids=(catalog_account, "@user:localhost"))
+    client = _join_model_test_bot(bot, room)
     unique_room_send_responses(client)
     picked = ScriptedModel([answer("Picked answer"), answer("Picked follow-up")])
     inherited = ScriptedModel([answer("Inherited answer"), answer("Inherited after reset")])
@@ -359,7 +368,14 @@ async def test_opening_pick_drives_the_reply_model_and_stays_in_its_thread(
         bot,
         "$opening",
         "First prompt",
-        **{THREAD_MODEL_CONTENT_KEY: {"version": 1, "runtime_user_id": catalog_account, "model": "large@high"}},
+        **{
+            THREAD_MODEL_CONTENT_KEY: {
+                "version": 1,
+                "runtime_user_id": catalog_account,
+                "runtime_device_id": "TESTDEVICE",
+                "model": "large@high",
+            },
+        },
     )
     relation = {"m.relates_to": {"rel_type": "m.thread", "event_id": root.event_id}}
     await seed_hydrated_conversation(bot, room_id=ROOM_ID, thread_id=root.event_id)
@@ -378,18 +394,62 @@ async def test_opening_pick_drives_the_reply_model_and_stays_in_its_thread(
     assert (len(picked.requests), len(inherited.requests)) == (2, 1)
     await send(_conversation_event(bot, "$reset", "!model reset", **relation))
     assert not resolve_thread_model_override(paths, root.event_id, config=bot.config).active
+    # Simulate a delayed responder preparing the original root after the reset.
     await dispatcher._prepare_dispatch(make_test_turn(room, root, root.sender))
     await send(_conversation_event(bot, "$after-reset", "Follow-up after reset", **relation))
     assert (len(picked.requests), len(inherited.requests)) == (2, 2)
 
 
 @pytest.mark.asyncio
+async def test_opening_pick_names_one_of_two_devices_on_the_same_runtime_account(tmp_path: Path) -> None:
+    """Only the selected device of the shared catalog account can write to its runtime's store."""
+    stores = []
+    for device_id in ("NOT_PICKED", "PICKED"):
+        bot = _fork_bot(tmp_path / device_id)
+        bot.config.agents["code"].access = ResponderAccessConfig(users=["@user:localhost"])
+        room = _matrix_room(ROOM_ID, bot.matrix_id.full_id, user_ids=(bot.matrix_id.full_id, "@user:localhost"))
+        client = _join_model_test_bot(bot, room, device_id)
+        event = _conversation_event(
+            bot,
+            "$root",
+            "A prompt",
+            **{
+                THREAD_MODEL_CONTENT_KEY: {
+                    "version": 1,
+                    "runtime_user_id": client.user_id,
+                    "runtime_device_id": "PICKED",
+                    "model": "large",
+                },
+            },
+        )
+        await bot._turn_dispatcher._prepare_dispatch(make_test_turn(room, event, event.sender))
+        stores.append(
+            resolve_thread_model_override(runtime_paths_for(bot.config), event.event_id, config=bot.config).active,
+        )
+    assert stores == [{}, {"code": "large", "router": "large"}]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "ignored",
-    ["reply", "room-mode", "other-runtime", "unknown-model", "unknown-level", "managed-sender", "no-access"],
+    [
+        "reply",
+        "room-mode",
+        "other-runtime",
+        "unknown-model",
+        "unknown-level",
+        "managed-sender",
+        "no-access",
+        "command",
+        "suppressed",
+    ],
 )
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_ineligible_opening_model_pick_does_not_write(tmp_path: Path, ignored: str) -> None:
+async def test_ineligible_opening_model_pick_does_not_write(
+    tmp_path: Path,
+    ignored: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Only new threads, valid choices, a runtime's own accounts, and the human's reply grants can seed the store."""
     bot = _fork_bot(tmp_path)
     bot.config.agents["code"].access = ResponderAccessConfig(
@@ -400,12 +460,25 @@ async def test_ineligible_opening_model_pick_does_not_write(tmp_path: Path, igno
         bot.config.agents["code"].thread_mode = "room"
     model = {"unknown-model": "unconfigured", "unknown-level": "large@high"}.get(ignored, "large")
     runtime = "@other_runtime:localhost" if ignored == "other-runtime" else bot.matrix_id.full_id
-    content = {THREAD_MODEL_CONTENT_KEY: {"version": 1, "runtime_user_id": runtime, "model": model}}
+    _join_model_test_bot(bot, room)
+    content = {
+        THREAD_MODEL_CONTENT_KEY: {
+            "version": 1,
+            "runtime_user_id": runtime,
+            "runtime_device_id": "TESTDEVICE",
+            "model": model,
+        },
+    }
     if ignored == "reply":
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$existing"}
         await seed_hydrated_conversation(bot, room_id=ROOM_ID, thread_id="$existing")
-    event = _conversation_event(bot, "$event", "A prompt", **content)
-    deps = bot._turn_dispatcher.deps
+    event = _conversation_event(bot, "$event", "!model" if ignored == "command" else "A prompt", **content)
+    dispatcher = bot._turn_dispatcher
+    deps = dispatcher.deps
+    if ignored == "no-access":
+        bot.config.router.access = ResponderAccessConfig(current_room_members=False)
+    if ignored == "suppressed":
+        monkeypatch.setattr(dispatcher, "_message_received_hook_settles_turn", AsyncMock(return_value=True))
     if ignored == "managed-sender":
         event.sender = "@mindroom_router:localhost"
     facts = deps.ingress.classify(event, room_id=ROOM_ID)

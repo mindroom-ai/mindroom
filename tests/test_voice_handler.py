@@ -858,7 +858,12 @@ class TestVoiceHandler:
         event = MagicMock(spec=nio.RoomMessageAudio)
         event.event_id = "$marked_voice"
         event.sender = "@alice:example.com"
-        pick = {"version": 1, "runtime_user_id": "@mindroom_helper:example.com", "model": "large"}
+        pick = {
+            "version": 1,
+            "runtime_user_id": "@mindroom_helper:example.com",
+            "runtime_device_id": "DEVICE",
+            "model": "large",
+        }
         event.source = {
             "content": {
                 "body": "voice.ogg",

@@ -68,25 +68,33 @@ class ThreadModelChoice:
     """A model reference chosen for a new thread on one runtime."""
 
     runtime_user_id: str
+    runtime_device_id: str
     model: str
 
 
 def parse_thread_model_choice(content: Mapping[str, object]) -> ThreadModelChoice | None:
     """Read an opening-message model choice, ignoring absent or malformed metadata."""
     raw = content.get(THREAD_MODEL_CONTENT_KEY)
-    if not isinstance(raw, Mapping) or set(raw) != {"version", "runtime_user_id", "model"}:
+    if not isinstance(raw, Mapping) or set(raw) != {"version", "runtime_user_id", "runtime_device_id", "model"}:
         return None
-    version, runtime_user_id, model = raw["version"], raw["runtime_user_id"], raw["model"]
+    version, runtime_user_id, runtime_device_id, model = (
+        raw["version"],
+        raw["runtime_user_id"],
+        raw["runtime_device_id"],
+        raw["model"],
+    )
     if (
         type(version) is not int
         or version != 1
         or not _bounded_string(runtime_user_id, 1024)
         or runtime_user_id != runtime_user_id.strip()
+        or not _bounded_string(runtime_device_id, 255)
+        or runtime_device_id != runtime_device_id.strip()
         or not _bounded_string(model, 1024)
         or model != model.strip()
     ):
         return None
-    return ThreadModelChoice(runtime_user_id, model)
+    return ThreadModelChoice(runtime_user_id, runtime_device_id, model)
 
 
 def parse_model_selection(content: Mapping[str, object]) -> ModelSelectionRequest | None:

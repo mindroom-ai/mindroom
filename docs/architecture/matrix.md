@@ -115,10 +115,11 @@ Refresh on picker opening; expire requests after 12 seconds and discard late res
 A catalog advertising `thread_model_on_root` supports an optional pick on the person's own opening `m.room.message`, including a media upload:
 
 ```json
-{"io.mindroom.thread_model":{"version":1,"runtime_user_id":"@mindroom_helper:example.org","model":"fast@high"}}
+{"io.mindroom.thread_model":{"version":1,"runtime_user_id":"@mindroom_helper:example.org","runtime_device_id":"DEVICE","model":"fast@high"}}
 ```
 
-Use the account that answered authenticated discovery for `runtime_user_id` and a catalog key or `key@level` for `model` (non-empty, unpadded strings of at most 1024 characters).
+Use the account and device that answered authenticated discovery for `runtime_user_id` and `runtime_device_id`, and a catalog key or `key@level` for `model`.
+The values must be nonempty, unpadded strings: up to 255 characters for the device ID and 1024 each for the account ID and model.
 Omit the key to inherit the defaults; it is not a room-wide setting or a separate event.
 For a coalesced opening turn, the latest source from the human requester carrying the key supplies the choice, and editing a message does not change or add a choice.
 The resolved thread root must be among that turn's source events, so an ordinary reply in an existing thread cannot set it.

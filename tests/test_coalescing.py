@@ -162,7 +162,7 @@ def _voice_pending(event_id: str, body: str, origin_server_ts: int) -> PendingEv
 def test_coalesced_turn_reads_the_latest_source_with_a_model_pick(picks: str, expected: str | None) -> None:
     """The latest explicit pick wins, even when the last source has no pick at all."""
     upload = _image_event("$upload", 1000)
-    choice = {"version": 1, "runtime_user_id": "@mindroom:localhost", "model": "large"}
+    choice = {"version": 1, "runtime_user_id": "@mindroom:localhost", "runtime_device_id": "DEVICE", "model": "large"}
     upload.source["content"][THREAD_MODEL_CONTENT_KEY] = choice
     caption = _text_event("$caption", "Caption", 1001)
     if picks != "first":
@@ -187,6 +187,7 @@ def test_only_original_direct_sources_can_choose_a_thread_model(source_type: str
     event.source["content"][THREAD_MODEL_CONTENT_KEY] = {
         "version": 1,
         "runtime_user_id": "@mindroom:localhost",
+        "runtime_device_id": "DEVICE",
         "model": "large",
     }
     if source_type == "media-edit":
@@ -1864,8 +1865,8 @@ async def test_an_edited_queued_caption_stays_in_its_submission() -> None:
         (SUBMISSION_CONTENT_KEY, {"id": "upload-1", "more": False}, {"id": "upload-2", "more": True}),
         (
             THREAD_MODEL_CONTENT_KEY,
-            {"version": 1, "runtime_user_id": "@mindroom:localhost", "model": "large"},
-            {"version": 1, "runtime_user_id": "@mindroom:localhost", "model": "small"},
+            {"version": 1, "runtime_user_id": "@mindroom:localhost", "runtime_device_id": "DEVICE", "model": "large"},
+            {"version": 1, "runtime_user_id": "@mindroom:localhost", "runtime_device_id": "DEVICE", "model": "small"},
         ),
     ],
 )

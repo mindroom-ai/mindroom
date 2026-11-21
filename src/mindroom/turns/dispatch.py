@@ -38,7 +38,6 @@ from mindroom.dispatch_source import (
     ScheduledHistoryBudget,
     scheduled_history_limit_from_content,
 )
-from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import MessageEnvelope, hook_ingress_policy
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.event_info import EventInfo
@@ -125,13 +124,18 @@ def _apply_root_thread_model(deps: TurnDispatchDeps, turn: PreparedTurn, thread_
         choice is None
         or thread_id is None
         or thread_id not in turn.handled_turn.source_event_ids
+        or turn.command is not None
+        # The batch filters each source; also check the provenance of the turn as a whole.
         or turn.facts.sender_is_managed
+        or turn.facts.acts_for_requester
     ):
         return
-    config, paths = deps.runtime.config, deps.runtime_paths
-    # Discovery can name any account of this runtime, not necessarily the one dispatching the opening turn.
-    if not entity_identity_registry(config, paths).is_managed_user_id(choice.runtime_user_id):
+    poster = deps.runtime.orchestrator.room_poster(turn.room.room_id)
+    client = None if poster is None else poster.client
+    if client is None or (client.user_id, client.device_id) != (choice.runtime_user_id, choice.runtime_device_id):
+        deps.logger.debug("Ignoring root thread model choice", thread_id=thread_id, reason="other_runtime_device")
         return
+    config, paths = deps.runtime.config, deps.runtime_paths
     if choice.model not in config.models:
         deps.logger.info("Ignoring root thread model choice", thread_id=thread_id, reason="unknown_model")
         return
@@ -924,8 +928,6 @@ class TurnDispatcher:
             extract_context_start,
             path=context_path,
         )
-        _apply_root_thread_model(self.deps, turn, target.resolved_thread_id)
-        _inherit_fork_thread_models(self.deps, turn, target.resolved_thread_id, context.thread_history)
         envelope_start = time.monotonic()
         envelope = self.deps.resolver.build_envelope(
             event=event,
@@ -968,6 +970,8 @@ class TurnDispatcher:
             await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
             return None
 
+        _apply_root_thread_model(self.deps, turn, target.resolved_thread_id)
+        _inherit_fork_thread_models(self.deps, turn, target.resolved_thread_id, context.thread_history)
         return PreparedDispatch(
             requester_user_id=requester_user_id,
             context=context,
