@@ -13,7 +13,14 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, CLIConnectionError, RateLimitEvent, RateLimitInfo
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    CLIConnectionError,
+    CLINotFoundError,
+    RateLimitEvent,
+    RateLimitInfo,
+)
 from claude_agent_sdk._internal.transport import subprocess_cli
 from structlog.testing import capture_logs
 
@@ -375,7 +382,8 @@ async def test_a_parked_process_with_a_call_the_model_never_made_is_rebuilt_at_o
     asked = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
 
     messages += [asked.message, result("toolu_a", "LILAC-HERON")]
-    answered = await asyncio.wait_for(complete(provider, ModelRequest(messages=messages, tools=[LOOKUP])), 10)
+    # Both subprocess cleanup and replacement must finish, even on a loaded runner.
+    answered = await asyncio.wait_for(complete(provider, ModelRequest(messages=messages, tools=[LOOKUP])), 30)
 
     assert answered.content == "Rebuilt."
     assert cli.events("tool_result") == []
@@ -904,6 +912,24 @@ async def test_each_claude_subscription_plan_is_answered(tmp_path: Path, plan: s
     assert (await complete(cli.provider(), ModelRequest(messages=[user("Hi")]))).content == "Hello."
 
 
+@pytest.mark.parametrize("name", ["CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK"])
+async def test_parent_sdk_settings_are_refused_by_name_before_taking_a_process_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    monkeypatch.setenv(name, "secret-setting-value")
+    monkeypatch.setattr(session_module, "_MAX_PROCESSES", 0)
+    cli = fake_cli(tmp_path, {})
+
+    with pytest.raises(AuthenticationFailed, match=name) as raised:
+        await cli.provider().preflight()
+
+    assert "secret-setting-value" not in str(raised.value)
+    assert cli.events("spawn") == []
+    assert not (cli.storage_root / "claude_code").exists()
+
+
 async def test_inherited_claude_settings_are_removed_only_from_the_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -919,6 +945,7 @@ async def test_inherited_claude_settings_are_removed_only_from_the_child(
     kept = {
         "CLAUDE_CODE_ENTRYPOINT",
         "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS",
         "CLAUDE_CONFIG_DIR",
         *session_module._ISOLATION_ENV,
     }
@@ -944,7 +971,11 @@ async def test_inherited_claude_settings_are_removed_only_from_the_child(
     child_names = set(spawn["env_names"])
     assert child_names.isdisjoint(inherited | {late_name, launcher_name})
     assert child_names.issuperset(kept)
-    assert spawn["trusted_env"] == {"DISABLE_AUTO_COMPACT": "1", "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1"}
+    assert spawn["trusted_env"] == {
+        "DISABLE_AUTO_COMPACT": "1",
+        "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
+        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "600000",
+    }
     assert all(os.environ[name] == "inherited" for name in parent_names | {late_name})
 
 
@@ -1033,6 +1064,31 @@ async def test_uses_sdk_discovery_when_claude_is_not_on_path(
     assert answer.content == "Discovered."
     assert provider.cli_path is None
     assert [entry["cli"] for entry in logs if entry["event"] == "claude_code_started"] == [str(cli.path)]
+
+
+@pytest.mark.parametrize("discovery", ["no executable", "missing method", "missing transport"])
+async def test_unavailable_sdk_discovery_reports_not_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    discovery: str,
+) -> None:
+    def cli_not_found(_transport: subprocess_cli.SubprocessCLITransport) -> str:
+        raise CLINotFoundError
+
+    cli = fake_cli(tmp_path / "bin", {})
+    monkeypatch.setenv("PATH", str(tmp_path))
+    if discovery == "missing transport":
+        monkeypatch.delattr(subprocess_cli, "SubprocessCLITransport")
+    elif discovery == "missing method":
+        monkeypatch.delattr(subprocess_cli.SubprocessCLITransport, "_find_cli")
+    else:
+        monkeypatch.setattr(subprocess_cli.SubprocessCLITransport, "_find_cli", cli_not_found)
+
+    with pytest.raises(AuthenticationFailed, match="Claude Code was not found") as raised:
+        await cli.provider(cli_path=None).preflight()
+
+    assert str(raised.value) == session_module._NOT_FOUND
+    assert cli.events("spawn") == []
 
 
 @pytest.mark.parametrize("exists", [False, True], ids=["missing", "not executable"])
