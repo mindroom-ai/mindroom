@@ -57,6 +57,16 @@ async def stack(tmp_path: Path) -> AsyncIterator[WorkflowStack]:
         await stack.engine.close()
 
 
+def _script_runtime(stack: WorkflowStack, pass_timeout_seconds: float = 30.0) -> SimpleNamespace:
+    """Return what the workflow lifecycle reads of the script runtime it follows."""
+    return SimpleNamespace(
+        after_reconcile=None,
+        retention_seconds=3600.0,
+        pass_timeout_seconds=pass_timeout_seconds,
+        runtime_paths=stack.context.runtime_paths,
+    )
+
+
 def _broker_call(stack: WorkflowStack, key: str = "@0") -> ScriptCallRecord:
     """Return the broker receipt that the handle of the node at *key* names."""
     node = stack.store.get_node(stack.run_id, key)
@@ -216,7 +226,7 @@ async def test_shell_output_over_the_auto_save_size_is_never_swapped_for_a_works
 async def test_result_over_eight_mebibytes_returns_a_reference_and_the_results_route_streams_all_of_it(
     stack: WorkflowStack,
 ) -> None:
-    """The receipt of a result too large to inline names the route that returns all of it, also after a restart."""
+    """The receipt of a result too large to inline names the route that returns all of it, also to the next attempt."""
     size = 8 * 1024 * 1024 + 1
     receipt = await stack.submit("@0", "tool", tool_args("counter", "text", size=size))
     while receipt.state == "running":
@@ -227,10 +237,13 @@ async def test_result_over_eight_mebibytes_returns_a_reference_and_the_results_r
         assert (await client.get(f"results/{receipt.id}")).json() == "x" * size
 
     stack = await stack.restart()
+    await stack.engine.reconcile()
+    await stack.engine.resume(stack.context, stack.run_id)
+    again = await stack.submit("@0", "tool", tool_args("counter", "text", size=size))
+    assert (again.state, again.cached, again.result_ref) == ("completed", True, f"results/{receipt.id}")
     async with stack.http() as client:
-        again = await client.get(f"nodes/{receipt.id}")
-        assert (again.json()["state"], again.json()["result_ref"]) == ("completed", f"results/{receipt.id}")
         assert (await client.get(f"results/{receipt.id}")).json() == "x" * size
+    assert stack.counting_tool.calls == 1
 
 
 @pytest.mark.asyncio
@@ -691,7 +704,7 @@ async def test_maintenance_pass_ends_every_run_it_can_and_prunes_expired_runs(
 ) -> None:
     """A run whose attempt record is gone ends interrupted, and neither it nor a failing run stops the pass."""
     with workflow_stack(tmp_path) as stack:
-        script_runtime = SimpleNamespace(after_reconcile=None, retention_seconds=3600.0, pass_timeout_seconds=30.0)
+        script_runtime = _script_runtime(stack)
         lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
         await lifecycle.start()
         orphan = await stack.start()
@@ -734,7 +747,7 @@ async def test_workflow_store_error_never_fails_the_script_runtime_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The script runtime prunes its own runs after this pass, so a workflow store it cannot read must not raise there."""
-    script_runtime = SimpleNamespace(after_reconcile=None, retention_seconds=3600.0, pass_timeout_seconds=30.0)
+    script_runtime = _script_runtime(stack)
     lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
     await lifecycle.start()
 
@@ -757,7 +770,7 @@ async def test_waiter_returns_when_the_pass_that_ended_its_run_timed_out_at_the_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The pass is cancelled while its last write is in a thread: the run ends there, and nobody is left to wake `wait`."""
-    script_runtime = SimpleNamespace(after_reconcile=None, retention_seconds=3600.0, pass_timeout_seconds=0.4)
+    script_runtime = _script_runtime(stack, pass_timeout_seconds=0.4)
     lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
     await lifecycle.start()
     at_commit, commit = threading.Event(), threading.Event()

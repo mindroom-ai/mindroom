@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import MappingProxyType, SimpleNamespace
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 from uuid import uuid4
 
 import httpx
@@ -29,13 +29,18 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths
-from mindroom.custom_tools.workflow import WorkflowTools
+from mindroom.custom_tools.workflow import WorkflowTools, unfinished_workflow_jobs
 from mindroom.message_target import MessageTarget
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker
 from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, RUN_ID_ENV, TOKEN_PATH_ENV
 from mindroom.script_runs.manager import ScriptRunManager
 from mindroom.script_runs.models import TERMINAL_SCRIPT_RUN_STATES, ScriptRunRecord, ScriptRunState
-from mindroom.script_runs.reasons import PROCESS_EXIT_OBSERVED
+from mindroom.script_runs.reasons import (
+    INTERRUPTION_REASONS,
+    PROCESS_EXIT_OBSERVED,
+    RUNTIME_RESTARTED,
+    RUNTIME_SHUTDOWN,
+)
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
@@ -54,7 +59,9 @@ from mindroom.workflow_runs.models import (
     WorkflowRun,
     new_workflow_run_id,
 )
+from mindroom.workflow_runs.recovery import recover_runs
 from mindroom.workflow_runs.store import WorkflowRunStore
+from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -64,7 +71,13 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.scripted_agent_helpers import registered_toolkit
-from tests.tool_job_helpers import call_job_tool, job_actor, tool_job_runtime, toolkit_job_tools
+from tests.tool_job_helpers import (
+    call_job_tool,
+    continue_stopped_jobs,
+    job_actor,
+    tool_job_runtime,
+    toolkit_job_tools,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator, Mapping
@@ -399,11 +412,12 @@ class FakeScripts:
         return revoked
 
     async def reconcile_durable(self, *, run_id: str) -> ScriptRunRecord:
-        """End a revoked attempt as cancelled, as the manager does once its process is confirmed dead."""
+        """End a revoked attempt as the manager does once its process is confirmed dead: interrupted or cancelled."""
         attempt = self.store.get_run(run_id)
         if attempt.state in TERMINAL_SCRIPT_RUN_STATES or attempt.cancel_requested_at is None:
             return attempt
-        return await self.end(run_id, ScriptRunState.CANCELLED)
+        interrupted = attempt.cancellation_reason in INTERRUPTION_REASONS
+        return await self.end(run_id, ScriptRunState.INTERRUPTED if interrupted else ScriptRunState.CANCELLED)
 
     async def end(
         self,
@@ -490,6 +504,12 @@ class WorkflowStack:
         """What the engine's clock reads, in seconds; a test moves it to let working time pass."""
         self.limits: WorkflowLimits | None = None
         """The limits `start` launches with; the engine's defaults when None."""
+        self.access: Literal["pending", "revoked"] | None = None
+        """What an automatic resume finds of the owner's access; None is confirmed access, with the owner's context."""
+        self.has_jobs = False
+        """Whether `open_jobs` started the job runtime, `jobs`."""
+        self.continues: Callable[[BackgroundJob], bool] = lambda _job: False
+        """Which jobs the job runtime keeps for a restart to continue; the coordinator's own rule in a recovery test."""
         self._open()
 
     def _open(self) -> None:
@@ -595,7 +615,12 @@ class WorkflowStack:
     async def open_jobs(self) -> ProcessRuntime:
         """Start the real job runtime on the stack's journal as the instance of the owner's storage root."""
         paths = self.context.runtime_paths
-        self.jobs = await tool_job_runtime(paths.storage_root, grant=lambda _job: self.admission)
+        self.has_jobs = True
+        self.jobs = await tool_job_runtime(
+            paths.storage_root,
+            grant=lambda _job: self.admission,
+            continues=lambda job: self.continues(job),
+        )
         self._instance = pin_background_tool_jobs(self.context.config, paths)
         register_background_runtime(paths, self.jobs)
         return self.jobs
@@ -649,11 +674,54 @@ class WorkflowStack:
         """Return the whole result an ended job delivers to the conversation that started it."""
         return (await read_result_payload(self.jobs, job)).value
 
-    async def restart(self) -> WorkflowStack:
-        """Close the runtimes and reopen them on the same databases, as a primary restart does."""
-        await self.engine.close()
+    async def restart(self, *, kill: bool = False) -> WorkflowStack:
+        """Stop the runtimes and reopen them on the same databases, as a primary restart does.
+
+        A primary that is killed closes nothing: its tasks stop where they are, and only what was saved survives.
+        An orderly one stops its engine and interrupts its attempts first. The job runtime keeps the jobs of a kind
+        it continues as they are saved, in both cases.
+        """
+        if kill:
+            tasks = [*self.broker._tasks.values(), *(task for owned in self.engine._tasks.values() for task in owned)]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            await self.engine.close()
+            await self._retire_attempts(RUNTIME_SHUTDOWN)
+        if self.has_jobs:
+            await self.jobs.quiesce()
+            await self.jobs.close_journal()
+            release_background_tool_jobs(self.context.runtime_paths, self._instance)
         self._open()
+        if self.has_jobs:
+            await (await self.open_jobs()).recover()
         return self
+
+    async def _retire_attempts(self, reason: str) -> None:
+        """Revoke and end every unfinished attempt, as the script runtime does when it stops and when it starts."""
+        for attempt in self.script_store.list_runs(include_finished=False):
+            await self.scripts.revoke(attempt.run_id, reason=reason)
+            await self.scripts.reconcile_durable(run_id=attempt.run_id)
+
+    async def recover(self) -> list[str]:
+        """Run a starting primary's steps for workflows and return the runs that got a new attempt.
+
+        The script runtime adopts no workflow attempt, so it retires the ones it inherited; then the workflow pass runs.
+        """
+        await self._retire_attempts(RUNTIME_RESTARTED)
+        return await self.maintain()
+
+    async def maintain(self) -> list[str]:
+        """Run the workflow pass that follows each pass of the script runtime."""
+        access = self.access or (self.context, self.limits or WorkflowLimits())
+        jobs = unfinished_workflow_jobs(self.context.runtime_paths)
+        return await recover_runs(self.engine, lambda _run: access, jobs)
+
+    async def continue_jobs(self) -> None:
+        """Run the job coordinator's pass that continues the jobs a restart stopped, with the owner's access granted."""
+        config = with_responder_access(self.context.config, self.context.agent_name, users=[self.context.requester_id])
+        await continue_stopped_jobs(self.jobs, config, self.context.runtime_paths, self.context)
 
     async def until(self, predicate: Callable[[], object]) -> None:
         """Wait until *predicate* holds."""

@@ -2509,27 +2509,51 @@ expose = [
 ]
 
 [[modules]]
+path = "mindroom.workflow_runs.faults"
+depends_on = []
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.faults"]
+expose = ["hold"]
+
+[[modules]]
+path = "mindroom.workflow_runs.recovery"
+depends_on = ["mindroom.workflow_runs.models"]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.recovery"]
+expose = ["AUTO_RESUME_REASONS", "recover_runs"]
+
+[[modules]]
 path = "mindroom.workflow_runs.engine"
 depends_on = [
     "mindroom.delegation.personas",
+    "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.recovery",
     "mindroom.workflow_runs.replay",
     "mindroom.workflow_runs.store",
 ]
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.engine"]
-expose = ["SupersededAttemptError", "WorkflowEngine", "WorkflowLimits"]
+expose = ["ResumeAccess", "SupersededAttemptError", "WorkflowEngine", "WorkflowLimits"]
 
 [[modules]]
 path = "mindroom.orchestration.workflow_runtime"
-depends_on = ["mindroom.workflow_runs.engine", "mindroom.workflow_runs.store"]
+depends_on = [
+    "mindroom.custom_tools.workflow",
+    "mindroom.workflow_runs.engine",
+    "mindroom.workflow_runs.recovery",
+    "mindroom.workflow_runs.store",
+]
 visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.custom_tools.workflow"
 depends_on = [
     "mindroom.config.main",
+    "mindroom.config.resolution",
     "mindroom.delegation.lifecycle",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.results",
@@ -9317,6 +9341,7 @@ depends_on = [
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.publication",
     "mindroom.custom_tools.job",
+    "mindroom.custom_tools.workflow",
     "mindroom.delegation.background",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.recovery",

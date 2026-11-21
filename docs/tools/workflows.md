@@ -9,9 +9,8 @@ The script defines `def main(args):`, and MindRoom calls it.
 Every `tool()` and `shell()` call of the script is saved with its result as a node of the run.
 
 A run that stopped or failed can be resumed: its saved calls are reused, and only what changed or failed runs again.
-Running agents from the script and continuing a run after a MindRoom restart are not available yet.
-After a restart, a run that was in progress ends as `interrupted` and its job as interrupted; `resume_workflow` continues it.
-A run whose script had not started when MindRoom stopped ends as `interrupted` with `MindRoom stopped while the run was starting.`
+A run that a MindRoom restart interrupts is resumed the same way on its own.
+Running agents from the script is not available yet.
 
 Treat `workflow` as trusted arbitrary code with authority comparable to `python` or `shell`.
 The script is ordinary Python, so nothing restricts its imports, file access, subprocesses, or network clients.
@@ -119,12 +118,29 @@ The Python between them, imports, and reads of files or the network run again on
 A call whose arguments contain the time or a random value never matches its saved result and runs again; take such values from `now()` and `random()`.
 When a call changed although the script did not, the run's log says `Call n17 changed between attempts without a script edit. It probably contains the time or a random value; use now() or random() from mindroom.workflow.`
 
+## Restarts And Interruptions
+
+A restart of MindRoom, a plugin reload, a worker configuration change, or a lost supervisor stops the script's process, not the run.
+The run's job stays `running`, and within about a minute of the interruption, or of MindRoom's start, the run gets its next attempt, which replays the script as a resume does.
+A write that finished before the interruption is not made again, and neither is a write whose end is unknown: that call is `indeterminate`, as described above.
+A run whose script had already returned its report ends with that report and gets no new attempt.
+
+- The next attempt starts once the requester's access to the agent is confirmed; while MindRoom cannot check it yet, the run waits.
+  When the access is gone, the run ends `interrupted` with `The requester no longer has access.`
+- After 5 attempts in a row that finish no call, the run ends `interrupted` with `Stopped resuming after 5 attempts that finished nothing. Fix the script and call resume_workflow.`
+- A run with no job, which is one that `start_workflow` waited for inside a subagent, is not resumed after an interruption: it ends `interrupted` with the reason, and `resume_workflow` continues it.
+- A run that was only reserved when MindRoom stopped, with no job and no script process yet, is deleted at the next start.
+- Removing the `workflow` tool or the agent, or revoking the requester's access, ends the run `interrupted`; it is not resumed on its own.
+- A script process that MindRoom did not start itself, such as one that survived a restart in a worker, is stopped, and each of its requests is refused with status 409.
+
 ## Working Time
 
 A run may work for `max_runtime_hours` of the agent's `workflow` entry, 72 by default.
 Only time in which the run is `running` counts.
 At the limit the run ends `interrupted` with `The run used its 72 hours of working time. resume_workflow continues it.`, and `resume_workflow` gives it the full time again.
+An attempt that MindRoom starts on its own after an interruption keeps the time the run had left.
 With `max_runtime_hours: 0` a run has no limit.
+One script process runs for at most 30 days; a run with working time left then continues in a new attempt.
 
 ## Where The Script Runs
 

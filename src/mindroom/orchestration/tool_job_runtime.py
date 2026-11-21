@@ -13,6 +13,7 @@ from uuid import uuid4
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.constants import CONVERSATION_CONTENT_KEY
 from mindroom.custom_tools.job import JobTools
+from mindroom.custom_tools.workflow import continued_workflow_job
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.continuation import continued_subagent_job
 from mindroom.delegation.lifecycle import active_delegation_edges, caller_grants_child, delegation_grant
@@ -81,6 +82,11 @@ def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
 def _is_subagent_job(job: BackgroundJob) -> bool:
     """Return whether a restart leaves the job running to continue it: a subagent's turn continues, a tool call never."""
     return job.kind == "delegation"
+
+
+def _continues(job: BackgroundJob) -> bool:
+    """Return whether a restart leaves the job running to continue it: also a workflow run's job, which waits again."""
+    return _is_subagent_job(job) or job.kind == "workflow"
 
 
 def _follow_up_candidates(jobs: Iterable[BackgroundJob]) -> dict[ConversationKey, tuple[BackgroundJob, ...]]:
@@ -177,7 +183,7 @@ class ToolJobRuntimeCoordinator:
                 grant=self._grant,
                 authorize_execution=self._authorize_execution,
                 cancel=self._interrupt,
-                continues=_is_subagent_job,
+                continues=_continues,
                 reply_stopped=self._reply_stopped,
             )
         self._initialized = True
@@ -423,7 +429,8 @@ class ToolJobRuntimeCoordinator:
             # The job's task starts in this context, so its child runs in its conversation as a reply's job does.
             with tool_runtime_context(context):
                 try:
-                    spec = await continued_subagent_job(job, runtime)
+                    of_run = job.kind == "workflow"
+                    spec = await (continued_workflow_job(job) if of_run else continued_subagent_job(job, runtime))
                 except Exception:
                     logger.exception("Subagent job could not continue after a restart", job_id=job.job_id)
                     spec = "its continuation could not be prepared"

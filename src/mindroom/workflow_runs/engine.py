@@ -11,7 +11,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import NAMESPACE_OID, uuid5
 from weakref import WeakValueDictionary
 
@@ -28,7 +28,9 @@ from mindroom.script_runs.models import (
     ScriptToolGrant,
     utc_timestamp,
 )
+from mindroom.script_runs.reasons import MAX_RUNTIME_EXCEEDED
 from mindroom.script_runs.store import ScriptCallNotFoundError, ScriptRunNotFoundError, ScriptRunStoreError
+from mindroom.workflow_runs.faults import hold
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
     DispatchHandle,
@@ -38,6 +40,7 @@ from mindroom.workflow_runs.models import (
     WorkflowRun,
     WorkflowRunState,
 )
+from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS
 from mindroom.workflow_runs.replay import DirtyLanes, decide, node_digest, split_key, stale_keys
 from mindroom.workflow_runs.store import WorkflowRunStoreError
 
@@ -70,6 +73,10 @@ _CHANGED_WITHOUT_EDIT = (
     "Call n{seq} changed between attempts without a script edit. It probably contains the time or a random value; "
     "use now() or random() from mindroom.workflow."
 )
+_NO_ACCESS = "The requester no longer has access."
+_IDLE = "Stopped resuming after {attempts} attempts that finished nothing. Fix the script and call resume_workflow."
+# How many attempts in a row an interrupted run is given on its own while none of them finishes a call.
+_MAX_IDLE_RESUMES = 5
 _OUT_OF_TIME = "The run used its {hours:g} hours of working time. resume_workflow continues it."
 # How often a running run's working time is saved, so a primary that dies loses at most this much of the count.
 _CHARGE_SECONDS = 60.0
@@ -92,6 +99,11 @@ class WorkflowLimits:
     max_runtime_hours: float = 72
     max_tool_calls_per_minute: int = 600
     max_concurrent_agents: int | None = None
+
+
+# What a run an interruption stopped goes on with: its owner's live context and limits once the owner's access is
+# confirmed; "pending" while that cannot be checked yet, "revoked" when it is gone, None when nobody waits for the run.
+type ResumeAccess = tuple[ToolRuntimeContext, WorkflowLimits] | Literal["pending", "revoked"] | None
 
 
 @dataclass(slots=True)
@@ -120,6 +132,9 @@ class WorkflowEngine:
         self.scripts = scripts
         self.broker = broker
         self._clock = clock
+        self.started_at = utc_timestamp()
+        # The attempts this engine started. No other is served: one an earlier primary left is a leftover process.
+        self._launched: set[str] = set()
         self._replays: dict[str, _Replay] = {}
         # When each running run's working time was last charged, by the engine's clock.
         self._charged: dict[str, float] = {}
@@ -136,15 +151,18 @@ class WorkflowEngine:
         run_id: str,
         context: ToolRuntimeContext,
         limits: WorkflowLimits | None = None,
+        *,
+        automatic: bool = False,
     ) -> WorkflowRun:
         """Start the next attempt of a reserved run; a script that cannot start ends the run failed with the reason.
 
         The engine owns a launch once it began: a caller that goes away leaves no process its run does not name, and
-        only the engine's stop ends a launch, which ends its run interrupted.
+        only the engine's stop ends a launch, which ends its run interrupted. An *automatic* launch that is refused
+        leaves the run as it is, for the next pass to try again.
         """
         if self._closed:
             return await asyncio.to_thread(self._stop_starting, run_id)
-        launch = self._spawn(_ADMISSIONS, self._launch(run_id, context, limits or WorkflowLimits()))
+        launch = self._spawn(_ADMISSIONS, self._launch(run_id, context, limits or WorkflowLimits(), automatic))
         self._launching[launch] = run_id
         launch.add_done_callback(self._launching.pop)
         try:
@@ -166,7 +184,13 @@ class WorkflowEngine:
             finished_at=utc_timestamp(),
         )
 
-    async def _launch(self, run_id: str, context: ToolRuntimeContext, limits: WorkflowLimits) -> WorkflowRun:
+    async def _launch(
+        self,
+        run_id: str,
+        context: ToolRuntimeContext,
+        limits: WorkflowLimits,
+        automatic: bool,
+    ) -> WorkflowRun:
         # Held until the run names the attempt, so the new process's first request waits instead of being refused.
         async with self._condition(run_id):
             run = self.store.get_run(run_id)
@@ -185,7 +209,12 @@ class WorkflowEngine:
             except Exception as exc:
                 logger.warning("workflow_launch_refused", run_id=run_id, error=str(exc))
                 attempt, refusal = None, str(exc)
+            if attempt is None and automatic:
+                return run
             if attempt is not None:
+                self._launched.add(attempt.run_id)
+                # Before the run reads `running`, so whoever sees that state sees its time counted from here.
+                self._charged[run_id] = self._clock()
                 launched = await asyncio.to_thread(
                     self.store.update_run,
                     run_id,
@@ -198,8 +227,8 @@ class WorkflowEngine:
                     # The run ended while its process started, so nothing names this attempt: stop it.
                     await self.scripts.revoke(attempt.run_id, reason=launched.error or launched.state.value)
                     await self.scripts.reconcile_durable(run_id=attempt.run_id)
+                    self._charged.pop(run_id, None)
                 else:
-                    self._charged[run_id] = self._clock()
                     self._spawn(run_id, self._watch_time(run_id, limits.max_runtime_hours))
                 return launched
         # The gate is free again, which ending a run takes.
@@ -325,20 +354,58 @@ class WorkflowEngine:
         """Return the run and its current nodes."""
         return self.store.get_run(run_id), self.store.nodes(run_id)
 
-    async def reconcile(self) -> None:
-        """End each run whose attempt has ended, as that attempt and the script's report say; one run's error stops no other."""
+    async def reconcile(self, access: Callable[[WorkflowRun], ResumeAccess] | None = None) -> list[str]:
+        """End each run whose attempt has ended, as that attempt and the script's report say.
+
+        With *access*, a run that an infrastructure interruption stopped gets its next attempt instead, with what
+        *access* answers for it; the runs that got one are returned. One run's error stops no other.
+        """
+        resumed = []
         for run in await asyncio.to_thread(self.store.list_runs, include_finished=False):
-            if run.script_run_id is None:
-                continue
             try:
-                try:
-                    attempt = await asyncio.to_thread(self.scripts.store.get_run, run.script_run_id)
-                except ScriptRunNotFoundError:
-                    attempt = None
-                if attempt is None or attempt.state in TERMINAL_SCRIPT_RUN_STATES:
-                    await self._end_run(run, *_run_outcome(self.store.get_run(run.run_id), attempt))
+                if await self._reconcile_run(run, access(run) if access is not None else None):
+                    resumed.append(run.run_id)
             except Exception:
                 logger.exception("workflow_run_reconcile_failed", run_id=run.run_id)
+        return resumed
+
+    async def _reconcile_run(self, run: WorkflowRun, access: ResumeAccess) -> bool:
+        """End *run* if its attempt has ended, or start its next attempt; return whether one started."""
+        if run.state is WorkflowRunState.STARTING:
+            if access is None or run.attempt == 0 or run.run_id in self._launching.values():
+                # Being launched, or still to be: a first attempt is its job's to start.
+                return False
+        else:
+            try:
+                attempt = await asyncio.to_thread(self.scripts.store.get_run, run.script_run_id or "")
+            except ScriptRunNotFoundError:
+                attempt = None
+            if attempt is not None and attempt.state not in TERMINAL_SCRIPT_RUN_STATES:
+                return False
+            state, error = _run_outcome(self.store.get_run(run.run_id), attempt)
+            interrupted = state is WorkflowRunState.INTERRUPTED and error in AUTO_RESUME_REASONS
+            # The attempt's own process limit says nothing about a run that has working time left, or no limit.
+            spent = error == MAX_RUNTIME_EXCEEDED and run.runtime_seconds_left == 0
+            if access is None or not interrupted or spent:
+                await self._end_run(run, state, error)
+                return False
+            # The attempt is over and the run is not: its nodes are settled, and it waits for its next attempt.
+            run = await self._end_run(run, WorkflowRunState.STARTING, None, finished_at=None)
+        return await self._relaunch(run, access)
+
+    async def _relaunch(self, run: WorkflowRun, access: ResumeAccess) -> bool:
+        """Start the next attempt of an interrupted run that waits for one, as *access* allows; return whether it started."""
+        if access is None or access == "pending" or run.state is not WorkflowRunState.STARTING:
+            return False
+        idle = run.idle_resumes >= _MAX_IDLE_RESUMES
+        if isinstance(access, str) or idle:
+            refusal = _IDLE.format(attempts=_MAX_IDLE_RESUMES) if idle else _NO_ACCESS
+            await self._end_run(run, WorkflowRunState.INTERRUPTED, refusal)
+            return False
+        context, limits = access
+        count = partial(self.store.update_run, run.run_id, when={WorkflowRunState.STARTING})
+        await asyncio.to_thread(count, idle_resumes=run.idle_resumes + 1)
+        return (await self.launch(run.run_id, context, limits, automatic=True)).attempt > run.attempt
 
     async def close(self) -> None:
         """Stop the engine's own tasks and start no more; unsettled nodes keep their handles for the next start."""
@@ -559,7 +626,7 @@ class WorkflowEngine:
             raise LookupError(msg)
         async with self._condition(attempt.workflow_run_id):
             run = self.store.get_run(attempt.workflow_run_id)
-        if run.script_run_id != attempt.run_id:
+        if run.script_run_id != attempt.run_id or attempt.run_id not in self._launched:
             msg = f"Attempt {attempt.run_id} is no longer the attempt of {run.run_id}."
             raise SupersededAttemptError(msg)
         return run
@@ -593,23 +660,25 @@ class WorkflowEngine:
         if same_as is not _RAN and (state is not WorkflowNodeState.COMPLETED or result != same_as):
             # Before the node shows its end, so the script's next call already finds the lane dirty.
             replay.dirty.mark(node.key)
+        await hold("before_settle")
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation)
         await asyncio.to_thread(settle, state=state, result=result, error=error)
+        if state is WorkflowNodeState.COMPLETED and self.store.get_run(node.run_id).idle_resumes:
+            # A call finished, so the attempts the run is given on its own count from here again.
+            await asyncio.to_thread(self.store.update_run, node.run_id, idle_resumes=0)
         await self._notify(node.run_id)
 
     async def _watch_time(self, run_id: str, hours: float) -> None:
         """Save a running run's working time as it is used, and stop the run when none is left."""
-        while True:
+        left = self.store.get_run(run_id).runtime_seconds_left
+        while left is not None and left > 0:
+            await asyncio.sleep(min(_CHARGE_SECONDS, left))
             run = self.store.get_run(run_id)
             if charge := self._time_left(run):
                 run = await asyncio.to_thread(partial(self.store.update_run, run_id, when=_SERVED_RUN_STATES, **charge))
             left = run.runtime_seconds_left
-            if left is None:
-                return
-            if left <= 0 and run.state is WorkflowRunState.RUNNING:
-                break
-            await asyncio.sleep(min(_CHARGE_SECONDS, left or _CHARGE_SECONDS))
-        await self._stop(run_id, WorkflowRunState.INTERRUPTED, _OUT_OF_TIME.format(hours=hours))
+        if left is not None:
+            await self._stop(run_id, WorkflowRunState.INTERRUPTED, _OUT_OF_TIME.format(hours=hours))
 
     def _time_left(self, run: WorkflowRun) -> dict[str, object]:
         """Return, as a change to save, the working time *run* has left after what it used since the last charge.
@@ -627,14 +696,29 @@ class WorkflowEngine:
         for delay in _EXIT_POLL_SECONDS:
             await asyncio.sleep(delay)
             if (await self.scripts.reconcile_durable(run_id=script_run_id)).state in TERMINAL_SCRIPT_RUN_STATES:
-                await self.reconcile()
+                # Only the run that reported: another run's ended attempt is the next pass's to judge.
+                run = await asyncio.to_thread(self.store.run_for_script, script_run_id)
+                if run is not None:
+                    await self._reconcile_run(run, None)
                 break
 
-    async def _end_run(self, run: WorkflowRun, state: WorkflowRunState, error: str | None) -> WorkflowRun:
-        """End *run*: stop its node tasks, read each unsettled node from its handle, store the state, wake waiters."""
+    async def _end_run(
+        self,
+        run: WorkflowRun,
+        state: WorkflowRunState,
+        error: str | None,
+        **changes: object,
+    ) -> WorkflowRun:
+        """End *run*: stop its node tasks, read each unsettled node from its handle, store the state, wake waiters.
+
+        With the state `starting` only the run's attempt is over. A run that has ended, or that names another attempt
+        than *run* does, is left as it is.
+        """
         condition = self._condition(run.run_id)
         # Held to the run's last write, so no call is admitted between the look at its nodes and its end.
         async with condition:
+            if (moved_on := self.store.get_run(run.run_id)).script_run_id != run.script_run_id:
+                return moved_on
             tasks = self._tasks.pop(run.run_id, set()) - {asyncio.current_task()}
             for task in tasks:
                 task.cancel()
@@ -649,12 +733,8 @@ class WorkflowEngine:
             if state is WorkflowRunState.COMPLETED:
                 # What the completed script no longer reaches leaves the run's current view.
                 await asyncio.to_thread(self.store.mark_stale, run.run_id, stale_keys(nodes, current.attempt))
-            changes: dict[str, object] = {
-                "state": state,
-                "error": error,
-                "finished_at": current.finished_at or utc_timestamp(),
-                **self._time_left(current),
-            }
+            ended_at = current.finished_at or utc_timestamp()
+            changes = {"state": state, "error": error, "finished_at": ended_at, **self._time_left(current), **changes}
             ended = await asyncio.to_thread(
                 partial(self.store.update_run, run.run_id, when=_LIVE_RUN_STATES, **changes),
             )

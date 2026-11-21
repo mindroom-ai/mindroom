@@ -6,17 +6,18 @@ import asyncio
 import hashlib
 import json
 from collections import Counter
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.background_tasks import run_blocking_or_compensate
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.config.resolution import authored_tool_entries
 from mindroom.delegation.lifecycle import running_child_id
 from mindroom.script_runs.manager import workflow_placement
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, BackgroundOutcome, JobSpec, get_background_runtime
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
@@ -31,6 +32,7 @@ from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunSt
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
@@ -367,6 +369,35 @@ def _run_job(
         refused=refused,
         handle=handle,
     )
+
+
+async def continued_workflow_job(job: BackgroundJob) -> JobSpec:
+    """Return what the job of a workflow run goes on as after a restart stopped it.
+
+    Called in the tool context of the job's conversation. The job waits for its run again: a run that never got an
+    attempt gets its first one here, one the restart interrupted gets its next one from the engine's pass, and one
+    that has ended ends the job with its report. A run that is gone raises, which ends the job.
+    """
+    engine, context = _runtime()
+    run = engine.store.get_run(str(job.adapter.get("workflow")))
+    limits = workflow_limits(context.config, run.agent_name)
+    return _run_job(engine, run, job.job_id, partial(engine.launch, run.run_id, context, limits))
+
+
+def unfinished_workflow_jobs(runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return the IDs of the workflow jobs the job runtime holds unfinished: the runs that still have a receiver."""
+    runtime = get_background_runtime(runtime_paths)
+    jobs = runtime.retained_jobs() if runtime is not None else ()
+    return frozenset(job.job_id for job in jobs if job.kind == "workflow" and job.status not in TERMINAL_STATUSES)
+
+
+def workflow_limits(config: Config, agent_name: str) -> WorkflowLimits:
+    """Return the limits the agent's `workflow` entry sets now, for a run that goes on with no call of the toolkit."""
+    entries = authored_tool_entries(config, agent_name)
+    settings = next((entry.tool_config_overrides for entry in entries if entry.name == "workflow"), {})
+    names = {limit.name for limit in fields(WorkflowLimits)}
+    limits: dict[str, Any] = {name: value for name, value in settings.items() if name in names}
+    return WorkflowLimits(**limits)
 
 
 def _workflow_job_outcome(run: WorkflowRun) -> BackgroundOutcome:

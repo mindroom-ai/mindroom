@@ -1,0 +1,561 @@
+"""Tests for workflow runs across a restart of MindRoom: inherited attempts, replay, the run's job, automatic resume.
+
+Level: engine harness (`WorkflowStack`): the real stores, broker, engine and job runtime; the test plays the script.
+A killed primary is the harness's `restart(kill=True)`: its tasks stop where they are and only saved state survives.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import threading
+from typing import TYPE_CHECKING
+
+import pytest
+import pytest_asyncio
+
+from mindroom.orchestration import tool_job_runtime as coordinator_module
+from mindroom.script_runs import manager as manager_module
+from mindroom.script_runs.models import ScriptCallState, ScriptRunState
+from mindroom.script_runs.reasons import (
+    MAX_RUNTIME_EXCEEDED,
+    PLUGIN_TOOLS_CHANGED,
+    RUNTIME_RESTARTED,
+    RUNTIME_SHUTDOWN,
+    WORKFLOW_TOOL_REMOVED,
+)
+from mindroom.workflow_runs.engine import SupersededAttemptError
+from mindroom.workflow_runs.models import NodeRequest, WorkflowNodeState, WorkflowRunState
+from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS
+from mindroom.workflow_runs.store import WorkflowRunNotFoundError
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.tool_job_helpers import wait_for_status
+from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflow_stack
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
+
+    from mindroom.script_runs.models import ScriptRunRecord
+    from mindroom.tool_jobs.runtime import BackgroundJob
+
+_A = tool_args("counter", "append", line="a")
+_B = tool_args("counter", "append", line="b")
+SCRIPT = "def main(args):\n    return 'counted'\n"
+
+
+@pytest.fixture(autouse=True)
+def _scripts_can_run_here(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the placement check pass on every platform; the stack starts no process."""
+    monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: True)
+
+
+@pytest_asyncio.fixture
+async def stack(tmp_path: Path) -> AsyncIterator[WorkflowStack]:
+    """The harness with the real job runtime, which keeps the jobs the coordinator continues after a restart."""
+    with workflow_stack(tmp_path, extra_tools=("workflow",)) as stack:
+        stack.continues = coordinator_module._continues
+        await stack.open_jobs()
+        yield stack
+        await stack.close()
+
+
+@pytest.fixture
+def barrier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Hold every fault barrier, as a crash test does; the directory shows which ones a call reached."""
+    faults = tmp_path / "faults"
+    faults.mkdir()
+    monkeypatch.setenv("MINDROOM_WORKFLOW_FAULT_DIR", str(faults))
+    return faults
+
+
+async def _started(stack: WorkflowStack, **arguments: object) -> dict[str, str]:
+    """Start a run as its job and return the handle, once its first attempt runs."""
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT, **arguments))
+    stack.run_id = handle["run_id"]
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+    return handle
+
+
+async def _ended_job(stack: WorkflowStack, job_id: str) -> BackgroundJob:
+    owner = stack.context.execution_identity
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        return (await stack.jobs.wait(job_id, owner=owner, depth=0)).job
+
+
+async def _killed_at(stack: WorkflowStack, barrier: Path, name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Submit the write, kill the primary once the call stands at the barrier *name*, and start a new primary."""
+    if name == "before_settle":
+        (barrier / "before_receipt.release").touch()
+    await stack.submit("@0", "tool", _A)
+    await stack.until((barrier / f"{name}.reached").exists)
+    assert stack.counting_tool.lines == ["a"]
+    await stack.restart(kill=True)
+    monkeypatch.delenv("MINDROOM_WORKFLOW_FAULT_DIR")
+
+
+@pytest.mark.asyncio
+async def test_crash_after_the_write_and_its_receipt_copies_the_result_and_writes_once(
+    stack: WorkflowStack,
+    barrier: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The acceptance test, receipt saved: the node was never settled, and the replay reads the receipt instead."""
+    handle = await _started(stack)
+    await _killed_at(stack, barrier, "before_settle", monkeypatch)
+    node = stack.store.get_node(stack.run_id, "@0")
+    assert node is not None
+    assert node.state is WorkflowNodeState.RUNNING
+
+    assert await stack.recover() == [stack.run_id]
+    await stack.continue_jobs()
+    receipt = await stack.submit("@0", "tool", _A)
+
+    assert (receipt.state, receipt.result, receipt.cached) == ("completed", "appended", True)
+    assert stack.counting_tool.lines == ["a"]
+    await stack.finish_attempt(result="report")
+    job = await _ended_job(stack, handle["job_id"])
+    assert (job.status, await stack.collect(job)) == ("completed", "report")
+    assert [job.job_id for job in stack.jobs.retained_jobs()] == [handle["job_id"]]
+
+
+@pytest.mark.asyncio
+async def test_crash_after_the_write_without_a_receipt_is_indeterminate_and_writes_once(
+    stack: WorkflowStack,
+    barrier: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The acceptance test, no receipt: the write happened and nothing says so, so the call is never issued again."""
+    handle = await _started(stack)
+    await _killed_at(stack, barrier, "before_receipt", monkeypatch)
+    assert not (barrier / "before_settle.reached").exists()
+
+    assert await stack.recover() == [stack.run_id]
+    await stack.continue_jobs()
+    receipt = await stack.submit("@0", "tool", _A)
+
+    assert receipt.error is not None
+    assert (receipt.state, receipt.error["kind"], stack.counting_tool.lines) == ("failed", "indeterminate", ["a"])
+    await stack.finish_attempt(error="ToolError: This call may already have run")
+    job = await _ended_job(stack, handle["job_id"])
+    assert job.status == "failed"
+    assert stack.counting_tool.lines == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_inherited_attempt_is_refused_before_anything_recovers(stack: WorkflowStack) -> None:
+    """A new primary serves no attempt it did not start: a leftover process gets 409 on every route and adds nothing."""
+    await _started(stack)
+    old, token = stack.attempt, stack.token
+
+    await stack.restart(kill=True)
+
+    with pytest.raises(SupersededAttemptError):
+        await stack.engine.submit_node(old, NodeRequest("@0", "tool", _A, {}))
+    async with stack.http(token) as client:
+        answers = [
+            await client.get("run"),
+            await client.post("nodes", json={"key": "@0", "kind": "tool", "args": _A}),
+            await client.post("log", json={"text": "still here"}),
+            await client.post("finish", json={"result": "late"}),
+        ]
+    assert [answer.status_code for answer in answers] == [409, 409, 409, 409]
+    run, nodes = stack.engine.status(stack.run_id)
+    assert (nodes, stack.store.log(stack.run_id), run.finished_at, stack.counting_tool.calls) == ([], [], None, 0)
+
+    await stack.recover()
+    assert (
+        stack.script_store.get_run(old.run_id).state,
+        stack.script_store.get_run(old.run_id).cancellation_reason,
+    ) == (
+        ScriptRunState.INTERRUPTED,
+        RUNTIME_RESTARTED,
+    )
+
+
+@pytest.mark.asyncio
+async def test_restart_keeps_the_job_running_and_delivers_one_report(stack: WorkflowStack) -> None:
+    """An orderly restart: the run gets its next attempt, reuses what finished, and its one job delivers the report."""
+    handle = await _started(stack)
+    assert await stack.result("@0", "tool", _A) == "appended"
+    first = stack.attempt.run_id
+
+    await stack.restart()
+    saved = stack.jobs.awaiting_continuation()
+    assert await stack.recover() == [stack.run_id]
+    await stack.continue_jobs()
+
+    assert [(job.job_id, job.status) for job in saved] == [(handle["job_id"], "running")]
+    assert stack.script_store.get_run(first).cancellation_reason == RUNTIME_SHUTDOWN
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.attempt, run.idle_resumes) == (WorkflowRunState.RUNNING, 2, 1)
+    assert (await stack.submit("@0", "tool", _A)).cached
+    assert await stack.result("@1", "tool", _B) == "appended"
+    assert stack.store.get_run(stack.run_id).idle_resumes == 0
+    await stack.finish_attempt(result="the report")
+    job = await _ended_job(stack, handle["job_id"])
+    assert (job.status, await stack.collect(job), stack.counting_tool.lines) == ("completed", "the report", ["a", "b"])
+    assert [job.job_id for job in stack.jobs.retained_jobs()] == [handle["job_id"]]
+
+
+@pytest.mark.asyncio
+async def test_restart_after_finish_was_stored_delivers_it_without_a_new_attempt(stack: WorkflowStack) -> None:
+    """The script had reported: the run ends with that report, and its job delivers it once."""
+    handle = await _started(stack)
+    await stack.engine.finish(stack.attempt, result="reported before the kill", error=None)
+
+    await stack.restart(kill=True)
+    assert await stack.recover() == []
+    await stack.continue_jobs()
+
+    job = await _ended_job(stack, handle["job_id"])
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.attempt, len(stack.script_store.list_runs())) == (WorkflowRunState.COMPLETED, 1, 1)
+    assert (job.status, await stack.collect(job)) == ("completed", "reported before the kill")
+
+
+@pytest.mark.asyncio
+async def test_crash_between_admission_and_launch_launches_once(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The job was admitted and no attempt started: the intent stays, and the job's continuation launches it once."""
+    monkeypatch.setattr(stack.engine, "launch", lambda *_args, **_options: asyncio.Event().wait())
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    stack.run_id = handle["run_id"]
+    await stack.until(lambda: stack.store.get_run(stack.run_id).job_id == handle["job_id"])
+
+    await stack.restart(kill=True)
+    assert await stack.recover() == []
+    assert stack.store.get_run(stack.run_id).state is WorkflowRunState.STARTING
+    await stack.continue_jobs()
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+
+    assert (stack.store.get_run(stack.run_id).attempt, len(stack.script_store.list_runs())) == (1, 1)
+    await stack.finish_attempt(result="the report")
+    assert await stack.collect(await _ended_job(stack, handle["job_id"])) == "the report"
+
+
+@pytest.mark.asyncio
+async def test_crash_between_launch_and_naming_the_attempt_retires_it_and_launches_once(stack: WorkflowStack) -> None:
+    """A process the run never named is retired like any inherited attempt, and the run gets one that it names."""
+    stack.scripts.hold_launch = asyncio.Event()
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    stack.run_id = handle["run_id"]
+    await stack.until(lambda: len(stack.scripts.launched) == 1)
+    unnamed = stack.scripts.launched[0].run_id
+
+    await stack.restart(kill=True)
+    assert await stack.recover() == []
+    await stack.continue_jobs()
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+
+    run = stack.store.get_run(stack.run_id)
+    assert stack.script_store.get_run(unnamed).state is ScriptRunState.INTERRUPTED
+    assert (run.attempt, run.script_run_id != unnamed, len(stack.script_store.list_runs())) == (1, True, 2)
+
+
+@pytest.mark.asyncio
+async def test_intent_without_a_job_is_deleted(stack: WorkflowStack) -> None:
+    """An intent a dead primary left counts toward the run limit for nobody: it goes, and a fresh one stays."""
+    left = stack.reserve(SCRIPT, origin_job_id="job-the-runtime-never-admitted")
+
+    await stack.restart(kill=True)
+    fresh = stack.reserve(SCRIPT, origin_job_id="job-being-admitted-now")
+    assert await stack.recover() == []
+
+    with pytest.raises(WorkflowRunNotFoundError):
+        stack.store.get_run(left.run_id)
+    assert stack.store.get_run(fresh.run_id).state is WorkflowRunState.STARTING
+
+
+@pytest.mark.asyncio
+async def test_run_with_no_job_left_is_ended_and_not_resumed(stack: WorkflowStack) -> None:
+    """A run nobody waits for after a restart, as one a subagent's call started, gets no attempt: it ends interrupted."""
+    await stack.start(SCRIPT)
+
+    await stack.restart(kill=True)
+    assert await stack.recover() == []
+
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.error, run.attempt) == (WorkflowRunState.INTERRUPTED, RUNTIME_RESTARTED, 1)
+
+
+async def _interrupt(stack: WorkflowStack, reason: str) -> None:
+    """End the attempt as the script runtime does when it stops a process for *reason*, with MindRoom still running."""
+    await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=reason)
+
+
+def test_automatic_resume_follows_infrastructure_interruptions_only() -> None:
+    """A removed tool, a removed agent and revoked access end a run; what MindRoom itself interrupted goes on."""
+    assert PLUGIN_TOOLS_CHANGED in AUTO_RESUME_REASONS
+    assert {RUNTIME_RESTARTED, RUNTIME_SHUTDOWN, MAX_RUNTIME_EXCEEDED} <= AUTO_RESUME_REASONS
+    assert WORKFLOW_TOOL_REMOVED not in AUTO_RESUME_REASONS
+
+
+@pytest.mark.asyncio
+async def test_attempt_interrupted_while_mindroom_runs_is_resumed_by_the_next_pass(stack: WorkflowStack) -> None:
+    """A plugin reload stops the process, not the run: the pass starts the next attempt, and the same job goes on."""
+    handle = await _started(stack)
+    await stack.result("@0", "tool", _A)
+    await _interrupt(stack, PLUGIN_TOOLS_CHANGED)
+
+    assert await stack.maintain() == [stack.run_id]
+    await stack.result("@0", "tool", _B)
+    await _interrupt(stack, PLUGIN_TOOLS_CHANGED)
+    assert await stack.maintain() == [stack.run_id]
+
+    # What ran again in the second attempt dirties nothing in the third.
+    assert (await stack.submit("@0", "tool", _B)).cached
+    await stack.finish_attempt(result="the report")
+    job = await _ended_job(stack, handle["job_id"])
+    assert (job.status, await stack.collect(job), stack.store.get_run(stack.run_id).attempt) == (
+        "completed",
+        "the report",
+        3,
+    )
+
+
+@pytest.mark.asyncio
+async def test_removed_tool_ends_the_run_interrupted(stack: WorkflowStack) -> None:
+    """An interruption that is no infrastructure fault is final, as before."""
+    handle = await _started(stack)
+    await _interrupt(stack, WORKFLOW_TOOL_REMOVED)
+
+    assert await stack.maintain() == []
+
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.error) == (WorkflowRunState.INTERRUPTED, WORKFLOW_TOOL_REMOVED)
+    assert (await _ended_job(stack, handle["job_id"])).status == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_restart_before_matrix_is_ready_waits_and_resumes_later(stack: WorkflowStack) -> None:
+    """Access that cannot be checked yet is tried again at the next pass, and counts as no attempt."""
+    await _started(stack)
+    await stack.restart()
+    stack.access = "pending"
+
+    assert await stack.recover() == []
+    assert await stack.maintain() == []
+    waiting = stack.store.get_run(stack.run_id)
+    stack.access = None
+    assert await stack.maintain() == [stack.run_id]
+
+    run = stack.store.get_run(stack.run_id)
+    assert (waiting.state, waiting.attempt, waiting.idle_resumes) == (WorkflowRunState.STARTING, 1, 0)
+    assert (run.state, run.attempt, len(stack.scripts.launched)) == (WorkflowRunState.RUNNING, 2, 1)
+
+
+@pytest.mark.asyncio
+async def test_run_of_a_requester_without_access_ends_interrupted(stack: WorkflowStack) -> None:
+    """Revoked access starts nothing and says why."""
+    await _started(stack)
+    await stack.restart()
+    stack.access = "revoked"
+
+    assert await stack.recover() == []
+
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.error) == (WorkflowRunState.INTERRUPTED, "The requester no longer has access.")
+    assert stack.scripts.launched == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_run_is_not_resumed(stack: WorkflowStack) -> None:
+    """A cancel is the owner's word: no restart starts the run again."""
+    await _started(stack)
+    await stack.engine.cancel(stack.run_id, reason="Cancelled by the agent.")
+
+    await stack.restart()
+    assert await stack.recover() == []
+
+    assert stack.store.get_run(stack.run_id).state is WorkflowRunState.CANCELLED
+    assert stack.scripts.launched == []
+
+
+@pytest.mark.asyncio
+async def test_automatic_resume_stops_after_five_idle_attempts(stack: WorkflowStack) -> None:
+    """A script that takes its attempt down every time is not started for ever; a finished call starts the count anew."""
+    await _started(stack)
+    for _ in range(2):
+        await _interrupt(stack, RUNTIME_RESTARTED)
+        assert await stack.maintain() == [stack.run_id]
+    await stack.result("@0", "tool", _A)
+    for _ in range(5):
+        await _interrupt(stack, RUNTIME_RESTARTED)
+        assert await stack.maintain() == [stack.run_id]
+    await _interrupt(stack, RUNTIME_RESTARTED)
+
+    assert await stack.maintain() == []
+
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.attempt) == (WorkflowRunState.INTERRUPTED, 8)
+    assert (
+        run.error == "Stopped resuming after 5 attempts that finished nothing. Fix the script and call resume_workflow."
+    )
+
+
+@pytest.mark.asyncio
+async def test_refused_launch_of_an_automatic_resume_is_tried_again(stack: WorkflowStack) -> None:
+    """A worker that is not there yet fails no run: the next pass tries again."""
+    await _started(stack)
+    await _interrupt(stack, RUNTIME_RESTARTED)
+    stack.scripts.refuse_launch = RuntimeError("Background script runtime reconciliation is in progress.")
+
+    assert await stack.maintain() == []
+    refused = stack.store.get_run(stack.run_id)
+    stack.scripts.refuse_launch = None
+    assert await stack.maintain() == [stack.run_id]
+
+    assert (refused.state, refused.error) == (WorkflowRunState.STARTING, None)
+    assert stack.store.get_run(stack.run_id).attempt == 2
+
+
+@pytest.mark.asyncio
+async def test_automatic_resume_keeps_the_used_time(stack: WorkflowStack) -> None:
+    """Only a person's resume gives the full working time again."""
+    await _started(stack)
+    full = stack.store.get_run(stack.run_id).runtime_seconds_left
+    stack.now += 600
+    await _interrupt(stack, RUNTIME_RESTARTED)
+
+    assert await stack.maintain() == [stack.run_id]
+
+    assert (full, stack.store.get_run(stack.run_id).runtime_seconds_left) == (72 * 3600, 72 * 3600 - 600)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("left", "resumed"), [(None, True), (120.0, True), (0.0, False)])
+async def test_attempt_at_its_process_limit_is_resumed_only_while_working_time_is_left(
+    stack: WorkflowStack,
+    left: float | None,
+    resumed: bool,
+) -> None:
+    """The attempt's own 30-day limit ends a process, and the run goes on while it has time or no limit."""
+    await _started(stack)
+    stack.store.update_run(stack.run_id, runtime_seconds_left=left)
+    await _interrupt(stack, MAX_RUNTIME_EXCEEDED)
+
+    assert await stack.maintain() == ([stack.run_id] if resumed else [])
+
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.runtime_seconds_left) == (
+        WorkflowRunState.RUNNING if resumed else WorkflowRunState.INTERRUPTED,
+        left,
+    )
+    # A run with no time left gets no process that would be stopped at once.
+    assert (run.attempt, run.error) == ((2, None) if resumed else (1, MAX_RUNTIME_EXCEEDED))
+
+
+@pytest.mark.asyncio
+async def test_look_at_an_attempt_that_was_replaced_meanwhile_leaves_the_new_one(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine's own look at an ended attempt, finished after a pass resumed the run, ends nothing."""
+    await _started(stack)
+    await _interrupt(stack, PLUGIN_TOOLS_CHANGED)
+    reading, resumed = threading.Event(), threading.Event()
+    get_run = stack.script_store.get_run
+
+    def slow_first_read(run_id: str) -> ScriptRunRecord:
+        if not reading.is_set():
+            reading.set()
+            resumed.wait(SETTLE_TIMEOUT_SECONDS)
+        return get_run(run_id)
+
+    monkeypatch.setattr(stack.script_store, "get_run", slow_first_read)
+    look = asyncio.create_task(stack.engine.reconcile())
+    await stack.until(reading.is_set)
+
+    assert await stack.maintain() == [stack.run_id]
+    resumed.set()
+    await look
+
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.attempt, run.error) == (WorkflowRunState.RUNNING, 2, None)
+
+
+@pytest.mark.asyncio
+async def test_rerun_names_a_call_for_one_attempt_only(stack: WorkflowStack) -> None:
+    """The call a person asked to run again ran in the resumed attempt; the automatic attempt after it reads it back."""
+    await _started(stack)
+    await stack.result("@0", "tool", _A)
+    await stack.finish_attempt(result="the report")
+    node = stack.store.get_node(stack.run_id, "@0")
+    assert node is not None
+    await stack.call("resume_workflow", run_id=stack.run_id, rerun=[f"n{node.seq}"])
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+    await stack.result("@0", "tool", _A)
+    await _interrupt(stack, PLUGIN_TOOLS_CHANGED)
+
+    assert await stack.maintain() == [stack.run_id]
+
+    assert (await stack.submit("@0", "tool", _A)).cached
+    assert stack.counting_tool.lines == ["a", "a"]
+
+
+@pytest.mark.asyncio
+async def test_run_whose_job_ended_is_not_resumed(stack: WorkflowStack) -> None:
+    """A job the coordinator ended instead of continuing receives nothing, so its run gets no further attempt."""
+    handle = await _started(stack)
+    await stack.restart(kill=True)
+    await stack.jobs.continue_stopped(handle["job_id"], None)
+
+    assert await stack.recover() == []
+
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.error, run.attempt) == (WorkflowRunState.INTERRUPTED, RUNTIME_RESTARTED, 1)
+
+
+@pytest.mark.asyncio
+async def test_a_continued_job_that_is_cancelled_cancels_the_run(stack: WorkflowStack) -> None:
+    """The job a restart continued still stops its run."""
+    handle = await _started(stack)
+    await stack.restart()
+    await stack.recover()
+    await stack.continue_jobs()
+
+    await stack.jobs.cancel(handle["job_id"], owner=stack.context.execution_identity, depth=0)
+    await wait_for_status(stack.jobs, handle["job_id"], "cancelled")
+
+    assert stack.store.get_run(stack.run_id).state is WorkflowRunState.CANCELLED
+    assert stack.attempt.state is ScriptRunState.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_a_job_whose_run_is_gone_ends_instead_of_continuing(stack: WorkflowStack) -> None:
+    """Nothing is left to wait for, so the job ends interrupted."""
+    handle = await _started(stack)
+    await stack.restart()
+    assert stack.store.prune("9999-01-01T00:00:00Z") == 0
+    await stack.engine.cancel(stack.run_id, reason="Cancelled by the agent.")
+    assert stack.store.prune("9999-01-01T00:00:00Z") == 1
+
+    await stack.continue_jobs()
+
+    assert (await _ended_job(stack, handle["job_id"])).status == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_indeterminate_call_of_a_killed_primary_fails_the_script_that_does_not_catch_it(
+    stack: WorkflowStack,
+    barrier: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The broker's receipt of the cut call is closed as indeterminate, and the call's node says how to run it again."""
+    await _started(stack)
+    await _killed_at(stack, barrier, "before_receipt", monkeypatch)
+    await stack.recover()
+
+    with pytest.raises(NodeFailed) as error:
+        await stack.result("@0", "tool", _A)
+
+    node = stack.store.get_node(stack.run_id, "@0")
+    assert node is not None
+    assert node.handle is not None
+    script_run_id, _, call_id = node.handle.ref.partition(":")
+    assert stack.script_store.get_call(script_run_id, call_id).state is ScriptCallState.INDETERMINATE
+    assert (node.state, error.value.kind) == (WorkflowNodeState.INDETERMINATE, "indeterminate")
+    assert f'rerun=["n{node.seq}"]' in str(error.value)

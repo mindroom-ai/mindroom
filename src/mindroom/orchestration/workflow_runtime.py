@@ -7,13 +7,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from mindroom.custom_tools.workflow import unfinished_workflow_jobs, workflow_limits
 from mindroom.logging_config import get_logger
 from mindroom.script_runs.models import utc_timestamp
 from mindroom.workflow_runs.engine import WorkflowEngine
+from mindroom.workflow_runs.recovery import recover_runs
 from mindroom.workflow_runs.store import WorkflowRunStore
 
 if TYPE_CHECKING:
     from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
+    from mindroom.workflow_runs.engine import ResumeAccess
+    from mindroom.workflow_runs.models import WorkflowRun
 
 
 logger = get_logger(__name__)
@@ -31,18 +35,43 @@ class WorkflowRuntimeLifecycle:
         self.script_runtime.after_reconcile = self._maintain
 
     async def _maintain(self) -> None:
-        """End the runs whose attempts ended, then delete the runs that ended before the script runtime's retention.
+        """Settle the runs whose attempts ended, then delete the runs that ended before the script runtime's retention.
 
+        A run that a restart, a reload or a lost worker interrupted gets its next attempt here: the first pass after
+        a start comes once the script runtime retired the attempts it inherited and the job runtime holds its jobs.
         The script runtime prunes its own runs after this, inside the same pass, so this gets half of the pass's time,
         and an error or a timeout here is logged and waits for the next pass.
         """
         try:
             async with asyncio.timeout(self.script_runtime.pass_timeout_seconds / 2):
-                await self.engine.reconcile()
+                jobs = unfinished_workflow_jobs(self.script_runtime.runtime_paths)
+                await recover_runs(self.engine, self._access, jobs)
                 cutoff = datetime.now(UTC) - timedelta(seconds=self.script_runtime.retention_seconds)
                 await asyncio.to_thread(self.engine.store.prune, utc_timestamp(cutoff))
         except Exception:
             logger.exception("workflow_maintenance_pass_failed")
+
+    def _access(self, run: WorkflowRun) -> ResumeAccess:
+        """Return what the next attempt of an interrupted run starts with, from its owner's live runtime.
+
+        The run's last attempt names the owner as the script runtime knows it, so its resolver answers: access that
+        cannot be checked while the owner's bot is not running is pending, and access that is gone is revoked.
+        """
+        resolver = self.script_runtime.resolver
+        try:
+            attempt = self.script_runtime.store.get_run(run.script_run_id or "")
+            authorized = resolver.is_authorized(attempt)
+            if authorized is None:
+                return "pending"
+            if authorized:
+                context = resolver.resolve(attempt, correlation_id=f"workflow:{run.run_id}")
+                return context, workflow_limits(context.config, run.agent_name)
+        except ValueError:
+            # The attempt's record is gone, or names another owner than the run's: nothing confirms the access.
+            logger.warning("workflow_resume_owner_unresolved", run_id=run.run_id, exc_info=True)
+        except RuntimeError:
+            return "pending"
+        return "revoked"
 
     async def shutdown(self) -> None:
         """Stop following the script runtime and stop the engine's tasks; saved handles keep what was in flight."""

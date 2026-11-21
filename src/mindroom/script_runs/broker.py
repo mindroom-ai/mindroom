@@ -68,6 +68,7 @@ from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     parse_tool_execution_identity_payload,
 )
+from mindroom.workflow_runs.faults import hold
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -523,6 +524,9 @@ class ScriptToolBroker:
                         origin=origin,
                         arguments=arguments,
                     )
+            if run.workflow_run_id is not None:
+                # The tool's effect happened and its receipt is not saved yet: where a crash test stops MindRoom.
+                await hold("before_receipt")
             if metadata and metadata.pop("unanswered", False) and not result.succeeded:
                 # The call left for a worker, and no answer says how the tool ended there.
                 return await self._publish_async(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR)
