@@ -4,9 +4,11 @@ Usage, from the checkout, after `just live up --backend <checkout>` in `~/repos/
 
     python3 -m tests.workflow_live.agents_restart [--slot N]
 
-The run calls `agent()` three times, one after the other.
+The run calls `agent()` three times, one after the other: two copies of the Helper, then the lobby's second agent.
+The backend is started again after the config edit, so the Helper has the toolkit before it is asked.
 The second agent appends one line to a file with its shell tool and then sleeps, so it is still working when the
 script stops the backend with SIGTERM and starts it again.
+The third call starts after that restart, when the second agent's own bot may not have synced yet.
 When the run has ended the script prints
 
     lines=<lines in the file> agents=<completed agent calls>/<agent calls> subagents=<subagents the calls ran as>
@@ -28,6 +30,7 @@ import sys
 import time
 
 from tests.workflow_live.kill_after_write import (
+    ROOM_AGENT,
     Deployment,
     LiveError,
     add_send_options,
@@ -49,7 +52,7 @@ def main(args):
         "Then reply with the single word: two. Never run the echo command a second time, whatever happens.",
         name="second",
     )
-    agent("Reply with the single word: three", name="third")
+    agent("Reply with the single word: three", name="third", agent="{room_agent}")
     return {{"report": "{report}"}}
 """
 _EXPECTED = "lines=1 agents=3/3 subagents=3 attempt=2 run=completed deliveries=1 reports=1"
@@ -71,11 +74,12 @@ def main() -> int:
     report = f"harbor{secrets.token_hex(6)}"
 
     backend = deployment.backend()
-    deployment.give_workflow_toolkit()
-    if "MINDROOM_WORKFLOW_FAULT_DIR" in backend.environment:
+    # A running backend reloads the edit some time later; one started after it has the toolkit before it is asked.
+    if deployment.give_workflow_toolkit(room_agent=True) or "MINDROOM_WORKFLOW_FAULT_DIR" in backend.environment:
         backend.stop()
         backend.start()
-    source = _THREE_AGENTS.format(counter=counter, sleep=args.sleep, report=report)
+    until(f"the bot of {ROOM_AGENT} in the lobby", lambda: deployment.in_lobby(ROOM_AGENT), 240, 1)
+    source = _THREE_AGENTS.format(counter=counter, sleep=args.sleep, report=report, room_agent=ROOM_AGENT)
     root = start_run(deployment, source, token, dev)
 
     until("the second agent's line", lambda: counter_lines(deployment, counter) or None, 600)

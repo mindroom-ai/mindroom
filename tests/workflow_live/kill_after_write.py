@@ -52,6 +52,17 @@ _EXPECTED = {
 # The engine's barrier that stands for each of the two states; the earlier one is released for the later one.
 _BARRIERS = {"before-receipt": "before_receipt", "after-receipt": "before_settle"}
 
+# A second agent of the lobby, which the Helper may not delegate to: a run runs it because its bot is in the room.
+ROOM_AGENT = "deckhand"
+_ROOM_AGENT_CONFIG = f"""\
+  {ROOM_AGENT}:
+    display_name: Deckhand
+    role: Second test agent, which a workflow run of the Helper runs
+    model: default
+    rooms: [lobby]
+    tools: [shell]
+"""
+
 _WRITE_ONCE = """\
 from mindroom.workflow import shell
 
@@ -146,16 +157,29 @@ class Deployment:
             raise LiveError(msg)
         return Backend(self, pid, command, directory, dict(pairs))
 
-    def give_workflow_toolkit(self) -> None:
-        """Give the Helper `workflow` and `file`, and let its shell and scripts run here when no worker is routed."""
+    def give_workflow_toolkit(self, room_agent: bool = False) -> bool:
+        """Give the Helper `workflow` and `file`, and let its shell and scripts run here when no worker is routed.
+
+        With *room_agent*, the lobby also gets a second agent, `ROOM_AGENT`, for a run of the Helper to run.
+        Return whether the config changed: a backend that is running reloads it some time later, so the caller
+        starts it again before it asks the Helper for anything.
+        """
         path = self.directory / "config.yaml"
-        text = path.read_text()
+        before = text = path.read_text()
         for toolkit in ("workflow", "file"):
             if f"      - {toolkit}\n" not in text:
                 text = text.replace("      - shell\n", f"      - shell\n      - {toolkit}\n", 1)
         if "allow_shell_without_worker" not in text and "worker_tools" not in text:
             text = text.replace("defaults:\n", "defaults:\n  allow_shell_without_worker: true\n", 1)
+        if room_agent and f"\n  {ROOM_AGENT}:\n" not in text:
+            text = text.replace("\nagents:\n", f"\nagents:\n{_ROOM_AGENT_CONFIG}", 1)
         path.write_text(text)
+        return text != before
+
+    def in_lobby(self, agent: str) -> bool:
+        """Return whether the bot of *agent* has joined the lobby, which a run needs to run it."""
+        room = urllib.parse.quote(self.live["lobby"]["roomId"], safe="")
+        return any(agent in member for member in self.matrix(f"/v3/rooms/{room}/joined_members")["joined"])
 
     def matrix(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         """GET *path* from the homeserver's client API as the test account, or PUT *body* there."""

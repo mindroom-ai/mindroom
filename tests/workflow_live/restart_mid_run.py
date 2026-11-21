@@ -66,8 +66,8 @@ def main() -> int:
     report = f"harbor{secrets.token_hex(6)}"
 
     backend = deployment.backend()
-    deployment.give_workflow_toolkit()
-    if "MINDROOM_WORKFLOW_FAULT_DIR" in backend.environment:
+    # A running backend reloads the edit some time later; one started after it has the toolkit before it is asked.
+    if deployment.give_workflow_toolkit() or "MINDROOM_WORKFLOW_FAULT_DIR" in backend.environment:
         backend.stop()
         backend.start()
     root = start_run(deployment, _WRITE_MANY.format(writes=args.writes, counter=counter, report=report), token, dev)

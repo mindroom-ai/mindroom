@@ -14,7 +14,7 @@ Each prints one result line on stdout and exits 0 when that line is the expected
 | `kill_after_write.py --barrier before-receipt` | Kills the backend with `SIGKILL` after the run's one write took effect and before its receipt was saved. | `lines=1 node=indeterminate attempt=2 run=failed deliveries=1 reports=0` |
 | `kill_after_write.py --barrier after-receipt` | Kills the backend with `SIGKILL` after the receipt was saved and before the run's node was written. | `lines=1 node=cached attempt=2 run=completed deliveries=1 reports=1` |
 | `restart_mid_run.py` | Stops the backend with `SIGTERM` after three of six writes and starts it again. | `lines=6 nodes=6/6 attempt=2 run=completed deliveries=1 reports=1` |
-| `agents_restart.py` | Stops the backend with `SIGTERM` while the second of three agents is working, after that agent wrote its one line, and starts it again. | `lines=1 agents=3/3 subagents=3 attempt=2 run=completed deliveries=1 reports=1` |
+| `agents_restart.py` | Stops the backend with `SIGTERM` while the second of three agents is working, after that agent wrote its one line, and starts it again. The first two are copies of the Helper; the third is the lobby's second agent, `deckhand`. | `lines=1 agents=3/3 subagents=3 attempt=2 run=completed deliveries=1 reports=1` |
 | `large_result.py` | Reads a 9 MiB file through `tool("file", "read_file", ...)` and compares what the script got. | `chars=9437184 same=True spilled=True attempt=1 run=completed` |
 
 - `lines` is the number of lines in the file the run appends to, so a write that ran twice shows as one line too many.
@@ -35,6 +35,9 @@ In the `before-receipt` case the second attempt fails, because the script does n
 That failure is delivered once, no report is, and `resume_workflow(run_id, rerun=["n1"])` runs the call again on purpose.
 
 Each script edits the slot's `config.yaml` once: the Helper gets the `workflow` and `file` toolkits, and `defaults.allow_shell_without_worker: true` unless the config routes tools to workers.
+`agents_restart.py` also adds the agent `deckhand` to the lobby, which the Helper may not delegate to: a run runs it because its bot is in the room.
+A running backend reloads a config edit some time later, so each script starts the backend again after an edit that changed the file, and only then sends its message.
+`agents_restart.py` also waits until the bot of `deckhand` has joined the lobby.
 Each script then asks the Helper to start a run from a file it saved in the Helper's workspace.
 It sends that one message with `just live ask`, which types it in Chat with Chromium.
 Pass `--send api` to send it through the homeserver's client API instead, on a machine with no browser, when Chat does not load, or for a stack without Chat.
@@ -99,11 +102,15 @@ With `worker_tools` set, the scripts leave `allow_shell_without_worker` out, and
 ## What has been run
 
 - 2026-11-20 at `d2525db67`, local stack (slot 50) and Docker stack (slot 43): all four scripts printed their expected lines.
-- `agents_restart.py` was added later and has not been run yet.
+- `agents_restart.py` was added later.
+  Its first live run failed before the run started: the Helper got the message before the backend had reloaded the config edit, so it had no `workflow` toolkit yet.
+  The script now starts the backend again after the edit, and its third call runs a room agent.
+  It has not been run since that change.
 - Without the gateway lines above, the Docker stack refuses every run with `Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL.`: the stack's `MINDROOM_PUBLIC_URL` is a loopback address, which workers may not use.
 
 ## What to check besides the result line
 
 - The stderr line `processes of the killed backend still running` names what the kill left behind after the run ended; it should say `none`.
 - After `agents_restart.py`, the Sub-agents panel of the thread lists three agents, `first`, `second` and `third`, and none of them twice.
+  The third call starts after the restart, when the bot of `deckhand` may not have synced yet: the call must then wait and run, not fail with `refused`.
 - `get_workflow(run_id)` in the thread shows the run's attempts and the call's state as the result line reports them.
