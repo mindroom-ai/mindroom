@@ -174,7 +174,10 @@ async def test_power_levels_event_makes_new_steward_publish(tmp_path: Path) -> N
     """A demotion the successor applies before the old steward does still ends with the successor publishing."""
     room = _Room(tmp_path, (ROUTER_AGENT_NAME, "agent1"))
     await room.frame(ROUTER_AGENT_NAME, joined=True)
+    owner = room.ids[ROUTER_AGENT_NAME]
+    roster = room.state[ACCOUNTS, owner]
     room.writes.clear()
+    room.config.agents["agent1"].thread_mode = "thread"
     # The old steward's own cache still shows its old power, so the election still names it.
     room.apply_power("agent1", {})
     await room.frame("agent1", power_levels=True)
@@ -182,8 +185,9 @@ async def test_power_levels_event_makes_new_steward_publish(tmp_path: Path) -> N
     room.apply_power(ROUTER_AGENT_NAME, {})
     await room.frame(ROUTER_AGENT_NAME, power_levels=True)
     await room.frame("agent1")
-    agent = room.ids["agent1"]
-    assert room.writes == [(agent, ACCOUNTS, agent)]
+    assert room.writes == [(room.ids["agent1"], THREAD_MODE, "")]
+    assert room.state[THREAD_MODE, ""] == {"mode": "thread"}
+    assert room.state[ACCOUNTS, owner] == roster
 
 
 @pytest.mark.asyncio

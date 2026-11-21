@@ -480,7 +480,7 @@ async def test_binding_claim_follows_a_handover_during_accounts_read(room_state:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("binding", ["writable", "absent", "stopped", "unjoined", "underpowered"])
+@pytest.mark.parametrize("binding", ["writable", "absent", "stopped", "stops_during_get", "unjoined", "underpowered"])
 async def test_roster_follows_the_binding_after_steward_handover(room_state: RoomState, binding: str) -> None:
     """The steward refreshes the trusted roster through its author when that bot can still write it."""
     _, _, ids, events, bound_client = room_state
@@ -488,6 +488,7 @@ async def test_roster_follows_the_binding_after_steward_handover(room_state: Roo
     runtime = owner.steward_duties.deps.runtime.orchestrator
     bound_id, steward_id, joining_id = (ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1", "agent2"))
     bound_room = bound_client.rooms[ROOM_ID]
+    bound_room.power_levels.events[ACCOUNTS_EVENT_TYPE] = 50
     bound_room.power_levels.users[bound_id] = 50
     events["m.room.member", joining_id] = {"membership": "leave"}
     await reconcile_held_room_states(runtime)
@@ -518,7 +519,10 @@ async def test_roster_follows_the_binding_after_steward_handover(room_state: Roo
         bound_room.power_levels.users[bound_id] = 0
 
     events["m.room.member", joining_id] = {"membership": "join"}
-    await duties.member_event(steward_room, _membership_event(joining_id, "join", "leave"))
+    if binding == "stops_during_get":
+        await _reconcile_accounts_during_bound_bot_stop(duties, steward_client, owner)
+    else:
+        await duties.member_event(steward_room, _membership_event(joining_id, "join", "leave"))
 
     expected_client = bound_client if binding == "writable" else steward_client
     expected_id = expected_client.user_id
@@ -532,6 +536,27 @@ async def test_roster_follows_the_binding_after_steward_handover(room_state: Roo
     assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": steward_id if binding == "absent" else bound_id}
     assert len(_writes(steward_client, ROUTER_EVENT_TYPE)) == (binding == "absent")
     assert not _writes(bound_client, ROUTER_EVENT_TYPE)
+
+
+async def _reconcile_accounts_during_bound_bot_stop(
+    duties: StewardDuties,
+    steward_client: AsyncMock,
+    bound_bot: MagicMock,
+) -> None:
+    """Stop the bound bot after the roster's binding GET starts and before it returns."""
+    read = steward_client.room_get_state_event.side_effect
+
+    async def stop_during_binding_get(room_id: str, event_type: str, state_key: str = "") -> object:
+        reply = await read(room_id, event_type, state_key)
+        if event_type == ROUTER_EVENT_TYPE:
+            bound_bot.running = False
+        return reply
+
+    steward_client.room_get_state_event.side_effect = stop_during_binding_get
+    # Run only accounts so the binding check's own GET cannot stop the bot first.
+    assert bound_bot.running
+    assert not await duties._reconcile_room_state(ROOM_ID, needed={"accounts"})
+    assert not bound_bot.running
 
 
 @pytest.mark.asyncio

@@ -31,7 +31,7 @@ async def reconcile_room_accounts(
     runtime_paths: RuntimePaths,
     room_id: str,
     *,
-    alternate_clients: Mapping[str, nio.AsyncClient] | None = None,
+    get_alternate_clients: Callable[[], Mapping[str, nio.AsyncClient]] | None = None,
     failure_level: Callable[[bool], int] = lambda _: logging.WARNING,
 ) -> bool:
     """Write the client's list of the room's joined MindRoom accounts when it changed and return whether it is current.
@@ -44,13 +44,13 @@ async def reconcile_room_accounts(
     try:
         # Bound lock waits too; the lock prevents an older comparison from overwriting a newer roster.
         async with asyncio.timeout(10), _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
-            if alternate_clients:
+            if get_alternate_clients is not None and get_alternate_clients():
                 phase = "binding_get"
                 reply = await client.room_get_state_event(room_id, ROUTER_BINDING_EVENT_TYPE, state_key="")
                 if isinstance(reply, nio.RoomGetStateEventResponse):
                     bound = reply.content.get("user_id") if isinstance(reply.content, dict) else None
                     if isinstance(bound, str):
-                        client = alternate_clients.get(bound, client)
+                        client = get_alternate_clients().get(bound, client)
                 elif not (
                     isinstance(reply, nio.RoomGetStateEventError)
                     and reply.status_code in {"M_NOT_FOUND", "M_FORBIDDEN"}
