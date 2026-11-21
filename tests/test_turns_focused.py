@@ -1112,6 +1112,52 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("history_degraded", [False, True])
+@pytest.mark.parametrize(
+    ("voice_flag", "body"),
+    [
+        pytest.param(constants.VOICE_TRANSCRIPT_KEY, "Can you check this?", id="transcript"),
+        pytest.param(constants.VOICE_RAW_AUDIO_FALLBACK_KEY, "upload", id="raw-audio-fallback"),
+    ],
+)
+async def test_older_voice_turn_reaches_policy_despite_newer_text(
+    config: Config,
+    tmp_path: Path,
+    history_degraded: bool,
+    voice_flag: str,
+    body: str,
+) -> None:
+    """A newer text turn cannot recover the contents of an older voice note from history."""
+    harness = _build_harness(config, tmp_path)
+    await _serve_newer_requester_message(harness, config, history_degraded=history_degraded)
+    room = _room_with_members(config, "general")
+    event = _thread_upload_event("m.audio", event_id="$voice:localhost", origin_server_ts=1_999_000)
+    assert isinstance(event, nio.RoomMessageAudio)
+    prompt = f"{constants.VOICE_PREFIX}{body}"
+    content = {
+        "body": prompt,
+        "msgtype": "m.text",
+        "m.relates_to": event.source["content"]["m.relates_to"],
+        constants.ORIGINAL_SENDER_KEY: _SENDER,
+        constants.SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+        voice_flag: True,
+    }
+    await harness.turn_store.record_prepared_voice(
+        _ROOM_ID,
+        event.event_id,
+        PreparedVoiceSource.from_content(prompt, content, thread_id=_THREAD_ROOT, coalescing_thread_id=_THREAD_ROOT),
+    )
+
+    with capture_logs() as logs:
+        await harness.ingress.handle_media_event(room, event)
+        await harness.gate.drain_all()
+        await harness.runner.settle_inbox_responses()
+
+    assert _skip_logs(logs) == []
+    assert harness.policy.plan_turn_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history_degraded", [False, True])
 async def test_a_superseded_turn_whose_reply_keeps_it_runs(
     config: Config,
     tmp_path: Path,
