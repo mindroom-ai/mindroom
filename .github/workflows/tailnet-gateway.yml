@@ -45,17 +45,9 @@ jobs:
       - name: Check formatting
         run: |
           unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "gofmt would change:" >&2
-            echo "$unformatted" >&2
-            exit 1
-          fi
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        run: go test -race ./...
+          test -z "$unformatted" || { printf 'gofmt would change:\n%s\n' "$unformatted" >&2; exit 1; }
+      - run: go vet ./...
+      - run: go test -race ./...
 
   # The gateway image and the worker image in a real tailnet: Headscale, Tailscale clients, and stock SSH clients.
   headscale-e2e:
@@ -94,37 +86,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Both builds read the cache build-mindroom.yml writes, and write none.
-      - name: Build the gateway image
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
-        with:
-          context: .
-          file: tailnet-gateway/Dockerfile
-          load: true
-          tags: mindroom-tailnet-gateway:e2e
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-tailnet-gateway:buildcache-amd64
-          provenance: false
-          sbom: false
+      - name: Build branch images with the release read caches
+        run: |
+          while read -r image dockerfile; do
+            docker buildx build --load --provenance=false --sbom=false \
+              --tag "$image:e2e" --file "$dockerfile" \
+              --cache-from "type=registry,ref=$REGISTRY/$OWNER/$image:buildcache-amd64" .
+          done <<'IMAGES'
+          mindroom-tailnet-gateway tailnet-gateway/Dockerfile
+          mindroom local/instances/deploy/Dockerfile.mindroom
+          IMAGES
 
-      - name: Build the worker image
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
-        with:
-          context: .
-          file: local/instances/deploy/Dockerfile.mindroom
-          load: true
-          tags: mindroom:e2e
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom:buildcache-amd64
-          provenance: false
-          sbom: false
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
-
-      - name: Set up Python
-        run: uv python install 3.13
-
-      - name: Install dependencies
-        run: uv sync
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
 
       - name: Install rsync
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rsync
