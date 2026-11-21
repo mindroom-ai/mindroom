@@ -470,30 +470,32 @@ async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispat
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pick", [None, "default"])
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_suppressed_fork_opener_keeps_parent_model_on_its_next_reply(
+async def test_fork_model_is_ready_before_a_hook_suppresses_the_opener(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     pick: str | None,
 ) -> None:
-    """Suppression blocks the opening pick and response, not the fork's inheritance."""
+    """A hook can suppress the reply without making parent inheritance beat an opening pick."""
     bot = _fork_bot(tmp_path)
     bot.config.agents["code"].access = ResponderAccessConfig(users=["@user:localhost"])
     paths = runtime_paths_for(bot.config)
     set_thread_model_override(paths, thread_id=THREAD_ID, model_name="large", entity_names=("code",), config=bot.config)
-    deps = bot._turn_dispatcher.deps
-    monkeypatch.setattr(deps.ingress_hook_runner, "emit_message_received_hooks", AsyncMock(side_effect=[True, False]))
+    expected = pick or "large"
 
-    async def settle(_turn: TurnRecord) -> None:
-        assert _fork_model(bot) == "large"
+    async def suppress(**_kwargs: object) -> bool:
+        assert resolve_thread_model_override(paths, _FORK_ID, config=bot.config).active["code"] == expected
+        return True
 
-    settlement = AsyncMock(side_effect=settle)
-    monkeypatch.setattr(deps.visible_responses, "settle_source_events_ignored", settlement)
+    hooks = AsyncMock(side_effect=suppress)
+    monkeypatch.setattr(bot._turn_dispatcher.deps.ingress_hook_runner, "emit_message_received_hooks", hooks)
     assert await _dispatch_fork_turn(bot, pick=pick) is None
-    settlement.assert_awaited_once()
+    hooks.assert_awaited_once()
+    hooks.side_effect = None
+    hooks.return_value = False
     child = await _dispatch_fork_turn(bot, ("$next:localhost",))
     assert child is not None
     assert child.target.resolved_thread_id == _FORK_ID
-    assert _fork_model(bot) == "large"
+    assert _fork_model(bot) == expected
 
 
 def _join_model_test_bot(bot: AgentBot, room: nio.MatrixRoom, device_id: str = "TESTDEVICE") -> AsyncMock:
@@ -728,15 +730,10 @@ async def test_opening_pick_names_one_of_two_devices_on_the_same_runtime_account
         "managed-sender",
         "no-access",
         "command",
-        "suppressed",
     ],
 )
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_ineligible_opening_model_pick_does_not_write(
-    tmp_path: Path,
-    ignored: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_ineligible_opening_model_pick_does_not_write(tmp_path: Path, ignored: str) -> None:
     """Only new threads, valid choices, a runtime's own devices, and the sender's reply grants can seed the store."""
     bot = _fork_bot(tmp_path)
     bot.config.agents["code"].access = ResponderAccessConfig(
@@ -764,8 +761,6 @@ async def test_ineligible_opening_model_pick_does_not_write(
     deps = dispatcher.deps
     if ignored == "no-access":
         bot.config.router.access = ResponderAccessConfig(current_room_members=False)
-    if ignored == "suppressed":
-        monkeypatch.setattr(dispatcher, "_message_received_hook_settles_turn", AsyncMock(return_value=True))
     if ignored == "managed-sender":
         event.sender = "@mindroom_router:localhost"
     facts = deps.ingress.classify(event, room_id=ROOM_ID)

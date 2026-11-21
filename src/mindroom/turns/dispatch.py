@@ -123,30 +123,26 @@ def _apply_root_thread_model(
     turn: PreparedTurn,
     thread_id: str | None,
     thread_history: Sequence[ResolvedVisibleMessage],
-    *,
-    blocked: bool,
-) -> bool:
-    """Return whether the opening pick and any fork snapshot have been recorded."""
+) -> None:
+    """Seed the opening pick before inheriting any remaining fork models."""
     choice = turn.thread_model_choice
     if choice is None:
-        return False
+        return
     config, paths = deps.runtime.config, deps.runtime_paths
     entity = entity_identity_registry(config, paths).current_entity_name_for_user_id(choice.runtime_user_id)
     if entity is None:
-        return False  # The pick is for another runtime.
+        return  # The pick is for another runtime.
     client = deps.runtime.orchestrator.running_entity_client(entity)
     reason = None
     if client is None or (client.user_id, client.device_id) != (choice.runtime_user_id, choice.runtime_device_id):
         reason = "other_runtime_device"
-    elif blocked:
-        reason = "opening_blocked"
     elif turn.command is not None or turn.facts.sender_is_managed or turn.facts.acts_for_requester:
         reason = "not_direct_opening_prompt"
     elif choice.model not in config.models:
         reason = "unknown_model"
     if reason is not None or thread_id is None or thread_id not in turn.handled_turn.source_event_ids:
         deps.logger.info("Ignoring root thread model choice", thread_id=thread_id, reason=reason or "not_opening_turn")
-        return False
+        return
     # Use the same sender rule as `!model`, including reply-authorized bridge accounts.
     names = addressable_responder_names(
         turn.facts.run_requester_id,
@@ -157,10 +153,10 @@ def _apply_root_thread_model(
     )
     if not names:
         deps.logger.info("Ignoring root thread model choice", thread_id=thread_id, reason="no_addressable_responder")
-        return False
+        return
     root = (turn.handled_turn.source_event_metadata or {}).get(thread_id)
     timestamp_ms = turn.event.server_timestamp if turn.event.event_id == thread_id else None
-    return apply_root_thread_model(
+    apply_root_thread_model(
         paths,
         thread_id=thread_id,
         root_timestamp_ms=timestamp_ms if root is None else root.timestamp_ms,
@@ -865,7 +861,6 @@ class TurnDispatcher:
         envelope: MessageEnvelope,
         handled_turn: TurnRecord,
         routed: bool,
-        before_suppressed_settlement: Callable[[], None] | None = None,
     ) -> bool:
         """Run the authorized ingress hook and settle when it blocks dispatch."""
         hooks_start = time.monotonic()
@@ -894,8 +889,6 @@ class TurnDispatcher:
         )
         if not suppressed:
             return False
-        if before_suppressed_settlement is not None:
-            before_suppressed_settlement()
         await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
         return True
 
@@ -949,6 +942,8 @@ class TurnDispatcher:
             extract_context_start,
             path=context_path,
         )
+        _apply_root_thread_model(self.deps, turn, target.resolved_thread_id, context.thread_history)
+        _inherit_fork_thread_models(self.deps, turn, target.resolved_thread_id, context.thread_history)
         envelope_start = time.monotonic()
         envelope = self.deps.resolver.build_envelope(
             event=event,
@@ -963,34 +958,12 @@ class TurnDispatcher:
             envelope_start,
             source_kind=envelope.source_kind,
         )
-        has_pick = turn.thread_model_choice is not None
-        inherit = partial(
-            _inherit_fork_thread_models,
-            self.deps,
-            turn,
-            target.resolved_thread_id,
-            context.thread_history,
-        )
-        if not has_pick:
-            inherit()
-        blocked = await self._message_received_hook_settles_turn(
+        if await self._message_received_hook_settles_turn(
             room=room,
             envelope=envelope,
             handled_turn=handled_turn,
             routed=bool(facts.routed_event_ids),
-            before_suppressed_settlement=inherit if has_pick else None,
-        )
-        if has_pick:
-            recorded = _apply_root_thread_model(
-                self.deps,
-                turn,
-                target.resolved_thread_id,
-                context.thread_history,
-                blocked=blocked,
-            )
-            if not blocked and not recorded:
-                inherit()
-        if blocked:
+        ):
             return None
 
         origin = envelope.origin
