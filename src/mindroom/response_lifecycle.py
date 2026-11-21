@@ -53,6 +53,7 @@ from mindroom.logging_config import get_logger
 from mindroom.message_target import ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnMode, MidTurnOutcome, QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.scheduling.scheduled_run_records import record_silent_schedule_result_if_needed
 from mindroom.streaming import strip_matching_visible_tool_markers
 from mindroom.tool_jobs.control import ReplyToolCalls, pending_human_messages_context
@@ -744,14 +745,16 @@ class ResponseLifecycleCoordinator:
         target: MessageTarget,
         admit: Callable[[], AbstractAsyncContextManager[None]],
         op: Callable[[], Awaitable[T]],
+        wait_until_ready: Callable[[Coroutine[None, None, object]], Awaitable[bool]],
     ) -> T:
         """Serialize non-reply work without occupying admission while an approval is paused."""
         key, lock = target.lifecycle_key, self._response_lifecycle_lock(target)
-        self._lock_only_users[key] += 1
+        self._lock_only_users[key] += 1  # Pin the FIFO lock while waiting without blocking approval resumes.
         try:
             while True:
                 while key in self._approval_holds.values():
-                    await self._approval_released.wait()
+                    if not await wait_until_ready(self._approval_released.wait()):
+                        raise ResponseAdmissionRefusedError
                 async with admit(), lock:
                     if key in self._approval_holds.values():
                         continue  # The preceding reply paused; release admission and the lock before waiting.

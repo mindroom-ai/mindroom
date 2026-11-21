@@ -95,7 +95,9 @@ async def test_eviction_preserves_a_lock_only_waiter_before_admission() -> None:
     async def fold() -> None:
         assert lock.locked()
 
-    task = asyncio.create_task(coordinator.run_lock_only(targets[0], admit, fold))
+    task = asyncio.create_task(
+        coordinator.run_lock_only(targets[0], admit, fold, lambda _: pytest.fail("unexpected approval")),
+    )
     try:
         await asyncio.wait_for(entering.wait(), 30)
         coordinator._response_lifecycle_lock(_target(_LOCK_TABLE_CAP))

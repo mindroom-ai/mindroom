@@ -573,6 +573,7 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.reaction_dispatch",
     "mindroom.reply_scope",
+    "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.follow_ups",
@@ -3547,6 +3548,8 @@ expose = ["InboxResponses"]
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.bot_runtime_view",
+    "mindroom.event_journal",
     "mindroom.history.manual",
     "mindroom.history.runtime",
     "mindroom.history.session_context",
@@ -3627,6 +3630,7 @@ visibility = [
     "mindroom.orchestrator",
     "mindroom.plugin_http",
     "mindroom.reply_turn.inbox",
+    "mindroom.response_lifecycle",
     "mindroom.response_runner",
     "mindroom.slack.delivery",
     "mindroom.slack.turns",
@@ -3637,6 +3641,7 @@ visibility = [
 [[modules]]
 path = "mindroom.response_lifecycle"
 depends_on = [
+    "mindroom.response_admission",
     "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.tool_jobs.control",
@@ -4134,6 +4139,7 @@ depends_on = ["mindroom.response_admission"]
 visibility = [
     "mindroom.bot",
     "mindroom.reply_turn.inbox",
+    "mindroom.response_runner",
     "mindroom.turns.dispatch",
 ]
 

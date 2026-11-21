@@ -29,10 +29,11 @@ from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig, ModelPricing
 from mindroom.config.personal_agents import PersonalAgentRoster, PersonalAgentRosterEntry, personal_agent_roster_path
-from mindroom.constants import AI_RUN_METADATA_KEY, MATRIX_EVENT_ID_METADATA_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, FORK_CONTENT_KEY, MATRIX_EVENT_ID_METADATA_KEY, SKIP_MENTIONS_KEY
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
 from mindroom.event_journal import EventClass, EventKind, journal
 from mindroom.event_journal.approval_signals import PausedReply
+from mindroom.event_journal.projection import ProjectedEvent
 from mindroom.history.runtime import _manual_summary_cap
 from mindroom.history.session_context import create_scope_session_storage, scope_session_database_path
 from mindroom.history.storage import has_queued_force_compaction, new_scope_session
@@ -48,8 +49,12 @@ from mindroom.hooks import (
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.response_admission import ResponseAdmissionRefusedError
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.session_storage import summary_rows
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from tests import response_runner_helpers
@@ -90,6 +95,7 @@ ALICE = "@alice:example.test"
 BOB = "@bob:example.test"
 ROOM = "!room:example.test"
 THREAD = "$thread:example.test"
+_DEFERRED = "Couldn't compact now; will compact before the next reply."
 
 
 def _config(tmp_path: Path, *, context_window: int | None = 48_000) -> tuple[Config, RuntimePaths]:
@@ -618,10 +624,9 @@ async def test_pending_compaction_folds_only_after_target_sync(
     target = _live_bot(runtime, entity)
     target.client.rooms[ROOM] = room
     await _hydrate(target)
-    assert await target._journal_dispatcher.drain_once() == 1
+    fold = await _start_fold(target)
     row_id = f"compact:$command:{entity}"
     assert target._response_runner.inbox.has_live_inbox_response(row_id)
-    [fold] = target._response_runner.inbox._inbox_response_tasks
     done, _ = await asyncio.wait({fold}, timeout=0.15)
     assert not done
     assert not model.requests
@@ -734,7 +739,7 @@ async def test_fold_queues_between_replies_without_claiming_unmentioned_messages
     try:
         await asyncio.wait_for(reply_started.wait(), 30)
         await _dispatch_message(target, room, command)
-        await target._journal_dispatcher.drain_once()
+        await _start_fold(target)
         assert target._response_runner.inbox.has_live_inbox_response(_ROW_ID)
         assert not fold_started.is_set()
         finish_reply.set()
@@ -784,8 +789,7 @@ async def test_compaction_waits_for_paused_approval(tmp_path: Path, monkeypatch:
     model = summary_model("finished fold", model_id="test-model", provider="openai")
     install_model_providers(monkeypatch, {"default": model})
     await _dispatch_message(target, room, command)
-    await target._journal_dispatcher.drain_once()
-    [fold] = target._response_runner.inbox._inbox_response_tasks
+    fold = await _start_fold(target)
     try:
         done, _ = await asyncio.wait({fold}, timeout=0.25)
         assert not done
@@ -797,6 +801,47 @@ async def test_compaction_waits_for_paused_approval(tmp_path: Path, monkeypatch:
         coordinator._release_approval_hold("approval")
         await asyncio.wait_for(fold, 30)
     assert _summaries(config, paths, "code") == ["finished fold"]
+
+
+@pytest.mark.asyncio
+async def test_restart_rejects_handoff_after_last_drain_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, paths = _config(tmp_path)
+    _, target, room, command = _compact_pair(config, paths)
+    runner = target._response_runner
+    coordinator = runner.lifecycle_coordinator
+    coordinator._hold_for_approval(PausedReply(target.journal_principal().principal_id, "held", ROOM, THREAD))
+    await _dispatch_message(target, room, command)
+    parked = await _start_fold(target)
+    await asyncio.sleep(0)
+    assert not parked.done()
+    snapshot = asyncio.Event()
+    released = asyncio.Event()
+    drain = runner.inbox.drain_inbox_responses
+
+    async def pause_after_drain(**kwargs: Any) -> bool:  # noqa: ANN401
+        result = await drain(**kwargs)
+        snapshot.set()
+        await released.wait()
+        return result
+
+    monkeypatch.setattr(runner.inbox, "drain_inbox_responses", pause_after_drain)
+    stopping = asyncio.create_task(target.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN))
+    late_id = "compact:$late:code"
+    try:
+        await asyncio.wait_for(snapshot.wait(), 5)
+        assert isinstance(parked.exception(), ResponseAdmissionRefusedError)
+        assert await target.admit_compaction(MessageTarget.resolve(ROOM, THREAD, "$late"), ALICE)
+        await target._journal_dispatcher.drain_once()
+        assert not runner.inbox.has_live_inbox_response(late_id)
+    finally:
+        if not snapshot.is_set() or runner.inbox.has_live_inbox_response(late_id):
+            coordinator._release_approval_hold("held")  # Only unblock cleanup on a regression.
+        released.set()
+        await asyncio.wait_for(stopping, 30)
+    assert {_ROW_ID, late_id} <= set(await target.journal_principal().unsettled_event_ids())
 
 
 @pytest.mark.asyncio
@@ -820,8 +865,7 @@ async def test_stopping_during_final_append_drains_write_and_replays_as_no_op(
     monkeypatch.setattr(summary_rows, "append_summary", blocked_append)
     await _hydrate(target)
     await _dispatch_message(target, room, event)
-    await target._journal_dispatcher.drain_once()
-    [fold] = runner.inbox._inbox_response_tasks
+    fold = await _start_fold(target)
     try:
         await asyncio.wait_for(appending.wait(), 30)
         target.begin_process_shutdown()
@@ -847,9 +891,7 @@ async def test_stopping_during_final_append_drains_write_and_replays_as_no_op(
 
     replacement = _live_bot(target.orchestrator, "code")
     replacement.client.rooms[ROOM] = room
-    assert await replacement._journal_dispatcher.drain_once() == 1
-    [replay] = replacement._response_runner.inbox._inbox_response_tasks
-    await asyncio.wait_for(replay, 30)
+    await asyncio.wait_for(await _start_fold(replacement), 30)
     assert _summaries(config, paths, "code") == ["accepted summary"]
     assert _ROW_ID not in await replacement.journal_principal().unsettled_event_ids()
     assert len(model.requests) == 1
@@ -884,9 +926,7 @@ async def test_compaction_over_cap_edits_notice_to_failure(tmp_path: Path, monke
     model = summary_model("too large", model_id="test-model", provider="openai")
     install_model_providers(monkeypatch, {"default": model})
     await _dispatch_message(target, room, command)
-    await target._journal_dispatcher.drain_once()
-    [fold] = target._response_runner.inbox._inbox_response_tasks
-    await asyncio.wait_for(fold, 30)
+    await asyncio.wait_for(await _start_fold(target), 30)
     assert not _summaries(config, paths, "code")
     assert not _queued(config, paths, "code")
     assert "Compaction failed" in str(target.client.room_send.await_args_list)
@@ -989,7 +1029,9 @@ async def _hydrate(bot: AgentBot, *, thread_id: str | None = THREAD) -> None:
 
 async def _start_fold(bot: AgentBot) -> asyncio.Task[None]:
     assert await bot._journal_dispatcher.drain_once() == 1
-    [fold] = bot._response_runner.inbox._inbox_response_tasks
+    [fold] = [
+        task for task in bot._response_runner.inbox._inbox_response_tasks if task.get_name().startswith("compact:")
+    ]
     return fold
 
 
@@ -1007,11 +1049,21 @@ async def test_compact_without_active_window_uses_explicit_summary_model(
     target = _live_bot(ready_runtime(config, paths), name)
     room = _room_with_members(ALICE, target.matrix_id.full_id, room_id=ROOM)
     room.members_synced = True
-    await _hydrate(target, thread_id=None if room_mode else THREAD)
-    _seed_history(config, paths, name, room_mode=room_mode)
+    if not room_mode:
+        await _hydrate(target)
+        _seed_history(config, paths, name)
     model = summary_model("summary without replay cap", model_id="summary-model", provider="openai")
-    install_model_providers(monkeypatch, {"default": summary_model(), "summary-model": model})
-    await _dispatch_message(target, room, _addressed(target, f"/compact {name}", "$command"))
+    install_model_providers(monkeypatch, {"default": summary_model("room reply"), "summary-model": model})
+    command = _addressed(target, f"/compact {name}", "$command")
+    if room_mode:
+        message = _addressed(target, "room history " * 500, "$first")
+        for event in (message, command):
+            del event.source["content"]["m.relates_to"]
+        await _dispatch_message(target, room, message)
+        await asyncio.wait_for(drain_coalescing(target), 30)
+        assert "room reply" in str(target.client.room_send.await_args_list)
+        assert not await target.journal_principal().conversation_is_hydrated(room_id=ROOM, thread_id=None)
+    await _dispatch_message(target, room, command)
     await asyncio.wait_for(await _start_fold(target), 30)
     assert _summaries(config, paths, name, room_mode=room_mode) == ["summary without replay cap"]
     assert "→" in str(target.client.room_send.await_args_list)
@@ -1030,11 +1082,12 @@ async def test_pre_fold_provider_error_settles_without_retry(tmp_path: Path, mon
     assert build.call_count == 1
     assert _ROW_ID not in await target.journal_principal().unsettled_event_ids()
     assert _queued(config, paths, "code")
-    assert target.client.room_send.await_count == 1  # Only the command acknowledgement.
+    assert target.client.room_send.await_count == 2
+    _assert_deferred(target)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("changed_tenure", ["cold", "stale_origin", "stale_row"])
+@pytest.mark.parametrize("changed_tenure", ["cold", "fork", "stale_origin", "stale_row"])
 async def test_compaction_requires_current_hydrated_membership(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1042,11 +1095,12 @@ async def test_compaction_requires_current_hydrated_membership(
 ) -> None:
     config, paths = _config(tmp_path)
     # A cached reply derived from the thread root. The target leaves before seeing its redaction.
-    owner, target, room, _ = _compact_pair(config, paths, source_event_id=THREAD)
+    redacted_root = "$parent" if changed_tenure == "fork" else THREAD
+    owner, target, room, _ = _compact_pair(config, paths, source_event_id=redacted_root)
     await _hydrate(target)
     origin = _addressed(owner, "/compact code", "$command")
     store = target.journal_principal()
-    if changed_tenure != "cold":
+    if changed_tenure not in {"cold", "fork"}:
         await admit_dispatch_event(target._journal_dispatcher, room, origin, EventKind.MESSAGE, EventClass.CONTEXT_ONLY)
     if changed_tenure == "stale_row":
         await _dispatch_message(owner, room, origin)
@@ -1054,18 +1108,41 @@ async def test_compaction_requires_current_hydrated_membership(
     await admit_room_membership(store, ROOM, "join")
     assert not await store.conversation_is_hydrated(room_id=ROOM, thread_id=THREAD)
     assert await store.room_history_recovery(ROOM) is None
-    if changed_tenure != "cold":
+    if changed_tenure not in {"cold", "fork"}:
         await _hydrate(target)
     else:
+        if changed_tenure == "fork":
+            child = ProjectedEvent(
+                THREAD,
+                ROOM,
+                None,
+                ALICE,
+                1,
+                {
+                    "body": "fork root",
+                    "msgtype": "m.text",
+                    FORK_CONTENT_KEY: {"thread_id": redacted_root, "event_id": redacted_root},
+                },
+                None,
+                None,
+            )
+            assert await store.install_hydrated_conversation(
+                room_id=ROOM,
+                thread_id=THREAD,
+                events=(child,),
+                complete=True,
+                expected_membership_epoch=await store.membership_epoch(ROOM),
+            )
+            assert not await store.conversation_is_hydrated(room_id=ROOM, thread_id=redacted_root)
         root = nio.RoomGetEventResponse()
         root.event = nio.Event.parse_event(
             {
                 "type": "m.room.message",
-                "event_id": THREAD,
+                "event_id": redacted_root,
                 "sender": ALICE,
                 "origin_server_ts": 0,
                 "content": {},
-                "unsigned": {"redacted_because": {"event_id": "$root-redaction"}},
+                "unsigned": {"redacted_because": {"type": "m.room.redaction", "sender": ALICE, "content": {}}},
             },
         )
         target.client.room_get_event = AsyncMock(return_value=root)
@@ -1084,13 +1161,21 @@ async def test_compaction_requires_current_hydrated_membership(
     await asyncio.wait_for(await _start_fold(target), 30)
     assert build.call_count == 0
     compaction_hook.assert_not_awaited()
-    assert _queued(config, paths, "code")
     assert _ROW_ID not in await store.unsettled_event_ids()
-    assert not target.client.room_send.await_count
+    if changed_tenure in {"cold", "fork"}:
+        target.client.room_get_event.assert_awaited_once_with(ROOM, redacted_root)
+        assert not _queued(config, paths, "code")
+        assert "Nothing to compact" in str(target.client.room_send.await_args_list)
+    else:
+        assert _queued(config, paths, "code")
+        _assert_deferred(target)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("boundary", ["first_recovery_check", "after_scrub", "origin_timeout"])
+@pytest.mark.parametrize(
+    "boundary",
+    ["first_recovery_check", "after_scrub", "origin_timeout", "degraded", "read_failed"],
+)
 async def test_compaction_defers_when_target_history_is_not_ready(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1101,7 +1186,7 @@ async def test_compaction_defers_when_target_history_is_not_ready(
     store = target.journal_principal()
     await _hydrate(target)
     origin = _addressed(owner, "/compact code", "$command")
-    if boundary == "after_scrub":
+    if boundary not in {"first_recovery_check", "origin_timeout"}:
         await admit_dispatch_event(target._journal_dispatcher, room, origin, EventKind.MESSAGE, EventClass.CONTEXT_ONLY)
     await _dispatch_message(owner, room, origin)
     scrub = runner_module.remove_history_of_redacted_events
@@ -1117,17 +1202,31 @@ async def test_compaction_defers_when_target_history_is_not_ready(
 
         record_gap = AsyncMock(side_effect=scrub_then_gap)
         monkeypatch.setattr(runner_module, "remove_history_of_redacted_events", record_gap)
+    elif boundary in {"degraded", "read_failed"}:
+        thread_read = AsyncMock(
+            return_value=ThreadHistoryResult([], False, {THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True}),
+            side_effect=RuntimeError("read failed") if boundary == "read_failed" else None,
+        )
+        monkeypatch.setattr(target._response_runner.deps.resolver, "fetch_thread_history", thread_read)
     build = MagicMock(return_value=summary_model("should not fold"))
     monkeypatch.setattr(runner_module.provider_registry, "build_model_provider", build)
     await asyncio.wait_for(await _start_fold(target), 30)
     assert not build.call_count
+    if boundary in {"degraded", "read_failed"}:
+        thread_read.assert_awaited_once_with(ROOM, THREAD)
     if boundary == "first_recovery_check":
         read_origin.assert_not_awaited()
     if boundary == "after_scrub":
         record_gap.assert_awaited_once()
     assert _queued(config, paths, "code")
     assert _ROW_ID not in await store.unsettled_event_ids()
-    assert not target.client.room_send.await_count
+    _assert_deferred(target)
+
+
+def _assert_deferred(bot: AgentBot) -> None:
+    [notice] = [call.kwargs["content"] for call in bot.client.room_send.await_args_list if _DEFERRED in str(call)]
+    assert notice["msgtype"] == "m.notice"
+    assert notice[SKIP_MENTIONS_KEY] is True
 
 
 @pytest.mark.asyncio
@@ -1143,8 +1242,20 @@ async def test_empty_manual_fold_reports_nothing_to_compact(tmp_path: Path, monk
     await _dispatch_message(target, room, _addressed(target, "/compact code", "$command"))
     await asyncio.wait_for(await _start_fold(target), 30)
     build.assert_not_called()
-    assert "Nothing to compact" in str(target.client.room_send.await_args_list)
+    notice = target.client.room_send.await_args.kwargs["content"]
+    assert "Nothing to compact" in notice["body"]
+    assert notice[SKIP_MENTIONS_KEY] is True
     assert not _queued(config, paths, "code")
+
+
+@pytest.mark.asyncio
+async def test_duplicate_compaction_row_is_already_admitted(tmp_path: Path) -> None:
+    config, paths = _config(tmp_path)
+    owner, target, room, _ = _compact_pair(config, paths)
+    assert await target.admit_compaction(_target(), ALICE)
+    await _dispatch_message(owner, room, _addressed(owner, "/compact code", "$command"))
+    assert "compacting now" in str(owner.client.room_send.await_args_list)
+    assert await target.journal_principal().unsettled_event_ids() == {_ROW_ID}
 
 
 @pytest.mark.asyncio

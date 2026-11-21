@@ -111,11 +111,10 @@ class JournalCallbacks:
     turn_has_live_claim: Callable[[str], bool]
     # Delivers what replies left waiting to replay a settled source owe Matrix.
     replies_ended: Callable[[tuple[str, ...]], None]
-    # Hands a follow-up to its response owner, which settles it.
-    on_job_follow_up: Callable[[JournalEvent], Awaitable[None]]
+    # Hands synthetic work to its source owner, which settles it.
+    on_synthetic_work: Callable[[JournalEvent], Awaitable[None]]
     on_job_cancel: _JobCancelCallback
     on_rtc: _RtcCallback | None = None
-    on_compaction: Callable[[JournalEvent], Awaitable[None]] | None = None
 
 
 @dataclass
@@ -260,13 +259,8 @@ class JournalDispatcher:
             # routing policy, either duplicating side effects or settling the
             # source before the continuation can resume.
             return approval_settled
-        if event.kind is EventKind.JOB_FOLLOW_UP:
-            # A runtime source, not a Matrix event: nothing for ingress to parse.
-            await self.callbacks.on_job_follow_up(event)
-            return False
-        if event.kind is EventKind.COMPACTION:
-            assert self.callbacks.on_compaction is not None
-            await self.callbacks.on_compaction(event)
+        if event.kind in {EventKind.JOB_FOLLOW_UP, EventKind.COMPACTION}:
+            await self.callbacks.on_synthetic_work(event)
             return False
         return await self._parse_and_invoke(event, needs_turn_replay=needs_turn_replay)
 

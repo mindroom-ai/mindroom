@@ -284,7 +284,7 @@ def _journal_dispatcher(
         "source_has_live_owner": lambda _event_id: False,
         "turn_has_live_claim": lambda _event_id: False,
         "replies_ended": lambda _reply_ids: None,
-        "on_job_follow_up": AsyncMock(),
+        "on_synthetic_work": AsyncMock(),
         "on_job_cancel": AsyncMock(),
     }
     return JournalDispatcher(

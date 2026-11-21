@@ -87,6 +87,7 @@ from .delivery_gateway import (
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
+    AdmissionResult,
     EventClass,
     EventKind,
     InboundEvent,
@@ -534,8 +535,7 @@ class AgentBot:
                 ),
                 turn_has_live_claim=lambda event_id: self._turn_store.has_live_turn_claim(event_id),
                 replies_ended=self._replies_ended,
-                on_job_follow_up=lambda event: self._response_runner.handoff_journal_work(event),
-                on_compaction=lambda event: self._response_runner.handoff_journal_work(event, compact=True),
+                on_synthetic_work=lambda event: self._response_runner.handoff_journal_work(event),
             ),
             room_for_id=self._room_for_journal_event,
             # Resolved late: the ingress validator, which owns the trust rule, is built after the dispatcher.
@@ -1031,7 +1031,7 @@ class AgentBot:
             return False
         origin = target.reply_to_event_id
         assert origin is not None
-        await self.journal_principal().admit(
+        result = await self.journal_principal().admit(
             InboundEvent(
                 event_id=f"compact:{origin}:{self.agent_name}",
                 room_id=target.room_id,
@@ -1043,8 +1043,9 @@ class AgentBot:
                 source={"requester_id": requester_id, "origin_event_id": origin},
             ),
         )
-        self._journal_dispatcher.wake()
-        return True
+        if result is AdmissionResult.ADMITTED:
+            self._journal_dispatcher.wake()
+        return True  # Duplicate means the durable row was already admitted.
 
     def _build_reply_turn_owners(self, deps: ReplyTurnDeps) -> None:
         """Build one reply turn's owners so the dependency between them runs one way.
