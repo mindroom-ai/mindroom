@@ -1905,6 +1905,37 @@ async def test_an_edit_of_a_queued_message_keeps_its_original_composer_metadata(
 
 
 @pytest.mark.asyncio
+async def test_edit_cannot_give_an_opening_model_pick_a_replacement_relation() -> None:
+    """Folding an edit cannot turn a relation-free opening pick into an ignored replacement."""
+    gate, _ = _recording_gate(60.0)
+    key = requester_coalescing_key("!room:localhost", None, "@user:localhost")
+    original = _text_event("$opening:localhost", "hi", 1_000_000)
+    original.source["content"][THREAD_MODEL_CONTENT_KEY] = {
+        "version": 1,
+        "runtime_user_id": "@mindroom:localhost",
+        "runtime_device_id": "DEVICE",
+        "model": "large",
+    }
+    await _admit_ready(gate, key, _pending(original))
+    assert gate.apply_pending_edit(
+        room_id=key.room_id,
+        source_event_id=original.event_id,
+        sender=original.sender,
+        body="edited",
+        new_content={
+            "msgtype": "m.text",
+            "body": "edited",
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$old"},
+        },
+        for_another_participant=None,
+    )
+    batch = build_prepared_turn(key, list(gate.queued_pending_events(key)), queues_other_run=nothing_else_queued)
+    assert batch.thread_model_choice is not None
+    assert batch.thread_model_choice.model == "large"
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("later_thread_id", [None, "$other-thread:localhost"])
 async def test_an_expired_submission_does_not_wait_for_later_lane_work(
     monkeypatch: pytest.MonkeyPatch,

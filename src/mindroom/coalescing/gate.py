@@ -310,13 +310,9 @@ class CoalescingGate:
                 ):
                     continue
                 content = dict(new_content)
-                # The edit's new content carries no relation; the message stays where it was posted.
+                # An edit cannot move the original message or change the composer's send choices.
                 original_content = event.source.get("content", {})
-                relation = original_content.get("m.relates_to")
-                if relation is not None:
-                    content["m.relates_to"] = relation
-                # An edit changes the message, not the composer's original send choices.
-                for kept_key in (MID_TURN_MODE_KEY, SUBMISSION_CONTENT_KEY, THREAD_MODEL_CONTENT_KEY):
+                for kept_key in ("m.relates_to", MID_TURN_MODE_KEY, SUBMISSION_CONTENT_KEY, THREAD_MODEL_CONTENT_KEY):
                     content.pop(kept_key, None)
                     if kept_key in original_content:
                         content[kept_key] = original_content[kept_key]

@@ -441,7 +441,7 @@ def _batch_source_event_metadata(ordered_pending_events: list[PendingEvent]) -> 
 
 
 def _batch_thread_model_choice(events: list[PendingEvent]) -> ThreadModelChoice | None:
-    """Take the latest pick submitted by the batch's requester, not by an entity or proxy."""
+    """Read the latest opening pick from a direct source, not from an edit or relay."""
     for pending in reversed(events):
         content = pending.event.source.get("content")
         if not isinstance(content, Mapping) or THREAD_MODEL_CONTENT_KEY not in content:
@@ -449,12 +449,16 @@ def _batch_thread_model_choice(events: list[PendingEvent]) -> ThreadModelChoice 
         if EventInfo.from_event(pending.event.source).is_edit:
             continue
         if pending.facts.sender_is_managed or pending.facts.acts_for_requester:
-            logger.info("Ignoring root thread model choice", event_id=pending.event.event_id, reason="not_direct_human")
+            logger.info(
+                "Ignoring root thread model choice",
+                event_id=pending.event.event_id,
+                reason="managed_or_proxied_source",
+            )
             continue
-        # A newer malformed choice must not silently fall back to an older pick.
         choice = parse_thread_model_choice(content)
         if choice is None:
             logger.info("Ignoring root thread model choice", event_id=pending.event.event_id, reason="malformed")
+        # A newer malformed choice must not silently fall back to an older pick.
         return choice
     return None
 
