@@ -7,7 +7,6 @@ import base64
 from mindroom.matrix_rtc.events import CallMember, ReceivedFrameKey
 from mindroom.matrix_rtc.frame_keys import (
     _KEY_ROTATION_GRACE_PERIOD_MS,
-    _USE_KEY_DELAY_MS,
     FrameKeyManager,
 )
 
@@ -35,10 +34,10 @@ def test_first_key_is_index_zero_and_immediately_usable() -> None:
     distribution = manager.update_memberships([alice], now_ms=0)
     assert distribution is not None
     assert distribution.key_index == 0
-    assert distribution.apply_after_ms == 0
+    assert distribution.generation == 0
     assert distribution.targets == (alice,)
     assert base64.b64decode(distribution.key_base64) == distribution.key
-    manager.mark_distributed(distribution)
+    assert manager.mark_distributed(distribution)
     assert manager.update_memberships([alice], now_ms=1) is None
 
 
@@ -64,7 +63,7 @@ def test_joiner_within_grace_period_gets_current_key_only() -> None:
     assert second.key == first.key
     assert second.key_index == 0
     assert second.targets == (bob,)
-    assert second.apply_after_ms == 0
+    assert second.generation == first.generation
 
 
 def test_joiner_after_grace_period_rotates_key_for_everyone() -> None:
@@ -81,27 +80,68 @@ def test_joiner_after_grace_period_rotates_key_for_everyone() -> None:
     assert second.key != first.key
     assert second.key_index == 1
     assert set(second.targets) == {alice, bob}
-    assert second.apply_after_ms == _USE_KEY_DELAY_MS
+    assert second.generation == 1
 
 
-def test_joiner_during_pending_rotation_keeps_remaining_activation_delay() -> None:
-    """Sharing a pending rotated key cannot make it active early."""
+def test_only_a_generations_first_completed_send_arms_its_activation() -> None:
+    """A re-share of a pending rotated key arms nothing, so it cannot move the switch."""
     manager = _manager()
     alice = _member("@alice:example.org")
     first = manager.update_memberships([alice], now_ms=0)
     assert first is not None
-    manager.mark_distributed(first)
+    assert manager.mark_distributed(first)
 
     bob = _member("@bob:example.org")
     rotated = manager.update_memberships([alice, bob], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 1)
     assert rotated is not None
-    manager.mark_distributed(rotated)
+    assert manager.mark_distributed(rotated)
     charlie = _member("@charlie:example.org")
     shared = manager.update_memberships([alice, bob, charlie], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 501)
 
     assert shared is not None
     assert shared.key == rotated.key
-    assert shared.apply_after_ms == 500
+    assert shared.generation == rotated.generation
+    assert not manager.mark_distributed(shared)
+
+
+def test_undelivered_member_after_grace_gets_the_same_key_again() -> None:
+    """A retry to a device the key already targeted re-sends it; only a genuine late joiner rotates."""
+    manager = _manager()
+    alice = _member("@alice:example.org")
+    bob = _member("@bob:example.org")
+    first = manager.update_memberships([alice, bob], now_ms=0)
+    assert first is not None
+    manager.mark_distributed(first, (alice,))
+
+    retry = manager.update_memberships([alice, bob], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 1)
+    assert retry is not None
+    assert retry.key == first.key
+    assert retry.targets == (bob,)
+    manager.mark_distributed(retry)
+
+    charlie = _member("@charlie:example.org")
+    joined = manager.update_memberships([alice, bob, charlie], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 2)
+    assert joined is not None
+    assert joined.key_index == 1
+
+
+def test_a_generation_arms_when_its_first_send_attempt_ends() -> None:
+    """A send that raised still ends the attempt (reported with nothing delivered); a retry arms nothing."""
+    manager = _manager()
+    alice = _member("@alice:example.org")
+    bob = _member("@bob:example.org")
+    first = manager.update_memberships([alice, bob], now_ms=0)
+    assert first is not None
+    assert manager.mark_distributed(first)
+
+    rotated = manager.update_memberships([alice], now_ms=1)
+    assert rotated is not None
+    manager.mark_exposed(rotated)
+    assert manager.mark_distributed(rotated, ())  # the transport raised
+    retry = manager.update_memberships([alice], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 1)
+    assert retry is not None
+    assert retry.key == rotated.key
+    assert not manager.mark_distributed(retry)
 
 
 def test_leaver_rotates_key() -> None:
@@ -118,7 +158,7 @@ def test_leaver_rotates_key() -> None:
     assert second.key_index == 1
     assert second.key != first.key
     assert second.targets == (alice,)
-    assert second.apply_after_ms == _USE_KEY_DELAY_MS
+    assert second.generation == 1
 
 
 def test_rejoin_with_new_membership_ts_is_treated_as_leave_and_join() -> None:
@@ -149,6 +189,7 @@ def test_key_index_wraps_at_256() -> None:
         assert distribution is not None
         manager.mark_distributed(distribution)
         assert distribution.key_index == round_number % 256
+        assert distribution.generation == round_number
     assert distribution.key_index == 0  # 256 rotations starting from 0 wrap back to 0
 
 
