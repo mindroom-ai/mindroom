@@ -291,11 +291,12 @@ async def test_a_room_that_refuses_the_routers_state_is_no_warning(
         ACCOUNTS_EVENT_TYPE,
         ROUTER_EVENT_TYPE,
     }
-    assert sorted((log["event"], log["log_level"]) for log in logs) == [
-        ("room_accounts_publish_failed", level),
-        ("room_router_binding_publish_failed", level),
-        ("room_thread_mode_reconcile_failed", level),
-    ]
+    assert {log["event"] for log in logs} == {
+        "room_accounts_publish_failed",
+        "room_router_binding_publish_failed",
+        "room_thread_mode_reconcile_failed",
+    }
+    assert sorted(log["log_level"] for log in logs) == ["debug", "debug", level]
 
 
 @pytest.mark.asyncio
@@ -1450,9 +1451,39 @@ async def test_sweep_retries_failed_room_with_backoff(
     assert times == ([0, 1] if lose_stewardship else [0, 1, 3])
     assert not duties._room_state_retries
     failures = [log for log in logs if log["event"] == "room_accounts_publish_failed"]
-    assert len(failures) == 2
+    assert [log["log_level"] for log in failures] == ["warning", "debug"]
     assert all(log["error"] == "TimeoutError" and "exc_info" not in log for log in failures)
     assert (_accounts(room_state) is None) == lose_stewardship
+
+
+@pytest.mark.asyncio
+async def test_room_state_failure_warns_again_after_recovery(room_state: RoomState) -> None:
+    """A room's first failure warns again after its state returns to current."""
+    _, _, _, events, client = room_state
+    duties = _router_duties(room_state)
+    write = client.room_put_state.side_effect
+    failing = True
+
+    async def put_state(room_id: str, event_type: str, content: dict, **kwargs: object) -> object:
+        if event_type == ACCOUNTS_EVENT_TYPE and failing:
+            raise TimeoutError
+        return await write(room_id, event_type, content, **kwargs)
+
+    client.room_put_state.side_effect = put_state
+    try:
+        with capture_logs() as logs:
+            for fail in (True, True, False, True):
+                failing = fail
+                events.pop((ACCOUNTS_EVENT_TYPE, client.user_id), None)
+                duties.mark_joined_for_room_state(ROOM_ID)
+                await _publish_joined_rooms(duties)
+        assert [log["log_level"] for log in logs if log["event"] == "room_accounts_publish_failed"] == [
+            "warning",
+            "debug",
+            "warning",
+        ]
+    finally:
+        duties.stopping()
 
 
 @pytest.mark.asyncio

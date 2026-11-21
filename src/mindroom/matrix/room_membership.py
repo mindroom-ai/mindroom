@@ -14,7 +14,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.joined_members import read_joined_members
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from nio.durable import SyncRecord
 
@@ -143,6 +143,7 @@ async def ensure_room_membership_synced(
     room: nio.MatrixRoom,
     *,
     sender_id: str,
+    repeat_failure: Callable[[], bool] = lambda: False,
 ) -> bool:
     """Reuse or fetch application membership without certifying nio's crypto projection."""
     if room_membership_is_complete(room):
@@ -158,7 +159,8 @@ async def ensure_room_membership_synced(
             try:
                 response = await read_joined_members(client, room.room_id)
             except Exception as exc:
-                logger.warning(
+                log = logger.debug if repeat_failure() else logger.warning
+                log(
                     "authoritative_room_membership_fetch_failed",
                     room_id=room.room_id,
                     sender_id=sender_id,
@@ -166,7 +168,8 @@ async def ensure_room_membership_synced(
                 )
                 return False
             if not isinstance(response, nio.JoinedMembersResponse):
-                logger.warning(
+                log = logger.debug if repeat_failure() else logger.warning
+                log(
                     "authoritative_room_membership_fetch_failed",
                     room_id=room.room_id,
                     sender_id=sender_id,

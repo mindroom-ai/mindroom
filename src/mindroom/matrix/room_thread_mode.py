@@ -35,6 +35,7 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
     *,
     put_state: Callable[..., Awaitable[bool | None]] | None = None,
     roster_lock: asyncio.Lock | None = None,
+    repeat_failure: Callable[[], bool] = lambda: False,
 ) -> bool | None:
     """Compare one state event with reply-path responders and return whether it is current.
 
@@ -50,7 +51,7 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
             room = client.rooms[room_id]
             responders = configured_responder_entities_for_room(room, config, runtime_paths)
             if responders is None:
-                if not await _ensure_roster(client, room, roster_lock):
+                if not await _ensure_roster(client, room, roster_lock, repeat_failure):
                     logger.debug("room_thread_mode_membership_unavailable", room_id=room_id)
                     return False
                 responders = get_available_responders_in_room(room, config, runtime_paths)
@@ -70,7 +71,8 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
                 if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
                     return True
                 if isinstance(current, nio.RoomGetStateEventError) and current.status_code != "M_NOT_FOUND":
-                    logger.warning("room_thread_mode_reconcile_failed", room_id=room_id, error=str(current))
+                    log = logger.debug if repeat_failure() else logger.warning
+                    log("room_thread_mode_reconcile_failed", room_id=room_id, error=str(current))
                     return False
                 if put_state is not None:
                     return await put_state(room_id, _THREAD_MODE_EVENT_TYPE, content)
@@ -78,24 +80,36 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
                 if not isinstance(response, nio.RoomPutStateResponse):
                     # A room whose power levels keep this account from sending this state refuses it on every trigger.
                     forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
-                    log = logger.debug if forbidden else logger.warning
+                    log = logger.debug if forbidden or repeat_failure() else logger.warning
                     log("room_thread_mode_reconcile_failed", room_id=room_id, error=str(response))
                     return None if forbidden else False
                 return True
     except TimeoutError:
-        logger.warning("room_thread_mode_reconcile_failed", room_id=room_id, error="TimeoutError")
+        log = logger.debug if repeat_failure() else logger.warning
+        log("room_thread_mode_reconcile_failed", room_id=room_id, error="TimeoutError")
         return False
     except Exception:
-        logger.warning("room_thread_mode_reconcile_failed", room_id=room_id, exc_info=True)
+        log = logger.debug if repeat_failure() else logger.warning
+        log("room_thread_mode_reconcile_failed", room_id=room_id, exc_info=True)
         return False
 
 
-async def _ensure_roster(client: nio.AsyncClient, room: nio.MatrixRoom, roster_lock: asyncio.Lock | None) -> bool:
+async def _ensure_roster(
+    client: nio.AsyncClient,
+    room: nio.MatrixRoom,
+    roster_lock: asyncio.Lock | None,
+    repeat_failure: Callable[[], bool],
+) -> bool:
     """Only queue for the shared roster slot when the room needs a membership read."""
     if room_membership_is_complete(room):
         return True
     async with roster_lock or nullcontext(), asyncio.timeout(10):
-        return await ensure_room_membership_synced(client, room, sender_id=client.user_id)
+        return await ensure_room_membership_synced(
+            client,
+            room,
+            sender_id=client.user_id,
+            repeat_failure=repeat_failure,
+        )
 
 
 async def _joined(client: nio.AsyncClient, room_id: str, user_id: str) -> bool:

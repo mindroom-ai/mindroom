@@ -159,6 +159,8 @@ class StewardDuties:
     _room_state_publishes: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     # Only the roster reads share nio's per-client crypto lock, not the state GETs and PUTs.
     _room_roster_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    # Warn once per room until reconciliation succeeds.
+    _room_state_warned: set[str] = field(default_factory=set, init=False, repr=False)
     # One backoff loop per failed room.
     _room_state_retries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
 
@@ -272,14 +274,31 @@ class StewardDuties:
         runtime = self.deps.runtime
         client = runtime.client
         if not self._may_publish_room_state(room_id) or client is None or room_id not in client.rooms:
+            self._room_state_warned.discard(room_id)
             return True
+
+        def repeat_failure() -> bool:
+            # Claim when logging, not when the gather ends: another trigger may fail while this one is still running.
+            if room_id in self._room_state_warned:
+                return True
+            self._room_state_warned.add(room_id)
+            return False
+
         args = (client, runtime.config, runtime.runtime_paths, room_id)
         accounts, mode, binding = await asyncio.gather(
-            reconcile_room_accounts(*args, roster_lock=self._room_roster_lock),
-            reconcile_room_thread_mode(*args, roster_lock=self._room_roster_lock),
-            reconcile_room_router_binding(client, room_id, may_claim=lambda: self._may_publish_room_state(room_id)),
+            reconcile_room_accounts(*args, roster_lock=self._room_roster_lock, repeat_failure=repeat_failure),
+            reconcile_room_thread_mode(*args, roster_lock=self._room_roster_lock, repeat_failure=repeat_failure),
+            reconcile_room_router_binding(
+                client,
+                room_id,
+                may_claim=lambda: self._may_publish_room_state(room_id),
+                repeat_failure=repeat_failure,
+            ),
         )
-        return accounts and mode is not False and binding
+        current = accounts and mode is not False and binding
+        if current:
+            self._room_state_warned.discard(room_id)
+        return current
 
     async def member_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
         """Refresh responder presentation, the room's MindRoom accounts and the welcome, and emit human membership hooks."""
