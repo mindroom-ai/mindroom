@@ -1035,9 +1035,10 @@ async def test_a_non_executable_launcher_explains_why_claude_code_cannot_start(
         return False if path == launcher and mode == os.X_OK else access(path, mode)
 
     monkeypatch.setattr(os, "access", noexec)
-    with pytest.raises(ProviderUnavailable, match="launcher is not executable"):
+    with pytest.raises(ProviderError, match="launcher is not executable") as raised:
         await complete(cli.provider(), ModelRequest(messages=[user("Hi")]))
 
+    assert not raised.value.retryable
     assert not cli.events("spawn")
 
 

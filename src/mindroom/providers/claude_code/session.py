@@ -240,7 +240,7 @@ def _prepare_launcher(home: Path, provider: str) -> Path:
             atomic_write_bytes_at(directory, launcher.name, payload, file_mode=0o700)
     if not os.access(launcher, os.X_OK):
         msg = f"Claude Code launcher is not executable: {launcher}. Check its permissions and the storage mount."
-        raise ProviderUnavailable(msg, provider=provider)
+        raise ProviderError(msg, provider=provider)
     return launcher
 
 
