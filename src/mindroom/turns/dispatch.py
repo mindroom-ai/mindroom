@@ -484,7 +484,8 @@ class TurnDispatcher:
         may_be_superseded = (
             prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
             and prepared.handled_turn.sources_all_from_requester(requester_user_id)
-            # A later turn cannot rely on history for voice: only the answering turn publishes its transcript.
+            # A later turn's history shows a voice message only as a file: its transcript is posted,
+            # and read, only by the turn that answers it.
             and not (prepared.turn.payload.voice_transcript or prepared.turn.payload.raw_audio_fallback)
             # While another run still waits in the queue, whether another
             # requester's follow-ups, an entity's reply written for this

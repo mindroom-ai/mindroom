@@ -1111,28 +1111,33 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("history_degraded", [False, True])
 @pytest.mark.parametrize(
-    ("voice_flag", "body"),
+    ("kind", "history_degraded"),
     [
-        pytest.param(constants.VOICE_TRANSCRIPT_KEY, "Can you check this?", id="transcript"),
-        pytest.param(constants.VOICE_RAW_AUDIO_FALLBACK_KEY, "upload", id="raw-audio-fallback"),
+        ("transcript", False),
+        ("transcript", True),
+        ("raw-audio-fallback", False),
+        ("raw-audio-fallback", True),
+        ("voice-then-text-batch", False),
     ],
 )
 async def test_older_voice_turn_reaches_policy_despite_newer_text(
     config: Config,
     tmp_path: Path,
+    kind: str,
     history_degraded: bool,
-    voice_flag: str,
-    body: str,
 ) -> None:
-    """A newer text turn cannot recover the contents of an older voice note from history."""
-    harness = _build_harness(config, tmp_path)
+    """Only the turn that owns the older voice note can post its transcript and handle its source."""
+    coalesced = kind == "voice-then-text-batch"
+    transcribed = kind != "raw-audio-fallback"
+    harness = _build_harness(config, tmp_path, debounce_seconds=30.0 if coalesced else 0.0)
     await _serve_newer_requester_message(harness, config, history_degraded=history_degraded)
     room = _room_with_members(config, "general")
     event = _thread_upload_event("m.audio", event_id="$voice:localhost", origin_server_ts=1_999_000)
     assert isinstance(event, nio.RoomMessageAudio)
+    body = "Can you check this?" if transcribed else "upload"
     prompt = f"{constants.VOICE_PREFIX}{body}"
+    voice_flag = constants.VOICE_TRANSCRIPT_KEY if transcribed else constants.VOICE_RAW_AUDIO_FALLBACK_KEY
     content = {
         "body": prompt,
         "msgtype": "m.text",
@@ -1147,13 +1152,37 @@ async def test_older_voice_turn_reaches_policy_despite_newer_text(
         PreparedVoiceSource.from_content(prompt, content, thread_id=_THREAD_ROOT, coalescing_thread_id=_THREAD_ROOT),
     )
 
+    source_ids = (event.event_id,)
     with capture_logs() as logs:
         await harness.ingress.handle_media_event(room, event)
+        if coalesced:
+            caption = _text_event(
+                "About the new schedule",
+                event_id="$caption:localhost",
+                thread_id=_THREAD_ROOT,
+                origin_server_ts=1_999_001,
+            )
+            await harness.ingress.handle_text_event(room, caption)
+            source_ids += (caption.event_id,)
         await harness.gate.drain_all()
         await harness.runner.settle_inbox_responses()
 
+    [batch] = harness.gate_batches
+    assert batch.handled_turn.source_event_ids == source_ids
+    assert batch.event.event_id == source_ids[-1]
     assert _skip_logs(logs) == []
     assert harness.policy.plan_turn_calls == 1
+    assert harness.ignored_dispatch_sources == []
+    assert await harness.turn_store.handled_among(_ROOM_ID, source_ids) == frozenset(source_ids)
+    if transcribed:
+        [echo] = harness.gateway.sent
+        assert echo.target.reply_to_event_id == event.event_id
+        assert echo.response_text == prompt
+        assert echo.extra_content is not None
+        assert echo.extra_content[constants.VISIBLE_ROUTER_VOICE_ECHO_KEY] is True
+        assert echo.extra_content[constants.VOICE_SOURCE_EVENT_ID_KEY] == event.event_id
+    else:
+        assert harness.gateway.sent == []
 
 
 @pytest.mark.asyncio
