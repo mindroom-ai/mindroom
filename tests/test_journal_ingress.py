@@ -22,6 +22,7 @@ from mindroom.constants import (
     ROUTE_EVENT_TYPE,
     ROUTE_PROMPT_FILE_KEY,
     ROUTE_REVISION_KEY,
+    ROUTE_VOICE_TRANSCRIPTS_KEY,
     SILENT_SCHEDULE_EVENT_TYPE,
     SOURCE_KIND_KEY,
     STREAM_STATUS_CANCELLED,
@@ -5536,24 +5537,25 @@ class TestRouteDispatch:
         assert await self._delivered(alice, route_event("$route-human", sender=ALICE)) == []
 
     @pytest.mark.parametrize(
-        "route",
+        "route_kwargs",
         [
-            "not an object",
-            {"entity": BOT},
-            {"entity": BOT, "event_ids": []},
-            {"entity": BOT, "event_ids": ["$question", 7]},
-            {"entity": BOT, "event_id": "$question"},
-            {"entity": 7, "event_ids": ["$question"]},
-            {"entity": BOT, "event_ids": ["$question"], "thread_id": 7},
+            {"route": "not an object"},
+            {"route": {"entity": BOT}},
+            {"route": {"entity": BOT, "event_ids": []}},
+            {"route": {"entity": BOT, "event_ids": ["$question", 7]}},
+            {"route": {"entity": BOT, "event_id": "$question"}},
+            {"route": {"entity": 7, "event_ids": ["$question"]}},
+            {"route": {"entity": BOT, "event_ids": ["$question"], "thread_id": 7}},
+            pytest.param({"extra_content": {ROUTE_VOICE_TRANSCRIPTS_KEY: ["x"]}}, id="voice-transcripts-not-an-object"),
         ],
     )
     async def test_a_malformed_route_settles_without_reaching_a_responder(
         self,
         alice: PrincipalStore,
-        route: object,
+        route_kwargs: dict[str, Any],
     ) -> None:
-        """A route that names no responder or no event is dropped, and later work still runs."""
+        """A malformed route is dropped, so it cannot reach the responder or block later work."""
         with capture_logs() as logs:
-            assert await self._delivered(alice, route_event("$route-malformed", route=route)) == []
+            assert await self._delivered(alice, route_event("$route-malformed", **route_kwargs)) == []
 
         assert [entry["event_id"] for entry in logs if entry["event"] == "route_invalid"] == ["$route-malformed"]

@@ -547,6 +547,12 @@ def _route_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFormatted:
     ):
         msg = "Route does not name its responder, the person's events and its thread"
         raise TypeError(msg)
+    voice_transcripts = content.get(ROUTE_VOICE_TRANSCRIPTS_KEY, {})
+    if not isinstance(voice_transcripts, dict) or not all(
+        isinstance(event_id, str) and isinstance(transcript, str) for event_id, transcript in voice_transcripts.items()
+    ):
+        msg = "Route voice transcripts must map event IDs to strings"
+        raise TypeError(msg)
     body = content.get("body")
     message = _as_message(
         event,
