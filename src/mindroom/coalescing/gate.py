@@ -17,6 +17,7 @@ from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import VOICE_SOURCE_KIND, source_kind_bypasses_coalescing
 from mindroom.logging_config import get_logger
 from mindroom.mid_turn import MID_TURN_MODE_KEY
+from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.runtime_shutdown import (
     GENERIC_SHUTDOWN,
@@ -314,9 +315,8 @@ class CoalescingGate:
                 relation = original_content.get("m.relates_to")
                 if relation is not None:
                     content["m.relates_to"] = relation
-                # The message keeps the mid-turn mode and composer submission it was sent with, so an edit can
-                # neither steer or queue it anew nor move it into, out of, or within a submission.
-                for kept_key in (MID_TURN_MODE_KEY, SUBMISSION_CONTENT_KEY):
+                # An edit changes the message, not the composer's original send choices.
+                for kept_key in (MID_TURN_MODE_KEY, SUBMISSION_CONTENT_KEY, THREAD_MODEL_CONTENT_KEY):
                     content.pop(kept_key, None)
                     if kept_key in original_content:
                         content[kept_key] = original_content[kept_key]
