@@ -73,6 +73,11 @@ export OPENAI_API_KEY="$(sed -n 's/^\(export \)\{0,1\}OPENAI_API_KEY=//p' ~/.min
 python3 scripts/agent-stack/stack.py "$N" up --model live --client-sessions \
   --computers --computer-tools shell \
   --checkout ~/repos/worktrees/mindroom-agent-graphs --ref HEAD
+# The workers reach the backend's script gateway over the Docker bridge; the stack's backend listens on loopback only.
+API=$((29600 + N))
+echo "MINDROOM_SCRIPT_GATEWAY_URL=http://172.17.0.1:$API/api/script-gateway" >> "/tmp/mindroom-client-agents/slot-$N/.env"
+nix shell nixpkgs#socat --command socat TCP-LISTEN:$API,bind=172.17.0.1,fork,reuseaddr TCP:127.0.0.1:$API &
+sudo nft add element inet nixos-fw temp-ports "{ tcp . $API }"     # NixOS firewall; drop it again after the teardown
 cd ~/repos/worktrees/mindroom-agent-graphs
 python3 -m tests.workflow_live.kill_after_write --barrier before-receipt --slot "$N" --send api
 python3 -m tests.workflow_live.kill_after_write --barrier after-receipt --slot "$N" --send api
@@ -89,9 +94,8 @@ With `worker_tools` set, the scripts leave `allow_shell_without_worker` out, and
 
 ## What has been run
 
-- Local stack, before the review fixes: both barriers and `restart_mid_run.py` printed their expected lines of that time (without `attempt`, `run` and `deliveries`).
-- Not run yet: the lines above with `attempt`, `run` and `deliveries`, `large_result.py`, and every step of the Docker stack.
-  The Docker steps are written from `stack.py`'s options.
+- 2026-11-20 at `d2525db67`, local stack (slot 50) and Docker stack (slot 43): all four scripts printed their expected lines.
+- Without the gateway lines above, the Docker stack refuses every run with `Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL.`: the stack's `MINDROOM_PUBLIC_URL` is a loopback address, which workers may not use.
 
 ## What to check besides the result line
 
