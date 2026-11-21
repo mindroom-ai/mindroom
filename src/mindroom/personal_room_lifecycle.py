@@ -118,6 +118,8 @@ class PersonalRoomLifecycle:
     # The onboarding rooms this bot stewarded all through the pass that set ``_reconciled``, which read them; a room
     # it takes over after is read by another pass.
     _reconciled_rooms: frozenset[str] = field(default=frozenset(), init=False)
+    # The rooms the running pass stewarded at its start that no sync frame has since seen another bot steward.
+    _held_through_pass: frozenset[str] = field(default=frozenset(), init=False)
     _config_revision: int = field(default=0, init=False)
     _completed_candidates: set[tuple[str, str]] = field(default_factory=set, init=False)
     _candidate_backoff: dict[tuple[str, str], _CandidateBackoff] = field(default_factory=dict, init=False)
@@ -222,6 +224,7 @@ class PersonalRoomLifecycle:
         stewarded = self._stewarded_onboarding_rooms()
         # A settled room seen while another bot stewards it is read again on takeover, as who is in it may change.
         self._reconciled_rooms &= stewarded
+        self._held_through_pass &= stewarded
         if (
             self._settled()
             or not (stewarded or self._retry_candidates)
@@ -573,6 +576,7 @@ class PersonalRoomLifecycle:
             return
         if not self._reconciliation_ready(settings):
             return
+        self._held_through_pass = stewarded
         candidates, failed = await asyncio.to_thread(self._recorded_intent, settings)
         if settings.backfill:
             backfill, backfill_failed, read = await self._backfill_candidates(settings.onboarding_rooms)
@@ -595,6 +599,7 @@ class PersonalRoomLifecycle:
             if not await self._reconcile_candidate(candidate, revision):
                 failed = True
         # A live trigger that failed during this pass is still owed a retry, and a pass for retries alone read no lobby.
+        stewarded &= self._held_through_pass
         if stewarded and not failed and not self._retry_candidates and revision == self._config_revision:
             self._reconciled, self._reconciled_rooms = True, stewarded
 
