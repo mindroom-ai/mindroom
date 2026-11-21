@@ -335,7 +335,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             and self.model.reply.state is ReplyState.ACTIVE
             and self.model.reply.current_span_id is None
             and self.model.reply.approval_id is None
-            and self.model.spans[self.model.reply.last_span_id].outcome in rl._SOURCES_PENDING_OUTCOMES
+            and self.model.spans[self.model.reply.last_span_id].outcome in rl.SOURCES_PENDING_OUTCOMES
             and not self._is_settled(self.model.reply.last_span_id)
         ),
     )
@@ -1009,7 +1009,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             and self.model.reply.state is ReplyState.ACTIVE
             and self.model.reply.current_span_id is None
             and not self.model.reply.unapplied_stop
-            and self.model.spans[self.model.reply.last_span_id].outcome in rl._SOURCES_PENDING_OUTCOMES
+            and self.model.spans[self.model.reply.last_span_id].outcome in rl.SOURCES_PENDING_OUTCOMES
             and not self._is_settled(self.model.reply.last_span_id)
             # The dispatcher hands a continuation's sources to the approval runtime instead.
             and self._held_by() is None
@@ -1061,7 +1061,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             and not self.model.continuations
             and self.model.reply.current_span_id is None
             and not self._is_settled(self.model.reply.last_span_id)
-            and self.model.spans[self.model.reply.last_span_id].outcome in rl._SOURCES_PENDING_OUTCOMES
+            and self.model.spans[self.model.reply.last_span_id].outcome in rl.SOURCES_PENDING_OUTCOMES
         ),
     )
     @rule()
@@ -1155,7 +1155,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         last = self._last()
         assert last is not None
         if (
-            last.outcome in rl._SOURCES_PENDING_OUTCOMES
+            last.outcome in rl.SOURCES_PENDING_OUTCOMES
             and "$source" in last.sources.pending_event_ids
             and not self._is_settled(last.span_id)
         ):
@@ -1255,7 +1255,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert not reply.redaction_pending, reply
         assert reply.terminal, (reply, self._last())
         for span in self.model.spans.values():
-            if span.outcome in rl._SOURCES_PENDING_OUTCOMES:
+            if span.outcome in rl.SOURCES_PENDING_OUTCOMES:
                 continue
             assert self._is_settled(span.span_id), span
 
@@ -1322,7 +1322,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 # A span an older instance left: the restart that follows ends it.
                 self.restart()
                 return True
-            if self.model.spans[reply.last_span_id].outcome in rl._SOURCES_PENDING_OUTCOMES:
+            if self.model.spans[reply.last_span_id].outcome in rl.SOURCES_PENDING_OUTCOMES:
                 self.replay()
                 return True
             self.restart()
