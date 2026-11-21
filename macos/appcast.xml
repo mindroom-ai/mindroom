@@ -5,6 +5,32 @@
         <link>https://github.com/mindroom-ai/mindroom</link>
         <description>Signed MindRoom macOS app updates.</description>
         <item>
+            <title>2026.11.493</title>
+            <pubDate>Sat, 21 Nov 2026 07:42:46 +0000</pubDate>
+            <link>https://github.com/mindroom-ai/mindroom</link>
+            <sparkle:version>3017</sparkle:version>
+            <sparkle:shortVersionString>2026.11.493</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# Release 2026.11.493
+
+## 📊 Statistics
+- 📦 **1** commits
+- 👥 **1** contributors
+
+## 📝 Changes
+
+- [Send agent replies to Matrix without tool marker lines (#4210)](https://github.com/mindroom-ai/mindroom/commit/2b8cadc4f) by @basnijholt
+## 👥 Contributors
+@basnijholt
+
+
+---
+🙏 Thank you for using this project! Please report any issues or feedback on the GitHub repository.
+]]></description>
+            <enclosure url="https://github.com/mindroom-ai/mindroom/releases/download/v2026.11.493/MindRoom.zip" length="75784758" type="application/octet-stream" sparkle:edSignature="8rWCcYqEK1rFJPdUcOVXmarygBmVrhGHpwLTonqW7n0oG50KsvoPlRmFeGYNxbDRMtWoK+LwIr0cTWtlA9gvAw=="/>
+        </item>
+        <item>
             <title>2026.11.33</title>
             <pubDate>Sun, 01 Nov 2026 14:43:07 +0000</pubDate>
             <link>https://github.com/mindroom-ai/mindroom</link>
