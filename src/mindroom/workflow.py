@@ -277,7 +277,9 @@ def agent(
     if schema is not None:
         raise WorkflowError(_NO_SCHEMA)
     # What the turn is, which a resume compares; how long this attempt waits for it is no part of that.
-    call = {"prompt": str(prompt), **{option: value for option, value in options.items() if value}}
+    # An empty list is a choice, of none: only an option that was not given is left out.
+    given = {option: value for option, value in options.items() if value is not None and value is not False}
+    call = {"prompt": str(prompt), **given}
     return str(_call("agent", call, name=name, timeout=timeout))
 
 

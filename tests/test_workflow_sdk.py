@@ -127,6 +127,20 @@ def test_agent_sends_its_turn_and_returns_the_answer(gateway: FakeWorkflowGatewa
 
 
 @pytest.mark.usefixtures("in_main")
+def test_agent_sends_an_empty_list_as_none_of_them(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """`tools=[]` asks for a copy without tools: only an option that was not given is left out of the call."""
+    sdk.agent("Summarize", system="Only summarize.", tools=[], skills=[], knowledge=[], minimal=False)
+
+    assert gateway.nodes[0]["args"] == {
+        "prompt": "Summarize",
+        "system": "Only summarize.",
+        "tools": [],
+        "skills": [],
+        "knowledge": [],
+    }
+
+
+@pytest.mark.usefixtures("in_main")
 def test_sdk_agent_raises_agent_error_with_kind(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
     """A turn that did not end with an answer raises with the stable kind the script can branch on."""
     gateway.respond = lambda _request: failed("refused", "Cannot delegate: Unknown model 'opus5'.")

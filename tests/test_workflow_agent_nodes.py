@@ -365,13 +365,35 @@ async def test_plain_copy_inherits_the_owners_tools(stack: WorkflowStack) -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("tools", "offered"), [([], []), (["counter"], ["append"])])
+async def test_narrowed_copy_is_offered_the_tools_its_call_lists_and_no_other(
+    stack: WorkflowStack,
+    tools: list[str],
+    offered: list[str],
+) -> None:
+    """`tools=[...]` with `system=` narrows the copy, and an empty list leaves it no tool at all."""
+    model = stack.child_script(answer("done"))
+
+    await stack.result("@0", "agent", _PROMPT | {"system": "Only summarize.", "tools": tools})
+
+    persona = delegation_child(stack.node_job("@0")).persona
+    assert persona is not None
+    assert (list(persona.tools or ()), persona.tools is not None) == (tools, True)
+    assert [name for name in offered_tools(model)[0] if name in ("append", "run_shell_command", "start_workflow")] == (
+        offered
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("options", "refusal"),
     [
         ({"model": "opus5"}, "Cannot delegate: Unknown model 'opus5'. Available models: default."),
         ({"agent": "stranger"}, "Cannot delegate to 'stranger': it is no longer an allowed target."),
         ({"agent": "nobody"}, "Cannot delegate to 'nobody': that agent is not allowed to reply to you."),
-        ({"tools": ["shell"]}, "Cannot delegate: system_prompt must be a non-empty string."),
+        ({"tools": ["shell"]}, "tools, skills and knowledge narrow a copy only together with system=."),
+        ({"tools": []}, "tools, skills and knowledge narrow a copy only together with system=."),
+        ({"knowledge": []}, "tools, skills and knowledge narrow a copy only together with system=."),
         ({"dedicated_worker": True}, "Cannot delegate: watcher may not run subagents in dedicated workers."),
     ],
 )

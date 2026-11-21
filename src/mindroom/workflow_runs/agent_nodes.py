@@ -45,6 +45,8 @@ _OPTIONS = (
         "resource_profile",
     }
 )
+_NARROWING = frozenset({"tools", "skills", "knowledge"})
+_NARROWS_WITH_SYSTEM = "tools, skills and knowledge narrow a copy only together with system=."
 _NO_ANSWER = "The agent's turn left no record of how it ended."
 # How long a wait for a job that cannot be read yet, while its requester's access resolves, sleeps before it asks again.
 _RECHECK_SECONDS = 1.0
@@ -96,6 +98,9 @@ async def launch_child(
     if cap is not None and arguments.get("agent_name") in (None, caller) and not arguments.get("profile"):
         # A copy of a narrowed agent is that agent again: its prompt, and at most what it was left with.
         arguments["system_prompt"] = arguments.get("system_prompt") or cap.system_prompt
+    if not arguments.get("system_prompt") and _NARROWING & arguments.keys():
+        # `run_subagent` reads a list without a prompt as nothing, which would hand the copy every tool.
+        raise AgentNodeError(_NARROWS_WITH_SYSTEM)
     with tool_runtime_context(context):
         target = resolve_fresh_target(
             arguments,
