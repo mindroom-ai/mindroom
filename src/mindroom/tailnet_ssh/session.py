@@ -8,7 +8,7 @@ proxy the agent's commands use, and ``scp notes.md host:`` lands where the agent
 A login gets Bash, but not as a login shell: that reads ``/etc/profile``, which on the image replaces ``PATH``, and
 with it the agent's tools. The shell still reads the workspace's ``.bashrc``.
 
-It imports only the standard library, because every session starts it.
+The session module itself imports only the standard library; ``python -m`` still initializes ``mindroom`` first.
 """
 
 from __future__ import annotations
