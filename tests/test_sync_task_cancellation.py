@@ -700,6 +700,7 @@ async def test_process_shutdown_signals_responses_before_coalescing_drain() -> N
         password=TEST_PASSWORD,
     )
     bot._runtime_view = MagicMock(client=None)
+    bot._runtime_view.orchestrator.room_state.release = AsyncMock()
     bot._sync_shutdown_budget = None
     bot._delivery_recovery_wake = MagicMock()
     bot._response_runner = runner
@@ -773,6 +774,7 @@ async def test_process_shutdown_fences_matrix_transport_before_response_drain() 
         password=TEST_PASSWORD,
     )
     bot._runtime_view = MagicMock(client=client)
+    bot._runtime_view.orchestrator.room_state.release = AsyncMock()
     bot._sync_shutdown_budget = None
     bot._delivery_recovery_wake = MagicMock()
     bot._response_runner = runner_for(MagicMock())
@@ -842,6 +844,7 @@ async def test_process_shutdown_preparation_does_not_wait_for_transport_close() 
         password=TEST_PASSWORD,
     )
     bot._runtime_view = MagicMock(client=client)
+    bot._runtime_view.orchestrator.room_state.release = AsyncMock()
     bot._sync_shutdown_budget = None
     bot._delivery_recovery_wake = MagicMock()
     bot._response_runner = runner_for(MagicMock())
@@ -889,7 +892,7 @@ async def test_router_process_shutdown_fences_transport_before_first_await() -> 
         admission_deferred_count=0,
     )
 
-    async def block_router_cleanup(**_kwargs: object) -> None:
+    async def block_router_cleanup(_bot: AgentBot) -> None:
         router_cleanup_started.set()
         await release_router_cleanup.wait()
 
@@ -913,7 +916,7 @@ async def test_router_process_shutdown_fences_transport_before_first_await() -> 
     bot._response_runner = runner_for(MagicMock())
     bot._coalescing_gate = MagicMock(drain_all=AsyncMock(return_value=drain_result))
     # The first await of shutdown preparation, after the transport fence.
-    bot._personal_room_lifecycle.cancel_reconciliation = AsyncMock(side_effect=block_router_cleanup)
+    bot._runtime_view.orchestrator.room_state.release = AsyncMock(side_effect=block_router_cleanup)
     bot.logger = MagicMock()
 
     with patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(return_value=True)):
@@ -2040,6 +2043,7 @@ async def test_prepare_then_stop_reuses_one_total_shutdown_budget() -> None:
         password=TEST_PASSWORD,
     )
     bot._runtime_view = MagicMock(client=None)
+    bot._runtime_view.orchestrator.room_state.release = AsyncMock()
     bot.running = True
     bot.last_sync_time = None
     bot._last_sync_monotonic = None
