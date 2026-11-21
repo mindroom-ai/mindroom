@@ -115,20 +115,23 @@ The options are those of `run_subagent` under shorter names.
 | Option | Meaning |
 |--------|---------|
 | `agent` | Run that configured agent, with its own tools, instead of a copy of the run's agent |
-| `name` | A label for the call; it does not pick an agent |
+| `name` | A label for the call; it does not pick an agent. Without it the label is the first line of the prompt, at most 80 characters, with secrets redacted |
 | `model` | Any configured model name, such as `haiku` or `opus@high` |
-| `system`, `tools`, `skills`, `knowledge`, `profile` | Shape a copy of the run's agent, as the same arguments of `run_subagent` do |
+| `system`, `tools`, `skills`, `knowledge`, `profile` | Shape a copy of the run's agent, as the same arguments of `run_subagent` do. `tools`, `skills` and `knowledge` narrow the copy only together with `system`, and an empty list gives it none |
 | `minimal` | Run the turn in minimal mode |
-| `timeout` | Seconds of work, after which the turn is cancelled and the call raises with kind `timeout`; time spent waiting for an approval does not count |
+| `timeout` | Seconds of work, after which the turn is cancelled and the call raises with kind `timeout`. Time spent waiting for an approval does not count, and the work before an approval or a restart does |
 | `output_path` | Also write the answer to this workspace file |
 | `dedicated_worker`, `resource_profile` | Those of `run_subagent` |
 
 A run may name itself, every agent in its agent's `delegate_to`, and every other agent whose bot is in the run's room and that may reply to the requester there.
 So an agent with `workflow` can run the agents of its room without a `delegate_to` entry for them.
 The description of `start_workflow` lists the `delegate_to` agents and the agents configured for the room.
+That list is read from the configuration alone; whether a listed agent's bot is in the room and may reply to the requester is checked when the call starts.
+While the bot of a room's agent has not finished starting, for example right after a restart, the call is not refused: it waits and starts once the bot knows its rooms.
 
 A turn that fails raises `AgentError`, whose `kind` says how: `failed`, `cancelled`, `timeout`, `refused`, `interrupted`, or `indeterminate`.
 A turn that may not start, for example because the model name is unknown or the agent may not reply to the requester, is `refused` with the sentence `run_subagent` gives.
+`tools`, `skills` or `knowledge` without `system` is refused with `tools, skills and knowledge narrow a copy only together with system=.`
 Stopping one agent from the Sub-agents panel fails only that call with kind `cancelled`; the run goes on.
 
 While an agent's tool call waits for an approval, the agent's call shows `waiting`, and so does the run when no other call of it is working.
@@ -136,7 +139,7 @@ Time the run spends `waiting` is not charged to its [working time](#working-time
 A denied card, and one that expired after `tool_approval.timeout_days`, denies that one tool call, and the agent goes on with its turn.
 A `tool()` or `shell()` call of the script that needs an approval shows `waiting` in the same way, and a denial raises `ToolError` with kind `denied`.
 
-The agents of a run are not listed among the conversation's background jobs: the run reports them, and `get_workflow` shows each as a node with the IDs of its job and subagent.
+The agents of a run are not listed among the conversation's background jobs: the run reports them, and `get_workflow` shows each as a node whose `links` hold the IDs of its job and subagent and the agent and model it ran as.
 An agent keeps running when the attempt that asked for it ends, and the next attempt waits for the same turn instead of starting another.
 Cancelling the run stops its agents, and a call whose prompt or options changed stops the agent of the old call.
 `schema` is not available yet.
@@ -196,6 +199,7 @@ A run whose script had already returned its report ends with that report and get
 - An agent that cannot be continued, for example after three restarts in a row or because its session is gone, ends its call.
   When it had started no tool call, the call fails with kind `interrupted` and the next attempt runs it again as a new agent.
   When it had, the call is `indeterminate` and is never run again on its own.
+  A call whose record of tool calls cannot be read is `indeterminate` too.
 - An agent that was waiting for an approval when MindRoom stopped ends in the same two ways, and its card is closed.
   A tool call that was still waiting for its decision counts as not started.
 - A `tool()` or `shell()` call of the script that was waiting for an approval when MindRoom stopped never ran: the next attempt asks again with a new card.
