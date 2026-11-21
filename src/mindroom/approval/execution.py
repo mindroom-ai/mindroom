@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
@@ -55,6 +56,7 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation, with_stored_calls
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.turn_model import ModelScope, resolve_turn_model
+from mindroom.workers.named import reply_named_workers
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -511,7 +513,9 @@ class AgentApprovalExecution:
         # The resumed turn goes on from what its subagents had cost before the pause.
         subagent_cost = resumed_subagent_cost(persisted.metadata)
         try:
-            with helper_usage_context(scope_context):
+            async with AsyncExitStack() as stack:
+                stack.enter_context(helper_usage_context(scope_context))
+                await stack.enter_async_context(reply_named_workers(tool_context.turn_id))
                 if cli_call is not None:
                     expected_worker_target = tool_context.resolve_worker_target()
                     with tool_runtime_context(tool_context), receiving_subagent_cost(subagent_cost):
