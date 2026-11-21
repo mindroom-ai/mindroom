@@ -408,9 +408,17 @@ class TurnIngress:
         )
         if edited is None:
             return False
-        self._renew_queued_notice(room, *edited)
+        key, pending_event = edited
+        edited_facts = self.deps.ingress.classify(pending_event.event, room_id=room.room_id)
+        # Keep admission-time provenance; only the command's mention facts follow the edited content.
+        pending_event.facts = replace(
+            pending_event.facts,
+            mention_names=edited_facts.mention_names,
+            aimed_at_owner=edited_facts.aimed_at_owner,
+        )
+        self._renew_queued_notice(room, key, pending_event)
         # The edit settles here, so after a crash only the message replays: the journal keeps it as edited.
-        await self.deps.interactive_questions.revise_pending(original_event_id, edited[1].event.source["content"])
+        await self.deps.interactive_questions.revise_pending(original_event_id, pending_event.event.source["content"])
         return True
 
     def _renew_queued_notice(self, room: nio.MatrixRoom, key: CoalescingKey, pending_event: PendingEvent) -> None:

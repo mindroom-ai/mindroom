@@ -28,6 +28,7 @@ from mindroom.coalescing.batch import (
 )
 from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
+from mindroom.commands.parsing import CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -101,6 +102,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from mindroom.turns.dispatch import TurnDispatcher, _attachment_parts
+from mindroom.turns.facts import command_for
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -2231,6 +2233,75 @@ async def test_edit_cannot_renew_notice_after_its_queued_message_flushes(tmp_pat
         assert signal.pending_human_messages == 0
     finally:
         signal.finish_response_turn()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("before", "after", "body", "expected_type"),
+    [
+        (None, "agent", "@TestAgent !help", CommandType.HELP),
+        ("agent", None, "@TestAgent !help", None),
+        (None, "owner", "!help", None),
+        ("owner", None, "!help", CommandType.HELP),
+    ],
+    ids=["add-agent-pill", "drop-agent-pill", "add-owner-pill", "drop-owner-pill"],
+)
+async def test_queued_edit_uses_edited_mentions_to_classify_the_command(
+    tmp_path: Path,
+    before: str | None,
+    after: str | None,
+    body: str,
+    expected_type: CommandType | None,
+) -> None:
+    """A live flush classifies the command the same way as replay of the edited content."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    gate = bot._coalescing_gate
+    ingress = bot._turn_ingress
+    validator = ingress.deps.ingress
+    registry = entity_identity_registry(bot.config, bot.runtime_paths)
+    mention_ids = {"agent": bot.matrix_id.full_id, "owner": registry.current_id(ROUTER_AGENT_NAME).full_id}
+    message = _text_event(event_id="$queued", body="hello", thread_id="$thread")
+    if before is not None:
+        message.source["content"]["m.mentions"] = {"user_ids": [mention_ids[before]]}
+    new_content = {
+        "msgtype": "m.text",
+        "body": body,
+        "m.mentions": {"user_ids": [] if after is None else [mention_ids[after]]},
+    }
+    edit = _text_event(event_id="$edit", body=f"* {body}", server_timestamp=1001)
+    edit.source["content"].update(
+        {
+            "m.relates_to": {"rel_type": "m.replace", "event_id": message.event_id},
+            "m.new_content": new_content,
+        },
+    )
+    await _admit_pending_thread_event(bot, message.source)
+    facts = validator.classify(message, room_id=room.room_id)
+    pending = make_pending_event(message, room, source_kind=MESSAGE_SOURCE_KIND, facts=facts)
+    target = MessageTarget.resolve(room.room_id, "$thread", message.event_id)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    signal = runner.lifecycle_coordinator._get_or_create_queued_signal(target)
+    dispatch = AsyncMock(return_value=True)
+
+    signal.begin_response_turn()
+    try:
+        with patch.object(TurnDispatcher, "dispatch_turn", new=dispatch):
+            key = requester_coalescing_key(room.room_id, "$thread", message.sender)
+            await _admit_ready(gate, key, pending)
+            assert await ingress._edit_queued_message(room, edit, EventInfo.from_event(edit.source))
+            signal.finish_response_turn()
+            await gate.drain_all()
+    finally:
+        signal.finish_response_turn()
+
+    dispatch.assert_awaited_once()
+    assert dispatch.await_args is not None
+    turn = dispatch.await_args.args[0]
+    edited_facts = validator.classify_source(message.sender, {"content": new_content}, room_id=room.room_id)
+    expected = command_for(edited_facts, body)
+    assert (None if expected is None else expected.type) is expected_type
+    assert turn.command == expected
 
 
 @pytest.mark.asyncio
