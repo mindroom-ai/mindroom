@@ -851,8 +851,9 @@ class TestVoiceHandler:
         assert prepared.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
         assert ATTACHMENT_IDS_KEY not in prepared.source["content"]
 
-    def test_build_prepared_voice_message_keeps_composer_metadata(self) -> None:
-        """The transcript keeps the original submission marker and opening model choice."""
+    @pytest.mark.parametrize("is_edit", [False, True])
+    def test_build_prepared_voice_message_keeps_composer_metadata(self, is_edit: bool) -> None:
+        """Keep a voice pick only for the original event, even when dispatch rewrites its relation."""
         config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
         marker = {"id": "upload-1", "more": True}
         event = MagicMock(spec=nio.RoomMessageAudio)
@@ -872,6 +873,8 @@ class TestVoiceHandler:
                 THREAD_MODEL_CONTENT_KEY: pick,
             },
         }
+        if is_edit:
+            event.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$original"}
 
         prepared = voice_handler._build_prepared_voice_message(
             event,
@@ -879,9 +882,12 @@ class TestVoiceHandler:
             runtime_paths_for(config),
             text="🎤 hello",
             attachment_id=None,
-            thread_id=None,
+            thread_id="$root" if is_edit else None,
             raw_audio_fallback=False,
         )
 
         assert prepared.source["content"][SUBMISSION_CONTENT_KEY] == marker
-        assert prepared.source["content"][THREAD_MODEL_CONTENT_KEY] == pick
+        if is_edit:
+            assert THREAD_MODEL_CONTENT_KEY not in prepared.source["content"]
+        else:
+            assert prepared.source["content"][THREAD_MODEL_CONTENT_KEY] == pick

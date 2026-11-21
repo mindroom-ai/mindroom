@@ -20,13 +20,16 @@ from mindroom.coalescing.batch import requester_coalescing_key
 from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import CommandType, command_parser, get_command_help
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing, ReasoningConfig
-from mindroom.constants import AI_RUN_METADATA_KEY, FORK_CONTENT_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, FORK_CONTENT_KEY, ROUTE_EVENT_TYPE, ROUTER_AGENT_NAME
 from mindroom.custom_tools.thread_model import ThreadModelTools
+from mindroom.entity_resolution import entity_identity_registry
+from mindroom.journal_dispatch import _route_as_message
 from mindroom.llm.runs import RunStatus
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
 from mindroom.room_model_overrides import set_room_model_override
@@ -52,8 +55,9 @@ from tests.authorization_helpers import (
     isolated_membership_index,
     make_test_tool_runtime_context,
 )
-from tests.bot_helpers import _matrix_room, unique_room_send_responses
+from tests.bot_helpers import _matrix_room, make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
+    TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
     install_model_providers,
@@ -61,10 +65,12 @@ from tests.conftest import (
     make_matrix_client_mock,
     make_relation_lookup,
     make_visible_message,
+    parsed_route,
     runtime_paths_for,
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.runtime_fakes import ready_runtime
 from tests.test_hook_sender import _agent_bot, _dispatch_context
 from tests.test_model_selection_commands import OTHER, resolved_thread_models, restricted_config
 from tests.test_model_selection_scope import ROOM, USER
@@ -309,6 +315,12 @@ def test_copy_thread_model_override_copies_once_and_never_overwrites(tmp_path: P
     copy_thread_model_override(runtime_paths, THREAD_ID, fork_id)
     assert entity_models(fork_id) == {}
 
+    # A reset before the fork prepared only suppresses inheritance for the addressed entity.
+    early_reset = "$early-reset:localhost"
+    assert not clear_thread_model_override(runtime_paths, early_reset, entity_names=("test_agent",), config=config)
+    copy_thread_model_override(runtime_paths, THREAD_ID, early_reset)
+    assert entity_models(early_reset) == {"model:router": "large"}
+
 
 @pytest.mark.parametrize("damage", ["unreadable", "corrupt"])
 def test_copy_thread_model_override_leaves_a_store_it_cannot_read_alone(tmp_path: Path, damage: str) -> None:
@@ -464,13 +476,18 @@ def _conversation_event(bot: AgentBot, event_id: str, body: str, **content: obje
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("is_bridge", [False, True], ids=["human", "permitted-bridge"])
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_opening_pick_drives_the_reply_model_and_stays_in_its_thread(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    is_bridge: bool,
 ) -> None:
     """Use the picked provider on the first reply and next; reset and new roots use the inherited provider."""
     bot = _fork_bot(tmp_path)
+    if is_bridge:
+        # A configured bridge with a reply grant can also issue the typed !model reset below.
+        bot.config.bot_accounts = ["@user:localhost"]
     bot.config.agents["code"].access = ResponderAccessConfig(users=["@user:localhost"])
     bot.config.agents["code"].memory_backend = "none"
     bot.config.router.access = ResponderAccessConfig(users=["@someone_else:localhost"], current_room_members=False)
@@ -517,6 +534,101 @@ async def test_opening_pick_drives_the_reply_model_and_stays_in_its_thread(
     await dispatcher._prepare_dispatch(make_test_turn(room, root, root.sender))
     await send(_conversation_event(bot, "$after-reset", "Follow-up after reset", **relation))
     assert (len(picked.requests), len(inherited.requests)) == (2, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_name", ["helper", "crew"])
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_route_and_first_reply_use_the_opening_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_name: str,
+) -> None:
+    """The catalog poster routes on the pick, and the chosen agent or team uses it to answer."""
+    sender = "@user:localhost"
+    grant = ResponderAccessConfig(users=[sender])
+    paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                name: AgentConfig(display_name=name, access=grant, memory_backend="none") for name in ("helper", "docs")
+            },
+            teams={"crew": TeamConfig(display_name="Crew", role="Help", agents=["helper", "docs"], access=grant)},
+            models={name: ModelConfig(provider="openai", id=name) for name in ("default", "large")},
+        ),
+        paths,
+    )
+    config.router.access = grant
+    runtime = ready_runtime(config, paths)
+    registry = entity_identity_registry(config, paths)
+    user_ids = tuple(registry.current_id(name).full_id for name in (ROUTER_AGENT_NAME, "helper", "docs", "crew"))
+    room = _matrix_room(ROOM_ID, user_ids[0], user_ids=(*user_ids, sender))
+
+    def make_bot(name: str, device_id: str) -> tuple[AgentBot, AsyncMock]:
+        bot = make_test_agent_bot(
+            AgentMatrixUser(
+                agent_name=name,
+                display_name=name,
+                user_id=registry.current_id(name).full_id,
+                password=TEST_PASSWORD,
+            ),
+            orchestrator=runtime,
+        )
+        client = _join_model_test_bot(bot, room, device_id)
+        unique_room_send_responses(client, prefix=f"${name}-sent")
+        return bot, client
+
+    router, catalog = make_bot(ROUTER_AGENT_NAME, "CATALOG")
+    responder, client = make_bot(target_name, "RESPONDER")
+    selection = answer(json.dumps({"entity_name": target_name, "reasoning": "Matches the prompt"}))
+    picked = ScriptedModel([selection, answer("Picked response")])
+    inherited = ScriptedModel([selection, answer("Wrong response")])
+    install_model_providers(monkeypatch, {"large": picked, "default": inherited})
+    root = _conversation_event(
+        router,
+        "$opening:localhost",
+        "Please advise",
+        **{
+            THREAD_MODEL_CONTENT_KEY: {
+                "version": 1,
+                "runtime_user_id": catalog.user_id,
+                "runtime_device_id": "CATALOG",
+                "model": "large",
+            },
+        },
+    )
+    root.source["content"].pop("m.mentions")
+    await dispatch_test_turn(router._turn_dispatcher, room, root, sender)
+    await drain_coalescing(router)
+    assert (len(picked.requests), len(inherited.requests)) == (1, 0)
+    (route,) = [
+        call.kwargs["content"]
+        for call in catalog.room_send.await_args_list
+        if call.kwargs["message_type"] == ROUTE_EVENT_TYPE
+    ]
+    assert route[ROUTE_EVENT_TYPE]["entity"] == client.user_id
+
+    # Deliver only the routed handoff: the responder must not need its own opening-event dispatch.
+    handoff = _route_as_message(
+        parsed_route(
+            route,
+            sender=catalog.user_id,
+            event_id="$routed:localhost",
+            room_id=ROOM_ID,
+            origin_server_ts=root.server_timestamp + 1,
+        ),
+    )
+    await seed_hydrated_conversation(responder, room_id=ROOM_ID, thread_id=root.event_id)
+    deps = responder._turn_dispatcher.deps
+    await dispatch_test_turn(
+        responder._turn_dispatcher,
+        room,
+        handoff,
+        facts=deps.ingress.classify(handoff, room_id=ROOM_ID),
+    )
+    await drain_coalescing(responder)
+    assert (len(picked.requests), len(inherited.requests)) == (2, 0)
+    assert any("Picked response" in send.kwargs["content"].get("body", "") for send in client.room_send.await_args_list)
 
 
 @pytest.mark.asyncio
