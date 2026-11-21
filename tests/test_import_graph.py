@@ -394,7 +394,15 @@ print(json.dumps({"exports": module.__all__, "loaded": loaded}))
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {
-        "exports": ["open_worker_state_root", "read_worker_identity", "remove_directory_tree_at"],
+        "exports": [
+            "open_worker_state_root",
+            "open_workers_root",
+            "read_worker_identity",
+            "read_worker_marker",
+            "remove_directory_tree_at",
+            "require_worker_identity",
+            "write_worker_marker",
+        ],
         "loaded": ["mindroom.workers.worker_retirement"],
     }
 
