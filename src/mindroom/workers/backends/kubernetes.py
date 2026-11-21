@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.credentials.manager import get_runtime_credentials_manager, sync_shared_credentials_to_worker
+from mindroom.path_confinement import open_directory_within_root
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import (
     pinned_worker_kind,
@@ -554,11 +555,13 @@ class KubernetesWorkerBackend:
             retiring = state.retirement_key() == worker_key
         if retiring:
             self._retire_worker_locked(worker_key)
-        self._resources.write_startup_manifest(
-            worker_key=worker_key,
-            state_subpath=state_subpath,
-            tool_validation_snapshot=launch.tool_validation_snapshot,
-        )
+        self.storage_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with open_directory_within_root(self.storage_root, state_subpath, create=True, mode=0o700):
+            self._resources.write_startup_manifest(
+                worker_key=worker_key,
+                state_subpath=state_subpath,
+                tool_validation_snapshot=launch.tool_validation_snapshot,
+            )
 
     def _require_retirement_deployment(self, worker_id: str, worker_key: str, state_subpath: str) -> None:
         """Refuse a retirement whose Deployment belongs to another worker or state."""

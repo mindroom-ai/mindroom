@@ -4813,6 +4813,32 @@ def test_kubernetes_maintenance_removes_pinned_state_after_a_failed_auth_secret(
     assert not root.exists()
 
 
+def test_first_kubernetes_subagent_creates_private_state_before_credential_setup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An early manifest must not create worker state with the process's usual public directory mode."""
+    backend, _apps, _core = _named_backend(tmp_path)
+    backend.named_workers_max = 0
+    key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32)
+    root = backend.storage_root / backend._state_subpath(key)
+    credentials_manager = kubernetes_backend_module.get_runtime_credentials_manager
+
+    def check_manifest_first(paths: RuntimePaths) -> object:
+        assert sandbox_startup_manifest_path(root).is_file()
+        assert root.parent.stat().st_mode & 0o777 == 0o700
+        assert root.stat().st_mode & 0o777 == 0o700
+        return credentials_manager(paths)
+
+    monkeypatch.setattr(kubernetes_backend_module, "get_runtime_credentials_manager", check_manifest_first)
+    assert not root.parent.exists()
+    previous_umask = os.umask(0o022)
+    try:
+        backend.ensure_worker(_spec(key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    finally:
+        os.umask(previous_umask)
+
+
 @pytest.mark.parametrize("leftovers", ["legacy-credentials", "partial-manifest", "interrupted-retirement"])
 def test_kubernetes_pinned_start_recovers_without_a_manifest(
     tmp_path: Path,
