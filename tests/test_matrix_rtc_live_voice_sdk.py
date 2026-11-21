@@ -541,19 +541,19 @@ async def test_live_sdk_recovers_content_close_with_history_and_drops_old_delega
         await asyncio.wait_for(provider.connected_again.wait(), 2)
         second = provider.sockets[1]
         start = await second.next_event("session.start")
-        assert bridge._session is agent_session
         assert start["session"]["input"] == [
             {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Is the blue kite ready?"}]},
             {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "I can check."}]},
         ]
         assert cancelled_at_close == [True]
-        await asyncio.wait_for(cancelled.wait(), 2)
 
         # A fresh delegation can reuse the ID, but neither old commentary nor a second greeting may be queued.
         second.feed(delegation)
         reply = await second.next_event("session.commentary.append")
         assert reply["delegation_id"] == "check-kite"
         assert reply["content"] == "The new request is complete."
+        assert bridge._session is agent_session
+        assert cast("Agent", bridge._live_agent).duplex_session is provider_session
         assert terminated == []
     finally:
         await asyncio.wait_for(bridge.aclose(), 3)
@@ -562,14 +562,25 @@ async def test_live_sdk_recovers_content_close_with_history_and_drops_old_delega
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("elapsed", "retryable"),
+    [
+        pytest.param(None, True, id="first-close"),
+        pytest.param(299, False, id="within-window"),
+        pytest.param(301, True, id="outside-window"),
+    ],
+)
 async def test_live_sdk_ends_content_close_when_commentary_is_still_queued(
     provider: _ProviderHTTP,
     monkeypatch: pytest.MonkeyPatch,
+    elapsed: int | None,
+    retryable: bool,
 ) -> None:
-    """A blocked first socket write must not leave the rest of the old reply on another socket."""
+    """Never replay queued commentary or let the retryable fallback override the repeat cap."""
+    now = 0.0
+    monkeypatch.setattr(live_voice_agent, "time", SimpleNamespace(time=time.time, monotonic=lambda: now))
     attempted: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     release_write = asyncio.Event()
-    send = provider.socket.send_str
 
     async def blocked_send(data: str) -> None:
         event = json.loads(data)
@@ -578,8 +589,8 @@ async def test_live_sdk_ends_content_close_when_commentary_is_still_queued(
             await release_write.wait()
         await send(data)
 
-    monkeypatch.setattr(provider.socket, "send_str", blocked_send)
     terminated: list[bool] = []
+    notices: list[str] = []
     options = LiveVoiceAgentOptions(
         get_instructions=AsyncMock(return_value="Delegate requests."),
         model="gpt-live-1",
@@ -587,28 +598,46 @@ async def test_live_sdk_ends_content_close_when_commentary_is_still_queued(
         voice="marin",
         respond=AsyncMock(return_value=CallAgentResponse("x" * 480 + "second chunk")),
         on_session_terminated=terminated.append,
+        on_session_error=notices.append,
     )
     bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
     bridge._room = SimpleNamespace(disconnect=AsyncMock())
     with capture_logs() as logs:
         try:
             await bridge.start_agent(options)
-            await provider.socket.next_event("session.start")
-            provider.socket.feed(
+            socket = provider.socket
+            await socket.next_event("session.start")
+            if elapsed is not None:
+                socket.content_close()
+                await asyncio.wait_for(provider.connected_again.wait(), 2)
+                socket = provider.sockets[1]
+                await socket.next_event("session.start")
+                now += elapsed
+
+            send = socket.send_str
+            monkeypatch.setattr(socket, "send_str", blocked_send)
+            socket.feed(
                 {"type": "session.delegation.created", "delegation": {"id": "old", "target": "client"}},
             )
             first = await asyncio.wait_for(attempted.get(), 2)
             assert first["content"] == "x" * 480
-            provider.socket.content_close()
-            await asyncio.wait_for(provider.socket.closed_event.wait(), 2)
-            assert terminated == [True]
+            socket.content_close()
+            await asyncio.wait_for(socket.closed_event.wait(), 2)
+            assert terminated == [retryable]
         finally:
             release_write.set()
             await asyncio.wait_for(bridge.aclose(), 3)
 
-    assert len(provider.sockets) == 1
-    (close,) = [entry for entry in logs if entry["event"] == "call_live_session_closed"]
-    assert (close["reason"], close["action"]) == ("content", "ending")
+    assert len(provider.sockets) == (1 if elapsed is None else 2)
+    closes = [entry for entry in logs if entry["event"] == "call_live_session_closed"]
+    assert [close["action"] for close in closes] == (["ending"] if elapsed is None else ["recovering", "ending"])
+    assert closes[-1]["reason"] == "content"
+    assert closes[-1]["queued_commentary_fallback"] is retryable
+    if retryable:
+        assert notices == []
+    else:
+        (notice,) = notices
+        assert "moderation closed the voice session again" in notice
 
 
 @pytest.mark.asyncio

@@ -288,11 +288,14 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             ending = self._provider_close_task is not None or self._exiting
             delegations = self._delegations
             retryable = True
-            # The SDK's send queue survives reconnect; fall back to a fresh call when it holds old commentary.
-            if not ending and reason == "content" and (delegations is None or not delegations.has_unsent_commentary):
+            queued_commentary_fallback = False
+            if not ending and reason == "content":
                 now = time.monotonic()
                 previous = self._last_recovered_content_close
-                if previous is None or now - previous >= _CONTENT_CLOSE_RECOVERY_WINDOW_SECONDS:
+                retryable = previous is None or now - previous >= _CONTENT_CLOSE_RECOVERY_WINDOW_SECONDS
+                # The SDK queue survives reconnect. Fall back to a fresh call only if the repeat cap allows it.
+                queued_commentary_fallback = retryable and delegations is not None and delegations.has_unsent_commentary
+                if retryable and not queued_commentary_fallback:
                     logger.info("call_live_session_closed", reason=reason, action="recovering")
                     self._last_recovered_content_close = now
                     # Fence off the moderated delegation now; the SDK reconnects with its own history.
@@ -303,9 +306,13 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
                         self._on_recovery_timeout,
                     )
                     return
-                retryable = False
 
-            logger.info("call_live_session_closed", reason=reason, action="ending")
+            logger.info(
+                "call_live_session_closed",
+                reason=reason,
+                action="ending",
+                queued_commentary_fallback=queued_commentary_fallback,
+            )
             if not ending:
                 self._end_provider_session(retryable=retryable)
 
