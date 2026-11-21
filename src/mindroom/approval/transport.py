@@ -366,10 +366,8 @@ class ApprovalMatrixTransport:
         thread_id: str | None,
         reason: str,
     ) -> bool:
-        """Send one approval notice through the card's sender while it runs, else through the room's poster."""
-        cards = self.cards()
-        card = await cards.approvals.approval_card(room_id=room_id, card_event_id=approval_event_id) if cards else None
-        bot = (self.sender_bot(card.sender_principal_id, room_id) if card else None) or self.room_poster(room_id)
+        """Send one approval notice through the room's poster."""
+        bot = self.room_poster(room_id)
         if bot is None or bot.client is None:
             return False
         content = build_message_content(
