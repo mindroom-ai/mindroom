@@ -701,17 +701,20 @@ class WorkflowEngine:
         await self._settle_agent(run, node, epoch)
         await self._notify(node.run_id)
 
-    async def _settle_agent(self, run: WorkflowRun, node: WorkflowNode, epoch: int) -> None:
+    async def _settle_agent(self, run: WorkflowRun, node: WorkflowNode, epoch: int, *, block: bool = True) -> None:
         """Settle an agent node from its job, once that has ended, for the attempt that began with *epoch*.
 
         The turn's usage and its answer are saved before the job's outcome is acknowledged, so a primary that dies
-        in between reads the same job again. A run that moved on meanwhile reads the job itself.
+        in between reads the same job again. A run that moved on meanwhile reads the job itself. Without *block*,
+        for a caller that holds the run's lock, a job that cannot be read now raises `AgentNotReadyError`.
         """
         assert node.handle is not None
         runtime = cast("AgentRuntime", self.agents())
         try:
-            waits = partial(self._node_waits, node, epoch)
+            waits = partial(self._node_waits, node, epoch) if block else None
             (kind, text), usage, claim = await await_child(run, node, runtime, on_waiting=waits)
+        except AgentNotReadyError:
+            raise
         except Exception as exc:
             logger.exception("workflow_agent_outcome_unreadable", run_id=node.run_id, key=node.key)
             # What the turn did is unknown, so its call is not one to run again without being asked to.
@@ -774,16 +777,24 @@ class WorkflowEngine:
             # ended, and the call must not attach to a job that may yet end without having done anything.
             raise ScriptRuntimeUnavailableError(_NOT_CONTINUED_YET)
         jobs = runtime.jobs.retained_jobs() if runtime is not None else ()
+        settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
         if runtime is None or any(job.job_id == job_id and job.status not in TERMINAL_STATUSES for job in jobs):
             if not stop:
                 return True
             if runtime is not None:
                 await runtime.jobs.request_cancel(job_id)
             cancelled = {"state": WorkflowNodeState.CANCELLED, "error": {"kind": "cancelled", "message": _RUN_ENDED}}
-            settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch, **cancelled)
-            await asyncio.to_thread(settle)
-        else:
-            await self._settle_agent(run, node, epoch)
+            await asyncio.to_thread(partial(settle, **cancelled))
+            return False
+        try:
+            await self._settle_agent(run, node, epoch, block=False)
+        except AgentNotReadyError as exc:
+            if not stop:
+                # The lock is not held while access resolves: the script's SDK asks again, and a Stop gets in.
+                raise ScriptRuntimeUnavailableError(str(exc)) from exc
+            # A Stop waits for nobody's access: the turn it may not read may have done anything.
+            state, _, error = _indeterminate(node)
+            await asyncio.to_thread(partial(settle, state=state, error=error))
         return False
 
     async def _restate(self, run_id: str) -> None:

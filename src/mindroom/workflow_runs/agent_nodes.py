@@ -52,6 +52,7 @@ _OPTIONS = (
     }
 )
 _NARROWING = frozenset({"tools", "skills", "knowledge"})
+_NOT_READABLE_YET = "The agent of this call cannot be read yet. Try again in a moment."
 _NARROWS_WITH_SYSTEM = "tools, skills and knowledge narrow a copy only together with system=."
 _INTERRUPTED = "The agent was stopped before it started a tool call. A resume runs it again."
 _NO_ANSWER = "The agent's turn left no record of how it ended."
@@ -211,18 +212,19 @@ async def launch_child(
     return node
 
 
-async def await_child(
+async def await_child(  # noqa: C901
     run: WorkflowRun,
     node: WorkflowNode,
     runtime: AgentRuntime,
     *,
-    on_waiting: Callable[[str | None, float | None], Awaitable[object]],
+    on_waiting: Callable[[str | None, float | None], Awaitable[object]] | None,
 ) -> tuple[ChildOutcome, dict[str, object] | None, JobClaim | None]:
     """Wait for the job of *node* to end; return how the turn ended, what it used, and the claim on the job's outcome.
 
     The wait is on the saved job ID and starts nothing. *on_waiting* is told when the job starts to wait for a
     person's approval, and with None when it works again; that time is not the turn's. After *timeout* seconds of
-    work the job is cancelled, and the wait goes on until it has ended.
+    work the job is cancelled, and the wait goes on until it has ended. Without *on_waiting* nothing is waited for:
+    a job whose outcome is not this reader's to take now raises `AgentNotReadyError`.
     """
     assert node.handle is not None
     jobs, job_id = runtime.jobs, node.handle.ref
@@ -239,16 +241,20 @@ async def await_child(
     while True:
         since = loop.time()
         try:
-            waited = await wait(approval_timeout=None if waiting else 0, work_timeout=0 if waiting else left)
+            times = {"approval_timeout": None if waiting else 0, "work_timeout": 0 if waiting else left}
+            waited = await wait(**times) if on_waiting is not None else await wait(timeout=0)
         except JobAccessError as exc:
             # A read that is denied says nothing of what the turn did, so its call is not one to run again.
             return ("indeterminate" if handle.dispatched else "denied", str(exc)), None, None
         job, claim = waited.job, waited.claim
         if left is not None and not waiting:
             left -= loop.time() - since
-        if job.status in TERMINAL_STATUSES and (claim is not None or job.consumed):
-            # The outcome is this wait's to read: a job that ended while its requester's access is unresolved is not.
+        if job.status in TERMINAL_STATUSES and claim is not None:
+            # The outcome is this wait's to read, by the access of now: that it was read before grants nothing, and
+            # a job that ended while its requester's access is unresolved is nobody's yet.
             break
+        if on_waiting is None:
+            raise AgentNotReadyError(_NOT_READABLE_YET)
         if (job.status == "awaiting_approval") != waiting:
             waiting = not waiting
             await on_waiting("approval" if waiting else None, left)

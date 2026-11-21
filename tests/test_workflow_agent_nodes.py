@@ -694,6 +694,47 @@ async def test_agent_whose_answer_may_not_be_read_is_not_run_again_once_it_may(s
     assert (blocked.value.kind, _node(stack).generation, stack.counting_tool.lines) == ("indeterminate", 1, ["a"])
 
 
+async def _ended_between_attempts(stack: WorkflowStack) -> None:
+    """Let the call's turn end while no attempt waits for it, have its owner collect the job, and unsettle the access."""
+    gate = _hanging(stack)
+    await stack.submit("@0", "agent", _PROMPT)
+    await _replayed(stack)
+    gate.set()
+    job_id, owner = stack.node_job("@0").job_id, stack.context.execution_identity
+    await wait_for_status(stack.jobs, job_id, "completed")
+    collected = await stack.jobs.wait(job_id, owner=owner, depth=0)
+    await stack.jobs.acknowledge_wait(job_id, collected.claim)
+    assert stack.node_job("@0").consumed
+    stack.admission = "pending"
+
+
+@pytest.mark.asyncio
+async def test_answer_that_was_collected_before_is_read_only_with_the_access_of_now(stack: WorkflowStack) -> None:
+    """That somebody read the job once grants nothing: the replay is asked to come back until the access is resolved."""
+    await _ended_between_attempts(stack)
+
+    with pytest.raises(ScriptRuntimeUnavailableError):
+        await stack.result("@0", "agent", _PROMPT)
+
+    assert (_node(stack).state, _node(stack).result) == (WorkflowNodeState.RUNNING, None)
+    stack.admission = "allowed"
+    assert await stack.result("@0", "agent", _PROMPT) == "late"
+
+
+@pytest.mark.asyncio
+async def test_stop_of_a_run_whose_ended_agent_cannot_be_read_ends_it_without_the_answer(stack: WorkflowStack) -> None:
+    """A Stop waits for nobody's access: the call it cannot read may have run, and the run ends at once."""
+    await _ended_between_attempts(stack)
+    with pytest.raises(ScriptRuntimeUnavailableError):
+        await stack.result("@0", "agent", _PROMPT)
+
+    await asyncio.wait_for(stack.engine.cancel(stack.run_id, reason="Stopped."), 5)
+
+    node = _node(stack)
+    assert (node.state, node.result) == (WorkflowNodeState.INDETERMINATE, None)
+    assert stack.store.get_run(stack.run_id).state is WorkflowRunState.CANCELLED
+
+
 @pytest.mark.asyncio
 async def test_agents_of_a_run_that_a_subagent_started_are_one_level_below_it(stack: WorkflowStack) -> None:
     """The run keeps the depth of the agent that started it, so the limit on nested subagents counts its agents too."""
