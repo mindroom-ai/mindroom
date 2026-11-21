@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 import threading
 import time
-from contextlib import suppress
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -65,11 +63,9 @@ from mindroom.workers.models import (
 from mindroom.workers.progress import WorkerStartReporter, WorkerWarmupProgress
 from mindroom.workers.worker_retirement import (
     open_worker_state_root,
-    open_workers_root,
     read_worker_identity,
-    read_worker_marker,
     require_worker_identity,
-    write_worker_marker,
+    worker_state_directories,
 )
 
 from . import kubernetes_resources as resources
@@ -98,9 +94,6 @@ _READY_WORKER_REVALIDATE_SECONDS = 300.0
 _PROCESS_STARTED_AT = time.time()
 # How long a worker directory must have had no Deployment before it counts as left behind by a failed removal.
 _ORPHANED_STATE_GRACE_SECONDS = 300.0
-# What follows a worker directory's name in the name of the file beside it that says the directory is being removed.
-# The file holds the worker's key, since a removal cut short may have deleted the manifest that names it.
-_RETIREMENT_MARKER_SUFFIX = ".retiring"
 # Where a worker's startup manifest names the worker key its files belong to.
 _STATE_IDENTITY_PATH = (".runtime", "startup_manifest.json")
 _STATE_IDENTITY_FIELD_PATH = ("runtime_paths", "process_env", SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"])
@@ -516,24 +509,16 @@ class KubernetesWorkerBackend:
         if not state_parts:
             msg = f"Kubernetes worker state path is invalid for retirement: {state_subpath!r}."
             raise WorkerBackendError(msg)
-        marker = state_parts[-1] + _RETIREMENT_MARKER_SUFFIX
         try:
             self._require_retirement_deployment(worker_id, worker_key, state_subpath)
-            with open_worker_state_root(
-                self.storage_root,
-                workers_subpath=state_parts[:-1],
-                worker_name=state_parts[-1],
-            ) as state:
-                workers_fd = state.workers_fd
-                # A marker only bypasses the identity check if the earlier removal was for this exact key.
-                resumed = workers_fd is not None and read_worker_marker(workers_fd, marker) == worker_key
-                if state.worker_fd is not None and not resumed:
-                    require_worker_identity(
-                        state.worker_fd,
-                        worker_key,
-                        identity_path=_STATE_IDENTITY_PATH,
-                        identity_field_path=_STATE_IDENTITY_FIELD_PATH,
-                    )
+            with (
+                open_worker_state_root(
+                    self.storage_root,
+                    workers_subpath=state_parts[:-1],
+                    worker_name=state_parts[-1],
+                ) as state,
+                state.retire(worker_key, _STATE_IDENTITY_PATH, _STATE_IDENTITY_FIELD_PATH),
+            ):
                 self._invalidate_ready_worker(worker_key)
                 self._resources.delete_service(worker_id)
                 self._resources.delete_secret(worker_id)
@@ -543,13 +528,6 @@ class KubernetesWorkerBackend:
                     worker_id,
                     timeout_seconds=self.config.ready_timeout_seconds,
                 )
-                if state.exists and workers_fd is not None:
-                    # Kept until the files are gone, so a removal that fails or dies partway is finished later.
-                    write_worker_marker(workers_fd, marker, worker_key)
-                state.remove()
-                if workers_fd is not None:
-                    with suppress(FileNotFoundError):
-                        os.unlink(marker, dir_fd=workers_fd)
         except WorkerBackendError:
             raise
         except (OSError, RecursionError, TypeError, ValueError, self._resources.api_exception) as exc:
@@ -573,14 +551,7 @@ class KubernetesWorkerBackend:
                     identity_field_path=_STATE_IDENTITY_FIELD_PATH,
                     allow_missing=True,
                 )
-            retiring = (
-                state.workers_fd is not None
-                and read_worker_marker(
-                    state.workers_fd,
-                    name + _RETIREMENT_MARKER_SUFFIX,
-                )
-                == worker_key
-            )
+            retiring = state.retirement_key() == worker_key
         if retiring:
             self._retire_worker_locked(worker_key)
         self._resources.write_startup_manifest(
@@ -690,7 +661,7 @@ class KubernetesWorkerBackend:
         a subagent's or a named worker's key. Keep it while any dependent might still use it.
         """
         prefix_parts = tuple(part for part in self.config.storage_subpath_prefix.strip().split("/") if part)
-        directories = self._worker_directories_and_prune_finished_markers(prefix_parts)
+        directories = worker_state_directories(self.storage_root, prefix_parts)
         deployed = {
             (deployment.metadata.annotations or {}).get(resources.ANNOTATION_STATE_SUBPATH, "").rpartition("/")[2]
             for deployment in deployments
@@ -724,23 +695,6 @@ class KubernetesWorkerBackend:
             finally:
                 worker_lock.release()
 
-    def _worker_directories_and_prune_finished_markers(self, prefix: tuple[str, ...]) -> set[str]:
-        """List worker trees and remove regular markers whose trees are already gone."""
-        try:
-            with open_workers_root(self.storage_root, prefix) as workers_fd, os.scandir(workers_fd) as entries:
-                by_name = {entry.name: entry for entry in entries}
-                for name, entry in by_name.items():
-                    if (
-                        name.endswith(_RETIREMENT_MARKER_SUFFIX)
-                        and name.removesuffix(_RETIREMENT_MARKER_SUFFIX) not in by_name
-                        and entry.is_file(follow_symlinks=False)
-                    ):
-                        with suppress(OSError):
-                            os.unlink(name, dir_fd=workers_fd)
-                return {name for name, entry in by_name.items() if entry.is_dir(follow_symlinks=False)}
-        except (OSError, ValueError):
-            return set()
-
     def _left_behind_worker_key(self, prefix_parts: tuple[str, ...], name: str) -> str | None:
         """Return the key of the worker whose removal left the directory ``name``, or None for any other directory.
 
@@ -749,9 +703,9 @@ class KubernetesWorkerBackend:
         """
         try:
             with open_worker_state_root(self.storage_root, workers_subpath=prefix_parts, worker_name=name) as state:
-                if state.worker_fd is None or state.workers_fd is None:
+                if state.worker_fd is None:
                     return None
-                worker_key = read_worker_marker(state.workers_fd, name + _RETIREMENT_MARKER_SUFFIX)
+                worker_key = state.retirement_key()
                 if worker_key is None:
                     worker_key = read_worker_identity(
                         state.worker_fd,

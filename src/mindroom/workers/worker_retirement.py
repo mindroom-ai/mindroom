@@ -22,6 +22,7 @@ __all__ = [
     "read_worker_marker",
     "remove_directory_tree_at",
     "require_worker_identity",
+    "worker_state_directories",
     "write_worker_marker",
 ]
 
@@ -29,6 +30,7 @@ __all__ = [
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _IDENTITY_FILE_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _MAX_IDENTITY_METADATA_BYTES = 4 * 1024 * 1024
+_RETIREMENT_MARKER_SUFFIX = ".retiring"
 
 
 def _validate_segment(segment: str) -> None:
@@ -207,6 +209,26 @@ class _BoundWorkerStateRoot:
         """Return whether the validated worker tree is present."""
         return self.worker_fd is not None
 
+    def retirement_key(self) -> str | None:
+        """Read the key from the unfinished retirement marker, if any."""
+        if self.workers_fd is None:
+            return None
+        return read_worker_marker(self.workers_fd, self.worker_name + _RETIREMENT_MARKER_SUFFIX)
+
+    @contextmanager
+    def retire(self, worker_key: str, path: tuple[str, ...], field_path: tuple[str, ...]) -> Iterator[None]:
+        """Validate ownership before backend cleanup, then mark, remove, and unmark the tree."""
+        if self.retirement_key() != worker_key and self.worker_fd is not None:
+            require_worker_identity(self.worker_fd, worker_key, identity_path=path, identity_field_path=field_path)
+        yield
+        marker = self.worker_name + _RETIREMENT_MARKER_SUFFIX
+        if self.exists and self.workers_fd is not None:
+            write_worker_marker(self.workers_fd, marker, worker_key)
+        self.remove()
+        if self.workers_fd is not None:
+            with suppress(FileNotFoundError):
+                os.unlink(marker, dir_fd=self.workers_fd)
+
     def remove(self) -> None:
         """Remove the validated worker tree or confirm that it is still absent."""
         if self.worker_fd is None:
@@ -264,6 +286,24 @@ def open_workers_root(trusted_root: Path, workers_subpath: tuple[str, ...]) -> I
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def worker_state_directories(trusted_root: Path, workers_subpath: tuple[str, ...]) -> set[str]:
+    """List worker trees and remove regular retirement markers whose trees are already gone."""
+    try:
+        with open_workers_root(trusted_root, workers_subpath) as workers_fd, os.scandir(workers_fd) as entries:
+            by_name = {entry.name: entry for entry in entries}
+            for name, entry in by_name.items():
+                if (
+                    name.endswith(_RETIREMENT_MARKER_SUFFIX)
+                    and name.removesuffix(_RETIREMENT_MARKER_SUFFIX) not in by_name
+                    and entry.is_file(follow_symlinks=False)
+                ):
+                    with suppress(OSError):
+                        os.unlink(name, dir_fd=workers_fd)
+            return {name for name, entry in by_name.items() if entry.is_dir(follow_symlinks=False)}
+    except (OSError, ValueError):
+        return set()
 
 
 @contextmanager

@@ -401,6 +401,7 @@ print(json.dumps({"exports": module.__all__, "loaded": loaded}))
             "read_worker_marker",
             "remove_directory_tree_at",
             "require_worker_identity",
+            "worker_state_directories",
             "write_worker_marker",
         ],
         "loaded": ["mindroom.workers.worker_retirement"],
