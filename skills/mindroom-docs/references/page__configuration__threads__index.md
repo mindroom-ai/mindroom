@@ -6,17 +6,17 @@ See also [Routing & Responder Selection](https://docs.mindroom.chat/configuratio
 ## Thread Mode Resolution
 
 Each agent's `thread_mode` and `room_thread_modes` fields (see [Agent Configuration](https://docs.mindroom.chat/configuration/agents/)) choose between Matrix threads and one continuous conversation per room.
-A room override set with [`!thread_mode`](#thread_mode) takes precedence for every agent, team, and the router in that room.
+A room override set with [`!thread_mode`](#thread_mode) takes precedence for every agent and team in that room, and for routing there.
 Without one, an agent uses the `room_thread_modes` entry matching the current room by Matrix room ID, room key, or a managed room's full alias, and otherwise its `thread_mode`.
 
 A team uses its members' mode for the room when all members agree, and `thread` when they differ.
-The router uses the mode shared by all agents relevant to the room, including agents that join through `teams.<name>.rooms`, and `thread` when they differ.
+Routing uses the mode shared by all agents relevant to the room, including agents that join through `teams.<name>.rooms`, and `thread` when they differ.
 
 MindRoom publishes each managed room's effective reply placement in room state event `io.mindroom.thread_mode`, with an empty state key and content `{"mode": "room"}`, `{"mode": "thread"}`, or `{"mode": "mixed"}`.
 `room` means all joined responding agents and teams use the main timeline, `thread` means all use threads, and `mixed` means both modes are present.
 Rooms without joined responders are left unchanged.
 When a room has configured responders, other visiting agents and teams do not affect its mode.
-The router updates this state during setup and reconciliation, after configuration or thread mode override changes, when it joins a room by any path, including an invite, and when responders join or leave, so clients can choose the appropriate conversation view.
+One MindRoom account in the room, the one with the highest power level there, updates this state during setup and reconciliation, after configuration or thread mode override changes, when it joins the room, and when responders join or leave, so clients can choose the appropriate conversation view.
 MindRoom writes the event only when its current value differs from the effective mode.
 Setting or resetting `!thread_mode` reconciles the resulting mode; `show` only reads the override.
 Unavailable room-state permissions do not prevent setup or replies.
@@ -38,7 +38,7 @@ Show or switch how future agent replies are grouped in the current Matrix room.
 Room-mode conversations are not included in [thread exports](https://docs.mindroom.chat/thread-exports/).
 `!thread_mode thread` uses Matrix threads for separate conversations in this room.
 `!thread_mode reset` (also `clear`) removes the room override so agents use their configured `thread_mode` and `room_thread_modes` again.
-When the router cannot update `io.mindroom.thread_mode`, as without permission to send state events, the command still saves the change and answers with ⚠️ that clients may still show the old thread mode; running it again retries.
+When no MindRoom account in the room may send state events, the command changes nothing and answers `I need moderator rights in this room to change the thread mode.`
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
 [Plugin routes](https://docs.mindroom.chat/plugins/#http-routes) change the override as this command does, for room admins only.
 The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it works when config is static or read-only.
@@ -48,9 +48,8 @@ The override is stored in MindRoom's runtime state under `mindroom_data/tracking
 A room's reply mode decides whether a message that mentions no agent or team can start a conversation.
 Set it with `rooms.<key>.reply_mode` (see [Room policy](https://docs.mindroom.chat/rooms/#room-policy)) or with [`!reply_mode`](#reply_mode).
 
-- `auto` (default): the router or the room's only agent or team answers such a message, as described in [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/#how-routing-works) and [Multi-Human Thread Protection](#multi-human-thread-protection).
-- `mentions`: neither the router nor any agent or team answers such a message, unless it is in a thread an agent or team already replied in or is still answering, where the rules below apply as in `auto`.
-  The router still shows the transcript, or the fallback text, of such a voice message ([router echo](https://docs.mindroom.chat/voice/#voice-message-processing)) unless `voice.visible_router_echo` is `false`.
+- `auto` (default): the room's only agent or team, or the one routing picks, answers such a message, as described in [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/#how-routing-works) and [Multi-Human Thread Protection](#multi-human-thread-protection).
+- `mentions`: no agent or team answers such a message, and none is routed, unless it is in a thread an agent or team already replied in or is still answering, where the rules below apply as in `auto`.
 
 ```yaml
 rooms:
@@ -82,11 +81,10 @@ Only Matrix room admins can set or reset the override; others get `Room admin on
 [Plugin routes](https://docs.mindroom.chat/plugins/#http-routes) change the override as this command does, for room admins only.
 The override is the room's `reply_mode` setting: the `io.mindroom.room_settings` state event with state key `reply_mode` and content `{"value": "auto"}` or `{"value": "mentions"}`, where `{}` clears it.
 MindRoom Chat sets it from the room settings dialog, and any client may send the event; it falls under the room's `state_default` power level (normally 50), so moderators and admins can change it there.
-The router writes it for the command, so the command answers ❌ when the room does not let the router send that state.
+An agent or team in the room answers `!reply_mode`, so the command works in any room, such as a direct-message room with one agent; it answers that it needs moderator rights when the room lets no MindRoom account send that state.
 It lives in the room, not in `config.yaml`, so it also sets the mode of a room without a `rooms` entry.
 Agents take a change as soon as their sync shows it, and read the setting again at least every ten minutes.
 An override an older MindRoom stored under `mindroom_data/tracking` moves into the room's setting the first time an agent reads a room that has none.
-The router answers `!reply_mode`, so in a room without the router, such as a direct-message room with one agent, set the mode with a `rooms` entry keyed by the room's `!` room ID instead, for example `rooms: {"!abc123:example.com": {reply_mode: mentions}}`; the router then also joins that room when it can.
 
 ## Threading (MSC3440)
 
@@ -108,7 +106,7 @@ Moving a fork to another room copies only the fork's own messages.
 ## Multi-Human Thread Protection
 
 When two or more people have posted in a thread, agents answer only when explicitly mentioned, so they do not interrupt a human conversation.
-The router stays silent in such threads, and they never automatically form ad hoc teams.
+Nothing is routed in such threads, and they never automatically form ad hoc teams.
 Agents that already replied there can opt into [Adaptive Participation](#adaptive-participation) to judge untagged messages.
 
 The rules are:

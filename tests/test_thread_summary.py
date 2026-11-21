@@ -880,10 +880,11 @@ class TestMaybeGenerateThreadSummary:
 
     async def _provisional(
         self,
-        prompt: str = "Plan a trip",
+        prompt: str | None = "Plan a trip",
         *,
         config: Config | None = None,
         prompt_event_ids: tuple[str, ...] = ("$event0",),
+        prompt_as_shown: bool = False,
     ) -> None:
         await automatic.maybe_generate_prompt_summary(
             self.client,
@@ -893,10 +894,32 @@ class TestMaybeGenerateThreadSummary:
             self.rp,
             prompt_event_ids=prompt_event_ids,
             prompt=prompt,
+            prompt_as_shown=prompt_as_shown,
             conversation_reader=self.conversation_reader,
             entity_name="router",
             membership_index=AgentReplyMembershipIndex(),
         )
+
+    async def test_provisional_title_without_a_prompt_text_titles_the_message_the_thread_shows(self) -> None:
+        """A routed responder's hidden route carries no text, so the person's message is read from the thread."""
+        model = self._summarizer(_title("Trip plan"))
+        self._history(_make_thread_history(1))
+
+        await self._provisional(None, prompt_as_shown=True)
+
+        assert "Message 0" in _prompt(model.requests[0])
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "Trip plan"
+
+    async def test_provisional_title_of_a_routed_batch_reads_every_message_the_thread_shows(self) -> None:
+        """A routed attachment and the text sent with it are titled together, each as the thread shows it."""
+        model = self._summarizer(_title("Video summary"))
+        self._history(_make_thread_history(2))
+
+        await self._provisional(None, prompt_event_ids=("$event0", "$event1"), prompt_as_shown=True)
+
+        assert "Message 0\nMessage 1" in _prompt(model.requests[0])
+        assert _sent_summaries(self.client)[0]["summary"] == "Video summary"
 
     def _fork_of_thread(self, parent: Sequence[ResolvedVisibleMessage], fork: Sequence[ResolvedVisibleMessage]) -> None:
         """Serve the parent thread ``_THREAD`` and its fork ``$fork``, whose root ``fork`` starts."""

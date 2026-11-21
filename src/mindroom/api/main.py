@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -90,12 +90,12 @@ from mindroom.workers.runtime import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Callable
 
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
-    from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
@@ -399,14 +399,11 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 def bind_external_trigger_runtime(
     api_app: FastAPI,
-    client: object,
-    conversation_reader: object,
     *,
     runtime_config: Config,
-    is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
-    admission_fence: Callable[[], AbstractAsyncContextManager[None]],
+    target_bot: Callable[[str], AgentBot | None],
 ) -> None:
-    """Attach router Matrix delivery runtime to one API app while it serves the config the bots run.
+    """Attach Matrix delivery through each trigger's target to one API app while it serves the config the bots run.
 
     The trigger endpoint authorizes against the API snapshot and the receiving
     bot enforces its own config, so while a dashboard save the runtime has not
@@ -419,16 +416,13 @@ def bind_external_trigger_runtime(
         app_state.external_trigger_runtime = None
         return
     app_state.external_trigger_runtime = ExternalTriggerRuntime(
-        client=client,
-        conversation_reader=conversation_reader,
+        target_bot=target_bot,
         config_generation=snapshot.generation,
-        is_trigger_snapshot_ready=is_trigger_snapshot_ready,
-        admission_fence=admission_fence,
     )
 
 
 def unbind_external_trigger_runtime(api_app: FastAPI) -> None:
-    """Clear router Matrix delivery runtime from one API app."""
+    """Clear Matrix delivery runtime from one API app."""
     config_lifecycle.app_state(api_app).external_trigger_runtime = None
 
 

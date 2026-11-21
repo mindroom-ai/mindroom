@@ -21,7 +21,7 @@ from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from . import turn_rows
 from .identity import agent_of_principal, encode_thread_id
 from .interactive_questions import record_projected_prompt
-from .membership_state import claim_membership_epoch
+from .membership_state import claim_membership_epoch, projection_generation
 from .outbox import event_belongs_to_membership
 
 if TYPE_CHECKING:
@@ -601,6 +601,7 @@ def install_refetched_revision(
     expected_revision_event_id: str,
     expected_refresh_token: int,
     expected_membership_epoch: int,
+    expected_projection_generation: int,
 ) -> int | None:
     """Install a refetched revision only if nothing changed underneath it.
 
@@ -634,6 +635,7 @@ def install_refetched_revision(
         principal_id,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
+        expected_projection_generation=expected_projection_generation,
     )
     if not membership_is_current or not event_belongs_to_membership(
         transaction,
@@ -653,6 +655,7 @@ def install_refetched_revision(
             expected_revision_event_id=expected_revision_event_id,
             expected_refresh_token=expected_refresh_token,
             expected_membership_epoch=expected_membership_epoch,
+            expected_projection_generation=expected_projection_generation,
         )
         return 0 if dropped else None
     if holds_unresolved_sidecar(content):
@@ -705,8 +708,12 @@ def drop_refetched_message(
     expected_revision_event_id: str,
     expected_refresh_token: int,
     expected_membership_epoch: int,
+    expected_projection_generation: int,
 ) -> bool:
     """Remove a logical message and revoke the coverage that included it."""
+    # A walk after a rejoin projects the same revision and token again, which this refetch never read.
+    if expected_projection_generation != projection_generation(transaction, principal_id, room_id):
+        return False
     row = transaction.fetchone(
         """
         DELETE FROM visible_messages

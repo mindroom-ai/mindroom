@@ -48,9 +48,11 @@ from mindroom.llm.media import Image
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.mid_turn import MidTurnGate
+from mindroom.participation import ParticipationDecision
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
 from mindroom.response_runner import ResponseRunner, _mid_turn_for_request
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
+from mindroom.response_turn import skip_unapproved_attempt
 from mindroom.runtime_shutdown import CONFIG_RELOAD_SHUTDOWN, SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.streaming import (
     CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE,
@@ -73,7 +75,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.journal_membership_helpers import admit_room_membership
-from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _plain_request, _target
+from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _plain_request, _target, streamed_answer
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -765,6 +767,60 @@ async def test_a_participation_turn_whose_preparation_fails_leaves_nothing_behin
     await restarted._take_over_replies()
     assert (await restarted._delivery_gateway.recover_deliveries()).complete
     assert _sent_bodies(restarted) == []
+
+
+async def test_a_judged_turn_whose_approved_first_post_fails_keeps_its_sources_for_a_retry(tmp_path: Path) -> None:
+    """A turn that chose to answer but could not post what goes first answers nothing, and its retry answers."""
+    bot = await _streaming_bot(tmp_path)
+    await _pending_turn(bot)
+    posts: list[list[str]] = []
+
+    async def post_first() -> None:
+        posts.append(_sent_bodies(bot))
+        if len(posts) == 1:
+            msg = "homeserver down"
+            raise RuntimeError(msg)
+
+    async def respond() -> ParticipationDecision:
+        return ParticipationDecision(action="respond", reason="asked")
+
+    async def answer(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        assert ctx.participation is not None
+        await ctx.participation.check(respond)
+        return "An answer."
+
+    async def judged(ctx: ResponseTurnContext, *args: object, **kwargs: object) -> AsyncIterator[str]:
+        # Like the turn driver, a failure before the decision skips the attempt and yields nothing.
+        try:
+            async for text in streamed_answer(answer)(ctx, *args, **kwargs):
+                yield text
+        except RuntimeError:
+            assert skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision") is not None
+
+    request = replace(
+        _plain_request(_target()),
+        participation=ParticipationConfig(),
+        on_participation_approved=post_first,
+    )
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    with patch_response_runner_module(
+        stream_agent_response=judged,
+        should_use_streaming=AsyncMock(return_value=False),
+        typing_indicator=_noop_typing,
+    ):
+        assert await runner.generate_response(request) == Owned()
+        # The failed post answered nothing: the source stays pending, for the journal to deliver again.
+        assert _sent_bodies(bot) == []
+        assert await bot._reply_runtime.store.is_pending("$event")
+        assert not await bot._turn_store.is_handled(_target().room_id, "$event")
+        assert await _span_outcomes(bot, await _reply(bot)) == [rl.SpanOutcome.RELEASED]
+
+        assert await runner.generate_response(request) == Owned()
+
+    # The retry posted first, before anything of the reply was sent, and then answered once.
+    assert posts == [[], []]
+    assert _sent_bodies(bot) == ["An answer."]
+    assert not await bot._reply_runtime.store.is_pending("$event")
 
 
 async def test_an_error_before_delivery_ends_the_reply_failed_without_a_retry(tmp_path: Path) -> None:

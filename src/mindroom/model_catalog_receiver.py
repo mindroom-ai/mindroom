@@ -1,4 +1,4 @@
-"""Router-owned authenticated, bounded Matrix model discovery lifecycle."""
+"""Owner-account authenticated, bounded Matrix model discovery lifecycle."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, TypeIs, cast
 import nio
 
 from mindroom.config.models import split_model_reference
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import (
     PinnedMatrixDevice,
@@ -58,7 +57,7 @@ class _Request:
 
 
 class _DroppedError(Exception):
-    """A request the router declines; by design, the client receives no reply."""
+    """A request this device declines; by design, the client receives no reply."""
 
     def __init__(self, *, reason: str) -> None:
         super().__init__(reason)
@@ -137,7 +136,9 @@ class _Receiver:
         runtime_paths: RuntimePaths,
         config_getter: Callable[[], Config],
         membership_index: AgentReplyMembershipIndex,
+        answers_in_room: Callable[[str], bool],
     ) -> None:
+        self.answers_in_room = answers_in_room
         self.client = client
         self.paths = runtime_paths
         self.config_getter = config_getter
@@ -152,13 +153,16 @@ class _Receiver:
         identity = event.authenticated_sender
         return PinnedMatrixDevice(identity.user_id, identity.device_id, identity.ed25519)
 
-    def admit(self, event: nio.AuthenticatedToDeviceEvent) -> bool:  # noqa: PLR0911
+    def admit(self, event: nio.AuthenticatedToDeviceEvent) -> bool:  # noqa: C901, PLR0911
         """Reserve bounded work synchronously, before the task wrapper queues it."""
         if not _is_request(event):
             return False
         request = _parse(event)
         if request is None:
             return _drop(event, None, "unparseable")
+        # One device answers per room, so a client sees one runtime there.
+        if not self.answers_in_room(request.room_id):
+            return _drop(event, request, "not_room_poster")
         target = self._target(event)
         if target is None:
             return _drop(event, request, "unknown_sender_device")
@@ -310,23 +314,22 @@ class _Receiver:
 def register_model_catalog_receiver(
     *,
     client: nio.AsyncClient,
-    agent_name: str,
     runtime_paths: RuntimePaths,
     config_getter: Callable[[], Config],
     membership_index: AgentReplyMembershipIndex,
+    answers_in_room: Callable[[str], bool],
     callback_wrapper: Callable[
         [Callable[[nio.AuthenticatedToDeviceEvent], Awaitable[None]]],
         Callable[..., Awaitable[None]],
     ],
 ) -> None:
-    """Register router-only discovery, with admission before background task creation."""
-    if agent_name != ROUTER_AGENT_NAME:
-        return
+    """Register discovery on this bot's device, which answers where ``answers_in_room``, before any task is made."""
     receiver = _Receiver(
         client=client,
         runtime_paths=runtime_paths,
         config_getter=config_getter,
         membership_index=membership_index,
+        answers_in_room=answers_in_room,
     )
     wrapped = callback_wrapper(receiver.on_event)
 

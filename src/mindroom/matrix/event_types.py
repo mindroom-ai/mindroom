@@ -8,13 +8,14 @@ BACKGROUND_JOBS_EVENT_TYPE = "io.mindroom.background_jobs"
 # Each entity publishes its runtime's origin, whether it has a worker computer, and its role, keyed by its own user ID,
 # so MindRoom Chat finds its MindRoom server without a typed URL and shows what the entity does.
 MINDROOM_SERVER_EVENT_TYPE = "io.mindroom.server"
-# The router publishes the room's open `!auto_approve` windows as state keyed by its own user ID, for a client indicator.
+# The room's steward publishes its open `!auto_approve` windows as state keyed by its own user ID, for a client indicator.
 AUTO_APPROVE_WINDOWS_EVENT_TYPE = "io.mindroom.auto_approve"
-# The router publishes the room's joined MindRoom accounts as state keyed by its own user ID, so a client recognizes
+# The room's steward publishes its joined MindRoom accounts as state keyed by its own user ID, so a client recognizes
 # agents whatever their user names.
 MINDROOM_ACCOUNTS_EVENT_TYPE = "io.mindroom.accounts"
-# The router names itself as the room's router, state key "", content `{"user_id": ...}`. It keeps the default state
-# level, so MindRoom Chat trusts a binding only ordinary members cannot write, and folds only that router's voice echoes.
+# The room's steward names itself under the name today's clients read, state key "", content `{"user_id": ...}`. It
+# keeps the default state level, so MindRoom Chat trusts a binding only ordinary members cannot write, and folds only
+# that account's voice echoes.
 ROUTER_BINDING_EVENT_TYPE = "io.mindroom.router"
 # Room admins set per-room MindRoom settings, one state event per setting keyed by its name, content `{"value": ...}`.
 ROOM_SETTINGS_EVENT_TYPE = "io.mindroom.room_settings"

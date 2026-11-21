@@ -35,7 +35,7 @@ def agent_terminals(
     tools = config_plugins(config, runtime_paths).tools
     agent_tools = resolve_agent_tools(config, agent_name, tools)
     placement = tool_placement(runtime_paths, tools)
-    entry = next((entry for entry in agent_tools.candidates(matrix_room_tools=True) if entry.name == "shell"), None)
+    entry = next((entry for entry in agent_tools.candidates() if entry.name == "shell"), None)
     if entry is None:
         return None
     shell = build_agent_toolkit(

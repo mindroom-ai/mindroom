@@ -2,10 +2,7 @@
 
 # Already pinned elsewhere, so left out here (paths under tests/):
 # - test_agent_tool_offer.py::test_one_build_offers_the_toolkits_config_and_turn_decide[room-tools-need-a-room]
-# - test_invite_router_tool.py::test_invite_router_stays_hidden_without_matrix_room_context
-# - test_invite_router_tool.py::test_matrix_runtime_ignores_authored_invite_router_function_filters
 # - test_agent_personas.py::test_empty_persona_tools_build_toolless_agent
-# - test_agent_personas.py::test_persona_may_name_the_matrix_room_runtime_tool
 # - test_tool_job_authorization.py::test_disabling_graph_edits_revokes_a_retained_graph_edit (graph edits off vs on)
 # - test_cli_approval_recovery.py::test_approval_tool_restore_requires_current_tool_search_assignment (kept, removed)
 # - test_dynamic_toolkits.py pins deferred owner membership, but not order or owner names, in
@@ -113,7 +110,7 @@ def _offered(build: AgentBuild) -> str:
         pytest.param(_MESSAGES, ("matrix_message", "attachments"), "attachments matrix_message", id="implied"),
         pytest.param(_FILE_CALC, ("calculator.add",), "calculator", id="function-entry"),
         pytest.param(_DELEGATE, ("delegate",), "delegate", id="injected-delegate"),
-        pytest.param(_FILE_CALC, None, "calculator dynamic_tools filesystem invite_router", id="no-tool-list"),
+        pytest.param(_FILE_CALC, None, "calculator dynamic_tools filesystem", id="no-tool-list"),
     ],
 )
 def test_a_persona_tool_list_builds_exactly_the_named_toolkits_eagerly(
@@ -122,7 +119,7 @@ def test_a_persona_tool_list_builds_exactly_the_named_toolkits_eagerly(
     persona_tools: tuple[str, ...] | None,
     expected: str,
 ) -> None:
-    """A persona tool list builds only the toolkits it names, deferred ones eager, without search or invite_router."""
+    """A persona tool list builds only the toolkits it names, deferred ones eager, without search."""
     persona = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=persona_tools)
     build = _build(tmp_path, agent, persona=persona)
     assert _offered(build) == expected
@@ -132,22 +129,15 @@ def test_a_persona_tool_list_builds_exactly_the_named_toolkits_eagerly(
 @pytest.mark.parametrize(
     ("tools", "identity", "options", "attached", "deferred"),
     [
-        pytest.param(_CALC_TOOLS, "room", {}, "filesystem invite_router shell", "calculator", id="initial"),
-        pytest.param(
-            _CALC_TOOLS,
-            "room",
-            _REQUIRE_CALC,
-            "calculator filesystem invite_router shell",
-            "",
-            id="required",
-        ),
-        pytest.param(_CALC_TOOLS, "room", _EAGER, "calculator filesystem invite_router shell", "", id="eager"),
-        pytest.param(_MESSAGE_TOOLS, "room", {}, "invite_router shell", _TRIO, id="implied"),
+        pytest.param(_CALC_TOOLS, "room", {}, "filesystem shell", "calculator", id="initial"),
+        pytest.param(_CALC_TOOLS, "room", _REQUIRE_CALC, "calculator filesystem shell", "", id="required"),
+        pytest.param(_CALC_TOOLS, "room", _EAGER, "calculator filesystem shell", "", id="eager"),
+        pytest.param(_MESSAGE_TOOLS, "room", {}, "shell", _TRIO, id="implied"),
         pytest.param(
             _MESSAGE_TOOLS,
             "room",
             _REQUIRE_MESSAGE,
-            "attachments invite_router matrix_message matrix_room shell",
+            "attachments matrix_message matrix_room shell",
             "",
             id="required-implied",
         ),
@@ -171,7 +161,7 @@ def test_minimal_mode_attaches_initial_required_or_eager_deferred_toolkits_and_d
 
 @pytest.mark.parametrize("identity", ["room", "roomless", "none"])
 def test_the_minimal_roster_names_every_surface_toolkit_whatever_the_turn(tmp_path: Path, identity: str) -> None:
-    """The minimal roster lists the whole authored surface, never invite_router, even room tools a roomless turn hid."""
+    """The minimal roster lists the whole authored surface, even room tools a roomless turn hid."""
     build = _build(tmp_path, {"tools": _MESSAGE_TOOLS}, identity, agent_mode="minimal")
     # today: deferred toolkits appear twice in toolkit_names; the rendered roster deduplicates them.
     assert sorted(set(build.surface.toolkit_names)) == ["attachments", "matrix_message", "matrix_room", "shell"]
@@ -182,19 +172,16 @@ def test_the_minimal_roster_names_every_surface_toolkit_whatever_the_turn(tmp_pa
     [
         pytest.param("none", ["matrix_message"], "attachments matrix_message matrix_room", id="identity-less"),
         pytest.param("api-room", ["matrix_message"], "attachments matrix_message matrix_room", id="non-matrix-room"),
-        # today: an authored invite_router entry survives where the runtime one is never injected.
-        pytest.param("none", ["invite_router", "calculator"], "calculator invite_router", id="identity-less-authored"),
-        pytest.param("api-room", ["invite_router", "calculator"], "calculator invite_router", id="non-matrix-authored"),
-        pytest.param("roomless", ["invite_router", "calculator"], "calculator", id="roomless-authored"),
+        pytest.param("roomless", ["invite_router", "calculator"], "calculator invite_router", id="roomless-authored"),
     ],
 )
-def test_room_context_tools_need_only_a_room_and_invite_router_a_matrix_room(
+def test_room_context_tools_need_only_a_room(
     tmp_path: Path,
     identity: str,
     tools: list[object],
     expected: str,
 ) -> None:
-    """Only an identity without a room hides room-context tools; only a Matrix room turn injects invite_router."""
+    """Only an identity without a room hides room-context tools; an authored invite_router needs none."""
     assert _offered(_build(tmp_path, {"tools": tools}, identity)) == expected
 
 
@@ -220,8 +207,8 @@ def test_room_context_tools_need_only_a_room_and_invite_router_a_matrix_room(
         ),
         pytest.param(
             {"tools": ["calculator", {"sleep": {"defer": True}}], "delegate_to": ["helper"], "allow_self_config": True},
-            {"portable_search": True, "matrix_room_tools": True},
-            "calculator sleep delegate self_config dynamic_tools invite_router",
+            {"portable_search": True},
+            "calculator sleep delegate self_config dynamic_tools",
             id="injected-after-authored",
         ),
         pytest.param(
@@ -243,24 +230,6 @@ def test_the_surface_lists_each_toolkit_with_its_owner_in_available_tool_order_t
     candidates = resolve_agent_tools(config, "code", builtin_tool_registry()).candidates(**options)
     entries = [(entry.name, entry.authored_name or entry.name) for entry in candidates]
     assert " ".join(name if owner == name else f"{owner}:{name}" for name, owner in entries) == expected
-
-
-@pytest.mark.parametrize(
-    ("room_runtime", "expected"),
-    [
-        pytest.param(True, [("calculator", {}), ("invite_router", {})], id="matrix-room-replaces"),
-        pytest.param(False, [("invite_router", {"exclude_tools": ["invite_router"]}), ("calculator", {})], id="kept"),
-    ],
-)
-def test_a_matrix_room_turn_moves_an_authored_invite_router_to_the_end_without_its_filters(
-    tmp_path: Path,
-    room_runtime: bool,
-    expected: list[tuple[str, dict[str, object]]],
-) -> None:
-    """On a Matrix room turn the authored invite_router entry gives way to the injected one, appended last."""
-    config, _ = _config(tmp_path, {"tools": [{"invite_router": {"exclude_tools": ["invite_router"]}}, "calculator"]})
-    candidates = resolve_agent_tools(config, "code", builtin_tool_registry()).candidates(matrix_room_tools=room_runtime)
-    assert [(entry.name, dict(entry.tool_config_overrides)) for entry in candidates] == expected
 
 
 @pytest.mark.parametrize(
@@ -346,9 +315,6 @@ def _locally_allowed(
             ("openclaw_compat",),
             id="preset",
         ),
-        pytest.param({}, "invite_router", "roomless", 0, "requires room context", id="room-runtime-roomless"),
-        # Only a Matrix room turn offers the Matrix room runtime tools.
-        pytest.param({}, "invite_router", "api-room", 0, "requires room context", id="room-runtime-non-matrix-room"),
         pytest.param(
             {"tools": ["memory"], "memory_backend": "none"},
             "memory",

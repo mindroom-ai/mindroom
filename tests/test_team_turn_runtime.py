@@ -3349,7 +3349,12 @@ async def _approving_team_bot(
     bot = _team_bot(team)
     cards: list[MatrixDelivery] = []
 
-    async def prepare_event(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> dict[str, Any]:
+    async def prepare_event(
+        _room_id: str,
+        _thread_id: str | None,
+        content: dict[str, Any],
+        _sender_entity: str,
+    ) -> dict[str, Any]:
         return content
 
     async def send_card(delivery: MatrixDelivery) -> str:
@@ -3365,8 +3370,8 @@ async def _approving_team_bot(
         send_approval_delivery=send_card,
         resolve_approval_delivery=AsyncMock(return_value=None),
         cards=bot._journal_store.principal("router@shared"),
-        transport_sender_id=lambda: "@router:localhost",
-        transport_device_id=lambda: "DEVICE",
+        sender_bot=lambda _entity_name, _room_id: object(),
+        sender_device_id=AsyncMock(return_value="DEVICE"),
     )
     try:
         with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=streaming)):

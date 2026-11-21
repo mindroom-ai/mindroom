@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from mindroom.api import config_lifecycle
 from mindroom.api import main as api_main
 from mindroom.config.main import Config, load_config
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.dispatch_source import source_kind_allows_self_authored_ingress
+from mindroom.external_triggers.executor import execute_external_trigger
+from mindroom.external_triggers.models import ExternalTriggerPayload
 from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
 from tests.api.conftest import request_for, save_config
 from tests.conftest import test_runtime_paths
@@ -61,26 +65,83 @@ def _snapshot(
     )
 
 
-def test_runtime_coordinator_binds_router_with_snapshot_readiness_gate() -> None:
-    """Coordinator binds router delivery with the authoritative snapshot readiness callback."""
+def test_runtime_coordinator_binds_any_running_bot() -> None:
+    """Coordinator binds delivery through each trigger's target once any bot runs, the owner account or not."""
     coordinator = ExternalTriggerRuntimeCoordinator()
-
-    router_bot = MagicMock()
-    router_bot.agent_name = ROUTER_AGENT_NAME
-    router_bot.running = True
-    router_bot.client = object()
-    router_bot.conversation_reader = object()
-    bots = {ROUTER_AGENT_NAME: router_bot}
+    code_bot = MagicMock(agent_name="code", running=True, client=object())
+    stopped_bot = MagicMock(agent_name="idle", running=False, client=object())
+    clientless_bot = MagicMock(agent_name="clientless", running=True, client=None)
+    bots = {"code": code_bot, "idle": stopped_bot, "clientless": clientless_bot}
 
     with patch("mindroom.api.main.bind_external_trigger_runtime") as mock_bind:
         coordinator.bind_if_ready(_config(), bots)
 
     mock_bind.assert_called_once()
     assert mock_bind.call_args.args == (api_main.app,)
-    assert mock_bind.call_args.kwargs["client"] is router_bot.client
-    assert mock_bind.call_args.kwargs["conversation_reader"] is router_bot.conversation_reader
-    assert mock_bind.call_args.kwargs["admission_fence"] is router_bot.admission_fence
-    assert callable(mock_bind.call_args.kwargs["is_trigger_snapshot_ready"])
+    target_bot = mock_bind.call_args.kwargs["target_bot"]
+    assert target_bot("code") is code_bot
+    assert target_bot("idle") is None
+    assert target_bot("clientless") is None
+    assert target_bot("missing") is None
+
+
+def test_runtime_coordinator_does_not_bind_while_no_bot_runs() -> None:
+    """Coordinator leaves delivery unbound until a bot runs."""
+    coordinator = ExternalTriggerRuntimeCoordinator()
+
+    with patch("mindroom.api.main.bind_external_trigger_runtime") as mock_bind:
+        coordinator.bind_if_ready(_config(), {"code": MagicMock(agent_name="code", running=False, client=object())})
+
+    mock_bind.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_trigger_posted_and_answered_by_target_without_owner(tmp_path: Path) -> None:
+    """In a room with one person, one agent and no owner account, the target's own bot posts the trigger it answers."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    api_main.initialize_api_app(api_main.app, runtime_paths)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
+    config = config_lifecycle.require_api_state(api_main.app).snapshot.runtime_config
+    assert config is not None
+    target_client = MagicMock(user_id="@mindroom_code:example.org")
+    target_bot = MagicMock(agent_name="code", client=target_client, running=True)
+    coordinator = ExternalTriggerRuntimeCoordinator()
+    sent: list[tuple[object, str, dict[str, object]]] = []
+
+    async def send(client: object, room_id: str, content: dict[str, object]) -> DeliveredMatrixEvent:
+        sent.append((client, room_id, content))
+        return DeliveredMatrixEvent(event_id="$trigger", content_sent=content)
+
+    try:
+        coordinator.bind_if_ready(config, {"code": target_bot})
+        runtime = config_lifecycle.app_state(api_main.app).external_trigger_runtime
+        assert runtime is not None
+        poster = runtime.target_bot("code")
+        assert poster is target_bot
+        with (
+            patch("mindroom.external_triggers.executor.send_matrix_message", send),
+            patch(
+                "mindroom.external_triggers.executor.format_entity_mention",
+                return_value=("@code", ["@mindroom_code:example.org"], "[@code](https://matrix.to/#/x)"),
+            ),
+        ):
+            event_id = await execute_external_trigger(
+                client=poster.client,
+                snapshot=_snapshot(),
+                payload=ExternalTriggerPayload(kind="campground.availability", message="A site opened up"),
+                config=config,
+                runtime_paths=runtime_paths,
+                conversation_reader=AsyncMock(),
+            )
+    finally:
+        coordinator.unbind()
+
+    assert event_id == "$trigger"
+    [(posting_client, room_id, content)] = sent
+    assert posting_client is target_client
+    assert room_id == "!campground:example.org"
+    assert content["m.mentions"] == {"user_ids": ["@mindroom_code:example.org"]}
+    assert source_kind_allows_self_authored_ingress(content[SOURCE_KIND_KEY])
 
 
 def test_runtime_coordinator_leaves_delivery_unavailable_until_the_bots_run_the_dashboard_config(
@@ -93,10 +154,7 @@ def test_runtime_coordinator_leaves_delivery_unavailable_until_the_bots_run_the_
     running_config = load_config(runtime_paths)
     saved_payload = {**running_config.authored_model_dump(), "timezone": "Europe/Amsterdam"}
     save_config(request_for(api_main.app), saved_payload)
-    router_bot = MagicMock()
-    router_bot.running = True
-    router_bot.client = object()
-    bots = {ROUTER_AGENT_NAME: router_bot}
+    bots = {"code": MagicMock(running=True, client=object())}
     coordinator = ExternalTriggerRuntimeCoordinator()
     try:
         coordinator.bind_if_ready(running_config, bots)
@@ -110,79 +168,3 @@ def test_runtime_coordinator_leaves_delivery_unavailable_until_the_bots_run_the_
         assert runtime.config_generation == snapshot.generation
     finally:
         coordinator.unbind()
-
-
-@pytest.mark.asyncio
-async def test_runtime_coordinator_is_ready_uses_snapshot_room_and_target() -> None:
-    """Coordinator readiness comes from live Matrix joined-room state."""
-    coordinator = ExternalTriggerRuntimeCoordinator()
-    router_client = object()
-    target_client = object()
-    router_bot = MagicMock(agent_name=ROUTER_AGENT_NAME, client=router_client, running=True)
-    target_bot = MagicMock(agent_name="code", client=target_client, running=True)
-    bots = {ROUTER_AGENT_NAME: router_bot, "code": target_bot}
-
-    async def get_joined_room_ids(client: object) -> list[str]:
-        return {
-            router_client: ["!campground:example.org"],
-            target_client: ["!campground:example.org"],
-        }[client]
-
-    with patch(
-        "mindroom.orchestration.external_trigger_runtime.get_joined_rooms",
-        side_effect=get_joined_room_ids,
-    ):
-        assert await coordinator._is_ready(_snapshot(), bots) is True
-
-
-@pytest.mark.asyncio
-async def test_runtime_coordinator_is_ready_rejects_unjoined_room() -> None:
-    """Coordinator rejects triggers when router or target is not joined to the snapshot room."""
-    coordinator = ExternalTriggerRuntimeCoordinator()
-    router_client = object()
-    target_client = object()
-    router_bot = MagicMock(agent_name=ROUTER_AGENT_NAME, client=router_client, running=True)
-    target_bot = MagicMock(agent_name="code", client=target_client, running=True)
-    bots = {ROUTER_AGENT_NAME: router_bot, "code": target_bot}
-
-    async def get_joined_room_ids(client: object) -> list[str]:
-        return {
-            router_client: ["!campground:example.org"],
-            target_client: ["!other:example.org"],
-        }[client]
-
-    with patch(
-        "mindroom.orchestration.external_trigger_runtime.get_joined_rooms",
-        side_effect=get_joined_room_ids,
-    ):
-        assert await coordinator._is_ready(_snapshot(), bots) is False
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("snapshot", "router_running", "router_client", "target_running", "target_client"),
-    [
-        (_snapshot(target_agent="missing"), True, object(), True, object()),
-        (_snapshot(), False, object(), True, object()),
-        (_snapshot(), True, None, True, object()),
-        (_snapshot(), True, object(), False, object()),
-        (_snapshot(), True, object(), True, None),
-    ],
-)
-async def test_runtime_coordinator_is_ready_rejects_inactive_runtime(
-    snapshot: TriggerDeliverySnapshot,
-    router_running: bool,
-    router_client: object | None,
-    target_running: bool,
-    target_client: object | None,
-) -> None:
-    """Coordinator rejects stopped or client-less runtime participants."""
-    coordinator = ExternalTriggerRuntimeCoordinator()
-    router_bot = MagicMock(agent_name=ROUTER_AGENT_NAME, client=router_client, running=router_running)
-    target_bot = MagicMock(agent_name="code", client=target_client, running=target_running)
-    bots = {ROUTER_AGENT_NAME: router_bot, "code": target_bot}
-
-    with patch("mindroom.orchestration.external_trigger_runtime.get_joined_rooms") as mock_get_joined_rooms:
-        assert await coordinator._is_ready(snapshot, bots) is False
-
-    mock_get_joined_rooms.assert_not_called()

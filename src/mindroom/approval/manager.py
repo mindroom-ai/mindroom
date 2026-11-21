@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from weakref import WeakValueDictionary
 
 from mindroom.approval.events import card_approvable
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.entity_resolution import owner_matrix_id
 from mindroom.event_journal import (
     SCHEDULED_APPROVAL_WINDOW_NS,
     TIMEOUT_REASON,
@@ -29,6 +31,7 @@ from mindroom.event_journal import (
     ScheduledCallOutcome,
     ScheduledCallRefusal,
 )
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.logging_config import get_logger
 from mindroom.redaction import nests_beyond_redaction_depth, redact_sensitive_data, truncate_review_text
@@ -53,6 +56,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import (
         ApprovalDeliveryView,
         DecisionStatus,
+        EventJournalStore,
         RecordedApprovalDecision,
         ScheduledApprovalArmState,
     )
@@ -63,7 +67,7 @@ _ResolutionStatus = Literal["approved", "denied"]
 _STARTUP_RECOVERY_SCAN_PAGE = 256
 _DEADLINE_SWEEP_SECONDS = 60.0
 _EVENT_TYPE = "io.mindroom.tool_approval"
-# What an approval request or settlement meets before the approval runtime and the router's card store are bound.
+# What an approval request or settlement meets before the approval runtime and the card store are bound.
 RUNTIME_NOT_READY_REASON = "Tool approval runtime is not ready."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the tool arguments cannot be shown in full, so a human cannot review "
@@ -92,7 +96,7 @@ class ToolApprovalTransportError(RuntimeError):
 
 
 class UnverifiableApprovalCardError(ToolApprovalTransportError):
-    """A legacy approval action target cannot be authenticated by Matrix."""
+    """An approval action target no account of the room may read cannot be authenticated by Matrix."""
 
 
 def _scheduled_call_target(task_id: str, execute_at_ns: int) -> dict[str, object]:
@@ -216,7 +220,7 @@ class ApprovalManager:
     """Own approval semantics while the generic worker owns Matrix delivery."""
 
     runtime_paths: RuntimePaths
-    # Prepares, sends, and verifies cards through the router, and wakes the replies their decisions unblock.
+    # Prepares, sends, and verifies cards through the account that asks, and wakes the replies their decisions unblock.
     transport: ApprovalMatrixTransport
     cards: ApprovalDeliveryView | None = None
     recovery: ApprovalRecovery | None = None
@@ -264,6 +268,7 @@ class ApprovalManager:
             tool_name=tool_name,
             raw_arguments=arguments,
             agent_name=agent_name,
+            sender_entity=entity_name,
             room_id=room_id,
             thread_id=thread_id,
             requester_id=requester_id,
@@ -330,6 +335,7 @@ class ApprovalManager:
             tool_name=tool_name,
             raw_arguments=arguments,
             agent_name=agent_name,
+            sender_entity=entity_name or agent_name,
             room_id=room_id,
             thread_id=thread_id,
             requester_id=requester_id,
@@ -435,6 +441,7 @@ class ApprovalManager:
             tool_name=binding.tool_name,
             raw_arguments=json.loads(binding.arguments_json),
             agent_name=binding.agent_name,
+            sender_entity=binding.agent_name,
             room_id=binding.room_id,
             thread_id=binding.thread_id,
             requester_id=binding.requester_id,
@@ -483,6 +490,7 @@ class ApprovalManager:
             tool_name=call.tool_name,
             raw_arguments=json.loads(arguments_json),
             agent_name=call.agent_name,
+            sender_entity=call.agent_name,
             room_id=call.room_id,
             thread_id=call.thread_id,
             requester_id=call.requester_id,
@@ -534,6 +542,7 @@ class ApprovalManager:
         tool_name: str,
         raw_arguments: dict[str, Any],
         agent_name: str | None,
+        sender_entity: str,
         room_id: str,
         thread_id: str | None,
         requester_id: str,
@@ -570,8 +579,10 @@ class ApprovalManager:
         content.update(target_fields)
         if grant_operation is None:
             content.pop("approval_scope", None)
-        prepared = await self.transport.prepare_approval_event(room_id, thread_id, content)
-        if prepared is None:
+        prepared = await self.transport.prepare_approval_event(room_id, thread_id, content, sender_entity)
+        # A reload can remove the sender's bot while the card is prepared; a card without a sender is a legacy router's.
+        sender_principal_id = self.transport.responder_principal_id(sender_entity)
+        if prepared is None or sender_principal_id is None:
             return None
         if prepared.get("approvable", True) is not True:
             grant_operation = None
@@ -585,6 +596,7 @@ class ApprovalManager:
             approver_user_id=approver_user_id,
             approvable=card_approvable(prepared),
             grant_operation=grant_operation,
+            sender_principal_id=sender_principal_id,
         )
 
     async def settle_background_approval(
@@ -645,10 +657,9 @@ class ApprovalManager:
 
     async def _publish_reserved_cards(self, delivery_ids: list[str]) -> None:
         """Send reserved cards now, leaving any failed send to the delivery worker's retries."""
-        worker = self._worker()
         for delivery_id in delivery_ids:
             try:
-                await worker.flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
+                await (await self._worker(delivery_id)).flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
             except Exception:
                 logger.warning(
                     "approval_card_initial_delivery_deferred",
@@ -657,18 +668,20 @@ class ApprovalManager:
                 )
         self._ensure_deadline_sweep()
 
-    def _worker(self) -> MatrixDeliveryWorker:
+    async def _worker(self, delivery_id: str | None = None) -> MatrixDeliveryWorker:
+        """Return the worker pinned to the client of one card's sender; without a card, one that only walks the outbox."""
         if self.cards is None:
             raise ToolApprovalTransportError(RUNTIME_NOT_READY_REASON)
+        send, resolve_delivered, device_id = await self.transport.pinned_delivery(delivery_id)
         return MatrixDeliveryWorker(
             store=self.cards,
-            send=self.transport.send_approval_delivery,
+            send=send,
             event_type=_EVENT_TYPE,
             resend_after_reconciliation_miss=lambda delivery: (
                 delivery.payload.get("status") == "approved" and delivery.payload.get("approvable") is False
             ),
-            sending_device_id=self.transport.transport_device_id(),
-            resolve_delivered=self.transport.resolve_approval_delivery,
+            sending_device_id=device_id,
+            resolve_delivered=resolve_delivered,
             delivery_locks=self._delivery_locks,
         )
 
@@ -702,7 +715,7 @@ class ApprovalManager:
                 if before_consume is not None:
                     await before_consume()
                 logger.warning(
-                    "unverifiable_legacy_approval_action_ignored",
+                    "unverifiable_approval_action_ignored",
                     room_id=room_id,
                     card_event_id=card_event_id,
                     transport_reason=exc.reason,
@@ -722,7 +735,7 @@ class ApprovalManager:
             self._ensure_deadline_sweep()
             return ApprovalActionResult(consumed=True, card_event_id=card_event_id)
         if (
-            not self._transport_ready()
+            not self._sender_ready(card)
             or card.approver_user_id != sender_id
             or not _approval_action_authorized(card, authorize_responder)
             or (
@@ -932,10 +945,11 @@ class ApprovalManager:
         """Deliver one committed card decision, preserving INITIAL before FINAL; return whether the card retired."""
         assert self.cards is not None
         try:
+            worker = await self._worker(delivery_id)
             if card_event_id is None:
-                card_event_id = await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
+                card_event_id = await worker.flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
             if card_event_id is not None:
-                await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+                await worker.flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
         except Exception:
             logger.warning(
                 "approval_terminal_delivery_deferred",
@@ -948,16 +962,31 @@ class ApprovalManager:
         # already retired is delivered too.
         return await self.cards.approvals.retire_approval_card(delivery_id=delivery_id)
 
-    async def expire_continuation_cards(self, continuation_id: str, reason: str) -> bool:
+    async def expire_continuation_cards(self, continuation_id: str, reason: str, *, unedited: bool = False) -> bool:
         """Enqueue and flush expiry for every card owned by one failed continuation, with its failure's reason."""
+        owned = await self.expire_cards(
+            lambda card: card.owner_kind == "reply" and card.call.owner_id == continuation_id,
+            reason,
+            unedited,
+        )
+        return self.cards is not None and all(owned)
+
+    async def expire_cards(self, matches: Callable[..., bool], reason: str, unedited: bool = False) -> list[bool]:
+        """Expire every live card that matches; ``unedited`` retires unedited one whose removed sender has no bot left."""
         if self.cards is None:
-            return False
-        complete = True
-        for room_id in await self.cards.approvals.pending_approval_room_ids():
-            async for card in self._pending_cards(self.cards, room_id):
-                if card.owner_kind == "reply" and card.call.owner_id == continuation_id:
-                    complete = await self._expire_stored(card, reason=reason) and complete
-        return complete
+            return []
+        retire = self.cards.approvals.retire_approval_card
+        return [
+            await self._expire_stored(card, reason=reason)
+            or (
+                unedited
+                and not self._sender_ready(card)
+                and await retire(delivery_id=card.delivery_id, without_edit=True)
+            )
+            for room_id in await self.cards.approvals.pending_approval_room_ids()
+            async for card in self._pending_cards(self.cards, room_id)
+            if matches(card)
+        ]
 
     @staticmethod
     async def _pending_cards(cards: ApprovalDeliveryView, room_id: str) -> AsyncIterator[ApprovalCardView]:
@@ -1041,8 +1070,6 @@ class ApprovalManager:
             if recorded.recorded and recorded.continuation_ready:
                 await self._wake_continuation(recorded)
             return False
-        if not self._transport_ready():
-            return False
         if card.decided:
             return await self._flush_card_delivery(card.delivery_id, card.card_event_id, room_id=card.room_id)
         return await self._record_and_flush_resolution(
@@ -1073,7 +1100,8 @@ class ApprovalManager:
         failed: set[tuple[str, DeliveryStage]] = set()
         for delivery_id in await self.cards.approvals.maintain_automatic_approvals(grant_id=grant_id):
             try:
-                acknowledged = await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+                worker = await self._worker(delivery_id)
+                acknowledged = await worker.flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
             except Exception:
                 logger.warning("approval_grant_revocation_delivery_deferred", delivery_id=delivery_id, exc_info=True)
                 acknowledged = None
@@ -1085,7 +1113,7 @@ class ApprovalManager:
         """Run generic delivery recovery, deadline decisions, and domain retirement."""
         if self.cards is None:
             return _ApprovalStartupSweep(discarded=0, failed=1)
-        outcome = await self._worker().recover()
+        outcome = await (await self._worker()).recover(self._worker)
         transport_failures = set(outcome.failed_deliveries)
         failed = outcome.failed - len(transport_failures)
         transport_failures.update(await self._maintain_automatic_approvals())
@@ -1183,9 +1211,9 @@ class ApprovalManager:
             with self._live_lock:
                 self._resolving_card_event_ids.discard(card_event_id)
 
-    def _transport_ready(self) -> bool:
-        """Return whether this process's transport account is known, without which no card is acted on."""
-        return self.transport.transport_sender_id() is not None
+    def _sender_ready(self, card: ApprovalCardView) -> bool:
+        """Return whether the account that sent a card runs in its room, without which the card is not acted on."""
+        return self.transport.sender_bot(card.sender_principal_id, card.room_id) is not None
 
     @staticmethod
     def _pending_event_content(
@@ -1240,6 +1268,11 @@ class ApprovalManager:
         return status, reason, False
 
 
+def approval_card_store(journal: Callable[[], EventJournalStore], runtime_paths: RuntimePaths) -> ApprovalDeliveryView:
+    """Return the principal that keeps every approval's books: the owner account's, which needs no prepared account."""
+    return journal().principal(journal_principal_id(ROUTER_AGENT_NAME, owner_matrix_id(runtime_paths)))
+
+
 def get_approval_store() -> ApprovalManager | None:
     """Return the configured approval domain, if the runtime is ready."""
     return _MANAGER
@@ -1254,7 +1287,7 @@ def initialize_approval_store(
 ) -> ApprovalManager:
     """Initialize the module-level approval domain for one runtime context, or rebind it after a reload.
 
-    A rebind keeps the bound card store and recovery when it is given none, as before the router bot is built.
+    A rebind keeps the bound card store and recovery when it is given none, as before the Matrix accounts are prepared.
     """
     global _MANAGER
     if _MANAGER is not None and _MANAGER.runtime_paths.storage_root == runtime_paths.storage_root:

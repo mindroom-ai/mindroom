@@ -47,7 +47,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
-from tests.scheduling_helpers import serve_full_room_state, serve_task_state_events
+from tests.scheduling_helpers import serve_task_state_events
 
 
 def _parser_model(workflow: ScheduledWorkflow) -> ScriptedModel:
@@ -908,7 +908,6 @@ class TestIntegrationWithScheduling:
     async def test_schedule_task_workflow_path(self, mock_parse_workflow: AsyncMock) -> None:
         """Test that schedule_task uses workflow parsing for complex requests."""
         client = AsyncMock()
-        serve_full_room_state(client, "!room:server")
         client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
         mock_parse_workflow.return_value = ScheduledWorkflow(
             schedule_type="cron",
@@ -965,7 +964,6 @@ class TestIntegrationWithScheduling:
     ) -> None:
         """An edit keeps the original scheduled message and stores the history limit the request resolves to."""
         client = AsyncMock()
-        serve_full_room_state(client, "!room:server")
         client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
 
         model = _parser_model(
@@ -984,6 +982,7 @@ class TestIntegrationWithScheduling:
             task_id="task123",
             room_id="!room:server",
             status="pending",
+            owner_id=entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id,
             created_at=datetime.now(UTC),
             workflow=ScheduledWorkflow(
                 schedule_type="once",

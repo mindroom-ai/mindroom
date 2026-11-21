@@ -53,6 +53,7 @@ async def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
     config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General", tools=[])},
+            server_emoji={"enabled": True},
             teams={"team": TeamConfig(display_name="Team", role="Coordinate", agents=["general"], model="other")},
             defaults=DefaultsConfig(tools=[], compaction=CompactionConfig()),
             models={

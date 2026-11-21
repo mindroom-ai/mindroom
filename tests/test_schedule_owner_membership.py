@@ -22,6 +22,7 @@ from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.scheduling import executor as scheduling_executor
+from mindroom.scheduling import ownership
 from mindroom.scheduling import runtime as scheduling_runtime
 from mindroom.scheduling import tasks as scheduling
 from mindroom.scheduling.errors import SchedulingError
@@ -116,7 +117,7 @@ def _owner_schedule(
     client = make_matrix_client_mock(user_id="@router:server")
     client.user_id = "@router:server"
     client.device_id = "TEST"
-    client.rooms = {}
+    client.rooms = {"!test:server": nio.MatrixRoom("!test:server", client.user_id)}
     client.room_send.return_value = nio.RoomSendResponse("$message", "!test:server")
     client.room_get_state_event.side_effect = read_state
     client.room_put_state.side_effect = write_state
@@ -824,9 +825,7 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
         schedule_type=schedule_type,
         writer=_ALIAS_SCHEDULE_WRITER,
     )
-    # The router saves the task in a room it has not joined, so it owns the task as its creator.
     client.user_id = _ALIAS_SCHEDULE_WRITER
-    serve_full_room_state(client, "!test:server")
     config, runtime_paths = _alias_schedule_config(tmp_path)
     config.agents["helper"].rooms = ["!test:server"]
     config.agents["helper"].access = ResponderAccessConfig(users=["@alice:server"])
@@ -932,3 +931,91 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
             with suppress(asyncio.CancelledError):
                 await task
         await journal.close()
+
+
+# Which bot runs a task: the bot that saves it, and for a stored task the router owned, an agent from the room's state.
+
+_OWNER_ROOM = "!owners:server"
+_ROUTER_ID = "@mindroom_router:server"
+_ALPHA, _BETA, _ZETA = "@mindroom_alpha:server", "@mindroom_beta:server", "@mindroom_zeta:server"
+
+
+def _owner_room_state(members: dict[str, int]) -> list[dict[str, Any]]:
+    """Return a room's full state: each member joined at its power level."""
+    events = [("m.room.power_levels", "", {"users": members, "state_default": 50})]
+    events += [("m.room.member", member, {"membership": "join"}) for member in members]
+    return [
+        {
+            "type": event_type,
+            "state_key": state_key,
+            "content": content,
+            "sender": next(iter(members)),
+            "event_id": f"${event_type}:{state_key}",
+            "origin_server_ts": 1,
+            "room_id": _OWNER_ROOM,
+        }
+        for event_type, state_key, content in events
+    ]
+
+
+def _owner_workflow() -> scheduling.ScheduledWorkflow:
+    return scheduling.ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(hours=1),
+        message="Check the queue",
+        description="Queue check",
+        room_id=_OWNER_ROOM,
+        created_by="@alice:server",
+    )
+
+
+def test_owner_room_view_parses_only_matrix_state() -> None:
+    """The room view never parses MindRoom's own state, of which a busy room holds thousands of events."""
+    finished = [scheduled_task_state_event(f"done{index}", {"status": "completed"}) for index in range(3)]
+    state = _owner_room_state({_ROUTER_ID: 100, _ALPHA: 0})
+
+    with patch.object(nio.Event, "parse_event", wraps=nio.Event.parse_event) as parse:
+        room = ownership.room_from_state(_OWNER_ROOM, _ALPHA, [*finished, *state])
+
+    assert [call.args[0]["type"] for call in parse.call_args_list] == [event["type"] for event in state]
+    assert set(room.users) == {_ROUTER_ID, _ALPHA}
+
+
+def test_router_owned_task_goes_to_first_mentioned_joined_agent() -> None:
+    """A task the router owned goes to the first agent its message mentions that is joined, before a lower Matrix ID."""
+    room = ownership.room_from_state(_OWNER_ROOM, _ALPHA, _owner_room_state({_ROUTER_ID: 100, _ALPHA: 0, _BETA: 0}))
+
+    owner = ownership.legacy_router_task_owner(
+        room,
+        _owner_workflow(),
+        # The message mentions an agent that left, then one that is joined; every agent follows by Matrix ID.
+        agent_ids=[_ZETA, _BETA, _ALPHA, _BETA, _ZETA],
+    )
+
+    assert owner == _BETA
+
+
+def test_router_owned_task_without_mention_goes_to_lowest_id_agent() -> None:
+    """A task the router owned whose message mentions nobody goes to the joined agent with the lowest Matrix ID."""
+    room = ownership.room_from_state(_OWNER_ROOM, _BETA, _owner_room_state({_ROUTER_ID: 100, _BETA: 0, _ZETA: 0}))
+
+    owner = ownership.legacy_router_task_owner(
+        room,
+        _owner_workflow(),
+        agent_ids=[_ALPHA, _BETA, _ZETA],
+    )
+
+    assert owner == _BETA
+
+
+def test_router_owned_task_with_no_agent_is_skipped() -> None:
+    """A task the router owned has no owner in a room that only the router, or an agent that may not post, is in."""
+    workflow = _owner_workflow()
+    candidates = [_ALPHA, _BETA]
+    router_only = ownership.room_from_state(_OWNER_ROOM, _ROUTER_ID, _owner_room_state({_ROUTER_ID: 100}))
+    muted_state = _owner_room_state({_ROUTER_ID: 100, _ALPHA: 0})
+    muted_state[0]["content"]["events_default"] = 50
+    muted = ownership.room_from_state(_OWNER_ROOM, _ROUTER_ID, muted_state)
+
+    assert ownership.legacy_router_task_owner(router_only, workflow, agent_ids=candidates) is None
+    assert ownership.legacy_router_task_owner(muted, workflow, agent_ids=candidates) is None

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from aiohttp import ClientError
+
+from mindroom.matrix.client_delivery import says_encryption_is_disabled
 from mindroom.matrix.client_room_admin import (
     room_admin_power_user,
     room_encryption_enable_failure,
@@ -11,8 +14,11 @@ from mindroom.matrix.client_room_admin import (
 )
 from mindroom.matrix.cross_signing import cross_signing_status_line
 from mindroom.matrix.decrypt_failure import e2ee_stats
+from mindroom.steward_duties import moderator_rights_message
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     import nio
 
 _ENCRYPT_USAGE = "Usage: `/encrypt` to review, then `/encrypt confirm` to enable."
@@ -26,19 +32,31 @@ async def _confirm_encrypt(
     room_id: str,
     requester_user_id: str,
     sender_user_id: str,
+    put_state: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]] | None,
+    steward_may_write_state: Callable[[str, str], bool] | None,
 ) -> str:
-    """Enable encryption for a room admin, or explain why not."""
+    """Enable encryption for a room admin through ``put_state``, the room steward's, or explain why not."""
     admin_user_id = await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id))
     if admin_user_id is None:
         return "❌ Room admin only."
-    failure = await room_encryption_enable_failure(client, room_id)
+    try:
+        failure = await room_encryption_enable_failure(client, room_id, put_state=put_state)
+    except (ClientError, OSError):
+        # The request did not get through, which a retry can fix.
+        return "❌ Failed to enable encryption. Run the command again to retry."
     if failure is None:
         return "🔐 End-to-end encryption is now enabled for this room. This cannot be undone."
-    return (
-        f"❌ Failed to enable encryption: {failure[:_FAILURE_REASON_MAX_CHARS]}\n\n"
-        # The requester already passed the room-admin check, so only my own power can be missing.
-        "If this is a permission error, enable it from your own client or give me the power to change room state."
+    # A server without encryption answers M_FORBIDDEN too: its own reason says so, and rights would not help.
+    # The steward's own power tells any other refusal apart.
+    lacks_power = (
+        failure.startswith("M_FORBIDDEN")
+        and not says_encryption_is_disabled(failure)
+        and steward_may_write_state is not None
+        and not steward_may_write_state(room_id, "m.room.encryption")
     )
+    if not failure or lacks_power:
+        return moderator_rights_message("enable encryption")
+    return f"❌ Failed to enable encryption: {failure[:_FAILURE_REASON_MAX_CHARS]}"
 
 
 async def handle_encrypt_command(
@@ -48,6 +66,8 @@ async def handle_encrypt_command(
     room_id: str,
     requester_user_id: str,
     sender_user_id: str,
+    put_state: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]] | None = None,
+    steward_may_write_state: Callable[[str, str], bool] | None = None,
 ) -> str:
     """Review or enable Matrix end-to-end encryption for the current room."""
     encrypted = await room_encryption_enabled(client, room_id)
@@ -66,7 +86,14 @@ async def handle_encrypt_command(
         )
     if requested not in _CONFIRM_ARGUMENTS:
         return f"❌ Unknown argument `{args_text.strip()}`.\n\n{_ENCRYPT_USAGE}"
-    return await _confirm_encrypt(client, room_id, requester_user_id, sender_user_id)
+    return await _confirm_encrypt(
+        client,
+        room_id,
+        requester_user_id,
+        sender_user_id,
+        put_state,
+        steward_may_write_state,
+    )
 
 
 async def handle_e2ee_command(

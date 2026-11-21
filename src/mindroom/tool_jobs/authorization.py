@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
 from mindroom.config.resolution import edits_knowledge_graph
-from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_room_flags
+from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_keeps_room_tools
 from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
 from mindroom.tool_system.filters import tool_name_allowed
 
@@ -69,11 +69,9 @@ def locally_allowed(
     construction = authority.get("construction")
     if not isinstance(construction, dict):
         return False
-    room_tools, matrix_room_tools = turn_room_flags(owner)
     candidates = resolve_agent_tools(config, owner.agent_name, tools).candidates(
         depth=depth,
-        room_tools=room_tools,
-        matrix_room_tools=matrix_room_tools,
+        room_tools=turn_keeps_room_tools(owner),
         portable_search=True,
     )
     entry = next(

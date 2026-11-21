@@ -21,7 +21,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.config.tool_aliases import TOOL_ALIASES
-from tests.access_schema_support import membership_index
+from tests.access_schema_support import OBSERVER_USER_ID, membership_index
 from tests.api.test_mcp_clients import _connect
 from tests.api.test_mcp_gateway_api import (
     MCP_HEADERS,
@@ -89,7 +89,13 @@ def test_room_membership_grants_require_room_independent_access(
     )
     assert not result["isError"]
     assert json.loads(result["structuredContent"]["result"])["result"] == 3
-    memberships.mark_room_unready(config, snapshot.runtime_paths, "!project:example.com", reason="membership_unknown")
+    memberships.mark_room_unready(
+        config,
+        snapshot.runtime_paths,
+        "!project:example.com",
+        observer_user_id=OBSERVER_USER_ID,
+        reason="membership_unknown",
+    )
     assert gateway_client.get(SELECTION, headers=alice).json()["agents"] == {}
     assert _call(gateway_client, token, "search_tools", {})["structuredContent"] == {"results": []}
     assert _call(
@@ -156,7 +162,7 @@ def test_membership_revocation_during_preparation_stops_tool_body(
                 config,
                 "!project:example.com",
                 event,
-                control_user_id="@router:example.org",
+                control_user_id=OBSERVER_USER_ID,
             )
         finally:
             release.set()

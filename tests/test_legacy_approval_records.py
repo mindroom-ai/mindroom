@@ -7,15 +7,21 @@ converted rows and what a requester can still do with them.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+import time
 from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock
 
 import psycopg
 import pytest
 
+from mindroom.approval.manager import ToolApprovalTransportError
+from mindroom.approval.recovery import ApprovalRecovery
+from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
 from mindroom.event_journal import (
     JOB_ENDED_REASON,
     ApprovalCardReservation,
@@ -31,6 +37,7 @@ from mindroom.event_journal import (
     scheduled_approvals,
 )
 from mindroom.reply_lifecycle import ApprovalFailureKind
+from mindroom.tool_approval_grants import ApprovalOperation
 from tests.approval_card_helpers import terminal_edit
 from tests.conftest import (
     approval_manager_for_test,
@@ -38,6 +45,7 @@ from tests.conftest import (
     postgres_journal_schema_url,
     test_runtime_paths,
 )
+from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -261,8 +269,17 @@ async def test_every_recording_converts_to_consistent_rows_once(
     assert _snapshot(journal) == converted
 
 
-def _manager(tmp_path: Path, store: EventJournalStore, sent: list[MatrixDelivery]) -> ApprovalManager:
+def _manager(
+    tmp_path: Path,
+    store: EventJournalStore,
+    sent: list[MatrixDelivery],
+    *,
+    sender_ready: bool = True,
+) -> ApprovalManager:
     async def send(delivery: MatrixDelivery) -> str:
+        if not sender_ready:
+            msg = "The sender of this approval delivery is not ready"
+            raise ToolApprovalTransportError(msg)
         sent.append(delivery)
         return f"${delivery.delivery_id}:{delivery.stage.value}"
 
@@ -270,8 +287,8 @@ def _manager(tmp_path: Path, store: EventJournalStore, sent: list[MatrixDelivery
         test_runtime_paths(tmp_path),
         send_approval_delivery=send,
         cards=store.principal(_ROUTER),
-        transport_sender_id=lambda: "@mindroom_router:example.org",
-        transport_device_id=lambda: "DEVICE",
+        sender_bot=lambda _sender, _room_id: object() if sender_ready else None,
+        sender_device_id=AsyncMock(return_value="DEVICE"),
     )
 
 
@@ -569,6 +586,8 @@ async def test_a_scheduled_approval_still_arms_and_claims(recorded_journal: Call
             payload={"approval_id": "scheduled-receipt:task-approved", "tool_name": call.tool_name},
             approver_user_id=_ALICE,
             approvable=False,
+            # The agent sends the receipt in its own membership, which never matched the router's the call recorded.
+            sender_principal_id=_CODE,
         )
         claimed = await store.backend.write(
             lambda transaction: scheduled_approvals.claim(
@@ -619,6 +638,42 @@ async def test_a_scheduled_approval_still_arms_and_claims(recorded_journal: Call
         [pending] = await router.approvals.pending_approval_cards(room_id=_ROOM)
         # Its card offered only the stored arguments.
         assert (pending.owner_kind, pending.any_arguments_offered) == ("scheduled", False)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_approval_is_not_spent_once_the_agent_left(
+    recorded_journal: Callable[[str], _Journal],
+) -> None:
+    """An approval given before the upgrade is not spent through an agent that is no longer in the room."""
+    store = recorded_journal("12_scheduled_calls.sql").open()
+    try:
+        armed = await store.principal(_ROUTER).approvals.scheduled_call(task_id="task-armed")
+        assert armed is not None
+        await admit_room_membership(store.principal(_CODE), _ROOM, "join")
+        await admit_room_membership(store.principal(_CODE), _ROOM, "leave")
+
+        claimed = await store.backend.write(
+            lambda transaction: scheduled_approvals.claim(
+                transaction,
+                _ROUTER,
+                call=armed,
+                arguments_json=armed.arguments_json,
+                receipt=ApprovalCardReservation(
+                    delivery_id="scheduled-receipt:task-armed",
+                    tool_call_id="task-armed",
+                    event_type="io.mindroom.tool_approval",
+                    payload={"approval_id": "scheduled-receipt:task-armed", "tool_name": armed.tool_name},
+                    approver_user_id=_ALICE,
+                    approvable=False,
+                    sender_principal_id=_CODE,
+                ),
+                now_ns=armed.execute_at_ns,
+            ),
+        )
+
+        assert claimed == "left_room"
     finally:
         await store.close()
 
@@ -743,3 +798,158 @@ async def test_a_receipt_outliving_its_reply_keeps_its_granted_call_until_it_ret
         assert retired.retired
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("router_in_room", "owner_configured"), [(True, True), (False, True), (False, False)])
+async def test_pending_router_card_is_ended_once_at_upgrade(
+    recorded_journal: Callable[[str], _Journal],
+    tmp_path: Path,
+    router_in_room: bool,
+    owner_configured: bool,
+) -> None:
+    """A card the router sent before upgrade expires at the first startup.
+
+    Its edit waits for a router bot that is only unavailable; a router the config no longer starts never edits it,
+    so the card retires unedited.
+    """
+    store = recorded_journal("01_waiting_card_acknowledged.sql").open()
+    sent: list[MatrixDelivery] = []
+    manager = _manager(tmp_path, store, sent, sender_ready=router_in_room)
+    recovery = ApprovalRecovery(deliver_unavailable_notice=AsyncMock(), owner_absent=lambda: not owner_configured)
+    recovery.bind(manager)
+    retired = router_in_room or not owner_configured
+    try:
+        approvals = store.principal(_ROUTER).approvals
+        pending = await approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
+        assert isinstance(pending, ApprovalCardView)
+        assert await approvals.approval_card_sender(delivery_id=pending.delivery_id) == (None, _ROOM)
+        assert not pending.decided
+
+        await recovery._end_cards_without_sender()
+
+        card = await approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
+        assert isinstance(card, ApprovalCardView)
+        assert (card.decided, card.retired) == (True, retired)
+        assert [delivery.stage for delivery in sent] == ([DeliveryStage.FINAL] if router_in_room else [])
+        # A later startup finds the card again only while its edit still waits for a router bot.
+        live = [card.delivery_id for card in await approvals.pending_approval_cards(room_id=_ROOM)]
+        assert live == ([] if retired else [pending.delivery_id])
+        await recovery._end_cards_without_sender()
+        card = await approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
+        assert isinstance(card, ApprovalCardView)
+        assert (card.decided, card.retired) == (True, retired)
+        assert [delivery.stage for delivery in sent] == ([DeliveryStage.FINAL] if router_in_room else [])
+    finally:
+        await manager.shutdown()
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_grants_survive_upgrade(recorded_journal: Callable[[str], _Journal], tmp_path: Path) -> None:
+    """Ending the router's pending cards at upgrade leaves every timed grant as it was."""
+    journal = recorded_journal("13_timed_grants.sql")
+    store = journal.open()
+    manager = _manager(tmp_path, store, [], sender_ready=False)
+    recovery = ApprovalRecovery(deliver_unavailable_notice=AsyncMock())
+    recovery.bind(manager)
+    try:
+        grants = sorted(journal.query("SELECT grant_id, revoked_at_ns FROM approval_grants"))
+        assert grants
+
+        await recovery._end_cards_without_sender()
+
+        assert sorted(journal.query("SELECT grant_id, revoked_at_ns FROM approval_grants")) == grants
+        grant = await store.principal(_ROUTER).approvals.approval_grant_for_card(
+            room_id=_ROOM,
+            card_event_id="$grant-origin-0-0",
+        )
+        assert grant is not None
+        assert grant.revoked_at_ns is None
+    finally:
+        await manager.shutdown()
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_grant_given_before_upgrade_approves_the_agents_next_call(
+    recorded_journal: Callable[[str], _Journal],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed grant given while the router and the agent were in different memberships still covers a new call."""
+    # The call comes while the recorded grant, given at 08:00:07 UTC on 2027-01-15 for ten minutes, is still live.
+    monkeypatch.setattr(time, "time_ns", lambda: 1_800_000_300_000_000_000)
+    store = recorded_journal("13_timed_grants.sql").open()
+
+    async def prepare(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:
+        return content
+
+    manager = approval_manager_for_test(
+        test_runtime_paths(tmp_path),
+        cards=store.principal(_ROUTER),
+        prepare_approval_event=prepare,
+        send_approval_delivery=AsyncMock(return_value="$receipt"),
+        sender_bot=lambda _sender, _room_id: object(),
+        responder_principal_id=lambda _entity_name: _CODE,
+    )
+    try:
+        decision = await asyncio.wait_for(
+            manager.request_background_approval(
+                owner_kind="job",
+                origin=BackgroundScriptToolOrigin(
+                    run_id="tool-job:after-upgrade",
+                    call_id="call-after-upgrade",
+                    requester_id=_ALICE,
+                    toolkit_name="shell",
+                    function_name="run_shell_command",
+                ),
+                room_id=_ROOM,
+                thread_id="$thread-root",
+                agent_name="code",
+                requester_id=_ALICE,
+                approver_user_id=_ALICE,
+                tool_name="run_shell_command",
+                arguments={"command": "git push"},
+                timeout_seconds=600,
+                entity_name="code",
+                grant_operation=ApprovalOperation(
+                    "54b15aead02f51587007195e1b8d8a28d9dc010a2279f7cf8590e9640de8ccb1",
+                    "run_shell_command",
+                ),
+            ),
+            timeout=5,
+        )
+
+        assert decision.status == "approved"
+    finally:
+        await manager.shutdown()
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_sender_column_is_added_to_a_current_card_table(tmp_path: Path) -> None:
+    """A journal whose card table predates the sender column gets it, once, and the router's left rooms take cards."""
+    path = tmp_path / "journal.db"
+    await EventJournalStore.open_sqlite(path).close()
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("ALTER TABLE approval_cards DROP COLUMN sender_principal_id")
+        for column in ("sender_principal_id", "sender_epoch"):
+            connection.execute(f"ALTER TABLE scheduled_call_approvals DROP COLUMN {column}")
+        connection.execute(
+            "INSERT INTO room_membership (principal_id, room_id, membership_epoch, departure_fenced) VALUES (?, ?, 1, 1)",
+            (_ROUTER, _ROOM),
+        )
+        connection.commit()
+
+    for _ in range(2):
+        await EventJournalStore.open_sqlite(path).close()
+
+    with closing(sqlite3.connect(path)) as connection:
+        columns = [str(row[1]) for row in connection.execute("PRAGMA table_info(approval_cards)")]
+        scheduled = {str(row[1]) for row in connection.execute("PRAGMA table_info(scheduled_call_approvals)")}
+        memberships = connection.execute("SELECT membership_epoch, departure_fenced FROM room_membership").fetchall()
+    assert columns.count("sender_principal_id") == 1
+    assert {"sender_principal_id", "sender_epoch"} <= scheduled
+    # The room the router had left keeps its epoch and is open to the cards an agent sends there.
+    assert memberships == [(1, 0)]

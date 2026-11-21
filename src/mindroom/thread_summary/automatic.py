@@ -429,7 +429,7 @@ async def _untitled_prompt(
     )
     if state is None or state.summary_event_ids:
         return None
-    # The router's voice echo and routing relay, and a responder's reply
+    # A voice transcript echo and an old routing relay, and a responder's reply
     # placeholder, can land before a read; none is a second prompt.
     ordinary = [
         message
@@ -461,6 +461,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
     *,
     prompt_event_ids: Collection[str],
     prompt: str | None,
+    prompt_as_shown: bool = False,
     conversation_reader: ConversationReader,
     entity_name: str,
     membership_index: AgentReplyMembershipIndex,
@@ -468,6 +469,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
     """Title a new thread from its first turn's messages without advancing the post-reply schedule.
 
     ``prompt`` is None for a batch of messages starting a fork: only the parent's title can title it then.
+    It is None too with ``prompt_as_shown``, for a routed prompt whose turn holds no text: the thread's own shows it.
     """
     baselines = schedule.THREAD_SUMMARY_BASELINES
     if (prompt is not None and not prompt.strip()) or not baselines.claim_provisional_title(room_id, thread_id):
@@ -510,13 +512,16 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 runtime_paths=runtime_paths,
                 trusted_sender_ids=trusted_sender_ids,
                 authorize_human=authorize_human,
-                sole=prompt is not None,
+                sole=prompt is not None or prompt_as_shown,
             )
             if (prompt_message := await untitled_prompt(history)) is None:
                 return
+            # A routed turn holds no text: it is titled from each of its messages as the thread shows it.
+            shown = "\n".join(message.body for message in history if message.event_id in prompt_event_ids)
+            body = shown if prompt_as_shown else prompt
             model_name = resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name)
             title = await _provisional_title(
-                None if prompt is None else replace(prompt_message, body=prompt),
+                replace(prompt_message, body=body) if body is not None else None,
                 history,
                 thread_id,
                 parent_summary=partial(

@@ -116,7 +116,6 @@ class VoiceIngress:
                 event=event,
                 target=voice_target,
                 coalescing_thread_id=coalescing_thread_id,
-                requester_user_id=facts.lane_requester_id,
                 dispatch_timing=dispatch_timing,
             )
             envelope = self.deps.resolver.build_envelope(event=normalized_event, facts=facts, target=voice_target)

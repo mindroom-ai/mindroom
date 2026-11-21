@@ -69,6 +69,10 @@ class _FakeBot:
         return MatrixID.parse(self.user_id)
 
     @property
+    def agent_name(self) -> str:
+        return self.matrix_id.username.removeprefix("mindroom_")
+
+    @property
     def approval_room_ids(self) -> frozenset[str]:
         return frozenset(self.rooms) | self.invited_room_ids
 
@@ -100,6 +104,7 @@ def _runner(config: Config, bots: dict[str, _ThreadExportBot]) -> WorkspaceThrea
             runtime_paths=runtime_paths_for(config),
             config_provider=lambda: config,
             bot_provider=bots.get,
+            steward_provider=lambda room_id: next((bot for bot in bots.values() if room_id in bot.rooms), None),
             response_admission_gate=ResponseAdmissionGate(),
             agent_reply_memberships=AgentReplyMembershipIndex(),
             debounce_seconds=0,
@@ -778,7 +783,7 @@ async def test_manual_export_borrows_live_owner_and_reserves_reload_admission(tm
     try:
         with patch("mindroom.thread_export.service.export_threads_for_targets_for_client", side_effect=export_source):
             stats = await runner.export_once()
-        assert stats.rooms_exported == 1
+        assert stats.rooms_exported == 2
         assert gate.in_flight_response_count == 0
         client.close.assert_not_awaited()
         assert await principal.load_event("$missing") is None
@@ -804,7 +809,7 @@ async def test_manual_export_preserves_previous_files_when_owner_is_unavailable(
     try:
         stats = await runner.export_once(output_dir=output)
         assert stats.failures == 2
-        assert all("No running Matrix owner for router" in item.error for item in stats.failed_items)
+        assert all("No running Matrix owner for !" in item.error for item in stats.failed_items)
         assert prior.exists()
         assert runner._deps.response_admission_gate.in_flight_response_count == 0
     finally:

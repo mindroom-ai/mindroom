@@ -74,7 +74,11 @@ Other people in the thread still approve their own calls, an agent cannot turn i
 In a room that uses `thread_mode: room`, the window covers the whole room.
 `!auto_approve` shows when the window ends and `!auto_approve off` ends it early; restarts and config reloads keep it.
 `!auto_approve off` does not stop auto-approval started from an approval card; stop that on the card.
-MindRoom Chat shows the open window in the thread header in rooms where the router may send the `io.mindroom.auto_approve` state event, which the rooms MindRoom creates allow.
+A window needs a MindRoom account that may send the `io.mindroom.auto_approve` state event, which the rooms MindRoom creates allow; elsewhere the command answers `I need moderator rights in this room to turn on auto-approve.`
+The window opens only after the room shows it, so a refused window never approves a tool call.
+`/auto_approve off` always ends the window, and says when the room refuses to show that or the update fails.
+After a failed update, running `/auto_approve off` again clears what the room shows.
+MindRoom Chat shows the open window in the thread header.
 
 ## Approval Card Contents
 
@@ -93,11 +97,10 @@ The [OpenAI-compatible API](openai-api.md) has no approval cards, so it hides ev
 Skill and knowledge-search functions such as `get_skill_script` and `search_knowledge_base` cannot pause for approval on any channel, so they are hidden when a required-approval rule or `default: require_approval` applies to them.
 Add an `auto_approve` rule for such a function to keep it available.
 
-## When the Router Is Missing
+## Who Posts the Card
 
-Approval cards need the router in the room, so a gated call in a room without the router is denied with `Tool approval needs the router in this room.`
-The agent gets that denial as the call's result and can recover on its own: every agent in a room has a built-in `invite_router` tool that invites the router into the current room, waits briefly for it to join, and reports when the invite is still pending.
-Once the router has joined, the agent retries the call, and the card appears as usual.
-The router accepts that invite only when its [`router.accept_invites`](configuration/router.md) allows the inviting agent's Matrix account; for a team, that is the team's account rather than the member agent's.
-Otherwise enable that setting or add the router to the room manually, then retry.
-An [adopted personal room](personal-rooms.md#adopting-an-existing-room) keeps the router out unless its record lists it in `router_user_id` or `additional_user_ids`, so `invite_router` refuses there instead of inviting a router the room would remove again.
+The agent or team whose turn asks for approval posts the card and edits it when the call is decided.
+A card is denied when the agent or team that posted it leaves the room.
+Whether the router account is in the room, or leaves it, changes nothing for a card.
+An approval for a scheduled tool call ends when the agent that asked leaves the room, even if it rejoins.
+When an agent or team is removed from the configuration, its pending cards may stay unedited, and a notice in the conversation says the request ended.

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence  # noqa: TC003
+from collections.abc import Mapping, Sequence  # noqa: TC003
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom.attachments.ids import merge_attachment_ids
 from mindroom.attachments.media import attachment_records_to_media, resolve_scoped_attachments
@@ -31,7 +31,8 @@ from mindroom.matrix.media import (
     is_image_message_event,
     is_matrix_media_dispatch_event,
 )
-from mindroom.matrix.message_content import is_v2_sidecar_text_preview
+from mindroom.matrix.message_content import resolve_event_source_content
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.matrix.thread_forks import fork_parent_thread_ids
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
@@ -53,7 +54,7 @@ if TYPE_CHECKING:
 class TextNormalizationRequest:
     """One inbound text-like event to normalize."""
 
-    event: nio.RoomMessageFormatted | PreparedIngress
+    event: nio.RoomMessageFormatted | FileMessageEvent | PreparedIngress
 
 
 @dataclass(frozen=True)
@@ -227,28 +228,10 @@ class InboundTurnNormalizer:
                 ),
             )
 
-    async def prepare_file_sidecar_text_event(
-        self,
-        event: FileMessageEvent,
-    ) -> PreparedIngress | None:
-        """Return a prepared text event when a file event is really a long-text preview."""
-        if not is_v2_sidecar_text_preview(event.source):
-            return None
-
-        resolved_source, body = await resolve_visible_event_source(
-            event.source,
-            self._client(),
-            fallback_body=event.body,
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-        )
-        return PreparedIngress(
-            sender=event.sender,
-            event_id=event.event_id,
-            body=body,
-            source=resolved_source,
-            server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
-        )
+    async def long_text_content(self, preview: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Return the whole content a long-text preview stands for, or none of it while its file cannot be read."""
+        content = (await resolve_event_source_content({"content": dict(preview)}, self._client()))["content"]
+        return {} if holds_unresolved_sidecar(content) else content
 
     async def register_routed_attachment(
         self,

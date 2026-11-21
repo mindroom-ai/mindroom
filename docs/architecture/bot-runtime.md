@@ -79,6 +79,11 @@ An approved run's resume saves no checkpoint, since the paused row is what an ap
 A subagent job's child is the exception: its job asks for its approvals and resumes each paused row once, so nothing settles from that row, and its approved resume checkpoints as its fresh run does, and before each approved call, because a crash that left the paused row would end its job where a restart continues it.
 An interrupted edit regeneration also stays pending: a retry of the same edit recovers its attempts as above, and a newer edit's regeneration starts fresh, because it replaced the prompt the stopped attempts answered; a regeneration's approved resume that was cut short continues below what it showed, as an interrupted turn does.
 
+A chat command runs on the bot it is aimed at, which `TurnPolicy.aims_command_at_me` decides from the bot's own copy of the room and the room's joined candidates.
+A Desktop agent alone with the requester runs `/desktop`; a command that mentions agents or teams goes to the lowest Matrix ID among the mentioned candidates; a command in a thread with one agent goes to that agent; any other command goes to the lowest Matrix ID among the room's candidates, whatever the reply mode, where `router.access` admits the requester.
+Bots can disagree while a join or a thread reaches them, so the first bot that decides saves the owner per event (`claim_room_event`, purpose `command`), and only the saved owner runs the command or says that its conversation is not resolved yet.
+A saved owner that never receives the command leaves it unanswered.
+A command that changes room state writes through the room's steward (`put_room_state_as_steward`), and answers `moderator_rights_message` when the room refuses the write.
 Potentially mutating chat commands are at-most-once: the start of execution is recorded before the handler runs, and the exact result before visible delivery.
 Recovery re-delivers a recorded result, while an interrupted attempt without one is not rerun and instead tells the requester its outcome is uncertain and to inspect state before retrying.
 `!config set` keeps its own Matrix-backed preview, decision, execution, and result journal, because its mutation begins only after the requester reacts to the preview.
@@ -107,7 +112,7 @@ Revisiting a receipt at or before the room's latest admitted receipt also backs 
 A periodic liveness sweep exists because a downstream owner can vanish without a completion notification.
 A running turn stays a pending row until its owner hands it back, so discovery does not page through running turns again on every wake: while turns are in flight it reads only what was admitted after its last finished scan.
 A lane still starts each pass at the front of its room, because a commit is visible before anything announces it, and an older source it made runnable has to run before the room's newer ones.
-A retry or a lost owner rewinds its room, and so does a departing router that fails a reply paused on its approval card, so the freed source still runs before later messages in its room.
+A retry or a lost owner rewinds its room, and so does an account that leaves a room and fails a reply paused on its approval card, so the freed source still runs before later messages in its room.
 The same sweep, which starts with the first turn in flight, sends discovery over the whole backlog again, which reopens a room for work that became runnable with nothing to announce it.
 
 ### Shutdown, replacement, and crash
@@ -118,7 +123,18 @@ Shutdown closes callback admission before withdrawing runtime capabilities, and 
 A cleanup that outlasts its budget keeps its owners, and the Matrix client and journal stay open until it finishes.
 Shutdown invalidates membership readiness only after owners finish, so readiness loss cannot settle an accepted source as revoked authorization.
 Replay does not wait for a later sync token or Sliding Sync position: recovered callbacks may rely on the room ID, but cached membership and state are best-effort.
-Recovery intent travels with queued ingress, so lane and coalescing workers cannot turn a recovered turn whose router target is temporarily unavailable into a terminal fallback response.
+A message that mentions nobody and that no bot answers by its own rules is routed by one bot per room, the room's steward.
+The steward routes under `router.access` alone: its own reply access decides whether it may answer the turn itself, run the person's commands, and run its own `message:received` hooks on the message.
+The steward selects a responder and sends it a hidden `io.mindroom.route` event, which names the responder, every message of the turn with the newest last, and the thread, carries the relay context and the transcript of each routed voice message, and has no `m.relates_to` or `m.mentions`.
+The route carries the person's text as its `body` only for a scheduled task and for a responder that answers in the room, which reads no conversation.
+Every bot journals that event from sync as `EventKind.ROUTE`, only when an account the identity registry manages sent it, and journal dispatch hands it to the message callback as a mention of the responder in reply to the person's newest message, keeping only the relay context keys a responder reads.
+Only an event journaled as a route is a route: every journal event loses the route key when it is rebuilt, beside its content and, unless it is a route, inside it, and only the dispatch of a route event writes the mark back.
+The responder answers the person's newest message for that person under its own access rules, every other bot settles the route without work, and every message the route names is an alias of the responder's turn, so a deletion of any of them reaches its answer.
+An edit regenerates the answer only when the route names that one message: an edit of one of several routed messages leaves the answer as it is, because the turn keeps no text of the others to run again with.
+A turn that pauses for an approval stores the event its reply answers, so its resumed reply, tools and model run answer the person's message and not the route.
+The steward records the route as its answer, so a replay sends none again, and a replay whose record a crash lost looks, before it selects anyone, for its own route in the room's history that names exactly the messages of its saved batch.
+A bot that is no longer the room's steward when its selection returns sends no route and answers nothing.
+A responder that is still starting leaves the turn pending with nothing sent, and a steward the selection names answers the turn itself with no event.
 
 ### Delivery and membership
 
@@ -128,7 +144,7 @@ Every outbox delivery freezes the room membership epoch that authorized it, exce
 ### Invites
 
 Invites have no stable event ID for a journal row, so the pending room and inviter are persisted before background handling starts.
-That record only wakes unfinished work and never grants inviter authority: routers and agents re-read Nio's current inviter after the join fence is durable and immediately before requesting the join.
+That record only wakes unfinished work and never grants inviter authority: agents and teams re-read Nio's current inviter after the join fence is durable and immediately before requesting the join.
 
 ### Best-effort inputs
 
@@ -168,7 +184,7 @@ A voice message's batching scope and its echo thread are distinct: a root audio 
 The user-visible history behavior is on [Conversation history](../configuration/history.md#compacted-history-and-redaction).
 
 - A redaction is recorded once per agent, in the transaction that admits it, and applied there to every Matrix login of that agent and to the agent's turns; it is kept when the bot leaves the room, because an earlier login the agent returns to, or a rejoin the server does not replay the redaction to, would otherwise show the deleted text again.
-- Deleting the human message a router relayed deletes the relay that answers for it: the routed reply ends, and its approval wait with it, exactly as for a directly sent message, because reply discovery matches exact logical ids and the redacted alias is resolved to its sources first.
+- Deleting a human message that a route answers for deletes that route, hidden or an old visible relay (the router relayed visibly in every release before the router-free change, v2026.11.459 the newest when written): the routed reply ends, and its approval wait with it, exactly as for a directly sent message, because reply discovery matches exact logical ids and the redacted alias is resolved to its sources first.
 - Nothing durable records that history cleanup is owed: every response derives it from the recorded redactions, so a crash between redaction and cleanup, or a redacted event no turn owns, needs no recovery path.
 - Approval creation and source-redaction admission serialize, so an approval cannot acquire a source that a deletion already settled.
 - Redacted replay can stay in local session storage until its history scope next serves a response, because cleanup runs only then.

@@ -173,7 +173,7 @@ async def send_welcome_thread_summary(
     welcome_event_id: str,
     conversation_reader: ConversationReader,
 ) -> None:
-    """Title the router welcome without counting it toward automatic summaries.
+    """Title the welcome message without counting it toward automatic summaries.
 
     A zero count keeps the first reply in the welcome thread due for an
     automatic summary, which then replaces this unpinned title.

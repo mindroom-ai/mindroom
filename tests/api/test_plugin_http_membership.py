@@ -1,4 +1,4 @@
-"""Plugin routes can require live room membership, read through a running bot in the room, the router first.
+"""Plugin routes can require live room membership, read through the room's steward among the running bots.
 
 The embedded API binds the reader as it serves, and entity restarts and reloads leave it bound.
 """
@@ -32,6 +32,7 @@ from tests.conftest import install_bots
 
 ROOM = "!room:example.org"
 OTHER_ROOM = "!other:example.org"
+BOT = "@mindroom_bot:example.org"
 
 
 @pytest.fixture
@@ -49,10 +50,14 @@ def _request(app: FastAPI, user_id: str = "@alice:example.org") -> Request:
     return Request({"type": "http", "app": app, "headers": [(b"authorization", f"Bearer {token}".encode())]})
 
 
-def _client(*user_ids: str, rooms: tuple[str, ...] = (ROOM,)) -> SimpleNamespace:
-    """A Matrix client joined to ``rooms`` that answers ``user_ids`` as the members of ``ROOM``."""
+def _client(*user_ids: str, rooms: tuple[str, ...] = (ROOM,), own_id: str = BOT, power: int = 0) -> SimpleNamespace:
+    """The client of ``own_id``, at ``power`` in the ``rooms`` it is joined to, answering ``user_ids`` as ``ROOM``'s members."""
+    cached_rooms = {room_id: nio.MatrixRoom(room_id, own_id) for room_id in rooms}
+    for room in cached_rooms.values():
+        room.power_levels.users[own_id] = power
     return SimpleNamespace(
-        rooms={room_id: object() for room_id in rooms},
+        user_id=own_id,
+        rooms=cached_rooms,
         joined_members=AsyncMock(return_value=joined_members_response(ROOM, *user_ids)),
     )
 
@@ -299,14 +304,17 @@ async def test_a_lookup_ending_after_its_callers_left_reports_no_error(cancelled
 
 
 @pytest.mark.asyncio
-async def test_router_in_room_is_asked_first() -> None:
-    """The router answers when it is in the room, even when an agent bot is in it too."""
-    router = _client("@alice:example.org")
-    agent = _client("@alice:example.org")
+async def test_the_rooms_steward_is_asked() -> None:
+    """The bot with the most power in the room answers, whatever its name and wherever it is listed."""
+    steward = _client("@alice:example.org", own_id="@mindroom_z:example.org", power=100)
+    router = _client("@alice:example.org", own_id="@mindroom_router:example.org", power=50)
+    agent = _client("@alice:example.org", own_id="@mindroom_a:example.org")
     app = FastAPI()
-    bind_room_members(app, {"general": _bot(agent), "router": _bot(router)})  # type: ignore[dict-item]
+    bots = {"general": _bot(agent), "router": _bot(router), "zeta": _bot(steward)}
+    bind_room_members(app, bots)  # type: ignore[arg-type]
     await require_room_member(_request(app), ROOM)
-    router.joined_members.assert_awaited_once_with(ROOM)
+    steward.joined_members.assert_awaited_once_with(ROOM)
+    router.joined_members.assert_not_awaited()
     agent.joined_members.assert_not_awaited()
 
 
@@ -406,6 +414,7 @@ def _orchestrator_config(tmp_path: Path, *, role: str = "Write code") -> Config:
         {
             "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {"demo": {"transport": "stdio", "command": "npx"}},
+            "server_emoji": {"enabled": True},
             "agents": {"code": {"display_name": "Code", "role": role, "tools": ["mcp_demo"]}},
         },
         _runtime_paths(tmp_path),
@@ -468,7 +477,7 @@ async def test_serving_api_binds_membership_and_a_failed_reload_leaves_it_bound(
     orchestrator.running = True
     install_bots(
         orchestrator,
-        {ROUTER_AGENT_NAME: _running_bot(_client("@alice:example.org")), "code": _running_bot(_client())},
+        {ROUTER_AGENT_NAME: _running_bot(_client("@alice:example.org", power=100)), "code": _running_bot(_client())},
     )
     plan = build_config_update_plan(current_config=current, new_config=new, bots=orchestrator.agent_bots)
     statuses: list[int] = []
@@ -495,13 +504,13 @@ async def test_restarting_one_bot_keeps_membership_answering_through_another(
     tmp_path: Path,
     main_app: FastAPI,
 ) -> None:
-    """While a catalog change restarts one bot, the running router in the room keeps answering membership."""
+    """While a catalog change restarts the room's steward, another running bot in the room answers membership."""
     orchestrator = _MultiAgentOrchestrator(
         runtime_paths=_runtime_paths(tmp_path),
         config=_orchestrator_config(tmp_path),
     )
     orchestrator.running = True
-    code = _running_bot(_client("@alice:example.org"))
+    code = _running_bot(_client("@alice:example.org", power=100))
     install_bots(orchestrator, {ROUTER_AGENT_NAME: _running_bot(_client("@alice:example.org")), "code": code})
     bind_room_members(main_app, orchestrator.agent_bots)
     new_code = _running_bot(_client("@alice:example.org"))

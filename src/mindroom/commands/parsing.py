@@ -84,6 +84,7 @@ _COMMAND_DOCS = {
     CommandType.HI: ("/hi", "Show welcome message"),
 }
 _WELCOME_COMMAND_TYPES = (CommandType.HI, CommandType.SCHEDULE, CommandType.HELP)
+_MAX_LEADING_MENTIONS = 16
 _COMPACT_COMMAND_DOC_OVERRIDES = {
     CommandType.SCHEDULE: ("/schedule <time> <message>", "Schedule tasks and reminders"),
     CommandType.HELP: ("/help [topic]", "Get detailed help"),
@@ -129,6 +130,26 @@ def get_compact_command_entries(
     ]
 
 
+COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
+    {
+        CommandType.RELOAD_PLUGINS,
+        CommandType.SCHEDULE,
+        CommandType.CANCEL_SCHEDULE,
+        CommandType.EDIT_SCHEDULE,
+        CommandType.CANCEL_JOB,
+        CommandType.DESKTOP,
+        CommandType.MODEL,
+        CommandType.MODE,
+        CommandType.COMPACT,
+        CommandType.ROOM_MODEL,
+        CommandType.THREAD_MODE,
+        CommandType.REPLY_MODE,
+        CommandType.AUTO_APPROVE,
+        CommandType.ENCRYPT,
+    },
+)
+
+
 @dataclass
 class Command:
     """Parsed command with arguments."""
@@ -136,6 +157,18 @@ class Command:
     type: CommandType
     args: dict[str, Any]
     raw_text: str
+
+
+def _without_leading_mentions(text: str, names: tuple[str, ...]) -> str:
+    """Return a command without the mentions before it, which aim it: `@Research Expert !model`."""
+    rest = text
+    for _ in range(_MAX_LEADING_MENTIONS):
+        body = rest.removeprefix("@")
+        spans = [len(n) for n in names if body[: len(n)].lower() == n.lower() and body[len(n) :][:1].isspace()]
+        if not spans:
+            break
+        rest = body[max(spans) :].lstrip()
+    return rest if rest.startswith(("!", "/")) else text
 
 
 class _CommandParser:
@@ -162,19 +195,18 @@ class _CommandParser:
     E2EE_PATTERN = re.compile(r"^!e2ee$", re.IGNORECASE)
     HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
 
-    def parse(self, message: str) -> Command | None:  # noqa: C901, PLR0911, PLR0912, PLR0915
+    def parse(self, message: str, mention_names: tuple[str, ...] = ()) -> Command | None:  # noqa: C901, PLR0911, PLR0912, PLR0915
         """Parse a message for commands.
 
         Args:
             message: The message text to parse
+            mention_names: The names the agents and teams the message mentions can read as in its text
 
         Returns:
             Parsed command or None if no command found
 
         """
-        message = message.strip()
-
-        raw_text = message.removeprefix(VOICE_PREFIX)
+        raw_text = _without_leading_mentions(message.strip().removeprefix(VOICE_PREFIX), mention_names)
         # `/cmd` parses like `!cmd`, but only a known command: other `/` text (paths, `/s`) is conversation.
         is_slash = raw_text.startswith("/")
         message = f"!{raw_text[1:]}" if is_slash else raw_text
@@ -577,7 +609,7 @@ Usage: `/reply_mode [auto|mentions|reset|show]` - Show or switch whether agents 
 **Examples:**
 - `/reply_mode` or `/reply_mode show` - Show the reply mode this room uses
 - `/reply_mode mentions` - Answer only messages that mention an agent or team, and follow-ups in threads an agent or team already replied in or is still answering
-- `/reply_mode auto` - Also let the router or the room's only agent answer messages that mention no one
+- `/reply_mode auto` - Also let the agent or team that fits best, or the room's only one, answer messages that mention no one
 - `/reply_mode reset` - Remove the room override and use `rooms.<room>.reply_mode` from config.yaml again
 
 How it works:

@@ -465,7 +465,9 @@ def build_prepared_turn(
     source_event_ids = tuple(pending_event.event.event_id for pending_event in ordered_pending_events)
     source_event_prompts = _batch_source_event_prompts(ordered_pending_events)
     source_event_metadata = _batch_source_event_metadata(ordered_pending_events)
-    routed_aliases = tuple(filter(None, (item.discovery_event_id for item in source_event_metadata.values())))
+    routed_aliases = tuple(
+        alias for pending_event in ordered_pending_events for alias in pending_event.facts.discovery_event_ids
+    )
     facts = _batch_facts(ordered_pending_events)
     return PreparedTurn(
         room=primary_pending_event.room,

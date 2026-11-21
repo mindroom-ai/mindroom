@@ -277,9 +277,9 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Invite the MindRoom router to the current Matrix room",
+      "description": "Deprecated: no longer needed, rooms work without another account",
       "display_name": "Invite Router",
-      "docs_url": "https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing",
+      "docs_url": "https://docs.mindroom.chat/authorization/",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -291,7 +291,7 @@
       "name": "invite_router",
       "requires_conversation": false,
       "requires_primary_runtime": true,
-      "requires_room_context": true,
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -8620,7 +8620,7 @@
       "function_names": [
         "desktop"
       ],
-      "helper_text": "Ask the requester to send `/desktop setup` in a private Matrix room containing only them and one Desktop-enabled agent, plus the router when it serves the command.",
+      "helper_text": "Ask the requester to send `/desktop setup` in a private Matrix room containing only them and one Desktop-enabled agent.",
       "icon": "MonitorUp",
       "icon_color": "text-cyan-500",
       "name": "desktop",

@@ -1,8 +1,7 @@
-"""Prepare durable voice input and satisfy its visible publication requirement."""
+"""Prepare durable voice input: transcribe a voice message once and checkpoint the result."""
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -19,7 +18,6 @@ from mindroom.inbound_turn_normalizer import VoiceNormalizationRequest
 from mindroom.matrix.media import carried_media_content, extract_media_caption
 from mindroom.timing import attach_dispatch_pipeline_timing
 from mindroom.turn_record import PreparedVoiceSource
-from mindroom.voice.visible_voice_echo import VisibleVoiceEchoRequest
 
 if TYPE_CHECKING:
     import nio
@@ -30,7 +28,6 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.turn_store import TurnStore
-    from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle
 
 
 def _text_only_fallback(event: AudioMessageEvent, *, thread_id: str | None) -> PreparedIngress:
@@ -64,11 +61,10 @@ def _text_only_fallback(event: AudioMessageEvent, *, thread_id: str | None) -> P
 
 @dataclass(frozen=True)
 class VoiceReadiness:
-    """Own preparation, checkpointing, and publication before voice lane handoff."""
+    """Own preparation and checkpointing before voice lane handoff."""
 
     normalizer: InboundTurnNormalizer
     turn_store: TurnStore
-    visible_echo: VisibleVoiceEchoLifecycle
     logger: structlog.stdlib.BoundLogger
 
     async def prepared_source(self, source_event_id: str) -> PreparedVoiceSource | None:
@@ -86,18 +82,9 @@ class VoiceReadiness:
         event: AudioMessageEvent,
         target: MessageTarget,
         coalescing_thread_id: str | None,
-        requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> PreparedIngress:
-        """Return one checkpointed event only after required visible publication succeeds."""
-        handle = self.visible_echo.start(
-            VisibleVoiceEchoRequest(
-                source_event_id=event.event_id,
-                target=target,
-                requester_user_id=requester_user_id,
-                raw_source=event.source,
-            ),
-        )
+        """Return one transcribed event only after its checkpoint is saved."""
         try:
             checkpoint = await self.prepared_source(event.event_id)
             if checkpoint is not None:
@@ -139,31 +126,15 @@ class VoiceReadiness:
                 source={**prepared_event.source, "content": checkpoint.to_content()},
             )
             attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
-            if not await self.visible_echo.finish(handle, prepared_event):
-                raise IngressRetryError  # noqa: TRY301 - preserve expected retry without exception logging
-            if not await self.visible_echo.await_publication(
-                room=room,
-                source_event_id=event.event_id,
-                requester_user_id=requester_user_id,
-            ):
-                raise IngressRetryError  # noqa: TRY301 - preserve expected retry without exception logging
         except IngressRetryError:
-            raise
-        except asyncio.CancelledError:
-            self.visible_echo.finish_after_cancellation(
-                handle,
-                _text_only_fallback(event, thread_id=target.resolved_thread_id),
-            )
             raise
         except Exception as exc:
             self.logger.exception(
-                "Voice preparation checkpoint or publication failed; deferring this voice turn",
+                "Voice preparation checkpoint failed; deferring this voice turn",
                 event_id=event.event_id,
                 room_id=room.room_id,
             )
             raise IngressRetryError from exc
-        finally:
-            self.visible_echo.abandon_unsettled(handle)
         return prepared_event
 
     async def _normalize(self, request: VoiceNormalizationRequest) -> PreparedIngress:

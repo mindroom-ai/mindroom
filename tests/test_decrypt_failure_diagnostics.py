@@ -23,7 +23,7 @@ from tests.journal_membership_helpers import admit_room_membership
 from tests.test_decrypt_failure import _megolm_event, _mock_client, _mock_room, _runtime_paths
 from tests.test_durable_ingestion_admission import Session
 from tests.test_durable_ingestion_decryption import ROOM, SENDER, _ciphertext, _decrypted
-from tests.test_room_member_hooks import _router_bot
+from tests.test_room_member_hooks import _steward_bot
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,7 +34,7 @@ pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 
 async def _bot(tmp_path: Path) -> AgentBot:
-    bot = _router_bot(tmp_path)
+    bot = _steward_bot(tmp_path)
     with_responder_access(bot.config, bot.agent_name, users=[SENDER])
     assert bot.client is not None
     bot.client.outgoing_key_requests = {}

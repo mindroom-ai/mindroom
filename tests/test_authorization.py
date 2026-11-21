@@ -20,7 +20,12 @@ from mindroom.authorization import (
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
 from mindroom.requester_identity import is_platform_administrator
-from tests.access_schema_support import membership_config, membership_index, unresolved_membership_index
+from tests.access_schema_support import (
+    OBSERVER_USER_ID,
+    membership_config,
+    membership_index,
+    unresolved_membership_index,
+)
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids
 
@@ -264,7 +269,13 @@ async def test_relevant_membership_certainty_and_alternative_grants(tmp_path: Pa
     config.authorization.aliases = {"@owner:example.com": ["@bridge:example.com"]}
     paths = runtime_paths_for(config)
     index = await membership_index(config, {"grant": {"@member:example.com"}, "other": set()})
-    index.mark_room_unready(config, paths, "!other:example.com", reason="refresh_failed")
+    index.mark_room_unready(
+        config,
+        paths,
+        "!other:example.com",
+        observer_user_id=OBSERVER_USER_ID,
+        reason="refresh_failed",
+    )
     for sender in (
         "@member:example.com",
         "@admin:example.com",
@@ -295,7 +306,13 @@ async def test_relevant_membership_certainty_and_alternative_grants(tmp_path: Pa
     config.agents["talent"].access = ResponderAccessConfig(members_of_rooms=["grant"])
     config.router.access = ResponderAccessConfig(members_of_rooms=["other"])
     index = await membership_index(config, {"grant": set(), "other": set()})
-    index.mark_room_unready(config, paths, "!other:example.com", reason="refresh_failed")
+    index.mark_room_unready(
+        config,
+        paths,
+        "!other:example.com",
+        observer_user_id=OBSERVER_USER_ID,
+        reason="refresh_failed",
+    )
     assert (
         _responder_reply_authorization(
             "@outsider:example.com",
@@ -328,7 +345,13 @@ async def test_current_room_absence_differs_from_unknown_joined_rooms(tmp_path: 
     )
     paths = runtime_paths_for(config)
     index = await membership_index(config, {"other": set()})
-    index.mark_room_unready(config, paths, "!other:example.com", reason="refresh_failed")
+    index.mark_room_unready(
+        config,
+        paths,
+        "!other:example.com",
+        observer_user_id=OBSERVER_USER_ID,
+        reason="refresh_failed",
+    )
     assert (
         _responder_reply_authorization(
             "@outsider:example.com",
@@ -429,7 +452,7 @@ async def test_newcomer_seen_joining_waits_for_the_router_to_apply_the_join(
             observed_room=_room_seen_by_the_agent(),
         )
 
-    index.apply_member_event(config, "!talent:example.com", _join_event(_NEWCOMER), control_user_id="@r:x")
+    index.apply_member_event(config, "!talent:example.com", _join_event(_NEWCOMER), control_user_id=OBSERVER_USER_ID)
 
     assert _newcomer_decision(config, index) is _ReplyAuthorizationDecision.ALLOWED
 
@@ -471,7 +494,7 @@ async def test_waiting_for_a_join_is_bounded_and_a_later_join_waits_afresh(tmp_p
     assert _newcomer_decision(config, index) is _ReplyAuthorizationDecision.DENIED
     now[0] += 30.0
     other = "@other:example.com"
-    assert index.awaits_router_join(  # an unrelated wait starting now cannot hand the expired one a fresh grace
+    assert index.awaits_observer_join(  # an unrelated wait starting now cannot hand the expired one a fresh grace
         other,
         "!talent:example.com",
         frozenset({other}),

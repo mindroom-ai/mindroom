@@ -41,7 +41,7 @@ from mindroom.plugin_http import ClientUser, client_user_oauth_access_token
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
-from tests.access_schema_support import joined_members_response
+from tests.access_schema_support import joined_members_response, refresh_memberships
 from tests.conftest import bind_runtime_paths, publish_test_plugins
 from tests.oauth_test_utils import (
     corrupt_oauth_credential_payload,
@@ -524,7 +524,12 @@ async def test_client_user_oauth_access_token_refuses_room_member_until_mindroom
     router = AsyncMock()
     router.joined_rooms.return_value = nio.JoinedRoomsResponse([LOUNGE])
     router.joined_members.return_value = joined_members_response(LOUNGE, ALICE)
-    await deployment.runtime.agent_reply_memberships.refresh(deployment.config, deployment.runtime_paths, router)
+    await refresh_memberships(
+        deployment.runtime.agent_reply_memberships,
+        deployment.config,
+        deployment.runtime_paths,
+        router,
+    )
     assert await deployment.token(ALICE, agent_name="lounge") == "alice-token"
     assert deployment.runtime.room_reads == 0
 

@@ -64,6 +64,8 @@ class ResponseAdmissionGate:
     response_identities: set[ActiveResponseIdentity] = field(default_factory=set, init=False, repr=False)
     _in_flight_response_count: int = field(default=0, init=False)
     _closed: bool = field(default=False, init=False)
+    # Startup keeps admission closed until it publishes, across any replacement that applies meanwhile.
+    startup_hold: bool = field(default=False, init=False)
     _open_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -94,7 +96,7 @@ class ResponseAdmissionGate:
 
     def close_if_idle(self) -> bool:
         """Close admission when no response is in flight, so an apply can start."""
-        if self._closed or self._in_flight_response_count > 0:
+        if (self._closed and not self.startup_hold) or self._in_flight_response_count > 0:
             return False
         self._closed = True
         self._open_event.clear()
@@ -106,7 +108,9 @@ class ResponseAdmissionGate:
         self._open_event.clear()
 
     def reopen(self) -> None:
-        """Reopen admission after a replacement finishes."""
+        """Reopen admission after a replacement finishes, unless startup still holds it closed."""
+        if self.startup_hold:
+            return
         self._closed = False
         self._open_event.set()
 

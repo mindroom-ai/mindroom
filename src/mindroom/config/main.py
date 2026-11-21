@@ -1721,6 +1721,10 @@ class Config(BaseModel):
             all_room_aliases.update(team_config.rooms)
         return all_room_aliases
 
+    def needs_owner_account(self) -> bool:
+        """Return whether this config has a room (the root Space links only those) or the emoji room for the owner."""
+        return bool(self.get_all_configured_rooms()) or self.server_emoji.enabled
+
     def managed_room_keys(self) -> set[str]:
         """Return configured room keys, excluding Matrix room IDs (`!…`) and aliases (`#…`)."""
         return {room_key for room_key in self.get_all_configured_rooms() if is_managed_room_key(room_key)}

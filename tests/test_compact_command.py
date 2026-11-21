@@ -10,8 +10,13 @@ import nio
 import pytest
 
 from mindroom.commands.compact_commands import handle_compact_command
-from mindroom.commands.handler import COMMAND_TYPES_WITH_SIDE_EFFECTS, handle_command
-from mindroom.commands.parsing import CommandType, _CommandParser, get_command_help
+from mindroom.commands.handler import handle_command
+from mindroom.commands.parsing import (
+    COMMAND_TYPES_WITH_SIDE_EFFECTS,
+    CommandType,
+    _CommandParser,
+    get_command_help,
+)
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.budgets import BudgetsConfig

@@ -19,7 +19,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.room_agent_access import room_execution_identity
-from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_room_flags
+from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_keeps_room_tools
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from tests.api.test_plugin_room_agents import ALICE, BOB, CAROL, READ_ONLY_FILE, ROOM, _paths, _Room
@@ -113,15 +113,13 @@ def test_a_member_reads_the_role_model_and_toolkits_and_no_tool_settings(tmp_pat
                 "mcp_server": "notes",
             },
             _registry_tool("scheduler"),  # Every agent gets it by default.
-            _registry_tool("invite_router"),  # Every Matrix room turn gets it.
         ],
     }
     # The toolkits a Matrix room turn of the agent may build, as its turn picks them, less the switched-off calculator.
     config, paths = client.room.config, client.room.paths
-    flags = turn_room_flags(room_execution_identity("coder", ALICE, ROOM, config, paths))
+    room_tools = turn_keeps_room_tools(room_execution_identity("coder", ALICE, ROOM, config, paths))
     candidates = resolve_agent_tools(config, "coder", config_plugins(config, paths).tools).candidates(
-        room_tools=flags[0],
-        matrix_room_tools=flags[1],
+        room_tools=room_tools,
     )
     turn_toolkits = [entry.name for entry in candidates if entry.name != "calculator"]
     assert [tool["name"] for tool in response.json()["tools"]] == turn_toolkits

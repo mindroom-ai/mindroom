@@ -19,6 +19,7 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import RouterConfig
 from mindroom.config.participation import ParticipationConfig
 from mindroom.constants import ROUTER_AGENT_NAME, SKIP_MENTIONS_KEY
 from mindroom.conversation_resolver import MessageContext
@@ -33,7 +34,7 @@ from mindroom.teams.spec import TeamMode
 from mindroom.thread_utils import history_mentioned_user_ids
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
-from tests.access_schema_support import with_responder_access
+from tests.access_schema_support import refresh_memberships, with_responder_access
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
 )
@@ -73,13 +74,16 @@ def config(tmp_path: Path) -> Config:
     )
 
 
-def _policy_for(config: Config, agent_name: str) -> TurnPolicy:
+def _policy_for(config: Config, agent_name: str, *, steward: str | None = ROUTER_AGENT_NAME) -> TurnPolicy:
+    """Return one bot's policy in a process whose rooms have ``steward`` as their steward."""
     runtime_paths = runtime_paths_for(config)
     registry = entity_identity_registry(config, runtime_paths)
+    orchestrator = ready_runtime(config, runtime_paths)
+    orchestrator.steward = steward
     return TurnPolicy(
         make_test_turn_policy_deps(
             runtime=BotRuntimeState(
-                orchestrator=ready_runtime(config, runtime_paths),
+                orchestrator=orchestrator,
                 client=make_matrix_client_mock(),
             ),
             logger=get_logger("test_turn_policy"),
@@ -164,7 +168,6 @@ async def _plan(
 ) -> object:
     return await policy.plan_turn(
         room,
-        _text_event("hello agents"),
         dispatch,
         has_active_response_for_target=lambda _target: has_active_response,
     )
@@ -413,20 +416,19 @@ async def test_untagged_follow_up_after_a_skip_marked_notice_stays_with_the_thre
 
 @pytest.mark.asyncio
 async def test_untagged_follow_up_in_a_moved_team_thread_still_gets_the_team(config: Config) -> None:
-    """A thread moved after a person tagged two agents keeps their team, though only its owner posted there."""
+    """A thread moved after a person tagged two agents keeps their team, though only its mover posted there."""
     general_id = _entity_id(config, "general").full_id
     research_id = _entity_id(config, "research").full_id
     room = _room_with_members(_SENDER, general_id, research_id)
     tagged = {"msgtype": "m.text", "body": "@general @research compare notes"}
-    posters = {"general": general_id, ROUTER_AGENT_NAME: _entity_id(config, ROUTER_AGENT_NAME).full_id}
     copies = _plan_thread_copy(
         [make_visible_message(sender=_SENDER, content=tagged), make_visible_message(sender=general_id, body="agreed")],
         entity_name_for_sender={general_id: "general"}.get,
-        target_posters=frozenset(posters),
+        mover_id=general_id,
         display_names={},
         mentioned_user_ids=lambda content: history_mentioned_user_ids(content, config, runtime_paths_for(config)),
     )
-    history = [make_visible_message(sender=posters[copy.poster], content=copy.content) for copy in copies]
+    history = [make_visible_message(sender=general_id, content=copy) for copy in copies]
     context = _context(thread_id="$moved:localhost", thread_history=history)
 
     general_plan = await _plan(_policy_for(config, "general"), room, _dispatch(context, agent_name="general"))
@@ -599,15 +601,111 @@ async def test_active_response_queues_untagged_thread_follow_up(config: Config) 
 
 
 @pytest.mark.asyncio
-async def test_router_routes_untagged_message_with_multiple_candidates(config: Config) -> None:
-    """The router produces a route plan when several responders could answer."""
-    policy = _policy_for(config, ROUTER_AGENT_NAME)
+@pytest.mark.parametrize("steward", [ROUTER_AGENT_NAME, "general", "research", None])
+async def test_only_the_rooms_steward_routes_an_untagged_message(config: Config, steward: str | None) -> None:
+    """One bot per room routes a message that names nobody: its steward, the owner account or a candidate."""
     room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
 
-    plan = await _plan(policy, room, _dispatch(_context(), agent_name=ROUTER_AGENT_NAME))
+    plans = {
+        name: await _plan(_policy_for(config, name, steward=steward), room, _dispatch(_context(), agent_name=name))
+        for name in (ROUTER_AGENT_NAME, "general", "research")
+    }
 
-    assert plan.kind == "route"
-    assert plan.router_event is not None
+    assert {name: plan.kind for name, plan in plans.items()} == {
+        name: "route" if name == steward else "ignore" for name in plans
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_steward_answers_by_its_own_rules_before_it_routes(config: Config) -> None:
+    """A steward that is a candidate answers its mention and its own thread itself, and routes neither."""
+    policy = _policy_for(config, "general", steward="general")
+    general_id = _entity_id(config, "general")
+    room = _room_with_members(_SENDER, general_id.full_id, _entity_id(config, "research").full_id)
+    mention = _context(mentioned=[general_id], am_i_mentioned=True)
+    own_thread = _context(
+        thread_id="$thread:localhost",
+        thread_history=[
+            make_visible_message(sender=_SENDER, body="please help"),
+            make_visible_message(sender=general_id.full_id, body="answering"),
+        ],
+    )
+    other_mention = _context(mentioned=[_entity_id(config, "research")])
+    other_thread = _context(
+        thread_id="$thread:localhost",
+        thread_history=[
+            make_visible_message(sender=_SENDER, body="please help"),
+            make_visible_message(sender=_entity_id(config, "research").full_id, body="answering"),
+        ],
+    )
+
+    plans = [
+        await _plan(policy, room, _dispatch(context, agent_name="general"))
+        for context in (mention, own_thread, other_mention, other_thread)
+    ]
+
+    assert [plan.kind for plan in plans] == ["respond", "respond", "ignore", "ignore"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("steward", [ROUTER_AGENT_NAME, "general"])
+@pytest.mark.parametrize("router_admits", [True, False])
+async def test_router_access_restricts_routing_for_every_steward(
+    tmp_path: Path,
+    steward: str,
+    router_admits: bool,
+) -> None:
+    """`router.access`, when set, stays a restriction on whose message is routed, whoever the steward is."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                name: AgentConfig(display_name=name.title(), access=ResponderAccessConfig(users=[_SENDER]))
+                for name in ("general", "research")
+            },
+            router=RouterConfig(
+                access=ResponderAccessConfig(
+                    users=[_SENDER if router_admits else "@owner:localhost"],
+                    current_room_members=False,
+                ),
+            ),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
+
+    plan = await _plan(_policy_for(config, steward, steward=steward), room, _dispatch(_context(), agent_name=steward))
+
+    assert plan.kind == ("route" if router_admits else "ignore")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_a_steward_only_routes_the_message_of_a_person_it_may_not_answer(tmp_path: Path) -> None:
+    """A steward whose own access denies a person routes their message, and never answers or queues it itself."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                name: AgentConfig(display_name=name.title(), access=ResponderAccessConfig(users=[admitted]))
+                for name, admitted in (("general", "@owner:localhost"), ("research", _SENDER), ("writer", _SENDER))
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    general_id = _entity_id(config, "general")
+    room = _room_with_members(_SENDER, *(_entity_id(config, name).full_id for name in config.agents))
+    steward = _policy_for(config, "general", steward="general")
+    bystander = _policy_for(config, "general", steward="research")
+    mention = _dispatch(_context(mentioned=[general_id], am_i_mentioned=True), agent_name="general")
+    untagged = _dispatch(_context(), agent_name="general")
+    in_thread = MessageTarget.resolve(_ROOM_ID, "$thread:localhost", _EVENT_ID)
+
+    assert not steward.can_reply_to_sender_in_room(_SENDER, _ROOM_ID)
+    assert steward.routes_for_sender_in_room(_SENDER, _ROOM_ID)
+    assert not bystander.routes_for_sender_in_room(_SENDER, _ROOM_ID)
+    assert [(await _plan(steward, room, dispatch)).kind for dispatch in (mention, untagged)] == ["ignore", "route"]
+    # A message it only routes neither asks its running response to wrap up nor steers it.
+    assert steward.not_for_this_agent(room, _text_event("hello agents").source, in_thread, untagged.envelope)
 
 
 @pytest.mark.asyncio
@@ -619,51 +717,27 @@ async def test_router_ignores_untagged_message_with_single_candidate(config: Con
     plan = await _plan(policy, room, _dispatch(_context(), agent_name=ROUTER_AGENT_NAME))
 
     assert plan.kind == "ignore"
-    assert plan.ignore_reason == "router"
 
 
 @pytest.mark.asyncio
-async def test_router_ignores_message_with_explicit_agent_mention(config: Config) -> None:
-    """Explicitly tagged messages bypass routing entirely."""
+async def test_a_mention_of_only_the_owner_account_gets_no_answer(config: Config) -> None:
+    """The owner account answers nobody, so a message that mentions only it is neither answered nor routed."""
     policy = _policy_for(config, ROUTER_AGENT_NAME)
     room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
-    context = _context(mentioned=[_entity_id(config, "general")])
+    # A tag of the owner account is a tag of someone who is no agent.
+    context = replace(_context(), has_non_agent_mentions=True)
 
     plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
 
     assert plan.kind == "ignore"
-    assert plan.ignore_reason == "router"
+    assert plan.response_action is None
 
 
-@pytest.mark.asyncio
-async def test_router_only_mention_returns_rules_of_engagement_rejection(config: Config) -> None:
-    """Tagging only the router yields the guidance rejection instead of routing."""
+def test_owner_reply_access_reads_no_membership_without_router_access(config: Config) -> None:
+    """Without `router.access` the owner works on anyone's message and waits for no room's membership row."""
     policy = _policy_for(config, ROUTER_AGENT_NAME)
-    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
-    context = _context(mentioned=[_entity_id(config, ROUTER_AGENT_NAME)])
 
-    plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
-
-    assert plan.kind == "respond"
-    assert plan.response_action.kind == "reject"
-    assert "Rules of engagement" in plan.response_action.rejection_message
-
-
-@pytest.mark.asyncio
-async def test_router_ignores_thread_already_owned_by_an_agent(config: Config) -> None:
-    """The router never re-routes a thread that already has a visible agent owner."""
-    policy = _policy_for(config, ROUTER_AGENT_NAME)
-    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
-    history = [
-        make_visible_message(sender=_SENDER, body="please help"),
-        make_visible_message(sender=_entity_id(config, "general").full_id, body="answering"),
-    ]
-    context = _context(thread_id="$thread:localhost", thread_history=history)
-
-    plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
-
-    assert plan.kind == "ignore"
-    assert plan.ignore_reason == "router"
+    assert policy.can_reply_to_sender_in_room(_SENDER, "!never-observed:localhost")
 
 
 @pytest.mark.asyncio
@@ -680,26 +754,6 @@ async def test_router_ignores_thread_with_unavailable_policy_history(config: Con
     plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
 
     assert plan.kind == "ignore"
-    assert plan.ignore_reason == "router"
-
-
-@pytest.mark.asyncio
-async def test_router_only_mention_gets_guidance_even_when_thread_policy_history_degraded(config: Config) -> None:
-    """A question to the router itself needs no thread policy history, so degraded history does not drop it."""
-    policy = _policy_for(config, ROUTER_AGENT_NAME)
-    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
-    context = _context(
-        mentioned=[_entity_id(config, ROUTER_AGENT_NAME)],
-        thread_id="$thread:localhost",
-        thread_history=[make_visible_message(sender=_SENDER, body="earlier")],
-        full_history=False,
-    )
-    assert context.planning_thread_history_unavailable
-
-    plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
-
-    assert plan.kind == "respond"
-    assert plan.response_action.kind == "reject"
 
 
 def test_prepared_dispatch_rejects_mismatched_envelope_target() -> None:
@@ -839,7 +893,7 @@ async def test_current_room_grant_preserves_existing_thread_owner(config: Config
         members=[nio.RoomMember(_SENDER, None, None)],
         room_id=room.room_id,
     )
-    await policy.deps.agent_reply_memberships.refresh(config, runtime_paths_for(config), client)
+    await refresh_memberships(policy.deps.agent_reply_memberships, config, runtime_paths_for(config), client)
     history = [make_visible_message(sender=_entity_id(config, "general").full_id, body="Earlier answer")]
     context = _context(thread_id="$root", thread_history=history)
     plan = await _plan(policy, room, _dispatch(context, agent_name=agent_name))
@@ -1088,46 +1142,33 @@ async def test_router_does_not_recruit_when_current_sender_is_second_human(confi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("mentioned", "pre_ingress_skip"),
-    [("general", True), (ROUTER_AGENT_NAME, False), (None, None)],
+    ("mentioned", "ignored"),
+    [("general", True), (ROUTER_AGENT_NAME, True), (None, False)],
 )
-async def test_router_pre_ingress_mention_rule_is_its_dispatch_plan_rule(
+async def test_owner_routes_only_a_message_that_mentions_nobody(
     config: Config,
     mentioned: str | None,
-    pre_ingress_skip: bool | None,
+    ignored: bool,
 ) -> None:
-    """The router drops a message before ingress work only where its dispatch plan would ignore it."""
+    """The owner account's plan ignores a message that mentions anyone and routes one that mentions nobody."""
     policy = _policy_for(config, ROUTER_AGENT_NAME)
     room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
     mentioned_ids = [] if mentioned is None else [_entity_id(config, mentioned)]
-    source = {
-        "content": {
-            "body": "hello",
-            "msgtype": "m.text",
-            "m.mentions": {"user_ids": [matrix_id.full_id for matrix_id in mentioned_ids]},
-        },
-        "sender": _SENDER,
-    }
 
-    assert policy.router_mention_skips(room, source) is pre_ingress_skip
     plan = await _plan(policy, room, _dispatch(_context(mentioned=mentioned_ids), agent_name=ROUTER_AGENT_NAME))
-    if pre_ingress_skip:
-        assert plan.kind == "ignore"
-    elif pre_ingress_skip is False:
-        assert plan.kind == "respond"
+    assert plan.kind == ("ignore" if ignored else "route")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owned", [True, False])
-async def test_router_pre_ingress_thread_rule_is_its_dispatch_plan_rule(config: Config, owned: bool) -> None:
-    """The router drops an unmentioned thread message before ingress work only where its plan would ignore it."""
+async def test_owner_leaves_a_thread_to_the_responders_it_names(config: Config, owned: bool) -> None:
+    """The owner account's plan ignores an unmentioned message in a thread whose history names its responders."""
     policy = _policy_for(config, ROUTER_AGENT_NAME)
     room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
     history = [make_visible_message(sender=_SENDER, body="please help")]
     if owned:
         history.append(make_visible_message(sender=_entity_id(config, "general").full_id, body="answering"))
 
-    assert await policy.router_thread_skips(room, _SENDER, history) is owned
     plan = await _plan(
         policy,
         room,
