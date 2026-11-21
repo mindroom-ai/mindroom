@@ -211,25 +211,34 @@ def _wait(client: AgentCliClient, call_id: str, result: dict[str, object], timeo
 def _settled(client: AgentCliClient, call_id: str, result: dict[str, object] | None) -> dict[str, object]:
     """Read a submitted call's receipt until it settles, however long its command runs.
 
-    The command runs on in its worker, so a read that fails is tried again, until reads have failed for
-    ``_RESULT_UNREACHABLE_SECONDS``.
+    The command runs on in its worker. The retry budget starts at the first failed read's start (or after a lost
+    submission response) and includes time spent in HTTP as well as between attempts.
     """
     delay = 0.2
-    unreachable_since = time.monotonic() if result is None else None
+    deadline = time.monotonic() + _RESULT_UNREACHABLE_SECONDS if result is None else None
+    read_error: AgentCliUnavailableError | None = None
     while result is None or _exit_code(result) == 3:
-        time.sleep(delay)
+        sleep_for = delay if deadline is None else min(delay, deadline - time.monotonic())
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+        now = time.monotonic()
+        if deadline is None:
+            deadline = now + _RESULT_UNREACHABLE_SECONDS
+        remaining = deadline - now
+        if remaining <= 0:
+            if read_error is not None:
+                raise read_error
+            msg = "Timed out waiting for a call receipt"
+            raise AgentCliUnavailableError(msg)
         # A long command is polled less often, so many of them at once stay cheap for MindRoom.
         delay = min(delay * 1.5, 2.0)
         try:
-            result = client.receipt(call_id)
-        except AgentCliUnavailableError:
-            now = time.monotonic()
-            if unreachable_since is None:
-                unreachable_since = now
-            if now - unreachable_since >= _RESULT_UNREACHABLE_SECONDS:
-                raise
+            result = client.receipt(call_id, timeout=remaining)
+        except AgentCliUnavailableError as exc:
+            read_error = exc
         else:
-            unreachable_since = None
+            deadline = None
+            read_error = None
     return result
 
 

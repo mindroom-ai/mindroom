@@ -307,7 +307,8 @@ def _worker_client(monkeypatch, *receipts: dict[str, object]) -> list[dict[str, 
             sent.append(payload)
             return self.receipt(payload["call_id"])
 
-        def receipt(self, call_id) -> dict[str, object]:
+        def receipt(self, call_id, *, timeout: float = 30) -> dict[str, object]:
+            del timeout
             assert call_id == sent[0]["call_id"]
             return remaining.pop(0) if len(remaining) > 1 else remaining[0]
 
@@ -428,29 +429,37 @@ class _Clock:
         return self.now
 
 
-def _unreachable_worker_client(monkeypatch, *, failed_reads: int | None, fail_submission: bool = False) -> tuple:
-    """Run a command whose result cannot be read ``failed_reads`` times in a row, or ever, and return what happened."""
+def _unreachable_worker_client(
+    monkeypatch,
+    *,
+    failed_reads: int | None,
+    fail_submission: bool = False,
+    failed_read_seconds: float = 0,
+) -> tuple:
+    """Simulate consecutive HTTP failures at the transport seam, using the actual client's timeouts."""
     clock = _Clock()
     reads: list[float] = []
     submissions: list[dict[str, object]] = []
+    url = "http://primary:8765"
 
-    class Client:
-        def operation(self, payload) -> dict[str, object]:
-            submissions.append(payload)
+    def open_request(_opener, request: urllib.request.Request, *, timeout: float) -> BytesIO:
+        if request.get_method() == "POST":
+            assert request.data is not None
+            submissions.append(json.loads(request.data))
             if fail_submission:
-                msg = "Agent CLI transport outcome is unknown"
-                raise AgentCliUnavailableError(msg)
-            return {"status": "running"}
+                raise TimeoutError
+            return BytesIO(b'{"status":"running"}')
+        assert request.full_url == f"{url}/api/agent-cli/calls/{submissions[0]['call_id']}"
+        reads.append(clock.now)
+        if failed_reads is None or len(reads) <= failed_reads:
+            clock.sleep(min(failed_read_seconds, timeout))
+            raise TimeoutError
+        receipt = _completed("[worker: w]\n" + format_shell_completion("shard ok", None, return_code=0))
+        return BytesIO(json.dumps(receipt).encode())
 
-        def receipt(self, call_id) -> dict[str, object]:
-            assert call_id == submissions[0]["call_id"]
-            reads.append(clock.now)
-            if failed_reads is None or len(reads) <= failed_reads:
-                msg = "Agent CLI transport outcome is unknown"
-                raise AgentCliUnavailableError(msg)
-            return _completed("[worker: w]\n" + format_shell_completion("shard ok", None, return_code=0))
-
-    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_URL", url)
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN", "private-capability")
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", open_request)
     monkeypatch.setattr("mindroom.agent_cli.main.time", clock)
     return clock, reads, submissions
 
@@ -465,13 +474,19 @@ def test_workers_run_keeps_waiting_when_reading_the_result_fails_for_a_while(cap
     assert (output.out, output.err) == ("shard ok\n", "")
 
 
-def test_workers_run_exits_125_when_the_result_stays_unreachable(capsys, monkeypatch) -> None:
-    """After a minute of failed reads the CLI gives up and says the command may still run."""
-    clock, reads, _submissions = _unreachable_worker_client(monkeypatch, failed_reads=None)
+@pytest.mark.parametrize("failed_read_seconds", [0, 30])
+def test_workers_run_exits_125_when_the_result_stays_unreachable(failed_read_seconds, capsys, monkeypatch) -> None:
+    """After a minute of failed reads (including time spent in HTTP), report that the command may still run."""
+    clock, reads, submissions = _unreachable_worker_client(
+        monkeypatch,
+        failed_reads=None,
+        failed_read_seconds=failed_read_seconds,
+    )
 
     assert main(["workers", "run", "w", "--", "bash", "shard.sh"]) == 125
+    assert len(submissions) == 1
     assert len(reads) > 1
-    assert 60 <= clock.now - reads[0] < 65
+    assert clock.now - reads[0] == pytest.approx(60)
     output = capsys.readouterr()
     assert output.out == ""
     assert "Agent CLI transport outcome is unknown" in output.err
@@ -488,8 +503,8 @@ def test_workers_run_counts_a_minute_of_failed_reads_from_the_last_one_that_work
             del payload
             return {"status": "running"}
 
-        def receipt(self, call_id) -> dict[str, object]:
-            del call_id
+        def receipt(self, call_id, *, timeout: float) -> dict[str, object]:
+            del call_id, timeout
             answer = next(answers)
             if answer is None:
                 msg = "Agent CLI transport outcome is unknown"
@@ -519,7 +534,7 @@ def test_workers_run_recovers_after_a_lost_submission_response(
     output = capsys.readouterr()
     if failed_reads is None:
         assert len(reads) > 1
-        assert 60 <= clock.now < 65
+        assert clock.now == pytest.approx(60)
         assert f"may still be running in worker w (call {submission['call_id']})" in output.err
     else:
         assert len(reads) == failed_reads + 1

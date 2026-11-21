@@ -17,6 +17,8 @@ from mindroom.agent_cli.shell_contract import (
     AGENT_CLI_WINDOW_HEADER,
 )
 
+_HTTP_TIMEOUT_SECONDS = 30
+
 
 class AgentCliUnavailableError(RuntimeError):
     """Authority or transport could not yield a known response."""
@@ -74,11 +76,17 @@ class AgentCliClient:
         """Submit once; callers retain the exact call ID on uncertain acceptance."""
         return self._request("/api/agent-cli/operations", canonical_json(payload).encode("utf-8"))
 
-    def receipt(self, call_id: str) -> dict[str, object]:
-        """Read one canonical call ID without client-side identity selectors."""
-        return self._request(f"/api/agent-cli/calls/{UUID(call_id)}")
+    def receipt(self, call_id: str, *, timeout: float = _HTTP_TIMEOUT_SECONDS) -> dict[str, object]:
+        """Read one canonical call ID, shortening the HTTP timeout if the caller has less time."""
+        return self._request(f"/api/agent-cli/calls/{UUID(call_id)}", timeout=min(timeout, _HTTP_TIMEOUT_SECONDS))
 
-    def _request(self, route: str, data: bytes | None = None) -> dict[str, object]:
+    def _request(
+        self,
+        route: str,
+        data: bytes | None = None,
+        *,
+        timeout: float = _HTTP_TIMEOUT_SECONDS,
+    ) -> dict[str, object]:
         headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
         if self._window:
             headers[AGENT_CLI_WINDOW_HEADER] = self._window
@@ -88,7 +96,7 @@ class AgentCliClient:
             headers=headers,
         )
         try:
-            with self._opener.open(request, timeout=30) as response:
+            with self._opener.open(request, timeout=timeout) as response:
                 result = read_json(response.read(MAX_ENVELOPE_BYTES + 1))
         except HTTPError as exc:
             if exc.code in {400, 409, 413, 422}:
