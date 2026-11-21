@@ -1212,7 +1212,10 @@ async def test_matrix_api_search_finds_a_reply_by_its_prose_and_shows_it_with_it
     agent = entity_identity_registry(ctx.config, ctx.runtime_paths).current_ids["general"].full_id
 
     async def found(
-        term: str, content: dict[str, object], neighbour: dict[str, object], sender: object
+        term: str,
+        content: dict[str, object],
+        neighbour: dict[str, object],
+        sender: object,
     ) -> list[object]:
         """Return the snippets, of each hit and of the message before it, that a search of one stored reply shows."""
         context = {"events_before": [{**_raw_event(content=neighbour), "sender": sender}], "events_after": []}
