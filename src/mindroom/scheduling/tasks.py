@@ -969,25 +969,15 @@ def _extract_mentioned_agents_from_text(
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Extract valid agent mentions from scheduling text."""
-    _, mentioned_user_ids, _ = parse_mentions_in_text(
-        full_text,
-        config,
-        runtime_paths,
-    )
-    mentioned_agents: list[MatrixID] = []
-
-    for user_id in mentioned_user_ids:
-        matrix_id = MatrixID.parse(user_id)
-        if (
-            entity_identity_registry(config, runtime_paths).current_entity_name_for_user_id(
-                matrix_id.full_id,
-                include_router=False,
-            )
-            and matrix_id not in mentioned_agents
-        ):
-            mentioned_agents.append(matrix_id)
-
-    return mentioned_agents
+    mentioned_user_ids = parse_mentions_in_text(full_text, config, runtime_paths)[1]
+    if not mentioned_user_ids:
+        return []
+    registry = entity_identity_registry(config, runtime_paths)
+    return [
+        MatrixID.parse(user_id)
+        for user_id in mentioned_user_ids
+        if registry.current_entity_name_for_user_id(user_id, include_router=False)
+    ]
 
 
 def _history_limit_display(history_limit: int) -> str:
