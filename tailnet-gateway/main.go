@@ -1,7 +1,5 @@
-// The tailnet SSH gateway holds one tailnet node per link the primary lists, and pipes each node's :22 to the
-// worker the primary names for that connection.
-//
-// It only listens: it has no way to dial a tailnet address, to run a command, or to talk to Docker or Kubernetes.
+// The tailnet SSH gateway listens on one node per link and pipes TCP to the worker named by the primary.
+// It never dials through the tailnet or talks to Docker or Kubernetes.
 package main
 
 import (
@@ -33,16 +31,13 @@ func main() {
 	if stateDir == "" {
 		stateDir = "/state"
 	}
-	authKey := os.Getenv("TAILNET_SSH_AUTH_KEY")
-	enrollment := "login"
-	if authKey != "" {
-		enrollment = "auth_key"
-	}
 	tags := strings.FieldsFunc(os.Getenv("TAILNET_SSH_TAGS"), func(r rune) bool { return r == ',' || r == ' ' })
+	nodes, err := NewTsnetNode(os.Getenv("TAILNET_SSH_LOGIN_SERVER"), os.Getenv("TAILNET_SSH_AUTH_KEY"), tags)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	// Before any node starts: no node log leaves for Tailscale or is kept beside the node's keys, where tsnet would
-	// buffer the lines that name the login URL, and no socket is bound to an interface, which without a default
-	// route is the loopback, where every dial hangs.
+	// Don't persist or upload node logs, or bind sockets to the default-route interface (which may be loopback).
 	envknob.SetNoLogsNoSupport()
 	logtail.Disable()
 	netns.SetEnabled(false)
@@ -51,7 +46,6 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	log.Printf("tailnet gateway %s: nodes in %s, enrolled by %s", version, stateDir, enrollment)
-	nodes := NewTsnetNode(os.Getenv("TAILNET_SSH_LOGIN_SERVER"), authKey, tags)
-	NewGateway(NewPrimary(primaryURL, token), nodes, stateDir, enrollment).Run(ctx)
+	log.Printf("tailnet gateway %s: nodes in %s", version, stateDir)
+	NewGateway(NewPrimary(primaryURL, token), nodes, stateDir).Run(ctx)
 }

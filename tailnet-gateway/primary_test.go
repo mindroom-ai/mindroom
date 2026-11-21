@@ -151,11 +151,15 @@ func TestPrimarySendsBearerAndParsesLinks(t *testing.T) {
 		t.Fatalf("requests = %+v, want one with Authorization: Bearer tok", sent)
 	}
 	want := []DesiredLink{
-		{ID: idA, Hostname: "mind-bas", Desired: "on", AllowedLogin: ptr("bas@github"), ClosedBefore: 1795000000.5, LoginAfter: 1795000100.25},
-		{ID: idB, Hostname: "code", Desired: "removing", AllowedLogin: nil, ClosedBefore: 1795000200.5, LoginAfter: 1795000200.5},
+		{ID: idA, Hostname: "mind-bas", Desired: "on", AllowedLogin: ptr("bas@github"), AccessRevision: "1a062839ccac17c6513015892a582b5f9a84714524f8272a1e0e8261dc5de728"},
+		{ID: idB, Hostname: "code", Desired: "removing"},
 	}
 	if !reflect.DeepEqual(links, want) {
 		t.Fatalf("links = %+v, want %+v", links, want)
+	}
+	raw, err := json.Marshal(links)
+	if err != nil || !reflect.DeepEqual(jsonValue(t, raw), jsonValue(t, fixture(t, "links.json"))) {
+		t.Fatalf("marshaled links = %s, %v; want testdata/links.json", raw, err)
 	}
 }
 
@@ -167,6 +171,8 @@ func TestLinksAnswerThatIsNotAListIsAnError(t *testing.T) {
 		{http.StatusBadGateway, "[]"},
 		{http.StatusOK, `{"detail": "x"}`},
 		{http.StatusOK, "not json"},
+		{http.StatusOK, `[] []`},
+		{http.StatusOK, `[]` + strings.Repeat(" ", maxAnswer)},
 		// JSON null decodes into a list without an error, and is none.
 		{http.StatusOK, "null"},
 	} {
@@ -181,55 +187,32 @@ func TestLinksAnswerThatIsNotAListIsAnError(t *testing.T) {
 	}
 }
 
-func TestStatusBodyIsTheContracts(t *testing.T) {
+func TestStatusBodyIsTheContract(t *testing.T) {
 	primary := newFakePrimary(t)
 	client := NewPrimary(primary.URL, "tok")
-	links := map[string]LinkStatus{idA: {
-		State:           "running",
-		LoginURL:        ptr("https://login.tailscale.com/a/1c0ffee"),
-		Tailnet:         ptr("tail1234.ts.net"),
-		DNSName:         ptr("mind-bas.tail1234.ts.net"),
-		LoginName:       ptr("bas@github"),
-		KeyExpiry:       ptr("2027-05-19T12:00:00Z"),
-		LastError:       ptr("scope"),
-		OpenConnections: 2,
-	}}
-
-	if err := client.PostStatus(context.Background(), "auth_key", links); err != nil {
+	report := StatusReport{OpenConnections: map[string]int{idA: 2}, Removed: []string{idB}}
+	if err := client.PostStatus(context.Background(), report); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.PostStatus(context.Background(), "login", map[string]LinkStatus{idB: {State: "removed"}}); err != nil {
+	if err := client.PostStatus(context.Background(), StatusReport{}); err != nil {
 		t.Fatal(err)
 	}
-	// A gateway that holds no node reports an object without links, never null.
-	if err := client.PostStatus(context.Background(), "login", nil); err != nil {
-		t.Fatal(err)
-	}
-
 	sent := primary.sent("POST /status")
-	if len(sent) != 3 || sent[0].authorization != "Bearer tok" {
-		t.Fatalf("requests = %+v, want three with Authorization: Bearer tok", sent)
+	if len(sent) != 2 || sent[0].authorization != "Bearer tok" || sent[1].authorization != "Bearer tok" {
+		t.Fatalf("requests = %+v, want two with Authorization: Bearer tok", sent)
 	}
-	if got, want := jsonValue(t, sent[0].body), jsonValue(t, fixture(t, "status.json")); !reflect.DeepEqual(got, want) {
-		t.Errorf("status body = %s, want testdata/status.json", sent[0].body)
-	}
-	removed := `{"enrollment": "login", "links": {"fedcba9876543210": {"state": "removed", "login_url": null,
-		"tailnet": null, "dns_name": null, "login_name": null, "key_expiry": null, "open_connections": 0,
-		"last_error": null}}}`
-	if got, want := jsonValue(t, sent[1].body), jsonValue(t, []byte(removed)); !reflect.DeepEqual(got, want) {
-		t.Errorf("status body = %s, want %s", sent[1].body, removed)
-	}
-	empty := `{"enrollment": "login", "links": {}}`
-	if got, want := jsonValue(t, sent[2].body), jsonValue(t, []byte(empty)); !reflect.DeepEqual(got, want) {
-		t.Errorf("status body = %s, want %s", sent[2].body, empty)
+	for i, want := range [][]byte{fixture(t, "status.json"), []byte(`{"open_connections": {}, "removed": []}`)} {
+		if !reflect.DeepEqual(jsonValue(t, sent[i].body), jsonValue(t, want)) {
+			t.Errorf("status body = %s, want %s", sent[i].body, want)
+		}
 	}
 }
 
 func TestStatusThatIsNotTakenIsAnError(t *testing.T) {
 	primary := newFakePrimary(t)
-	primary.answer("POST /status", http.StatusServiceUnavailable, `{"detail": "Tailnet SSH is off."}`)
+	primary.answer("POST /status", http.StatusServiceUnavailable, `{"detail": "Tailnet SSH is disabled."}`)
 
-	err := NewPrimary(primary.URL, "tok").PostStatus(context.Background(), "login", nil)
+	err := NewPrimary(primary.URL, "tok").PostStatus(context.Background(), StatusReport{})
 
 	if err == nil {
 		t.Fatal("PostStatus returned no error for a 503")
@@ -263,8 +246,9 @@ func TestConnectRefusalCarriesDetail(t *testing.T) {
 		detail string
 	}{
 		{fakeAnswer{http.StatusConflict, `{"detail":"scope"}`}, "scope"},
+		{fakeAnswer{http.StatusForbidden, `{"detail":"wrong login"}`}, "wrong login"},
 		{fakeAnswer{http.StatusNotFound, `{"detail":"No such link."}`}, "No such link."},
-		{fakeAnswer{http.StatusServiceUnavailable, `{"detail":"Tailnet SSH is off."}`}, "Tailnet SSH is off."},
+		{fakeAnswer{http.StatusServiceUnavailable, `{"detail":"Agent membership is not yet known; retry shortly."}`}, "Agent membership is not yet known; retry shortly."},
 		// An answer that is not the contract's still refuses, and says with what status.
 		{fakeAnswer{http.StatusBadGateway, "<html>"}, "502 Bad Gateway"},
 		{fakeAnswer{http.StatusUnprocessableEntity, `{"detail":[{"type":"missing"}]}`}, "422 Unprocessable Entity"},
@@ -275,8 +259,8 @@ func TestConnectRefusalCarriesDetail(t *testing.T) {
 		_, _, err := NewPrimary(primary.URL, "tok").Connect(context.Background(), idA, "bas@github", "laptop")
 
 		var refused *RefusedError
-		if !errors.As(err, &refused) || refused.Detail != refusal.detail {
-			t.Errorf("answer %+v: err = %v, want a RefusedError with detail %q", refusal.answer, err, refusal.detail)
+		if !errors.As(err, &refused) || refused.Detail != refusal.detail || refused.StatusCode != refusal.answer.code {
+			t.Errorf("answer %+v: err = %v, want a RefusedError with status %d and detail %q", refusal.answer, err, refusal.answer.code, refusal.detail)
 		}
 	}
 }
@@ -298,7 +282,7 @@ func TestConnectAnswerWithoutATargetIsAnError(t *testing.T) {
 
 		host, port, err := NewPrimary(primary.URL, "tok").Connect(context.Background(), idA, "bas@github", "laptop")
 
-		// The primary did not refuse, so its words are no link's last error.
+		// A malformed success is not a refusal.
 		var refused *RefusedError
 		if err == nil || errors.As(err, &refused) {
 			t.Errorf("answer %s: target = %q:%d, err = %v, want an error that is no RefusedError", body, host, port, err)
@@ -341,7 +325,7 @@ func TestConnectMayTake610SecondsAndTheOthersTen(t *testing.T) {
 	client.client.Transport = seen
 
 	client.Links(context.Background())
-	client.PostStatus(context.Background(), "login", nil)
+	client.PostStatus(context.Background(), StatusReport{})
 	client.Connect(context.Background(), idA, "bas@github", "laptop")
 
 	want := map[string]time.Duration{

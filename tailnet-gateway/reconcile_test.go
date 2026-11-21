@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -19,18 +21,13 @@ type fakeNode struct {
 	dir, hostname string
 	listener      net.Listener
 
-	mu       sync.Mutex
-	observed NodeObserved
+	mu sync.Mutex
 	// peer is who the tailnet says is behind every connection; nil is a peer it does not know.
 	peer      *fakePeer
 	calls     []string
 	logoutIn  time.Duration
 	logoutErr error
-	loginErr  error
-	// reloginHeld, when set, holds every Relogin until it is closed; reloginEntered tells of each one held.
-	reloginHeld    chan struct{}
-	reloginEntered chan struct{}
-	// logoutHeld and logoutEntered do the same for Logout.
+	// logoutHeld delays Logout; logoutEntered signals that the call reached it.
 	logoutHeld    chan struct{}
 	logoutEntered chan struct{}
 }
@@ -69,33 +66,6 @@ func (n *fakeNode) peerIs(login, node string) {
 	n.peer = &fakePeer{login, node}
 }
 
-func (n *fakeNode) Observed() NodeObserved {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.observed
-}
-
-func (n *fakeNode) Relogin(ctx context.Context) error {
-	n.mu.Lock()
-	n.calls = append(n.calls, "Relogin")
-	held, entered, err := n.reloginHeld, n.reloginEntered, n.loginErr
-	n.mu.Unlock()
-	hold(ctx, held, entered)
-	return err
-}
-
-// holdRelogin makes every Relogin of the node wait for the returned release, which the test's end calls too.
-func (n *fakeNode) holdRelogin(t *testing.T) (release func()) {
-	t.Helper()
-	held := make(chan struct{})
-	release = sync.OnceFunc(func() { close(held) })
-	t.Cleanup(release)
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.reloginHeld, n.reloginEntered = held, make(chan struct{}, 16)
-	return release
-}
-
 func (n *fakeNode) Logout(ctx context.Context) error {
 	n.mu.Lock()
 	n.calls = append(n.calls, "Logout")
@@ -115,12 +85,6 @@ func (n *fakeNode) Close() error {
 	return n.listener.Close()
 }
 
-func (n *fakeNode) observe(seen NodeObserved) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.observed = seen
-}
-
 // called returns how often the gateway called the method.
 func (n *fakeNode) called(method string) int {
 	n.mu.Lock()
@@ -134,7 +98,7 @@ func (n *fakeNode) called(method string) int {
 	return count
 }
 
-// fakeNodes is the factory of fake nodes: like tsnet it makes the node's directory, and a new node needs a login.
+// fakeNodes is the factory of fake nodes: like tsnet it makes the node's directory.
 type fakeNodes struct {
 	mu        sync.Mutex
 	started   []*fakeNode
@@ -193,7 +157,6 @@ func (f *fakeNodes) start(dir, hostname string) (Node, error) {
 		dir:       dir,
 		hostname:  hostname,
 		listener:  listener,
-		observed:  NodeObserved{State: "needs_login"},
 		logoutErr: f.logoutErr,
 
 		logoutHeld:    f.logoutHeld,
@@ -278,8 +241,7 @@ func (c *fakeClock) asleep(t *testing.T, sleepers int) {
 	}
 }
 
-// settle waits until the gateway's pass and every report are over: its passes sleep until the next one, which
-// they do once their report is over, and its reports until the next 5 s have passed.
+// settle waits until both loops have registered the next timers.
 func (c *fakeClock) settle(t *testing.T) {
 	t.Helper()
 	c.asleep(t, 2)
@@ -301,7 +263,7 @@ type fixtures struct {
 }
 
 // newFixtures is a gateway on a fake primary, fake nodes, a fake clock and an empty state directory.
-func newFixtures(t *testing.T, enrollment string) *fixtures {
+func newFixtures(t *testing.T) *fixtures {
 	t.Helper()
 	f := &fixtures{
 		primary: newFakePrimary(t),
@@ -312,7 +274,7 @@ func newFixtures(t *testing.T, enrollment string) *fixtures {
 	if err := os.Mkdir(f.state, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	f.gateway = NewGateway(NewPrimary(f.primary.URL, "tok"), f.nodes.start, f.state, enrollment)
+	f.gateway = NewGateway(NewPrimary(f.primary.URL, "tok"), f.nodes.start, f.state)
 	f.gateway.clock = f.clock
 	return f
 }
@@ -412,23 +374,32 @@ func quiet(happened <-chan struct{}) bool {
 }
 
 // posted returns the POST /status bodies the primary got, as JSON values.
-func (f *fixtures) posted(t *testing.T) []map[string]any {
+func (f *fixtures) posted(t *testing.T) []StatusReport {
 	t.Helper()
-	var bodies []map[string]any
+	var bodies []StatusReport
 	for _, request := range f.primary.sent("POST /status") {
-		bodies = append(bodies, jsonValue(t, request.body).(map[string]any))
+		var report StatusReport
+		if err := json.Unmarshal(request.body, &report); err != nil {
+			t.Fatal(err)
+		}
+		bodies = append(bodies, report)
 	}
 	return bodies
 }
 
+func (f *fixtures) wasRemoved(id string) bool { return slices.Contains(f.gateway.Status().Removed, id) }
+
+func (f *fixtures) waitPosts(t *testing.T, count int) {
+	t.Helper()
+	eventually(t, "publish status", func() bool { return len(f.posted(t)) >= count })
+}
+
 func on(id string) DesiredLink {
-	return DesiredLink{ID: id, Hostname: "mind-bas", Desired: "on", AllowedLogin: ptr("bas@github"), LoginAfter: 100}
+	return DesiredLink{ID: id, Hostname: "mind-bas", Desired: "on", AllowedLogin: ptr("bas@github"), AccessRevision: "revision-a"}
 }
 
 func removing(id string) DesiredLink {
-	link := on(id)
-	link.Desired = "removing"
-	return link
+	return DesiredLink{ID: id, Hostname: "mind-bas", Desired: "removing"}
 }
 
 func exists(t *testing.T, path string) bool {
@@ -450,7 +421,10 @@ func (f *fixtures) connect(t *testing.T, id string) net.Conn {
 	})
 	f.gateway.mu.Lock()
 	defer f.gateway.mu.Unlock()
-	f.gateway.conns[id] = map[net.Conn]*held{ours: {cancel: func() {}, reached: f.clock.Now()}}
+	if f.gateway.conns[id] == nil {
+		f.gateway.conns[id] = map[net.Conn]*held{}
+	}
+	f.gateway.conns[id][ours] = &held{cancel: func() {}, reached: f.clock.Now()}
 	return theirs
 }
 
@@ -478,7 +452,7 @@ func mkdir(t *testing.T, path string) {
 }
 
 func TestOnStartsNodeInDirNamedByID(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	f.primary.list(t, on(idA))
 
 	f.reconcile(t)
@@ -494,32 +468,10 @@ func TestOnStartsNodeInDirNamedByID(t *testing.T) {
 	if exists(t, filepath.Join(f.state, "mind-bas")) {
 		t.Error("the hostname names a state directory")
 	}
-	want := map[string]LinkStatus{idA: {State: "needs_login"}}
-	if got := f.gateway.Status(); !reflect.DeepEqual(got, want) {
-		t.Errorf("status = %+v, want %+v", got, want)
-	}
-}
-
-func TestSuspendedKeepsItsNode(t *testing.T) {
-	f := newFixtures(t, "login")
-	f.primary.list(t, on(idA))
-	f.reconcile(t)
-	suspended := on(idA)
-	suspended.Desired = "suspended"
-	f.primary.list(t, suspended)
-
-	f.reconcile(t)
-
-	if node := f.nodes.node(t, 0); f.nodes.count() != 1 || len(node.calls) != 0 {
-		t.Errorf("%d nodes started and the first got %v, want the one node untouched", f.nodes.count(), node.calls)
-	}
-	if got := f.gateway.Status()[idA].State; got != "needs_login" {
-		t.Errorf("state = %q, want the node's needs_login", got)
-	}
 }
 
 func TestUnknownDesiredStateIsALinkNotListed(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	f.primary.list(t, on(idA))
 	f.reconcile(t)
 	node := f.nodes.node(t, 0)
@@ -532,91 +484,44 @@ func TestUnknownDesiredStateIsALinkNotListed(t *testing.T) {
 	if !reflect.DeepEqual(node.calls, []string{"Close"}) || !exists(t, node.dir) {
 		t.Errorf("the node got %v, want it closed and its state kept", node.calls)
 	}
-	if got := f.gateway.Status(); len(got) != 0 {
+	if got := f.gateway.Status(); len(got.Removed) != 0 || len(got.OpenConnections) != 0 {
 		t.Errorf("status = %+v, want no link reported", got)
 	}
 }
 
-func TestStatusReportsWhatTheNodeSees(t *testing.T) {
-	f := newFixtures(t, "login")
-	f.primary.list(t, on(idA))
-	f.reconcile(t)
-	seen := NodeObserved{
-		State:     "running",
-		LoginURL:  ptr("https://login.tailscale.com/a/1c0ffee"),
-		Tailnet:   ptr("tail1234.ts.net"),
-		DNSName:   ptr("mind-bas.tail1234.ts.net"),
-		LoginName: ptr("bas@github"),
-		KeyExpiry: ptr("2027-05-19T12:00:00Z"),
-	}
-	f.nodes.node(t, 0).observe(seen)
-
-	want := map[string]LinkStatus{idA: {
-		State:     "running",
-		LoginURL:  seen.LoginURL,
-		Tailnet:   seen.Tailnet,
-		DNSName:   seen.DNSName,
-		LoginName: seen.LoginName,
-		KeyExpiry: seen.KeyExpiry,
-	}}
-	if got := f.gateway.Status(); !reflect.DeepEqual(got, want) {
-		t.Errorf("status = %+v, want %+v", got, want)
-	}
-}
-
 func TestStatusCountsAConnectionOnce75SecondsOld(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	f.primary.list(t, on(idA))
 	f.reconcile(t)
 	f.connect(t, idA)
 
 	f.clock.advance(74 * time.Second)
-	young := f.gateway.Status()[idA].OpenConnections
+	young := f.gateway.Status().OpenConnections[idA]
 	f.clock.advance(time.Second)
-	old := f.gateway.Status()[idA].OpenConnections
+	old := f.gateway.Status().OpenConnections[idA]
 
 	if young != 0 || old != 1 {
 		t.Errorf("open connections = %d at 74 s and %d at 75 s, want 0 and 1", young, old)
 	}
 }
 
-func TestNodeThatDoesNotStartIsReportedAndTriedAgain(t *testing.T) {
-	f := newFixtures(t, "login")
-	f.primary.list(t, on(idA))
-	f.nodes.startErr = errors.New("no space left on device in /state/" + idA)
-
-	f.reconcile(t)
-	failed := f.gateway.Status()
-	f.nodes.startErr = nil
-	f.reconcile(t)
-
-	// The card shows the sentence, so it says nothing of the gateway's disk.
-	want := map[string]LinkStatus{idA: {State: "needs_login", LastError: ptr(nodeDidNotStart)}}
-	if !reflect.DeepEqual(failed, want) {
-		t.Errorf("status = %+v while the node did not start, want %+v", failed, want)
-	}
-	if got := f.gateway.Status()[idA]; got.State != "needs_login" || got.LastError != nil || f.nodes.count() != 1 {
-		t.Errorf("status = %+v with %d nodes, want the node of the second pass and no error", got, f.nodes.count())
-	}
-}
-
-func TestNodeThatDoesNotStartIsNotReportedOnceItsLinkIsRemoved(t *testing.T) {
-	f := newFixtures(t, "login")
+func TestNodeThatDoesNotStartIsTriedAgain(t *testing.T) {
+	f := newFixtures(t)
 	f.primary.list(t, on(idA))
 	f.nodes.startErr = errors.New("no space left on device")
 	f.reconcile(t)
-	f.primary.list(t, removing(idA))
-
+	if f.nodes.count() != 0 {
+		t.Fatal("a failed start left a node running")
+	}
+	f.nodes.startErr = nil
 	f.reconcile(t)
-
-	want := map[string]LinkStatus{idA: {State: "removed"}}
-	if got := f.gateway.Status(); !reflect.DeepEqual(got, want) {
-		t.Errorf("status = %+v, want %+v", got, want)
+	if f.nodes.count() != 1 {
+		t.Fatal("the next pass did not retry the start")
 	}
 }
 
 func TestUnlistedStateIsStoppedAndKept(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	never := filepath.Join(f.state, "gone")
 	mkdir(t, never)
 	f.primary.list(t, on(idA), on(idB))
@@ -626,14 +531,14 @@ func TestUnlistedStateIsStoppedAndKept(t *testing.T) {
 	f.reconcile(t)
 
 	unlisted, listed := f.nodes.node(t, 0), f.nodes.node(t, 1)
+	if filepath.Base(unlisted.dir) != idA {
+		unlisted, listed = listed, unlisted
+	}
 	if !reflect.DeepEqual(unlisted.calls, []string{"Close"}) || len(listed.calls) != 0 {
 		t.Errorf("calls = %v for the unlisted node and %v for the listed, want [Close] and none", unlisted.calls, listed.calls)
 	}
 	if !exists(t, unlisted.dir) || !exists(t, never) {
 		t.Error("a state directory the primary does not list is gone")
-	}
-	if _, reported := f.gateway.Status()[idA]; reported {
-		t.Error("the stopped node is still reported")
 	}
 
 	// Its enrolment is kept for when the primary lists it again.
@@ -645,83 +550,39 @@ func TestUnlistedStateIsStoppedAndKept(t *testing.T) {
 }
 
 func TestRevokedConnectionsAreClosedBeforeAnyNodeCall(t *testing.T) {
-	f := newFixtures(t, "login")
-	slow := on(idA)
-	f.primary.list(t, slow, on(idB), on(idC))
+	f := newFixtures(t)
+	stay := on("123456789abcdef0")
+	f.primary.list(t, on(idA), on(idB), on(idC), stay)
 	f.run(t)
-	slowNode, removedNode := f.nodes.node(t, 0), f.nodes.node(t, 1)
-	endRelogin := slowNode.holdRelogin(t)
-	f.connect(t, idA)
-	removed, unlisted := f.connect(t, idB), f.connect(t, idC)
-	// The link listed first has a node whose new login does not come back; of the others one is removed and one
-	// is no longer listed.
-	slow.LoginAfter = 200
-	f.primary.list(t, slow, removing(idB))
+	removed, unlisted, cut := f.connect(t, idA), f.connect(t, idB), f.connect(t, idC)
+	f.connect(t, stay.ID)
+	starts, release := f.nodes.holdStarts()
+	revised := on(idC)
+	revised.AccessRevision = "revision-b"
+	f.primary.list(t, on("123456789abcdef1"), removing(idA), revised, stay)
+	f.clock.advance(reconcileEvery)
+	await(t, starts, "a held node start")
 
-	f.clock.advance(5 * time.Second)
-	await(t, slowNode.reloginEntered, "the pass that asks the node for a new login")
-
-	if !closed(t, removed) {
-		t.Error("the connection of a link that is removed is open while another link's node is asked for a login")
+	for _, conn := range []net.Conn{removed, unlisted, cut} {
+		if !closed(t, conn) {
+			t.Error("a revoked connection remained open during a slow node start")
+		}
 	}
-	if !closed(t, unlisted) {
-		t.Error("the connection of a link no longer listed is open while another link's node is asked for a login")
-	}
-	if got := removedNode.called("Logout"); got != 0 {
-		t.Errorf("%d Logout calls before the other link's login came back, want the logout after it", got)
-	}
-	endRelogin()
-	f.clock.settle(t)
-
 	f.gateway.mu.Lock()
-	open := len(f.gateway.conns[idA])
+	open := len(f.gateway.conns[stay.ID])
 	f.gateway.mu.Unlock()
-	if open != 1 {
-		t.Errorf("the link that stays on has %d open connections, want its 1", open)
+	if open != 1 || f.wasRemoved(idA) {
+		t.Fatal("kept pipe was revoked or retirement was acknowledged early")
 	}
-	if got := f.gateway.Status()[idB].State; got != "removed" || removedNode.called("Logout") != 1 {
-		t.Errorf("state = %q after %d Logout calls, want the link removed after 1", got, removedNode.called("Logout"))
-	}
-}
-
-func TestSuspendedAndCutConnectionsAreClosedBeforeAnyNodeCall(t *testing.T) {
-	f := newFixtures(t, "login")
-	slow, suspended, cut := on(idA), on(idB), on(idC)
-	f.primary.list(t, slow, suspended, cut)
-	f.run(t)
-	slowNode := f.nodes.node(t, 0)
-	endRelogin := slowNode.holdRelogin(t)
-	kept := f.connect(t, idA)
-	ofSuspended, ofCut := f.connect(t, idB), f.connect(t, idC)
-	// The link listed first has a node whose new login does not come back; of the others one is suspended and one
-	// has its connections cut.
-	slow.LoginAfter = 200
-	suspended.Desired = "suspended"
-	cut.ClosedBefore = 300
-	f.primary.list(t, slow, suspended, cut)
-
-	f.clock.advance(5 * time.Second)
-	await(t, slowNode.reloginEntered, "the pass that asks the node for a new login")
-
-	if !closed(t, ofSuspended) {
-		t.Error("the connection of a suspended link is open while another link's node is asked for a login")
-	}
-	if !closed(t, ofCut) {
-		t.Error("the connection of a link whose closed_before moved is open while another link's node is asked for a login")
-	}
-	endRelogin()
+	release()
 	f.clock.settle(t)
-
-	f.gateway.mu.Lock()
-	open := len(f.gateway.conns[idA])
-	f.gateway.mu.Unlock()
-	if open != 1 || closed(t, kept) {
-		t.Errorf("the link that stays on has %d open connections, want its 1 still open", open)
+	if !f.wasRemoved(idA) {
+		t.Fatal("retirement was not acknowledged")
 	}
 }
 
 func TestUnlistedLinkLosesItsConnections(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	f.primary.list(t, on(idA))
 	f.reconcile(t)
 	theirs := f.connect(t, idA)
@@ -734,29 +595,8 @@ func TestUnlistedLinkLosesItsConnections(t *testing.T) {
 	}
 }
 
-func TestStatusCarriesALinksLastErrorWhileItIsListed(t *testing.T) {
-	f := newFixtures(t, "login")
-	f.primary.list(t, on(idA))
-	f.reconcile(t)
-	f.gateway.lastError[idA] = "scope"
-
-	f.reconcile(t)
-	listed := f.gateway.Status()[idA].LastError
-	f.primary.list(t)
-	f.reconcile(t)
-	f.primary.list(t, on(idA))
-	f.reconcile(t)
-
-	if listed == nil || *listed != "scope" {
-		t.Errorf("last error = %v, want scope", listed)
-	}
-	if again := f.gateway.Status()[idA].LastError; again != nil {
-		t.Errorf("last error = %q after the link was not listed, want none", *again)
-	}
-}
-
-func TestFailedOrEmptyLinksAnswerChangesNothing(t *testing.T) {
-	f := newFixtures(t, "login")
+func TestFailedLinksPreserveNodeButEmptyListStopsIt(t *testing.T) {
+	f := newFixtures(t)
 	f.primary.list(t, on(idA))
 	f.reconcile(t)
 	node := f.nodes.node(t, 0)
@@ -767,15 +607,15 @@ func TestFailedOrEmptyLinksAnswerChangesNothing(t *testing.T) {
 	if err == nil {
 		t.Error("a pass that could not read the links returned no error")
 	}
-	if len(node.calls) != 0 || f.gateway.Status()[idA].State != "needs_login" {
+	if len(node.calls) != 0 {
 		t.Errorf("after a failed answer the node got %v and the status is %+v, want nothing changed", node.calls, f.gateway.Status())
 	}
 
 	f.primary.list(t)
 	f.reconcile(t)
 
-	if node.called("Logout") != 0 {
-		t.Error("an empty answer logged the node out")
+	if !reflect.DeepEqual(node.calls, []string{"Close"}) {
+		t.Errorf("an empty list did %v; want only Close", node.calls)
 	}
 	if !exists(t, node.dir) {
 		t.Error("an empty answer deleted the node's state")
@@ -783,7 +623,7 @@ func TestFailedOrEmptyLinksAnswerChangesNothing(t *testing.T) {
 }
 
 func TestNullLinksAnswerLeavesALiveNodeUntouched(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	f.primary.list(t, on(idA))
 	f.reconcile(t)
 	node := f.nodes.node(t, 0)
@@ -796,7 +636,7 @@ func TestNullLinksAnswerLeavesALiveNodeUntouched(t *testing.T) {
 	if err == nil {
 		t.Error("a pass whose links answer was null returned no error")
 	}
-	if len(node.calls) != 0 || f.gateway.Status()[idA].State != "needs_login" {
+	if len(node.calls) != 0 {
 		t.Errorf("after a null answer the node got %v and the status is %+v, want nothing changed", node.calls, f.gateway.Status())
 	}
 	if closed(t, theirs) {
@@ -805,7 +645,7 @@ func TestNullLinksAnswerLeavesALiveNodeUntouched(t *testing.T) {
 }
 
 func TestRemovingLogsOutDeletesDirAndReportsRemoved(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	f.primary.list(t, on(idA))
 	f.reconcile(t)
 	node := f.nodes.node(t, 0)
@@ -826,7 +666,7 @@ func TestRemovingLogsOutDeletesDirAndReportsRemoved(t *testing.T) {
 	if !closed(t, theirs) {
 		t.Error("the connection of a removed link is still open")
 	}
-	want := map[string]LinkStatus{idA: {State: "removed"}}
+	want := StatusReport{OpenConnections: map[string]int{}, Removed: []string{idA}}
 	if got := f.gateway.Status(); !reflect.DeepEqual(got, want) {
 		t.Errorf("status = %+v, want %+v", got, want)
 	}
@@ -838,13 +678,13 @@ func TestRemovingLogsOutDeletesDirAndReportsRemoved(t *testing.T) {
 	}
 	f.primary.list(t)
 	f.reconcile(t)
-	if got := f.gateway.Status(); len(got) != 0 {
+	if got := f.gateway.Status(); len(got.Removed) != 0 || len(got.OpenConnections) != 0 {
 		t.Errorf("status = %+v, want nothing of a link no longer listed", got)
 	}
 }
 
 func TestRemovingStartsAStoppedNodeToLogItOut(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	dir := filepath.Join(f.state, idA)
 	mkdir(t, dir)
 	f.primary.list(t, removing(idA))
@@ -855,13 +695,13 @@ func TestRemovingStartsAStoppedNodeToLogItOut(t *testing.T) {
 	if node.dir != dir || !reflect.DeepEqual(node.calls, []string{"Logout", "Close"}) {
 		t.Errorf("a node in %s got %v, want one in %s to get [Logout Close]", node.dir, node.calls, dir)
 	}
-	if exists(t, dir) || f.gateway.Status()[idA].State != "removed" {
+	if exists(t, dir) || !f.wasRemoved(idA) {
 		t.Errorf("state directory kept or status %+v, want it deleted and removed", f.gateway.Status())
 	}
 }
 
 func TestRemovingWithoutStateStillReportsRemoved(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	f.primary.list(t, removing(idA))
 
 	f.reconcile(t)
@@ -869,13 +709,13 @@ func TestRemovingWithoutStateStillReportsRemoved(t *testing.T) {
 	if f.nodes.count() != 0 {
 		t.Errorf("the gateway started %d nodes for a link without state, want 0", f.nodes.count())
 	}
-	if got := f.gateway.Status()[idA].State; got != "removed" {
-		t.Errorf("state = %q, want removed", got)
+	if !f.wasRemoved(idA) {
+		t.Error("missing removal acknowledgement")
 	}
 }
 
 func TestRemovingDeletesEvenWhenLogoutFails(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	f.nodes.logoutErr = errors.New("the control server does not answer")
 	f.primary.list(t, on(idA))
 	f.reconcile(t)
@@ -887,13 +727,13 @@ func TestRemovingDeletesEvenWhenLogoutFails(t *testing.T) {
 	if !reflect.DeepEqual(node.calls, []string{"Logout", "Close"}) {
 		t.Errorf("the node got %v, want [Logout Close]", node.calls)
 	}
-	if exists(t, node.dir) || f.gateway.Status()[idA].State != "removed" {
+	if exists(t, node.dir) || !f.wasRemoved(idA) {
 		t.Errorf("state directory kept or status %+v, want it deleted and removed", f.gateway.Status())
 	}
 }
 
 func TestRemovingDeletesEvenWhenTheNodeDoesNotStart(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	dir := filepath.Join(f.state, idA)
 	mkdir(t, dir)
 	f.nodes.startErr = errors.New("the state does not load")
@@ -901,376 +741,152 @@ func TestRemovingDeletesEvenWhenTheNodeDoesNotStart(t *testing.T) {
 
 	f.reconcile(t)
 
-	if exists(t, dir) || f.gateway.Status()[idA].State != "removed" {
+	if exists(t, dir) || !f.wasRemoved(idA) {
 		t.Errorf("state directory kept or status %+v, want it deleted and removed", f.gateway.Status())
 	}
 }
 
-func TestLoginAfterChangeCallsRelogin(t *testing.T) {
-	f := newFixtures(t, "login")
-	link := on(idA)
-	pass := func(loginAfter float64, state string) int {
-		t.Helper()
-		link.LoginAfter = loginAfter
-		f.primary.list(t, link)
-		if f.nodes.count() > 0 {
-			f.nodes.node(t, 0).observe(NodeObserved{State: state})
-		}
-		f.reconcile(t)
-		return f.nodes.node(t, 0).called("Relogin")
-	}
-
-	// A new node asks for its own login, and a value that stays calls nothing.
-	pass(100, "needs_login")
-	if got := pass(100, "needs_login"); got != 0 {
-		t.Errorf("%d Relogin calls while login_after stayed, want 0", got)
-	}
-	if got := pass(200, "needs_login"); got != 1 {
-		t.Errorf("%d Relogin calls after login_after moved, want 1", got)
-	}
-	if got := pass(200, "needs_login"); got != 1 {
-		t.Errorf("%d Relogin calls after a pass without a move, want still 1", got)
-	}
-	// A move while the node waits for approval is no reason, not then and not later.
-	if got := pass(300, "needs_approval"); got != 1 {
-		t.Errorf("%d Relogin calls after a move while the node waited for approval, want still 1", got)
-	}
-	if got := pass(300, "needs_login"); got != 1 {
-		t.Errorf("%d Relogin calls for a move of an earlier pass, want still 1", got)
-	}
-}
-
-func TestNeedsLoginAfterRunningCallsReloginOnce(t *testing.T) {
-	f := newFixtures(t, "login")
+func TestStatusPostedOnChange(t *testing.T) {
+	f := newFixtures(t)
 	f.primary.list(t, on(idA))
-	f.reconcile(t)
-	node := f.nodes.node(t, 0)
-	node.observe(NodeObserved{State: "running"})
-	f.reconcile(t)
-
-	node.observe(NodeObserved{State: "needs_login"})
-	f.reconcile(t)
-	f.reconcile(t)
-
-	if got := node.called("Relogin"); got != 1 {
-		t.Errorf("%d Relogin calls for a node that fell back to needs_login, want 1", got)
-	}
-
-	// Each fall back gets its own.
-	node.observe(NodeObserved{State: "running"})
-	f.reconcile(t)
-	node.observe(NodeObserved{State: "needs_login"})
-	f.reconcile(t)
-	if got := node.called("Relogin"); got != 2 {
-		t.Errorf("%d Relogin calls after a second fall back, want 2", got)
-	}
-}
-
-func TestFailedReloginIsTriedAgain(t *testing.T) {
-	f := newFixtures(t, "login")
-	link := on(idA)
-	f.primary.list(t, link)
-	f.reconcile(t)
-	node := f.nodes.node(t, 0)
-	node.loginErr = errors.New("the control server does not answer")
-	link.LoginAfter = 200
-	f.primary.list(t, link)
-
-	f.reconcile(t)
-	f.reconcile(t)
-	node.loginErr = nil
-	f.reconcile(t)
-	f.reconcile(t)
-
-	if got := node.called("Relogin"); got != 3 {
-		t.Errorf("%d Relogin calls, want 3: two that failed and the one that worked", got)
-	}
-}
-
-func TestStatusPostedOnChangeAndCarriesEnrollment(t *testing.T) {
-	f := newFixtures(t, "auth_key")
-	f.primary.list(t, on(idA))
-
 	f.run(t)
+	f.waitPosts(t, 1)
 	f.clock.pass(t)
-
-	posted := f.posted(t)
-	if len(posted) != 1 {
-		t.Fatalf("%d status posts after two identical passes, want 1", len(posted))
+	if got := len(f.primary.sent("GET /links")); got != 2 || len(f.posted(t)) != 1 {
+		t.Fatalf("got %d reconciles and %d posts, want 2 and 1", got, len(f.posted(t)))
 	}
-	if got := len(f.primary.sent("GET /links")); got != 2 {
-		t.Errorf("%d passes read the links, want 2: one at start and one 5 s later", got)
-	}
-	want := map[string]any{
-		"enrollment": "auth_key",
-		"links": map[string]any{idA: map[string]any{
-			"state": "needs_login", "login_url": nil, "tailnet": nil, "dns_name": nil, "login_name": nil,
-			"key_expiry": nil, "open_connections": 0.0, "last_error": nil,
-		}},
-	}
-	if !reflect.DeepEqual(posted[0], want) {
-		t.Errorf("status body = %v, want %v", posted[0], want)
-	}
-
-	f.nodes.node(t, 0).observe(NodeObserved{State: "running", LoginName: ptr("bas@github")})
+	f.primary.list(t, removing(idA))
 	f.clock.pass(t)
-
-	posted = f.posted(t)
-	if len(posted) != 2 {
-		t.Fatalf("%d status posts after the node's state changed, want 2", len(posted))
-	}
-	link := posted[1]["links"].(map[string]any)[idA].(map[string]any)
-	if link["state"] != "running" || link["login_name"] != "bas@github" {
-		t.Errorf("status of the link = %v, want it running as bas@github", link)
-	}
-}
-
-func TestGatewayWithoutLinksStillSaysHowItEnrols(t *testing.T) {
-	f := newFixtures(t, "login")
-
-	f.run(t)
-
-	want := []map[string]any{{"enrollment": "login", "links": map[string]any{}}}
-	if got := f.posted(t); !reflect.DeepEqual(got, want) {
-		t.Errorf("status posts = %v, want %v", got, want)
+	f.waitPosts(t, 2)
+	if got := f.posted(t); !slices.Equal(got[1].Removed, []string{idA}) {
+		t.Fatalf("status posts = %+v; want a removal acknowledgement", got)
 	}
 }
 
 func TestUnchangedStatusIsPostedEvery30Seconds(t *testing.T) {
-	f := newFixtures(t, "login")
-	f.primary.list(t, on(idA))
+	f := newFixtures(t)
 	f.run(t)
-
+	f.waitPosts(t, 1)
 	for range 5 {
 		f.clock.pass(t)
 	}
-	early := len(f.posted(t))
-	f.clock.pass(t)
-
-	if late := len(f.posted(t)); early != 1 || late != 2 {
-		t.Errorf("%d status posts after 25 s and %d after 30 s, want 1 and 2", early, late)
+	if got := len(f.posted(t)); got != 1 {
+		t.Errorf("%d posts after 25 s, want 1", got)
 	}
+	f.clock.pass(t)
+	f.waitPosts(t, 2)
 }
 
-func TestStatusThePrimaryDidNotTakeIsPostedOnTheNextPass(t *testing.T) {
-	f := newFixtures(t, "login")
-	f.primary.answer("POST /status", http.StatusServiceUnavailable, `{"detail": "Tailnet SSH is off."}`)
+func TestStatusThePrimaryDidNotTakeIsRetried(t *testing.T) {
+	f := newFixtures(t)
+	f.primary.answer("POST /status", http.StatusServiceUnavailable, `{"detail": "Tailnet SSH is disabled."}`)
 	f.run(t)
+	f.waitPosts(t, 1)
 	f.primary.answer("POST /status", http.StatusNoContent, "")
-
 	f.clock.pass(t)
-	f.clock.pass(t)
-
-	if got := len(f.posted(t)); got != 2 {
-		t.Errorf("%d status posts, want 2: the one refused and one on the pass after it", got)
-	}
+	f.waitPosts(t, 2)
 }
 
-func TestNoStatusIsPostedWhileTheFirstNodesStart(t *testing.T) {
-	f := newFixtures(t, "login")
-	starts, endStarts := f.nodes.holdStarts()
-	f.primary.list(t, on(idA), on(idB))
-	f.start(t)
-	await(t, starts, "the start of its first node")
-	f.clock.asleep(t, 1)
-
-	// A report now would hold neither node, and tell the primary both are gone.
-	f.clock.advance(5 * time.Second)
-	f.clock.asleep(t, 1)
-	early := len(f.posted(t))
-	endStarts()
-	f.clock.settle(t)
-
-	posted := f.posted(t)
-	if early != 0 || len(posted) != 1 {
-		t.Fatalf("%d status posts while the first nodes started and %d after, want 0 and 1", early, len(posted))
-	}
-	if links := posted[0]["links"].(map[string]any); links[idA] == nil || links[idB] == nil {
-		t.Errorf("first status post = %v, want both links' nodes", links)
-	}
-}
-
-func TestNoStatusIsPostedBeforeTheLinksWereRead(t *testing.T) {
-	f := newFixtures(t, "login")
-	f.primary.answer("GET /links", http.StatusServiceUnavailable, `{"detail": "MindRoom's configuration is not loaded."}`)
-
-	// A report without the nodes the gateway has yet to start would tell the primary they are gone.
-	f.run(t)
-	for range 7 {
-		f.clock.pass(t)
-	}
-	unread := len(f.posted(t))
+func TestStatusIsIndependentOfNodeStartup(t *testing.T) {
+	f := newFixtures(t)
+	starts, _ := f.nodes.holdStarts()
 	f.primary.list(t, on(idA))
-	f.clock.pass(t)
-
-	if read := len(f.posted(t)); unread != 0 || read != 1 {
-		t.Errorf("%d status posts in 35 s without the links and %d once they were read, want 0 and 1", unread, read)
+	f.start(t)
+	await(t, starts, "the first node start")
+	f.clock.asleep(t, 1)
+	f.clock.advance(reconcileEvery)
+	f.waitPosts(t, 1)
+	if got := f.posted(t)[0]; len(got.Removed) != 0 || len(got.OpenConnections) != 0 {
+		t.Fatalf("status during the first startup = %+v, want no activity or acknowledgement", got)
 	}
 }
 
 func TestStatusIsPostedWhileTheLinksCannotBeReadAgain(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	f.primary.list(t, on(idA))
 	f.run(t)
+	f.waitPosts(t, 1)
+	f.connect(t, idA)
 	f.primary.answer("GET /links", http.StatusServiceUnavailable, `{"detail": "MindRoom's configuration is not loaded."}`)
-
-	for range 6 {
-		f.clock.pass(t)
-	}
-
-	posted := f.posted(t)
-	if len(posted) != 2 {
-		t.Fatalf("%d status posts in 30 s, want 2: the nodes it holds stay reported", len(posted))
-	}
-	if _, held := posted[1]["links"].(map[string]any)[idA]; !held {
-		t.Errorf("status body = %v, want the node the gateway still holds", posted[1])
+	f.clock.advance(countedAfter)
+	f.waitPosts(t, 2)
+	if got := f.posted(t)[1].OpenConnections[idA]; got != 1 {
+		t.Fatalf("status counts %d connections, want the one that stayed open", got)
 	}
 }
 
 func TestStatusIsPostedWhileTheFirstPassIsHeldUp(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	mkdir(t, filepath.Join(f.state, idB))
-	logouts, endLogout := f.nodes.holdLogouts(t)
-	// The link to remove is listed first, and its logout does not end.
+	logouts, release := f.nodes.holdLogouts(t)
 	f.primary.list(t, removing(idB), on(idA))
 	f.start(t)
-	await(t, logouts, "the logout of its first pass")
+	await(t, logouts, "the first logout")
+	if node := f.nodes.node(t, 0); filepath.Base(node.dir) != idA {
+		t.Fatal("the healthy node did not start before logout")
+	}
 	f.clock.asleep(t, 1)
-
-	// The other link's node is up by then, and its row is the one connections are checked against.
-	healthy := f.nodes.node(t, 0)
-	f.gateway.mu.Lock()
-	_, known := f.gateway.links[idA]
-	f.gateway.mu.Unlock()
-	if healthy.dir != filepath.Join(f.state, idA) || !known {
-		t.Fatalf("the first node started in %s and the link is known: %v; want the link that is on, before any logout", healthy.dir, known)
+	f.clock.advance(reconcileEvery)
+	f.waitPosts(t, 1)
+	if len(f.posted(t)[0].Removed) != 0 {
+		t.Fatal("a held logout was acknowledged")
 	}
-
-	// Its status is posted 5 s after the start, long before a report would be stale.
-	f.clock.advance(5 * time.Second)
-	f.clock.asleep(t, 1)
-	want := []map[string]any{{
-		"enrollment": "login",
-		"links": map[string]any{idA: map[string]any{
-			"state": "needs_login", "login_url": nil, "tailnet": nil, "dns_name": nil, "login_name": nil,
-			"key_expiry": nil, "open_connections": 0.0, "last_error": nil,
-		}},
-	}}
-	if got := f.posted(t); !reflect.DeepEqual(got, want) {
-		t.Fatalf("status posts while the first pass is held up = %v, want %v", got, want)
-	}
-
-	// While the next post has no answer the pass ends, with one more change, and the next 30 s pass.
-	posts := f.holdPosts(t)
-	healthy.observe(NodeObserved{State: "running"})
-	f.clock.advance(5 * time.Second)
-	await(t, posts.entered, "the post of the changed status")
-	endLogout()
-	f.clock.advance(30 * time.Second)
-	if !quiet(posts.entered) {
-		t.Error("a second POST /status was sent while the first had no answer")
-	}
-	posts.release()
-	f.clock.settle(t)
-
-	posted := f.posted(t)
-	if len(posted) != 3 {
-		t.Fatalf("%d status posts, want 3: the link that is on, its change, and the removal once it was done", len(posted))
-	}
-	changed, done := posted[1]["links"].(map[string]any), posted[2]["links"].(map[string]any)
-	if changed[idA].(map[string]any)["state"] != "running" || changed[idB] != nil {
-		t.Errorf("second status post = %v, want the link that is on as running, and nothing of the other", changed)
-	}
-	if done[idA].(map[string]any)["state"] != "running" || done[idB].(map[string]any)["state"] != "removed" {
-		t.Errorf("third status post = %v, want one link running and the other removed", done)
-	}
-	if posts.atOnce() != 1 {
-		t.Errorf("%d POST /status were in flight at once, want 1", posts.atOnce())
+	release()
+	f.waitPosts(t, 2)
+	if !slices.Equal(f.posted(t)[1].Removed, []string{idB}) {
+		t.Fatal("the completed retirement was not posted")
 	}
 }
 
 func TestStatusIsPostedWhileAPassIsHeldUp(t *testing.T) {
-	f := newFixtures(t, "login")
-	link := on(idA)
-	f.primary.list(t, link)
+	f := newFixtures(t)
+	f.primary.list(t, on(idA))
 	f.run(t)
-	node := f.nodes.node(t, 0)
-	endPass := node.holdRelogin(t)
-	link.LoginAfter = 200
-	f.primary.list(t, link)
-	f.clock.advance(5 * time.Second)
-	await(t, node.reloginEntered, "the pass that asks the node for a new login")
-	// The loop that reports sleeps again; the passes do not, held up as they are.
+	f.waitPosts(t, 1)
+	starts, _ := f.nodes.holdStarts()
+	f.primary.list(t, on(idA), on(idB))
+	f.clock.advance(reconcileEvery)
+	await(t, starts, "a held node start")
 	f.clock.asleep(t, 1)
-	posts := f.holdPosts(t)
-
-	// The pass is 25 s old and not over when 30 s have passed since the last report.
-	f.clock.advance(25 * time.Second)
-	await(t, posts.entered, "a status post while its pass is held up")
-
-	// While that post has no answer the pass ends, with a changed status, and the next 30 s pass.
-	node.observe(NodeObserved{State: "running"})
-	endPass()
-	f.clock.advance(30 * time.Second)
-	if !quiet(posts.entered) {
-		t.Error("a second POST /status was sent while the first had no answer")
-	}
-	posts.release()
-	f.clock.settle(t)
-
-	posted := f.posted(t)
-	if len(posted) != 3 {
-		t.Fatalf("%d status posts, want 3: at the start, 30 s later, and after the pass that changed it", len(posted))
-	}
-	for i, state := range []string{"needs_login", "needs_login", "running"} {
-		if got := posted[i]["links"].(map[string]any)[idA].(map[string]any)["state"]; got != state {
-			t.Errorf("status post %d says %v, want %s", i+1, got, state)
-		}
-	}
-	if posts.atOnce() != 1 {
-		t.Errorf("%d POST /status were in flight at once, want 1", posts.atOnce())
+	f.clock.advance(statusEvery - reconcileEvery)
+	f.waitPosts(t, 2)
+	if len(f.primary.sent("GET /links")) != 2 {
+		t.Fatal("there was more than one reconcile in flight")
 	}
 }
 
 func TestStatusPostsNeverOverlap(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	f.primary.list(t, on(idA))
 	posts := f.holdPosts(t)
 	f.start(t)
-	await(t, posts.entered, "its first status post")
-
-	// While the first post waits for its answer the status changes, and both of the loop's periods pass, twice.
-	f.nodes.node(t, 0).observe(NodeObserved{State: "running"})
-	for range 12 {
-		f.clock.advance(5 * time.Second)
-	}
+	await(t, posts.entered, "the first held status post")
+	f.clock.asleep(t, 2)
+	f.primary.list(t, removing(idA))
+	f.clock.advance(statusEvery)
+	eventually(t, "complete removal while a post is held", func() bool { return f.wasRemoved(idA) })
 	if !quiet(posts.entered) {
-		t.Error("a second POST /status was sent while the first had no answer")
+		t.Fatal("status posts overlapped")
 	}
 	posts.release()
-	f.clock.settle(t)
-	f.clock.pass(t)
-
-	if got := len(f.posted(t)); got != 2 {
-		t.Errorf("%d status posts, want 2: the first, and the changed status once it had its answer", got)
-	}
-	if posts.atOnce() != 1 {
-		t.Errorf("%d POST /status were in flight at once, want 1", posts.atOnce())
+	f.waitPosts(t, 2)
+	if posts.atOnce() != 1 || !slices.Equal(f.posted(t)[1].Removed, []string{idA}) {
+		t.Fatal("the publisher missed an acknowledgement or overlapped posts")
 	}
 }
 
 func TestInvalidLinkIDIsIgnored(t *testing.T) {
-	f := newFixtures(t, "login")
+	f := newFixtures(t)
 	outside := filepath.Join(filepath.Dir(f.state), "x")
 	mkdir(t, outside)
 	mkdir(t, filepath.Join(f.state, "0123456789ABCDEF"))
 	escaping, upper, short := removing("../x"), removing("0123456789ABCDEF"), on("0123456789abcde")
-	f.primary.list(t, escaping, upper, short, on(""), on("."), on(idA+"/../"+idB))
+	f.primary.list(t, escaping, upper, short, on(""), on("."), on(idA+"/../"+idB), on(idC))
 
 	f.reconcile(t)
 
-	if f.nodes.count() != 0 {
-		t.Errorf("the gateway started %d nodes for ids that are not 16 hex characters, want 0", f.nodes.count())
+	if f.nodes.count() != 1 || filepath.Base(f.nodes.node(t, 0).dir) != idC {
+		t.Fatal("only the valid row should start a node")
 	}
 	if !exists(t, outside) || !exists(t, filepath.Join(f.state, "0123456789ABCDEF")) {
 		t.Error("a link with an invalid id deleted a directory")
@@ -1279,10 +895,10 @@ func TestInvalidLinkIDIsIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Errorf("the state directory holds %d entries, want only the one made before the pass", len(entries))
+	if len(entries) != 2 {
+		t.Errorf("the state directory holds %d entries, want the valid node and the one created before the pass", len(entries))
 	}
-	if got := f.gateway.Status(); len(got) != 0 {
+	if got := f.gateway.Status(); len(got.Removed) != 0 || len(got.OpenConnections) != 0 {
 		t.Errorf("status = %+v, want no link reported", got)
 	}
 }
