@@ -24,6 +24,7 @@ In `config.yaml`, `tailnet_ssh.logins` maps concrete Matrix user IDs to distinct
 `tailnet_ssh.authorized_keys` maps those IDs to lists of OpenSSH `.pub` lines, without key options or private keys.
 Both maps default to empty; each requester needs a login and at least one key, and tagged client devices are not admitted.
 Set the agent's `tailnet_ssh` boolean to `true` (default `false`) and make sure its `shell` tool runs on the worker.
+MindRoom refuses the opt-in if another toolkit takes precedence for `run_shell_command` or could supply it from a function list only known at runtime.
 Merge these settings into your existing config and replace the sample login and public key:
 
 ```yaml
@@ -128,7 +129,8 @@ ssh -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519_mind
 
 Connect from a device signed in as the configured tailnet login, using port `22`, not the internal `2222`.
 Use a client timeout long enough for startup; the gateway may report `MindRoom: waking worker` while it waits.
-Active sessions normally keep the worker from idling out. With idle cleanup enabled, set the worker idle timeout to at least 150 seconds (the default is 1,800 seconds).
+Active sessions normally keep the worker from idling out, even when a bad config reload temporarily blocks new connections and link listings.
+With idle cleanup enabled, set the worker idle timeout to at least 150 seconds (the default is 1,800 seconds).
 The gateway waits 75 seconds before counting a connection and reports every 30 seconds; leave extra time for slow startup or delayed reports.
 Password authentication and forwarding are disabled; do not use clients that forward credentials or trust and execute code from the worker.
 
