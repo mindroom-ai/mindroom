@@ -29,9 +29,8 @@ if TYPE_CHECKING:
 _TOKEN = "runner-token"  # noqa: S105
 _SHELL_REQUEST = {"protocol": WORKER_PROTOCOL_VERSION, "tool_name": "shell", "function_name": "run_shell_command"}
 _BODY = {"request": _SHELL_REQUEST}
-# What the shell toolkit returns for a terminal: an interactive Bash that reads no startup file.
+# The SSH session uses the terminal's environment and workspace, but chooses its own command.
 _LAUNCH = {
-    "argv": ["bash", "--noprofile", "--norc", "-i"],
     "env": {
         "PATH": "/x",
         "PROMPT_COMMAND": "p",
@@ -218,7 +217,7 @@ async def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keys: Path) ->
     )
     sandbox_runner.initialize_sandbox_runner_app(app, paths, runner_token=_TOKEN)
     monkeypatch.setattr(session, "LAUNCH_PATH", tmp_path / "mindroom-ssh" / "launch.json")
-    launch = TerminalLaunch(argv=tuple(_LAUNCH["argv"]), env=dict(_LAUNCH["env"]), cwd=_LAUNCH["cwd"])
+    launch = TerminalLaunch(argv=("bash", "--noprofile", "--norc", "-i"), env=dict(_LAUNCH["env"]), cwd=_LAUNCH["cwd"])
     monkeypatch.setattr(worker_ssh, "prepare_terminal_launch", lambda _app, _payload, _cwd: launch)
     transport = httpx.ASGITransport(app=app)
     headers = {"x-mindroom-sandbox-token": _TOKEN}

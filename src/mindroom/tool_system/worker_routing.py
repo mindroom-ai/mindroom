@@ -40,8 +40,6 @@ _SHARED_ONLY_INTEGRATION_NAMES = frozenset({"spotify", "spotify_oauth", "homeass
 _SUBAGENT_PIN_PREFIX = "subagent="
 _SUBAGENT_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 _SUBAGENT_PIN_PATTERN = re.compile(rf"{re.escape(_SUBAGENT_PIN_PREFIX)}[0-9a-f]{{32}}")
-# The part `workers.models.process_worker_key` pins a script run's worker with, before the agent part.
-_SCRIPT_PIN_PATTERN = re.compile(r"script-[0-9a-f]{32}")
 
 
 @dataclass(frozen=True)

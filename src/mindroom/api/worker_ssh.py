@@ -77,7 +77,7 @@ def _store_launch(app: FastAPI, payload: ExecuteRequest) -> None:
     launch = prepare_terminal_launch(app, payload, None)
     if launch.cwd is None:
         raise TerminalError(400, "This shell has no workspace for an SSH session to start in.")
-    content = json.dumps({"argv": list(launch.argv), "env": launch.env, "cwd": launch.cwd}).encode()
+    content = json.dumps({"env": launch.env, "cwd": launch.cwd}).encode()
     directory = session.LAUNCH_PATH.parent
     directory.mkdir(mode=0o700, exist_ok=True)
     directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
