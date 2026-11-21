@@ -35,7 +35,8 @@ class AgentSurface:
     ``knowledge_sources``, the knowledge bases its search reaches after the persona and approval gating.
 
     Minimal mode's bootstrap message names the agent by ``identity`` when an authored persona replaces it, lists
-    ``toolkit_names`` as its roster, points at its file memory under ``memory_root``, and ends with the Mind agent's
+    ``toolkit_names`` as its roster, points at its file memory under ``memory_root``, names the CLI command that runs
+    in a named worker when ``named_workers`` says its shell offers them, and ends with the Mind agent's
     ``runtime_context`` and the ``minimal_instructions``; ``interactive_prompt`` and ``skills`` are context documents
     beside the role and instructions. ``output_file_policy`` saves large CLI results and their media in the agent's
     workspace.
@@ -51,6 +52,7 @@ class AgentSurface:
     toolkit_names: tuple[str, ...] = ()
     memory_root: Path | None = None
     runtime_context: str = ""
+    named_workers: bool = False
     minimal_instructions: tuple[str, ...] = ()
     interactive_prompt: str = ""
     skills: tuple[Skill, ...] = ()

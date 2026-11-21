@@ -45,6 +45,7 @@ from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.tool_system.tool_schema import closed_parameters
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
+from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -112,6 +113,28 @@ _WORKING_METHOD_NOTE = (
     "only one value must change, replace just that span and keep every other byte, including comments and "
     "spacing. Afterwards verify the result: read outputs back, search for leftover old names after a rename, run "
     "available tests, and recheck suspicious results such as a zero count."
+)
+
+# How a call uses the named workers its agent may run, which `workers.named` owns and removes.
+_NAMED_WORKERS_NOTE = (
+    "Set `worker` to a short name to run the command in a worker of its own instead of your normal worker: a "
+    "separate pod with its own processes, ports, and /tmp that mounts the same workspace. The first call with a "
+    "name starts that worker, and later calls of this reply with the same name reach it, so several isolated "
+    "stacks or shards of one job can run side by side. Calls with `background_after` 0 start their workers at the "
+    "same time. Where `mindroom-agent` is available, a shell script does the same with "
+    "`mindroom-agent workers run NAME -- COMMAND`, which waits and exits with the command's exit code. A result "
+    "that starts with `[worker: NAME, started]` marks a new Deployment or startup MindRoom recorded, not a "
+    "pod or container restart within that Deployment. "
+    "Named workers are removed when this reply and its background jobs end, and one in which no command has run "
+    "for several minutes is removed sooner, so keep results in the workspace and run long work as the call's own "
+    "command, not detached from it. Give each worker its own output directory, and its own git worktree when it "
+    "changes a checkout. Build or install what every worker needs once in the workspace before fanning out, "
+    "because package caches start empty in each worker. Network access granted with `request_network_access` "
+    "does not reach named workers."
+)
+_NO_NAMED_WORKERS_ERROR = (
+    "Error: `worker` and `resource_profile` need a shell that runs in a worker on the kubernetes worker backend, "
+    "and this agent's shell runs in MindRoom's own process."
 )
 
 _NO_WORKER_ERROR = (
@@ -406,12 +429,16 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             runtime_paths: RuntimePaths,
             tool_output_workspace_root: Path | None = None,
             allow_without_worker: bool = False,
+            named_workers: bool = False,
         ) -> None:
             self.base_dir: Path | None = Path(base_dir) if isinstance(base_dir, str) else base_dir
             # Beside a workdir, ``base_dir`` is the workdir; ``$MINDROOM_AGENT_WORKSPACE`` stays the workspace.
             self._beside_workdir = current_tool_workdir() is not None
             self._workspace_dir = tool_output_workspace_root if self._beside_workdir else self.base_dir
             self._refuse_commands = shell_refuses_commands(runtime_paths, allow_without_worker=allow_without_worker)
+            # Whether calls may name a worker of their own, which the primary then routes them to.
+            self._named_workers = named_workers
+            self._in_worker = runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"])
 
             tools: list[Callable[..., object]] = []
             if all or enable_run_shell_command:
@@ -433,13 +460,19 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             self._supervisor_socket = os.environ.get(SHELL_SUPERVISOR_SOCKET_ENV) or None
 
         def offered_function(self, function: ToolFunction) -> ToolFunction:
-            """Describe ``run_shell_command`` with the working directory and the working method it runs under."""
+            """Describe ``run_shell_command`` with where and how it runs, offering named workers only where it may."""
             cwd_note = _WORKDIR_CWD_NOTE if self._beside_workdir else _WORKSPACE_CWD_NOTE
             notes = (cwd_note, _WORKING_METHOD_NOTE) if self.base_dir is not None else (_WORKING_METHOD_NOTE,)
+            hidden = () if self._named_workers else ("worker", "resource_profile")
+            properties = {
+                name: value for name, value in function.parameters["properties"].items() if name not in hidden
+            }
             return replace(
                 function,
-                description="\n\n".join((function.description or "", *notes)).strip(),
-                parameters=closed_parameters(self.run_shell_command, function.parameters),
+                description="\n\n".join(
+                    (function.description or "", *notes, *((_NAMED_WORKERS_NOTE,) if self._named_workers else ())),
+                ).strip(),
+                parameters=closed_parameters(self.run_shell_command, {**function.parameters, "properties": properties}),
             )
 
         def _command_env(self, process_environ: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -476,11 +509,22 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 cwd=_terminal_cwd(self.base_dir, cwd),
             )
 
+        def _refusal(self, *, named_worker: bool) -> str | None:
+            """Return why a call cannot run here, where ``named_worker`` says it names a worker of its own."""
+            if self._refuse_commands:
+                return _NO_WORKER_ERROR
+            # The primary routes a call to the worker it names, so one that reaches a shell outside a worker has none.
+            if named_worker and not self._in_worker:
+                return _NO_NAMED_WORKERS_ERROR
+            return None
+
         async def run_shell_command(
             self,
             args: list[str] | str,
             tail: int = 100,
             timeout: int | None = None,  # noqa: ASYNC109
+            worker: str | None = None,
+            resource_profile: ScriptResourceProfileName | None = None,
         ) -> str | ToolOutputFileHandled:
             """Runs a shell command and returns the output or error.
 
@@ -513,20 +557,30 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 args: The command to run as a shell command string or a list of argv strings.
                 tail: The number of lines to return from the output.
                 timeout: Seconds after which the command is stopped; null uses the default limit.
+                worker: Name of a worker of its own to run the command in, 1 to 32 lowercase letters, digits, or
+                    hyphens; null runs it in your normal worker.
+                resource_profile: CPU and memory size of the named worker, small, standard, or large, set by the
+                    first call that names it; null gives it the normal worker size.
 
             Returns:
                 The command output or an error message.
 
             """
-            if self._refuse_commands:
-                return _NO_WORKER_ERROR
+            refusal = self._refusal(named_worker=worker is not None or resource_profile is not None)
+            if refusal is not None:
+                return refusal
             try:
                 command_args = _normalize_shell_args(args)
             except ValueError as exc:
+                if worker is not None:
+                    raise
                 return f"Error: {exc}"
             if timeout is not None and timeout <= 0:
                 # A model may mean "no limit" or "run in the background"; either way, stopping at once helps nobody.
-                return "Error: timeout must be a positive number of seconds; omit it for the default limit."
+                msg = "timeout must be a positive number of seconds; omit it for the default limit."
+                if worker is not None:
+                    raise ValueError(msg)
+                return f"Error: {msg}"
             subprocess_env = self._command_env()
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None
@@ -570,6 +624,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                     on_progress=report_tool_progress,
                     output_destination=output_destination,
                 )
+            if worker is not None and result.execution_error:
+                raise ValueError(result.message)
             return ToolOutputFileHandled(result.message) if result.output_file_handled else result.message
 
     return MindRoomShellTools

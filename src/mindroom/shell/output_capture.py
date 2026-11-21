@@ -60,6 +60,20 @@ def format_shell_completion(stdout: str, stderr: str | None, *, return_code: int
     return "\n".join(lines)
 
 
+def format_shell_timeout(stdout: str, stderr: str | None, *, timeout: float, no_output_file: bool = False) -> str:
+    """Format the output so far of a command stopped at its timeout, leading with the stop.
+
+    ``stderr`` is None when the command printed nothing to it, as for `format_shell_completion`.
+    ``no_output_file`` says the call asked for an output file, which a stopped command does not save.
+    """
+    lines = [f"Stopped after {timeout:g}s." + (" No output file was saved." if no_output_file else "")]
+    if stdout:
+        lines += ["Output:", stdout]
+    if stderr is not None:
+        lines += ["Stderr:", stderr]
+    return "\n".join(lines)
+
+
 class CapturedShellStream:
     """Spool decoded text up to the redirect cap without retaining it in memory."""
 

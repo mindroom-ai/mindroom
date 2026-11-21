@@ -21,7 +21,7 @@ from mindroom.matrix.olm_to_device import (
     send_encrypted_to_device,
 )
 from mindroom.model_catalog import ModelCatalog
-from mindroom.model_selection_scope import validate_model_picker_scope
+from mindroom.model_selection_scope import model_picker_thread_root_denial, validate_model_picker_scope
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.turn_model import resolve_inherited_model
 
@@ -41,7 +41,7 @@ _DEADLINE_SECONDS = 12.0
 _MAX_IN_FLIGHT = 8
 # One Matrix account may log in any number of devices, so per-user limits keep
 # it from holding the whole shared pool.
-_MAX_USER_IN_FLIGHT = 2
+_MAX_USER_IN_FLIGHT = 4
 _MAX_USER_REQUESTS = 8
 _MAX_RATE_USERS = 1024
 _MAX_MODELS = 256
@@ -191,7 +191,14 @@ class _Receiver:
         event: nio.AuthenticatedToDeviceEvent,
         request: _Request,
         config: Config,
+        *,
+        root_first: bool = False,
     ) -> ModelPickerScope:
+        thread_id = request.thread_id
+        if root_first and thread_id is not None:
+            if (denial := await model_picker_thread_root_denial(self.client, request.room_id, thread_id)) is not None:
+                raise _DroppedError(reason=denial)
+            thread_id = None
         scope = await validate_model_picker_scope(
             client=self.client,
             config=config,
@@ -199,7 +206,8 @@ class _Receiver:
             membership_index=self.membership_index,
             room_id=request.room_id,
             requester_user_id=event.sender,
-            thread_id=request.thread_id,
+            thread_id=thread_id,
+            recheck_membership=False,
         )
         if isinstance(scope, str):
             raise _DroppedError(reason=scope)
@@ -234,14 +242,13 @@ class _Receiver:
             raise _DroppedError(reason="too_many_models")
         if not authenticated_sender_matches(self.client, event, target):
             raise _DroppedError(reason="sender_device_changed")
-        await self._scope(event, request, config)
-        entries, revision = await self.catalog.snapshot(config)
         scope = await self._scope(event, request, config)
+        entries, revision = await self.catalog.snapshot(config)
         content: dict[str, object] = {
             "version": 1,
             "request_id": request.request_id,
             "room_id": request.room_id,
-            "capabilities": ["model_selection"],
+            "capabilities": ["model_selection", "thread_model_on_root"],
             "agent_user_ids": list(scope.agent_user_ids),
             "catalog_revision": revision,
             "models": entries,
@@ -256,7 +263,8 @@ class _Receiver:
         # Authorize at the NIO handoff; NIO owns preparation and delivery retries.
         if self.config_getter() is not config:
             raise _DroppedError(reason="config_changed")
-        if await self._scope(event, request, config) != scope:
+        # Reprove the root first so the final membership read catches departures during that lookup.
+        if await self._scope(event, request, config, root_first=True) != scope:
             raise _DroppedError(reason="scope_changed")
         if self.config_getter() is not config:
             raise _DroppedError(reason="config_changed")

@@ -16,6 +16,7 @@ import pytest
 from mindroom.agent_cli.client import AgentCliUnavailableError
 from mindroom.agent_cli.main import main, parse_arguments, read_call_arguments
 from mindroom.script_runs.launch_contract import digest_arguments
+from mindroom.shell.output_capture import format_shell_completion, format_shell_timeout
 
 
 def test_call_accepts_json_object() -> None:
@@ -89,6 +90,13 @@ def test_help_and_imports_need_no_runtime() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "tools" in result.stdout
+
+
+def test_help_says_what_workers_run_needs(capsys: pytest.CaptureFixture[str]) -> None:
+    """The CLI knows no config, so its help says the command works only for an agent that may name workers."""
+    with pytest.raises(SystemExit):
+        parse_arguments(["--help"])
+    assert "needs the agent's named_workers setting" in " ".join(capsys.readouterr().out.split())
 
 
 def test_main_reports_missing_authority(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -287,3 +295,333 @@ def test_a_background_script_call_the_gateway_refused_failed(capsys, monkeypatch
 
     assert main(["tools", "call", "memory.add_memory", "{}"]) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "failed"
+
+
+def _worker_client(monkeypatch, *receipts: dict[str, object]) -> list[dict[str, object]]:
+    """Answer one submitted call with *receipts* in turn, the last one for every later read, and return what was sent."""
+    sent: list[dict[str, object]] = []
+    remaining = list(receipts)
+
+    class Client:
+        def operation(self, payload) -> dict[str, object]:
+            sent.append(payload)
+            return self.receipt(payload["call_id"])
+
+        def receipt(self, call_id, *, timeout: float = 30) -> dict[str, object]:
+            del timeout
+            assert call_id == sent[0]["call_id"]
+            return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setattr("mindroom.agent_cli.main.time.sleep", lambda _seconds: None)
+    return sent
+
+
+def _completed(outcome: object) -> dict[str, object]:
+    return {"status": "completed", "outcome": outcome}
+
+
+def test_workers_run_sends_one_shell_call_that_names_the_worker(capsys, monkeypatch) -> None:
+    """Everything after ``--`` is the command, and the call is waited for however long it takes."""
+    sent = _worker_client(
+        monkeypatch,
+        {"status": "queued"},
+        {"status": "running"},
+        _completed("[worker: e2e-3, started]\n" + format_shell_completion("shard 3 ok", None, return_code=0)),
+    )
+
+    argv = ["workers", "run", "e2e-3", "--resource-profile", "large", "--timeout", "900", "--tail", "20"]
+    assert main([*argv, "--", "bash", "e2e/shard.sh", "--timeout", "3"]) == 0
+
+    [call] = sent
+    assert (call["operation"], call["toolkit"], call["function"]) == ("tools.call", "shell", "run_shell_command")
+    assert call["arguments"] == {
+        "args": ["bash", "e2e/shard.sh", "--timeout", "3"],
+        "worker": "e2e-3",
+        "resource_profile": "large",
+        "timeout": 900,
+        "tail": 20,
+    }
+    output = capsys.readouterr()
+    assert (output.out, output.err) == ("shard 3 ok\n", "")
+
+
+def test_workers_run_defaults_to_an_hour_and_the_normal_worker_size(monkeypatch) -> None:
+    result = format_shell_completion("", None, return_code=0)
+    sent = _worker_client(monkeypatch, _completed(f"[worker: build]\n{result}"))
+
+    assert main(["workers", "run", "build", "--", "make test && make lint"]) == 0
+    assert sent[0]["arguments"] == {"args": ["make test && make lint"], "worker": "build", "timeout": 3600, "tail": 100}
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "Exit code 0",
+        "Exit code 3 was expected",
+        "Exit code 3\nand more",
+        "Stopped after 5s.",
+        "Stopped after 60s. Nothing failed.",
+        "Stopped after 60s.\nThen finished.",
+        "[cwd: genuine]\nkept",
+    ],
+)
+def test_workers_run_keeps_successful_command_output_verbatim(stdout, capsys, monkeypatch) -> None:
+    """Output that resembles CLI or shell metadata is still printed."""
+    result = format_shell_completion(stdout, None, return_code=0)
+    _worker_client(monkeypatch, _completed(f"[worker: w]\n{result}"))
+
+    assert main(["workers", "run", "w", "--timeout", "60", "--", "pytest"]) == 0
+    assert capsys.readouterr().out == f"{stdout}\n"
+
+
+@pytest.mark.parametrize(
+    ("return_code", "exit_code"),
+    [(1, 1), (3, 3), (137, 137), (255, 255), (-9, 137), (-15, 143)],
+)
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [("", ""), ("ran 4 tests", ""), ("", "Killed"), ("ran 4 tests", "1 failed")],
+)
+def test_workers_run_reads_a_failure_as_the_shell_words_it(
+    return_code,
+    exit_code,
+    stdout,
+    stderr,
+    capsys,
+    monkeypatch,
+) -> None:
+    """The shell's own wording of a failed command gives the exit code; a command a signal killed exits 128 + signal."""
+    result = format_shell_completion(stdout, stderr, return_code=return_code)
+    _worker_client(monkeypatch, _completed(f"[worker: w]\n{result}"))
+
+    assert main(["workers", "run", "w", "--", "pytest"]) == exit_code
+    streams = result.partition("\n")[2]
+    assert capsys.readouterr().out == (f"{streams}\n" if streams else "")
+
+
+@pytest.mark.parametrize("timeout", [1, 90, 3600])
+@pytest.mark.parametrize(("stdout", "stderr"), [("", None), ("still going", None), ("still going", "warning")])
+def test_workers_run_reads_a_stop_at_the_time_limit_as_the_shell_words_it(
+    timeout,
+    stdout,
+    stderr,
+    capsys,
+    monkeypatch,
+) -> None:
+    """The shell's own wording of a command stopped at its time limit makes the CLI exit 124."""
+    result = format_shell_timeout(stdout, stderr, timeout=timeout)
+    _worker_client(monkeypatch, _completed(f"[worker: w]\n{result}"))
+
+    assert main(["workers", "run", "w", "--timeout", str(timeout), "--", "sleep", "9999"]) == 124
+    assert capsys.readouterr().out == f"{result}\n"
+
+
+class _Clock:
+    """The CLI's clock, which only its own waiting moves."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def _unreachable_worker_client(
+    monkeypatch,
+    *,
+    failed_reads: int | None,
+    fail_submission: bool = False,
+    failed_read_seconds: float = 0,
+) -> tuple:
+    """Simulate consecutive HTTP failures at the transport seam, using the actual client's timeouts."""
+    clock = _Clock()
+    reads: list[float] = []
+    submissions: list[dict[str, object]] = []
+    url = "http://primary:8765"
+
+    def open_request(_opener, request: urllib.request.Request, *, timeout: float) -> BytesIO:
+        if request.get_method() == "POST":
+            assert request.data is not None
+            submissions.append(json.loads(request.data))
+            if fail_submission:
+                raise TimeoutError
+            return BytesIO(b'{"status":"running"}')
+        assert request.full_url == f"{url}/api/agent-cli/calls/{submissions[0]['call_id']}"
+        reads.append(clock.now)
+        if failed_reads is None or len(reads) <= failed_reads:
+            clock.sleep(min(failed_read_seconds, timeout))
+            raise TimeoutError
+        receipt = _completed("[worker: w]\n" + format_shell_completion("shard ok", None, return_code=0))
+        return BytesIO(json.dumps(receipt).encode())
+
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_URL", url)
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN", "private-capability")
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", open_request)
+    monkeypatch.setattr("mindroom.agent_cli.main.time", clock)
+    return clock, reads, submissions
+
+
+def test_workers_run_keeps_waiting_when_reading_the_result_fails_for_a_while(capsys, monkeypatch) -> None:
+    """The command runs on in its worker, so a read that fails is tried again."""
+    _clock, reads, _submissions = _unreachable_worker_client(monkeypatch, failed_reads=5)
+
+    assert main(["workers", "run", "w", "--", "bash", "shard.sh"]) == 0
+    assert len(reads) == 6
+    output = capsys.readouterr()
+    assert (output.out, output.err) == ("shard ok\n", "")
+
+
+@pytest.mark.parametrize("failed_read_seconds", [0, 30])
+def test_workers_run_exits_125_when_the_result_stays_unreachable(failed_read_seconds, capsys, monkeypatch) -> None:
+    """After a minute of failed reads (including time spent in HTTP), report that the command may still run."""
+    clock, reads, submissions = _unreachable_worker_client(
+        monkeypatch,
+        failed_reads=None,
+        failed_read_seconds=failed_read_seconds,
+    )
+
+    assert main(["workers", "run", "w", "--", "bash", "shard.sh"]) == 125
+    assert len(submissions) == 1
+    assert len(reads) > 1
+    assert clock.now - reads[0] == pytest.approx(60)
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "Agent CLI transport outcome is unknown" in output.err
+    assert "may still be running in worker w" in output.err
+
+
+def test_workers_run_counts_a_minute_of_failed_reads_from_the_last_one_that_worked(monkeypatch) -> None:
+    clock = _Clock()
+    done = _completed("[worker: w]\n" + format_shell_completion("ok", None, return_code=0))
+    answers = iter([*[None] * 20, {"status": "running"}, *[None] * 20, done])
+
+    class Client:
+        def operation(self, payload) -> dict[str, object]:
+            del payload
+            return {"status": "running"}
+
+        def receipt(self, call_id, *, timeout: float) -> dict[str, object]:
+            del call_id, timeout
+            answer = next(answers)
+            if answer is None:
+                msg = "Agent CLI transport outcome is unknown"
+                raise AgentCliUnavailableError(msg)
+            return answer
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setattr("mindroom.agent_cli.main.time", clock)
+
+    # Each run of failed reads is shorter than a minute, and both together are longer.
+    assert main(["workers", "run", "w", "--", "true"]) == 0
+    assert clock.now > 60
+
+
+@pytest.mark.parametrize(("failed_reads", "expected_code"), [(None, 125), (2, 0)])
+def test_workers_run_recovers_after_a_lost_submission_response(
+    capsys,
+    monkeypatch,
+    failed_reads,
+    expected_code,
+) -> None:
+    """Only read the receipt: another submission could run the command twice."""
+    clock, reads, submissions = _unreachable_worker_client(monkeypatch, failed_reads=failed_reads, fail_submission=True)
+
+    assert main(["workers", "run", "w", "--", "true"]) == expected_code
+    [submission] = submissions
+    output = capsys.readouterr()
+    if failed_reads is None:
+        assert len(reads) > 1
+        assert clock.now == pytest.approx(60)
+        assert f"may still be running in worker w (call {submission['call_id']})" in output.err
+    else:
+        assert len(reads) == failed_reads + 1
+        assert (output.out, output.err) == ("shard ok\n", "")
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        {"status": "failed", "outcome": "Cannot start worker 'w': 2 of the 2 named workers ..."},
+        {"status": "cancelled", "outcome": "Call interrupted after dispatch; effects may have occurred"},
+        # A shell that runs without workers answers without the worker's line, so nothing ran in a worker named so.
+        _completed("Error: `worker` and `resource_profile` need a shell that runs in a worker"),
+        _completed("[worker: other]\n" + format_shell_completion("ran elsewhere", None, return_code=0)),
+    ],
+)
+def test_workers_run_exits_125_when_the_command_did_not_run_in_its_worker(receipt, capsys, monkeypatch) -> None:
+    """A refused, failed, or cancelled call prints its reason on stderr and never looks like the command's result."""
+    _worker_client(monkeypatch, receipt)
+
+    assert main(["workers", "run", "w", "--", "true"]) == 125
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert str(receipt["outcome"]) in output.err
+
+
+def test_workers_run_exits_125_when_mindroom_cannot_be_reached(capsys, monkeypatch) -> None:
+    monkeypatch.delenv("MINDROOM_AGENT_CLI_URL", raising=False)
+    monkeypatch.delenv("MINDROOM_AGENT_CLI_TOKEN", raising=False)
+
+    assert main(["workers", "run", "w", "--", "true"]) == 125
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "Agent CLI authority is unavailable" in output.err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["workers", "run", "w"],
+        ["workers", "run", "w", "--"],
+        ["workers", "run", "w", "true"],
+        ["workers", "run", "--", "true"],
+        ["workers", "run", "w", "--timeout", "0", "--", "true"],
+        ["workers", "run", "w", "--tail", "-1", "--", "true"],
+        ["workers", "run", "w", "--resource-profile", "huge", "--", "true"],
+    ],
+)
+def test_workers_run_needs_a_name_a_command_and_usable_limits(argv) -> None:
+    with pytest.raises(SystemExit):
+        parse_arguments(argv)
+
+
+@pytest.mark.parametrize("tail", [0, -1])
+def test_workers_run_rejects_nonpositive_tail_without_submitting(tail, capsys, monkeypatch) -> None:
+    """A zero tail would print every line rather than limiting the output."""
+    result = format_shell_completion("finished", None, return_code=0)
+    sent = _worker_client(monkeypatch, _completed(f"[worker: w]\n{result}"))
+
+    assert main(["workers", "run", "w", "--tail", str(tail), "--", "true"]) == 2
+    assert sent == []
+    assert "--tail" in capsys.readouterr().err
+
+
+def test_workers_run_prints_the_error_when_output_auto_save_fails(capsys, monkeypatch, tmp_path) -> None:
+    """A refused output write returns a failure receipt, not a preview."""
+    from mindroom.agent_cli.projection import project_cli_result  # noqa: PLC0415
+    from mindroom.tool_system.output_files import ToolOutputFilePolicy  # noqa: PLC0415
+
+    result = format_shell_completion("finished", None, return_code=0)
+    policy = ToolOutputFilePolicy(tmp_path, max_bytes=1, auto_save_threshold_bytes=1)
+    outcome = project_cli_result(f"[worker: w]\n{result}", policy, "run_shell_command")
+    _worker_client(monkeypatch, _completed(outcome))
+
+    assert main(["workers", "run", "w", "--", "true"]) == 125
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "exceeds the 1 byte auto-save limit" in output.err
+
+
+def test_a_background_script_cannot_run_commands_in_named_workers(capsys, monkeypatch, tmp_path) -> None:
+    """Named workers belong to a reply, and a background script outlives the reply that started it."""
+    _in_background_script(monkeypatch, tmp_path)
+
+    assert main(["workers", "run", "w", "--", "true"]) == 125
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "A named worker belongs to a reply in a conversation" in output.err
+    assert "background script" in output.err

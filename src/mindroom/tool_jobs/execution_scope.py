@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from functools import wraps
 from typing import Protocol, cast
 
@@ -20,7 +20,7 @@ class _OwnedExecution(Protocol):
 
 
 def owned_tool_execution(*, enabled: Callable[..., bool]) -> _OwnedExecution:
-    """Decorate a coroutine or async stream to own resources, durable result claims, and job notices when ``enabled``.
+    """Own execution resources for a response, and durable claims and notices when jobs are enabled.
 
     The decorated function keeps its signature for type checking.
     """
@@ -30,8 +30,7 @@ def owned_tool_execution(*, enabled: Callable[..., bool]) -> _OwnedExecution:
 
             @wraps(function)
             def streaming(*args: object, **kwargs: object) -> AsyncIterator[object]:
-                if not enabled(*args, **kwargs):
-                    return cast("Callable[..., AsyncIterator[object]]", function)(*args, **kwargs)
+                jobs_enabled = enabled(*args, **kwargs)
                 resources = ExecutionResources()
                 consumption = ConsumptionOwner()
                 notices = JobNotices()
@@ -39,9 +38,9 @@ def owned_tool_execution(*, enabled: Callable[..., bool]) -> _OwnedExecution:
                 @contextmanager
                 def bind() -> Iterator[None]:
                     with (
-                        bind_execution_resources(resources),
-                        consumption_context(consumption),
-                        job_notice_context(notices),
+                        bind_execution_resources(resources, response=True, jobs_enabled=jobs_enabled),
+                        consumption_context(consumption) if jobs_enabled else nullcontext(),
+                        job_notice_context(notices) if jobs_enabled else nullcontext(),
                     ):
                         yield
 
@@ -53,7 +52,8 @@ def owned_tool_execution(*, enabled: Callable[..., bool]) -> _OwnedExecution:
                                 yield chunk
                     finally:
                         try:
-                            await finalize_consumption()
+                            if jobs_enabled:
+                                await finalize_consumption()
                         finally:
                             await run_coroutine_until_complete(resources.release_parent())
 
@@ -63,10 +63,11 @@ def owned_tool_execution(*, enabled: Callable[..., bool]) -> _OwnedExecution:
 
         @wraps(function)
         async def blocking(*args: object, **kwargs: object) -> object:
-            if not enabled(*args, **kwargs):
-                return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
+            jobs_enabled = enabled(*args, **kwargs)
             # Consumption finalizes, even for a cancelled parent, before response resources are released.
-            async with execution_resources():
+            async with execution_resources(response=True, jobs_enabled=jobs_enabled):
+                if not jobs_enabled:
+                    return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
                 with consumption_context(ConsumptionOwner()), job_notice_context(JobNotices()):
                     try:
                         return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)

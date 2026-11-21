@@ -19,7 +19,7 @@ from mindroom.workers import protocol
 # fields it does not know. Record a new digest for the same version only when nothing a request or response carries
 # changed, such as a pydantic upgrade that renders the same schema differently.
 _SCHEMA_DIGESTS = {
-    8: "d6320479ed4156c12809f20bf04ebe9252c180c7a7965f46a898680301c59cf3",
+    9: "d6320479ed4156c12809f20bf04ebe9252c180c7a7965f46a898680301c59cf3",
 }
 
 

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.authorization import addressable_responder_names
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.thread_models import (
+    THREAD_MODEL_STORAGE_ERROR,
     clear_thread_model_override,
     resolve_thread_model_override,
     set_thread_model_override,
@@ -132,13 +133,17 @@ class ThreadModelTools(Toolkit):
                 message=f"Unknown model '{model_name}'.",
                 available_models=sorted(switchable),
             )
-        set_thread_model_override(
-            context.runtime_paths,
-            thread_id=thread_id,
-            model_name=model_name,
-            entity_names=self._addressable_entities(context),
-            config=context.config,
-        )
+        entity_names = self._addressable_entities(context)
+        try:
+            set_thread_model_override(
+                context.runtime_paths,
+                thread_id=thread_id,
+                model_name=model_name,
+                entity_names=entity_names,
+                config=context.config,
+            )
+        except OSError:
+            return self._payload("error", action="switch", message=THREAD_MODEL_STORAGE_ERROR)
         # A switch reads the config it takes effect in: the turn's own for the current response, the current one for
         # later turns.
         config = context.config if when == "after-toolcall" else current
@@ -205,12 +210,16 @@ class ThreadModelTools(Toolkit):
         if isinstance(resolved, str):
             return resolved
         context, thread_id = resolved
-        cleared = clear_thread_model_override(
-            context.runtime_paths,
-            thread_id,
-            entity_names=self._addressable_entities(context),
-            config=context.config,
-        )
+        entity_names = self._addressable_entities(context)
+        try:
+            cleared = clear_thread_model_override(
+                context.runtime_paths,
+                thread_id,
+                entity_names=entity_names,
+                config=context.config,
+            )
+        except OSError:
+            return self._payload("error", action="reset", message=THREAD_MODEL_STORAGE_ERROR)
         return self._payload(
             "ok",
             action="reset",

@@ -141,6 +141,7 @@ delete_file("scratch/todo.txt")
 It runs commands only in a worker unless [`defaults.allow_shell_without_worker: true`](https://docs.mindroom.chat/configuration/agents/#defaults) lets them run in the MindRoom process; otherwise each call there is refused.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
 The tool returns the last `tail` lines of stdout (default 100), then the last `tail` lines of any stderr under `Stderr:`, each capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and all of stderr under `Stderr:`.
+If the result is auto-saved, read the saved file rather than relying on the preview for the last lines.
 When `tail` or the cap leaves lines out of a successful result, it starts with a notice for each stream that lost lines, such as `[Showing the last 100 of 230 lines. Pass a larger tail, or narrow the command.]` or `[Showing the last 100 of 230 stderr lines. ...]`.
 Blank lines count as lines in a notice and in the tail; output shown whole loses only its trailing newlines, and stderr of only blank lines still gets its `Stderr:` heading.
 A result that leads with a status line keeps it first and puts the notice at the start of the stream it describes: `Exit code <code>` on a failure, `Stopped after <timeout>s.` at the timeout, and `Status: FINISHED` or `Status: RUNNING` when a background command is checked.
@@ -187,6 +188,63 @@ run_shell_command(["git", "status", "--short"], tail=50)
 run_shell_command(["bash", "-lc", "make test"], timeout=900)
 run_shell_command("nohup npm run dev > dev.log 2>&1 &")
 ```
+
+### Named workers
+
+On the Kubernetes worker backend, an agent's shell commands can run in extra workers that the agent names, so one reply runs several isolated environments side by side, such as end-to-end test stacks that listen on the same ports, or the shards of a test suite or a build.
+Set [`named_workers`](https://docs.mindroom.chat/configuration/agents/#configuration-options) on the agent to the most named workers it may have at once for one requester; MindRoom then offers `worker` and `resource_profile` in its `run_shell_command`.
+The agent's workers must be per requester and agent: set `worker_scope: user_agent`, or make it a [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) with `private.per: user_agent`.
+The runtime must also run idle-worker cleanup, as for [dedicated subagent workers](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers).
+
+```yaml
+agents:
+  code:
+    display_name: Code
+    tools: [shell]
+    worker_tools: [shell]
+    worker_scope: user_agent
+    named_workers: 8
+```
+
+```python
+run_shell_command("bash e2e/shard.sh 0 2", worker="e2e-0", resource_profile="large", timeout=3600, background_after=0)
+run_shell_command("bash e2e/shard.sh 1 2", worker="e2e-1", resource_profile="large", timeout=3600, background_after=0)
+```
+
+- `worker` is a name of 1 to 32 lowercase letters, digits, or hyphens that starts with a letter or digit.
+  The first call with a name starts a worker, and later calls of the same reply with that name, including its [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) and its [`mindroom-agent`](https://docs.mindroom.chat/tools/agent-cli/#run-commands-in-named-workers) calls, run in it.
+  Another reply's calls with the same name get a worker of their own.
+- `resource_profile` is `small`, `standard`, or `large`, the [background script profiles](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings), and sizes the worker when its name is first used; omitting it gives the worker the normal worker resources.
+  A later call that asks for another size fails.
+- The result starts with `[worker: <name>]`, or `[worker: <name>, started]` on the first call to a Deployment or a start MindRoom recorded.
+  Kubernetes may replace a pod or restart its container without changing the Deployment. The marker does not report those restarts.
+- A named worker has its own processes, network ports, and `/tmp`.
+  It sees the same workspace, shared directories, and knowledge as the agent's normal worker, with the same leased tool settings and shared credentials, but not the packages installed into the normal worker's environment or its package caches.
+- Workers share the workspace, so give each one its own output directory, and its own git worktree when it changes a checkout, and build or install what all of them need once before starting them.
+
+Named workers are removed, with their processes and package caches, when the reply and its background jobs end.
+A named worker in which no command has run for 10 minutes is removed sooner, and every named worker is removed 4 hours after it started, whatever runs in it; [worker settings](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) lists both limits.
+Run long work as the call's own command rather than detached with `nohup`, and keep results in the workspace.
+Stopping the reply or cancelling a job stops its command in the named worker, as in the normal worker.
+A MindRoom restart ends a reply's use of its named workers: the first cleanup pass after the restart removes them, and a later reply's calls start new ones.
+If a named worker crashes, the call that ran in it fails, and the next call with its name starts a new one.
+A reply that pauses for a [tool approval](https://docs.mindroom.chat/tool-approval/) gives up its named workers unless one of its background jobs still runs, and its calls after the approval start new ones, so an agent whose shell commands need approval gets a new worker for each command.
+
+A named worker counts against `named_workers` for its requester, and against `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` for the whole deployment, from the call that starts it until it is removed, so also while it starts, sits idle, or has failed.
+Set `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX=0` to disable named workers for the whole deployment.
+A call that would start one more than either limit allows fails instead of waiting. Reusing a worker this reply started does not recheck the limits while the worker is starting or its Kubernetes Deployment exists and is not being removed. If idle cleanup removes it, starting it again is subject to both limits.
+Only calls of a reply in a Matrix conversation can name a worker, so [background scripts](https://docs.mindroom.chat/tools/background-scripts/) and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) requests cannot.
+[Approved egress](https://docs.mindroom.chat/deployment/approved-egress/#requesting-access) grants do not reach named workers.
+
+Errors:
+
+- `Named workers are off for this agent; named_workers in its config allows them.` - set `named_workers` on the agent.
+- `Named workers need an agent whose workers are per requester and agent: worker_scope: user_agent, or private.per: user_agent.` - set one of the two on the agent.
+- `Named workers need the kubernetes worker backend and idle-worker cleanup, which the API server runs when MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS is above 0.` - use the Kubernetes worker backend, run the API server, and set the cleanup interval.
+- `Cannot start worker '<name>': this agent already has <n> of the <n> named workers it may have for you.` - run the command in a worker this reply started, wait until an idle one is removed, or raise `named_workers`.
+- `Cannot start worker '<name>': this deployment already has its limit of <n> named workers.` - try again later, or raise `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX`.
+- `Worker '<name>' was started with resource_profile <profile> in this reply; omit resource_profile, or name another worker.` - a name keeps the size its first call gave it.
+- `A named worker belongs to a reply in a conversation, and this call runs outside one, or after its reply and that reply's background jobs ended.` - the call came from a background script, an API request, or a job that outlived a restart.
 
 ### Per-workspace environment
 

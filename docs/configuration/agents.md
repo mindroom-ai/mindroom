@@ -107,6 +107,7 @@ agents:
 | `allow_self_config` | bool | `null` | Give the agent a tool to read and change its own entry under `agents:`; see [`self_config`](../tools/agent-orchestration.md#self_config) |
 | `delegate_to` | list | `[]` | Agents this agent may run as subagents, including itself only when listed; see [Agent Delegation](../tools/agent-orchestration.md#agent-delegation) |
 | `dedicated_subagent_workers` | bool | `false` | Let this agent run a subagent in a worker of its own on the Docker or Kubernetes worker backend; see [Dedicated workers](../tools/agent-orchestration.md#dedicated-workers) |
+| `named_workers` | int | `0` | How many [named workers](../tools/execution-and-coding.md#named-workers) this agent's shell commands may have at once for one requester on the Kubernetes worker backend; the agent's workers must be per requester and agent (`worker_scope: user_agent`, or `private.per: user_agent`); `0` turns named workers off |
 | `thread_exports` | bool or object | `null` | Keep YAML exports of the agent's threads under `<workspace>/thread_exports/`; `true` uses the defaults. See [Thread Exports](../thread-exports.md#thread-exports) |
 
 Unset fields that appear in the inheritance table under [Defaults](#defaults) take the `defaults` value; a per-agent value overrides it.

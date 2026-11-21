@@ -45,7 +45,6 @@ def build_provider(
         ),
         settings=settings,
         storage_root=storage_root,
-        # Prefer the CLI the user keeps updated to the copy bundled with the SDK.
         cli_path=settings.cli_path or shutil.which("claude"),
         scope=None
         if execution_identity is None

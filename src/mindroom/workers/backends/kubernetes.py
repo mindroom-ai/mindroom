@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.credentials.manager import get_runtime_credentials_manager, sync_shared_credentials_to_worker
+from mindroom.path_confinement import open_directory_within_root
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import (
+    pinned_worker_kind,
     resolved_worker_key_scope,
     worker_dir_name,
     worker_id_for_key,
@@ -29,7 +33,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     SharedDirectoryMount,
     plan_scoped_workspace_mounts,
     resolve_state_scope_worker_key,
-    retire_subagent_worker,
+    retire_pinned_worker,
     stable_json_digest,
     subagent_worker_expired,
 )
@@ -59,7 +63,12 @@ from mindroom.workers.models import (
     WorkerStatus,
 )
 from mindroom.workers.progress import WorkerStartReporter, WorkerWarmupProgress
-from mindroom.workers.worker_retirement import open_worker_state_root
+from mindroom.workers.worker_retirement import (
+    open_worker_state_root,
+    read_worker_identity,
+    require_worker_identity,
+    worker_state_directories,
+)
 
 from . import kubernetes_resources as resources
 from .kubernetes_config import (
@@ -69,7 +78,7 @@ from .kubernetes_config import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from mindroom.constants import RuntimePaths
 
@@ -82,6 +91,15 @@ __all__ = [
 ]
 
 _READY_WORKER_REVALIDATE_SECONDS = 300.0
+_NAMED_WORKER_REQUEST_TIMEOUT_SECONDS = 5.0
+# When this process started. No reply can reach a named worker an earlier process created, because its key holds a
+# digest only that process's memory could produce.
+_PROCESS_STARTED_AT = time.time()
+# How long a worker directory must have had no Deployment before it counts as left behind by a failed removal.
+_ORPHANED_STATE_GRACE_SECONDS = 300.0
+# Where a worker's startup manifest names the worker key its files belong to.
+_STATE_IDENTITY_PATH = (".runtime", "startup_manifest.json")
+_STATE_IDENTITY_FIELD_PATH = ("runtime_paths", "process_env", SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"])
 _PULL_POLICY_DOCS_URL = "https://docs.mindroom.chat/deployment/kubernetes/#worker-settings"
 _CACHED_IMAGE_HINT = (
     "A replacement pod reported the same protocol, so with a mutable tag such as ':latest' its node may still "
@@ -95,12 +113,25 @@ _RESTART_RUNTIME_HINT = (
 logger = logging.getLogger(__name__)
 
 
+@contextmanager
+def _named_worker_admission_read() -> Iterator[float]:
+    from urllib3 import exceptions  # noqa: PLC0415 - Keep the optional Kubernetes transport off the import path.
+
+    try:
+        yield _NAMED_WORKER_REQUEST_TIMEOUT_SECONDS
+    except (TimeoutError, exceptions.TimeoutError, exceptions.MaxRetryError) as exc:
+        msg = f"Kubernetes Deployment read failed during named worker admission: {exc}"
+        raise WorkerBackendError(msg) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class _ReadyWorkerCacheEntry:
     spec: WorkerSpec
     # The applied launch the worker was provisioned from; another one means the worker must be re-applied.
     launch_digest: str
     worker_id: str
+    # The UID of the worker's Deployment, which a failure names so that it never stops the worker's replacement.
+    incarnation: str | None
     state_subpath: str
     # The worker's lifecycle when cached, so a cached touch returns its full handle without reading the Deployment.
     lifecycle: WorkerLifecycleState
@@ -200,6 +231,9 @@ class KubernetesWorkerBackend:
         config.pop("resource_limits")
         config.pop("tmp_size_limit")
         config.pop("user_resources")
+        config.pop("named_worker_idle_timeout_seconds")
+        config.pop("named_worker_max_age_seconds")
+        config.pop("named_workers_max")
         return {
             "config": config,
             "owner": self.cleanup_locator,
@@ -222,6 +256,8 @@ class KubernetesWorkerBackend:
         self.auth_token = auth_token
         self.storage_root = storage_root.expanduser().resolve()
         self.idle_timeout_seconds = config.idle_timeout_seconds
+        self.named_workers_max = config.named_workers_max
+        self._process_started_at = _PROCESS_STARTED_AT
         self._resources = resources.KubernetesResourceManager(
             runtime_paths=runtime_paths,
             config=config,
@@ -232,6 +268,8 @@ class KubernetesWorkerBackend:
         self._progress = WorkerWarmupProgress(self.backend_name)
         self._ready_workers: dict[str, _ReadyWorkerCacheEntry] = {}
         self._ready_workers_lock = threading.Lock()
+        # When each worker directory was first seen without a Deployment, infinity for one no pass removes.
+        self._stateless_since: dict[str, float] = {}
 
     def shutdown(self) -> None:
         """Kubernetes workers are persistent; manager replacement leaves them running."""
@@ -267,6 +305,11 @@ class KubernetesWorkerBackend:
         worker_id = self._worker_id(worker_key)
         state_subpath = self._state_subpath(worker_key)
         existing = self._resources.read_deployment(worker_id)
+        if existing is not None and int(existing.spec.replicas or 0) == 0 and pinned_worker_kind(worker_key) == "named":
+            # A stopped named worker is never restarted: the reply that names it gets an empty one with its full
+            # lifetime, where a restart would keep the old one's age and files.
+            self._retire_worker_locked(worker_key)
+            existing = None
         current_handle = self._handle_from_deployment(existing, now=timestamp) if existing is not None else None
         should_restart = current_handle is None or current_handle.status in {"idle", "failed"}
         lifecycle = prepare_worker_ensure_lifecycle(
@@ -288,6 +331,8 @@ class KubernetesWorkerBackend:
             reporter = self._progress.start_reporter(spec)
         auth_secret_applied = False
         try:
+            if existing is None and pinned_worker_kind(worker_key) is not None:
+                self._prepare_pinned_state(worker_key, state_subpath, launch)
             # kubelet resolves the read-only mirror subPath when the pod starts, so the
             # primary validates and creates the worker's credential directories first.
             get_runtime_credentials_manager(self.runtime_paths).for_worker(worker_key)
@@ -379,6 +424,7 @@ class KubernetesWorkerBackend:
                 spec=spec,
                 launch_digest=launch.digest,
                 worker_id=worker_id,
+                incarnation=deployment.metadata.uid,
                 state_subpath=state_subpath,
                 lifecycle=lifecycle,
                 validated_at=timestamp,
@@ -435,6 +481,34 @@ class KubernetesWorkerBackend:
         ]
         return filter_and_sort_worker_handles(handles, include_idle)
 
+    def has_named_worker(self, worker_key: str) -> bool:
+        """Check one deployed named worker without listing the fleet."""
+        with _named_worker_admission_read() as timeout:
+            deployment = self._resources.read_deployment(self._worker_id(worker_key), request_timeout=timeout)
+        if (
+            deployment is None
+            or deployment.metadata.deletion_timestamp is not None
+            or (deployment.metadata.annotations or {}).get(resources.ANNOTATION_WORKER_KEY) != worker_key
+        ):
+            self._invalidate_ready_worker(worker_key)
+            return False
+        with self._ready_workers_lock:
+            cached = self._ready_workers.get(worker_key)
+            if cached is not None and (not deployment.spec.replicas or deployment.metadata.uid != cached.incarnation):
+                self._ready_workers.pop(worker_key, None)
+        return True
+
+    def named_worker_keys(self) -> frozenset[str]:
+        """Return the key of every named worker that exists, running or stopped, and is not being removed."""
+        with _named_worker_admission_read() as timeout:
+            deployments = self._resources.list_deployments(request_timeout=timeout)
+        keys = (
+            (deployment.metadata.annotations or {}).get(resources.ANNOTATION_WORKER_KEY, "")
+            for deployment in deployments
+            if deployment.metadata.deletion_timestamp is None
+        )
+        return frozenset(key for key in keys if pinned_worker_kind(key) == "named")
+
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
         """Scale idle workers to zero while retaining their state, and remove expired subagent workers with theirs."""
         timestamp = time.time() if now is None else now
@@ -454,18 +528,14 @@ class KubernetesWorkerBackend:
             raise WorkerBackendError(msg)
         try:
             self._require_retirement_deployment(worker_id, worker_key, state_subpath)
-            with open_worker_state_root(
-                self.storage_root,
-                workers_subpath=state_parts[:-1],
-                worker_name=state_parts[-1],
-                expected_worker_key=worker_key,
-                identity_path=(".runtime", "startup_manifest.json"),
-                identity_field_path=(
-                    "runtime_paths",
-                    "process_env",
-                    SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"],
-                ),
-            ) as state:
+            with (
+                open_worker_state_root(
+                    self.storage_root,
+                    workers_subpath=state_parts[:-1],
+                    worker_name=state_parts[-1],
+                ) as state,
+                state.retire(worker_key, _STATE_IDENTITY_PATH, _STATE_IDENTITY_FIELD_PATH),
+            ):
                 self._invalidate_ready_worker(worker_key)
                 self._resources.delete_service(worker_id)
                 self._resources.delete_secret(worker_id)
@@ -475,12 +545,39 @@ class KubernetesWorkerBackend:
                     worker_id,
                     timeout_seconds=self.config.ready_timeout_seconds,
                 )
-                state.remove()
         except WorkerBackendError:
             raise
         except (OSError, RecursionError, TypeError, ValueError, self._resources.api_exception) as exc:
             msg = f"Failed to retire Kubernetes worker '{worker_log_id(worker_key)}': {exc}"
             raise WorkerBackendError(msg) from exc
+
+    def _prepare_pinned_state(self, worker_key: str, state_subpath: str, launch: WorkerLaunchConfig) -> None:
+        """Finish an interrupted retirement, then record ownership before provisioning credentials."""
+        prefix, _, name = state_subpath.rpartition("/")
+        with open_worker_state_root(
+            self.storage_root,
+            workers_subpath=tuple(prefix.split("/")) if prefix else (),
+            worker_name=name,
+        ) as state:
+            if state.worker_fd is not None:
+                # A legacy failed start can leave state without a manifest. A conflicting key is never reusable.
+                require_worker_identity(
+                    state.worker_fd,
+                    worker_key,
+                    identity_path=_STATE_IDENTITY_PATH,
+                    identity_field_path=_STATE_IDENTITY_FIELD_PATH,
+                    allow_missing=True,
+                )
+            retiring = state.retirement_key() == worker_key
+        if retiring:
+            self._retire_worker_locked(worker_key)
+        self.storage_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with open_directory_within_root(self.storage_root, state_subpath, create=True, mode=0o700):
+            self._resources.write_startup_manifest(
+                worker_key=worker_key,
+                state_subpath=state_subpath,
+                tool_validation_snapshot=launch.tool_validation_snapshot,
+            )
 
     def _require_retirement_deployment(self, worker_id: str, worker_key: str, state_subpath: str) -> None:
         """Refuse a retirement whose Deployment belongs to another worker or state."""
@@ -519,7 +616,7 @@ class KubernetesWorkerBackend:
                 if action is None:
                     continue
                 if action == "retire":
-                    if retire_subagent_worker(self._retire_worker_locked, handle.worker_key):
+                    if retire_pinned_worker(self._retire_worker_locked, handle.worker_key):
                         cleaned.append(handle)
                     continue
                 annotations = resources.with_lifecycle_transition(
@@ -550,13 +647,95 @@ class KubernetesWorkerBackend:
     ) -> Literal["stop", "retire"] | None:
         """Return what idle cleanup does to one worker: scale it to zero, remove it, or leave it.
 
-        A subagent's own worker is stopped like any idle worker once it expires, and removed on a later pass, when it
-        runs no pod: the removal then returns at once, and a failed one leaves the Deployment for the next pass.
+        A pinned worker is stopped like any idle worker once it expires, and removed on a later pass, when it runs no
+        pod: the removal then returns at once, and a failed one leaves the Deployment for the next pass. A subagent's
+        own worker expires with the idle timeout. A named worker expires once no call has run in it for its own,
+        shorter idle timeout, or once it reaches its maximum age whatever runs in it, and a stopped one is always
+        removed, because its next start replaces it anyway. One an earlier process created is removed at once, pod
+        and all: no reply can reach it, and until it is gone it counts against the limits of those that start.
         """
-        expired_subagent_worker = subagent_worker_expired(handle, self.idle_timeout_seconds, now=now)
+        named = pinned_worker_kind(handle.worker_key) == "named"
+        if named and handle.created_at < self._process_started_at:
+            return "retire"
+        expired = (
+            now - handle.last_used_at >= self.config.named_worker_idle_timeout_seconds
+            or now - handle.created_at >= self.config.named_worker_max_age_seconds
+            if named
+            else subagent_worker_expired(handle, self.idle_timeout_seconds, now=now)
+        )
         if int(deployment.spec.replicas or 0) == 0:
-            return "retire" if expired_subagent_worker else None
-        return "stop" if handle.status == "idle" or expired_subagent_worker else None
+            return "retire" if expired or named else None
+        return "stop" if handle.status == "idle" or expired else None
+
+    def _retire_orphaned_pinned_workers(
+        self,
+        deployments: list[resources.KubernetesDeployment],
+        *,
+        now: float,
+    ) -> None:
+        """Remove the files a worker left behind when its removal failed after its Deployment was deleted.
+
+        Idle cleanup finds workers by their Deployments, so nothing else would retry that removal. A worker directory
+        without a Deployment is eligible after the grace period if retirement began or its startup manifest names
+        a subagent's or a named worker's key. Keep it while any dependent might still use it.
+        """
+        prefix_parts = tuple(part for part in self.config.storage_subpath_prefix.strip().split("/") if part)
+        directories = worker_state_directories(self.storage_root, prefix_parts)
+        deployed = {
+            (deployment.metadata.annotations or {}).get(resources.ANNOTATION_STATE_SUBPATH, "").rpartition("/")[2]
+            for deployment in deployments
+        }
+        stateless = directories - deployed
+        previous = self._stateless_since
+        # A concurrent sweep may publish another snapshot; this pass only visits and updates its own names.
+        since = {name: previous.get(name, now) for name in stateless}
+        self._stateless_since = since
+        for name in sorted(stateless):
+            if now - since[name] < _ORPHANED_STATE_GRACE_SECONDS:
+                continue
+            try:
+                worker_key = self._left_behind_worker_key(prefix_parts, name)
+            except OSError:
+                # Unreadable now, as on a storage error, so it is read again after another grace period.
+                since[name] = now
+                continue
+            if worker_key is None:
+                since[name] = math.inf
+                continue
+            worker_lock = self._worker_locks.for_key(worker_key)
+            if not worker_lock.acquire(blocking=False):
+                continue
+            try:
+                if not self._resources.worker_is_orphaned(self._worker_id(worker_key)):
+                    continue
+                if not retire_pinned_worker(self._retire_worker_locked, worker_key):
+                    # A removal that keeps failing is tried again only after another grace period.
+                    since[name] = now
+            finally:
+                worker_lock.release()
+
+    def _left_behind_worker_key(self, prefix_parts: tuple[str, ...], name: str) -> str | None:
+        """Return the key of the worker whose removal left the directory ``name``, or None for any other directory.
+
+        That is the key a removal that began wrote beside the directory, or else the pinned key its startup manifest
+        names. A file that cannot be read raises ``OSError``.
+        """
+        try:
+            with open_worker_state_root(self.storage_root, workers_subpath=prefix_parts, worker_name=name) as state:
+                if state.worker_fd is None:
+                    return None
+                worker_key = state.retirement_key()
+                if worker_key is None:
+                    worker_key = read_worker_identity(
+                        state.worker_fd,
+                        identity_path=_STATE_IDENTITY_PATH,
+                        identity_field_path=_STATE_IDENTITY_FIELD_PATH,
+                    )
+            if not isinstance(worker_key, str) or pinned_worker_kind(worker_key) is None:
+                return None
+        except (TypeError, ValueError):
+            return None
+        return worker_key if self._state_subpath(worker_key).rpartition("/")[2] == name else None
 
     def _reconcile_drifted_deployments(
         self,
@@ -589,13 +768,14 @@ class KubernetesWorkerBackend:
         return reconciled
 
     def maintain_workers(self, *, now: float | None = None) -> WorkerMaintenanceResult:
-        """Clean and reconcile workers using one lightweight Deployment list.
+        """Clean and reconcile workers, and remove what failed removals left behind, using one Deployment list.
 
         Reconciliation renders from the applied launch, so it waits until a config has been applied.
         """
         timestamp = time.time() if now is None else now
         deployments = self._resources.list_deployments()
         cleaned = self._cleanup_idle_deployments(deployments, now=timestamp)
+        self._retire_orphaned_pinned_workers(deployments, now=timestamp)
         launch = self._applied_launch_or_none() if self.config.reconcile_pod_templates else None
         reconciled = (
             self._reconcile_drifted_deployments(
@@ -707,6 +887,7 @@ class KubernetesWorkerBackend:
         *,
         now: float | None = None,
         startup_count: int | None = None,
+        incarnation: str | None = None,
     ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
         timestamp = time.time() if now is None else now
@@ -716,6 +897,7 @@ class KubernetesWorkerBackend:
                 failure_reason,
                 now=timestamp,
                 startup_count=startup_count,
+                incarnation=incarnation,
             )
 
     def _record_failure_locked(
@@ -726,6 +908,7 @@ class KubernetesWorkerBackend:
         now: float,
         annotations_override: dict[str, str] | None = None,
         startup_count: int | None = None,
+        incarnation: str | None = None,
     ) -> WorkerHandle:
         """Persist failure state while holding the worker provisioning lock."""
         worker_id = self._worker_id(worker_key)
@@ -734,8 +917,11 @@ class KubernetesWorkerBackend:
             msg = f"Unknown worker '{worker_log_id(worker_key)}' for Kubernetes failure recording."
             raise WorkerBackendError(msg)
         current = self._handle_from_deployment(deployment, now=now)
-        if startup_count is not None and current.startup_count != startup_count:
-            # The request failed on a pod this worker has since replaced, such as for a new workspace mount.
+        if (startup_count is not None and current.startup_count != startup_count) or (
+            incarnation is not None and current.incarnation != incarnation
+        ):
+            # The request failed on a pod this worker has since replaced, such as for a new workspace mount, or on a
+            # named worker whose Deployment a new one replaced, which counts its starts from one again.
             return current
         self._invalidate_ready_worker(worker_key)
 
@@ -877,6 +1063,7 @@ class KubernetesWorkerBackend:
             lifecycle,
             "ready",
             state_subpath=entry.state_subpath,
+            incarnation=entry.incarnation,
         )
 
     def _record_startup_failure_or_cleanup_secret(
@@ -953,6 +1140,7 @@ class KubernetesWorkerBackend:
             lifecycle,
             self._effective_status(deployment, lifecycle, now=now, replicas_override=replicas_override),
             state_subpath=annotations.get(resources.ANNOTATION_STATE_SUBPATH, ""),
+            incarnation=metadata.uid,
         )
 
     def _handle(
@@ -963,6 +1151,7 @@ class KubernetesWorkerBackend:
         status: WorkerStatus,
         *,
         state_subpath: str,
+        incarnation: str | None,
     ) -> WorkerHandle:
         endpoint_root = resources.service_host(worker_id, self.config.namespace, self.config.worker_port)
         return worker_handle(
@@ -980,6 +1169,7 @@ class KubernetesWorkerBackend:
                 "state_subpath": state_subpath,
                 "api_root": f"{endpoint_root}{SANDBOX_RUNNER_API_ROOT}",
             },
+            incarnation=incarnation,
         )
 
     def _effective_status(

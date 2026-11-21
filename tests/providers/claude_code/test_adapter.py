@@ -7,13 +7,21 @@ import asyncio
 import base64
 import json
 import os
+import signal
 import stat
+import sys
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from claude_agent_sdk import ClaudeSDKClient, CLIConnectionError, RateLimitEvent, RateLimitInfo
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    CLIConnectionError,
+    RateLimitEvent,
+    RateLimitInfo,
+)
 from structlog.testing import capture_logs
 
 from mindroom.agent_loop.tools import media_follow_up
@@ -374,7 +382,8 @@ async def test_a_parked_process_with_a_call_the_model_never_made_is_rebuilt_at_o
     asked = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
 
     messages += [asked.message, result("toolu_a", "LILAC-HERON")]
-    answered = await asyncio.wait_for(complete(provider, ModelRequest(messages=messages, tools=[LOOKUP])), 10)
+    # Both subprocess cleanup and replacement must finish, even on a loaded runner.
+    answered = await asyncio.wait_for(complete(provider, ModelRequest(messages=messages, tools=[LOOKUP])), 30)
 
     assert answered.content == "Rebuilt."
     assert cli.events("tool_result") == []
@@ -699,7 +708,7 @@ async def test_a_system_prompt_is_private_to_the_user_and_gone_once_claude_code_
     assert spawn["prompt_modes"] == [0o600, 0o700]
     assert spawn["cwd"] == str(cwd)
     assert stat.S_IMODE(cwd.stat().st_mode) == 0o700
-    assert list(home_path.iterdir()) == [cwd]
+    assert set(home_path.iterdir()) == {cwd, home_path / "exec-claude"}
     assert not list(cwd.iterdir())
     # The process still rests, and its prompt is no longer on disk.
     assert len(SESSIONS.resting) == 1
@@ -855,7 +864,7 @@ async def test_a_signed_out_claude_code_says_how_to_sign_in_and_sends_nothing(tm
     assert str(error) == ("Claude Code is not signed in. Run `claude auth login` as the user that runs MindRoom.")
 
 
-async def test_an_api_key_from_the_environment_is_refused_by_name(tmp_path: Path) -> None:
+async def test_an_api_key_reported_by_claude_code_is_refused_by_name(tmp_path: Path) -> None:
     account = {"tokenSource": "claude.ai", "apiKeySource": "ANTHROPIC_API_KEY", "apiProvider": "firstParty"}
 
     error = await _failure(tmp_path, {"account": account, "turns": [text_turn("billed to the key")]}, asked=False)
@@ -903,56 +912,134 @@ async def test_each_claude_subscription_plan_is_answered(tmp_path: Path, plan: s
     assert (await complete(cli.provider(), ModelRequest(messages=[user("Hi")]))).content == "Hello."
 
 
-@pytest.mark.parametrize(
-    "variable",
-    [
+@pytest.mark.parametrize("name", ["CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK"])
+async def test_parent_sdk_settings_are_refused_by_name_before_taking_a_process_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    monkeypatch.setenv(name, "secret-setting-value")
+    monkeypatch.setattr(session_module, "_MAX_PROCESSES", 0)
+    cli = fake_cli(tmp_path, {})
+
+    with pytest.raises(AuthenticationFailed, match=name) as raised:
+        await cli.provider().preflight()
+
+    assert "secret-setting-value" not in str(raised.value)
+    assert raised.value.status_code is None
+    assert cli.events("spawn") == []
+    assert not (cli.storage_root / "claude_code").exists()
+
+
+async def test_inherited_claude_settings_are_removed_only_from_the_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inherited = {
         "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_CUSTOM_HEADERS",
-        "ANTHROPIC_UNIX_SOCKET",
-        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_FUTURE,CLAUDE_CONFIG_DIR",
         "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-        "CLAUDE_CODE_USE_FOUNDRY",
-        "CLAUDE_CODE_USE_GATEWAY",
-        "ANTHROPIC_PROFILE",
         "CLAUDE_BG_AUTH_SNAPSHOT_PATH",
         "CLAUDE_AUTO_BACKGROUND_TASKS",
-        "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
-        "CLAUDE_CODE_EXTRA_BODY",
-        "ANTHROPIC_A_VARIABLE_OF_A_LATER_CLAUDE_CODE",
-    ],
-)
-async def test_an_inherited_variable_that_replaces_the_sign_in_or_where_it_is_sent_is_refused_by_name(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    variable: str,
-) -> None:
-    monkeypatch.setenv(variable, "https://gateway.invented.example/invented-value")
-    # The account Claude Code reports still looks like a plain subscription sign-in.
-    cli = fake_cli(tmp_path, {"turns": [text_turn("sent elsewhere")]})
+    }
+    kept = {
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS",
+        "CLAUDE_CONFIG_DIR",
+        *session_module._ISOLATION_ENV,
+    }
+    launcher_names = {"MINDROOM_CLAUDE_CODE_CLI", "MINDROOM_CLAUDE_CODE_KEEP"}
+    parent_names = inherited | kept | launcher_names
+    late_name = "ANTHROPIC_LATE_TEST_SETTING"
+    monkeypatch.delenv(late_name, raising=False)
+    open_process = session_module.ClaudeProcess.open
 
-    with pytest.raises(AuthenticationFailed) as raised:
-        await complete(cli.provider(), ModelRequest(messages=[user("Hi")]))
+    async def inject_late_setting(options: ClaudeAgentOptions, **kwargs: Any) -> session_module.ClaudeProcess:  # noqa: ANN401
+        # The SDK has its options but has not copied os.environ for the subprocess yet.
+        monkeypatch.setenv(late_name, "inherited")
+        return await open_process(options, **kwargs)
 
-    assert variable in str(raised.value)
-    assert "invented-value" not in str(raised.value)
-    assert not raised.value.retryable
-    # Claude Code never started, so it was sent nothing.
-    assert cli.events("spawn") == []
-
-
-async def test_a_variable_that_is_set_for_claude_code_anyway_is_not_refused(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The SDK sets the first for the process and MindRoom the others, whatever the environment held.
-    for variable in ("CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_DISABLE_AUTO_MEMORY", "MCP_TOOL_TIMEOUT"):
-        monkeypatch.setenv(variable, "0")
+    monkeypatch.setattr(session_module.ClaudeProcess, "open", staticmethod(inject_late_setting))
+    for name in parent_names:
+        monkeypatch.setenv(name, "inherited")
     cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
 
     assert (await complete(cli.provider(), ModelRequest(messages=[user("Hi")]))).content == "Hello."
+
+    [spawn] = cli.events("spawn")
+    child_names = set(spawn["env_names"])
+    assert child_names.isdisjoint(inherited | launcher_names | {late_name})
+    assert child_names.issuperset(kept)
+    assert spawn["trusted_env"] == {
+        "DISABLE_AUTO_COMPACT": "1",
+        "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
+        "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
+        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "600000",
+    }
+    assert all(os.environ[name] == "inherited" for name in parent_names | {late_name})
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires /proc/self/status")
+async def test_launcher_does_not_leave_sigpipe_ignored(tmp_path: Path) -> None:
+    launcher = session_module._prepare_launcher(tmp_path, "claude_code")
+    script = 'while read -r key mask; do [ "$key" = SigIgn: ] && { echo "$mask"; break; }; done </proc/self/status'
+    env = {"MINDROOM_CLAUDE_CODE_CLI": "/bin/sh", "MINDROOM_CLAUDE_CODE_KEEP": ""}
+    process = await asyncio.create_subprocess_exec(launcher, "-c", script, env=env, stdout=asyncio.subprocess.PIPE)
+    stdout, _ = await process.communicate()
+
+    assert process.returncode == 0
+    assert not int(stdout, 16) & (1 << (signal.SIGPIPE - 1))
+
+
+async def test_two_starts_reuse_the_same_private_launcher(tmp_path: Path) -> None:
+    cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
+    launcher = cli.storage_root / "claude_code" / "exec-claude"
+    request = ModelRequest(messages=[user("Hi")])
+
+    await complete(cli.provider(), request)
+    first = launcher.stat()
+    await complete(cli.provider(), request)
+    second = launcher.stat()
+
+    assert len(cli.events("spawn")) == 2
+    assert stat.S_IMODE(second.st_mode) == 0o700
+    assert (first.st_ino, first.st_mtime_ns) == (second.st_ino, second.st_mtime_ns)
+
+
+async def test_a_launcher_with_the_wrong_mode_is_replaced(tmp_path: Path) -> None:
+    cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
+    launcher = cli.storage_root / "claude_code" / "exec-claude"
+    request = ModelRequest(messages=[user("Hi")])
+    await complete(cli.provider(), request)
+    launcher.chmod(0o600)
+    old_inode = launcher.stat().st_ino
+
+    assert (await complete(cli.provider(), request)).content == "Hello."
+
+    current = launcher.stat()
+    assert stat.S_IMODE(current.st_mode) == 0o700
+    assert current.st_ino != old_inode
+
+
+async def test_a_non_executable_launcher_explains_why_claude_code_cannot_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
+    launcher = cli.storage_root / "claude_code" / "exec-claude"
+    access = os.access
+
+    def noexec(path: str | Path, mode: int) -> bool:
+        return False if path == launcher and mode == os.X_OK else access(path, mode)
+
+    monkeypatch.setattr(os, "access", noexec)
+    with pytest.raises(ProviderError, match="launcher is not executable") as raised:
+        await complete(cli.provider(), ModelRequest(messages=[user("Hi")]))
+
+    assert not raised.value.retryable
+    assert not cli.events("spawn")
 
 
 async def test_a_claude_code_older_than_the_one_this_route_was_run_against_gets_no_prompt(tmp_path: Path) -> None:
@@ -964,11 +1051,42 @@ async def test_a_claude_code_older_than_the_one_this_route_was_run_against_gets_
     assert "claude update" in str(error)
 
 
-async def test_a_missing_claude_binary_says_how_to_install_it(tmp_path: Path) -> None:
-    cli = fake_cli(tmp_path, {})
+async def test_a_configured_cli_name_is_searched_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cli = fake_cli(tmp_path / "bin", {"turns": [text_turn("On PATH.")]})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(cli.path.parent))
+    provider = cli.provider(cli_path="claude")
 
-    with pytest.raises(AuthenticationFailed, match="Claude Code was not found"):
-        await complete(cli.provider(cli_path=str(tmp_path / "nowhere")), ModelRequest(messages=[user("Hi")]))
+    assert (await complete(provider, ModelRequest(messages=[user("Hi")]))).content == "On PATH."
+    assert provider.cli_path == "claude"
+
+
+async def test_no_claude_on_path_and_none_configured_reports_not_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = fake_cli(tmp_path / "bin", {})
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    with pytest.raises(AuthenticationFailed, match="Claude Code was not found") as raised:
+        await cli.provider(cli_path=None).preflight()
+
+    assert str(raised.value) == session_module._NOT_FOUND
+    assert cli.events("spawn") == []
+
+
+@pytest.mark.parametrize("exists", [False, True], ids=["missing", "not executable"])
+async def test_an_unavailable_configured_binary_says_how_to_install_claude(tmp_path: Path, exists: bool) -> None:
+    cli = fake_cli(tmp_path, {})
+    path = tmp_path / "unavailable"
+    if exists:
+        path.touch(mode=0o600)
+
+    with pytest.raises(AuthenticationFailed, match="Claude Code was not found") as raised:
+        await complete(cli.provider(cli_path=str(path)), ModelRequest(messages=[user("Hi")]))
+
+    assert str(raised.value) == session_module._NOT_FOUND
+    assert cli.events("spawn") == []
 
 
 @pytest.mark.parametrize(
