@@ -1488,11 +1488,6 @@ class KubernetesResourceManager:
         state_scope_worker_key: str | None = None,
     ) -> list[dict[str, object]]:
         agent_policies = launch.agent_policies
-        shared_mounts = self.plan_shared_directory_mounts(
-            worker_key,
-            state_scope_worker_key=state_scope_worker_key,
-            agent_policies=agent_policies,
-        )
         mounts = self._scoped_storage_mounts(
             worker_key,
             state_subpath,
@@ -1507,7 +1502,11 @@ class KubernetesResourceManager:
                 "subPath": str(shared_mount.local_path.relative_to(self.storage_root)),
                 **({"readOnly": True} if shared_mount.read_only else {}),
             }
-            for shared_mount in shared_mounts
+            for shared_mount in self.plan_shared_directory_mounts(
+                worker_key,
+                state_scope_worker_key=state_scope_worker_key,
+                agent_policies=agent_policies,
+            )
         )
         mounts.append({"name": WORKER_TMP_VOLUME_NAME, "mountPath": "/tmp"})  # noqa: S108
         mounts.extend(

@@ -1306,26 +1306,24 @@ class DockerWorkerBackend:
     def _scoped_storage_mount_specs(self, spec: WorkerSpec, launch: WorkerLaunchConfig) -> list[tuple[Path, str, bool]]:
         resolved_agent_policies = launch.agent_policies
         state_scope_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
-        mounted_storage_root = Path(self.config.storage_mount_path)
-        shared_mounts = plan_shared_directory_mounts(
-            worker_key=state_scope_key,
-            runtime_paths=self._runtime_paths,
-            worker_visible_shared_storage_root=mounted_storage_root,
-            resolved_agent_policies=resolved_agent_policies,
-        )
         mount_specs = [
             (workspace_mount.local_path, str(workspace_mount.worker_visible_path), False)
             for workspace_mount in plan_scoped_workspace_mounts(
                 worker_key=state_scope_key,
                 local_shared_storage_root=self._storage_root,
-                worker_visible_shared_storage_root=mounted_storage_root,
+                worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
                 private_agent_names=spec.private_agent_names,
                 resolved_agent_policies=resolved_agent_policies,
             )
         ]
         mount_specs.extend(
             (shared_mount.local_path, str(shared_mount.worker_visible_path), shared_mount.read_only)
-            for shared_mount in shared_mounts
+            for shared_mount in plan_shared_directory_mounts(
+                worker_key=state_scope_key,
+                runtime_paths=self._runtime_paths,
+                worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
+                resolved_agent_policies=resolved_agent_policies,
+            )
         )
         validate_unique_worker_visible_paths(
             (container_path for _host_path, container_path, _read_only in mount_specs),
