@@ -41,7 +41,7 @@ from mindroom.dispatch_source import (
 from mindroom.hooks import MessageEnvelope, hook_ingress_policy
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.media import is_matrix_media_dispatch_event, is_matrix_media_msgtype
+from mindroom.matrix.media import is_matrix_media_msgtype
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_forks import fork_parent_thread_id
@@ -674,11 +674,6 @@ class TurnDispatcher:
         turn = prepared.turn
         ids = prepared.handled_turn.source_event_ids
         route_event = turn.media_events[0] if turn.media_events and len(ids) == 1 else turn.event
-        single_direct_media_route = (
-            is_matrix_media_dispatch_event(route_event)
-            and turn.media_events == (route_event,)
-            and ids == (turn.event.event_id,)
-        )
         # Config application waits until the selection and its relay delivery finish.
         async with self.deps.runtime.admission_fence():
             return await execute_router_relay(
@@ -690,7 +685,7 @@ class TurnDispatcher:
                 message=turn.event.body if turn.media_events else None,
                 requester_user_id=prepared.dispatch.requester_user_id,
                 extra_content=extra_content,
-                media_events=None if single_direct_media_route else list(turn.media_events) or None,
+                media_events=list(turn.media_events) or None,
                 handled_turn=None
                 if ids in ((), (turn.event.event_id,), (route_event.event_id,))
                 else prepared.handled_turn,

@@ -143,7 +143,7 @@ class TestAgentBot(AgentBotTestBase):
             message="[Attached image]",
             requester_user_id="@user:localhost",
             extra_content={"com.mindroom.original_sender": "@user:localhost"},
-            media_events=None,
+            media_events=[event],
             handled_turn=None,
             prompt_is_structured=False,
         )
