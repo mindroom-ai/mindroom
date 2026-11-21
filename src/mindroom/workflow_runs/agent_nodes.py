@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
@@ -91,7 +92,7 @@ async def launch_child(
     *,
     store: WorkflowRunStore,
     jobs: ToolJobRuntime,
-    turn: int = 1,
+    timeout: float | None = None,  # noqa: ASYNC109 - the seconds of work the turn gets, not a deadline of this call.
 ) -> WorkflowNode:
     """Start the job of one agent turn of *run* in its owner's *context*, and return the node as saved with its handle.
 
@@ -161,7 +162,7 @@ async def launch_child(
             node.key,
             node.generation,
         )
-        job_id = turn_job_id(run, node.key, node.generation, turn)
+        job_id = turn_job_id(run, node.key, node.generation, 1)
         orchestrator = context.orchestrator
         spec = delegation_call_job(
             child,
@@ -181,7 +182,8 @@ async def launch_child(
             raise AgentNodeError(spec)
         # What tells the job of a run's call from a job of its own: the run reports it, and nothing else lists it.
         spec.adapter.update(workflow=run.run_id, node=node.key, generation=node.generation)
-        handle = DispatchHandle("job", job_id, dispatched=False)
+        work_until = None if timeout is None else time.time() + timeout
+        handle = DispatchHandle("job", job_id, dispatched=False, work_until=work_until)
         links = {"job_id": job_id, "delegation_id": child.delegation_id, "subagent_id": child.subagent_id}
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle, links=links)
         node = await asyncio.to_thread(partial(store.put_node, node, epoch, dirty_after=True))
@@ -200,8 +202,9 @@ async def launch_child(
         except JobAccessError as exc:
             raise AgentNodeError(str(exc)) from exc
     await jobs.release_wait(job_id, claim)
+    node = replace(node, handle=replace(handle, dispatched=True))
     stamp = partial(store.update_node, run.run_id, node.key, node.generation, epoch)
-    await asyncio.to_thread(partial(stamp, handle=replace(handle, dispatched=True)))
+    await asyncio.to_thread(partial(stamp, handle=node.handle))
     return node
 
 
@@ -210,8 +213,7 @@ async def await_child(
     node: WorkflowNode,
     runtime: AgentRuntime,
     *,
-    on_waiting: Callable[[str | None], Awaitable[object]],
-    timeout: float | None = None,  # noqa: ASYNC109 - the seconds of work the turn gets, not a deadline of this call.
+    on_waiting: Callable[[str | None, float | None], Awaitable[object]],
 ) -> tuple[ChildOutcome, dict[str, object] | None, JobClaim | None]:
     """Wait for the job of *node* to end; return how the turn ended, what it used, and the claim on the job's outcome.
 
@@ -227,25 +229,28 @@ async def await_child(
         # A job the runtime never admitted did nothing. One it has since deleted may have done anything.
         kind = "indeterminate" if node.handle.dispatched else "interrupted"
         return (kind, "The agent was interrupted before it started."), None, None
-    loop, waiting, timed_out, claim = asyncio.get_running_loop(), False, False, None
+    # What the turn has left of its working time, as the node's handle says: an earlier wait may have used some.
+    handle, loop, timed_out, claim = node.handle, asyncio.get_running_loop(), False, None
+    waiting = handle.work_left is not None
+    left = handle.work_left if waiting or handle.work_until is None else handle.work_until - time.time()
     while True:
         since = loop.time()
         try:
-            waited = await wait(approval_timeout=None if waiting else 0, work_timeout=0 if waiting else timeout)
+            waited = await wait(approval_timeout=None if waiting else 0, work_timeout=0 if waiting else left)
         except JobAccessError as exc:
             return ("denied", str(exc)), None, None
         job, claim = waited.job, waited.claim
+        if left is not None and not waiting:
+            left -= loop.time() - since
         if job.status in TERMINAL_STATUSES and (claim is not None or job.consumed):
             # The outcome is this wait's to read: a job that ended while its requester's access is unresolved is not.
             break
         if (job.status == "awaiting_approval") != waiting:
             waiting = not waiting
-            await on_waiting("approval" if waiting else None)
-        elif job.status in TERMINAL_STATUSES:
-            await asyncio.sleep(_RECHECK_SECONDS)
-        elif timeout is not None and (timeout := timeout - (loop.time() - since)) <= 0:
+            await on_waiting("approval" if waiting else None, left)
+        elif left is not None and left <= 0 and job.status not in TERMINAL_STATUSES:
             # Asked once; the job's end then says what the turn had done.
-            timed_out, timeout = True, None
+            timed_out, left = True, None
             await jobs.request_cancel(job_id)
         else:
             # The job cannot be read while its requester's access resolves.

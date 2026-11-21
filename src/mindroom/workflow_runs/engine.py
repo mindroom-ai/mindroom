@@ -562,7 +562,7 @@ class WorkflowEngine:
                 return replace(_receipt(saved), state=WorkflowNodeState.FAILED)
             if action == "attach":
                 # The job an earlier attempt started still runs: this attempt waits for it, and starts none.
-                self._spawn(run.run_id, self._run_agent_node(run, saved, epoch, _timeout(meta)))
+                self._spawn(run.run_id, self._run_agent_node(run, saved, epoch))
             return replace(_receipt(saved), cached=action == "hit")
         # The completed node this call replaces although no rule before it said so: the call itself changed, or it
         # runs on every resume.
@@ -668,7 +668,8 @@ class WorkflowEngine:
             if node.name in access[0].current_config.agents and not node.request.get("agent"):
                 notice = _NAME_LABELS.format(name=node.name)
                 await asyncio.to_thread(self.store.append_log, run.run_id, run.epoch, notice)
-            node = await launch_child(access[0], run, node, run.epoch, store=self.store, jobs=runtime.jobs)
+            launch = partial(launch_child, access[0], run, node, run.epoch, store=self.store, jobs=runtime.jobs)
+            node = await launch(timeout=timeout)
         except AgentNotReadyError as exc:
             raise ScriptRuntimeUnavailableError(str(exc)) from exc
         except AgentNodeError as exc:
@@ -685,24 +686,18 @@ class WorkflowEngine:
             # script's SDK sends it again.
             saved = self.store.get_node(run.run_id, node.key)
             if saved is not None and saved.generation == node.generation and saved.handle is not None:
-                self._spawn(run.run_id, self._run_agent_node(run, saved, run.epoch, timeout))
+                self._spawn(run.run_id, self._run_agent_node(run, saved, run.epoch))
             raise
         self._restate(run.run_id)
-        self._spawn(run.run_id, self._run_agent_node(run, node, run.epoch, timeout))
+        self._spawn(run.run_id, self._run_agent_node(run, node, run.epoch))
         return _receipt(node)
 
-    async def _run_agent_node(self, run: WorkflowRun, node: WorkflowNode, epoch: int, timeout: float | None) -> None:  # noqa: ASYNC109
+    async def _run_agent_node(self, run: WorkflowRun, node: WorkflowNode, epoch: int) -> None:
         """Wait for the job of an agent node and settle the node as its turn ended, then wake the run's waiters."""
-        await self._settle_agent(run, node, epoch, timeout)
+        await self._settle_agent(run, node, epoch)
         await self._notify(node.run_id)
 
-    async def _settle_agent(
-        self,
-        run: WorkflowRun,
-        node: WorkflowNode,
-        epoch: int,
-        timeout: float | None = None,  # noqa: ASYNC109
-    ) -> None:
+    async def _settle_agent(self, run: WorkflowRun, node: WorkflowNode, epoch: int) -> None:
         """Settle an agent node from its job, once that has ended, for the attempt that began with *epoch*.
 
         The turn's usage and its answer are saved before the job's outcome is acknowledged, so a primary that dies
@@ -712,7 +707,7 @@ class WorkflowEngine:
         runtime = cast("AgentRuntime", self.agents())
         try:
             waits = partial(self._node_waits, node, epoch)
-            (kind, text), usage, claim = await await_child(run, node, runtime, on_waiting=waits, timeout=timeout)
+            (kind, text), usage, claim = await await_child(run, node, runtime, on_waiting=waits)
         except Exception as exc:
             logger.exception("workflow_agent_outcome_unreadable", run_id=node.run_id, key=node.key)
             (kind, text), usage, claim = ("failed", str(exc)), None, None
@@ -736,12 +731,18 @@ class WorkflowEngine:
             # reader's. After the acknowledgement there is no claim left to give back.
             await runtime.jobs.release_wait(node.handle.ref, claim)
 
-    async def _node_waits(self, node: WorkflowNode, epoch: int, on: str | None) -> None:
-        """Show a node as waiting for a person, for what *on* says, or as running again with None; its run follows."""
-        state = WorkflowNodeState.WAITING if on else WorkflowNodeState.RUNNING
+    async def _node_waits(self, node: WorkflowNode, epoch: int, on: str | None, left: float | None = None) -> None:
+        """Show a node as waiting for a person, for what *on* says, or as running again with None; its run follows.
+
+        *left* is the working time an agent's turn has left, which its handle keeps for whoever waits for it next.
+        """
+        changes: dict[str, object] = {"state": WorkflowNodeState.WAITING if on else WorkflowNodeState.RUNNING}
+        if left is not None and node.handle is not None:
+            until = None if on else time.time() + left
+            changes["handle"] = replace(node.handle, work_left=left if on else None, work_until=until)
         stamp = partial(self.store.update_node, node.run_id, node.key, node.generation, epoch)
         with suppress(SupersededAttemptError):
-            await asyncio.to_thread(partial(stamp, state=state, waiting_on=on))
+            await asyncio.to_thread(partial(stamp, waiting_on=on, **changes))
         await self._notify(node.run_id)
 
     async def _reconcile(self, run: WorkflowRun, node: WorkflowNode, epoch: int, *, stop: bool = False) -> bool:

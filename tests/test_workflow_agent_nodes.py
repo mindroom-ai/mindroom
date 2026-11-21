@@ -6,6 +6,7 @@ Level: engine harness (`WorkflowStack`) with the real job runtime and real deleg
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -351,6 +352,43 @@ async def test_timeout_cancels_the_child_and_waits_for_it_to_end(stack: Workflow
         await stack.result("@0", "agent", _PROMPT, {"timeout": 0.05})
 
     assert (failed.value.kind, stack.node_job("@0").status) == ("timeout", "cancelled")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("work", "kind"), [(0.2, "completed"), (1.4, "timeout")])
+async def test_timeout_counts_the_work_before_and_after_an_approval_and_not_the_wait(
+    gated: WorkflowStack,
+    work: float,
+    kind: str,
+) -> None:
+    """The seconds are the turn's working time as a whole: a card does not hand out the full time again."""
+    cards: JobApprovalCards = gated.cards  # type: ignore[attr-defined]
+    busy = Await(partial(asyncio.sleep, work))
+    gated.child_script([busy, *calls(tool_call("append", "c1", line="a"))], [busy, *answer("sent")])
+    receipt = await gated.submit("@0", "agent", _PROMPT, {"timeout": 2.0})
+    await asyncio.wait_for(cards.posted.wait(), 10)
+    await asyncio.sleep(2.5)
+    cards.decision.set_result(BackgroundApprovalDecision("approved", None))
+
+    while receipt.state in ("running", "waiting"):
+        receipt = await gated.engine.node_receipt(gated.attempt, receipt.id, wait=10)
+
+    assert (receipt.error["kind"] if receipt.error else receipt.state) == kind
+
+
+@pytest.mark.asyncio
+async def test_timeout_is_not_given_again_to_the_attempt_that_finds_the_agent_working(stack: WorkflowStack) -> None:
+    """The next attempt waits for the same turn with the time that turn has left, not with all of it."""
+    _hanging(stack)
+    started = asyncio.get_running_loop().time()
+    await stack.submit("@0", "agent", _PROMPT, {"timeout": 3.0})
+    await asyncio.sleep(2.0)
+    await _replayed(stack)
+
+    with pytest.raises(NodeFailed) as failed:
+        await stack.result("@0", "agent", _PROMPT, {"timeout": 3.0})
+
+    assert (failed.value.kind, asyncio.get_running_loop().time() - started < 4.5) == ("timeout", True)
 
 
 @pytest.mark.asyncio

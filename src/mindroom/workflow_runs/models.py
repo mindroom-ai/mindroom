@@ -54,6 +54,10 @@ class DispatchHandle:
     ref: str
     dispatched: bool
     same_as: str | None = None
+    # The working time an agent's job has, which no approval wait and no later attempt hands out again: the moment
+    # its work must have ended, or, while it waits for a person, the seconds of work it has left.
+    work_until: float | None = None
+    work_left: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
