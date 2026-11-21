@@ -15,6 +15,7 @@ import pytest
 import pytest_asyncio
 
 from mindroom.script_runs.models import ScriptRunState
+from mindroom.script_runs.reasons import RUNTIME_RESTARTED
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.engine import SupersededAttemptError, WorkflowLimits
 from mindroom.workflow_runs.models import NodeRequest, WorkflowNodeState, WorkflowRunState
@@ -399,10 +400,22 @@ async def test_resume_refuses_an_unknown_call_in_rerun_by_name(stack: WorkflowSt
 
 
 @pytest.mark.asyncio
-async def test_look_at_the_old_attempt_after_a_resume_took_the_run_leaves_the_resume(stack: WorkflowStack) -> None:
-    """A pass that read the run before it ended and was resumed judges the old attempt, which the run names no more."""
+@pytest.mark.parametrize(
+    ("ended", "reason"),
+    [(ScriptRunState.EXITED, None), (ScriptRunState.INTERRUPTED, RUNTIME_RESTARTED)],
+    ids=["exited", "interrupted"],
+)
+async def test_look_at_the_old_attempt_after_a_resume_took_the_run_leaves_the_resume(
+    stack: WorkflowStack,
+    ended: ScriptRunState,
+    reason: str | None,
+) -> None:
+    """A pass that read the run before it ended and was resumed judges the old attempt, which the run names no more.
+
+    It neither ends the run as the old attempt ended nor starts the attempt that the resume is about to start.
+    """
     seen = stack.store.get_run(stack.run_id)
-    await stack.end_attempt(ScriptRunState.EXITED)
+    await stack.end_attempt(ended, reason)
     await stack.engine.reopen(stack.run_id, stack.context)
 
     assert not await stack.engine._reconcile_run(seen, stack.engine.owner_access)

@@ -21,6 +21,7 @@ import pytest_asyncio
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
+from mindroom.custom_tools import workflow as workflow_tool_module
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.custom_tools.workflow import WorkflowTools
 from mindroom.delegation import lifecycle
@@ -1113,14 +1114,48 @@ async def test_resume_cancelled_at_its_write_marks_no_call_of_a_run_it_did_not_t
     # The resume's write waits in its thread for the database, which is where the cancellation finds it.
     await asyncio.sleep(0.2)
     resuming.cancel()
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.05)
+    # The cancelled call waits for its write, so that whoever cleans up after it finds the run as the write left it.
+    waited = not resuming.done()
     writer.execute("COMMIT")
     writer.close()
     with pytest.raises(asyncio.CancelledError):
         await resuming
-    await stack.until(lambda: not stack.store.nodes(stack.run_id)[0].digest)
 
-    assert stack.store.get_run(stack.run_id).state is WorkflowRunState.STARTING
+    run, [node] = stack.store.get_run(stack.run_id), stack.store.nodes(stack.run_id)
+    assert (waited, run.state, node.digest) == (True, WorkflowRunState.STARTING, "")
+
+
+@pytest.mark.parametrize(
+    ("status", "waits", "standing"),
+    [
+        ("running", False, "live"),
+        ("awaiting_approval", False, "live"),
+        ("running", True, "waiting"),
+        ("cancel_requested", False, "stopping"),
+        ("cancelled", False, "stopped"),
+        ("denied", False, "stopped"),
+        ("interrupted", False, "ended"),
+        ("failed", False, "ended"),
+        ("completed", False, "ended"),
+    ],
+)
+def test_job_standing_says_what_the_job_runtime_knows(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    waits: bool,
+    standing: str,
+) -> None:
+    """Only a Stop or a denial stopped a job; one that is being stopped or waits to be continued has not ended."""
+    job, paths = SimpleNamespace(job_id="job-1", status=status), stack.context.runtime_paths
+    runtime = SimpleNamespace(retained_jobs=lambda: (job,), awaiting_continuation=lambda: (job,) if waits else ())
+    monkeypatch.setattr(workflow_tool_module, "get_background_runtime", lambda _paths: runtime)
+
+    assert workflow_tool_module.workflow_job_standing(paths, "job-1") == standing
+    assert workflow_tool_module.workflow_job_standing(paths, "job-2") == "absent"
+    monkeypatch.setattr(workflow_tool_module, "get_background_runtime", lambda _paths: None)
+    assert workflow_tool_module.workflow_job_standing(paths, "job-1") == "unknown"
 
 
 @pytest.mark.asyncio

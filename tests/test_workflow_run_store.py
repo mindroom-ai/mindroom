@@ -738,3 +738,33 @@ def test_failed_migration_leaves_the_version_unchanged(tmp_path: Path, monkeypat
     with sqlite3.connect(path) as connection:
         columns = [row[1] for row in connection.execute("PRAGMA table_info(workflow_runs)")]
     assert "placeholder" not in columns
+
+
+def test_claim_takes_an_ended_run_only_from_the_job_and_the_end_it_names(tmp_path: Path) -> None:
+    """A resume names what the run was when it was accepted; a run with another job or another end is left whole."""
+    store, node = _store_with_node(tmp_path)
+    ended = store.update_run(_RUN_A, state=WorkflowRunState.FAILED, job_id="job-1", finished_at="2026-01-01T00:00:00Z")
+    changes: dict[str, object] = {"state": WorkflowRunState.STARTING, "job_id": "job-2", "finished_at": None}
+
+    assert store.claim_run(_RUN_A, ["job-0", ended.finished_at], [node.key], **changes) is None
+    assert store.claim_run(_RUN_A, ["job-1", "2026-01-02T00:00:00Z"], [node.key], **changes) is None
+    assert (store.get_run(_RUN_A), _saved(store).digest) == (ended, "digest")
+
+    taken = store.claim_run(_RUN_A, ["job-1", ended.finished_at], [node.key], **changes)
+
+    assert taken == store.get_run(_RUN_A) == replace(ended, **changes)
+    assert _saved(store).digest == ""
+    # Taken once: the same claim finds a run that is no longer ended.
+    assert store.claim_run(_RUN_A, ["job-1", ended.finished_at], [], **changes) is None
+
+
+def test_forgetting_no_digest_writes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Most calls mark nothing to run again, and each of them would otherwise wait for the database's writer."""
+    store, _ = _store_with_node(tmp_path)
+
+    def no_write() -> None:
+        raise AssertionError
+
+    monkeypatch.setattr(store, "_write_transaction", no_write)
+
+    store.forget_digests(_RUN_A, [])

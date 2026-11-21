@@ -34,7 +34,7 @@ from mindroom.script_runs.reasons import (
     RUNTIME_SHUTDOWN,
     WORKFLOW_TOOL_REMOVED,
 )
-from mindroom.workflow_runs.engine import SupersededAttemptError
+from mindroom.workflow_runs.engine import SupersededAttemptError, WorkflowLimits
 from mindroom.workflow_runs.models import NodeRequest, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError
@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.script_runs.models import ScriptCallRecord, ScriptRunRecord
     from mindroom.tool_jobs.runtime import BackgroundJob
+    from mindroom.workflow_runs.engine import ResumeAccess
     from mindroom.workflow_runs.models import WorkflowRun
 
 _A = tool_args("counter", "append", line="a")
@@ -370,6 +371,74 @@ async def test_first_attempt_of_a_continued_job_waits_for_a_script_runtime_that_
     assert (run.state, run.attempt, run.idle_resumes, stack.scripts.refused) == (WorkflowRunState.RUNNING, 1, 0, 2)
     await stack.finish_attempt(result="the report")
     assert await stack.collect(await _ended_job(stack, handle["job_id"])) == "the report"
+
+
+@pytest.mark.asyncio
+async def test_resume_that_waits_for_a_starting_script_runtime_counts_as_no_idle_attempt(stack: WorkflowStack) -> None:
+    """The attempt a person's resume asked for is that person's, also when a pass is what finally starts it."""
+    first = await _started(stack)
+    await stack.end_attempt(ScriptRunState.FAILED)
+    await _ended_job(stack, first["job_id"])
+    stack.scripts.refuse_launch = ScriptRuntimeNotReadyError("Background script runtime reconciliation is in progress.")
+
+    handle = json.loads(await stack.call("resume_workflow", run_id=first["run_id"]))
+    await stack.until(lambda: stack.scripts.refused == 1 and not stack.engine._launching)
+    waiting = stack.store.get_run(stack.run_id)
+    stack.scripts.refuse_launch = None
+    assert await stack.maintain() == [stack.run_id]
+
+    run = stack.store.get_run(stack.run_id)
+    assert (waiting.state, waiting.job_id, waiting.error) == (WorkflowRunState.STARTING, handle["job_id"], None)
+    assert (run.state, run.attempt, run.idle_resumes) == (WorkflowRunState.RUNNING, 2, 0)
+
+
+@pytest.mark.asyncio
+async def test_first_attempt_of_a_call_that_waits_itself_fails_on_a_starting_script_runtime(
+    stack: WorkflowStack,
+) -> None:
+    """No pass starts the run of a call that waits for it in this process, so that call is told why nothing started."""
+    stack.scripts.refuse_launch = ScriptRuntimeNotReadyError("Background script runtime reconciliation is in progress.")
+
+    run = await stack.start(SCRIPT)
+
+    assert (run.state, run.error) == (
+        WorkflowRunState.FAILED,
+        "Background script runtime reconciliation is in progress.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_access_is_asked_again_when_the_next_attempt_is_handed_over(stack: WorkflowStack) -> None:
+    """Between the look at the ended attempt and the launch the run's job may be stopped: the later answer decides."""
+    await _started(stack)
+    await _interrupt(stack, RUNTIME_RESTARTED)
+    answers = iter([(stack.context, WorkflowLimits()), "pending"])
+
+    assert await stack.engine.reconcile(lambda _run: next(answers)) == []
+
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.attempt, len(stack.scripts.launched)) == (WorkflowRunState.STARTING, 1, 1)
+    assert list(answers) == []
+
+
+@pytest.mark.asyncio
+async def test_access_is_asked_about_the_run_as_it_is_at_the_handoff(stack: WorkflowStack) -> None:
+    """A pass that listed a waiting run a while ago asks about the job the run has now, not the one it listed."""
+    await _started(stack)
+    await _interrupt(stack, RUNTIME_RESTARTED)
+    stack.scripts.refuse_launch = RuntimeError("No worker is free.")
+    assert await stack.maintain() == []
+    listed = stack.store.get_run(stack.run_id)
+    stack.store.update_run(stack.run_id, job_id="the-job-of-a-later-resume")
+    asked: list[str | None] = []
+
+    def access(run: WorkflowRun) -> ResumeAccess:
+        asked.append(run.job_id)
+        return "pending"
+
+    assert not await stack.engine._reconcile_run(listed, access)
+
+    assert (listed.state, asked) == (WorkflowRunState.STARTING, ["the-job-of-a-later-resume"])
 
 
 @pytest.mark.asyncio
