@@ -748,6 +748,7 @@ def _build_execute_request(
     wire_kwargs: dict[str, object],
     progress_sink: ProgressSink | None = None,
     start: bool = True,
+    include_execution_env: bool = True,
 ) -> tuple[ExecuteRequest, WorkerHandle | None]:
     """Build one call that ``stand_ins`` sends, unsent, and return it with the handle of the worker that serves it.
 
@@ -773,15 +774,22 @@ def _build_execute_request(
     )
     # A shell call's own environment, plugin hooks' changes and a response's CLI grant, travels with each command;
     # the runner passes a variable on only when told to, so the call's pass-through patterns join the configured ones.
-    call_environment = current_tool_environment() if tool_name == "shell" else ToolEnvironment()
-    execution_env = call_environment.applied(stand_ins.execution_env or {}, runtime_paths.process_env)
+    call_environment = (
+        current_tool_environment() if tool_name == "shell" and include_execution_env else ToolEnvironment()
+    )
+    execution_env = (
+        call_environment.applied(stand_ins.execution_env or {}, runtime_paths.process_env)
+        if include_execution_env
+        else {}
+    )
     extra_env_passthrough = (
         ",".join(filter(None, (stand_ins.extra_env_passthrough, *call_environment.pass_through))) or None
     )
     agent_name = worker_target.routing_agent_name if worker_target is not None else None
     # Only an agent that opted into Agent Keys gets the broker env; a call without a configured agent never does.
     if (
-        tool_name in EXECUTION_ENV_TOOL_NAMES
+        include_execution_env
+        and tool_name in EXECUTION_ENV_TOOL_NAMES
         and egress_broker_enabled(runtime_paths)
         and runtime_config is not None
         and agent_name is not None
@@ -1023,31 +1031,19 @@ class WorkerCall:
     handle: WorkerHandle | None = field(repr=False, compare=False)
 
 
-def worker_runner_address(
-    runtime_paths: RuntimePaths,
-    worker_handle: WorkerHandle | None,
-) -> tuple[str, dict[str, str]]:
-    """Return the sandbox runner API root and the headers that reach a worker, or the shared runner without one.
-
-    The shared runner's URL is the caller's to have required, as a call's route does.
-    """
-    proxy_config = sandbox_proxy_config(runtime_paths)
-    api_root = (
-        worker_api_root(worker_handle)
-        if worker_handle is not None
-        else normalize_sandbox_runner_api_root(proxy_config.proxy_url or "")
-    )
-    headers = worker_request_headers(worker_handle, config=worker_proxy_client_config(proxy_config, runtime_paths))
-    return api_root, headers
-
-
-def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = True) -> WorkerCall | None:
+def worker_call(
+    stand_ins: WorkerStandIns,
+    function_name: str,
+    *,
+    start: bool = True,
+    include_execution_env: bool = True,
+) -> WorkerCall | None:
     """Build the call of ``function_name`` that ``stand_ins`` would send, without sending it.
 
     The request carries no arguments, nor what sending adds: the job flag, the cancellation id, and a credential lease.
     Otherwise it is the request a sent call carries, for the worker that would serve it. That worker starts unless
     ``start`` is False; then a dedicated worker is only marked used, as ``worker_route`` describes, and the answer
-    is None while it is not running.
+    is None while it is not running. Worker-wide sessions omit the call environment and scoped broker credentials.
     """
     runtime_paths = stand_ins.runtime_paths
     proxy_config = sandbox_proxy_config(runtime_paths)
@@ -1059,11 +1055,17 @@ def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = 
             wire_args=[],
             wire_kwargs={},
             start=start,
+            include_execution_env=include_execution_env,
         )
     if worker_backend_kind(runtime_paths).dedicated and (worker_handle is None or worker_handle.status != "ready"):
         return None
     # Without a worker of its own, the call goes to the shared runner, whose URL its route has already required.
-    api_root, headers = worker_runner_address(runtime_paths, worker_handle)
+    api_root = (
+        worker_api_root(worker_handle)
+        if worker_handle is not None
+        else normalize_sandbox_runner_api_root(proxy_config.proxy_url or "")
+    )
+    headers = worker_request_headers(worker_handle, config=worker_proxy_client_config(proxy_config, runtime_paths))
     return WorkerCall(request, api_root, headers, worker_handle)
 
 
@@ -1086,6 +1088,5 @@ __all__ = [
     "worker_call",
     "worker_proxy_client_config",
     "worker_route",
-    "worker_runner_address",
     "worker_stand_ins",
 ]

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import secrets
 from typing import TYPE_CHECKING
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -16,70 +15,60 @@ from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
 
 
 class Link(BaseModel):
-    """One person's SSH node for one agent."""
+    """One SSH node for a worker key."""
 
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    requester_id: str
-    agent_name: str
+    worker_key: str
     hostname: str
     host_key: str
 
 
 class LinkBook(BaseModel):
-    """Link identities and the IDs whose retirement is final."""
+    """Persisted identities for current and previously listed workers."""
 
     model_config = ConfigDict(extra="forbid")
 
     links: list[Link] = Field(default_factory=list)
-    retiring_ids: set[str] = Field(default_factory=set)
 
     def by_id(self, link_id: str) -> Link | None:
         """Return the link with this id."""
         return next((link for link in self.links if link.id == link_id), None)
 
-
-def default_hostname(agent_name: str) -> str:
-    """Return the agent name as one DNS label."""
-    return re.sub(r"[^a-z0-9]+", "-", agent_name.lower()).strip("-")[:63].rstrip("-") or "worker"
-
-
-def _hostname(requester_id: str, agent_name: str, reserved: Collection[str]) -> str:
-    base = default_hostname(agent_name)
-    if base not in reserved:
-        return base
-    localpart = default_hostname(requester_id.removeprefix("@").partition(":")[0])[:61].rstrip("-")
-    prefix = f"{base[: 62 - len(localpart)].rstrip('-')}-{localpart}"
-    if prefix not in reserved:
-        return prefix
-    digest = hashlib.sha256(f"{requester_id}\0{agent_name}".encode()).hexdigest()
-    for length in range(8, 63, 2):
-        candidate = f"{prefix[: 62 - length].rstrip('-')}-{digest[:length]}"
-        if candidate not in reserved:
-            return candidate
-    msg = "Could not allocate a unique tailnet SSH hostname."
-    raise ValueError(msg)
-
-
-def new_link(requester_id: str, agent_name: str, reserved: Collection[str] = ()) -> Link:
-    """Allocate a hostname and a fresh ID and Ed25519 host key."""
-    return Link(
-        id=secrets.token_hex(8),
-        requester_id=requester_id,
-        agent_name=agent_name,
-        hostname=_hostname(requester_id, agent_name, reserved),
-        host_key=Ed25519PrivateKey.generate()
-        .private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption())
-        .decode(),
-    )
+    def ensure(self, worker_key: str) -> Link:
+        """Keep the existing identity, or allocate it the first time a worker is listed."""
+        digest = hashlib.sha256(worker_key.encode()).hexdigest()
+        link_id = digest[:16]
+        if (link := self.by_id(link_id)) is not None:
+            if link.worker_key != worker_key:
+                msg = "Tailnet SSH link ID collision."
+                raise ValueError(msg)
+            return link
+        reserved = {item.hostname for item in self.links}
+        hostname = re.sub(r"[^a-z0-9]+", "-", worker_key.lower()).strip("-") or "worker"
+        if len(hostname) > 63 or hostname in reserved:
+            hostname = f"{hostname[:46].rstrip('-')}-{link_id}"
+            if hostname in reserved:
+                msg = "Tailnet SSH hostname collision."
+                raise ValueError(msg)
+        link = Link(
+            id=link_id,
+            worker_key=worker_key,
+            hostname=hostname,
+            host_key=Ed25519PrivateKey.generate()
+            .private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption())
+            .decode(),
+        )
+        self.links.append(link)
+        return link
 
 
 def _links_path(runtime_paths: RuntimePaths) -> Path:

@@ -70,21 +70,21 @@ def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
 
     read_config = partial(_read_config, api_app)
 
-    def ready() -> tuple[RuntimePaths, ssh.GatewayStatus]:
+    def ready() -> tuple[Config, RuntimePaths, ssh.GatewayStatus]:
         status = config_lifecycle.app_state(api_app).tailnet_ssh_status
         if status is None:
             raise HTTPException(503, "Tailnet SSH is disabled.")
-        return read_config()[1], status
+        return (*read_config(), status)
 
     @app.get("/links")
     async def links() -> list[dict[str, object]]:
-        paths, status = ready()
+        config, paths, _ = ready()
         memberships = config_lifecycle.app_state(api_app).runtime.agent_reply_memberships
-        return await ssh.desired_links(read_config, paths, memberships, status, monotonic=time.monotonic())
+        return await asyncio.to_thread(ssh.desired_links, config, paths, memberships)
 
     @app.post("/status", status_code=204)
     async def post_status(request: Request) -> None:
-        paths, status = ready()
+        _, paths, status = ready()
         report = await _body(request, ssh.StatusReport)
         await asyncio.to_thread(ssh.record_status, paths, status, report, monotonic=time.monotonic())
 

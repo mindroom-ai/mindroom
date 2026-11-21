@@ -50,7 +50,7 @@ from mindroom.runtime_env_policy import (
 )
 from mindroom.tailnet_ssh import links as link_service
 from mindroom.tailnet_ssh.links import ConnectRefused, GatewayStatus, StatusReport
-from mindroom.tailnet_ssh.store import Link, new_link, read_links, update_links
+from mindroom.tailnet_ssh.store import Link, read_links, update_links
 from mindroom.worker_computer.sessions import ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.models import WorkerMaintenanceResult, WorkerSpec, WorkerSshEndpoint
@@ -67,7 +67,7 @@ PEER = {"peer_login": "alice@github", "peer_node": "laptop"}
 # One well-formed call of each route.
 CALLS: list[tuple[str, str, dict[str, object] | None]] = [
     ("GET", "/links", None),
-    ("POST", "/status", {"open_connections": {}, "removed": []}),
+    ("POST", "/status", {"open_connections": {}}),
     ("POST", "/links/abc/connect", PEER),
 ]
 ROUTES = [(method, path) for method, path, _body in CALLS]
@@ -87,6 +87,7 @@ _DATA: dict[str, Any] = {
     "agents": {
         "mine": {
             "display_name": "Mine",
+            "tools": ["shell"],
             "worker_scope": "user_agent",
             "access": {"users": [ALICE], "members_of_rooms": []},
             "tailnet_ssh": True,
@@ -142,12 +143,10 @@ def client(api_app: FastAPI) -> TestClient:
     return TestClient(gateway_app(api_app, "tok"))
 
 
-def _stored_link(api_app: FastAPI, agent: str = "mine") -> Link:
+def _stored_link(api_app: FastAPI) -> Link:
     """Store Alice's link to the agent."""
     _, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
-    link = new_link(ALICE, agent)
-    update_links(paths, lambda book: book.links.append(link))
-    return link
+    return update_links(paths, lambda book: book.ensure(_ALICE_MINE_KEY))
 
 
 def _status(api_app: FastAPI) -> GatewayStatus | None:
@@ -197,92 +196,16 @@ def test_get_links_returns_desired_rows(
     client: TestClient,
     calls_on_event_loop: Callable[[object, str], list[bool]],
 ) -> None:
-    """A stored link that is on is one row of what the gateway is to run, read from the store off the event loop."""
-    link = _stored_link(api_app)
-    on_event_loop = calls_on_event_loop(link_service, "_list_workers")
+    """Create a link from config alone, keeping disk I/O off the event loop."""
+    _, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
+    on_event_loop = calls_on_event_loop(link_service, "desired_links")
 
     response = client.get("/links", headers=AUTH)
 
     assert response.status_code == 200
     assert on_event_loop == [False]
-    assert len(response.json()[0]["access_revision"]) == 64
-    assert response.json() == [
-        {
-            "id": link.id,
-            "hostname": "mine",
-            "desired": "on",
-            "allowed_login": "alice@github",
-            "access_revision": response.json()[0]["access_revision"],
-        },
-    ]
-
-
-def test_get_links_clears_the_keys_of_a_removed_links_worker(
-    api_app: FastAPI,
-    client: TestClient,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    calls_on_event_loop: Callable[[object, str], list[bool]],
-) -> None:
-    """A link the reconcile removes is answered as ``removing``, its worker's keys emptied off the event loop first.
-
-    Its sshd's stop is left to run apart from the answer.
-    """
-    config, _ = config_lifecycle.read_app_committed_runtime_config(api_app)
-    moved = _stored_link(api_app)
-    del config.agents["mine"]
-    ssh_dir = tmp_path / "ssh"
-    link_service.write_projection(ssh_dir, moved, [f"restrict,pty {PUBLIC_KEY}"])
-    handle = SimpleNamespace(
-        worker_key=_ALICE_MINE_KEY,
-        ssh_endpoint=SimpleNamespace(projection_dir=ssh_dir),
-    )
-    handle.status = "ready"
-    manager = MagicMock(list_workers=MagicMock(return_value=[handle]))
-    manager.__enter__.return_value = manager
-    monkeypatch.setattr(link_service, "lease_configured_primary_worker_manager", lambda _paths: manager)
-
-    async def stop(*_args: object) -> None:
-        pass
-
-    monkeypatch.setattr(link_service, "_stop_sshd", stop)
-    on_event_loop = calls_on_event_loop(link_service, "clear_authorized_keys")
-
-    response = client.get("/links", headers=AUTH)
-
-    assert [(row["id"], row["desired"]) for row in response.json()] == [(moved.id, "removing")]
-    assert (ssh_dir / "authorized_keys").read_text() == ""
-    assert on_event_loop == [False]
-
-
-@pytest.mark.usefixtures("enforce_turn_authorization")
-@pytest.mark.parametrize("index", ["fresh", "invalidated"])
-def test_get_links_omits_a_room_granted_link_while_membership_is_pending(
-    api_app: FastAPI,
-    client: TestClient,
-    index: str,
-) -> None:
-    """At a primary's start, or after a reload, room membership is not known: a room-granted link is omitted, not retired."""
-    data = deepcopy(_DATA)
-    data["agents"]["research"] = {
-        "display_name": "Research",
-        "private": {"per": "user_agent"},
-        "tailnet_ssh": True,
-        "rooms": ["lobby"],
-    }
-    state = config_lifecycle.require_api_state(api_app)
-    paths = state.snapshot.runtime_paths
-    config = Config.validate_with_runtime(data, paths)
-    state.snapshot = config_lifecycle.ApiSnapshot(2, paths, runtime_config=config)
-    if index == "invalidated":
-        config_lifecycle.app_state(api_app).runtime.agent_reply_memberships.invalidate(config, reason="config_reload")
-    link = _stored_link(api_app, "research")
-
-    response = client.get("/links", headers=AUTH)
-
-    assert response.status_code == 200
-    assert response.json() == []
-    assert read_links(paths).by_id(link.id) == link
+    [link] = read_links(paths).links
+    assert response.json() == [{"id": link.id, "hostname": link.hostname, "allowed_logins": ["alice@github"]}]
 
 
 def test_status_is_stored_and_answers_204(
@@ -297,7 +220,7 @@ def test_status_is_stored_and_answers_204(
     response = client.post(
         "/status",
         headers=AUTH,
-        json={"open_connections": {link.id: 2}, "removed": []},
+        json={"open_connections": {link.id: 2}},
     )
 
     assert (response.status_code, response.content) == (204, b"")
@@ -308,12 +231,10 @@ def test_status_is_stored_and_answers_204(
 @pytest.mark.parametrize(
     "body",
     [
-        {"open_connections": {}},
-        {"removed": [], "open_connections": {"abc": -1}},
-        {"removed": [], "open_connections": {"abc": "2"}},
-        {"removed": [], "open_connections": {"abc": True}},
-        {"removed": [1], "open_connections": {}},
-        {"removed": [], "open_connections": {}, "unexpected": "secret-value"},
+        {"open_connections": {"abc": -1}},
+        {"open_connections": {"abc": "2"}},
+        {"open_connections": {"abc": True}},
+        {"open_connections": {}, "unexpected": "secret-value"},
     ],
 )
 def test_status_outside_the_contract_is_refused_and_changes_nothing(
@@ -321,7 +242,7 @@ def test_status_outside_the_contract_is_refused_and_changes_nothing(
     client: TestClient,
     body: dict[str, object],
 ) -> None:
-    """Invalid status never publishes activity, retires IDs, or echoes values."""
+    """Invalid status never publishes activity or echoes values."""
     response = client.post("/status", headers=AUTH, json=body)
     assert (response.status_code, response.json()) == (422, {"detail": BAD_BODY})
     assert _status(api_app) == GatewayStatus()
@@ -392,16 +313,19 @@ def test_the_go_gateways_fixtures_are_what_this_listener_takes_and_answers(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both row variants and both POST bodies match the gateway's shared fixtures."""
+    """The multi-login row and both POST bodies match the gateway's shared fixtures."""
     status_body = (GATEWAY_FIXTURES / "status.json").read_bytes()
     connect_body = (GATEWAY_FIXTURES / "connect.json").read_bytes()
-    on, removing = expected = json.loads((GATEWAY_FIXTURES / "links.json").read_text())
-    link_id, removed_id = on["id"], removing["id"]
+    expected = json.loads((GATEWAY_FIXTURES / "links.json").read_text())
+    [row] = expected
+    link_id = row["id"]
     config, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
-    config.tailnet_ssh.logins[ALICE] = "bas@github"
-    link = new_link(ALICE, "mine").model_copy(update={"id": link_id, "hostname": "mind-bas"})
-    deleted = new_link(ALICE, "code").model_copy(update={"id": removed_id})
-    update_links(paths, lambda book: book.links.extend([link, deleted]))
+    agent = config.agents["mine"]
+    agent.worker_scope = "shared"
+    assert agent.access is not None
+    agent.access.users.append("@bas:example.org")
+    config.tailnet_ssh.logins["@bas:example.org"] = "bas@github"
+    config.tailnet_ssh.authorized_keys["@bas:example.org"] = [PUBLIC_KEY]
     peers: list[tuple[object, ...]] = []
 
     async def connect(*args: object) -> tuple[str, int]:
@@ -414,14 +338,15 @@ def test_the_go_gateways_fixtures_are_what_this_listener_takes_and_answers(
     assert (posted.status_code, posted.content) == (204, b"")
     status = StatusReport.model_validate_json(status_body)
     assert status.open_connections == {link_id: 2}
-    assert read_links(paths).links == [link]
-    assert active_tailnet_ssh_worker_keys(api_app) == {_ALICE_MINE_KEY}
+    assert [link.worker_key for link in read_links(paths).links] == ["v1:default:shared:mine"]
+    assert active_tailnet_ssh_worker_keys(api_app) == {"v1:default:shared:mine"}
     connected = client.post(f"/links/{link_id}/connect", headers=AUTH, content=connect_body)
     assert (connected.status_code, connected.json()) == (200, {"host": "10.0.0.5", "port": 2222})
     assert peers == [(link_id, "bas@github", "laptop")]
 
 
-@pytest.mark.parametrize("revoked", ["login", "keys", "opt-in"])
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("revoked", ["login", "keys", "opt-in", "access", "scope"])
 def test_connect_rereads_the_committed_config_replaced_during_wake(
     api_app: FastAPI,
     client: TestClient,
@@ -437,8 +362,13 @@ def test_connect_rereads_the_committed_config_replaced_during_wake(
         changed.tailnet_ssh.logins[ALICE] = "new@login"
     elif revoked == "keys":
         changed.tailnet_ssh.authorized_keys.clear()
-    else:
+    elif revoked == "opt-in":
         changed.agents["mine"].tailnet_ssh = False
+    elif revoked == "scope":
+        changed.agents["mine"].worker_scope = "user"
+    else:
+        assert changed.agents["mine"].access is not None
+        changed.agents["mine"].access.users.clear()
     state = config_lifecycle.require_api_state(api_app)
     ssh = tmp_path / "ssh"
     manager = MagicMock()
@@ -460,7 +390,7 @@ def test_connect_rereads_the_committed_config_replaced_during_wake(
     monkeypatch.setattr(link_service, "_start_sshd", runner)
     reply = client.post(f"/links/{link.id}/connect", headers=AUTH, json=PEER)
     manager.ensure_worker.assert_called_once()
-    assert reply.status_code == (403 if revoked == "login" else 409)
+    assert reply.status_code == 403
     assert not ssh.exists()
     runner.assert_not_called()
 
@@ -550,7 +480,9 @@ async def test_listener_is_off_without_token_and_refuses_the_api_port(
         assert _status(api_app) == GatewayStatus()
         async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
             assert (await http.get("/links")).status_code == 401
-            assert (await http.get("/links", headers=AUTH)).json() == []
+            response = await http.get("/links", headers=AUTH)
+            [row] = response.json()
+            assert row["allowed_logins"] == ["alice@github"]
     assert _status(api_app) is None
     socket.create_server(("127.0.0.1", port)).close()
 
@@ -593,24 +525,24 @@ async def test_listener_port_defaults_to_8769(
     ]
 
 
-@pytest.mark.parametrize("pattern", ["MINDROOM_*", "*_TOKEN", "*", TOKEN_ENV])
-def test_gateway_token_never_reaches_a_worker_env(pattern: str) -> None:
+@pytest.mark.parametrize("name", [TOKEN_ENV, "TAILNET_SSH_GATEWAY_TOKEN", "TAILNET_SSH_AUTH_KEY", "TS_AUTHKEY"])
+def test_gateway_secrets_never_reach_a_worker_env(name: str) -> None:
     """No worker's startup manifest, runtime env, or extra env carries the gateway's token, nor does a tool's env.
 
     A shell passthrough pattern an operator sets gives an agent's shell the other values it names, never the token.
     """
-    assert public_worker_startup_env({TOKEN_ENV: "t"}) == {}
-    assert isolated_worker_runtime_env({TOKEN_ENV: "t"}) == {}
-    assert worker_extra_env({TOKEN_ENV: "t"}) == {}
-    assert sandbox_runner_startup_process_env({TOKEN_ENV: "t"}) == {}
-    assert not is_trusted_tool_runtime_env_file_name(TOKEN_ENV)
-    assert not is_trusted_tool_runtime_process_env_name(TOKEN_ENV)
-    assert not is_workspace_env_overlay_name_allowed(TOKEN_ENV)
+    assert public_worker_startup_env({name: "t"}) == {}
+    assert isolated_worker_runtime_env({name: "t"}) == {}
+    assert worker_extra_env({name: "t"}) == {}
+    assert sandbox_runner_startup_process_env({name: "t"}) == {}
+    assert not is_trusted_tool_runtime_env_file_name(name)
+    assert not is_trusted_tool_runtime_process_env_name(name)
+    assert not is_workspace_env_overlay_name_allowed(name)
 
-    env = {TOKEN_ENV: "t", "MINDROOM_SERVICE_TOKEN": "passed"}
-    passed = shell_extra_env_values(extra_env_passthrough=f"MINDROOM_SERVICE_TOKEN,{pattern}", process_env=env)
-
-    assert dict(passed) == {"MINDROOM_SERVICE_TOKEN": "passed"}
+    env = {name: "t", "MINDROOM_SERVICE_TOKEN": "passed"}
+    for pattern in ("MINDROOM_*", "*_TOKEN", "*", name):
+        passed = shell_extra_env_values(extra_env_passthrough=f"MINDROOM_SERVICE_TOKEN,{pattern}", process_env=env)
+        assert dict(passed) == {"MINDROOM_SERVICE_TOKEN": "passed"}
 
 
 def test_only_a_fresh_report_with_open_connections_holds_a_worker(api_app: FastAPI) -> None:

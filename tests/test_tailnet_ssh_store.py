@@ -12,69 +12,16 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from mindroom.constants import tracking_dir
-from mindroom.tailnet_ssh.store import LinkBook, default_hostname, new_link, read_links, update_links
+from mindroom.tailnet_ssh.store import LinkBook, read_links, update_links
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-ALICE = "@alice:example.org"
-BOB = "@bob:example.org"
+KEY = "v1:default:shared:mind_alice"
 
 
 _DNS_LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
-
-
-def test_new_link_has_16_hex_id_and_loadable_host_key() -> None:
-    """Each claim has exactly the five identity fields and a fresh ID and host key."""
-    link = new_link(ALICE, "mind_alice")
-    assert set(link.model_dump()) == {"id", "requester_id", "agent_name", "hostname", "host_key"}
-    assert re.fullmatch("[0-9a-f]{16}", link.id)
-    key = serialization.load_ssh_private_key(link.host_key.encode(), password=None)
-    assert isinstance(key, Ed25519PrivateKey)
-    restored = new_link(ALICE, "mind_alice")
-    assert (restored.hostname, restored.id != link.id, restored.host_key != link.host_key) == (
-        link.hostname,
-        True,
-        True,
-    )
-
-
-def test_default_hostname() -> None:
-    """The default is the agent name in DNS spelling, at most one label long."""
-    assert default_hostname("mind_bas") == "mind-bas"
-    assert default_hostname("A__b_") == "a-b"
-    long_name = default_hostname("a" * 80)
-    assert len(long_name) == 63
-    assert _DNS_LABEL.fullmatch(long_name)
-    cut_at_dash = default_hostname("a" * 62 + "_" + "b" * 17)
-    assert cut_at_dash == "a" * 62
-    assert _DNS_LABEL.fullmatch(cut_at_dash)
-
-
-@pytest.mark.parametrize("agent", ["research", "Res_Earch", "a" * 62 + "_b" * 10, "a" * 90])
-def test_hostname_collision_uses_localpart_then_stable_hash(agent: str) -> None:
-    """A normalized localpart shared across domains falls back to a stable hash that can extend."""
-    base = new_link(BOB, agent).hostname
-    short = new_link(ALICE, agent, {base}).hostname
-    assert short.endswith("-alice")
-    reserved = {base, short}
-    other = "@alice:other.org"
-    hashed = new_link(other, agent, reserved).hostname
-    assert new_link(other, agent, reserved).hostname == hashed
-    extended = new_link(other, agent, reserved | {hashed}).hostname
-    distinct = reserved | {hashed, extended}
-    assert len(distinct) == 4
-    assert all(_DNS_LABEL.fullmatch(hostname) for hostname in distinct)
-
-
-def test_normalized_and_truncated_agent_names_reserve_the_same_base() -> None:
-    """Normalization and truncation collisions cannot reassign an existing name."""
-    for first, second in [("Foo_Bar", "foo-bar"), ("a" * 63 + "b", "a" * 63 + "c")]:
-        reserved = new_link(BOB, first).hostname
-        assert default_hostname(second) == reserved
-        assert new_link(ALICE, second, {reserved}).hostname.endswith("-alice")
-    assert default_hostname("___") == "worker"
 
 
 def test_update_links_round_trips_and_writes_under_tracking(tmp_path: Path) -> None:
@@ -82,20 +29,14 @@ def test_update_links_round_trips_and_writes_under_tracking(tmp_path: Path) -> N
     runtime_paths = test_runtime_paths(tmp_path)
     assert read_links(runtime_paths) == LinkBook()
 
-    def add(book: LinkBook) -> str:
-        link = new_link(ALICE, "mind_alice")
-        book.links.append(link)
-        book.retiring_ids.add(link.id)
-        return link.id
-
-    link_id = update_links(runtime_paths, add)
+    link = update_links(runtime_paths, lambda book: book.ensure(KEY))
+    link_id = link.id
     path = tracking_dir(runtime_paths) / "tailnet_ssh.json"
-    assert json.loads(path.read_text(encoding="utf-8"))["retiring_ids"] == [link_id]
+    assert json.loads(path.read_text(encoding="utf-8")) == {"links": [link.model_dump()]}
     book = read_links(runtime_paths)
     stored = book.by_id(link_id)
     assert stored is not None
-    assert stored.hostname == "mind-alice"
-    assert book.retiring_ids == {link_id}
+    assert stored == link
 
     def fail(book: LinkBook) -> None:
         book.links.clear()
@@ -115,29 +56,27 @@ def test_update_links_writes_only_a_changed_book(tmp_path: Path) -> None:
     assert update_links(runtime_paths, lambda book: len(book.links)) == 0
     assert not path.exists()
 
-    link = new_link(ALICE, "mind_alice")
-    update_links(runtime_paths, lambda book: book.links.append(link))
+    update_links(runtime_paths, lambda book: book.ensure(KEY))
     stored = path.stat()
 
-    assert update_links(runtime_paths, lambda book: book.by_id(link.id)) == link
-    update_links(runtime_paths, lambda book: book.retiring_ids.discard(link.id))
+    update_links(runtime_paths, lambda book: book.ensure(KEY))
     assert (path.stat().st_ino, path.stat().st_mtime_ns) == (stored.st_ino, stored.st_mtime_ns)
 
-    update_links(runtime_paths, lambda book: book.retiring_ids.add(link.id))
+    update_links(runtime_paths, lambda book: book.ensure("v1:default:shared:code"))
     assert path.stat().st_ino != stored.st_ino
-    assert read_links(runtime_paths).retiring_ids == {link.id}
+    assert len(read_links(runtime_paths).links) == 2
 
 
 def test_invalid_file_error_names_fields_but_not_secrets(tmp_path: Path) -> None:
     """A corrupt file is reported by path and error types, never with its values or input-derived names."""
     runtime_paths = test_runtime_paths(tmp_path)
-    record = new_link(ALICE, "mind_alice").model_dump(mode="json")
+    record = LinkBook().ensure(KEY).model_dump(mode="json")
     secret = record["host_key"].splitlines()[1]
     del record["hostname"]
     record[f"unknown {secret}"] = True
     path = tracking_dir(runtime_paths) / "tailnet_ssh.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    stored = {"links": [record], "retiring_ids": [True], "host_key": secret}
+    stored = {"links": [record], "host_key": secret}
     path.write_text(json.dumps(stored), encoding="utf-8")
 
     for call in (lambda: read_links(runtime_paths), lambda: update_links(runtime_paths, lambda _book: None)):
@@ -145,7 +84,7 @@ def test_invalid_file_error_names_fields_but_not_secrets(tmp_path: Path) -> None
             call()
         rendered = "".join(traceback.format_exception(caught.value))
         assert str(path) in rendered
-        prefix = f"Tailnet SSH file {path} is invalid: 4 validation errors ("
+        prefix = f"Tailnet SSH file {path} is invalid: 3 validation errors ("
         message = str(caught.value)
         assert message.startswith(prefix)
         assert message.endswith(")")
@@ -153,21 +92,41 @@ def test_invalid_file_error_names_fields_but_not_secrets(tmp_path: Path) -> None
             "extra_forbidden",
             "extra_forbidden",
             "missing",
-            "string_type",
         ]
         assert "hostname" not in rendered
         assert "host_key" not in rendered
         assert secret not in rendered
-        assert "mind-alice" not in rendered
+        assert "mind_alice" not in rendered
 
 
-def test_same_agent_has_distinct_ids_and_host_keys_per_requester() -> None:
-    """Two requesters of one agent have different node identities and distinct claimed hostnames."""
-    alice = new_link(ALICE, "mind_shared")
-    bob = new_link(BOB, "mind_shared", {alice.hostname})
-    book = LinkBook(links=[alice, bob])
-    assert bob.id != alice.id
-    assert bob.host_key != alice.host_key
-    assert bob.hostname == "mind-shared-bob"
-    assert book.by_id(bob.id) is bob
-    assert book.by_id("0" * 16) is None
+def test_worker_identity_is_stable_and_has_a_loadable_host_key() -> None:
+    """Reusing a worker key keeps the link and key; the persisted record contains no requester/agent pair."""
+    book = LinkBook()
+    link = book.ensure(KEY)
+    assert book.ensure(KEY) is link
+    assert re.fullmatch("[0-9a-f]{16}", link.id)
+    assert link.id == LinkBook().ensure(KEY).id
+    assert link.hostname == "v1-default-shared-mind-alice"
+    assert set(link.model_dump()) == {"id", "worker_key", "hostname", "host_key"}
+    assert isinstance(serialization.load_ssh_private_key(link.host_key.encode(), password=None), Ed25519PrivateKey)
+
+
+def test_hostname_collision_and_overlength_use_worker_hash() -> None:
+    """DNS normalization can collide without aliasing the two workers or changing the first hostname."""
+    book = LinkBook()
+    first = book.ensure(KEY)
+    second = book.ensure(KEY.replace("_", "-"))
+    long = book.ensure(KEY * 10)
+    assert len({first.hostname, second.hostname, long.hostname}) == 3
+    assert second.hostname.endswith(second.id)
+    assert long.hostname.endswith(long.id)
+    assert all(_DNS_LABEL.fullmatch(link.hostname) for link in book.links)
+    assert book.ensure(KEY).hostname == first.hostname
+
+
+def test_id_collision_is_refused() -> None:
+    """A saved ID can never redirect a link to a different worker key."""
+    link = LinkBook().ensure(KEY)
+    book = LinkBook(links=[link.model_copy(update={"worker_key": "different"})])
+    with pytest.raises(ValueError, match="ID collision"):
+        book.ensure(KEY)

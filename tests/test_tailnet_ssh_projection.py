@@ -3,23 +3,19 @@
 from __future__ import annotations
 
 import stat
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
-from mindroom.tailnet_ssh.projection import authorized_key_lines, clear_authorized_keys, signin_keys, write_projection
-from mindroom.tailnet_ssh.store import new_link
+from mindroom.tailnet_ssh.projection import write_projection
+from mindroom.tailnet_ssh.store import LinkBook
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.tailnet_ssh.store import Link
 
-ALICE = "@alice:example.org"
-BOB = "@bob:example.org"
 
 _SPIKE_LINES = [
     "Port 2222",
@@ -53,24 +49,8 @@ def _public_key(comment: str = "") -> str:
     return f"{line} {comment}".strip()
 
 
-def _config(tmp_path: Path, authorized_keys: dict[str, list[str]]) -> Config:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
-    paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "mindroom_data",
-        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": ""},
-    )
-    data: dict[str, Any] = {
-        "models": {"default": {"provider": "openai", "id": "m"}},
-        "agents": {},
-        "tailnet_ssh": {"authorized_keys": authorized_keys},
-    }
-    return Config.validate_with_runtime(data, paths)
-
-
 def _link() -> Link:
-    return new_link(ALICE, "mind_alice")
+    return LinkBook().ensure("v1:default:shared:mind")
 
 
 def _lines(path: Path) -> list[str]:
@@ -89,18 +69,12 @@ def test_sshd_config_is_the_spikes(tmp_path: Path) -> None:
     assert stat.S_IMODE(projection.stat().st_mode) == 0o755
 
 
-def test_authorized_keys_are_config_only_restricted_and_deduplicated(tmp_path: Path) -> None:
-    """Only the requester's config keys are projected, once per identity and with restrictions."""
-    alice, other_alice, bob = _public_key(), _public_key("other device"), _public_key()
-    config = _config(tmp_path, {ALICE: [alice, f"{alice} duplicate", other_alice], BOB: [bob]})
-    lines = authorized_key_lines(signin_keys(config, ALICE))
-    assert lines == [f"restrict,pty {alice}", f"restrict,pty {other_alice}"]
-    assert authorized_key_lines(signin_keys(config, BOB)) == [f"restrict,pty {bob}"]
-    assert authorized_key_lines(signin_keys(config, "@carol:example.org")) == []
-
+def test_authorized_keys_are_restricted_and_deduplicated(tmp_path: Path) -> None:
+    """Keys from all admitted requesters are projected with restrictions, once per key identity."""
+    alice, bob = _public_key(), _public_key("other login")
     projection = tmp_path / "ssh"
-    write_projection(projection, _link(), lines)
-    assert _lines(projection / "authorized_keys") == lines
+    write_projection(projection, _link(), [alice, f"{alice} duplicate", bob])
+    assert _lines(projection / "authorized_keys") == [f"restrict,pty {alice}", f"restrict,pty {bob}"]
     assert stat.S_IMODE((projection / "authorized_keys").stat().st_mode) == 0o644
 
 
@@ -123,44 +97,15 @@ def test_host_key_is_0600_and_matches_link(tmp_path: Path) -> None:
 
 def test_rewrite_replaces_removed_key(tmp_path: Path) -> None:
     """A second write of the same link without a key drops its line, keeps the host key, and leaves no temporary file."""
-    kept, removed = f"restrict,pty {_public_key()}", f"restrict,pty {_public_key()}"
+    kept, removed = _public_key(), _public_key()
     projection = tmp_path / "ssh"
     link = _link()
     write_projection(projection, link, [kept, removed])
     host_key = (projection / "ssh_host_ed25519_key").read_bytes()
     write_projection(projection, link, [kept])
 
-    assert _lines(projection / "authorized_keys") == [kept]
+    assert _lines(projection / "authorized_keys") == [f"restrict,pty {kept}"]
     assert (projection / "ssh_host_ed25519_key").read_bytes() == host_key == link.host_key.encode()
-    assert sorted(path.name for path in projection.iterdir()) == [
-        "authorized_keys",
-        "ssh_host_ed25519_key",
-        "sshd_config",
-    ]
-
-
-def test_no_keys_writes_empty_authorized_keys(tmp_path: Path) -> None:
-    """With no key, the file exists and is empty, so sshd admits nobody."""
-    projection = tmp_path / "ssh"
-    write_projection(projection, _link(), [f"restrict,pty {_public_key()}"])
-    write_projection(projection, _link(), [])
-
-    assert (projection / "authorized_keys").read_bytes() == b""
-
-
-def test_clear_empties_authorized_keys_only(tmp_path: Path) -> None:
-    """A removed link's worker admits nobody; its sshd still has its config and host key, so a restart would not fail."""
-    projection = tmp_path / "ssh"
-    link = _link()
-    write_projection(projection, link, [f"restrict,pty {_public_key()}"])
-    config = (projection / "sshd_config").read_bytes()
-
-    clear_authorized_keys(projection)
-
-    assert (projection / "authorized_keys").read_bytes() == b""
-    assert stat.S_IMODE((projection / "authorized_keys").stat().st_mode) == 0o644
-    assert (projection / "ssh_host_ed25519_key").read_bytes() == link.host_key.encode()
-    assert (projection / "sshd_config").read_bytes() == config
     assert sorted(path.name for path in projection.iterdir()) == [
         "authorized_keys",
         "ssh_host_ed25519_key",

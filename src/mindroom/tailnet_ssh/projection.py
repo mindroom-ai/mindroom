@@ -9,10 +9,9 @@ from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.durable_write import create_directory_durable
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable
     from pathlib import Path
 
-    from mindroom.config.main import Config
     from mindroom.tailnet_ssh.store import Link
 
 _SSHD_CONFIG = b"""Port 2222
@@ -36,20 +35,16 @@ GatewayPorts no
 """
 
 
-def signin_keys(config: Config, requester_id: str) -> dict[str, str]:
-    """Return the requester's configured keys, deduplicated by type and blob (not comment)."""
-    keys: dict[str, str] = {}
-    for line in config.tailnet_ssh.authorized_keys.get(requester_id, []):
-        keys.setdefault(" ".join(line.split()[:2]), line)
-    return keys
-
-
-def authorized_key_lines(keys: Mapping[str, str]) -> list[str]:
-    """Prefix each deduplicated key with the enforced sshd restrictions."""
-    return [f"restrict,pty {line}" for line in keys.values()]
-
-
-def _write_files(projection_dir: Path, files: Sequence[tuple[str, bytes, int]]) -> None:
+def write_projection(projection_dir: Path, link: Link, keys: Iterable[str]) -> None:
+    """Atomically replace the worker's files, deduplicating restricted keys by type and blob."""
+    unique: dict[str, str] = {}
+    for key in keys:
+        unique.setdefault(" ".join(key.split()[:2]), key)
+    files = (
+        ("ssh_host_ed25519_key", link.host_key.encode(), 0o600),
+        ("authorized_keys", "".join(f"restrict,pty {line}\n" for line in unique.values()).encode(), 0o644),
+        ("sshd_config", _SSHD_CONFIG, 0o644),
+    )
     create_directory_durable(projection_dir, mode=0o755)
     directory_fd = os.open(projection_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -57,18 +52,3 @@ def _write_files(projection_dir: Path, files: Sequence[tuple[str, bytes, int]]) 
             atomic_write_bytes_at(directory_fd, name, content, file_mode=mode, temp_prefix=f".{name}.")
     finally:
         os.close(directory_fd)
-
-
-def clear_authorized_keys(projection_dir: Path) -> None:
-    """Empty the allowlist without replacing the host key or config."""
-    _write_files(projection_dir, [("authorized_keys", b"", 0o644)])
-
-
-def write_projection(projection_dir: Path, link: Link, key_lines: Sequence[str]) -> None:
-    """Replace sshd's files atomically; OpenSSH requires mode 0600 on the host key."""
-    files = (
-        ("ssh_host_ed25519_key", link.host_key.encode(), 0o600),
-        ("authorized_keys", "".join(f"{line}\n" for line in key_lines).encode(), 0o644),
-        ("sshd_config", _SSHD_CONFIG, 0o644),
-    )
-    _write_files(projection_dir, files)
