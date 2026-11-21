@@ -12,7 +12,11 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES
+from mindroom.model_defaults import (
+    ANTHROPIC_BASE_URL_DEFAULT,
+    ANTHROPIC_OPENROUTER_BASE_URL,
+    CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES,
+)
 from mindroom.native_compaction import (
     NATIVE_CHECKPOINT_KEY,
     checkpoint_items,
@@ -61,17 +65,23 @@ def native_compaction_supported(
 ) -> bool:
     """Return whether MindRoom may add its own compaction trigger on this route.
 
-    An authored ``context_management`` keeps its own policy, and the direct API supports it only on its
-    public endpoint.
+    MindRoom manages compaction on Vertex AI Claude, Anthropic's own endpoint, and OpenRouter's Messages endpoint.
+    Other gateways use text compaction unless an authored ``context_management`` supplies its own compaction policy.
     """
     request_params = settings.request_params or {}
+    extra_body = request_params.get("extra_body") or {}
+    # OpenRouter may serve another model from a fallback list. Do not send a managed edit to an unknown model.
+    if endpoint == ANTHROPIC_OPENROUTER_BASE_URL and any(
+        field in request_params or field in extra_body for field in ("models", "fallbacks")
+    ):
+        return False
     return (
         route in _NATIVE_COMPACTION_ROUTES
         and model_id.startswith(CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES)
         and settings.context_management is None
         and "context_management" not in request_params
-        and "context_management" not in (request_params.get("extra_body") or {})
-        and (route == "vertexai_claude" or endpoint == ANTHROPIC_BASE_URL_DEFAULT)
+        and "context_management" not in extra_body
+        and (route == "vertexai_claude" or endpoint in {ANTHROPIC_BASE_URL_DEFAULT, ANTHROPIC_OPENROUTER_BASE_URL})
     )
 
 
