@@ -6,15 +6,14 @@ import (
 	"net"
 	"strings"
 
-	"tailscale.com/client/local"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tsnet"
 )
 
 // Each link has a persistent node that only listens on the operator's tailnet.
 type tsnetNode struct {
-	server   *tsnet.Server
-	client   *local.Client
+	*tsnet.Server
+	whoIs    func(context.Context, string) (*apitype.WhoIsResponse, error)
 	listener net.Listener
 }
 
@@ -30,7 +29,7 @@ func NewTsnetNode(loginServer, authKey string, tags []string) (NodeFactory, erro
 			return nil, errors.New(strings.ReplaceAll(err.Error(), authKey, "[redacted]"))
 		}
 		client, _ := server.LocalClient() // Listen already started the server.
-		return &tsnetNode{server, client, listener}, nil
+		return &tsnetNode{server, client.WhoIs, listener}, nil
 	}, nil
 }
 
@@ -48,18 +47,10 @@ func tsnetServer(dir, hostname, loginServer, authKey string, tags []string) *tsn
 
 func (n *tsnetNode) Listener() net.Listener { return n.listener }
 
-func (n *tsnetNode) WhoIs(ctx context.Context, remoteAddr string) (string, string, error) {
-	who, err := n.client.WhoIs(ctx, remoteAddr)
-	if err != nil {
+func (n *tsnetNode) WhoIs(ctx context.Context, remoteAddr string) (login, node string, err error) {
+	who, err := n.whoIs(ctx, remoteAddr)
+	if err != nil || who == nil || who.Node == nil {
 		return "", "", err
-	}
-	login, node := peer(who)
-	return login, node, nil
-}
-
-func peer(who *apitype.WhoIsResponse) (login, node string) {
-	if who.Node == nil {
-		return "", ""
 	}
 	if who.UserProfile != nil && !who.Node.IsTagged() {
 		login = who.UserProfile.LoginName
@@ -67,7 +58,5 @@ func peer(who *apitype.WhoIsResponse) (login, node string) {
 	if node = who.Node.ComputedName; node == "" {
 		node = strings.TrimSuffix(who.Node.Name, ".")
 	}
-	return login, node
+	return login, node, nil
 }
-
-func (n *tsnetNode) Close() error { return n.server.Close() }

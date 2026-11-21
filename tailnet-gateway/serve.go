@@ -30,17 +30,12 @@ func (g *Gateway) serve(ctx context.Context, id string, node *linkNode) {
 func (g *Gateway) admit(node *linkNode, conn net.Conn, login string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if login == "" || !slices.Contains(node.logins, login) {
-		return false
-	}
 	now := g.now()
-	for len(node.recent) > 0 && now.Sub(node.recent[0]) >= time.Minute {
-		node.recent = node.recent[1:]
-	}
-	if len(node.recent) >= connectsAMinute {
+	if login == "" || !slices.Contains(node.logins, login) || now.Before(node.recent[node.next].Add(time.Minute)) {
 		return false
 	}
-	node.recent = append(node.recent, now)
+	node.recent[node.next] = now
+	node.next = (node.next + 1) % connectsAMinute
 	node.open[conn] = time.Time{}
 	return true
 }
@@ -75,9 +70,8 @@ func (g *Gateway) carry(ctx context.Context, id string, node *linkNode, conn net
 			node.open[conn] = to.reached
 			g.mu.Unlock()
 			go func() {
+				defer cancel()
 				io.Copy(to, conn)
-				conn.Close()
-				to.Close()
 			}()
 			io.Copy(conn, to.reader)
 			return
@@ -112,12 +106,13 @@ func (g *Gateway) wake(ctx context.Context, id, login, peer string) worker {
 	context.AfterFunc(ctx, func() { sshd.Close() })
 	to := worker{sshd, bufio.NewReader(sshd), g.now()}
 	deadline, _ := inTime.Deadline()
-	if sshd.SetReadDeadline(deadline) == nil {
-		if _, err := to.reader.Peek(1); err == nil && sshd.SetReadDeadline(time.Time{}) == nil {
-			return to
-		}
+	if sshd.SetReadDeadline(deadline) != nil {
+		return worker{}
 	}
-	return worker{}
+	if _, err := to.reader.Peek(1); err != nil || sshd.SetReadDeadline(time.Time{}) != nil {
+		return worker{}
+	}
+	return to
 }
 
 func dialWorker(ctx context.Context, address string) (net.Conn, error) {

@@ -185,12 +185,12 @@ func TestLinksAnswerThatIsNotAListIsAnError(t *testing.T) {
 func TestStatusBodyIsTheContract(t *testing.T) {
 	primary := newFakePrimary(t)
 	client := NewPrimary(primary.URL, "tok")
-	report := StatusReport{OpenConnections: map[string]int{idA: 2}}
+	report := map[string]int{idA: 2}
 	if err := client.PostStatus(context.Background(), report); err != nil {
 		t.Fatal(err)
 	}
 	primary.answer("POST /status", http.StatusOK, `{}`)
-	if err := client.PostStatus(context.Background(), StatusReport{}); err != nil {
+	if err := client.PostStatus(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 	sent := primary.sent("POST /status")
@@ -208,7 +208,7 @@ func TestStatusThatIsNotTakenIsAnError(t *testing.T) {
 	primary := newFakePrimary(t)
 	primary.answer("POST /status", http.StatusServiceUnavailable, `{"detail": "Tailnet SSH is disabled."}`)
 
-	err := NewPrimary(primary.URL, "tok").PostStatus(context.Background(), StatusReport{})
+	err := NewPrimary(primary.URL, "tok").PostStatus(context.Background(), nil)
 
 	if err == nil {
 		t.Fatal("PostStatus returned no error for a 503")
@@ -316,7 +316,7 @@ func TestConnectMayTake610SecondsAndTheOthersTen(t *testing.T) {
 	client.client.Transport = seen
 
 	client.Links(context.Background())
-	client.PostStatus(context.Background(), StatusReport{})
+	client.PostStatus(context.Background(), nil)
 	client.Connect(context.Background(), idA, "bas@github", "laptop")
 
 	want := map[string]time.Duration{

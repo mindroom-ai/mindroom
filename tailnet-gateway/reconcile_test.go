@@ -341,6 +341,10 @@ func quiet(happened <-chan struct{}) bool {
 	}
 }
 
+type StatusReport struct {
+	OpenConnections map[string]int `json:"open_connections"`
+}
+
 // posted returns the POST /status bodies the primary got, as JSON values.
 func (f *fixtures) posted(t *testing.T) []StatusReport {
 	t.Helper()
@@ -509,7 +513,7 @@ func TestStatusThePrimaryDidNotTakeIsRetried(t *testing.T) {
 	f.waitPosts(t, 2)
 }
 
-func TestStatusIsPostedWhileTheLinksCannotBeReadAgain(t *testing.T) {
+func TestStatusReportsDrainingConnectionsEvenWhenPollFails(t *testing.T) {
 	f := newFixtures(t)
 	f.wake(t)
 	f.primary.list(t, listed(idA))
@@ -521,6 +525,9 @@ func TestStatusIsPostedWhileTheLinksCannotBeReadAgain(t *testing.T) {
 	if got := line(peer); got != banner {
 		t.Fatalf("peer read %q, want %q", got, banner)
 	}
+	f.primary.list(t)
+	f.clock.advance(reconcileEvery)
+	f.clock.waitTimer(t, reconcileEvery)
 	f.primary.answer("GET /links", http.StatusServiceUnavailable, `{"detail": "MindRoom's configuration is not loaded."}`)
 	f.clock.advance(countedAfter)
 	f.waitPosts(t, 2)
@@ -528,7 +535,7 @@ func TestStatusIsPostedWhileTheLinksCannotBeReadAgain(t *testing.T) {
 		t.Fatalf("status counts %d connections, want the one that stayed open", got)
 	}
 	peer.Close()
-	eventually(t, "forget the closed connection", func() bool { return f.gateway.Status().OpenConnections[idA] == 0 })
+	eventually(t, "forget the closed connection", func() bool { return f.gateway.Status()[idA] == 0 })
 	f.clock.waitTimer(t, statusEvery)
 	f.clock.advance(statusEvery)
 	f.waitPosts(t, 3)
@@ -599,7 +606,7 @@ func TestInvalidLinkIDIsIgnored(t *testing.T) {
 	if len(entries) != 2 {
 		t.Errorf("the state directory holds %d entries, want the valid node and the one created before the pass", len(entries))
 	}
-	if got := f.gateway.Status(); len(got.OpenConnections) != 0 {
+	if got := f.gateway.Status(); len(got) != 0 {
 		t.Errorf("status = %+v, want no link reported", got)
 	}
 }

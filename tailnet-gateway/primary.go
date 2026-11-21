@@ -24,10 +24,6 @@ type Link struct {
 	AllowedLogins []string `json:"allowed_logins"`
 }
 
-type StatusReport struct {
-	OpenConnections map[string]int `json:"open_connections"`
-}
-
 type RefusedError int
 
 func (e RefusedError) Error() string { return fmt.Sprintf("primary answered HTTP %d", int(e)) }
@@ -86,11 +82,11 @@ func (p *Primary) Links(ctx context.Context) ([]Link, error) {
 	return links, nil
 }
 
-func (p *Primary) PostStatus(ctx context.Context, report StatusReport) error {
-	if report.OpenConnections == nil {
-		report.OpenConnections = map[string]int{}
+func (p *Primary) PostStatus(ctx context.Context, counts map[string]int) error {
+	if counts == nil {
+		counts = map[string]int{}
 	}
-	body, _ := json.Marshal(report) // only string keys and integer counts
+	body, _ := json.Marshal(map[string]map[string]int{"open_connections": counts})
 	return p.call(ctx, callTimeout, http.MethodPost, "/status", body, nil)
 }
 

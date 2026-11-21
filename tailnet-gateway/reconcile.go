@@ -30,7 +30,8 @@ type linkNode struct {
 	Node
 	logins []string               // nil when omitted; read and updated under Gateway.mu
 	open   map[net.Conn]time.Time // admitted, zero until piping to sshd
-	recent []time.Time
+	recent [connectsAMinute]time.Time
+	next   int
 }
 
 type Gateway struct {
@@ -111,7 +112,7 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 	return err
 }
 
-func (g *Gateway) Status() StatusReport {
+func (g *Gateway) Status() map[string]int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	counts, now := map[string]int{}, g.now()
@@ -122,5 +123,5 @@ func (g *Gateway) Status() StatusReport {
 			}
 		}
 	}
-	return StatusReport{OpenConnections: counts}
+	return counts
 }
