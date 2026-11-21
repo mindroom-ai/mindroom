@@ -643,7 +643,11 @@ class WorkflowStack:
         Without *joined* the owner's bot is no longer in the run's room, so each job ends instead of going on.
         """
         await continue_stopped_jobs(
-            self.jobs, self.context.config, self.context.runtime_paths, self.context, joined=joined,
+            self.jobs,
+            self.context.config,
+            self.context.runtime_paths,
+            self.context,
+            joined=joined,
         )
 
     def node_job(self, key: str) -> BackgroundJob:

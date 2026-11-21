@@ -14,10 +14,12 @@ Each prints one result line on stdout and exits 0 when that line is the expected
 | `kill_after_write.py --barrier before-receipt` | Kills the backend with `SIGKILL` after the run's one write took effect and before its receipt was saved. | `lines=1 node=indeterminate attempt=2 run=failed deliveries=1 reports=0` |
 | `kill_after_write.py --barrier after-receipt` | Kills the backend with `SIGKILL` after the receipt was saved and before the run's node was written. | `lines=1 node=cached attempt=2 run=completed deliveries=1 reports=1` |
 | `restart_mid_run.py` | Stops the backend with `SIGTERM` after three of six writes and starts it again. | `lines=6 nodes=6/6 attempt=2 run=completed deliveries=1 reports=1` |
+| `agents_restart.py` | Stops the backend with `SIGTERM` while the second of three agents is working, after that agent wrote its one line, and starts it again. | `lines=1 agents=3/3 subagents=3 attempt=2 run=completed deliveries=1 reports=1` |
 | `large_result.py` | Reads a 9 MiB file through `tool("file", "read_file", ...)` and compares what the script got. | `chars=9437184 same=True spilled=True attempt=1 run=completed` |
 
 - `lines` is the number of lines in the file the run appends to, so a write that ran twice shows as one line too many.
 - `node` is the state of the write's call; `cached` means a later attempt read the saved result back without running the call.
+- `agents` counts the `agent()` calls that completed as the call they first were, so an agent that was started a second time shows as one too few; `subagents` is the number of subagents those calls ran as.
 - `attempt=2` shows that the run was replayed after the kill; a run that only ended `interrupted` would show `attempt=1`.
 - `run` is the state the run ended in.
 - `deliveries` is the number of follow-up turns the journal admitted for the run's job, read from `journal_events` in the slot's `storage/tracking/event_journal.db`.
@@ -49,6 +51,7 @@ cd ~/repos/worktrees/mindroom-agent-graphs
 python3 -m tests.workflow_live.kill_after_write --barrier before-receipt --slot N
 python3 -m tests.workflow_live.kill_after_write --barrier after-receipt --slot N
 python3 -m tests.workflow_live.restart_mid_run --slot N
+python3 -m tests.workflow_live.agents_restart --slot N
 python3 -m tests.workflow_live.large_result --slot N
 cd ~/repos/dev
 just live down --slot N
@@ -82,6 +85,7 @@ cd ~/repos/worktrees/mindroom-agent-graphs
 python3 -m tests.workflow_live.kill_after_write --barrier before-receipt --slot "$N" --send api
 python3 -m tests.workflow_live.kill_after_write --barrier after-receipt --slot "$N" --send api
 python3 -m tests.workflow_live.restart_mid_run --slot "$N" --send api
+python3 -m tests.workflow_live.agents_restart --slot "$N" --send api
 python3 -m tests.workflow_live.large_result --slot "$N" --send api
 docker ps --all --filter "label=mindroom-client-e2e.slot=$N"        # the slot's workers, before the teardown
 cd "$CHAT"
@@ -95,9 +99,11 @@ With `worker_tools` set, the scripts leave `allow_shell_without_worker` out, and
 ## What has been run
 
 - 2026-11-20 at `d2525db67`, local stack (slot 50) and Docker stack (slot 43): all four scripts printed their expected lines.
+- `agents_restart.py` was added later and has not been run yet.
 - Without the gateway lines above, the Docker stack refuses every run with `Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL.`: the stack's `MINDROOM_PUBLIC_URL` is a loopback address, which workers may not use.
 
 ## What to check besides the result line
 
 - The stderr line `processes of the killed backend still running` names what the kill left behind after the run ended; it should say `none`.
+- After `agents_restart.py`, the Sub-agents panel of the thread lists three agents, `first`, `second` and `third`, and none of them twice.
 - `get_workflow(run_id)` in the thread shows the run's attempts and the call's state as the result line reports them.
