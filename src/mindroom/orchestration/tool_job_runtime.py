@@ -17,6 +17,7 @@ from mindroom.custom_tools.workflow import continued_workflow_job, stopped_workf
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.continuation import continued_subagent_job
 from mindroom.delegation.lifecycle import (
+    DelegationPendingError,
     active_delegation_edges,
     caller_grants_child,
     delegation_grant,
@@ -457,6 +458,9 @@ class ToolJobRuntimeCoordinator:
                 try:
                     of_run = job.kind == "workflow"
                     spec = await (continued_workflow_job(job) if of_run else continued_subagent_job(job, runtime))
+                except DelegationPendingError:
+                    # The bot of a run's agent is still starting: a later pass decides.
+                    return
                 except Exception:
                     logger.exception("Subagent job could not continue after a restart", job_id=job.job_id)
                     spec = "its continuation could not be prepared"

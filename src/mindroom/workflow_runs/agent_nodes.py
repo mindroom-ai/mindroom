@@ -13,7 +13,12 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import prior_usage_of, turn_usage
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.execution import delegation_call_job
-from mindroom.delegation.lifecycle import authorize_delegation, prepare_child_turn, reload_stopped_child_result
+from mindroom.delegation.lifecycle import (
+    DelegationPendingError,
+    authorize_delegation,
+    prepare_child_turn,
+    reload_stopped_child_result,
+)
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.state import RESTART_INTERRUPTION_REASON, RUN_SUBAGENT, SPENT_RUNS_KEY, SubagentPersona
 from mindroom.delegation.targets import resolve_fresh_target
@@ -57,6 +62,10 @@ type ChildOutcome = tuple[str, str]
 
 class AgentNodeError(Exception):
     """An agent turn that did not start: the refusal the script reads, of kind `refused`."""
+
+
+class AgentNotReadyError(Exception):
+    """An agent turn that cannot be decided yet, such as one for an agent whose bot is still starting."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,17 +124,20 @@ async def launch_child(
         )
         if isinstance(target, str):
             raise AgentNodeError(target)
-        authorized = authorize_delegation(
-            caller,
-            target.agent_name,
-            node.label,
-            config=config,
-            runtime_paths=paths,
-            execution_identity=owner,
-            depth=run.depth,
-            model=target.model,
-            grant="workflow",
-        )
+        try:
+            authorized = authorize_delegation(
+                caller,
+                target.agent_name,
+                node.label,
+                config=config,
+                runtime_paths=paths,
+                execution_identity=owner,
+                depth=run.depth,
+                model=target.model,
+                grant="workflow",
+            )
+        except DelegationPendingError as exc:
+            raise AgentNotReadyError(str(exc)) from exc
         if isinstance(authorized, str):
             raise AgentNodeError(authorized)
         child = prepare_child_turn(
@@ -223,11 +235,14 @@ async def await_child(
         except JobAccessError as exc:
             return ("denied", str(exc)), None, None
         job, claim = waited.job, waited.claim
-        if job.status in TERMINAL_STATUSES:
+        if job.status in TERMINAL_STATUSES and (claim is not None or job.consumed):
+            # The outcome is this wait's to read: a job that ended while its requester's access is unresolved is not.
             break
         if (job.status == "awaiting_approval") != waiting:
             waiting = not waiting
             await on_waiting("approval" if waiting else None)
+        elif job.status in TERMINAL_STATUSES:
+            await asyncio.sleep(_RECHECK_SECONDS)
         elif timeout is not None and (timeout := timeout - (loop.time() - since)) <= 0:
             # Asked once; the job's end then says what the turn had done.
             timed_out, timeout = True, None

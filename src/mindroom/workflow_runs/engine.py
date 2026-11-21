@@ -30,7 +30,13 @@ from mindroom.script_runs.models import (
 )
 from mindroom.script_runs.store import ScriptCallNotFoundError, ScriptRunNotFoundError, ScriptRunStoreError
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
-from mindroom.workflow_runs.agent_nodes import AgentNodeError, AgentRuntime, await_child, launch_child
+from mindroom.workflow_runs.agent_nodes import (
+    AgentNodeError,
+    AgentNotReadyError,
+    AgentRuntime,
+    await_child,
+    launch_child,
+)
 from mindroom.workflow_runs.faults import hold
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
@@ -663,6 +669,8 @@ class WorkflowEngine:
                 notice = _NAME_LABELS.format(name=node.name)
                 await asyncio.to_thread(self.store.append_log, run.run_id, run.epoch, notice)
             node = await launch_child(access[0], run, node, run.epoch, store=self.store, jobs=runtime.jobs)
+        except AgentNotReadyError as exc:
+            raise ScriptRuntimeUnavailableError(str(exc)) from exc
         except AgentNodeError as exc:
             # Nothing ran. The node is saved already when the job runtime refused the job it names.
             end = {"state": WorkflowNodeState.FAILED, "error": {"kind": "refused", "message": str(exc)}}

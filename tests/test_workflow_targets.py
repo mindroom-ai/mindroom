@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.delegation.lifecycle import (
     MAX_DELEGATION_DEPTH,
+    DelegationPendingError,
     authorize_delegation,
     caller_grants_child,
     delegation_grant,
@@ -40,14 +41,25 @@ _ROOM = "!room:example.org"
 _ALICE = "@alice:example.org"
 _IDENTITY = ToolExecutionIdentity("matrix", "dev", _ALICE, _ROOM, "$thread", "$thread", "session")
 # The rooms each agent's bot is in. `stranger` answers Alice anywhere and is not in the run's room.
-_ROOMS = {"dev": [_ROOM], "helper": [_ROOM], "reviewer": [_ROOM], "secret": [_ROOM], "stranger": ["!other:example.org"]}
+# `late` has not finished its first sync, so its bot does not know its rooms yet.
+_ROOMS = {
+    "dev": [_ROOM],
+    "helper": [_ROOM],
+    "reviewer": [_ROOM],
+    "secret": [_ROOM],
+    "stranger": ["!other:example.org"],
+    "late": [],
+}
 
 
 def _config(*, workflow: bool = True) -> Config:
     """`dev` has the workflow toolkit and may delegate to `helper`; Alice may address every agent but `secret`."""
     agents = {
         "dev": AgentConfig(display_name="Dev", tools=["workflow"] if workflow else [], delegate_to=["helper"]),
-        **{name: AgentConfig(display_name=name.title()) for name in ("helper", "reviewer", "secret", "stranger")},
+        **{
+            name: AgentConfig(display_name=name.title())
+            for name in ("helper", "reviewer", "secret", "stranger", "late")
+        },
     }
     config = Config(
         agents=agents,
@@ -55,7 +67,7 @@ def _config(*, workflow: bool = True) -> Config:
         memory={"backend": "none"},
         models={"default": ModelConfig(provider="openai", id="default-model")},
     )
-    for name in ("dev", "helper", "reviewer", "stranger"):
+    for name in ("dev", "helper", "reviewer", "stranger", "late"):
         with_responder_access(config, name, users=[_ALICE])
     return with_responder_access(config, "secret", users=["@bob:example.org"])
 
@@ -70,7 +82,10 @@ def _authorize(
 ) -> Config | str:
     """Ask as the workflow of `dev`, for Alice, in the room, with each bot's own list of the rooms it is in."""
     config, paths = config or _config(), _runtime_paths(tmp_path)
-    bots = {name: SimpleNamespace(client=SimpleNamespace(rooms=dict.fromkeys(rooms))) for name, rooms in _ROOMS.items()}
+    bots = {
+        name: SimpleNamespace(client=SimpleNamespace(rooms=dict.fromkeys(rooms)), first_sync_complete=name != "late")
+        for name, rooms in _ROOMS.items()
+    }
     context = _delegate_runtime_context(config, paths, execution_identity=_IDENTITY, agent_name="dev")
     with tool_runtime_context(replace(context, orchestrator=SimpleNamespace(agent_bots=bots))):  # type: ignore[arg-type]
         return authorize_delegation(
@@ -116,6 +131,13 @@ def test_agent_whose_bot_is_unknown_is_refused(tmp_path: Path) -> None:
     with_responder_access(config, "absent", users=[_ALICE])
 
     assert "Cannot delegate to 'absent'" in str(_authorize(tmp_path, "absent", config=config))
+
+
+def test_agent_whose_bot_has_not_synced_yet_is_not_ready_instead_of_refused(tmp_path: Path) -> None:
+    """A bot that is still starting cannot say which rooms it is in: the answer is to ask again, not a refusal."""
+    with pytest.raises(DelegationPendingError, match="'late'"):
+        _authorize(tmp_path, "late")
+    assert "Cannot delegate to 'late'" in str(_authorize(tmp_path, "late", grant="delegate"))
 
 
 def test_depth_limit_and_model_check_are_kept(tmp_path: Path) -> None:

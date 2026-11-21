@@ -16,6 +16,7 @@ from mindroom.delegation.background import delegation_child
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.llm.errors import ProviderError
 from mindroom.orchestration.tool_job_runtime import _follow_up_candidates
+from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.script_runs.reasons import PLUGIN_TOOLS_CHANGED
 from mindroom.tool_jobs.conversation import ConversationKey
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.tool_jobs.runtime import BackgroundJob
+    from mindroom.tool_jobs.runtime import BackgroundJob, JobGrant
     from mindroom.workflow_runs.models import WorkflowNode
 
 _PROMPT: dict[str, object] = {"prompt": "Say hi"}
@@ -43,6 +44,7 @@ _PROMPT: dict[str, object] = {"prompt": "Say hi"}
 async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
     """The harness with the real job runtime, scripted agents and one started run; no tool asks for approval."""
     monkeypatch.setattr(engine_module, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(agent_nodes, "_RECHECK_SECONDS", 0.05)
     with workflow_stack(tmp_path, extra_tools=("workflow",), require_approval=()) as stack:
         await stack.open_jobs()
         stack.script_agents(monkeypatch)
@@ -445,6 +447,51 @@ async def test_another_agent_runs_as_configured_when_the_run_may_run_it(
         )
         assert "start_workflow" not in offered_tools(model)[0]
         await stack.close()
+
+
+@pytest.mark.asyncio
+async def test_room_agent_whose_bot_has_not_synced_is_asked_for_again_and_runs_once_it_has(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a restart the owner's bot may be ready before the target's: the call is not ready, and saves nothing."""
+    with workflow_stack(tmp_path, extra_tools=("workflow",), other_agents=("roommate",)) as stack:
+        stack.bot_rooms = {"roommate": (stack.context.room_id,)}
+        stack.unsynced = {"roommate"}
+        stack._open()
+        await stack.open_jobs()
+        stack.script_agents(monkeypatch)
+        await stack.start()
+        stack.child_script(answer("here now"), agent="roommate")
+
+        with pytest.raises(ScriptRuntimeUnavailableError, match="'roommate'"):
+            await stack.submit("@0", "agent", _PROMPT | {"agent": "roommate"})
+        assert (stack.store.get_node(stack.run_id, "@0"), _node_jobs(stack)) == (None, [])
+        stack.context.orchestrator.agent_bots["roommate"].first_sync_complete = True  # type: ignore[union-attr]
+
+        assert await stack.result("@0", "agent", _PROMPT | {"agent": "roommate"}) == "here now"
+        await stack.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resolved", ["allowed", "denied"])
+async def test_answer_of_a_job_that_cannot_be_read_yet_is_not_taken(stack: WorkflowStack, resolved: JobGrant) -> None:
+    """While the requester's access to the job is unresolved, its ended turn is no result: the node waits for the answer."""
+    gate = _hanging(stack, "unread")
+    await stack.submit("@0", "agent", _PROMPT)
+    stack.admission = "pending"
+    gate.set()
+    await wait_for_status(stack.jobs, stack.node_job("@0").job_id, "completed")
+    await asyncio.sleep(0.3)
+    assert (_node(stack).state, _node(stack).result) == (WorkflowNodeState.RUNNING, None)
+    stack.admission = resolved
+
+    if resolved == "allowed":
+        assert await stack.result("@0", "agent", _PROMPT) == "unread"
+    else:
+        with pytest.raises(NodeFailed) as refused:
+            await stack.result("@0", "agent", _PROMPT)
+        assert (refused.value.kind, _node(stack).result) == ("denied", None)
 
 
 @pytest.mark.asyncio

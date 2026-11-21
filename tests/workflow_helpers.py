@@ -594,6 +594,8 @@ class WorkflowStack:
         self.models: dict[str, ScriptedModel] = {}
         """The scripted model of each agent, once `script_agents` serves them."""
         self.bot_rooms: dict[str, tuple[str, ...]] = {}
+        self.unsynced: set[str] = set()
+        """The agents whose bots have not finished their first sync, so they do not know their rooms yet."""
         """The rooms each agent's bot is in, as a run's check of the agents it may run reads them."""
         self._open()
 
@@ -618,7 +620,10 @@ class WorkflowStack:
             budgets=None,
             knowledge_refresh_scheduler=None,
             agent_bots={
-                name: SimpleNamespace(client=SimpleNamespace(rooms=rooms)) for name, rooms in self.bot_rooms.items()
+                name: SimpleNamespace(
+                    client=SimpleNamespace(rooms=rooms), first_sync_complete=name not in self.unsynced
+                )
+                for name, rooms in self.bot_rooms.items()
             },
         )
         self.context = replace(self.context, orchestrator=orchestrator)  # type: ignore[arg-type]
