@@ -1431,6 +1431,7 @@ class DockerWorkerBackend:
             if running is not None and container_config_labels(running).get(LABEL_TAILNET_SSH) == "true"
             else None
         )
+        ssh_host = self.config.endpoint_host.strip("[]")
         return worker_handle(
             worker_id=metadata.worker_id,
             worker_key=metadata.worker_key,
@@ -1448,5 +1449,5 @@ class DockerWorkerBackend:
             },
             ssh_endpoint=None
             if ssh_port is None
-            else WorkerSshEndpoint(self.config.endpoint_host, ssh_port, paths.state.root / ".runtime" / "ssh"),
+            else WorkerSshEndpoint(ssh_host, ssh_port, paths.state.root / ".runtime" / "ssh"),
         )

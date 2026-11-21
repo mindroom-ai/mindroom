@@ -6476,12 +6476,13 @@ def _ssh_backend(
     tmp_path: Path,
     *,
     publish_host: str = "127.0.0.1",
+    endpoint_host: str = "127.0.0.1",
 ) -> tuple[DockerWorkerBackend, _FakeDockerClient]:
     base_backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=_SSH_CONFIG_TEXT)
-    if publish_host == base_backend.config.publish_host:
+    if (publish_host, endpoint_host) == (base_backend.config.publish_host, base_backend.config.endpoint_host):
         return base_backend, fake_client
     backend = _docker_backend(
-        config=replace(base_backend.config, publish_host=publish_host),
+        config=replace(base_backend.config, publish_host=publish_host, endpoint_host=endpoint_host),
         auth_token=base_backend.auth_token,
         storage_root=tmp_path,
     )
@@ -6537,12 +6538,15 @@ def test_docker_ssh_port_needs_a_publish_host_that_is_an_address(
     assert handle.ssh_endpoint is None
 
 
+@pytest.mark.parametrize(("endpoint_host", "host"), [("127.0.0.1", "127.0.0.1"), ("[::1]", "::1")])
 def test_docker_handle_endpoint_needs_label_and_running_container(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    endpoint_host: str,
+    host: str,
 ) -> None:
-    """Only a running container that carries the mark has an SSH endpoint, at the host port bound to its 2222."""
-    backend, fake_client = _ssh_backend(monkeypatch, tmp_path)
+    """Only a marked running worker exposes its bound SSH port, with a bare host for the gateway."""
+    backend, fake_client = _ssh_backend(monkeypatch, tmp_path, publish_host=host, endpoint_host=endpoint_host)
     other_key = _shared_worker_key("other")
 
     marked = backend.ensure_worker(_spec(backend, _SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
@@ -6551,8 +6555,9 @@ def test_docker_handle_endpoint_needs_label_and_running_container(
     marked_container = fake_client.containers.by_name[marked.worker_id]
     ssh_port = int(marked_container.attrs["NetworkSettings"]["Ports"]["2222/tcp"][0]["HostPort"])
     assert ssh_port != int(marked.debug_metadata["host_port"])
+    assert marked.endpoint.startswith(f"http://{endpoint_host}:")
     assert marked.ssh_endpoint == WorkerSshEndpoint(
-        host="127.0.0.1",
+        host=host,
         port=ssh_port,
         projection_dir=Path(marked.debug_metadata["state_root"]) / ".runtime" / "ssh",
     )
