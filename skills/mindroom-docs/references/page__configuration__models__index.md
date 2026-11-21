@@ -428,7 +428,7 @@ defaults:
 
 The `id` is any model ID or alias Claude Code takes for `--model`, such as `claude-opus-5-5` or `opus`, within what the plan includes.
 `extra_kwargs` accepts `cli_path`, the `claude` executable to run, and `effort`, one of `low`, `medium`, `high`, `xhigh`, or `max`.
-Without `cli_path`, MindRoom runs the `claude` on its `PATH` or falls back to the Claude Agent SDK's lookup, which checks its bundled copy and standard install locations.
+Without `cli_path`, MindRoom runs the `claude` on its `PATH`; set `cli_path` when the service's `PATH` does not include it.
 MindRoom's storage directory must allow executing files for this provider.
 MindRoom never reads Claude Code's credentials, ignores an authored `api_key`, and does not accept a token, endpoint, or headers for this provider.
 MindRoom removes inherited `ANTHROPIC_*`, `CLAUDE_CODE_*`, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`, and `CLAUDE_AUTO_BACKGROUND_TASKS` variables from Claude Code's environment (except settings MindRoom explicitly allows), so Claude Code never uses an `ANTHROPIC_API_KEY` exported for other models.

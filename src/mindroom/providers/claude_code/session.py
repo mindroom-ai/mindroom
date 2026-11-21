@@ -92,21 +92,15 @@ import os
 import signal
 import sys
 
-try:
-    real = os.environ[{_CLI_ENV!r}]
-    del os.environ[{_CLI_ENV!r}]
-    keep = frozenset({tuple(sorted(_SET_FOR_THE_PROCESS))!r})
-    for name in tuple(os.environ):
-        if name not in keep and (name.startswith({_SCRUB_PREFIXES!r}) or name in {tuple(sorted(_SCRUB_NAMES))!r}):
-            del os.environ[name]
-    # Undo Python's ignored signals, which would otherwise survive exec.
-    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    if hasattr(signal, "SIGXFSZ"):
-        signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
-    os.execv(real, [real, *sys.argv[1:]])
-except (KeyError, OSError, ValueError) as error:
-    detail = f": {{error.strerror}}" if isinstance(error, OSError) and error.strerror else ""
-    sys.exit(f"MindRoom's Claude Code launcher could not exec Claude Code ({{type(error).__name__}}{{detail}}).")
+real = os.environ.pop({_CLI_ENV!r})
+keep = frozenset({tuple(sorted(_SET_FOR_THE_PROCESS))!r})
+for name in tuple(os.environ):
+    if name not in keep and (name.startswith({_SCRUB_PREFIXES!r}) or name in {tuple(sorted(_SCRUB_NAMES))!r}):
+        del os.environ[name]
+# Undo Python's ignored signals, which would otherwise survive exec.
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+os.execv(real, [real, *sys.argv[1:]])
 """
 # How Claude Code names the plans of a Claude subscription; an account without one is "Claude API".
 _PLAN = re.compile(r"Claude (Pro|Team|Enterprise|Max( \d+x)?)")
@@ -247,18 +241,10 @@ def _prepare(root: Path, system: str, provider: str, cli_path: str | None) -> tu
 
 
 def _resolve_cli(cli_path: str | None, provider: str) -> Path:
-    """Resolve a configured path or command, or use the SDK's fallback discovery if the builder found none."""
-    if not cli_path:
-        # Reuse the SDK's lookup without depending on its private transport when a path is supplied.
-        try:
-            from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport  # noqa: PLC0415
-
-            cli_path = SubprocessCLITransport("", ClaudeAgentOptions())._find_cli()
-        except (ImportError, AttributeError, TypeError) as error:
-            raise AuthenticationFailed(_NOT_FOUND, provider=provider) from error
-    elif os.sep not in cli_path:
+    """Resolve the configured path or command, or the `claude` the builder found on `PATH`."""
+    if cli_path and os.sep not in cli_path:
         cli_path = shutil.which(cli_path)
-    if cli_path is not None:
+    if cli_path:
         cli = Path(cli_path).absolute()
         if cli.is_file() and os.access(cli, os.X_OK):
             return cli

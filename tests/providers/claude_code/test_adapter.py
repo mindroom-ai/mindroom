@@ -19,11 +19,9 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     CLIConnectionError,
-    CLINotFoundError,
     RateLimitEvent,
     RateLimitInfo,
 )
-from claude_agent_sdk._internal.transport import subprocess_cli
 from structlog.testing import capture_logs
 
 from mindroom.agent_loop.tools import media_follow_up
@@ -1062,45 +1060,12 @@ async def test_a_configured_cli_name_is_searched_on_path(tmp_path: Path, monkeyp
     assert provider.cli_path == "claude"
 
 
-@pytest.mark.parametrize("location", ["_bundled", ".npm-global/bin"], ids=["bundled", "standard install"])
-async def test_uses_sdk_discovery_when_claude_is_not_on_path(
+async def test_no_claude_on_path_and_none_configured_reports_not_found(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    location: str,
 ) -> None:
-    cli = fake_cli(tmp_path / location, {"turns": [text_turn("Discovered.")]})
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.setattr(subprocess_cli, "__file__", str(tmp_path / "_internal/transport/subprocess_cli.py"))
-    provider = cli.provider(cli_path=None)
-
-    with capture_logs() as logs:
-        answer = await complete(provider, ModelRequest(messages=[user("Hi")]))
-
-    assert answer.content == "Discovered."
-    assert provider.cli_path is None
-    assert [entry["cli"] for entry in logs if entry["event"] == "claude_code_started"] == [str(cli.path)]
-
-
-@pytest.mark.parametrize("discovery", ["no executable", "missing method", "missing transport", "changed signature"])
-async def test_unavailable_sdk_discovery_reports_not_found(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    discovery: str,
-) -> None:
-    def cli_not_found(_transport: subprocess_cli.SubprocessCLITransport) -> str:
-        raise CLINotFoundError
-
     cli = fake_cli(tmp_path / "bin", {})
     monkeypatch.setenv("PATH", str(tmp_path))
-    if discovery == "missing transport":
-        monkeypatch.delattr(subprocess_cli, "SubprocessCLITransport")
-    elif discovery == "missing method":
-        monkeypatch.delattr(subprocess_cli.SubprocessCLITransport, "_find_cli")
-    elif discovery == "changed signature":
-        monkeypatch.setattr(subprocess_cli.SubprocessCLITransport, "_find_cli", lambda _self, _options: None)
-    else:
-        monkeypatch.setattr(subprocess_cli.SubprocessCLITransport, "_find_cli", cli_not_found)
 
     with pytest.raises(AuthenticationFailed, match="Claude Code was not found") as raised:
         await cli.provider(cli_path=None).preflight()
