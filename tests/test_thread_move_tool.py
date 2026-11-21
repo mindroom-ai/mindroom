@@ -743,21 +743,13 @@ async def test_move_thread_copies_tags_posts_notice_and_resolves_source(tmp_path
 _SHELL_CALL = {"type": "tool_call_completed", "tool_name": "shell"}
 
 
-def _real_sends() -> tuple[AsyncMock, AsyncMock]:
-    """Return a Matrix client and a send that goes through the real one to it, so a copy is what Matrix gets."""
-    client = make_matrix_client_mock()
+def _real_sends(move: _Move) -> tuple[AsyncMock, AsyncMock]:
+    """Return what Matrix gets from every client the move picks, and a send that goes through the real one to it."""
     event_ids = iter(f"$copy{index}:localhost" for index in range(100))
-    client.room_send = AsyncMock(side_effect=lambda **_kwargs: nio.RoomSendResponse(next(event_ids), TARGET_ROOM_ID))
-
-    async def send(
-        _client: object,
-        room_id: str,
-        content: dict[str, Any],
-        **kwargs: bool,
-    ) -> DeliveredMatrixEvent | None:
-        return await send_message_result(client, room_id, content, **kwargs)
-
-    return client, AsyncMock(side_effect=send)
+    room_send = AsyncMock(side_effect=lambda **_kwargs: nio.RoomSendResponse(next(event_ids), TARGET_ROOM_ID))
+    for client in (*move.clients.values(), move.context.client):
+        client.room_send = room_send
+    return room_send, AsyncMock(wraps=send_message_result)
 
 
 @pytest.mark.asyncio
@@ -770,7 +762,7 @@ async def test_move_thread_sends_each_copy_of_a_reply_with_tool_calls_whole(tmp_
     history = _thread(move)
     history[1] = _message(move.ids["code"], with_calls, "$code:localhost")
     history[2] = _message(move.ids["research"], with_calls, "$research:localhost")
-    client, send = _real_sends()
+    room_send, send = _real_sends(move)
 
     with _matrix(move, history, send=send) as mocks:
         payload = await _run()
@@ -779,7 +771,7 @@ async def test_move_thread_sends_each_copy_of_a_reply_with_tool_calls_whole(tmp_
     assert payload["copied"] == 3
     planned = [call.args[2] for call in mocks.send.await_args_list[1:3]]
     assert [copy["body"] for copy in planned] == [reply, f"{move.ids['research']}: {reply}"]
-    sent = [call.kwargs["content"] for call in client.room_send.await_args_list[1:3]]
+    sent = [call.kwargs["content"] for call in room_send.await_args_list[1:3]]
     without_markers = ["Checking.\n\nDone.", f"{move.ids['research']}: Checking.\n\nDone."]
     assert [copy["body"] for copy in sent] == (
         without_markers if events == [_SHELL_CALL] else [reply, planned[1]["body"]]
@@ -813,14 +805,14 @@ async def test_move_thread_copies_the_calls_of_a_reply_a_read_put_back_in_its_te
     assert held["body"] == "Checking.\n\nDone."
     history = _thread(move)
     history[2] = _message(sender, held if held_without_markers else built, "$reply:localhost")
-    client, send = _real_sends()
+    room_send, send = _real_sends(move)
 
     with _matrix(move, history, send=send) as mocks:
         payload = await _run()
 
     assert payload["status"] == "ok"
     planned = mocks.send.await_args_list[2].args[2]
-    sent = client.room_send.await_args_list[2].kwargs["content"]
+    sent = room_send.await_args_list[2].kwargs["content"]
     assert planned["body"] == f"{said_by}{held['body'] if held_without_markers else reply}"
     assert (TOOL_TRACE_CONTENT_KEY in planned) is not held_without_markers
     assert sent["body"] == f"{said_by}Checking.\n\nDone."
