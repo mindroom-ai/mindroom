@@ -24,18 +24,21 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 import pytest
 import uvicorn
+from cryptography.hazmat.primitives import serialization
 from fastapi import Depends, FastAPI, Header, HTTPException
 
 from mindroom.config.main import Config
 from mindroom.tailnet_ssh import session
-from mindroom.tailnet_ssh.projection import authorized_key_lines
-from mindroom.tailnet_ssh.store import Link, LinkBook, new_link, set_keys
+from mindroom.tailnet_ssh.projection import authorized_key_lines, signin_keys
+from mindroom.tailnet_ssh.store import new_link
 from mindroom.workers.backends.worker_security import docker_worker_security_options
 from mindroom.workers.models import WORKER_SSH_PORT
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
+
+    from mindroom.tailnet_ssh.store import Link
 
 pytestmark = [
     pytest.mark.e2e,
@@ -171,9 +174,9 @@ class _Primary:
     reports: list[dict[str, Any]] = field(default_factory=list)
     connects: list[_Connect] = field(default_factory=list)
 
-    def status(self, link_id: str) -> dict[str, Any] | None:
-        """Return what the gateway reported last of the link's node."""
-        return self.reports[-1]["links"].get(link_id) if self.reports else None
+    def removed(self, link_id: str) -> bool:
+        """Whether the latest report acknowledges completed retirement."""
+        return bool(self.reports and link_id in self.reports[-1]["removed"])
 
     def app(self) -> FastAPI:
         def authorized(authorization: Annotated[str | None, Header()] = None) -> None:
@@ -237,8 +240,6 @@ class _Node:
     owner: _Person
     row: dict[str, Any]
     root: Path | None = None
-    # What the gateway reported while the node waited for its login.
-    pending: dict[str, Any] | None = None
 
 
 @dataclass
@@ -252,7 +253,6 @@ class _Stack:
     # The gateway's volume of node keys.
     state: str
     config: Config
-    book: LinkBook = field(default_factory=LinkBook)
     nodes: dict[str, _Node] = field(default_factory=dict)
     # How many connections the tests opened that each link's connect call is for, by link id.
     opened: dict[str, int] = field(default_factory=dict)
@@ -398,7 +398,7 @@ def _assert_turned_away(stack: _Stack, person: _Person, node: _Node) -> None:
     refusal = f"link {node.link.id}: closed a connection, its peer is not the link's login"
     refused, asked = _logs(stack.gateway).count(refusal), len(stack.primary.connects)
     done = subprocess.run(
-        [*_client(stack.tailnet, person), node.link.hostname, "true"],
+        [*_client(stack.tailnet, person, key=node.owner.key), node.link.hostname, "true"],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -451,7 +451,7 @@ def _own(folder: Path, owner: str) -> None:
 
 def _project(stack: _Stack, node: _Node) -> None:
     """Write sshd's files for the link with its owner's keys into its worker's root, as the primary and its uid."""
-    key_lines = authorized_key_lines(stack.config, stack.book, node.owner.requester_id)
+    key_lines = authorized_key_lines(signin_keys(stack.config, node.owner.requester_id))
     _docker(
         *("run", "--rm", "--interactive", "--user", "1000:1000", "--volume", f"{node.root}:{_WORKER_ROOT}"),
         *(_WORKER_IMAGE, "python", "-c", _WRITE_PROJECTION, _PROJECTION),
@@ -489,23 +489,22 @@ def _add_link(
     owner: _Person,
     hostname: str,
     *,
-    allowed_login: str | None = None,
     worker: bool = True,
 ) -> _Node:
-    """Add a link that is on, as the portal's connect does, with a worker that runs sshd unless ``worker`` is false."""
-    link = new_link(owner.requester_id, hostname.replace("-", "_"), f"worker-{hostname}", hostname, now=time.time())
+    """Publish one operator-tailnet node, optionally with a worker already listening."""
+    link = new_link(owner.requester_id, hostname.replace("-", "_"))
     row = {
         "id": link.id,
-        "hostname": hostname,
+        "hostname": link.hostname,
         "desired": "on",
-        "allowed_login": allowed_login,
-        "closed_before": link.closed_before,
-        "login_after": link.login_after,
+        "allowed_login": stack.config.tailnet_ssh.logins[owner.requester_id],
+        "access_revision": _revision(stack, owner),
     }
     node = stack.nodes[hostname] = _Node(link, owner, row)
-    stack.book.links.append(link)
+    key = serialization.load_ssh_private_key(link.host_key.encode(), password=None).public_key()
     with (stack.tailnet.folder / "known_hosts").open("a", encoding="utf-8") as known_hosts:
-        known_hosts.write(f"{hostname} {link.host_public_key}\n")
+        host_key = key.public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode()
+        known_hosts.write(f"{hostname} {host_key}\n")
     if worker:
         _start_worker(stack, node)
     stack.primary.rows.append(row)
@@ -534,41 +533,21 @@ def _await_admitted(stack: _Stack, node: _Node) -> None:
     stack.opened[link_id] = stack.opened.get(link_id, 0) + 1
 
 
-def _enrol(stack: _Stack, node: _Node) -> None:
-    """Sign the link's node in as its owner, by the login URL the gateway reports, and admit that login from then on.
-
-    A node with a worker is returned once the gateway took a connection of that login to it.
-    """
-    link_id = node.link.id
-
-    def reported(state: str, told: str) -> dict[str, Any] | None:
-        status = stack.primary.status(link_id)
-        return status if status and status["state"] == state and status[told] else None
-
-    node.pending = _eventually(f"the login URL of {node.link.hostname}", lambda: reported("needs_login", "login_url"))
-    auth_id = node.pending["login_url"].rsplit("/", 1)[1]
-    _docker(
-        *("exec", stack.tailnet.headscale, "headscale", "auth", "register"),
-        *("--auth-id", auth_id, "--user", node.owner.login),
-    )
-    running = _eventually(f"{node.link.hostname} to run", lambda: reported("running", "login_name"))
-    node.row["allowed_login"] = running["login_name"]
-    if node.root is not None:
-        _await_admitted(stack, node)
+def _revision(stack: _Stack, person: _Person) -> str:
+    login = stack.config.tailnet_ssh.logins[person.requester_id]
+    keys = signin_keys(stack.config, person.requester_id)
+    return hashlib.sha256(json.dumps([login, sorted(keys)]).encode()).hexdigest()
 
 
-def _set_keys(stack: _Stack, person: _Person, lines: list[str]) -> None:
-    """Replace the person's keys as the portal does: store them, rewrite their workers' files, close their sessions."""
-    set_keys(stack.book, person.requester_id, lines, now=time.time())
-    for node in stack.nodes.values():
-        if node.owner == person:
-            if node.root is not None:
-                _project(stack, node)
-            node.row["closed_before"] = node.link.closed_before
+def _set_key(stack: _Stack, node: _Node, key: str) -> None:
+    """Replace the owner's configured key, then refresh the projection and revision."""
+    stack.config.tailnet_ssh.authorized_keys[node.owner.requester_id] = [key]
+    _project(stack, node)
+    node.row["access_revision"] = _revision(stack, node.owner)
 
 
 @contextmanager
-def _gateway(tailnet: _Tailnet, name: str, config: Config, *, auth_key: str | None = None) -> Iterator[_Stack]:
+def _gateway(tailnet: _Tailnet, name: str, config: Config, *, auth_key: str) -> Iterator[_Stack]:
     """Run the gateway image as the chart runs it, against a fake primary of its own."""
     primary = _Primary()
     listener = uvicorn.Config(primary.app(), host="127.0.0.1", port=primary.port, log_level="warning", ws="none")
@@ -581,7 +560,7 @@ def _gateway(tailnet: _Tailnet, name: str, config: Config, *, auth_key: str | No
         "TAILNET_SSH_PRIMARY_URL": f"http://127.0.0.1:{primary.port}",
         "TAILNET_SSH_GATEWAY_TOKEN": primary.token,
         "TAILNET_SSH_LOGIN_SERVER": tailnet.login_server,
-        **({"TAILNET_SSH_AUTH_KEY": auth_key} if auth_key else {}),
+        "TAILNET_SSH_AUTH_KEY": auth_key,
     }
     try:
         _eventually("the fake primary to listen", lambda: served.started, seconds=10)
@@ -650,16 +629,6 @@ def _headscale(folder: Path, logins: Sequence[str], *, base_domain: str, v4: str
         _remove(prefix)
 
 
-@contextmanager
-def _login_stack(tailnet: _Tailnet, login: str) -> Iterator[_Stack]:
-    """Run a gateway that enrols by login URL, with a link and a worker for the person, who signed its node in."""
-    person = tailnet.people[login]
-    with _gateway(tailnet, "login", Config()) as stack:
-        set_keys(stack.book, person.requester_id, [person.public_key], now=time.time())
-        _enrol(stack, _add_link(stack, person, f"mind-{login}"))
-        yield stack
-
-
 @pytest.fixture(scope="module")
 def tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
     """A tailnet with a device each of alice and bob."""
@@ -670,40 +639,16 @@ def tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
 
 
 @pytest.fixture(scope="module")
-def other_tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
-    """A second tailnet, of a Headscale that shares nothing with the first, with another device of bob."""
-    folder = tmp_path_factory.mktemp("other-tailnet")
-    domain, v4, v6 = "other.test", "100.96.0.0/16", "fd7a:115c:a1e0:b::/64"
-    with _headscale(folder, ("bob",), base_domain=domain, v4=v4, v6=v6) as tailnet:
-        yield tailnet
-
-
-@pytest.fixture(scope="module")
 def stack(tailnet: _Tailnet) -> Iterator[_Stack]:
-    """A gateway that enrols by login URL, with a link and a worker for alice, who signed its node in."""
-    with _login_stack(tailnet, "alice") as stack:
-        yield stack
-
-
-@pytest.fixture(scope="module")
-def stack_other_tailnet(other_tailnet: _Tailnet) -> Iterator[_Stack]:
-    """A gateway in the second tailnet, with a link and a worker for bob, who signed its node in there."""
-    with _login_stack(other_tailnet, "bob") as stack:
-        yield stack
-
-
-@pytest.fixture(scope="module")
-def stack_auth_key(tailnet: _Tailnet) -> Iterator[_Stack]:
-    """A gateway that enrols with an operator's pre-auth key, with a link and a worker for alice."""
-    alice = tailnet.people["alice"]
-    # With an operator key the config names the login a person's link admits, and may name their SSH keys.
-    operated = {
-        "logins": {alice.requester_id: alice.login},
-        "authorized_keys": {alice.requester_id: [alice.public_key]},
-    }
-    config = Config(tailnet_ssh=operated)
+    """Two owners and their nodes in one operator-managed tailnet."""
+    config = Config(tailnet_ssh={
+        "logins": {person.requester_id: person.login for person in tailnet.people.values()},
+        "authorized_keys": {person.requester_id: [person.public_key] for person in tailnet.people.values()},
+    })
     with _gateway(tailnet, "key", config, auth_key=_pre_auth_key(tailnet.headscale, "operator")) as stack:
-        _add_link(stack, alice, "mind-key", allowed_login=config.tailnet_ssh.logins[alice.requester_id])
+        for person in tailnet.people.values():
+            node = _add_link(stack, person, f"mind-{person.login}")
+            _await_admitted(stack, node)
         yield stack
 
 
@@ -711,28 +656,12 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_enrol_by_login_url_then_exec(stack: _Stack) -> None:
-    """A node signs in by the login URL its gateway reports, and its login's command runs in the worker."""
+def test_pre_auth_node_exec_uses_a_read_only_worker_projection(stack: _Stack) -> None:
+    """The operator-enrolled node admits the configured owner to its worker's restricted SSH server."""
     alice = stack.tailnet.people["alice"]
     node = stack.nodes["mind-alice"]
-    assert node.pending is not None
-    assert node.pending["state"] == "needs_login"
-    login_url = node.pending["login_url"]
-    assert login_url.startswith(f"{stack.tailnet.login_server}/register/")
-    status = stack.primary.status(node.link.id)
-    assert status is not None
-    assert (status["state"], status["login_url"], status["login_name"]) == ("running", None, "alice")
-    domain = stack.tailnet.base_domain
-    assert (status["dns_name"], status["tailnet"]) == (f"mind-alice.{domain}", domain)
-    assert stack.primary.reports[-1]["enrollment"] == "login"
-
-    # The login URL signs a machine in to the tailnet of whoever opens it, so it is kept nowhere: not in the gateway's
-    # log, and not in its volume, which does hold the node's keys.
-    auth_id = login_url.rsplit("/", 1)[1]
-    assert auth_id not in _logs(stack.gateway)
+    assert node.link.hostname in _signed_in(stack.tailnet)
     assert _in_state_volume(stack, "test", "-s", f"/state/{node.link.id}/tailscaled.state").returncode == 0
-    naming = _in_state_volume(stack, "grep", "-rlF", "--", auth_id, "/state")
-    assert (naming.returncode, naming.stdout) == (1, ""), naming.stderr
 
     # The session is the worker's user in the launch's folder, and sshd's files are that user's, who cannot write them.
     seen = f"stat --format %u:%a {_PROJECTION} {_PROJECTION}/ssh_host_ed25519_key; touch {_PROJECTION}/planted"
@@ -741,25 +670,6 @@ def test_enrol_by_login_url_then_exec(stack: _Stack) -> None:
     assert (done.returncode, "Read-only file system" in done.stderr) == (1, True), done.stderr
     asked = stack.primary.connects[-1]
     assert (asked.link_id, asked.peer) == (node.link.id, {"peer_login": "alice", "peer_node": "alice-laptop"})
-
-
-def test_enrol_by_pre_auth_key(stack_auth_key: _Stack) -> None:
-    """With an operator's key a node runs without a login URL, and admits the login the config names."""
-    stack = stack_auth_key
-    node = stack.nodes["mind-key"]
-
-    def running() -> bool:
-        status = stack.primary.status(node.link.id)
-        return status is not None and status["state"] == "running" and status["login_name"] is not None
-
-    _eventually("the node to run", running)
-    reports = [report for report in stack.primary.reports if node.link.id in report["links"]]
-    assert {report["enrollment"] for report in reports} == {"auth_key"}
-    assert {report["links"][node.link.id]["login_url"] for report in reports} == {None}
-    assert reports[-1]["links"][node.link.id]["login_name"] == "operator"
-
-    done = _run_ssh(stack, node, [*_client(stack.tailnet, stack.tailnet.people["alice"]), "mind-key", "id -u"])
-    assert (done.returncode, done.stdout.strip()) == (0, "1000"), done.stderr
 
 
 def test_pty_scp_sftp_rsync(stack: _Stack, tmp_path: Path) -> None:
@@ -858,55 +768,36 @@ def test_wrong_key_and_password_are_refused(stack: _Stack, tmp_path: Path) -> No
         assert "Permission denied (publickey)." in refused.stderr
 
 
-def test_second_user_in_same_tailnet_is_refused_before_connect(stack: _Stack) -> None:
-    """Another login of the same tailnet, which its policy lets reach the node, gets no connect call."""
-    _assert_turned_away(stack, stack.tailnet.people["bob"], stack.nodes["mind-alice"])
-
-
-def test_two_links_two_users_cannot_cross(stack: _Stack, stack_other_tailnet: _Stack) -> None:
-    """Each of two people, in a tailnet of their own, reaches the node they signed in, and neither the other's."""
-    alice, bob = stack.tailnet.people["alice"], stack_other_tailnet.tailnet.people["bob"]
-    for own, person, other, theirs in (
-        (stack, alice, stack_other_tailnet, bob),
-        (stack_other_tailnet, bob, stack, alice),
-    ):
-        node, elsewhere = own.nodes[f"mind-{person.login}"], other.nodes[f"mind-{theirs.login}"]
-        done = _run_ssh(own, node, [*_client(own.tailnet, person), node.link.hostname, "id -u"])
+def test_two_links_in_one_tailnet_refuse_cross_login_even_with_the_right_key(stack: _Stack) -> None:
+    """TCP reaches both nodes, but WhoIs rejects each other login before the primary sees a connect."""
+    for login, other in (("alice", "bob"), ("bob", "alice")):
+        person = stack.tailnet.people[login]
+        own, theirs = stack.nodes[f"mind-{login}"], stack.nodes[f"mind-{other}"]
+        assert {own.link.hostname, theirs.link.hostname} <= _peers(person)
+        done = _run_ssh(stack, own, [*_client(stack.tailnet, person), own.link.hostname, "id -u"])
         assert (done.returncode, done.stdout.strip()) == (0, "1000"), done.stderr
-        assert own.primary.connects[-1].peer["peer_login"] == person.login
-
-        # The other tailnet's node is no machine of this one, so its name leads nowhere and its gateway sees nobody.
-        peers = _peers(person)
-        assert node.link.hostname in peers
-        assert elsewhere.link.hostname not in peers
-        seen = _logs(other.gateway), len(other.primary.connects)
-        missed = subprocess.run(
-            [*_client(own.tailnet, person), "-o", "ConnectTimeout=30", elsewhere.link.hostname, "true"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        assert missed.returncode == 255
-        assert (_logs(other.gateway), len(other.primary.connects)) == seen
+        assert stack.primary.connects[-1].peer["peer_login"] == person.login
+        _assert_turned_away(stack, person, theirs)
 
 
-def test_key_removal_cuts_an_open_session(stack: _Stack) -> None:
+def test_key_removal_cuts_an_open_session(stack: _Stack, tmp_path: Path) -> None:
     """Removing a person's key ends their open session within the gateway's next passes, and admits no new one."""
     alice = stack.tailnet.people["alice"]
     node = stack.nodes["mind-alice"]
     ssh = _client(stack.tailnet, alice)
+    new_key = tmp_path / "replacement"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", new_key], check=True)
+    replacement = new_key.with_suffix(".pub").read_text().strip()
     with _ssh_session(stack, node, [*ssh, "mind-alice", "echo up; sleep 300"]) as held:
         _await_up(held)
         try:
-            _set_keys(stack, alice, [])
+            _set_key(stack, node, replacement)
             assert held.wait(timeout=15) == 255
             refused = _run_ssh(stack, node, [*ssh, "mind-alice", "true"])
             assert refused.returncode == 255
             assert "Permission denied (publickey)." in refused.stderr
         finally:
-            _set_keys(stack, alice, [alice.public_key])
+            _set_key(stack, node, alice.public_key)
 
 
 def test_connection_held_through_a_120s_start(stack: _Stack) -> None:
@@ -935,38 +826,21 @@ def test_removing_logs_out_and_gateway_restart_keeps_others(stack: _Stack) -> No
     alice = stack.tailnet.people["alice"]
     kept = stack.nodes["mind-alice"]
     gone, late = (_add_link(stack, alice, hostname, worker=False) for hostname in ("mind-gone", "mind-late"))
-    for node in (gone, late):
-        _enrol(stack, node)
-    assert {"mind-gone", "mind-late"} <= _signed_in(stack.tailnet)
+    _eventually("both nodes to join", lambda: {"mind-gone", "mind-late"} <= _signed_in(stack.tailnet))
 
-    def removed(node: _Node) -> bool:
-        status = stack.primary.status(node.link.id)
-        return status is not None and status["state"] == "removed"
-
-    gone.row["desired"] = "removing"
-    _eventually("the removed link's node to be gone", lambda: removed(gone))
+    gone.row.update(desired="removing", allowed_login=None, access_revision="")
+    _eventually("the removed link's node to be gone", lambda: stack.primary.removed(gone.link.id))
     assert "mind-gone" not in _signed_in(stack.tailnet)
     assert _in_state_volume(stack, "test", "-e", f"/state/{gone.link.id}").returncode == 1
     stack.primary.rows.remove(gone.row)
 
     # A restart, with a link removed while the gateway is down: its node is signed out from the keys in the volume.
     _docker("stop", stack.gateway)
-    late.row["desired"] = "removing"
-    before = len(stack.primary.reports)
+    late.row.update(desired="removing", allowed_login=None, access_revision="")
     _docker("start", stack.gateway)
-    _eventually("the link removed meanwhile to be gone", lambda: removed(late))
+    _eventually("the link removed meanwhile to be gone", lambda: stack.primary.removed(late.link.id))
     assert "mind-late" not in _signed_in(stack.tailnet)
     assert _in_state_volume(stack, "test", "-e", f"/state/{late.link.id}").returncode == 1
     stack.primary.rows.remove(late.row)
 
-    def running() -> bool:
-        status = stack.primary.status(kept.link.id)
-        return len(stack.primary.reports) > before and status is not None and status["state"] == "running"
-
-    _eventually("the kept link's node to run again", running)
-    since = [
-        report["links"][kept.link.id] for report in stack.primary.reports[before:] if kept.link.id in report["links"]
-    ]
-    assert {status["login_url"] for status in since} == {None}
-    done = _run_ssh(stack, kept, [*_client(stack.tailnet, alice), "mind-alice", "id -u"])
-    assert (done.returncode, done.stdout.strip()) == (0, "1000"), done.stderr
+    _await_admitted(stack, kept)  # StrictHostKeyChecking requires the same pinned key after restart.

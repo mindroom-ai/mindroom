@@ -32,7 +32,6 @@ from mindroom.api.tailnet_ssh_gateway import (
     active_tailnet_ssh_worker_keys,
     gateway_app,
     serve_tailnet_ssh_gateway_listener,
-    tailnet_ssh_status,
 )
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -53,15 +52,13 @@ from mindroom.tailnet_ssh import links as link_service
 from mindroom.tailnet_ssh.links import (
     ConnectRefused,
     GatewayStatus,
-    LinkReport,
-    LinkStatus,
-    _GatewayReport,
-    _resolve_target,
+    StatusReport,
+    _worker_key,
 )
 from mindroom.tailnet_ssh.store import Link, new_link, read_links, update_links
 from mindroom.worker_computer.sessions import ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
-from mindroom.workers.models import WorkerMaintenanceResult
+from mindroom.workers.models import WorkerMaintenanceResult, WorkerSpec, WorkerSshEndpoint
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.test_computer_sessions import authorized_target
 
@@ -74,22 +71,23 @@ PEER = {"peer_login": "alice@github", "peer_node": "laptop"}
 # One well-formed call of each route.
 CALLS: list[tuple[str, str, dict[str, object] | None]] = [
     ("GET", "/links", None),
-    ("POST", "/status", {"enrollment": "login", "links": {}}),
+    ("POST", "/status", {"open_connections": {}, "removed": []}),
     ("POST", "/links/abc/connect", PEER),
 ]
 ROUTES = [(method, path) for method, path, _body in CALLS]
-LOGIN_URL = "https://login.tailscale.com/a/1c0ffee"
-BAD_BODY = "The request body is not what the gateway contract describes."
+PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPVHVwHKbi4VF0jfKNiYpfwAeEgeTqB6B8NVRZvzjnDS alice@laptop"
+BAD_BODY = "Invalid gateway request body."
 # What the Go gateway's own tests parse and send; the two sides are checked against each other nowhere else.
 GATEWAY_FIXTURES = Path(__file__).parents[2] / "tailnet-gateway" / "testdata"
 # Bodies neither POST route takes: not JSON, not an object, and an object without the route's fields.
 BAD_BODIES = [
     (path, body)
     for path in ("/status", "/links/abc/connect")
-    for body in (b"", b"not json", b"[]", b"{}", b'{"peer_login": 7, "peer_node": "laptop", "enrollment": "oauth"}')
+    for body in (b"", b"not json", b"[]", b"{}", b'{"peer_login": 7, "peer_node": "laptop"}')
 ]
 _DATA: dict[str, Any] = {
     "models": {"default": {"provider": "openai", "id": "m"}},
+    "tailnet_ssh": {"logins": {ALICE: "alice@github"}, "authorized_keys": {ALICE: [PUBLIC_KEY]}},
     "agents": {
         "mine": {
             "display_name": "Mine",
@@ -149,27 +147,15 @@ def client(api_app: FastAPI) -> TestClient:
 
 
 def _stored_link(api_app: FastAPI, agent: str = "mine") -> Link:
-    """Store Alice's link to the agent, enrolled, for the worker her turns run in."""
-    config, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
-    now = time.time()
-    link = new_link(ALICE, agent, _resolve_target(config, paths, ALICE, agent).worker_key, agent, now=now)
-    link = link.model_copy(update={"enrolled_login": "alice@github", "enrolled_at": now})
+    """Store Alice's link to the agent."""
+    _, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
+    link = new_link(ALICE, agent)
     update_links(paths, lambda book: book.links.append(link))
     return link
 
 
-def _report(**fields: object) -> dict[str, object]:
-    report: dict[str, object] = {
-        "state": "running",
-        "login_url": None,
-        "tailnet": "tail1234.ts.net",
-        "dns_name": "mine.tail1234.ts.net",
-        "login_name": "alice@github",
-        "key_expiry": None,
-        "open_connections": 0,
-        "last_error": None,
-    }
-    return report | fields
+def _status(api_app: FastAPI) -> GatewayStatus | None:
+    return config_lifecycle.app_state(api_app).tailnet_ssh_status
 
 
 def _unload_config(api_app: FastAPI) -> None:
@@ -217,20 +203,20 @@ def test_get_links_returns_desired_rows(
 ) -> None:
     """A stored link that is on is one row of what the gateway is to run, read from the store off the event loop."""
     link = _stored_link(api_app)
-    on_event_loop = calls_on_event_loop(tailnet_ssh_gateway, "desired_links")
+    on_event_loop = calls_on_event_loop(link_service, "_list_workers")
 
     response = client.get("/links", headers=AUTH)
 
     assert response.status_code == 200
     assert on_event_loop == [False]
+    assert len(response.json()[0]["access_revision"]) == 64
     assert response.json() == [
         {
             "id": link.id,
             "hostname": "mine",
             "desired": "on",
             "allowed_login": "alice@github",
-            "closed_before": link.closed_before,
-            "login_after": link.login_after,
+            "access_revision": response.json()[0]["access_revision"],
         },
     ]
 
@@ -246,35 +232,32 @@ def test_get_links_clears_the_keys_of_a_removed_links_worker(
 
     Its sshd's stop is left to run apart from the answer.
     """
-    _config, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
-    moved = new_link(ALICE, "mine", "v1:elsewhere:user_agent:~@alice:example.org:mine", "mine", now=time.time())
-    update_links(paths, lambda book: book.links.append(moved))
+    config, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
+    moved = _stored_link(api_app)
+    del config.agents["mine"]
     ssh_dir = tmp_path / "ssh"
-    link_service.write_projection(ssh_dir, moved, ["restrict,pty ssh-ed25519 AAAA alice@laptop"])
-    handle = SimpleNamespace(worker_key=moved.worker_key, ssh_endpoint=SimpleNamespace(projection_dir=ssh_dir))
+    link_service.write_projection(ssh_dir, moved, [f"restrict,pty {PUBLIC_KEY}"])
+    handle = SimpleNamespace(worker_key=_worker_key(paths, ALICE, "mine"), ssh_endpoint=SimpleNamespace(projection_dir=ssh_dir))
     manager = MagicMock(list_workers=MagicMock(return_value=[handle]))
     manager.__enter__.return_value = manager
     monkeypatch.setattr(link_service, "lease_configured_primary_worker_manager", lambda _paths: manager)
-    stops: list[object] = []
-    monkeypatch.setattr(link_service, "_stop_in_background", lambda _paths, handles: stops.extend(handles))
-    on_event_loop = calls_on_event_loop(link_service, "_clear_revoked_workers")
+    on_event_loop = calls_on_event_loop(link_service, "clear_authorized_keys")
 
     response = client.get("/links", headers=AUTH)
 
     assert [(row["id"], row["desired"]) for row in response.json()] == [(moved.id, "removing")]
     assert (ssh_dir / "authorized_keys").read_text() == ""
     assert on_event_loop == [False]
-    assert stops == [handle]
 
 
 @pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize("index", ["fresh", "invalidated"])
-def test_get_links_suspends_a_room_granted_link_while_membership_is_pending(
+def test_get_links_omits_a_room_granted_link_while_membership_is_pending(
     api_app: FastAPI,
     client: TestClient,
     index: str,
 ) -> None:
-    """At a primary's start, or after a reload, room membership is not known: a room-granted link waits, suspended."""
+    """At a primary's start, or after a reload, room membership is not known: a room-granted link is omitted, not retired."""
     data = deepcopy(_DATA)
     data["agents"]["research"] = {
         "display_name": "Research",
@@ -293,9 +276,7 @@ def test_get_links_suspends_a_room_granted_link_while_membership_is_pending(
     response = client.get("/links", headers=AUTH)
 
     assert response.status_code == 200
-    assert [(row["id"], row["desired"], row["closed_before"]) for row in response.json()] == [
-        (link.id, "suspended", link.closed_before),
-    ]
+    assert response.json() == []
     assert read_links(paths).by_id(link.id) == link
 
 
@@ -311,66 +292,41 @@ def test_status_is_stored_and_answers_204(
     response = client.post(
         "/status",
         headers=AUTH,
-        json={"enrollment": "login", "links": {link.id: _report(open_connections=2)}},
+        json={"open_connections": {link.id: 2}, "removed": []},
     )
 
     assert (response.status_code, response.content) == (204, b"")
     assert on_event_loop == [False]
-    status = tailnet_ssh_status(api_app)
-    assert status is not None
-    assert read_links(config_lifecycle.read_app_committed_runtime_config(api_app)[1]).enrollment == "login"
-    assert status.report.links[link.id].state == "running"
-    assert status.report.links[link.id].open_connections == 2
-    assert active_tailnet_ssh_worker_keys(api_app) == {link.worker_key}
+    paths = config_lifecycle.read_app_committed_runtime_config(api_app)[1]
+    assert active_tailnet_ssh_worker_keys(api_app) == {_worker_key(paths, ALICE, "mine")}
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        {"links": {}},
-        {"enrollment": "oauth", "links": {}},
-        {"enrollment": "login", "links": {"abc": {"state": "sleeping"}}},
-        {"enrollment": "login", "links": {"abc": _report(open_connections="many")}},
-    ],
-)
+@pytest.mark.parametrize("body", [
+    {"open_connections": {}},
+    {"removed": [], "open_connections": {"abc": -1}},
+    {"removed": [], "open_connections": {"abc": "2"}},
+    {"removed": [], "open_connections": {"abc": True}},
+    {"removed": [1], "open_connections": {}},
+    {"removed": [], "open_connections": {}, "unexpected": "secret-value"},
+])
 def test_status_outside_the_contract_is_refused_and_changes_nothing(
-    api_app: FastAPI,
-    client: TestClient,
-    body: dict[str, Any],
+    api_app: FastAPI, client: TestClient, body: dict[str, object],
 ) -> None:
-    """A report the contract does not describe answers 422, repeats nothing it carried, and changes nothing.
-
-    The report holds login URLs, which leave the primary only for a link's owner.
-    """
-    body = {**body, "links": {**body["links"], "def": _report(login_url=LOGIN_URL)}}
-
+    """Invalid status never publishes activity, retires IDs, or echoes values."""
     response = client.post("/status", headers=AUTH, json=body)
-
     assert (response.status_code, response.json()) == (422, {"detail": BAD_BODY})
-    assert LOGIN_URL not in response.text
-    assert tailnet_ssh_status(api_app) == GatewayStatus()
+    assert _status(api_app) == GatewayStatus()
 
 
-def test_a_refused_body_logs_how_many_errors_and_their_kinds_but_never_where_or_what(client: TestClient) -> None:
-    """The operator reads how the body broke the contract, without any value or key the gateway sent.
-
-    An error's location holds the report's own keys, such as link ids, so a malformed report could put a login URL
-    there; the log names no location. At most ten kinds are listed.
-    """
-    links = {LOGIN_URL: _report(state="sleeping")} | {f"link{index}": _report(state="sleeping") for index in range(10)}
-    body = {"enrollment": "oauth", "links": links}
-
+def test_a_refused_body_does_not_log_request_keys_or_values(client: TestClient) -> None:
+    """Validation locations and rejected values may be sensitive."""
+    body = {"open_connections": {"sensitive-field": "sensitive-value"}, "removed": []}
     with capture_logs() as logs:
         response = client.post("/status", headers=AUTH, json=body)
-
     assert response.status_code == 422
-    refused = [log for log in logs if log["event"] == "tailnet_ssh_gateway_body_refused"]
-    assert [
-        (log["log_level"], log["model"], log["error_count"], log["error_types"], "errors" in log) for log in refused
-    ] == [("warning", "StatusReport", 12, ["literal_error"] * 10, False)]
-    assert "oauth" not in repr(logs)
-    assert LOGIN_URL not in repr(logs)
-    assert "link0" not in repr(logs)
+    assert "sensitive" not in repr(logs)
+    assert "sensitive" not in response.text
+    assert any(log["event"] == "tailnet_ssh_gateway_body_refused" for log in logs)
 
 
 @pytest.mark.parametrize(("path", "body"), BAD_BODIES)
@@ -410,8 +366,11 @@ def test_connect_answers_endpoint_or_refusal_detail(
     assert (refused.status_code, refused.json()) == (409, {"detail": "x"})
     config, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
     state = config_lifecycle.app_state(api_app)
-    expected = (config, paths, state.runtime.agent_reply_memberships)
-    assert calls == [(*expected, "abc", "alice@github", "laptop")] * 2
+    for read, *parameters in calls:
+        assert callable(read)
+        assert read() == (config, paths)
+        assert parameters == [state.runtime.agent_reply_memberships, "abc", "alice@github", "laptop"]
+
 
 
 def test_connect_of_an_unknown_link_is_the_services_404(client: TestClient) -> None:
@@ -422,50 +381,71 @@ def test_connect_of_an_unknown_link_is_the_services_404(client: TestClient) -> N
 
 
 def test_the_go_gateways_fixtures_are_what_this_listener_takes_and_answers(
-    api_app: FastAPI,
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
+    api_app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The bodies the Go gateway sends are read field by field, and ``GET /links`` answers rows it can parse."""
+    """Both row variants and both POST bodies match the gateway's shared fixtures."""
     status_body = (GATEWAY_FIXTURES / "status.json").read_bytes()
     connect_body = (GATEWAY_FIXTURES / "connect.json").read_bytes()
-    gateway_rows = json.loads((GATEWAY_FIXTURES / "links.json").read_bytes())
-    sent_peer = json.loads(connect_body)
-    ((link_id, sent_report),) = json.loads(status_body)["links"].items()
-    link = _stored_link(api_app)
-    _config, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
-    update_links(paths, lambda book: setattr(book.by_id(link.id), "id", link_id))
+    on, removing = expected = json.loads((GATEWAY_FIXTURES / "links.json").read_text())
+    link_id, removed_id = on["id"], removing["id"]
+    config, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
+    config.tailnet_ssh.logins[ALICE] = "bas@github"
+    link = new_link(ALICE, "mine").model_copy(update={"id": link_id, "hostname": "mind-bas"})
+    deleted = new_link(ALICE, "code").model_copy(update={"id": removed_id})
+    update_links(paths, lambda book: book.links.extend([link, deleted]))
     peers: list[tuple[object, ...]] = []
 
     async def connect(*args: object) -> tuple[str, int]:
         peers.append(args[-3:])
-        return ("10.0.0.5", 2222)
+        return "10.0.0.5", 2222
 
     monkeypatch.setattr(tailnet_ssh_gateway, "connect", connect)
-
-    rows = client.get("/links", headers=AUTH).json()
+    assert client.get("/links", headers=AUTH).json() == expected
     posted = client.post("/status", headers=AUTH, content=status_body)
-    connected = client.post(f"/links/{link_id}/connect", headers=AUTH, content=connect_body)
-
-    # A field the listener does not know would be dropped without a word, so each one is read back.
     assert (posted.status_code, posted.content) == (204, b"")
-    status = tailnet_ssh_status(api_app)
-    assert status is not None
-    assert status.report.enrollment == json.loads(status_body)["enrollment"] == "auth_key"
-    assert sent_report.keys() == LinkReport.model_fields.keys()
-    assert None not in sent_report.values()
-    report = status.report.links[link_id]
-    assert {field: getattr(report, field) for field in sent_report} == sent_report
+    status = StatusReport.model_validate_json(status_body)
+    assert status.open_connections == {link_id: 2}
+    assert read_links(paths).links == [link]
+    assert active_tailnet_ssh_worker_keys(api_app) == {_worker_key(paths, ALICE, "mine")}
+    connected = client.post(f"/links/{link_id}/connect", headers=AUTH, content=connect_body)
     assert (connected.status_code, connected.json()) == (200, {"host": "10.0.0.5", "port": 2222})
-    assert peers == [(link_id, sent_peer["peer_login"], sent_peer["peer_node"])]
-    # The rows have the keys and value types of the ones the Go client's test parses.
-    assert [row["id"] for row in rows] == [link_id]
-    assert {row["desired"] for row in gateway_rows} == {"on", "removing"}
-    for row in rows:
-        assert all(row.keys() == gateway_row.keys() for gateway_row in gateway_rows)
-        for key, value in row.items():
-            assert type(value) in {type(gateway_row[key]) for gateway_row in gateway_rows}, key
-    assert {type(gateway_row["allowed_login"]) for gateway_row in gateway_rows} == {str, type(None)}
+    assert peers == [(link_id, "bas@github", "laptop")]
+
+
+@pytest.mark.parametrize("revoked", ["login", "keys", "opt-in"])
+def test_connect_rereads_the_committed_config_replaced_during_wake(
+    api_app: FastAPI, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revoked: str,
+) -> None:
+    """A real committed snapshot change during ensure_worker must prevent projection and /ssh/start."""
+    link = _stored_link(api_app)
+    original, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
+    changed = original.model_copy(deep=True)
+    if revoked == "login":
+        changed.tailnet_ssh.logins[ALICE] = "new@login"
+    elif revoked == "keys":
+        changed.tailnet_ssh.authorized_keys.clear()
+    else:
+        changed.agents["mine"].tailnet_ssh = False
+    state = config_lifecycle.require_api_state(api_app)
+    ssh = tmp_path / "ssh"
+    manager = MagicMock()
+    manager.__enter__.return_value = manager
+
+    def wake(spec: WorkerSpec) -> SimpleNamespace:
+        assert spec.worker_key == _worker_key(paths, ALICE, "mine")
+        with state.config_lock:
+            state.snapshot = config_lifecycle.ApiSnapshot(2, paths, runtime_config=changed)
+        return SimpleNamespace(worker_key=spec.worker_key, status="ready", ssh_endpoint=WorkerSshEndpoint("worker", 2222, ssh))
+
+    manager.ensure_worker.side_effect = wake
+    monkeypatch.setattr(link_service, "lease_configured_primary_worker_manager", lambda _paths: manager)
+    runner = MagicMock()
+    monkeypatch.setattr(link_service, "_start_sshd", runner)
+    reply = client.post(f"/links/{link.id}/connect", headers=AUTH, json=PEER)
+    manager.ensure_worker.assert_called_once()
+    assert reply.status_code == (403 if revoked == "login" else 409)
+    assert not ssh.exists()
+    runner.assert_not_called()
 
 
 @pytest.mark.parametrize(("method", "path", "body"), CALLS)
@@ -482,7 +462,7 @@ def test_config_not_loaded_answers_503(
     response = client.request(method, path, headers=AUTH, json=body)
 
     assert (response.status_code, response.json()) == (503, {"detail": "MindRoom's configuration is not loaded."})
-    assert tailnet_ssh_status(api_app) == GatewayStatus()
+    assert _status(api_app) == GatewayStatus()
 
 
 @pytest.mark.parametrize(("path", "body"), BAD_BODIES)
@@ -499,7 +479,7 @@ def test_an_unready_primary_answers_503_before_it_reads_a_body(
     off = client.post(path, headers=AUTH, content=body)
 
     assert (unloaded.status_code, unloaded.json()) == (503, {"detail": "MindRoom's configuration is not loaded."})
-    assert (off.status_code, off.json()) == (503, {"detail": "Tailnet SSH is off."})
+    assert (off.status_code, off.json()) == (503, {"detail": "Tailnet SSH is disabled."})
 
 
 @pytest.mark.parametrize(("method", "path", "body"), CALLS)
@@ -515,7 +495,7 @@ def test_routes_answer_503_once_tailnet_ssh_is_off(
 
     response = client.request(method, path, headers=AUTH, json=body)
 
-    assert (response.status_code, response.json()) == (503, {"detail": "Tailnet SSH is off."})
+    assert (response.status_code, response.json()) == (503, {"detail": "Tailnet SSH is disabled."})
 
 
 @pytest.mark.asyncio
@@ -538,7 +518,7 @@ async def test_listener_is_off_without_token_and_refuses_the_api_port(
         )
 
     async with listener(**{PORT_ENV: str(port)}):
-        assert tailnet_ssh_status(api_app) is None
+        assert _status(api_app) is None
         assert active_tailnet_ssh_worker_keys(api_app) == frozenset()
         with pytest.raises(ConnectionRefusedError):
             socket.create_connection(("127.0.0.1", port), timeout=1).close()
@@ -547,14 +527,14 @@ async def test_listener_is_off_without_token_and_refuses_the_api_port(
         with pytest.raises(ValueError, match=PORT_ENV):
             async with listener(**{TOKEN_ENV: "tok"}, **taken):
                 pass
-        assert tailnet_ssh_status(api_app) is None
+        assert _status(api_app) is None
 
     async with listener(**{TOKEN_ENV: "tok", PORT_ENV: str(port)}):
-        assert tailnet_ssh_status(api_app) == GatewayStatus()
+        assert _status(api_app) == GatewayStatus()
         async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
             assert (await http.get("/links")).status_code == 401
             assert (await http.get("/links", headers=AUTH)).json() == []
-    assert tailnet_ssh_status(api_app) is None
+    assert _status(api_app) is None
     socket.create_server(("127.0.0.1", port)).close()
 
 
@@ -618,18 +598,14 @@ def test_gateway_token_never_reaches_a_worker_env(pattern: str) -> None:
 
 def test_only_a_fresh_report_with_open_connections_holds_a_worker(api_app: FastAPI) -> None:
     """A link without connections holds nothing, and a report older than 90 seconds says nothing."""
-    status = tailnet_ssh_status(api_app)
+    status = _status(api_app)
     assert status is not None
-    links = {"busy": _link_status("worker-busy", 1), "quiet": _link_status("worker-quiet", 0)}
+    keys = frozenset({"worker-busy"})
 
-    status.report = _GatewayReport(time.monotonic(), links, "login")
+    status.report = (time.monotonic(), keys)
     assert active_tailnet_ssh_worker_keys(api_app) == {"worker-busy"}
-    status.report = _GatewayReport(time.monotonic() - 91, links, "login")
+    status.report = (time.monotonic() - 91, keys)
     assert active_tailnet_ssh_worker_keys(api_app) == frozenset()
-
-
-def _link_status(worker_key: str, open_connections: int) -> LinkStatus:
-    return LinkStatus("running", None, None, None, None, None, open_connections, None, worker_key)
 
 
 @pytest.mark.asyncio
@@ -638,9 +614,9 @@ async def test_both_maintenance_paths_touch_ssh_workers(api_app: FastAPI, monkey
 
     They touch the worker a Computer viewer holds as before.
     """
-    status = tailnet_ssh_status(api_app)
+    status = _status(api_app)
     assert status is not None
-    status.report = _GatewayReport(time.monotonic(), {"abc": _link_status("worker-ssh", 1)}, "login")
+    status.report = (time.monotonic(), frozenset({"worker-ssh"}))
     computer_sessions = ComputerSessionStore()
     # A viewer whose stream is open holds its worker, which `authorized_target` names "worker".
     computer_sessions.create(authorized_target()).stream = asyncio.Event()

@@ -10,8 +10,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.tailnet_ssh.projection import authorized_key_lines, clear_authorized_keys, write_projection
-from mindroom.tailnet_ssh.store import LinkBook, new_link, set_keys
+from mindroom.tailnet_ssh.projection import authorized_key_lines, clear_authorized_keys, signin_keys, write_projection
+from mindroom.tailnet_ssh.store import new_link
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 
 ALICE = "@alice:example.org"
 BOB = "@bob:example.org"
-ALICE_KEY = "v1:default:user_agent:~@alice:example.org:mind_alice"
 
 _SPIKE_LINES = [
     "Port 2222",
@@ -71,7 +70,7 @@ def _config(tmp_path: Path, authorized_keys: dict[str, list[str]]) -> Config:
 
 
 def _link() -> Link:
-    return new_link(ALICE, "mind_alice", ALICE_KEY, "mind-alice", now=1.0)
+    return new_link(ALICE, "mind_alice")
 
 
 def _lines(path: Path) -> list[str]:
@@ -90,30 +89,19 @@ def test_sshd_config_is_the_spikes(tmp_path: Path) -> None:
     assert stat.S_IMODE(projection.stat().st_mode) == 0o755
 
 
-def test_authorized_keys_are_restricted_and_merged(tmp_path: Path) -> None:
-    """Portal keys come first, then the operator's, each restricted, and a key in both appears once."""
-    portal, shared, operator = _public_key("bas@laptop"), _public_key("bas@desk"), _public_key()
-    shared_base = " ".join(shared.split()[:2])
-    config = _config(tmp_path, {ALICE: [f"{shared_base} from-operator", operator], BOB: [_public_key()]})
-    book = LinkBook()
-    set_keys(book, ALICE, [portal, shared], now=1.0)
-    set_keys(book, BOB, [_public_key()], now=1.0)
-
-    lines = authorized_key_lines(config, book, ALICE)
-    assert lines == [f"restrict,pty {portal}", f"restrict,pty {shared}", f"restrict,pty {operator}"]
+def test_authorized_keys_are_config_only_restricted_and_deduplicated(tmp_path: Path) -> None:
+    """Only the requester's config keys are projected, once per identity and with restrictions."""
+    alice, other_alice, bob = _public_key(), _public_key("other device"), _public_key()
+    config = _config(tmp_path, {ALICE: [alice, f"{alice} duplicate", other_alice], BOB: [bob]})
+    lines = authorized_key_lines(signin_keys(config, ALICE))
+    assert lines == [f"restrict,pty {alice}", f"restrict,pty {other_alice}"]
+    assert authorized_key_lines(signin_keys(config, BOB)) == [f"restrict,pty {bob}"]
+    assert authorized_key_lines(signin_keys(config, "@carol:example.org")) == []
 
     projection = tmp_path / "ssh"
     write_projection(projection, _link(), lines)
-    written = _lines(projection / "authorized_keys")
-    assert written == lines
-    assert all(line.startswith("restrict,pty ssh-") for line in written)
+    assert _lines(projection / "authorized_keys") == lines
     assert stat.S_IMODE((projection / "authorized_keys").stat().st_mode) == 0o644
-
-    assert authorized_key_lines(config, LinkBook(), "@carol:example.org") == []
-    assert authorized_key_lines(config, LinkBook(), ALICE) == [
-        f"restrict,pty {shared_base} from-operator",
-        f"restrict,pty {operator}",
-    ]
 
 
 def test_host_key_is_0600_and_matches_link(tmp_path: Path) -> None:
@@ -129,7 +117,8 @@ def test_host_key_is_0600_and_matches_link(tmp_path: Path) -> None:
         serialization.Encoding.OpenSSH,
         serialization.PublicFormat.OpenSSH,
     )
-    assert public_line.decode() == link.host_public_key
+    assert public_line.startswith(b"ssh-ed25519 ")
+    assert key_path.read_bytes() == link.host_key.encode()
 
 
 def test_rewrite_replaces_removed_key(tmp_path: Path) -> None:
