@@ -118,6 +118,22 @@ def test_disabled_renders_nothing_and_no_primary_env() -> None:
     assert not [name for name in _env_by_name(primary) if name.startswith("MINDROOM_TAILNET_SSH_")]
 
 
+@pytest.mark.parametrize(
+    ("image_values", "tag"),
+    [
+        ((), "latest"),
+        (("image.tag=v2026.11.21",), "v2026.11.21"),
+        (("image.tag=v2026.11.21", "tailnetSsh.image.tag=1.2.3"), "1.2.3"),
+    ],
+)
+def test_gateway_tag_follows_primary_unless_overridden(image_values: tuple[str, ...], tag: str) -> None:
+    """A chart from checkout defaults to latest; pinning the runtime pins the gateway unless overridden."""
+    docs = _render(*ENABLED, *image_values)
+    container = _container(_resource(docs, "Deployment", NAME), "tailnet-gateway")
+
+    assert container["image"] == f"ghcr.io/mindroom-ai/mindroom-tailnet-gateway:{tag}"
+
+
 def test_gateway_deployment_is_single_recreate_and_hardened() -> None:
     """One replica that never overlaps its successor, non-root on a read-only root, with no service account token."""
     docs = _render(
@@ -135,7 +151,6 @@ def test_gateway_deployment_is_single_recreate_and_hardened() -> None:
     assert deployment["spec"]["strategy"] == {"type": "Recreate"}
     assert deployment["spec"]["selector"] == {"matchLabels": GATEWAY_SELECTOR}
     assert pod["metadata"]["labels"] == GATEWAY_SELECTOR
-    assert container["image"] == "ghcr.io/mindroom-ai/mindroom-tailnet-gateway:0.0.0"
     assert pod["spec"]["automountServiceAccountToken"] is False
     assert pod["spec"]["nodeSelector"] == {"pool": "control"}
     assert pod["spec"]["tolerations"] == [{"key": "dedicated", "operator": "Exists"}]
@@ -200,16 +215,12 @@ def test_login_server_tags_and_proxy_are_optional_env() -> None:
         "tailnetSsh.loginServer=https://headscale.example",
         "tailnetSsh.tags={tag:mindroom,tag:ssh}",
         "tailnetSsh.persistence.storageClassName=fast",
-        "tailnetSsh.image.tag=1.2.3",
     )
     env = _gateway_env(docs)
 
     assert env["TAILNET_SSH_LOGIN_SERVER"]["value"] == "https://headscale.example"
     assert env["TAILNET_SSH_TAGS"]["value"] == "tag:mindroom,tag:ssh"
     assert env["HTTPS_PROXY"]["value"] == "http://proxy.example:3128"
-    assert _container(_resource(docs, "Deployment", NAME), "tailnet-gateway")["image"] == (
-        "ghcr.io/mindroom-ai/mindroom-tailnet-gateway:1.2.3"
-    )
     assert _resource(docs, "PersistentVolumeClaim", NAME)["spec"]["storageClassName"] == "fast"
 
 

@@ -66,7 +66,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: tailnet-gateway
-          image: {{ printf "%s:%s" $ssh.image.repository ($ssh.image.tag | default .Chart.AppVersion) | quote }}
+          image: {{ printf "%s:%s" $ssh.image.repository ($ssh.image.tag | default (.Values.image.tag | default .Chart.AppVersion)) | quote }}
           env:
             - {name: TAILNET_SSH_PRIMARY_URL, value: {{ printf "http://%s.%s.svc.cluster.local:%v" $name .Release.Namespace $ssh.port | quote }}}
             - {name: TAILNET_SSH_GATEWAY_TOKEN, valueFrom: {secretKeyRef: {name: {{ $name }}, key: token}}}
