@@ -148,7 +148,8 @@ mindroom-agent workers run NAME [--resource-profile small|standard|large] [--tim
 
 The command is everything after `--`. Multiple arguments run as the exact argument list. A single argument runs as an executable unless it contains whitespace or shell syntax, in which case Bash interprets it as a command line.
 For shell builtins or syntax, pass Bash explicitly, for example `mindroom-agent workers run build -- bash -c 'cd src && pwd'`.
-The CLI waits until the command ends and prints the last `--tail` lines (default 100) of its output; for a failed command it prints stdout under `Output:` and stderr under `Stderr:`.
+The CLI waits until the command ends. `--tail` (default 100) selects the last lines of each stream for the shell result; for a failed command, the result puts stdout under `Output:` and stderr under `Stderr:`.
+If the shell result is [auto-saved](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files), the CLI prints its preview to stdout and the saved file's path to stderr. The preview may not include the last lines.
 `--timeout` (default 3600 seconds) stops the command, and `--resource-profile` sizes the worker when its name is first used.
 If the CLI loses the submission response or cannot read a running command’s receipt, it retries reading the receipt for up to a minute. It never submits the command twice.
 Stopping `workers run` itself, with Ctrl-C or at the `timeout` of the shell command it runs in, does not stop its command, which runs on in its worker until it ends or reaches `--timeout`.
@@ -160,14 +161,17 @@ Stopping `workers run` itself, with Ctrl-C or at the `timeout` of the shell comm
 | `125` | The command did not run in the named worker, or its outcome is unknown: the call was refused, its command could not start, the call was cancelled, or its result stayed unreadable for a minute while the command may still be running; the reason is on stderr |
 | `2` | Invalid CLI arguments |
 
-This script runs eight shards at once, each in a worker of its own, and fails if any shard fails:
+Run this script from the shared workspace. It runs eight shards at once and fails if any shard fails.
+Each shard writes its full log to the shared workspace from inside its worker, so the log keeps the final summary even when CLI output would be previewed. CLI diagnostics go to a separate log.
 
 ```bash
 out="runs/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$out"
 pids=()
 for i in $(seq 0 7); do
-  mindroom-agent workers run "shard-$i" --resource-profile large -- bash ci/shard.sh "$i" 8 > "$out/$i.log" 2>&1 &
+  mindroom-agent workers run "shard-$i" --resource-profile large -- \
+    bash -c 'bash ci/shard.sh "$1" 8 > "$2" 2>&1' _ "$i" "$out/$i.log" \
+    > "$out/$i.cli.log" 2>&1 &
   pids+=("$!")
 done
 failed=0
