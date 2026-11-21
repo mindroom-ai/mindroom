@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 _BUSY_TIMEOUT_SECONDS = 10
 _MAX_INLINE_RESULT_BYTES = 8 * 1024 * 1024
 _RESULT_PREVIEW_BYTES = 64 * 1024
+# The longest report a run keeps for the call it was taken from; a longer one is not kept.
+_MAX_KEPT_REPORT_CHARS = 64 * 1024
 _RUN_JSON_FIELDS = frozenset({"execution_identity", "persona", "args", "result", "claims"})
 _NODE_JSON_FIELDS = frozenset({"request", "handle", "members", "result", "error", "links"})
 # A run keeps the owner and the origin key it was reserved with; a redelivered start is checked against both.
@@ -164,10 +166,12 @@ class WorkflowRunStore:
                 if taker in run.claims:
                     msg = f"Run {run_id} was taken by this invocation before."
                     raise SupersededAttemptError(msg)
-                # The owner it is taken from is remembered too, with its report if it waited for the run itself: a
-                # run from before runs kept their takers names nobody else.
-                left = {} if run.owner in run.claims else {run.owner: None if run.job_id else run.outcome_text()}
-                changes["claims"] = run.claims | left | {taker: None}
+                # The owner it is taken from is remembered too: a run from before runs kept their takers names
+                # nobody else. If that owner waited for the run itself, no job keeps its report, so the run does,
+                # for that one owner and while the report is small: the run's own result is the next attempt's.
+                report = None if run.job_id else run.outcome_text()
+                kept = report if report is not None and len(report) <= _MAX_KEPT_REPORT_CHARS else None
+                changes["claims"] = dict.fromkeys(run.claims) | {run.owner: kept, taker: None}
             _require_slot(connection, run, max_active)
             connection.executemany(
                 "UPDATE workflow_nodes SET digest = '' WHERE run_id = ? AND key = ?",

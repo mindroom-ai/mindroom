@@ -125,6 +125,12 @@ async def test_resume_call_delivered_again_after_a_later_resume_ended_returns_it
 
     assert stack.engine.status(stack.run_id) == ended
     assert (stack.counting_tool.lines, len(stack.scripts.launched)) == (["a", "a"], 3)
+    last = asyncio.create_task(stack.call("resume_workflow", depth=1, call_id="the-last-resume", run_id=stack.run_id))
+    await stack.until(lambda: _run(stack).attempt == 4)
+    # Only the call the run was last taken from keeps its report: a run does not grow with each resume of it.
+    assert [report for report in _run(stack).claims.values() if report] == ["the third report"]
+    await stack.finish_attempt(result="the fourth report")
+    assert await last == "the fourth report"
 
 
 @pytest.mark.asyncio

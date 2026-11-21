@@ -1012,10 +1012,6 @@ class WorkflowEngine:
                 await asyncio.to_thread(self.store.mark_stale, run.run_id, run.epoch, stale)
             ended_at = current.finished_at or utc_timestamp()
             changes = {"state": state, "error": error, "finished_at": ended_at, **self._time_left(current), **changes}
-            if state in TERMINAL_RUN_STATES and current.job_id is None and current.owner in current.claims:
-                # A call that took the run and waits for it itself has no job that keeps its report for it.
-                report = replace(current, state=state, error=error).outcome_text()
-                changes["claims"] = current.claims | {current.owner: report}
             attempt = current.script_run_id or ""
 
             def forget(written: asyncio.Future[WorkflowRun]) -> None:
