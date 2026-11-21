@@ -777,6 +777,55 @@ async def test_a_shell_call_runs_in_the_worker_it_names(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [0, 17])
+async def test_workers_run_prints_saved_output_from_its_named_worker(
+    runtime_paths: RuntimePaths,
+    backend: _FakeBackend,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    exit_code: int,
+) -> None:
+    from mindroom.agent_cli.main import main  # noqa: PLC0415
+
+    worker_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "runner.yaml",
+        storage_path=tmp_path / "runner-storage",
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
+    )
+    runner_shell = get_tool_by_name(
+        "shell",
+        worker_paths,
+        tools=builtin_tool_registry(),
+        runs_in_worker=False,
+        tool_output_workspace_root=tmp_path,
+        tool_output_auto_save_threshold_bytes=32,
+        worker_target=None,
+    )
+    command = ["bash", "-c", f"printf '%100s' shard-output; exit {exit_code}"]
+    saved = await _offered_entrypoint(runner_shell, "run_shell_command")(command, worker="shard")
+    receipt = saved["mindroom_tool_output"]
+    assert receipt["auto_saved"] is True
+    assert "shard-output" in (tmp_path / receipt["path"]).read_text()
+    _route_through(monkeypatch, backend, responder=lambda _url, _payload: {"ok": True, "result": saved})
+    shell, _target = _shell(runtime_paths)
+    with tool_runtime_context(_tool_context(runtime_paths)):
+        async with reply_named_workers(_TURN):
+            outcome = await shell(command, worker="shard")
+
+    class Client:
+        def operation(self, payload: dict[str, object]) -> dict[str, object]:
+            assert payload["arguments"]["args"] == command
+            return {"status": "completed", "outcome": outcome}
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    assert main(["workers", "run", "shard", "--", *command]) == exit_code
+    output = capsys.readouterr()
+    assert "shard-output" in output.out
+    assert f"full output saved to {receipt['path']}" in output.err
+
+
+@pytest.mark.asyncio
 async def test_a_stopped_shell_call_is_stopped_in_its_named_worker(
     runtime_paths: RuntimePaths,
     backend: _FakeBackend,

@@ -923,8 +923,15 @@ def _call_proxy_sync(
         if tool_name == "browser_mcp" or is_media_result_envelope(result):
             decoded = decode_media_result(result)
             return finalize_tool_media(decoded) if isinstance(decoded, ToolValue) else decoded
-        if named is not None and worker_handle is not None and isinstance(result, str):
-            return f"{named.header(worker_handle)}\n{result}"
+        if named is not None and worker_handle is not None:
+            if isinstance(result, str):
+                return f"{named.header(worker_handle)}\n{result}"
+            # The runner can save its shell result before it gets here. The preview has the same exit line.
+            saved = result.get("mindroom_tool_output") if isinstance(result, dict) else None
+            if isinstance(saved, dict) and saved.get("status") == "saved_to_file":
+                preview = saved.get("preview")
+                if isinstance(preview, str):
+                    return {**result, "mindroom_tool_output": {**saved, "preview": f"{named.header(worker_handle)}\n{preview}"}}
         return result
 
 
