@@ -306,13 +306,15 @@ class StewardDuties:
             if not self._may_publish_room_state(room_id) or client is None or room_id not in client.rooms:
                 return {}
 
+            steward_id = client.user_id
+
             def get_alternate_clients() -> dict[str, nio.AsyncClient]:
                 return {
                     other.user_id: other
                     for bot in runtime.orchestrator.agent_bots.values()
                     if bot.running
                     and (other := bot.client) is not None
-                    and other.user_id != client.user_id
+                    and other.user_id != steward_id
                     and (room := other.rooms.get(room_id)) is not None
                     and room.power_levels.can_user_send_state(other.user_id, MINDROOM_ACCOUNTS_EVENT_TYPE)
                 }
