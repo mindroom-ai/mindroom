@@ -628,22 +628,25 @@ async def test_typed_model_command_consumes_a_delayed_opening_pick(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_opening_pick_reports_unavailable_storage_without_running_a_model(
+async def test_opening_pick_with_unavailable_storage_answers_on_the_inherited_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A real opening reply reports failure rather than answering on an unselected model."""
+    """Failing to save a pick must not refuse the turn or skip ordinary model inheritance."""
     bot = _fork_bot(tmp_path)
     bot.config.agents["code"].access = ResponderAccessConfig(users=["@user:localhost"])
     bot.config.agents["code"].memory_backend = "none"
     room = _matrix_room(ROOM_ID, bot.matrix_id.full_id, user_ids=(bot.matrix_id.full_id, "@user:localhost"))
     client = _join_model_test_bot(bot, room)
     unique_room_send_responses(client)
-    store = _store_path(runtime_paths_for(bot.config))
+    paths = runtime_paths_for(bot.config)
+    bot.config.models["room_model"] = ModelConfig(provider="openai", id="room-model")
+    set_room_model_override(paths, room_id=ROOM_ID, model_name="room_model")
+    store = _store_path(paths)
     store.parent.mkdir(parents=True, exist_ok=True)
     store.write_text("not json", encoding="utf-8")
-    fallback = ScriptedModel([answer("This would hide the failed choice")])
-    install_model_providers(monkeypatch, {"default": fallback})
+    inherited = ScriptedModel([answer("Inherited answer")])
+    install_model_providers(monkeypatch, {"room_model": inherited})
     opening = _conversation_event(
         bot,
         "$opening",
@@ -657,13 +660,15 @@ async def test_opening_pick_reports_unavailable_storage_without_running_a_model(
             },
         },
     )
-    await dispatch_test_turn(bot._turn_dispatcher, room, opening, opening.sender)
-    await drain_coalescing(bot)
+    with capture_logs() as logs:
+        await dispatch_test_turn(bot._turn_dispatcher, room, opening, opening.sender)
+        await drain_coalescing(bot)
 
-    assert any(
-        "storage is unavailable" in call.kwargs["content"].get("body", "") for call in client.room_send.await_args_list
-    )
-    assert not fallback.requests
+    assert len(inherited.requests) == 1
+    bodies = [call.kwargs["content"].get("body", "") for call in client.room_send.await_args_list]
+    assert any("Inherited answer" in body for body in bodies)
+    assert not any("storage is unavailable" in body for body in bodies)
+    assert [entry["log_level"] for entry in logs if entry["event"] == "Opening model storage failed"] == ["warning"]
     assert store.read_text(encoding="utf-8") == "not json"
 
 
@@ -1604,6 +1609,33 @@ async def test_thread_model_tool_switch_get_and_reset(tmp_path: Path) -> None:
     assert reset_payload["status"] == "ok"
     assert reset_payload["cleared"] is True
     assert _stored_model(context.runtime_paths, THREAD_ID) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["switch", "reset"])
+async def test_thread_model_tool_reports_unavailable_storage(tmp_path: Path, action: str) -> None:
+    """A failed mutation returns an error string, not an exception or a model switch."""
+    context = _make_tool_context(tmp_path)
+    store = _store_path(context.runtime_paths)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text("not json", encoding="utf-8")
+    tool = ThreadModelTools()
+
+    with tool_runtime_context(context):
+        result = (
+            await tool.switch_thread_model("large", when="after-toolcall")
+            if action == "switch"
+            else await tool.reset_thread_model()
+        )
+
+    assert isinstance(result, str)
+    assert json.loads(result) == {
+        "tool": "thread_model",
+        "status": "error",
+        "action": action,
+        "message": "Thread model storage is unavailable. Please try again.",
+    }
+    assert store.read_text(encoding="utf-8") == "not json"
 
 
 @pytest.mark.asyncio

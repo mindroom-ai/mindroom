@@ -133,7 +133,7 @@ A handled `!model` set or reset consumes the opening pick for the entire thread,
 While the thread's bounded record is retained, later handling does not reapply the pick, even after a reset or expanded access.
 Known limit: more than 1,000 thread model records within the seven-day window can evict a consumed marker and let a still-eligible pick apply again on replay.
 A `!model reset` handled before a fork's first turn does not stop that turn from inheriting the parent's models.
-If the runtime cannot save an opening pick, it reports a storage error instead of asking a different model.
+If the runtime cannot save an opening pick, it logs a warning and the reply uses the inherited model without a separate acknowledgement.
 Invalid or unauthorized picks are ignored without an acknowledgement, and the reply uses the inherited model.
 The key has the same visibility as the message it travels in.
 
