@@ -4732,6 +4732,25 @@ def test_kubernetes_pinned_start_recovers_without_a_manifest(
     assert not root.with_name(f"{root.name}.retiring").exists()
 
 
+@pytest.mark.parametrize("change", ["stopped", "replaced"])
+def test_reusing_a_named_worker_revalidates_external_deployment_changes(tmp_path: Path, change: str) -> None:
+    """A cached handle is invalid after its Deployment stops or is replaced outside this manager."""
+    backend, apps, _core = _named_backend(tmp_path)
+    spec = _named_spec()
+    first = backend.ensure_worker(spec, now=0.0)
+    deployment = apps.deployments[first.worker_id]
+    if change == "stopped":
+        deployment.spec.replicas = 0
+    else:
+        deployment.metadata.uid = "replacement-uid"
+
+    assert backend.has_named_worker(first.worker_key)  # Stopped Deployments still count for admission.
+    current = backend.ensure_worker(spec, now=1.0)
+
+    assert current.incarnation != first.incarnation
+    assert apps.deployments[current.worker_id].spec.replicas == 1
+
+
 def test_kubernetes_maintenance_keeps_files_that_are_not_an_orphaned_pinned_workers(tmp_path: Path) -> None:
     """Only a pinned worker's own files without a Deployment are removed; every other directory stays."""
     backend, apps_api, _core_api = _named_backend(tmp_path, named_worker_idle_timeout_seconds=10_000.0)
