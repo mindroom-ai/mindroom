@@ -186,7 +186,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with patch("mindroom.turns.dispatch.execute_router_relay", new=AsyncMock(return_value=False)) as relay:
-            await bot._turn_dispatcher._execute_route_plan(room, prepared, None)
+            await bot._turn_dispatcher._execute_route_plan(prepared, None)
 
         assert relay.await_args.args[2] is image
         assert relay.await_args.kwargs["handled_turn"] is None
@@ -415,7 +415,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client.room_get_event.return_value = root_response
         plans: list[tuple[str, tuple[str, ...]]] = []
 
-        async def record_plan(_dispatcher: object, _room: object, prepared: object, plan: object, **_: object) -> None:
+        async def record_plan(_dispatcher: object, prepared: object, plan: object, **_: object) -> None:
             plans.append((plan.kind, tuple(prepared.handled_turn.source_event_ids)))
 
         with (
