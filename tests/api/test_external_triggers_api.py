@@ -816,6 +816,69 @@ def test_delivery_waits_for_the_target_to_be_joined_to_the_trigger_room(
     target_joined_rooms.assert_awaited_once_with(target_client)
 
 
+@pytest.mark.asyncio
+async def test_a_trigger_that_moved_rooms_while_it_waited_is_checked_against_the_room_it_delivers_to(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_joined_rooms: AsyncMock,
+) -> None:
+    """Readiness reads the snapshot taken behind the fence, the one delivery uses, not the one the request arrived with.
+
+    The same bot stays the target and is joined only to the room the trigger named before it waited.
+    """
+    private_key = Ed25519PrivateKey.generate()
+    config_path = tmp_path / "config.yaml"
+    config = _write_runtime_config(config_path)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    api_main.initialize_api_app(api_main.app, runtime_paths)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
+    _create_record(runtime_paths, config, _public_key_b64(private_key))
+    gate = ResponseAdmissionGate()
+    assert gate.close_if_idle()
+    wait_started = asyncio.Event()
+
+    async def wait_for_admission() -> bool:
+        wait_started.set()
+        await gate.wait_until_open()
+        return True
+
+    _bind_runtime(response_admission_gate=gate, wait_for_admission_or_shutdown=wait_for_admission)
+    monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
+    execute = AsyncMock(return_value="$matrix-event")
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute)
+    target_joined_rooms.return_value = [resolve_room_id("campground", runtime_paths)]
+    body = _body()
+    request_task = None
+
+    try:
+        async with AsyncClient(transport=ASGITransport(app=api_main.app), base_url="http://testserver") as client:
+            request_task = asyncio.create_task(
+                client.post("/api/triggers/campground", content=body, headers=_sign(private_key, body=body)),
+            )
+            await asyncio.wait_for(wait_started.wait(), timeout=1)
+            state = MatrixState.load(runtime_paths=runtime_paths)
+            state.add_room("campground", "!moved:example.org", "#campground:example.org", "Campground")
+            save_matrix_state(state, runtime_paths)
+            gate.reopen()
+            response = await request_task
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "External trigger target runtime is not available"
+        target_joined_rooms.assert_awaited_once()
+        execute.assert_not_awaited()
+    finally:
+        gate.reopen()
+        if request_task is not None:
+            if not request_task.done():
+                request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+        api_main.unbind_external_trigger_runtime(api_main.app)
+
+
 def test_delivery_snapshot_read_runs_off_event_loop(
     trigger_api: TriggerApiContext,
     monkeypatch: pytest.MonkeyPatch,
