@@ -8,6 +8,7 @@ import pytest
 from mindroom.matrix_rtc.events import (
     CALL_MEMBER_EVENT_TYPE,
     DEFAULT_MEMBERSHIP_EXPIRES_MS,
+    ReceivedFrameKey,
     build_key_to_device_content,
     build_membership_content,
     membership_state_key,
@@ -216,7 +217,7 @@ def test_parse_membership_rejects_boolean_timestamps() -> None:
 def test_key_to_device_content_round_trip() -> None:
     """Key to device content round trip."""
     content = build_key_to_device_content(
-        key_base64="a2V5a2V5a2V5a2V5a2V5a2U=",
+        key_base64="QUJDREVGR0hJSktMTU5PUA==",
         key_index=3,
         room_id="!room:example.org",
         member_id=f"{USER}:{DEVICE}",
@@ -226,7 +227,7 @@ def test_key_to_device_content_round_trip() -> None:
     # matrix-js-sdk 41.7.0 src/matrixrtc/ToDeviceKeyTransport.ts:73-86.
     assert content == {
         "room_id": "!room:example.org",
-        "keys": {"index": 3, "key": "a2V5a2V5a2V5a2V5a2V5a2U="},
+        "keys": {"index": 3, "key": "QUJDREVGR0hJSktMTU5PUA=="},
         "member": {"id": f"{USER}:{DEVICE}", "claimed_device_id": DEVICE},
         "session": {"application": "m.call", "call_id": "", "scope": "m.room"},
         "sent_ts": 777,
@@ -288,6 +289,39 @@ def test_parse_sdk_45_rejects_invalid_member_id() -> None:
         "member": {"id": f"{USER}:{DEVICE}", "claimed_device_id": DEVICE},
     }
     assert parse_key_to_device_content(USER, content, room_id="!room:example.org", received_at_ms=888) is None
+
+
+@pytest.mark.parametrize("index", [-1, 256, True, "5", None])
+def test_parse_sdk_45_rejects_invalid_index_without_a_legacy_copy(index: object) -> None:
+    """A message carrying only ``media_key`` has no legacy copy to fall back on."""
+    content = {
+        "room_id": "!room:example.org",
+        "member_id": f"{USER}:{DEVICE}",
+        "media_key": {"index": index, "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="},
+        "member": {"claimed_device_id": DEVICE},
+    }
+    assert parse_key_to_device_content(USER, content, room_id="!room:example.org", received_at_ms=888) is None
+
+
+def test_parse_sdk_45_member_id_does_not_change_the_keys_owner() -> None:
+    """A key belongs to the Matrix sender and its claimed device, whoever the member IDs name."""
+    spoofed = "@victim:example.org:VICTIMDEVICE"
+    content = {
+        "room_id": "!room:example.org",
+        "member_id": spoofed,
+        "media_key": {"index": 5, "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="},
+        "member": {"id": spoofed, "claimed_device_id": DEVICE},
+    }
+
+    received = parse_key_to_device_content(USER, content, room_id="!room:example.org", received_at_ms=888)
+
+    assert received == ReceivedFrameKey(
+        user_id=USER,
+        claimed_device_id=DEVICE,
+        key_base64="AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        key_index=5,
+        received_at_ms=888,
+    )
 
 
 def test_parse_key_content_requires_key_and_claimed_device() -> None:

@@ -173,8 +173,10 @@ class FrameKeyManager:
         newest = self._newest_inbound_ts.get(filter_key)
         if newest is not None and received.received_at_ms < newest:
             return None
+        # MSC4143 specifies unpadded base64; SDK 41 and 45 send it padded. Accept exactly those two spellings.
+        padding = "" if received.key_base64.endswith("=") else "=" * (-len(received.key_base64) % 4)
         try:
-            key = base64.b64decode(received.key_base64, validate=True)
+            key = base64.b64decode(received.key_base64 + padding, validate=True)
         except ValueError:
             return None
         if len(key) not in _INBOUND_KEY_SIZES:

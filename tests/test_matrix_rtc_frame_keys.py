@@ -219,6 +219,39 @@ def test_receive_accepts_matrix_rtc_key_lengths(size: int) -> None:
     assert inbound.key == key
 
 
+@pytest.mark.parametrize("size", [16, 32])
+def test_receive_accepts_unpadded_base64(size: int) -> None:
+    """MSC4143 specifies unpadded base64 for a media key, though SDK 41 and 45 send it padded."""
+    key = bytes(range(size))
+    # matrix-js-sdk 45.1.0 src/matrixrtc/types.ts:126-127.
+    unpadded = base64.b64encode(key).decode("ascii").rstrip("=")
+    assert len(unpadded) % 4
+
+    inbound = _manager().receive(
+        ReceivedFrameKey("@alice:example.org", "DEV", unpadded, 0, 0),
+        participant_identity="@alice:example.org:DEV",
+    )
+
+    assert inbound is not None
+    assert inbound.key == key
+
+
+@pytest.mark.parametrize(
+    "key_base64",
+    ["QUJDREVGR0hJSktMTU5PUA=", "QUJDREVGR0hJSktMTU5PUA===", "QUJDREVGR0hJSktMTU5PU", "QUJDREVGR0hJSktMTU5P UA"],
+    ids=["one-pad-short", "one-pad-over", "impossible-length", "whitespace"],
+)
+def test_receive_rejects_base64_that_is_neither_padded_nor_unpadded(key_base64: str) -> None:
+    """Only the fully padded and the unpadded spelling of a key are accepted."""
+    assert (
+        _manager().receive(
+            ReceivedFrameKey("@alice:example.org", "DEV", key_base64, 0, 0),
+            participant_identity="@alice:example.org:DEV",
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize("size", [15, 17, 24, 31, 33])
 def test_receive_rejects_wrong_length_key(size: int) -> None:
     """Reject frame keys of every length except 16 and 32 bytes."""
