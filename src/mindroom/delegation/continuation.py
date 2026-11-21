@@ -128,6 +128,9 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
             # The job stays the call of its workflow run, which reads what each run of the call used and did.
             spec.adapter.update({key: job.adapter[key] for key in ("workflow", "node", "generation")})
             spec.adapter[SPENT_RUNS_KEY] = [*dict.fromkeys([*job.adapter.get(SPENT_RUNS_KEY, ()), child.run_id])]
+            if prompt == workflow_call_prompt(child):
+                # The run keeps the call's prompt, so the job, whose every snapshot repeats its adapter, needs no copy.
+                del spec.adapter[_PROMPT_KEY]
     return spec
 
 
@@ -177,7 +180,9 @@ async def _continuation_prompt(
     run = await read_child_run(child, config, runtime_paths)
     if run is None or not is_recovered_run(run):
         return None if run is not None and run.tools else sent
-    task = f"{sent[:_MAX_TASK_CHARACTERS]}…" if len(sent) > _MAX_TASK_CHARACTERS else sent
+    # The prompt of a workflow run's call is sent whole: what it asks for may stand at its end.
+    clip = len(sent) > _MAX_TASK_CHARACTERS and child.workflow_run_id is None
+    task = f"{sent[:_MAX_TASK_CHARACTERS]}…" if clip else sent
     note = config.get_prompt("SUBAGENT_RESTART_CONTINUATION_PROMPT")
     account = _calls_account(run) if run.tools else ""
     return "\n\n".join(part for part in (note, f"<interrupted_task>\n{task}\n</interrupted_task>", account) if part)

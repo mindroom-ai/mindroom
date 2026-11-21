@@ -143,9 +143,29 @@ async def test_restart_before_the_first_tool_call_continues_with_the_full_prompt
     await _restarted(stack, answer("done"))
 
     assert await stack.result("@0", "agent", {"prompt": prompt}) == "done"
-    child = delegation_child(stack.node_job("@0"))
+    job = stack.node_job("@0")
+    child = delegation_child(job)
     assert (len(child.task), child.depth, _node(stack).generation) == (80, 1, 1)
     assert prompt in _sent(stack)
+    # The run keeps the prompt; the job, whose every snapshot repeats its adapter, does not get a copy.
+    assert "continuation_prompt" not in job.adapter
+
+
+@pytest.mark.asyncio
+async def test_continuation_after_a_tool_call_is_sent_the_whole_prompt_however_long(stack: WorkflowStack) -> None:
+    """What the call asks for may stand at the end of a long prompt: the continued agent is sent all of it."""
+    prompt = "Append a line. " + "x" * 9_000 + " Then answer with the word tide."
+    model = stack.child_script(
+        calls(tool_call("append", "c1", line="a")),
+        [Await(asyncio.Event().wait), *answer("never")],
+    )
+    await stack.submit("@0", "agent", {"prompt": prompt})
+    await stack.until(lambda: len(model.requests) == 2)
+
+    await _restarted(stack, answer("tide"))
+
+    assert await stack.result("@0", "agent", {"prompt": prompt}) == "tide"
+    assert f"<interrupted_task>\n{prompt}\n</interrupted_task>" in _sent(stack)
 
 
 @pytest.mark.asyncio
