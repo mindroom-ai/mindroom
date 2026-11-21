@@ -1608,6 +1608,45 @@ async def test_thread_mode_command_times_out_while_a_frame_uses_the_room_lock(
 
 
 @pytest.mark.asyncio
+async def test_slow_refused_roster_writer_leaves_a_full_budget_for_the_steward(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each writer fits its own deadline even though the two membership reads together exceed ten seconds."""
+    config, paths, ids, events, steward = room_state
+    bound_id = ids["agent1"].full_id
+    events[ROUTER_EVENT_TYPE, ""] = {"user_id": bound_id}
+    bound = AsyncMock(spec=nio.AsyncClient, user_id=bound_id)
+    bound.room_get_state_event.side_effect = steward.room_get_state_event.side_effect
+    bound.room_put_state.return_value = nio.RoomPutStateError("Forbidden", "M_FORBIDDEN")
+    clock = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    read_members = steward.joined_members.side_effect
+
+    async def slow_members(room_id: str) -> nio.JoinedMembersResponse:
+        await asyncio.sleep(6)
+        return await read_members(room_id)
+
+    bound.joined_members.side_effect = steward.joined_members.side_effect = slow_members
+    task = asyncio.create_task(
+        reconcile_room_accounts(steward, config, paths, ROOM_ID, get_alternate_clients=lambda: {bound_id: bound}),
+    )
+    try:
+        for tick in (0, 6, 10, 12):
+            clock = tick
+            await _yield_loop(20)
+        bound.room_put_state.assert_awaited_once()
+        assert task.done()
+        assert await task is True
+        assert _accounts(room_state) == sorted(identity.full_id for identity in ids.values())
+        assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": bound_id}
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_setup_sweep_logs_a_real_roster_deadline(room_state: RoomState, monkeypatch: pytest.MonkeyPatch) -> None:
     """An in-flight request takes the retry path and logs its own deadline, not silent caller cancellation."""
     _, _, _, _, client = room_state
