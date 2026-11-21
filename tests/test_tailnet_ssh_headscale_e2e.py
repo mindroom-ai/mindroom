@@ -18,6 +18,7 @@ import socket
 import subprocess
 import threading
 import time
+import traceback
 from collections import Counter
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -119,21 +120,25 @@ def _redact(text: str, values: set[str]) -> str:
 
 def _docker(*args: str, stdin: str | None = None) -> str:
     """Run a Docker command that has to succeed, and return what it printed."""
-    secrets = {arg.partition("=")[2] for arg in args if arg.partition("=")[0] in _SECRET_ENV}
-    command = shlex.join([_redact(arg, secrets) for arg in args])
+    secret_values = {arg.partition("=")[2] for arg in args if arg.partition("=")[0] in _SECRET_ENV}
+    command = shlex.join([_redact(arg, secret_values) for arg in args])
     try:
         done = _docker_result(*args, stdin=stdin)
     except subprocess.TimeoutExpired:
+        done = None  # Do not chain the exception that carries the unredacted argv.
+    if done is None:
         pytest.fail(f"docker {command} timed out", pytrace=False)
     if done.returncode != 0:
         pytest.fail(
-            f"docker {command} exited {done.returncode}: {_redact(done.stderr.strip(), secrets)}", pytrace=False
+            f"docker {command} exited {done.returncode}: {_redact(done.stderr.strip(), secret_values)}",
+            pytrace=False,
         )
     return done.stdout.strip()
 
 
 @pytest.mark.parametrize("times_out", [False, True])
 def test_docker_failure_redacts_secret_env(monkeypatch: pytest.MonkeyPatch, *, times_out: bool) -> None:
+    """A Docker failure must not put secrets in the error message or its traceback."""
     env = {
         "TS_AUTHKEY": "test-client-key",
         "TAILNET_SSH_AUTH_KEY": "test-gateway-key",
@@ -151,7 +156,8 @@ def test_docker_failure_redacts_secret_env(monkeypatch: pytest.MonkeyPatch, *, t
     with pytest.raises(pytest.fail.Exception) as failure:
         _docker("run", *argv, "image")
 
-    assert all(secret not in str(failure.value) for secret in env.values())
+    diagnostic = "".join(traceback.format_exception(failure.value))
+    assert all(secret not in diagnostic for secret in env.values())
     assert ("timed out" if times_out else "docker could not start") in str(failure.value)
 
 
