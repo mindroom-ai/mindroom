@@ -464,7 +464,6 @@ _._reject_bare_yaml_off  # Pydantic field validator (src/mindroom/config/models.
 _.reasoning_levels  # ModelCatalogEntry key the model picker reads (src/mindroom/model_catalog.py)
 _.reasoning_default  # ModelCatalogEntry key the model picker reads (src/mindroom/model_catalog.py)
 _.FAILSAFE  # PyAutoGUI setting, turned off so no screen corner stops input (src/mindroom/desktop/provider.py)
-_.validate_tailnet_ssh_agents  # Pydantic model validator (src/mindroom/config/main.py)
 _._validate_logins  # Pydantic field validator (src/mindroom/config/tailnet_ssh.py)
 _._validate_authorized_keys  # Pydantic field validator (src/mindroom/config/tailnet_ssh.py)
 post_status  # FastAPI route (src/mindroom/api/tailnet_ssh_gateway.py)

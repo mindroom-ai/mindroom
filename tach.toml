@@ -3810,7 +3810,6 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.delegation.personas",
     "mindroom.config.tailnet_ssh",
-    "mindroom.tailnet_ssh.eligibility",
 ]
 
 [[modules]]

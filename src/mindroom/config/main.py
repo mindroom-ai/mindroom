@@ -754,20 +754,6 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_tailnet_ssh_agents(self) -> Config:
-        """Require every agent with tailnet_ssh to have a worker and workspace per person."""
-        if not any(agent.tailnet_ssh for agent in self.agents.values()):
-            return self
-        # why-lazy: the rule's module loads the shared directory store and the worker backend kinds, which a config
-        # import must not load for a config no agent opts in from.
-        from mindroom.tailnet_ssh.eligibility import config_error  # noqa: PLC0415
-
-        for agent_name in self.agents:
-            if (error := config_error(self, agent_name)) is not None:
-                raise ValueError(error)
-        return self
-
-    @model_validator(mode="after")
     def validate_integration_config(self) -> Config:
         """Run each built-in integration's own config checks."""
         validate_integrations(self)
