@@ -472,61 +472,6 @@ async def test_start_refuses_a_shell_without_a_workspace(
 
 
 @pytest.mark.asyncio
-async def test_stop_route_kills_sshd_and_is_idempotent(
-    client: httpx.AsyncClient,
-    fake_sshd: _FakeSshd,
-    keys: Path,
-) -> None:
-    """A stop ends sshd, and answers the same when none runs; the next start runs a new one."""
-    assert (await client.post("/api/sandbox-runner/ssh/stop")).status_code == 204
-    await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
-
-    original = keys.read_text(encoding="utf-8")
-    keys.write_text("", encoding="utf-8")
-    responses = [await client.post("/api/sandbox-runner/ssh/stop") for _ in range(2)]
-    keys.write_text(original, encoding="utf-8")
-
-    assert [response.status_code for response in responses] == [204, 204]
-    assert fake_sshd.processes[0].returncode == -signal.SIGKILL
-    assert (await client.post("/api/sandbox-runner/ssh/start", json=_BODY)).status_code == 200
-    assert len(fake_sshd.argvs) == 2
-    assert fake_sshd.processes[1].returncode is None
-
-
-@pytest.mark.asyncio
-async def test_a_stop_sent_before_a_newer_connect_leaves_that_connects_sshd(
-    client: httpx.AsyncClient,
-    fake_sshd: _FakeSshd,
-    keys: Path,
-) -> None:
-    """The primary cleared the keys and sent a stop; a connect wrote keys and started sshd before the stop arrived.
-
-    The stop then finds keys that admit someone, so the newer connect's sshd runs on. Once the keys are empty again,
-    as the next removal leaves them, a stop ends it.
-    """
-    await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
-
-    response = await client.post("/api/sandbox-runner/ssh/stop")
-
-    assert response.status_code == 204
-    assert fake_sshd.processes[0].returncode is None
-    keys.write_text("", encoding="utf-8")
-    assert (await client.post("/api/sandbox-runner/ssh/stop")).status_code == 204
-    assert fake_sshd.processes[0].returncode == -signal.SIGKILL
-
-
-@pytest.mark.asyncio
-async def test_stop_route_requires_runner_token(client: httpx.AsyncClient, fake_sshd: _FakeSshd) -> None:
-    """Only the primary, which holds the runner token, stops sshd."""
-    await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
-
-    response = await client.post("/api/sandbox-runner/ssh/stop", headers={"x-mindroom-sandbox-token": ""})
-
-    assert response.status_code == 401
-    assert fake_sshd.processes[0].returncode is None
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("present", [False, True])
 async def test_start_refuses_missing_or_empty_keys(
     client: httpx.AsyncClient,
@@ -535,7 +480,7 @@ async def test_start_refuses_missing_or_empty_keys(
     *,
     present: bool,
 ) -> None:
-    """A delayed start must not launch a listener after the primary clears its keys."""
+    """Do not start a listener without an authorized key projection."""
     if present:
         keys.write_text("", encoding="utf-8")
     else:
@@ -547,12 +492,11 @@ async def test_start_refuses_missing_or_empty_keys(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["stop", "shutdown", "restart"])
+@pytest.mark.parametrize("operation", ["shutdown", "restart"])
 async def test_listener_cleanup_does_not_wait_for_sessions(
     client: httpx.AsyncClient,
     tmp_path: Path,
     install_fake_sshd: Callable[..., _FakeSshd],
-    keys: Path,
     operation: str,
 ) -> None:
     """The listener is reaped promptly even if a session inherited its stderr."""
@@ -562,10 +506,7 @@ async def test_listener_cleanup_does_not_wait_for_sessions(
         async with asyncio.timeout(5), app.router.lifespan_context(app):
             assert (await client.post("/api/sandbox-runner/ssh/start", json=_BODY)).status_code == 200
             listener = fake.processes[0]
-            if operation == "stop":
-                keys.write_text("", encoding="utf-8")
-                assert (await client.post("/api/sandbox-runner/ssh/stop")).status_code == 204
-            elif operation == "restart":
+            if operation == "restart":
                 listener.kill()
                 await _exited(listener)
                 assert (await client.post("/api/sandbox-runner/ssh/start", json=_BODY)).status_code == 200

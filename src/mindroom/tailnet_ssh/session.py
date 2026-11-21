@@ -1,9 +1,8 @@
 """The program a worker's sshd runs for every session, as its ``ForceCommand``.
 
 The image's passwd entry for the worker's uid gives ``/bin/sh`` and a home on the read-only root, so this module
-starts the session instead: in the agent's workspace as its home, with the environment of the agent's shell, which
-the runner keeps in ``LAUNCH_PATH`` (``mindroom.api.worker_ssh``). So a session reaches the network through the
-proxy the agent's commands use, and ``scp notes.md host:`` lands where the agent looks.
+starts the session instead, using the worker-wide launch in ``LAUNCH_PATH`` (``mindroom.api.worker_ssh``).
+Its initial workspace is the session's home, not a file boundary.
 
 A login gets Bash, but not as a login shell: that reads ``/etc/profile``, which on the image replaces ``PATH``, and
 with it the agent's tools. The shell still reads the workspace's ``.bashrc``.

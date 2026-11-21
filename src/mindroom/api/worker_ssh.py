@@ -164,12 +164,3 @@ async def start(request: Request, payload: _Start) -> dict[str, int]:
     async with state.lock:
         await _ensure_sshd(request.app, state)
     return {"port": WORKER_SSH_PORT}
-
-
-@router.post("/stop", status_code=204, dependencies=[Depends(validate_runner_token)])
-async def stop(request: Request) -> None:
-    """Stop sshd only with empty keys, so a late stop cannot kill a newer admission."""
-    state = _worker_ssh(request.app)
-    async with state.lock:
-        if await asyncio.to_thread(_admits_nobody, _projection_dir(request.app)):
-            await _stop(state)
