@@ -53,6 +53,7 @@ agents:
 
 - The worker must be the requester's normal `user_agent` worker, not one set aside for a script run or subagent, with the agent's `shell` tool routed to that worker.
 - Use `private.per: user_agent` for a [private agent](configuration/agents.md#private-instances), without setting `worker_scope` on it, or use effective `worker_scope: user_agent` and grant access to exactly one concrete Matrix user with no room grants, as above.
+  No team may list a non-private agent, and if administrators can bypass its access rules, there must be no administrator other than the requester.
 - The requester must still be allowed to use the agent under its [access rules](authorization.md#responder-access); if room membership is not yet known, retry after it resolves.
 - The worker cannot mount another agent's shared directory as a read-only join; an owned shared directory or an assigned read-only knowledge base does not disqualify it.
 - The configured agent name must be unchanged by worker-key normalization and unambiguous.

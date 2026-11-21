@@ -388,6 +388,22 @@ def test_ssh_eligible_launch_matrix(tmp_path: Path) -> None:
     assert ssh_eligible_launch(mind_key, launch, frozenset({"mind"}), (joined,)) is False
 
 
+@pytest.mark.parametrize("other_admission", ["team", "other-admin", "requester-admin"])
+def test_non_private_agent_has_no_other_ingress(tmp_path: Path, other_admission: str) -> None:
+    paths = _paths(tmp_path)
+    data = _data()
+    if other_admission == "team":
+        data["teams"] = {
+            "crew": {"display_name": "Crew", "role": "Help", "agents": ["mine"], "access": {"users": [BOB]}}
+        }
+    else:
+        data["administrators"] = [BOB if other_admission == "other-admin" else ALICE]
+    config = _load(paths, data)
+
+    assert (_ineligibility(paths, config, ALICE, "mine") is None) == (other_admission == "requester-admin")
+    assert ssh_eligible_launch(_ALICE_MINE_KEY, _launch(config), None, ()) == (other_admission == "requester-admin")
+
+
 def test_names_that_share_a_key_are_no_ones(tmp_path: Path) -> None:
     """`mine` and `mine_` both load and resolve to one worker key, so neither a link nor a launch may claim it."""
     paths = _paths(tmp_path)

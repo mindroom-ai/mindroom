@@ -62,6 +62,17 @@ def _concrete_users_alone(config: Config, agent_name: str) -> tuple[str, ...] | 
     return access.users
 
 
+def _sole_workspace_user(config: Config, agent: str, requester: str | None) -> bool:
+    # why-lazy: authorization loads nio, which the sandbox runner does not otherwise need here.
+    from mindroom.authorization import administrators_pass_access  # noqa: PLC0415
+
+    return (
+        _concrete_users_alone(config, agent) == (requester,)
+        and not any(agent in team.agents for team in config.teams.values())
+        and (not (set(config.administrators) - {requester}) or not administrators_pass_access(config, agent))
+    )
+
+
 def _key_agent(worker_key: str, agent_names: Iterable[str]) -> str | None:
     """Return the one agent an unpinned ``user_agent`` key's agent part encodes, or None when none or several do.
 
@@ -154,7 +165,7 @@ def link_ineligibility(
     denied = _not_authorized(config, runtime_paths, requester_id, agent_name, worker_key, membership_index)
     if denied is not None:
         return denied
-    if not policy.is_private and _concrete_users_alone(config, agent_name) != (requester_id,):
+    if not policy.is_private and not _sole_workspace_user(config, agent_name, requester_id):
         return _Ineligible("shared_workspace")
     if directories is None:
         directories = load_shared_directories(runtime_paths)
@@ -183,6 +194,6 @@ def ssh_eligible_launch(
     if policy.is_private:
         if private_agent_names is None or agent_name not in private_agent_names:
             return False
-    elif _concrete_users_alone(launch.config, agent_name) != (requester_id,):
+    elif not _sole_workspace_user(launch.config, agent_name, requester_id):
         return False
     return not any(mount.read_only for mount in shared_mounts)
