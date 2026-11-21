@@ -2479,8 +2479,12 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
 
 
 @pytest.mark.asyncio
-async def test_schedule_persists_model_and_history_limit_and_edits_model(tmp_path: Path) -> None:
-    """Model and history limit round-trip; the model can also be changed or cleared."""
+@pytest.mark.parametrize("model_override", [None, "cheap"], ids=["history-only", "model-and-history"])
+async def test_schedule_persists_model_and_history_limit_and_edits_model(
+    tmp_path: Path,
+    model_override: str | None,
+) -> None:
+    """The history limit round-trips with or without a model, which can be changed or cleared."""
     client = AsyncMock()
     serve_task_state_events(client)
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
@@ -2505,6 +2509,7 @@ async def test_schedule_persists_model_and_history_limit_and_edits_model(tmp_pat
         description="Queue poller",
     )
 
+    model_kwargs = {} if model_override is None else {"model": model_override}
     with (
         patch(
             "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
@@ -2530,20 +2535,18 @@ async def test_schedule_persists_model_and_history_limit_and_edits_model(tmp_pat
             thread_id="$thread",
             scheduled_by="@alice:server",
             full_text="every 25 minutes poll the queue with only the last 5 messages",
-            model="cheap",
             history_limit=5,
             silent=True,
+            **model_kwargs,
         )
 
     assert "**Task ID:** `task1234`" in message
-    assert "**Model:** cheap" in message
     assert "**History:** last 5 messages" in message
     assert "**Mode:** Silent" in message
     tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", runtime_paths=runtime_paths)
     assert [task.task_id for task in tasks] == ["task1234"]
-    assert tasks[0].workflow.model == "cheap"
+    assert tasks[0].workflow.model == model_override
     assert tasks[0].workflow.history_limit == 5
-    assert build_edited_scheduled_workflow(tasks[0].workflow, "!test:server", message="new task").model == "cheap"
     assert tasks[0].workflow.silent is True
     listed = await list_scheduled_tasks(
         client=client,
@@ -2552,9 +2555,14 @@ async def test_schedule_persists_model_and_history_limit_and_edits_model(tmp_pat
         thread_id="$thread",
         config=config,
     )
-    assert "Model: cheap" in listed
     assert "History: last 5 messages" in listed
     assert "Mode: Silent" in listed
+    if model_override is None:
+        return
+
+    assert f"**Model:** {model_override}" in message
+    assert f"Model: {model_override}" in listed
+    assert build_edited_scheduled_workflow(tasks[0].workflow, "!test:server", message="new task").model == model_override
 
     with (
         patch(
@@ -2572,7 +2580,7 @@ async def test_schedule_persists_model_and_history_limit_and_edits_model(tmp_pat
             ),
         ),
     ):
-        for model, expected in [(None, "cheap"), ("default", "default"), ("", None)]:
+        for model, expected in [(None, model_override), ("default", "default"), ("", None)]:
             result = await edit_scheduled_task(
                 runtime=_scheduling_runtime(
                     client=client,
