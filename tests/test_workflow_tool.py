@@ -59,7 +59,15 @@ from tests.tool_job_helpers import (
     tool_job_journal,
     wait_for_status,
 )
-from tests.workflow_helpers import CallFailed, NodeFailed, WorkflowStack, owner_context, tool_args, workflow_stack
+from tests.workflow_helpers import (
+    CallFailed,
+    NodeFailed,
+    WorkflowStack,
+    owner_context,
+    set_run,
+    tool_args,
+    workflow_stack,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -963,7 +971,7 @@ async def _failed(stack: WorkflowStack, **arguments: object) -> dict[str, str]:
 async def test_resume_registers_a_new_job_when_the_old_one_ended(stack: WorkflowStack) -> None:
     """The resumed run is a new job with the same handle shape; the run keeps the job that first started it."""
     first = await _failed(stack, title="Count things")
-    ended_at = stack.store.get_run(stack.run_id).finished_at
+    ended = stack.store.get_run(stack.run_id).epoch
 
     handle = json.loads(await stack.call("resume_workflow", run_id=first["run_id"]))
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
@@ -979,8 +987,8 @@ async def test_resume_registers_a_new_job_when_the_old_one_ended(stack: Workflow
     assert job.adapter == {
         "workflow_job": handle["job_id"],
         "workflow": first["run_id"],
-        # What the run was when the resume was accepted: its job and its end.
-        "resume": {"source": None, "rerun": [], "claim": [first["job_id"], ended_at]},
+        # What the run was when the resume was accepted: the epoch its end gave it.
+        "resume": {"source": None, "rerun": [], "epoch": ended},
     }
     assert (run.origin_job_id, run.job_id) == (first["job_id"], handle["job_id"])
     assert stack.counting_tool.lines == ["a"]
@@ -1371,7 +1379,7 @@ async def test_ninth_top_level_run_is_refused_and_nested_runs_do_not_count(stack
         await _started(stack)
     nested = await _inline(stack, runs=8)
     [inline] = [run for run in stack.store.list_runs() if (run.origin_job_id or "").startswith("inline:")]
-    stack.store.update_run(inline.run_id, parent_run_id=stack.run_id, parent_node_key="@0")
+    set_run(stack.store, inline.run_id, parent_run_id=stack.run_id, parent_node_key="@0")
 
     eighth = await _started(stack)
     ninth = await _refused(stack, "start_workflow", source=SCRIPT)

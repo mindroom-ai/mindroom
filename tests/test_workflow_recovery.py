@@ -40,7 +40,7 @@ from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.tool_job_helpers import wait_for_status
-from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflow_stack
+from tests.workflow_helpers import NodeFailed, WorkflowStack, set_run, tool_args, workflow_stack
 from tests.workflow_live import kill_after_write
 
 if TYPE_CHECKING:
@@ -429,7 +429,7 @@ async def test_access_is_asked_about_the_run_as_it_is_at_the_handoff(stack: Work
     stack.scripts.refuse_launch = RuntimeError("No worker is free.")
     assert await stack.maintain() == []
     listed = stack.store.get_run(stack.run_id)
-    stack.store.update_run(stack.run_id, job_id="the-job-of-a-later-resume")
+    set_run(stack.store, stack.run_id, job_id="the-job-of-a-later-resume")
     asked: list[str | None] = []
 
     def access(run: WorkflowRun) -> ResumeAccess:
@@ -755,7 +755,7 @@ async def test_attempt_at_its_process_limit_is_resumed_only_while_working_time_i
 ) -> None:
     """The attempt's own 30-day limit ends a process, and the run goes on while it has time or no limit."""
     await _started(stack)
-    stack.store.update_run(stack.run_id, runtime_seconds_left=left)
+    set_run(stack.store, stack.run_id, runtime_seconds_left=left)
     await _interrupt(stack, MAX_RUNTIME_EXCEEDED)
 
     assert await stack.maintain() == ([stack.run_id] if resumed else [])

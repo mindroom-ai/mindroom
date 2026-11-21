@@ -23,7 +23,7 @@ from mindroom.constants import RuntimePaths
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs.models import WorkflowRunState
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
-from tests.workflow_helpers import WorkflowStack, tool_args, workflow_stack
+from tests.workflow_helpers import WorkflowStack, set_run, tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -131,7 +131,7 @@ async def test_unknown_token_is_404(stack: WorkflowStack) -> None:
 @pytest.mark.asyncio
 async def test_superseded_attempt_is_409(stack: WorkflowStack, client: httpx.AsyncClient) -> None:
     """An attempt the run no longer names is told so on every route, and the SDK exits on that answer."""
-    stack.store.update_run(stack.run_id, script_run_id="script-" + "0" * 32)
+    set_run(stack.store, stack.run_id, state=WorkflowRunState.STARTING)
 
     answers = [
         await client.get("run"),

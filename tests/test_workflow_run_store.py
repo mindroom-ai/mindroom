@@ -11,12 +11,14 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.workflow_runs import store as store_module
 from mindroom.workflow_runs.models import (
+    TERMINAL_RUN_STATES,
     DispatchHandle,
     WorkflowNode,
     WorkflowNodeState,
@@ -25,14 +27,18 @@ from mindroom.workflow_runs.models import (
     new_workflow_run_id,
     validated_workflow_run_id,
 )
+from mindroom.workflow_runs.replay import DirtyLanes
 from mindroom.workflow_runs.store import (
+    SupersededAttemptError,
     WorkflowRunConflictError,
     WorkflowRunNotFoundError,
     WorkflowRunStore,
     WorkflowRunStoreError,
 )
+from tests.workflow_helpers import set_run
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 _RUN_A = "wf-" + "a" * 32
@@ -80,7 +86,7 @@ def _node(key: str = "@0", run_id: str = _RUN_A, **changes: object) -> WorkflowN
 def _store_with_node(tmp_path: Path, generation: int = 1) -> tuple[WorkflowRunStore, WorkflowNode]:
     store = WorkflowRunStore(tmp_path / "w.sqlite3")
     store.reserve_run(_run())
-    return store, store.put_node(_node(generation=generation, state=WorkflowNodeState.RUNNING))
+    return store, store.put_node(_node(generation=generation, state=WorkflowNodeState.RUNNING), 0)
 
 
 def _saved(store: WorkflowRunStore, key: str = "@0", run_id: str = _RUN_A) -> WorkflowNode:
@@ -93,9 +99,10 @@ def test_put_node_assigns_stable_sequence(tmp_path: Path) -> None:
     """A new key gets the next sequence number, and writing the key again keeps it."""
     store = WorkflowRunStore(tmp_path / "w.sqlite3")
     run, _ = store.reserve_run(_run(origin_job_id="job-1"))
-    first, second = store.put_node(_node(key="@0")), store.put_node(_node(key="@1"))
+    first, second = store.put_node(_node(key="@0"), 0), store.put_node(_node(key="@1"), 0)
     again = store.put_node(
         replace(first, generation=2, state=WorkflowNodeState.COMPLETED, result={"big": "x" * 200_000}),
+        0,
     )
     assert (first.seq, second.seq, again.seq) == (1, 2, 1)
     assert _saved(store).request == first.request
@@ -128,6 +135,7 @@ def test_node_round_trips_every_field(tmp_path: Path) -> None:
             error={"kind": "tool_failed", "message": "placeholder"},
             links={"job_id": "job-7", "event_id": "$card"},
         ),
+        0,
     )
     assert _saved(store, "/0:ab12@3") == node
     assert node.members == ("/0:ab12", "/0:cd34")
@@ -169,7 +177,8 @@ def test_redelivered_start_hits_its_run_after_an_edited_resume(tmp_path: Path) -
     """The reservation is compared as it was made, so a resume with an edited script does not change it."""
     store = WorkflowRunStore(tmp_path / "w.sqlite3")
     store.reserve_run(_run(_RUN_A, origin_job_id="job-1"))
-    resumed = store.update_run(
+    resumed = set_run(
+        store,
         _RUN_A,
         source="def main(args):\n    return 1\n",
         source_digest="edited-digest",
@@ -180,7 +189,7 @@ def test_redelivered_start_hits_its_run_after_an_edited_resume(tmp_path: Path) -
     with pytest.raises(WorkflowRunConflictError):
         store.reserve_run(_run(_RUN_B, origin_job_id="job-1", source_digest="edited-digest"))
     with pytest.raises(WorkflowRunStoreError, match="origin_job_id"):
-        store.update_run(_RUN_A, origin_job_id="job-2")
+        set_run(store, _RUN_A, origin_job_id="job-2")
     assert store.get_run(_RUN_A) == resumed
 
 
@@ -198,7 +207,7 @@ def test_a_run_keeps_its_owner_and_a_hit_checks_the_stored_one(tmp_path: Path, f
     store = WorkflowRunStore(tmp_path / "w.sqlite3")
     first, _ = store.reserve_run(_run(_RUN_A, origin_job_id="job-1"))
     with pytest.raises(WorkflowRunStoreError, match=field):
-        store.update_run(_RUN_A, **{field: column_value})
+        set_run(store, _RUN_A, **{field: column_value})
     assert store.reserve_run(_run(_RUN_B, origin_job_id="job-1")) == (first, False)
 
     with sqlite3.connect(store.database_path) as connection:
@@ -237,7 +246,7 @@ def test_concurrent_writers_reserve_one_run_and_number_nodes_without_gaps(tmp_pa
     with ThreadPoolExecutor(max_workers=8) as pool:
         reserved = list(pool.map(lambda run_id: store.reserve_run(_run(run_id, origin_job_id="job-1")), run_ids))
         winner = reserved[0][0].run_id
-        nodes = list(pool.map(lambda number: store.put_node(_node(key=f"@{number}", run_id=winner)), range(16)))
+        nodes = list(pool.map(lambda number: store.put_node(_node(key=f"@{number}", run_id=winner), 0), range(16)))
     assert [created for _run_record, created in reserved].count(True) == 1
     assert {run.run_id for run, _created in reserved} == {winner}
     assert [run.run_id for run in store.list_runs()] == [winner]
@@ -250,7 +259,7 @@ def test_reserve_counts_the_owners_live_top_level_runs_in_the_write_that_stores_
     store.reserve_run(_run(_RUN_A, origin_job_id="job-a"))
     store.reserve_run(_run(_RUN_B, parent_run_id=_RUN_A, parent_node_key="@0"))
     store.reserve_run(_run(_RUN_C, owner_user_id="@other:example.org"))
-    store.update_run(store.reserve_run(_run("wf-" + "d" * 32))[0].run_id, state=WorkflowRunState.COMPLETED)
+    set_run(store, store.reserve_run(_run("wf-" + "d" * 32))[0].run_id, state=WorkflowRunState.COMPLETED)
 
     def reserve(number: int) -> str:
         try:
@@ -279,7 +288,7 @@ def test_delete_intent_removes_only_a_run_that_never_started(tmp_path: Path) -> 
     store = WorkflowRunStore(tmp_path / "w.sqlite3")
     store.reserve_run(_run(_RUN_A))
     store.reserve_run(_run(_RUN_B))
-    store.update_run(_RUN_B, attempt=1)
+    set_run(store, _RUN_B, attempt=1)
     assert store.delete_intent(_RUN_A)
     assert not store.delete_intent(_RUN_A)
     assert not store.delete_intent(_RUN_B)
@@ -290,7 +299,8 @@ def test_update_run_changes_named_fields_only(tmp_path: Path) -> None:
     """An update writes the given fields and returns the stored run."""
     store = WorkflowRunStore(tmp_path / "w.sqlite3")
     run, _ = store.reserve_run(_run())
-    updated = store.update_run(
+    updated = set_run(
+        store,
         run.run_id,
         state=WorkflowRunState.COMPLETED,
         attempt=1,
@@ -301,6 +311,7 @@ def test_update_run_changes_named_fields_only(tmp_path: Path) -> None:
     assert updated == replace(
         run,
         state=WorkflowRunState.COMPLETED,
+        epoch=1,
         attempt=1,
         script_run_id="script-" + "1" * 32,
         result={"answer": [1, 2]},
@@ -310,9 +321,9 @@ def test_update_run_changes_named_fields_only(tmp_path: Path) -> None:
     assert store.run_for_script("script-" + "1" * 32) == updated
     assert store.run_for_script("script-" + "2" * 32) is None
     with pytest.raises(WorkflowRunNotFoundError):
-        store.update_run(_RUN_B, attempt=1)
+        set_run(store, _RUN_B, attempt=1)
     with pytest.raises(WorkflowRunStoreError, match="no_such_field"):
-        store.update_run(run.run_id, no_such_field=1)
+        set_run(store, run.run_id, no_such_field=1)
 
 
 def test_list_runs_filters_by_owner_place_and_state(tmp_path: Path) -> None:
@@ -330,7 +341,7 @@ def test_list_runs_filters_by_owner_place_and_state(tmp_path: Path) -> None:
             thread_root_event_id=None,
         ),
     )
-    store.update_run(_RUN_B, state=WorkflowRunState.FAILED)
+    set_run(store, _RUN_B, state=WorkflowRunState.FAILED)
 
     def ids(**filters: object) -> list[str]:
         return [run.run_id for run in store.list_runs(**filters)]
@@ -348,7 +359,7 @@ def test_list_runs_filters_by_owner_place_and_state(tmp_path: Path) -> None:
 def test_settle_refuses_an_old_generation(tmp_path: Path) -> None:
     """A late result of a replaced generation changes nothing."""
     store, node = _store_with_node(tmp_path, generation=2)
-    assert not store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result="late")
+    assert not store.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.COMPLETED, result="late")
     assert _saved(store).state is WorkflowNodeState.RUNNING
     assert _saved(store) == node
 
@@ -356,17 +367,17 @@ def test_settle_refuses_an_old_generation(tmp_path: Path) -> None:
 def test_settle_records_the_end_of_the_current_generation(tmp_path: Path) -> None:
     """The current generation's result or error is stored with its end time."""
     store, node = _store_with_node(tmp_path)
-    assert store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result={"lines": 1})
+    assert store.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.COMPLETED, result={"lines": 1})
     settled = _saved(store)
     assert (settled.state, settled.result, settled.error) == (WorkflowNodeState.COMPLETED, {"lines": 1}, None)
     assert settled.ended_at is not None
     assert replace(settled, state=node.state, result=None, ended_at=None) == node
 
-    failed = store.put_node(_node(key="@1", state=WorkflowNodeState.WAITING, waiting_on="user"))
+    failed = store.put_node(_node(key="@1", state=WorkflowNodeState.WAITING, waiting_on="user"), 0)
     error = {"kind": "indeterminate", "message": "placeholder"}
-    assert store.settle_node(failed.run_id, failed.key, 1, state=WorkflowNodeState.INDETERMINATE, error=error)
+    assert store.settle_node(failed.run_id, failed.key, 1, 0, state=WorkflowNodeState.INDETERMINATE, error=error)
     assert (_saved(store, "@1").error, _saved(store, "@1").waiting_on) == (error, None)
-    assert not store.settle_node(node.run_id, "@9", 1, state=WorkflowNodeState.COMPLETED)
+    assert not store.settle_node(node.run_id, "@9", 1, 0, state=WorkflowNodeState.COMPLETED)
 
 
 def _two_stores(tmp_path: Path) -> tuple[WorkflowRunStore, WorkflowRunStore]:
@@ -380,27 +391,27 @@ def _two_stores(tmp_path: Path) -> tuple[WorkflowRunStore, WorkflowRunStore]:
 def test_old_snapshot_cannot_replace_or_settle_a_newer_generation(tmp_path: Path) -> None:
     """A writer that read generation 1 changes nothing once generation 2 is claimed."""
     engine, late = _two_stores(tmp_path)
-    claimed = engine.put_node(_node(state=WorkflowNodeState.RUNNING))
+    claimed = engine.put_node(_node(state=WorkflowNodeState.RUNNING), 0)
     snapshot = _saved(late)
-    newer = engine.put_node(replace(claimed, generation=2, digest="edited"))
+    newer = engine.put_node(replace(claimed, generation=2, digest="edited"), 0)
 
     with pytest.raises(WorkflowRunConflictError, match="generation 2"):
-        late.put_node(replace(snapshot, attempt=2))
-    assert not late.update_node(snapshot.run_id, snapshot.key, 1, attempt=2)
-    assert not late.settle_node(snapshot.run_id, snapshot.key, 1, state=WorkflowNodeState.COMPLETED, result="late")
+        late.put_node(replace(snapshot, attempt=2), 0)
+    assert not late.update_node(snapshot.run_id, snapshot.key, 1, 0, attempt=2)
+    assert not late.settle_node(snapshot.run_id, snapshot.key, 1, 0, state=WorkflowNodeState.COMPLETED, result="late")
     assert _saved(engine) == newer
 
 
 def test_a_key_and_each_generation_are_claimed_once(tmp_path: Path) -> None:
     """Of two writers that claim the same new key or the same next generation, the second is refused."""
     engine, other = _two_stores(tmp_path)
-    first = engine.put_node(_node())
+    first = engine.put_node(_node(), 0)
     with pytest.raises(WorkflowRunConflictError):
-        other.put_node(_node(digest="other"))
-    second = engine.put_node(replace(first, generation=2))
+        other.put_node(_node(digest="other"), 0)
+    second = engine.put_node(replace(first, generation=2), 0)
     for generation in (1, 2, 4):
         with pytest.raises(WorkflowRunConflictError):
-            other.put_node(replace(first, generation=generation, digest="other"))
+            other.put_node(replace(first, generation=generation, digest="other"), 0)
     assert _saved(engine) == second
     assert (second.seq, second.digest) == (first.seq, "digest")
 
@@ -408,29 +419,29 @@ def test_a_key_and_each_generation_are_claimed_once(tmp_path: Path) -> None:
 def test_late_receipt_never_replaces_a_definitive_outcome(tmp_path: Path) -> None:
     """Once a generation has a proven outcome, a second settlement of it is a no-op."""
     engine, late = _two_stores(tmp_path)
-    node = engine.put_node(_node(state=WorkflowNodeState.RUNNING))
-    assert engine.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result="done")
+    node = engine.put_node(_node(state=WorkflowNodeState.RUNNING), 0)
+    assert engine.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.COMPLETED, result="done")
     settled = _saved(engine)
     error = {"kind": "indeterminate", "message": "placeholder"}
-    assert not late.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.INDETERMINATE, error=error)
-    assert not late.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result="other")
-    assert not late.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.FAILED, error=error)
+    assert not late.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.INDETERMINATE, error=error)
+    assert not late.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.COMPLETED, result="other")
+    assert not late.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.FAILED, error=error)
     assert _saved(late) == settled
 
 
 def test_late_receipt_resolves_an_indeterminate_node(tmp_path: Path) -> None:
     """A call whose end was unknown takes the proven outcome when its receipt does arrive."""
     engine, late = _two_stores(tmp_path)
-    node = engine.put_node(_node(state=WorkflowNodeState.RUNNING))
+    node = engine.put_node(_node(state=WorkflowNodeState.RUNNING), 0)
     error = {"kind": "indeterminate", "message": "placeholder"}
-    assert engine.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.INDETERMINATE, error=error)
-    assert not engine.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.INDETERMINATE, error={})
+    assert engine.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.INDETERMINATE, error=error)
+    assert not engine.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.INDETERMINATE, error={})
     assert _saved(engine).error == error
-    assert late.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result="done")
+    assert late.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.COMPLETED, result="done")
     resolved = _saved(engine)
     assert (resolved.state, resolved.result, resolved.error) == (WorkflowNodeState.COMPLETED, "done", None)
     with pytest.raises(WorkflowRunStoreError, match="waiting"):
-        engine.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.WAITING)
+        engine.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.WAITING)
 
 
 def test_stamps_change_named_fields_and_never_an_outcome(tmp_path: Path) -> None:
@@ -438,26 +449,26 @@ def test_stamps_change_named_fields_and_never_an_outcome(tmp_path: Path) -> None
     store, node = _store_with_node(tmp_path)
     handle = DispatchHandle("job", "job-7", dispatched=True)
     stamp = {"state": WorkflowNodeState.WAITING, "waiting_on": "user", "handle": handle, "links": {"job_id": "job-7"}}
-    assert store.update_node(node.run_id, node.key, 1, **stamp)
+    assert store.update_node(node.run_id, node.key, 1, 0, **stamp)
     assert _saved(store) == replace(node, **stamp)
-    assert not store.update_node(node.run_id, "@9", 1, attempt=2)
+    assert not store.update_node(node.run_id, "@9", 1, 0, attempt=2)
 
-    assert store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result={"lines": 1})
+    assert store.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.COMPLETED, result={"lines": 1})
     settled = _saved(store)
-    assert store.update_node(node.run_id, node.key, 1, attempt=2, stale=True, members=("/0:a", "/0:b"))
+    assert store.update_node(node.run_id, node.key, 1, 0, attempt=2, stale=True, members=("/0:a", "/0:b"))
     assert _saved(store) == replace(settled, attempt=2, stale=True, members=("/0:a", "/0:b"))
-    assert not store.update_node(node.run_id, node.key, 1, state=WorkflowNodeState.RUNNING, attempt=3)
+    assert not store.update_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.RUNNING, attempt=3)
     assert _saved(store).attempt == 2
     for outcome in ({"state": WorkflowNodeState.FAILED}, {"result": "x"}, {"error": {}}, {"digest": "x"}, {}):
         with pytest.raises(WorkflowRunStoreError):
-            store.update_node(node.run_id, node.key, 1, **outcome)
+            store.update_node(node.run_id, node.key, 1, 0, **outcome)
 
 
 def test_stale_nodes_leave_the_current_view(tmp_path: Path) -> None:
     """Nodes are listed in sequence order, and stale ones only on request."""
     store, first = _store_with_node(tmp_path)
-    second, third = store.put_node(_node(key="@1")), store.put_node(_node(key="/1:ab@0"))
-    store.mark_stale(first.run_id, ["@1", "@7"])
+    second, third = store.put_node(_node(key="@1"), 0), store.put_node(_node(key="/1:ab@0"), 0)
+    store.mark_stale(first.run_id, 0, ["@1", "@7"])
     assert store.nodes(first.run_id) == [first, third]
     assert store.nodes(first.run_id, include_stale=True) == [first, replace(second, stale=True), third]
     assert store.nodes(_RUN_B) == []
@@ -483,7 +494,7 @@ def test_usage_is_append_only_and_deduplicated(tmp_path: Path) -> None:
 def test_unknown_price_marks_totals_unknown(tmp_path: Path) -> None:
     """A turn without a price makes the sum a lower bound, for its node and for the run."""
     store, node = _store_with_node(tmp_path)
-    store.put_node(_node(key="@1"))
+    store.put_node(_node(key="@1"), 0)
     store.add_usage(node.run_id, "@0", 1, 1, 1, {"cost_usd": 0.5, "output_tokens": 7, "tool_calls": 2})
     store.add_usage(node.run_id, "@1", 1, 1, 1, {"input_tokens": 3, "output_tokens": 4})
     store.add_usage(node.run_id, "@1", 1, 2, 1, {"input_tokens": 1, "cost_usd": 0.125})
@@ -510,7 +521,7 @@ def test_large_result_spills_to_a_file_and_prune_removes_it(tmp_path: Path) -> N
     """A result over 8 MiB lives in a file; the row keeps its path and a 64 KiB preview."""
     store, node = _store_with_node(tmp_path)
     big = {"text": "x" * (9 * 1024 * 1024)}
-    assert store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result=big)
+    assert store.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.COMPLETED, result=big)
     settled = _saved(store)
     assert settled.result_file == f"results/{node.run_id}/1-1.json"
     spilled = store.directory / settled.result_file
@@ -519,21 +530,21 @@ def test_large_result_spills_to_a_file_and_prune_removes_it(tmp_path: Path) -> N
     assert len(settled.result) == 64 * 1024
     assert settled.result.startswith('{"text":"xxx')
 
-    assert store.update_node(node.run_id, node.key, 1, attempt=2)
+    assert store.update_node(node.run_id, node.key, 1, 0, attempt=2)
     settled = replace(settled, attempt=2)
     assert _saved(store) == settled
     assert json.loads(spilled.read_text()) == big
 
     bigger = {"text": "é" * (5 * 1024 * 1024)}
-    rerun = store.put_node(replace(settled, generation=2, result=bigger, result_file=None))
+    rerun = store.put_node(replace(settled, generation=2, result=bigger, result_file=None), 0)
     assert rerun.result_file == f"results/{node.run_id}/1-2.json"
     assert isinstance(rerun.result, str)
     assert len(rerun.result.encode()) <= 64 * 1024
 
-    small = store.put_node(replace(rerun, generation=3, result="small", result_file=None))
+    small = store.put_node(replace(rerun, generation=3, result="small", result_file=None), 0)
     assert (small.result, small.result_file) == ("small", None)
 
-    store.update_run(node.run_id, state=WorkflowRunState.COMPLETED, finished_at="2026-11-01T00:00:00Z")
+    set_run(store, node.run_id, state=WorkflowRunState.COMPLETED, finished_at="2026-11-01T00:00:00Z")
     assert store.prune("2026-11-02T00:00:00Z") == 1
     assert not spilled.exists()
     assert not (store.directory / "results" / node.run_id).exists()
@@ -543,14 +554,14 @@ def test_settling_again_never_touches_a_committed_spill(tmp_path: Path) -> None:
     """A row that names a spill file keeps that file and its preview, whatever a later settlement brings."""
     store, node = _store_with_node(tmp_path)
     first = {"text": "a" * (9 * 1024 * 1024)}
-    assert store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result=first)
+    assert store.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.COMPLETED, result=first)
     settled = _saved(store)
     assert settled.result_file is not None
     spilled = store.directory / settled.result_file
 
     second = {"text": "b" * (9 * 1024 * 1024)}
-    assert not store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result=second)
-    assert not store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.FAILED, error={"kind": "late"})
+    assert not store.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.COMPLETED, result=second)
+    assert not store.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.FAILED, error={"kind": "late"})
     assert json.loads(spilled.read_text()) == first
     assert _saved(store) == settled
 
@@ -562,8 +573,8 @@ def test_failed_spill_write_publishes_no_file_and_no_reference(
     """A spill appears under its name only whole, and the row names it only after that."""
     store, first = _store_with_node(tmp_path)
     big = {"text": "a" * (9 * 1024 * 1024)}
-    assert store.settle_node(first.run_id, first.key, 1, state=WorkflowNodeState.COMPLETED, result=big)
-    node = store.put_node(_node(key="@1", state=WorkflowNodeState.RUNNING))
+    assert store.settle_node(first.run_id, first.key, 1, 0, state=WorkflowNodeState.COMPLETED, result=big)
+    node = store.put_node(_node(key="@1", state=WorkflowNodeState.RUNNING), 0)
     results = store.directory / "results" / node.run_id
 
     def refuse(_fd: int) -> None:
@@ -573,11 +584,11 @@ def test_failed_spill_write_publishes_no_file_and_no_reference(
     with monkeypatch.context() as patched:
         patched.setattr("os.fsync", refuse)
         with pytest.raises(OSError, match="placeholder disk failure"):
-            store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result=big)
+            store.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.COMPLETED, result=big)
     assert [path.name for path in results.iterdir()] == ["1-1.json"]
     assert _saved(store, "@1") == node
 
-    assert store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result=big)
+    assert store.settle_node(node.run_id, node.key, 1, 0, state=WorkflowNodeState.COMPLETED, result=big)
     assert json.loads((results / "2-1.json").read_text()) == big
     assert sorted(path.name for path in results.iterdir()) == ["1-1.json", "2-1.json"]
 
@@ -587,13 +598,13 @@ def test_prune_removes_only_old_finished_runs(tmp_path: Path) -> None:
     store = WorkflowRunStore(tmp_path / "w.sqlite3")
     for run_id in (_RUN_A, _RUN_B, _RUN_C):
         store.reserve_run(_run(run_id))
-        store.put_node(_node(run_id=run_id))
+        store.put_node(_node(run_id=run_id), 0)
         store.add_usage(run_id, "@0", 1, 1, 1, {"cost_usd": 1.0})
-        store.append_log(run_id, "placeholder line")
-    store.update_run(_RUN_A, state=WorkflowRunState.CANCELLED, finished_at="2026-11-01T00:00:00Z")
-    store.update_run(_RUN_B, state=WorkflowRunState.COMPLETED, finished_at="2026-11-10T00:00:00Z")
+        store.append_log(run_id, 0, "placeholder line")
+    set_run(store, _RUN_A, state=WorkflowRunState.CANCELLED, finished_at="2026-11-01T00:00:00Z")
+    set_run(store, _RUN_B, state=WorkflowRunState.COMPLETED, finished_at="2026-11-10T00:00:00Z")
     # A resumed run keeps the end time of its earlier attempt and must not be pruned while it runs.
-    store.update_run(_RUN_C, state=WorkflowRunState.RUNNING, finished_at="2026-11-01T00:00:00Z")
+    set_run(store, _RUN_C, state=WorkflowRunState.RUNNING, finished_at="2026-11-01T00:00:00Z")
 
     assert store.prune("2026-11-05T00:00:00Z") == 1
     assert sorted(run.run_id for run in store.list_runs()) == [_RUN_B, _RUN_C]
@@ -616,7 +627,7 @@ def test_prune_compares_instants_at_an_exact_second_cutoff(tmp_path: Path) -> No
     }
     for run_id, finished_at in finishes.items():
         store.reserve_run(_run(run_id))
-        store.update_run(run_id, state=WorkflowRunState.COMPLETED, finished_at=finished_at)
+        set_run(store, run_id, state=WorkflowRunState.COMPLETED, finished_at=finished_at)
     assert store.prune("2026-11-05T00:00:00Z") == 1
     assert sorted(run.run_id for run in store.list_runs()) == [_RUN_B, _RUN_C]
     assert store.prune("2026-11-05T00:00:00.500001Z") == 2
@@ -628,8 +639,8 @@ def test_log_returns_the_last_lines_in_order(tmp_path: Path) -> None:
     store.reserve_run(_run(_RUN_A))
     store.reserve_run(_run(_RUN_B))
     for number in range(4):
-        store.append_log(_RUN_A, f"line {number}")
-    store.append_log(_RUN_B, "other run")
+        store.append_log(_RUN_A, 0, f"line {number}")
+    store.append_log(_RUN_B, 0, "other run")
     assert store.log(_RUN_A) == ["line 0", "line 1", "line 2", "line 3"]
     assert store.log(_RUN_A, limit=2) == ["line 2", "line 3"]
 
@@ -740,31 +751,120 @@ def test_failed_migration_leaves_the_version_unchanged(tmp_path: Path, monkeypat
     assert "placeholder" not in columns
 
 
-def test_claim_takes_an_ended_run_only_from_the_job_and_the_end_it_names(tmp_path: Path) -> None:
-    """A resume names what the run was when it was accepted; a run with another job or another end is left whole."""
+def test_claim_takes_an_ended_run_only_at_the_epoch_it_names(tmp_path: Path) -> None:
+    """A resume names the epoch the run had when it was accepted; a run that moved on since is left whole."""
     store, node = _store_with_node(tmp_path)
-    ended = store.update_run(_RUN_A, state=WorkflowRunState.FAILED, job_id="job-1", finished_at="2026-01-01T00:00:00Z")
+    ended = set_run(store, _RUN_A, state=WorkflowRunState.FAILED, job_id="job-1", finished_at="2026-01-01T00:00:00Z")
     changes: dict[str, object] = {"state": WorkflowRunState.STARTING, "job_id": "job-2", "finished_at": None}
+    claim = partial(store.update_run, _RUN_A, when=TERMINAL_RUN_STATES, rerun=[node.key], **changes)
 
-    assert store.claim_run(_RUN_A, ["job-0", ended.finished_at], [node.key], **changes) is None
-    assert store.claim_run(_RUN_A, ["job-1", "2026-01-02T00:00:00Z"], [node.key], **changes) is None
+    for stale in (ended.epoch - 1, ended.epoch + 1):
+        with pytest.raises(SupersededAttemptError):
+            claim(epoch=stale)
     assert (store.get_run(_RUN_A), _saved(store).digest) == (ended, "digest")
 
-    taken = store.claim_run(_RUN_A, ["job-1", ended.finished_at], [node.key], **changes)
+    taken = claim(epoch=ended.epoch)
 
-    assert taken == store.get_run(_RUN_A) == replace(ended, **changes)
+    assert taken == store.get_run(_RUN_A) == replace(ended, epoch=ended.epoch + 1, **changes)
     assert _saved(store).digest == ""
-    # Taken once: the same claim finds a run that is no longer ended.
-    assert store.claim_run(_RUN_A, ["job-1", ended.finished_at], [], **changes) is None
+    # Taken once: the same claim finds a run that is no longer ended, and one that ended again has another epoch.
+    with pytest.raises(SupersededAttemptError):
+        claim(epoch=ended.epoch)
+    set_run(store, _RUN_A, state=WorkflowRunState.FAILED)
+    with pytest.raises(SupersededAttemptError):
+        claim(epoch=ended.epoch)
 
 
-def test_forgetting_no_digest_writes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Most calls mark nothing to run again, and each of them would otherwise wait for the database's writer."""
-    store, _ = _store_with_node(tmp_path)
+def test_claim_counts_the_owners_live_runs_in_the_write_that_takes_the_run(tmp_path: Path) -> None:
+    """An ended run that is taken becomes live again, so it needs a free slot; a refused claim changes nothing."""
+    store, node = _store_with_node(tmp_path)
+    ended = set_run(store, _RUN_A, state=WorkflowRunState.COMPLETED)
+    store.reserve_run(_run(_RUN_B))
+    claim = partial(store.update_run, _RUN_A, ended.epoch, when=TERMINAL_RUN_STATES, rerun=[node.key])
 
-    def no_write() -> None:
-        raise AssertionError
+    with pytest.raises(WorkflowRunStoreError, match="You have 1 workflow runs in progress, the limit"):
+        claim(max_active=1, state=WorkflowRunState.STARTING)
+    assert (store.get_run(_RUN_A), _saved(store).digest) == (ended, "digest")
 
-    monkeypatch.setattr(store, "_write_transaction", no_write)
+    assert claim(max_active=2, state=WorkflowRunState.STARTING).state is WorkflowRunState.STARTING
 
-    store.forget_digests(_RUN_A, [])
+
+_FENCED_WRITES: dict[str, Callable[[WorkflowRunStore, WorkflowNode, int], object]] = {
+    "update_run": lambda store, node, epoch: store.update_run(node.run_id, epoch, result="late"),
+    "end": lambda store, node, epoch: store.update_run(node.run_id, epoch, state=WorkflowRunState.COMPLETED),
+    "put_node": lambda store, node, epoch: store.put_node(replace(node, generation=2, digest="late"), epoch),
+    "update_node": lambda store, node, epoch: store.update_node(node.run_id, node.key, 1, epoch, attempt=9),
+    "settle_node": lambda store, node, epoch: store.settle_node(
+        node.run_id,
+        node.key,
+        1,
+        epoch,
+        state=WorkflowNodeState.COMPLETED,
+        result="late",
+        dirty_after=True,
+    ),
+    "mark_stale": lambda store, node, epoch: store.mark_stale(node.run_id, epoch, [node.key]),
+    "append_log": lambda store, node, epoch: store.append_log(node.run_id, epoch, "late"),
+}
+
+
+@pytest.mark.parametrize("write", _FENCED_WRITES)
+@pytest.mark.parametrize("moved_on", ["next_attempt", "ended"])
+def test_every_write_of_an_attempt_is_refused_once_its_run_moved_on(tmp_path: Path, write: str, moved_on: str) -> None:
+    """A write names the epoch it was decided on: after the run began another attempt or ended, it changes nothing."""
+    store, node = _store_with_node(tmp_path)
+    store.put_node(_node("@1", attempt=0, state=WorkflowNodeState.COMPLETED), 0)
+    held = set_run(store, _RUN_A, state=WorkflowRunState.RUNNING).epoch
+    if moved_on == "next_attempt":
+        set_run(store, _RUN_A, state=WorkflowRunState.STARTING)
+        set_run(store, _RUN_A, state=WorkflowRunState.RUNNING)
+    else:
+        # The epoch alone does not open an ended run: also a write that names it is refused.
+        with sqlite3.connect(store.database_path) as connection:
+            connection.execute("UPDATE workflow_runs SET state = 'failed'")
+    before = store.get_run(_RUN_A), store.nodes(_RUN_A, include_stale=True), store.log(_RUN_A)
+
+    with pytest.raises(SupersededAttemptError):
+        _FENCED_WRITES[write](store, node, held)
+
+    assert (store.get_run(_RUN_A), store.nodes(_RUN_A, include_stale=True), store.log(_RUN_A)) == before
+
+
+_LANE_KEYS = ("@0", "@1", "@2", "@3", "/1:a@0", "/1:a@1", "/1:b@0", "/1:b/0:x@0", "/1:b/0:x@1", "/1:b@1", "/3:a@0")
+
+
+@pytest.mark.parametrize("ran", _LANE_KEYS)
+def test_call_that_runs_makes_exactly_what_follows_it_in_earlier_attempts_run_again(tmp_path: Path, ran: str) -> None:
+    """The store's one write blanks the rows the replay rule calls dirty, and no other.
+
+    Not a row of the call's own attempt, and not a call that may have run.
+    """
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    store.reserve_run(_run())
+    for key in _LANE_KEYS:
+        store.put_node(_node(key, state=WorkflowNodeState.COMPLETED, attempt=1), 0)
+    store.put_node(_node("@9", state=WorkflowNodeState.INDETERMINATE, attempt=1), 0)
+    store.put_node(_node("@10", state=WorkflowNodeState.COMPLETED, attempt=2), 0)
+    lanes = DirtyLanes()
+    lanes.mark(ran)
+
+    store.put_node(replace(_saved(store, ran), generation=2, attempt=2), 0, dirty_after=True)
+
+    blanked = {node.key for node in store.nodes(_RUN_A) if not node.digest}
+    assert blanked == {key for key in _LANE_KEYS if lanes.is_dirty(key)}
+
+
+def test_first_attempt_and_a_clean_stamp_blank_nothing(tmp_path: Path) -> None:
+    """Rows of the attempt that writes are never earlier ones, and a write without `dirty_after` leaves digests alone."""
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    store.reserve_run(_run())
+    for key in ("@0", "@1"):
+        store.put_node(_node(key, state=WorkflowNodeState.COMPLETED, attempt=1), 0, dirty_after=True)
+    store.put_node(_node("@2", state=WorkflowNodeState.RUNNING, attempt=2), 0)
+    assert store.update_node(_RUN_A, "@0", 1, 0, attempt=2)
+    assert store.settle_node(_RUN_A, "@2", 1, 0, state=WorkflowNodeState.COMPLETED)
+
+    assert [node.digest for node in store.nodes(_RUN_A)] == ["digest"] * 3
+    # The stamp that says the group changed blanks what follows it, in its own write.
+    assert store.update_node(_RUN_A, "@0", 1, 0, dirty_after=True, attempt=3)
+    assert [node.digest for node in store.nodes(_RUN_A)] == ["digest", "", ""]

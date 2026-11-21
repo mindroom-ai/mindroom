@@ -23,11 +23,8 @@ class WorkflowRunState(StrEnum):
     INTERRUPTED = "interrupted"
 
 
-TERMINAL_RUN_STATES = frozenset(WorkflowRunState) - {
-    WorkflowRunState.STARTING,
-    WorkflowRunState.RUNNING,
-    WorkflowRunState.WAITING,
-}
+LIVE_RUN_STATES = frozenset({WorkflowRunState.STARTING, WorkflowRunState.RUNNING, WorkflowRunState.WAITING})
+TERMINAL_RUN_STATES = frozenset(WorkflowRunState) - LIVE_RUN_STATES
 
 
 class WorkflowNodeState(StrEnum):
@@ -83,6 +80,8 @@ class WorkflowRun:
     parent_run_id: str | None = None
     parent_node_key: str | None = None
     state: WorkflowRunState = WorkflowRunState.STARTING
+    epoch: int = 0
+    """Raised by each write that takes the run, begins an attempt or ends one; every other write must name it."""
     attempt: int = 0
     idle_resumes: int = 0
     previous_source_digest: str | None = None

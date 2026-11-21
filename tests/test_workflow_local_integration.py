@@ -11,6 +11,7 @@ import json
 import socket
 import sys
 from contextlib import closing
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
@@ -28,7 +29,7 @@ from mindroom.workflow_runs.engine import WorkflowEngine
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, bound_worker_launch_config
 from tests.tool_job_helpers import wait_for_status
-from tests.workflow_helpers import WorkflowStack, workflow_stack
+from tests.workflow_helpers import WorkflowStack, set_run, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -273,7 +274,7 @@ async def test_attempt_that_hits_its_process_limit_is_resumed_while_working_time
     handle = await _start_job(local_stack, _SLEEP_ONCE, args={"marker": str(marker)})
     await local_stack.until(marker.exists)
     first = local_stack.attempt.run_id
-    await asyncio.to_thread(local_stack.store.update_run, local_stack.run_id, runtime_seconds_left=1000.0)
+    await asyncio.to_thread(partial(set_run, local_stack.store, local_stack.run_id, runtime_seconds_left=1000.0))
     await asyncio.sleep(1)
     monkeypatch.setattr(manager_module, "_WORKFLOW_ATTEMPT_SECONDS", month)
 

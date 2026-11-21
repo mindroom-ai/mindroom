@@ -275,7 +275,7 @@ class WorkflowTools(Toolkit):
     ) -> tuple[WorkflowRun, dict[str, Any]]:
         """Check one resume and return its run and the request its job is admitted with; a refusal raises.
 
-        The request names the job and the end the run has now, so it takes the run only if no other resume did since.
+        The request names the epoch the run has now, so it takes the run only if nothing else did since.
         *accepted* is the request this same call was admitted with before, which is returned unchecked.
         """
         source, path, rerun = arguments.get("source"), arguments.get("path"), arguments.get("rerun") or ()
@@ -291,7 +291,7 @@ class WorkflowTools(Toolkit):
             raise WorkflowRunStoreError(msg)
         edited = source is not None or path is not None
         text = (await engine.scripts.resolve_source(context, source=source, path=path)).decode() if edited else None
-        return run, {"source": text, "rerun": list(rerun), "claim": [run.job_id, run.finished_at]}
+        return run, {"source": text, "rerun": list(rerun), "epoch": run.epoch}
 
     async def _reserve(
         self,

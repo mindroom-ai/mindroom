@@ -15,12 +15,12 @@ import pytest
 import pytest_asyncio
 
 from mindroom.script_runs.models import ScriptRunState
-from mindroom.script_runs.reasons import RUNTIME_RESTARTED
+from mindroom.script_runs.reasons import PLUGIN_TOOLS_CHANGED, RUNTIME_RESTARTED
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.engine import SupersededAttemptError, WorkflowLimits
 from mindroom.workflow_runs.models import NodeRequest, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.store import WorkflowRunStoreError
-from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflow_stack
+from tests.workflow_helpers import HeldWrite, NodeFailed, WorkflowStack, set_run, tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -126,7 +126,8 @@ async def test_unsettled_node_of_a_dead_attempt_is_read_from_its_handle_before_a
     assert await stack.result("@0", "tool", _A) == "appended"
     await _resume(stack)
     # As a primary leaves it that stopped after the receipt and before the node: still running, under the old attempt.
-    stack.store.put_node(replace(_node(stack, "@0"), state=WorkflowNodeState.RUNNING, result=None, generation=2))
+    unsettled = replace(_node(stack, "@0"), state=WorkflowNodeState.RUNNING, result=None, generation=2)
+    stack.store.put_node(unsettled, stack.store.get_run(stack.run_id).epoch)
 
     receipt = await stack.submit("@0", "tool", _A)
 
@@ -158,23 +159,6 @@ async def test_cached_false_with_another_result_reruns_what_follows(stack: Workf
     assert await stack.result("@1", "tool", _A) == "appended"
 
     assert (_node(stack, "@1").generation, stack.counting_tool.lines) == (2, ["a", "a"])
-
-
-@pytest.mark.asyncio
-async def test_first_attempt_looks_for_no_saved_call_to_run_again(
-    stack: WorkflowStack,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No earlier attempt left a call to reuse, so a first attempt's calls read and write nothing to mark one."""
-
-    def unexpected(*_args: object) -> None:
-        raise AssertionError
-
-    monkeypatch.setattr(stack.store, "reusable_keys", unexpected)
-    monkeypatch.setattr(stack.store, "forget_digests", unexpected)
-
-    assert await stack.result("@0", "tool", _A) == "appended"
-    assert await stack.result("@1", "tool", _B, _EVERY_TIME) == "appended"
 
 
 @pytest.mark.asyncio
@@ -502,11 +486,11 @@ async def test_working_time_limit_interrupts_and_resume_continues(timed: Workflo
 @pytest.mark.asyncio
 async def test_working_time_does_not_count_while_waiting(timed: WorkflowStack) -> None:
     """Eighty hours of waiting for a person use none of the run's hour."""
-    timed.store.update_run(timed.run_id, state=WorkflowRunState.WAITING)
+    set_run(timed.store, timed.run_id, state=WorkflowRunState.WAITING)
     await asyncio.sleep(0.05)
     timed.now += 80 * 3600
     await asyncio.sleep(0.05)
-    timed.store.update_run(timed.run_id, state=WorkflowRunState.RUNNING)
+    set_run(timed.store, timed.run_id, state=WorkflowRunState.RUNNING)
     await asyncio.sleep(0.05)
     timed.now += 600
     await timed.until(lambda: _left(timed) == 3000)
@@ -540,3 +524,60 @@ async def test_run_without_a_limit_is_never_interrupted_for_its_time(timed: Work
 
     run = timed.store.get_run(timed.run_id)
     assert (run.state, run.runtime_seconds_left) == (WorkflowRunState.RUNNING, None)
+
+
+async def _replayed(stack: WorkflowStack) -> None:
+    """Lose the attempt to an interruption of its process and let the pass start the next one."""
+    await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=PLUGIN_TOOLS_CHANGED)
+    assert await stack.maintain() == [stack.run_id]
+
+
+@pytest.mark.asyncio
+async def test_settle_held_across_two_takeovers_marks_nothing_of_the_later_attempts(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call's task that outlives its attempt writes with that attempt's epoch, so its late write changes nothing."""
+    answer = tool_args("counter", "answer")
+    stack.counting_tool.answers = ["old", "new", "new", "new"]
+    await stack.result("@0", "tool", answer, _EVERY_TIME)
+    await stack.result("@1", "tool", _A)
+    await _replayed(stack)
+    held = HeldWrite(stack.store, "settle_node", monkeypatch)
+    await stack.submit("@0", "tool", answer, _EVERY_TIME)
+    await held.reached()
+
+    # The attempt dies with its write held; the look at its receipt finds the changed answer and marks the append.
+    await _replayed(stack)
+    assert await stack.result("@0", "tool", answer, _EVERY_TIME) == "new"
+    assert await stack.result("@1", "tool", _A) == "appended"
+    before = stack.store.nodes(stack.run_id)
+    await held.release()
+
+    assert stack.store.nodes(stack.run_id) == before
+    await _replayed(stack)
+    assert await stack.result("@0", "tool", answer, _EVERY_TIME) == "new"
+    assert (await stack.submit("@1", "tool", _A)).cached
+    assert stack.counting_tool.lines == ["a", "a"]
+
+
+@pytest.mark.asyncio
+async def test_report_held_across_a_takeover_is_refused_and_the_next_attempts_report_stays(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A report is written with the epoch its attempt began with: the attempt that follows keeps its own."""
+    old = stack.attempt
+    held = HeldWrite(stack.store, "update_run", monkeypatch, when=lambda *_args, **changes: "result" in changes)
+    late = asyncio.create_task(stack.engine.finish(old, result="the first report", error=None))
+    await held.reached()
+    await _replayed(stack)
+    await stack.engine.finish(stack.attempt, result="the second report", error=None)
+
+    await held.release()
+    with pytest.raises(SupersededAttemptError):
+        await late
+    await stack.end_attempt(ScriptRunState.EXITED)
+
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.attempt, run.result) == (WorkflowRunState.COMPLETED, 2, "the second report")

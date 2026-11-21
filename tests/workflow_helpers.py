@@ -59,6 +59,7 @@ from mindroom.workflow_runs.models import (
     WorkflowNode,
     WorkflowNodeState,
     WorkflowRun,
+    WorkflowRunState,
     new_workflow_run_id,
 )
 from mindroom.workflow_runs.recovery import recover_runs
@@ -501,6 +502,46 @@ def owner_context(
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )
+
+
+class HeldWrite:
+    """Hold one call of a store method in its thread, before it writes, so a test moves the run on meanwhile."""
+
+    def __init__(
+        self,
+        store: WorkflowRunStore,
+        name: str,
+        monkeypatch: pytest.MonkeyPatch,
+        when: Callable[..., bool] = lambda *_args, **_options: True,
+    ) -> None:
+        self._entered, self._release, self.done = threading.Event(), threading.Event(), threading.Event()
+        write = getattr(store, name)
+
+        def held(*args: Any, **options: Any) -> object:  # noqa: ANN401
+            if self._entered.is_set() or not when(*args, **options):
+                return write(*args, **options)
+            self._entered.set()
+            self._release.wait(SETTLE_TIMEOUT_SECONDS)
+            try:
+                return write(*args, **options)
+            finally:
+                self.done.set()
+
+        monkeypatch.setattr(store, name, held)
+
+    async def reached(self) -> None:
+        """Wait until the call stands before its write."""
+        assert await asyncio.to_thread(self._entered.wait, SETTLE_TIMEOUT_SECONDS)
+
+    async def release(self) -> None:
+        """Let the call write, and wait until it did or was refused."""
+        self._release.set()
+        assert await asyncio.to_thread(self.done.wait, SETTLE_TIMEOUT_SECONDS)
+
+
+def set_run(store: WorkflowRunStore, run_id: str, **changes: object) -> WorkflowRun:
+    """Write fields of a run as a test arranges it, in whatever state it is; a new state raises its epoch."""
+    return store.update_run(run_id, store.get_run(run_id).epoch, when=frozenset(WorkflowRunState), **changes)
 
 
 class WorkflowStack:
