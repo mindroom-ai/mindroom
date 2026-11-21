@@ -41,9 +41,8 @@ async def reconcile_room_accounts(
     """
     phase = "room_lock"
 
-    async def _write_roster(writer: nio.AsyncClient, deadline: asyncio.Timeout) -> bool | None:
+    async def _write_roster(writer: nio.AsyncClient) -> bool | None:
         nonlocal phase
-        deadline.reschedule(asyncio.get_running_loop().time() + 10)
         event_type = MINDROOM_ACCOUNTS_EVENT_TYPE
         phase = "joined_members"
         try:
@@ -52,8 +51,7 @@ async def reconcile_room_accounts(
             response = exc
         if isinstance(response, nio.JoinedMembersResponse):
             members = {member.user_id for member in response.members}
-            accounts = members & prepared_entity_names_by_user_id(config, runtime_paths).keys()
-            content = {"accounts": sorted(accounts)}
+            content = {"accounts": sorted(members & prepared_entity_names_by_user_id(config, runtime_paths).keys())}
             phase = "state_get"
             current = await writer.room_get_state_event(room_id, event_type, writer.user_id)
             if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
@@ -73,7 +71,7 @@ async def reconcile_room_accounts(
         return None if forbidden else False
 
     try:
-        # Bound lock and binding waits, then renew the deadline per writer without releasing the room lock.
+        # Share one deadline across lock, binding, and the first writer; renew only for steward fallback.
         lock = _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock())
         async with asyncio.timeout(10) as deadline, lock:
             lookup = bool(get_alternate_clients())
@@ -88,9 +86,11 @@ async def reconcile_room_accounts(
             binding = reply.content if isinstance(reply, nio.RoomGetStateEventResponse) else None
             bound = binding.get("user_id") if isinstance(binding, dict) else None
             alternate = get_alternate_clients().get(bound) if isinstance(bound, str) else None
-            if alternate is not None and (result := await _write_roster(alternate, deadline)) is not None:
-                return result
-            return (await _write_roster(client, deadline)) is not False
+            result = await _write_roster(alternate if alternate is not None else client)
+            if alternate is None or result is not None:
+                return result is not False
+            deadline.reschedule(asyncio.get_running_loop().time() + 10)
+            return (await _write_roster(client)) is not False
     except Exception as exc:
         timed_out = isinstance(exc, TimeoutError)
         detail = {"error": "TimeoutError", "phase": phase} if timed_out else {"exc_info": True}
