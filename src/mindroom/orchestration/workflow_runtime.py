@@ -32,6 +32,7 @@ class WorkflowRuntimeLifecycle:
 
     async def start(self) -> None:
         """Follow each pass of the script runtime, which records the attempts that ended."""
+        self.engine.owner_access = self._access
         self.script_runtime.after_reconcile = self._maintain
 
     async def _maintain(self) -> None:

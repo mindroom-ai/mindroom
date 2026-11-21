@@ -74,6 +74,7 @@ _CHANGED_WITHOUT_EDIT = (
     "use now() or random() from mindroom.workflow."
 )
 _NO_ACCESS = "The requester no longer has access."
+_OWNER_NOT_READY = "The run's agent is not ready in the run's room yet. Try again in a moment."
 _IDLE = "Stopped resuming after {attempts} attempts that finished nothing. Fix the script and call resume_workflow."
 # How many attempts in a row an interrupted run is given on its own while none of them finishes a call.
 _MAX_IDLE_RESUMES = 5
@@ -125,6 +126,8 @@ class WorkflowEngine:
         self.broker = broker
         self._clock = clock
         self.started_at = utc_timestamp()
+        # What the saved owner of a run may start an attempt with now; set by the runtime that knows the live bots.
+        self.owner_access: Callable[[WorkflowRun], ResumeAccess] = lambda _run: "pending"
         # The attempts this engine started. No other is served: one an earlier primary left is a leftover process.
         self._launched: set[str] = set()
         # The lanes in which a call ran in each run's current attempt.
@@ -197,7 +200,7 @@ class WorkflowEngine:
             if not idle:
                 try:
                     attempt = await self.scripts.run(
-                        context,
+                        self._owner_context(run, context),
                         source=run.source,
                         workflow_run_id=run_id,
                         resource_profile=cast("ScriptResourceProfileName | None", run.resource_profile),
@@ -231,6 +234,19 @@ class WorkflowEngine:
                 return launched
         # The gate is free again, which ending a run takes.
         return await self._end_run(run, WorkflowRunState.INTERRUPTED if idle else WorkflowRunState.FAILED, refusal)
+
+    def _owner_context(self, run: WorkflowRun, caller: ToolRuntimeContext) -> ToolRuntimeContext:
+        """Return the context every attempt of *run* executes in: that of the conversation the run was started in.
+
+        A caller in that conversation is that context. One that resumes the run from elsewhere only receives the
+        report: the run's own conversation is rebuilt from its saved owner, whose access there is checked again.
+        """
+        if (run.room_id, run.thread_root_event_id) == (caller.room_id, caller.resolved_thread_id):
+            return caller
+        access = self.owner_access(run)
+        if not isinstance(access, tuple):
+            raise WorkflowRunStoreError(_NO_ACCESS if access == "revoked" else _OWNER_NOT_READY)
+        return access[0]
 
     async def cancel(self, run_id: str, *, reason: str) -> WorkflowRun:
         """Revoke the run's attempt, end its process and end the run cancelled; completed nodes stay saved."""

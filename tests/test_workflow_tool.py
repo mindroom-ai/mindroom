@@ -58,7 +58,7 @@ from tests.tool_job_helpers import (
     tool_job_journal,
     wait_for_status,
 )
-from tests.workflow_helpers import CallFailed, NodeFailed, WorkflowStack, tool_args, workflow_stack
+from tests.workflow_helpers import CallFailed, NodeFailed, WorkflowStack, owner_context, tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -965,6 +965,46 @@ async def test_resume_registers_a_new_job_when_the_old_one_ended(stack: Workflow
     assert job.adapter == {"workflow_job": handle["job_id"], "workflow": first["run_id"]}
     assert (run.origin_job_id, run.job_id) == (first["job_id"], handle["job_id"])
     assert stack.counting_tool.lines == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_resume_from_another_thread_runs_in_the_runs_own_conversation(stack: WorkflowStack) -> None:
+    """The run's calls stay in the conversation it was started in; only the report goes to where the resume was called."""
+    first = await _failed(stack)
+    elsewhere = replace(
+        owner_context(stack.tmp_path, **stack.owner_options, thread_id="$elsewhere:example.test"),
+        orchestrator=stack.context.orchestrator,
+    )
+
+    handle = json.loads(await stack.call("resume_workflow", context=elsewhere, run_id=first["run_id"]))
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+
+    run = stack.store.get_run(stack.run_id)
+    job = next(job for job in stack.jobs.retained_jobs() if job.job_id == handle["job_id"])
+    assert run.thread_root_event_id == "$thread:example.test"
+    assert stack.attempt.thread_root_event_id == "$thread:example.test"
+    assert stack.attempt.execution_identity == run.execution_identity
+    assert job.owner.resolved_thread_id == "$elsewhere:example.test"
+
+
+@pytest.mark.asyncio
+async def test_resume_from_another_thread_is_refused_when_the_runs_conversation_is_closed_to_its_owner(
+    stack: WorkflowStack,
+) -> None:
+    """The run's own conversation is checked again, and no attempt starts anywhere else."""
+    first = await _failed(stack)
+    stack.access = "revoked"
+    elsewhere = replace(
+        owner_context(stack.tmp_path, **stack.owner_options, thread_id="$elsewhere:example.test"),
+        orchestrator=stack.context.orchestrator,
+    )
+
+    handle = json.loads(await stack.call("resume_workflow", context=elsewhere, run_id=first["run_id"]))
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        job = (await stack.jobs.wait(handle["job_id"], owner=elsewhere.execution_identity, depth=0)).job
+
+    assert (job.status, await stack.collect(job)) == ("failed", "The requester no longer has access.")
+    assert len(stack.scripts.launched) == 1
 
 
 @pytest.mark.asyncio

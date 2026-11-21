@@ -90,6 +90,7 @@ if TYPE_CHECKING:
     from mindroom.script_runs.models import ScriptToolGrant
     from mindroom.tool_jobs.runtime import BackgroundJob, JobGrant
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.workflow_runs.engine import ResumeAccess
     from tests.tool_job_helpers import ProcessRuntime
 
 SCRIPT_RUN_ID = "script-" + "a" * 32
@@ -452,6 +453,7 @@ def owner_context(
     extra_tools: tuple[str, ...] = (),
     process_env: Mapping[str, str] = MappingProxyType({}),
     require_approval: tuple[str, ...] = ("append",),
+    thread_id: str = "$thread:example.test",
 ) -> ToolRuntimeContext:
     """Return the tool context of the stack's owner: the agent `watcher` with `counter` and `shell`, for Alice.
 
@@ -483,7 +485,7 @@ def owner_context(
         agent_name="watcher",
         target=MessageTarget.resolve(
             room_id="!room:example.test",
-            thread_id="$thread:example.test",
+            thread_id=thread_id,
             reply_to_event_id=None,
         ),
         requester_id="@alice:example.test",
@@ -529,8 +531,13 @@ class WorkflowStack:
         self.scripts = FakeScripts(self.script_store, self.broker)
         self.scripts.tokens = self.tokens
         self.engine = WorkflowEngine(self.store, self.scripts, self.broker, clock=lambda: self.now)  # type: ignore[arg-type]
+        self.engine.owner_access = self._owner_access
         # What a turn of the owner sees: the context with the orchestrator that holds the engine.
         self.context = replace(self.context, orchestrator=SimpleNamespace(workflow_engine=self.engine, running=True))  # type: ignore[arg-type]
+
+    def _owner_access(self, _run: WorkflowRun) -> ResumeAccess:
+        """Answer for the run's saved owner as the live runtime does: the stack's own context, or what `access` says."""
+        return self.access or (self.context, self.limits or WorkflowLimits())
 
     @property
     def attempt(self) -> ScriptRunRecord:
@@ -720,9 +727,8 @@ class WorkflowStack:
 
     async def maintain(self) -> list[str]:
         """Run the workflow pass that follows each pass of the script runtime."""
-        access = self.access or (self.context, self.limits or WorkflowLimits())
         jobs = unfinished_workflow_jobs(self.context.runtime_paths)
-        return await recover_runs(self.engine, lambda _run: access, jobs)
+        return await recover_runs(self.engine, self._owner_access, jobs)
 
     async def continue_jobs(self) -> None:
         """Run the job coordinator's pass that continues the jobs a restart stopped, with the owner's access granted."""
