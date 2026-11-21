@@ -408,8 +408,7 @@ class TurnStateAdapter:
 
     async def visible_echo(self, event_id: str) -> str | None:
         """Return the visible echo tracked for a source."""
-        echo = await self.store.visible_echo(event_id)
-        return None if echo is None else echo.event_id
+        return await self.store.visible_echo(event_id)
 
     async def finalized_echo(self, event_id: str) -> dict[str, object] | None:
         """Return a source's replaced echo and whether a fallback replaced it."""
@@ -464,7 +463,7 @@ class TurnStateAdapter:
             None,
         )
         if echo is not None:
-            view["echo"] = echo.event_id
+            view["echo"] = echo
         return dict(sorted(view.items()))
 
     def _turn(

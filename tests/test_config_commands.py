@@ -839,7 +839,7 @@ async def test_config_preview_is_kept_locally_and_writes_no_room_state(
         restored.room_id,
         restored.thread_id,
     ) == ("defaults.markdown", False, False, "@alice:example.org", "!room:example.org", None)
-    context.record_handled_turn.assert_called_once_with(TurnRecord.create(["$event"], response_event_id="$preview"))
+    context.record_handled_turn.assert_awaited_once_with(TurnRecord.create(["$event"], response_event_id="$preview"))
     client.room_put_state.assert_not_awaited()
     client.room_get_state.assert_not_awaited()
     client.room_get_state_event.assert_not_awaited()
