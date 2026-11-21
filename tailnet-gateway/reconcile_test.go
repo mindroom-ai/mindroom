@@ -11,8 +11,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -416,7 +418,7 @@ func (f *fixtures) connect(t *testing.T, id string) net.Conn {
 	if f.gateway.conns[id] == nil {
 		f.gateway.conns[id] = map[net.Conn]*held{}
 	}
-	f.gateway.conns[id][ours] = &held{cancel: func() {}, reached: f.clock.Now()}
+	f.gateway.conns[id][ours] = &held{cancel: func() { ours.Close() }, reached: f.clock.Now()}
 	return theirs
 }
 
@@ -612,6 +614,75 @@ func TestFailedLinksPreserveNodeButEmptyListStopsIt(t *testing.T) {
 	if !exists(t, node.dir) {
 		t.Error("an empty answer deleted the node's state")
 	}
+}
+
+type leasePrimary struct{ offline bool }
+
+func (p *leasePrimary) RoundTrip(*http.Request) (*http.Response, error) {
+	if p.offline {
+		return nil, errors.New("primary offline")
+	}
+	body := `[{"id":"` + idA + `","hostname":"a","desired":"on","allowed_login":"alice"}]`
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+}
+
+func TestLinksLeaseExpiresAndRecoversWithoutRestartingNode(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		transport := &leasePrimary{}
+		p := NewPrimary("http://primary", "tok")
+		p.client.Transport = transport
+		state := t.TempDir()
+		dir := filepath.Join(state, idA)
+		mkdir(t, dir)
+		g := NewGateway(p, nil, state) // A poll should not touch this running node.
+		node := &fakeNode{}
+		g.nodes[idA] = node
+		ctx := context.Background()
+		open := func() (net.Conn, bool) {
+			ours, peer := net.Pipe()
+			admitCtx, cancel := context.WithCancel(ctx)
+			context.AfterFunc(admitCtx, func() { ours.Close() })
+			t.Cleanup(func() { cancel(); peer.Close() })
+			return peer, g.open(idA, node, ours, cancel)
+		}
+		poll := func() {
+			if err := g.Reconcile(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		poll()
+		peer, admitted := open()
+		if !admitted {
+			t.Fatal("fresh lease refused a connection")
+		}
+		time.Sleep(time.Minute)
+		poll() // Refresh without touching the existing pipe.
+		transport.offline = true
+		time.Sleep(119 * time.Second)
+		if err := g.Reconcile(ctx); err == nil {
+			t.Fatal("expected a failed poll")
+		}
+		other, admitted := open()
+		if !admitted {
+			t.Fatal("lease expired before two minutes")
+		}
+		time.Sleep(time.Second) // No further poll or status response at expiration.
+		synctest.Wait()
+		for _, conn := range []net.Conn{peer, other} {
+			conn.SetReadDeadline(time.Now())
+			if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+				t.Fatalf("lease expiration did not close the pipe: %v", err)
+			}
+		}
+		if _, admitted := open(); admitted || g.nodes[idA] != node || !exists(t, dir) {
+			t.Fatal("expired lease admitted a connection or discarded node state")
+		}
+		transport.offline = false
+		poll()
+		if _, admitted := open(); !admitted || g.nodes[idA] != node {
+			t.Fatal("successful poll did not restore admission on the same node")
+		}
+	})
 }
 
 func TestNullLinksAnswerLeavesALiveNodeUntouched(t *testing.T) {

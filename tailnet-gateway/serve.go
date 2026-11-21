@@ -142,7 +142,7 @@ func dialWorker(ctx context.Context, address string) (net.Conn, error) {
 func (g *Gateway) open(id string, node Node, conn net.Conn, cancel context.CancelFunc) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.links[id].Desired != "on" || g.nodes[id] != node {
+	if !g.now().Before(g.leaseUntil) || g.links[id].Desired != "on" || g.nodes[id] != node {
 		return false
 	}
 	if g.conns[id] == nil {

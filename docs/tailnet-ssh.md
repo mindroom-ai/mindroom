@@ -119,6 +119,10 @@ tailnetSsh:
 ```
 
 The chart sets the gateway environment, shares a separate listener token with the primary, and mounts a persistent volume for node state; keep that volume across restarts.
+The chart reuses the listener token via Helm `lookup` when rendering against the live release.
+Offline renders (including GitOps tools that use `helm template`) can generate a new token without restarting either consumer.
+Keep the generated Secret stable, or roll both the primary and gateway together after its token changes; restarting only one can leave them with different tokens.
+
 `tailnetSsh.port` defaults to `8769` and must differ from `runtime.apiPort`, `scriptGateway.port`, and `egressBroker.port`.
 `tailnetSsh.image.tag` defaults to the chart app version, `tailnetSsh.persistence.size` to `1Gi`, and `tailnetSsh.resources` sets the gateway's resource requests and limits.
 The gateway policy allows DNS, the internal endpoints, and outbound TCP 443 to public IPv4 by default.
@@ -164,9 +168,10 @@ It gets the agent shell's `PATH`, environment variables (including any credentia
 Keep forwarding off in the client even though the worker disables it; do not use clients that trust and execute code from the remote, such as VS Code Remote-SSH.
 
 Remove a public key or login from `config.yaml` to revoke it.
-After the config is applied and the gateway next successfully reconciles (normally within seconds), a change to the configured login or set of keys closes **all** sessions for that link, even those using a remaining key.
+After the config is applied, on the next successful `/links` poll (normally within seconds), a change to the configured login or set of keys closes **all** sessions for that link, even those using a remaining key.
 Removing the last key or login refuses new sign-ins but does not retire the node.
-Existing sessions can survive a primary outage, so wait for the gateway to observe revocation before restoring access.
+If no `/links` poll succeeds for two minutes, the gateway closes all its sessions and refuses new connections, retaining node state until polling recovers.
+Wait for the gateway to observe revocation before restoring access; a successful poll must see the change to cut sessions before the lease expires.
 
 ## Operating limits
 

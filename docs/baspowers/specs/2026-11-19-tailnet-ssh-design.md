@@ -429,14 +429,14 @@ There is no user enrollment or management UI in v1.
   When eligibility returns, reuse its ID, hostname, host key and state directory, even if its worker is asleep.
   An actual roster deletion is final for that link ID: record its ID durably in `retiring_ids`, omit it until keys are cleared or there is no live SSH endpoint, then send `removing` until the gateway acknowledges `removed` after best-effort logout and successful state-directory deletion.
   A restored agent never reactivates a retiring ID; once that retirement completes, discover it as a new link with a fresh ID and host key, so an old acknowledgement cannot delete it.
-  Reject a failed or unparseable response as a whole, leaving state unchanged; in a decoded list from the trusted primary, skip a bad row (invalid ID or unknown `desired`) and reconcile the valid rows.
+  Reject a failed or unparseable response as a whole, leaving node state unchanged and not renewing the two-minute lease; in a decoded list from the trusted primary, skip a bad row (invalid ID or unknown `desired`) and reconcile the valid rows.
   A valid empty list stops all nodes but keeps state.
 - **Revoke worker access and close pipes.** When a live current-backend worker loses eligibility, is deleted, or loses its last login/key, clear `authorized_keys` before requesting the token-gated `/ssh/stop`; derive its unpinned key from the ledger even if scope changed, and retry failed lists or clears while the row is present.
   No runner call is needed for a stopped worker; new connects always project current keys before starting sshd.
   Serialize projection writes and revocation clears for the same worker; `/ssh/start` refuses an empty key file and a late `/ssh/stop` cannot kill a newer admission with keys restored.
   Stops are bounded and best effort; stopping the listener does not close established sessions, so the gateway closes their transports.
   Replace `closed_before` and `seen_keys` with `access_revision`, a digest of the configured login and sorted set of normalized key identities (type and blob, not comments); a changed digest, omission or `removing` closes all existing pipes for the link.
-  New connects fail during a primary outage, but existing sessions can outlive it; if revoke and restore yield the same digest before any successful poll observes the change, those pipes stay open in v1.
+  Two minutes without a successful `GET /links` closes all existing pipes and refuses new ones, without removing nodes or state. A successful poll renews the lease. If revoke and restore yield the same digest before a poll observes the change and before the lease expires, those pipes stay open.
 - **Report activity, not enrollment.** `POST /status` reports only `{open_connections: {link_id: count}, removed: [link_id, ...]}`; drop `pending_login`, `needs_login`, `needs_approval`, `enrolled`/`running`, `suspended`, `off` and card-only worker-readiness states.
   One non-overlapping status publisher reports on change and at least every 30 s, independently of a slow reconcile; both maintenance paths touch workers from known IDs and reports no older than 90 s.
   Count only pipes at least 75 s past reaching sshd (`LoginGraceTime 60`); this is an activity heuristic, not an authentication signal.

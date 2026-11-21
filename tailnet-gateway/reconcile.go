@@ -16,6 +16,7 @@ import (
 
 const (
 	reconcileEvery  = 5 * time.Second
+	linkLease       = 2 * time.Minute
 	statusEvery     = 30 * time.Second // the primary expires activity after 90 s
 	nodeCallTimeout = 10 * time.Second
 	countedAfter    = 75 * time.Second // beyond sshd's LoginGraceTime, not proof of authentication
@@ -46,12 +47,14 @@ type Gateway struct {
 	dial     func(context.Context, string) (net.Conn, error)
 
 	// Reconcile alone writes links, nodes and removed. Other goroutines read them under mu.
-	mu       sync.Mutex
-	links    map[string]DesiredLink
-	nodes    map[string]Node
-	removed  map[string]bool
-	conns    map[string]map[net.Conn]*held
-	connects map[string][]time.Time
+	mu         sync.Mutex
+	links      map[string]DesiredLink
+	nodes      map[string]Node
+	removed    map[string]bool
+	conns      map[string]map[net.Conn]*held
+	connects   map[string][]time.Time
+	leaseUntil time.Time
+	leaseTimer *time.Timer
 }
 
 func NewGateway(p *Primary, f NodeFactory, stateDir string) *Gateway {
@@ -109,6 +112,22 @@ func (g *Gateway) Run(ctx context.Context) {
 	<-done
 }
 
+// revoke and expirePipes run with mu held. Cancelling carry closes both ends of the pipe.
+func (g *Gateway) revoke(id string) {
+	for _, kept := range g.conns[id] {
+		kept.cancel()
+	}
+	delete(g.conns, id)
+}
+
+func (g *Gateway) expirePipes() {
+	if !g.now().Before(g.leaseUntil) {
+		for id := range g.conns {
+			g.revoke(id)
+		}
+	}
+}
+
 func (g *Gateway) Reconcile(ctx context.Context) error {
 	answer, err := g.primary.Links(ctx)
 	if err != nil {
@@ -125,17 +144,24 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 
 	// Revoke admissions and cancel pipes before any slow node operation.
 	g.mu.Lock()
-	var revoked []net.Conn
+	// Expire before renewing, even if the timer callback hasn't run yet.
+	g.expirePipes()
+	g.leaseUntil = g.now().Add(linkLease)
+	if g.leaseTimer == nil {
+		g.leaseTimer = time.AfterFunc(linkLease, func() {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			g.expirePipes()
+		})
+	} else {
+		g.leaseTimer.Reset(linkLease)
+	}
 	for id, previous := range g.links {
 		link := listed[id]
 		if link.Desired == "on" && previous.Desired == "on" && link.AccessRevision == previous.AccessRevision {
 			continue
 		}
-		for conn, kept := range g.conns[id] {
-			kept.cancel()
-			revoked = append(revoked, conn)
-		}
-		delete(g.conns, id)
+		g.revoke(id)
 		if link.Desired != "on" {
 			delete(g.connects, id)
 		}
@@ -145,9 +171,6 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 	}
 	g.links = listed
 	g.mu.Unlock()
-	for _, conn := range revoked {
-		conn.Close()
-	}
 
 	for id := range g.nodes {
 		if _, ok := listed[id]; !ok {
