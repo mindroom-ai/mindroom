@@ -577,5 +577,8 @@ def test_a_background_script_cannot_run_commands_in_named_workers(capsys, monkey
     """Named workers belong to a reply, and a background script outlives the reply that started it."""
     _in_background_script(monkeypatch, tmp_path)
 
-    assert main(["workers", "run", "w", "--", "true"]) == 2
-    assert "background script" in json.loads(capsys.readouterr().out)["error"]
+    assert main(["workers", "run", "w", "--", "true"]) == 125
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "A named worker belongs to a reply in a conversation" in output.err
+    assert "background script" in output.err

@@ -239,6 +239,13 @@ def _run_in_worker(args: argparse.Namespace) -> int:
     The command is a call of the agent's own shell tool that names the worker, so it runs under the same rules as
     every other call. It is waited for however long it runs, since its own time limit stops it.
     """
+    if os.environ.get(RUN_ID_ENV):
+        print(
+            "mindroom-agent: A named worker belongs to a reply in a conversation; "
+            "it cannot run from a background script.",
+            file=sys.stderr,
+        )
+        return _EXIT_NOT_RUN
     arguments: dict[str, object] = {
         "args": args.command,
         "worker": args.name,
@@ -340,14 +347,14 @@ def main(argv: list[str] | None = None) -> int:
         args = _parsed_or_exit_code(argv)
         if isinstance(args, int):
             return args
+        if args.group == "workers":
+            return _run_in_worker(args)
         # Only a background script's launcher sets its run ID.
         if os.environ.get(RUN_ID_ENV):
             result = _script_tool_call(args)
             # The gateway bounded the outcome already; its receipt may still pass the CLI's 64 KiB wire limit.
             print(json.dumps(result, allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
             return _exit_code(result)
-        if args.group == "workers":
-            return _run_in_worker(args)
         if args.group == "calls":
             call_id = str(args.call_id)
             client = AgentCliClient()
