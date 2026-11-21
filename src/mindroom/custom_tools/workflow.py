@@ -545,6 +545,7 @@ def _public_node(node: WorkflowNode) -> dict[str, object]:
         "label": node.label,
         "status": node.state.value,
         "error": node.error,
+        **({"links": node.links} if node.links else {}),
     }
 
 

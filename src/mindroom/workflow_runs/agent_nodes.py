@@ -186,6 +186,8 @@ async def launch_child(
         work_until = None if timeout is None else time.time() + timeout
         handle = DispatchHandle("job", job_id, dispatched=False, work_until=work_until)
         links = {"job_id": job_id, "delegation_id": child.delegation_id, "subagent_id": child.subagent_id}
+        # And what the call resolved to, which its arguments need not name.
+        links |= {"agent": target.agent_name, "model": child.model_name}
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle, links=links)
         node = await asyncio.to_thread(partial(store.put_node, node, epoch, dirty_after=True))
         try:

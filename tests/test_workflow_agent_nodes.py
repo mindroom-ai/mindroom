@@ -6,6 +6,7 @@ Level: engine harness (`WorkflowStack`) with the real job runtime and real deleg
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -75,7 +76,11 @@ async def test_agent_node_runs_a_child_job_and_saves_the_raw_answer_and_usage(st
     assert (job.adapter["workflow"], job.adapter["node"], job.adapter["generation"]) == (stack.run_id, "@0", 1)
     assert (child.workflow_run_id, child.workflow_node_key, child.workflow_generation) == (stack.run_id, "@0", 1)
     assert (child.task, child.depth, child.child_agent_name) == ("Say hi", 1, "watcher")
-    assert node.links == {"job_id": job.job_id, "delegation_id": child.delegation_id, "subagent_id": child.subagent_id}
+    ids = {"job_id": job.job_id, "delegation_id": child.delegation_id, "subagent_id": child.subagent_id}
+    # With the agent and the model the call resolved to, which its arguments need not name.
+    assert node.links == ids | {"agent": "watcher", "model": "default"}
+    listed = json.loads(await stack.call("get_workflow", run_id=stack.run_id, nodes="all"))["nodes"]
+    assert [shown["links"] for shown in listed] == [node.links]
     totals = stack.store.usage_totals(stack.run_id)
     assert (totals["input_tokens"], totals["output_tokens"]) == (11, 3)
 
@@ -509,6 +514,19 @@ async def test_the_job_snapshot_holds_the_label_not_the_prompt(stack: WorkflowSt
     assert (child.task, len(child.task)) == (prompt[:80], 80)
     sent = [str(message.content) for message in model.requests[0].messages if message.role == "user"]
     assert prompt in sent[-1]
+
+
+@pytest.mark.asyncio
+async def test_label_of_a_call_without_a_name_is_the_first_line_of_its_prompt_without_its_secrets(
+    stack: WorkflowStack,
+) -> None:
+    """The label goes where the prompt does not: into the job, the room and the run's view. It is one redacted line."""
+    stack.child_script(answer("done"))
+
+    await stack.result("@0", "agent", {"prompt": "\nDeploy with password=placeholder-not-a-secret now.\nThen report."})
+
+    label = "Deploy with password=***redacted***"
+    assert (_node(stack).label, delegation_child(stack.node_job("@0")).task) == (label, label)
 
 
 @pytest.mark.asyncio

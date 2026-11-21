@@ -18,6 +18,7 @@ from weakref import WeakValueDictionary
 from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
 from mindroom.delegation.personas import persona_allows
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_text
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.manager import ScriptRunLimits, ScriptRuntimeNotReadyError
 from mindroom.script_runs.models import (
@@ -1051,7 +1052,9 @@ def _require_kept(kept: list[str] | None, grant: ScriptToolGrant) -> None:
 def _default_label(kind: str, args: dict[str, object]) -> object:
     """Return what a node is called when its script gave no label: its function, name, prompt or operation."""
     if kind == "agent":
-        return args.get("name") or args.get("prompt") or kind
+        # The label goes into the job, the room and the run's view, where the prompt does not: one redacted line.
+        line = str(args.get("prompt") or kind).strip().partition("\n")[0]
+        return args.get("name") or redact_sensitive_text(line[:_MAX_LABEL_CHARS])
     return f"{args.get('toolkit')}.{args.get('function')}" if kind == "tool" else args.get("op") or kind
 
 
