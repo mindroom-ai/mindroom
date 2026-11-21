@@ -17,7 +17,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
 from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import agent_policy
@@ -72,24 +72,6 @@ _admission_lock = threading.Lock()
 
 class NamedWorkerError(RuntimeError):
     """Why a call cannot run in the worker it names, in words for the agent that made the call."""
-
-
-class _NamedWorkerBackend(Protocol):
-    """What a backend whose ``named_workers_max`` is above 0 adds to run named workers."""
-
-    def has_named_worker(self, worker_key: str) -> bool:
-        """Return whether one named worker exists and is not being removed."""
-
-    def named_worker_keys(self) -> frozenset[str]:
-        """Return the key of every named worker that exists, running or stopped, and is not being removed."""
-
-    def retire_worker(self, worker_key: str) -> None:
-        """Remove one exact worker and all backend-owned state."""
-
-
-def _named_backend(backend: WorkerBackend) -> _NamedWorkerBackend:
-    """Return ``backend``, whose ``named_workers_max`` is above 0, as one that runs named workers."""
-    return cast("_NamedWorkerBackend", backend)
 
 
 @dataclass(slots=True)
@@ -309,9 +291,8 @@ def ensure_named_worker(
         with _lock:
             starting = frozenset(_starting)
             already_admitted = worker_key in call._fleet.workers
-        named_backend = _named_backend(backend)
-        existing = worker_key in starting or (already_admitted and named_backend.has_named_worker(worker_key))
-        counted = None if existing else named_backend.named_worker_keys() | starting
+        existing = worker_key in starting or (already_admitted and backend.has_named_worker(worker_key))
+        counted = None if existing else backend.named_worker_keys() | starting
         if counted is not None and worker_key not in counted:
             mine = sum(pinned_worker_state_scope_key(key) == normal_worker_key for key in counted)
             if mine >= call.agent_limit:
@@ -341,10 +322,10 @@ def ensure_named_worker(
                 del _starting[worker_key]
             retire = last_start and not call._fleet.holders
         if retire:
-            _retire_named_worker(named_backend, worker_key)
+            _retire_named_worker(backend, worker_key)
 
 
-def _retire_named_worker(backend: _NamedWorkerBackend, worker_key: str) -> None:
+def _retire_named_worker(backend: WorkerBackend, worker_key: str) -> None:
     try:
         backend.retire_worker(worker_key)
     except WorkerBackendError:
@@ -359,7 +340,5 @@ def _retire_workers(runtime_paths: RuntimePaths, worker_keys: tuple[str, ...]) -
     with lease as backend:
         if backend.named_workers_max < 1:
             return
-        named_backend = _named_backend(backend)
-
         with ThreadPoolExecutor(max_workers=len(worker_keys), thread_name_prefix="named-worker-retire") as pool:
-            list(pool.map(partial(_retire_named_worker, named_backend), worker_keys))
+            list(pool.map(partial(_retire_named_worker, backend), worker_keys))

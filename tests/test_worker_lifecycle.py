@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, TextIO
 
 import pytest
 
-from mindroom.workers.backend import effective_idle_status, filter_and_sort_worker_handles
+from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
 from mindroom.workers.backends import local as local_module
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
@@ -174,6 +174,24 @@ def test_static_backend_touch_does_not_revive_failed_worker() -> None:
     assert touched is not None
     assert touched.status == "failed"
     assert touched.failure_reason == "boom"
+
+
+def test_worker_backends_without_named_workers_use_safe_defaults(tmp_path: Path) -> None:
+    """Shared and local runners report no named workers and cannot retire an exact worker."""
+    key = "v1:t:shared:a"
+    for backend in (
+        StaticSandboxRunnerBackend(api_root="http://runner", auth_token=None),
+        local_module._LocalWorkerBackend(
+            worker_root=tmp_path / "workers",
+            api_root="/api/sandbox-runner",
+            idle_timeout_seconds=10.0,
+        ),
+    ):
+        assert backend.named_workers_max == 0
+        assert not backend.has_named_worker(key)
+        assert backend.named_worker_keys() == frozenset()
+        with pytest.raises(WorkerBackendError, match="does not support exact retirement"):
+            backend.retire_worker(key)
 
 
 def test_local_backend_touch_revives_idle_worker_and_clears_failure(tmp_path: Path) -> None:

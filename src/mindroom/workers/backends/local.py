@@ -18,6 +18,7 @@ from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import worker_dir_name, worker_log_id
 from mindroom.workers.backend import (
     WorkerBackend,
+    WorkerBackendDefaults,
     WorkerBackendError,
     effective_idle_status,
     filter_and_sort_worker_handles,
@@ -235,12 +236,11 @@ def _worker_initialization_lock(paths: LocalWorkerStatePaths) -> threading.Lock:
     return _WORKER_INITIALIZATION_LOCKS.for_key(str(paths.root))
 
 
-class _LocalWorkerBackend:
+class _LocalWorkerBackend(WorkerBackendDefaults):
     """Persistent local worker backend used by the sandbox runner."""
 
     backend_name = "local_sandbox_runner"
     cleanup_locator: str | None = None
-    named_workers_max = 0
 
     def __init__(
         self,

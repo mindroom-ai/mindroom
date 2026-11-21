@@ -43,15 +43,32 @@ def filter_and_sort_worker_handles(handles: list[WorkerHandle], include_idle: bo
     return sorted(filtered_handles, key=lambda handle: handle.last_used_at, reverse=True)
 
 
-class WorkerBackend(Protocol):
+class WorkerBackendDefaults(Protocol):
+    """Shared defaults for backends without named workers or exact retirement."""
+
+    # Deployment-wide limit across all agents and requesters; zero disables named workers.
+    named_workers_max: int = 0
+
+    def has_named_worker(self, _worker_key: str, /) -> bool:
+        """Check whether one named worker exists and is not being removed."""
+        return False
+
+    def named_worker_keys(self) -> frozenset[str]:
+        """List existing named workers, running or stopped, that are not being removed."""
+        return frozenset()
+
+    def retire_worker(self, _worker_key: str, /) -> None:
+        """Remove one exact worker and all backend-owned state, or refuse if unsupported."""
+        msg = "This worker backend does not support exact retirement."
+        raise WorkerBackendError(msg)
+
+
+class WorkerBackend(WorkerBackendDefaults, Protocol):
     """Backend contract for realizing persistent workers."""
 
     backend_name: str
     cleanup_locator: str | None
     idle_timeout_seconds: float
-    # How many named workers (``workers.named``) may exist at once for every requester and agent together; 0 for a
-    # backend that runs none.
-    named_workers_max: int
 
     def shutdown(self) -> None:
         """Release backend-owned runtime resources before discarding this manager."""

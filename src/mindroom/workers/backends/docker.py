@@ -38,6 +38,7 @@ from mindroom.tool_system.worker_routing import (
     worker_log_id,
 )
 from mindroom.workers.backend import (
+    WorkerBackendDefaults,
     WorkerBackendError,
     WorkerStartTimeoutError,
     filter_and_sort_worker_handles,
@@ -444,12 +445,11 @@ class _WorkerContainerState:
     mounts: list[tuple[Path, str, bool]]
 
 
-class DockerWorkerBackend:
+class DockerWorkerBackend(WorkerBackendDefaults):
     """Docker-backed worker provider for dedicated local sandbox-runner containers."""
 
     backend_name = WorkerBackendKind.DOCKER.value
     cleanup_locator: str | None = None
-    named_workers_max = 0
 
     def __init__(
         self,

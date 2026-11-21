@@ -10,6 +10,7 @@ import httpx
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import (
+    WorkerBackendDefaults,
     WorkerBackendError,
     effective_idle_status,
     filter_and_sort_worker_handles,
@@ -46,12 +47,11 @@ def _read_runner_health(runner_root: str) -> httpx.Response:
         return client.get(f"{runner_root}/healthz")
 
 
-class StaticSandboxRunnerBackend:
+class StaticSandboxRunnerBackend(WorkerBackendDefaults):
     """Worker backend representing the current shared sandbox-runner deployment."""
 
     backend_name = WorkerBackendKind.STATIC_RUNNER.value
     cleanup_locator: str | None = None
-    named_workers_max = 0
 
     def __init__(
         self,
