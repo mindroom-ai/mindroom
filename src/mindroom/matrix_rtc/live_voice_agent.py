@@ -31,6 +31,7 @@ logger = get_logger(__name__)
 _DELEGATION_ERROR = "Voice call error: the agent could not complete the delegated request. Please try again."
 _EMPTY_DELEGATION_RESPONSE = "No response is available from the agent for this request."
 _CONTENT_CLOSE_RECOVERY_WINDOW_SECONDS = 5 * 60
+_CONTENT_CLOSE_FAST_REPEAT_SECONDS = 30
 _CONTENT_CLOSE_RECOVERY_TIMEOUT_SECONDS = 10
 _MODERATION_NOTICE = "Voice call notice: the voice model's moderation stopped that reply. Try rephrasing."
 _MODERATION_ENDED_NOTICE = (
@@ -293,29 +294,39 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             ending = self._provider_close_task is not None or self._exiting
             delegations = self._delegations
             retryable = True
+            fast_repeat_fallback = False
             queued_commentary_fallback = False
             if not ending and reason == "content":
                 now = time.monotonic()
                 previous = self._last_recovered_content_close
-                retryable = previous is None or now - previous >= _CONTENT_CLOSE_RECOVERY_WINDOW_SECONDS
-                # The SDK queue survives reconnect. Fall back to a fresh call only if the repeat cap allows it.
-                queued_commentary_fallback = retryable and delegations is not None and delegations.has_unsent_commentary
-                if retryable and not queued_commentary_fallback:
-                    logger.info("call_live_session_closed", reason=reason, action="recovering")
-                    self._last_recovered_content_close = now
-                    # Fence off the moderated delegation now; the SDK reconnects with its own history.
-                    if delegations is not None:
-                        delegations.on_reconnected()
-                    self._recovery_deadline = asyncio.get_running_loop().call_later(
-                        _CONTENT_CLOSE_RECOVERY_TIMEOUT_SECONDS,
-                        self._on_recovery_timeout,
-                    )
-                    return
+                elapsed = now - previous if previous is not None else None
+                if self._recovery_deadline is not None or (
+                    elapsed is not None and elapsed < _CONTENT_CLOSE_FAST_REPEAT_SECONDS
+                ):
+                    # If replaying history triggers another close, rejoin without that history.
+                    fast_repeat_fallback = True
+                elif elapsed is not None and elapsed < _CONTENT_CLOSE_RECOVERY_WINDOW_SECONDS:
+                    retryable = False
+                else:
+                    # The SDK queue survives reconnect. Rejoin fresh rather than replay queued commentary.
+                    queued_commentary_fallback = delegations is not None and delegations.has_unsent_commentary
+                    if not queued_commentary_fallback:
+                        logger.info("call_live_session_closed", reason=reason, action="recovering")
+                        self._last_recovered_content_close = now
+                        # Fence off the moderated delegation now; the SDK reconnects with its own history.
+                        if delegations is not None:
+                            delegations.on_reconnected()
+                        self._recovery_deadline = asyncio.get_running_loop().call_later(
+                            _CONTENT_CLOSE_RECOVERY_TIMEOUT_SECONDS,
+                            self._on_recovery_timeout,
+                        )
+                        return
 
             logger.info(
                 "call_live_session_closed",
                 reason=reason,
                 action="ending",
+                fast_repeat_fallback=fast_repeat_fallback,
                 queued_commentary_fallback=queued_commentary_fallback,
             )
             if not ending:
