@@ -334,6 +334,7 @@ class AgentBot:
         self._calls_full_reconcile_pending = False
         self._call_rooms_reconcile_pending = set()
         self._local_membership_lock = asyncio.Lock()
+        self._membership_changed_rooms: set[str] = set()
         self._ingestion_admission_progress = asyncio.Event()
 
         async def send_room_lifecycle_response(
@@ -1389,7 +1390,12 @@ class AgentBot:
         if self._first_sync_done and not self._orchestrator_ready_handled:
             await self.orchestrator.handle_bot_ready(self)
             self._orchestrator_ready_handled = True
-        self.steward_duties.publish_joined_room_state(every_room=opened)
+        # A local join can precede the sync frame that populates the room's cache.
+        if opened and self.client is not None:
+            self._membership_changed_rooms.update(self.client.rooms)
+        for room_id in self._membership_changed_rooms:
+            orchestrator.room_state.mark(room_id)
+        self._membership_changed_rooms.clear()
 
     def _before_ingestion_admission(
         self,
@@ -1453,7 +1459,7 @@ class AgentBot:
             if joined:
                 self._request_call_reconciliation(room_id)
         if joined != (admission.previous_membership == "join"):
-            self.steward_duties.mark_joined_for_room_state(room_id)
+            self._membership_changed_rooms.add(room_id)
         if not joined and admission.previous_membership == "join":
             await self._reply_runtime.departed(room_id)
             if (runtime := get_background_runtime(self.runtime_paths)) is not None:
@@ -1962,7 +1968,6 @@ class AgentBot:
         if shutdown_budget is None:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)
             self._sync_shutdown_budget = shutdown_budget
-        self.steward_duties.stopping()
         if self._bot_ready_hooks_task is not None:
             # Waiting for an observer hook would spend the budget the replies drained below need to finish.
             self._bot_ready_hooks_task.cancel()

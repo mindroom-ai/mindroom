@@ -34,6 +34,7 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
     room_id: str,
     *,
     put_state: Callable[..., Awaitable[bool | None]] | None = None,
+    may_write: Callable[[], bool] | None = None,
     failure_level: Callable[[bool], int] = lambda _: logging.WARNING,
 ) -> bool | None:
     """Compare one state event with reply-path responders and return whether it is current.
@@ -41,7 +42,7 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
     The room's steward reads and writes with its own client; a bot that answers a command reads with its client
     and writes through ``put_state``, the steward's.
     None says the room refused the write for lack of power.
-    The steward retries transient failures in the background.
+    The room-state worker retries transient failures in the background.
     """
     phase = "room_lock"
     try:
@@ -78,12 +79,15 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
             if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
                 return True
             if isinstance(current, nio.RoomGetStateEventError) and current.status_code != "M_NOT_FOUND":
-                level = failure_level(False)
+                forbidden = may_write is not None and current.status_code == "M_FORBIDDEN"
+                level = logging.DEBUG if forbidden else failure_level(False)
                 logger.log(level, "room_thread_mode_reconcile_failed", room_id=room_id, error=str(current))
-                return False
+                return None if forbidden else False
             phase = "state_put"
             if put_state is not None:
                 return await put_state(room_id, _THREAD_MODE_EVENT_TYPE, content)
+            if may_write is not None and not may_write():
+                return True
             response = await client.room_put_state(room_id, _THREAD_MODE_EVENT_TYPE, content, state_key="")
             if not isinstance(response, nio.RoomPutStateResponse):
                 # A room whose power levels keep this account from sending this state refuses it on every trigger.

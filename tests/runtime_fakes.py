@@ -56,7 +56,9 @@ class ReadyRuntime(_MultiAgentOrchestrator):
         """Return the entity the test made every room's steward: its registered bot, else a stand-in with its name."""
         if self.steward is None:
             return None
-        return self.agent_bots.get(self.steward) or cast("AgentBot", SimpleNamespace(agent_name=self.steward))
+        return self.agent_bots.get(self.steward) or cast(
+            "AgentBot", SimpleNamespace(agent_name=self.steward, client=None)
+        )
 
     def event_journal_store(self) -> EventJournalStore:
         """Return the store the test handed in, or the runtime's own."""

@@ -38,7 +38,10 @@ The room state event has type `io.mindroom.accounts`, the publisher's own user I
 {"accounts":["@alice.mind:example.org","@mindroom_research:example.org","@mindroom_router:example.org"]}
 ```
 
-The steward publishes it on startup and after every config reload, and updates it when one of those accounts joins or leaves the room.
+The runtime marks held rooms for background reconciliation on startup and after each config reload, and marks individual rooms on membership or power changes and first settled syncs.
+One worker task per room picks the current steward for each attempt and checks thread mode, accounts, then the binding.
+Transient failures retry with jitter, but refused writes wait for another trigger.
+Explicit mode changes still compare and write directly, sharing the thread-mode room lock with the worker.
 Matrix accepts a state key that starts with `@` only from that user, but any member allowed to send the type can send it under another state key.
 So a client reads only an event keyed by its sender's user ID.
 The steward is often the MindRoom owner account (`@mindroom_router:<server>`, or `@mindroom_router_<namespace>:<server>` for a namespaced installation), but can be any MindRoom account, so the owner's localpart does not identify every valid publisher.

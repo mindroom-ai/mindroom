@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom import constants
@@ -111,8 +111,7 @@ class RoomSetup:
     # The owner account's client when it runs; without one no room is created or administered.
     owner_client: Callable[[], nio.AsyncClient | None]
     refresh_agent_reply_memberships: Callable[[], Awaitable[object]]
-    reconcile_room_states: Callable[[], Awaitable[None]]
-    publication_allowed: Callable[[], bool] = field(default=lambda: True)
+    publish_room_state: Callable[[], Awaitable[None]]
 
     async def setup(self, bots: list[AgentBot]) -> None:
         """Setup rooms and ensure all bots have correct memberships.
@@ -157,17 +156,6 @@ class RoomSetup:
         await self.publish_room_state()
 
         logger.info("All agents have joined their configured rooms")
-
-    async def publish_room_state(self) -> None:
-        """Reconcile the room state of every room a bot holds, through its steward, after reply admission reopens.
-
-        This includes retained invited rooms.
-        """
-        try:
-            if self.publication_allowed():
-                await self.reconcile_room_states()
-        except Exception:
-            logger.warning("room_state_publish_failed", exc_info=True)
 
     async def ensure_rooms_exist(self) -> dict[str, str]:
         """Ensure all configured rooms exist, creating them if necessary.

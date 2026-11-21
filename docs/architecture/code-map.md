@@ -69,7 +69,8 @@ Matrix sync callback
 | `turns/queued_notice.py` | The queued notice and approval-wait reaction that text, media, and voice ingress share |
 | `voice/ingress.py` | VoiceIngress - fixes a voice message's conversation, then readies it behind its sender's lane |
 | `voice/readiness.py` | Voice preparation: transcription and its durable per-bot checkpoint |
-| `steward_duties.py` | What a room's steward does for the room: publish its thread mode and MindRoom accounts, on its own triggers, on a handover and in the startup and reload sweep, and emit room-membership hooks under a per-event claim taken for the steward elected then; `runs_room_hooks` says which bot runs an emission's room-scoped hooks; also the owner account's orphaned-account cleanup and welcome in configured rooms |
+| `steward_duties.py` | On-demand steward writes and room-membership hooks, plus the owner's welcome and orphaned-account cleanup |
+| `orchestration/room_state.py` | Runtime-owned background room-state reconciliation with one task per room and a fresh election per attempt |
 | `ingress_validation.py` | Ingress boundary validation: classify each event's provenance once against the entity registry, handled-id dedup, reply access at the first gate and again under the admission fence |
 | `turns/facts.py` | One inbound event's classified provenance (`IngressFacts`), the turn origin derived from it, and the one command rule |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |

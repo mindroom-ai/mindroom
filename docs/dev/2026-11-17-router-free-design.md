@@ -38,7 +38,10 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
    - A command aimed at an agent (`@X !model`, or a command in X's thread) is handled by X; an untargeted command at room top level is routed like any message.
 3. **The steward does invisible work only.**
    Per room, the steward is the MindRoom account with the highest power level among the MindRoom accounts joined there, ties going to the lowest Matrix ID.
-   It tracks members for reply access, writes room state (thread mode, `io.mindroom.accounts`, schedule state), and runs member-join hooks and once-per-room plugin hooks.
+   The runtime owns background reconciliation of thread mode, `io.mindroom.accounts`, and the legacy `io.mindroom.router` binding.
+   One task per room borrows the current steward for each attempt, and no reconciliation or retry is owned by a bot.
+   Foreground state mutations still write directly through the steward.
+   Member tracking for reply access uses a pinned observer, and member-join hooks and other room-scoped hooks keep their existing claims.
    It never posts a message.
    Duties that must not run twice take a durable per-event claim.
 4. **The owner account is the old router account, demoted.**

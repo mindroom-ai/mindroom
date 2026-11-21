@@ -130,6 +130,7 @@ from .orchestration.entity_fleet import EntityFleet, EntityFleetHooks, EntitySta
 from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
 from .orchestration.plugin_http_runtime import bind_room_members, unbind_room_members
 from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
+from .orchestration.room_state import RoomStateWorker
 from .orchestration.rooms import RoomSetup
 from .orchestration.runtime import (
     is_permanent_startup_error,
@@ -147,7 +148,7 @@ from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .orchestration.turn_recovery import TurnJournalRecovery
 from .room_steward import membership_observers, room_poster, room_steward
-from .steward_duties import reconcile_held_room_states, runs_room_hooks
+from .steward_duties import runs_room_hooks
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
 
 if TYPE_CHECKING:
@@ -297,6 +298,7 @@ class _MultiAgentOrchestrator:
     _tool_job_runtime: ToolJobRuntimeCoordinator = field(init=False, repr=False)
     _thread_export_runner: WorkspaceThreadExportRunner = field(init=False, repr=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
+    room_state: RoomStateWorker = field(init=False, repr=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     turn_recovery: TurnJournalRecovery = field(init=False, repr=False)
@@ -455,13 +457,13 @@ class _MultiAgentOrchestrator:
             ),
             api_enabled=self.api_enabled,
         )
+        self.room_state = RoomStateWorker(self)
         self._rooms = RoomSetup(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
             owner_client=lambda: self.running_entity_client(ROUTER_AGENT_NAME),
             refresh_agent_reply_memberships=lambda: self.refresh_agent_reply_memberships(),
-            reconcile_room_states=lambda: reconcile_held_room_states(self),
-            publication_allowed=lambda: not self.response_admission_gate.closed,
+            publish_room_state=self.room_state.mark_held,
         )
         self.config_reload = ConfigReloadLifecycle(
             runtime_paths=self.runtime_paths,
@@ -1466,6 +1468,7 @@ class _MultiAgentOrchestrator:
     async def stop(self) -> None:  # noqa: C901, PLR0915 - one ordered shutdown sequence
         """Stop all agent bots."""
         self.running = False
+        self.room_state.stop()
         self._runtime_ready_event.clear()
         # First, so integration events that arrive from now on are refused instead of reaching stopping bots.
         integration_runtimes = self._unbind_integrations()

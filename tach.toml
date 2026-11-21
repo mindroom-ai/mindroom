@@ -3374,6 +3374,14 @@ depends_on = [
 visibility = ["mindroom.orchestrator"]
 
 [[modules]]
+path = "mindroom.orchestration.room_state"
+depends_on = [
+    "mindroom.matrix.room_accounts",
+    "mindroom.matrix.room_thread_mode",
+]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
 path = "mindroom.orchestration.rooms"
 depends_on = [
     "mindroom.constants",
@@ -3434,6 +3442,7 @@ depends_on = [
     "mindroom.memory.legacy_team_memory",
     "mindroom.orchestration.config_lifecycle",
     "mindroom.orchestration.external_trigger_runtime",
+    "mindroom.orchestration.room_state",
     "mindroom.orchestration.rooms",
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.script_runtime",

@@ -317,7 +317,7 @@ async def test_room_setup_without_owner_creates_nothing_and_says_so_once(tmp_pat
         lambda: config,
         owner_client=lambda: None,
         refresh_agent_reply_memberships=refresh,
-        reconcile_room_states=AsyncMock(),
+        publish_room_state=AsyncMock(),
     )
 
     with (

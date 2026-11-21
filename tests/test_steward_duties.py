@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -11,9 +10,11 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.orchestration.room_state import RoomStateWorker
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.room_steward import room_steward
 from mindroom.steward_duties import (
@@ -54,7 +55,9 @@ class _Room:
         self.refusal: nio.RoomPutStateError | None = None
         self.joined = [PERSON, *(self.ids[name] for name in names)]
         self.bots: dict[str, Any] = {}
-        self.runtime = MagicMock(agent_bots=self.bots)
+        self.runtime = MagicMock(agent_bots=self.bots, config=self.config, runtime_paths=self.paths, running=True)
+        self.runtime.response_admission_gate.closed = False
+        self.runtime.room_state = RoomStateWorker(self.runtime)
         self.runtime.room_steward.side_effect = lambda room_id: room_steward(self.bots, room_id)
         for name in names:
             self._add_bot(name)
@@ -120,19 +123,12 @@ class _Room:
         )
 
     async def frame(self, name: str, *, joined: bool = False, power_levels: bool = False) -> None:
-        """One bot's sync frame settles, after the bot joined the room or applied a power-levels event in it."""
-        duties = self.duties(name)
+        """Trigger shared room-state reconciliation from a join or power-level change."""
         if joined:
-            duties.mark_joined_for_room_state(ROOM_ID)
+            self.runtime.room_state.mark(ROOM_ID)
         if power_levels:
-            await duties.power_levels_event(self.bots[name].client.rooms[ROOM_ID], MagicMock())
-        await _publish(duties)
-
-
-async def _publish(duties: StewardDuties, *, every_room: bool = False) -> None:
-    """Publish the marked rooms in the background, as a settled sync frame does, and wait for that publish."""
-    duties.publish_joined_room_state(every_room=every_room)
-    await asyncio.gather(*duties._room_state_publishes)
+            await self.duties(name).power_levels_event(self.bots[name].client.rooms[ROOM_ID], MagicMock())
+        assert await wait_for_background_tasks(timeout=2, owner=self.runtime.room_state)
 
 
 @pytest.mark.asyncio
@@ -164,7 +160,6 @@ async def test_forbidden_background_write_is_silent(tmp_path: Path) -> None:
     room.refusal = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
     with capture_logs() as logs:
         await room.frame("agent1", joined=True)
-    room.duties("agent1").stopping()
     assert {log["log_level"] for log in logs} == {"debug"}
     room.bots["agent1"].client.room_send.assert_not_awaited()
 
@@ -187,28 +182,20 @@ async def test_power_levels_event_makes_new_steward_publish(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_sync_that_opens_publishes_every_stewarded_room(tmp_path: Path) -> None:
-    """A bot's first settled frame publishes the rooms it stewards, as a power change in state alone reaches no callback."""
-    room = _Room(tmp_path, (ROUTER_AGENT_NAME, "agent1"))
-    await _publish(room.duties("agent1"), every_room=True)
-    assert room.writes == []
-    await _publish(room.duties(ROUTER_AGENT_NAME), every_room=True)
-    owner = room.ids[ROUTER_AGENT_NAME]
-    assert sorted(room.writes) == [(owner, ACCOUNTS, owner), (owner, BINDING, ""), (owner, THREAD_MODE, "")]
-
-
-@pytest.mark.asyncio
 async def test_sweep_reconciles_each_held_room_once_through_its_steward(tmp_path: Path) -> None:
     """A startup or reload sweep reaches a room without the owner account, and a joined owner that is not steward stays out."""
     room = _Room(tmp_path, ("agent1", ROUTER_AGENT_NAME))
     orchestrator = _MultiAgentOrchestrator(runtime_paths=room.paths, config=room.config)
+    orchestrator.running = True
     install_bots(orchestrator, room.bots)
     await orchestrator.config_reload.after_reload()
+    assert await wait_for_background_tasks(timeout=2, owner=orchestrator.room_state)
     agent = room.ids["agent1"]
     assert sorted(room.writes) == [(agent, ACCOUNTS, agent), (agent, BINDING, ""), (agent, THREAD_MODE, "")]
     # A reload that only changes the config republishes the thread mode of the room it already holds.
     room.config.agents["agent1"].thread_mode = "thread"
     await orchestrator.config_reload.after_reload()
+    assert await wait_for_background_tasks(timeout=2, owner=orchestrator.room_state)
     assert room.state[THREAD_MODE, ""] == {"mode": "thread"}
     assert {writer for writer, _, _ in room.writes} == {agent}
 

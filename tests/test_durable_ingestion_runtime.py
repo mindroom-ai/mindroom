@@ -168,7 +168,7 @@ async def test_slow_first_frame_side_effect_does_not_delay_a_stewards_dispatch( 
         entered.set()
         await release.wait()
 
-    async def slow_reconcile(_room_id: str) -> set[str]:
+    async def slow_reconcile(*_args: object) -> set[int]:
         entered.set()
         await release.wait()
         return set()
@@ -178,8 +178,9 @@ async def test_slow_first_frame_side_effect_does_not_delay_a_stewards_dispatch( 
             [_hook_plugin("slow-ready", [slow_ready])],
         )
     else:
-        bot.steward_duties.mark_joined_for_room_state(ROOM)
-        monkeypatch.setattr(bot.steward_duties, "_reconcile_room_state", slow_reconcile)
+        bot.client.rooms[ROOM] = nio.MatrixRoom(ROOM, bot.agent_user.user_id)
+        bot.mark_sync_loop_started()
+        monkeypatch.setattr(bot.orchestrator.room_state, "_attempt", slow_reconcile)
 
     async def on_message(_room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
         dispatched_ids.append(event.event_id)
@@ -240,6 +241,7 @@ async def test_slow_first_frame_side_effect_does_not_delay_a_stewards_dispatch( 
         await frames
         await bot._journal_dispatcher.stop()
         await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot.orchestrator.room_state)
 
 
 @asynccontextmanager

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import HookBindings, HookRegistryState
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
+    from mindroom.orchestration.room_state import RoomStateWorker
     from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
     from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
     from mindroom.response_admission import ResponseAdmissionGate
@@ -112,6 +113,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
     def service_hook_bindings(self) -> HookBindings:
         """Return the hook bindings of the runtime's own emissions, which each room's poster and steward back."""
         ...
+
+    @property
+    def room_state(self) -> RoomStateWorker: ...  # noqa: D102
 
     def room_steward(self, room_id: str) -> AgentBot | None:
         """Return the bot that does one room's shared invisible work now."""
