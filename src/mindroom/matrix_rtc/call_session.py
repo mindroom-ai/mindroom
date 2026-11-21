@@ -382,7 +382,7 @@ class CallSession:
                     key_index=distribution.key_index,
                     targets=list(distribution.targets),
                 )
-            self._key_manager.mark_distributed(distribution, tuple(delivered))
+            self._key_manager.mark_distributed(distribution, tuple(delivered), now_ms=self.deps.clock_ms())
             delivered_members = set(delivered)
             undelivered_device_ids = frozenset(
                 target.device_id for target in distribution.targets if target not in delivered_members

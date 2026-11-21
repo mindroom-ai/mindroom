@@ -38,7 +38,7 @@ def test_first_key_is_index_zero_and_immediately_usable() -> None:
     assert distribution.apply_after_ms == 0
     assert distribution.targets == (alice,)
     assert base64.b64decode(distribution.key_base64) == distribution.key
-    manager.mark_distributed(distribution)
+    manager.mark_distributed(distribution, now_ms=0)
     assert manager.update_memberships([alice], now_ms=1) is None
 
 
@@ -56,7 +56,7 @@ def test_joiner_within_grace_period_gets_current_key_only() -> None:
     alice = _member("@alice:example.org")
     first = manager.update_memberships([alice], now_ms=0)
     assert first is not None
-    manager.mark_distributed(first)
+    manager.mark_distributed(first, now_ms=0)
 
     bob = _member("@bob:example.org")
     second = manager.update_memberships([alice, bob], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS - 1)
@@ -73,7 +73,7 @@ def test_joiner_after_grace_period_rotates_key_for_everyone() -> None:
     alice = _member("@alice:example.org")
     first = manager.update_memberships([alice], now_ms=0)
     assert first is not None
-    manager.mark_distributed(first)
+    manager.mark_distributed(first, now_ms=0)
 
     bob = _member("@bob:example.org")
     second = manager.update_memberships([alice, bob], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 1)
@@ -90,18 +90,43 @@ def test_joiner_during_pending_rotation_keeps_remaining_activation_delay() -> No
     alice = _member("@alice:example.org")
     first = manager.update_memberships([alice], now_ms=0)
     assert first is not None
-    manager.mark_distributed(first)
+    manager.mark_distributed(first, now_ms=0)
 
     bob = _member("@bob:example.org")
     rotated = manager.update_memberships([alice, bob], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 1)
     assert rotated is not None
-    manager.mark_distributed(rotated)
+    manager.mark_distributed(rotated, now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 1)
     charlie = _member("@charlie:example.org")
     shared = manager.update_memberships([alice, bob, charlie], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 501)
 
     assert shared is not None
     assert shared.key == rotated.key
     assert shared.apply_after_ms == 500
+
+
+def test_rotated_key_activates_one_delay_after_its_first_completed_send() -> None:
+    """A slow or failed rotation send cannot let a re-share switch to the key early."""
+    manager = _manager()
+    alice = _member("@alice:example.org")
+    first = manager.update_memberships([alice], now_ms=0)
+    assert first is not None
+    manager.mark_distributed(first, now_ms=0)
+
+    bob = _member("@bob:example.org")
+    rotated = manager.update_memberships([alice, bob], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 1)
+    assert rotated is not None
+    charlie = _member("@charlie:example.org")
+    # The rotation's send has not returned (or raised): a re-share waits the full delay.
+    pending = manager.update_memberships([alice, bob, charlie], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 1_201)
+    assert pending is not None
+    assert pending.key == rotated.key
+    assert pending.apply_after_ms == _USE_KEY_DELAY_MS
+
+    manager.mark_distributed(pending, now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 1_300)
+    dave = _member("@dave:example.org")
+    later = manager.update_memberships([alice, bob, charlie, dave], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 1_800)
+    assert later is not None
+    assert later.apply_after_ms == 500
 
 
 def test_leaver_rotates_key() -> None:
@@ -111,7 +136,7 @@ def test_leaver_rotates_key() -> None:
     bob = _member("@bob:example.org")
     first = manager.update_memberships([alice, bob], now_ms=0)
     assert first is not None
-    manager.mark_distributed(first)
+    manager.mark_distributed(first, now_ms=0)
 
     second = manager.update_memberships([alice], now_ms=1)
     assert second is not None
@@ -127,7 +152,7 @@ def test_rejoin_with_new_membership_ts_is_treated_as_leave_and_join() -> None:
     alice = _member("@alice:example.org", created_ts=0)
     first = manager.update_memberships([alice], now_ms=0)
     assert first is not None
-    manager.mark_distributed(first)
+    manager.mark_distributed(first, now_ms=0)
 
     rejoined = _member("@alice:example.org", created_ts=500)
     second = manager.update_memberships([rejoined], now_ms=600)
@@ -142,12 +167,12 @@ def test_key_index_wraps_at_256() -> None:
     alice = _member("@alice:example.org", created_ts=0)
     distribution = manager.update_memberships([alice], now_ms=0)
     assert distribution is not None
-    manager.mark_distributed(distribution)
+    manager.mark_distributed(distribution, now_ms=0)
     for round_number in range(1, 257):
         rejoined = _member("@alice:example.org", created_ts=round_number)
         distribution = manager.update_memberships([rejoined], now_ms=round_number)
         assert distribution is not None
-        manager.mark_distributed(distribution)
+        manager.mark_distributed(distribution, now_ms=round_number)
         assert distribution.key_index == round_number % 256
     assert distribution.key_index == 0  # 256 rotations starting from 0 wrap back to 0
 

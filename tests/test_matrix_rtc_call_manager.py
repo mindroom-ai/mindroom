@@ -6020,6 +6020,65 @@ async def test_rapid_roster_changes_preserve_key_activation_deadline(
     await session.stop()
 
 
+@pytest.mark.asyncio
+async def test_reshare_after_slow_rotation_send_keeps_the_rotation_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rotated key activates one delay after its own send returns, even if a re-share follows at once."""
+    release_delays = asyncio.Event()
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def controlled_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await release_delays.wait()
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", controlled_sleep)
+    clock = [0]
+
+    class SlowRotationTransport(FakeKeyTransport):
+        async def send_key(
+            self,
+            *,
+            room_id: str,
+            key_base64: str,
+            key_index: int,
+            targets: list[CallMember],
+        ) -> list[CallMember]:
+            if key_index == 1:
+                clock[0] += 1_200
+            return await super().send_key(
+                room_id=room_id,
+                key_base64=key_base64,
+                key_index=key_index,
+                targets=targets,
+            )
+
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, SlowRotationTransport(), clock)
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+    charlie = _member("@charlie:example.org", "CHARLIEDEV")
+
+    session._members = [alice]
+    await session._distribute_keys()
+    clock[0] = 10_001
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice, bob, charlie]
+    await session._distribute_keys()
+    await real_sleep(0)
+
+    assert [key_index for _, _, key_index in bridge.frame_keys] == [0]
+    assert delays == [1.0, 1.0]
+    release_delays.set()
+    for _ in range(5):
+        await real_sleep(0)
+
+    assert {key_index for _, _, key_index in bridge.frame_keys} == {0, 1}
+    await session.stop()
+
+
 def test_calls_config_rejects_unknown_agents() -> None:
     """Call configuration may reference only declared agents."""
     with pytest.raises(ValueError, match=r"calls\.agents references unknown agent"):

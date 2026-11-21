@@ -74,7 +74,8 @@ class FrameKeyManager:
     _key: bytes | None = field(default=None, init=False)
     _key_index: int = field(default=0, init=False)
     _key_created_ms: int = field(default=0, init=False)
-    _key_activation_ms: int = field(default=0, init=False)
+    # When our senders switch to the current key; ``None`` until its first send has returned.
+    _key_activation_ms: int | None = field(default=None, init=False)
     # Sets keep each distribution linear in the roster, which a caller can inflate with planted devices.
     _shared_with: set[_SharedWith] = field(default_factory=set, init=False)
     _exposed_to: set[_SharedWith] = field(default_factory=set, init=False)
@@ -111,11 +112,12 @@ class FrameKeyManager:
             return self._rotate(members_by_share, now_ms)
         if joined:
             if now_ms - self._key_created_ms < _KEY_ROTATION_GRACE_PERIOD_MS:
+                activation_ms = self._key_activation_ms
                 return _KeyDistribution(
                     key=self._key,
                     key_index=self._key_index,
                     targets=tuple(joined),
-                    apply_after_ms=max(0, self._key_activation_ms - now_ms),
+                    apply_after_ms=_USE_KEY_DELAY_MS if activation_ms is None else max(0, activation_ms - now_ms),
                 )
             return self._rotate(members_by_share, now_ms)
         return None
@@ -124,7 +126,8 @@ class FrameKeyManager:
         self._key = secrets.token_bytes(_KEY_SIZE_BYTES)
         self._key_index = (self._key_index + 1) % _KEY_INDEX_MODULUS
         self._key_created_ms = now_ms
-        self._key_activation_ms = now_ms + _USE_KEY_DELAY_MS
+        # Set by mark_distributed: the delay counts from the end of the send, however slow it was.
+        self._key_activation_ms = None
         self._shared_with = set()
         self._exposed_to = set()
         # Rotation always re-shares with every current member.
@@ -143,8 +146,15 @@ class FrameKeyManager:
         self,
         distribution: _KeyDistribution,
         delivered: tuple[CallMember, ...] | None = None,
+        *,
+        now_ms: int,
     ) -> None:
-        """Record successful sends so unavailable targets are retried later."""
+        """Record successful sends so unavailable targets are retried later.
+
+        The first completed send of a key fixes when it activates; a later re-share never moves that earlier.
+        """
+        if self._key_activation_ms is None and self.is_current_outbound_key(distribution.key, distribution.key_index):
+            self._key_activation_ms = now_ms + distribution.apply_after_ms
         self.mark_exposed(distribution)
         self._shared_with.update(
             _share(member) for member in (distribution.targets if delivered is None else delivered)
