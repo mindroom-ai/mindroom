@@ -9950,6 +9950,8 @@ def main(args):
         return "Tests failed:\n" + tests.output
     return tool("file", "read_file", file_name="CHANGELOG.md")
 ```
+The same call delivered again finds its own run: it waits for it, or returns the report the run ended with, and runs nothing a second time.
+A run that another call resumed since belongs to that call: the earlier one neither cancels it nor returns its report, and ends with `Run <id> was resumed by another call.`
 
 - `shell(command)` runs a command with the agent's `shell` tool and returns `.ok`, `.exit_code`, and `.output`.
   It returns at most the last 50 KiB of output; redirect to a file and read it for more.
@@ -9985,8 +9987,9 @@ The next attempt runs the script from the top, and each call gets its saved resu
 One resume takes a run, and it takes it in one step: the run, its new script and the calls named in `rerun` change together or not at all.
 Of two calls made at the same time, the second ends `failed` with `Run <id> was resumed by another call.` and changes nothing, also when the first one took the run and its attempt could not start.
 A resume that is cancelled or refused before it took the run leaves the run, its report and its saved calls as they were.
-That includes a resume from another room or thread while the run's own conversation is closed to the requester, which is refused with `The requester no longer has access.` or `The run's agent is not ready in the run's room yet. Try again in a moment.`
-When that access can no longer be checked after the resume took the run, for example across a restart of MindRoom, the run waits `starting` with its job until it can; access that is gone then ends the run `interrupted`.
+That includes a resume while the run's own conversation is closed to the requester, from that conversation or from another room or thread: it is refused with `The requester no longer has access.` or `The run's agent is not ready in the run's room yet. Try again in a moment.`
+When that access can no longer be checked after the resume was accepted as a job, for example across a restart of MindRoom, the job waits until it can.
+Before it took the run it changes nothing while it waits; after that the run waits `starting` with it. Access that is gone ends the job, and a run it had taken ends `interrupted`.
 While the job of the last attempt has not ended and saved its report, a resume is refused with `Run <id> is still delivering its report. Try again in a moment.`, so each report reaches one job.
 A resumed run counts as a run in progress again: at the limit of `max_concurrent_runs` the resume's job ends `failed` with `You have 8 workflow runs in progress, the limit. Wait for one to end or cancel one.` and the run stays as it ended.
 The accepted script and `rerun` list are saved with the job, so a restart of MindRoom before the attempt starts loses neither.
@@ -10015,9 +10018,11 @@ A run whose script had already returned its report ends with that report and get
 - A run with no job, which is one that `start_workflow` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.
   When the call that waited for it is gone, nothing delivers the report; `get_workflow(run_id)` returns it in `result`.
 - A run that MindRoom stopped while its script process was starting stays `starting`, and the next start launches it.
-- A run whose job was stopped, by a Stop or because it lost its access, gets no further attempt: it ends with the reason, and `resume_workflow` continues it.
+- A run whose job was stopped gets no further attempt, and `resume_workflow` continues it.
+  After a Stop the run ends `cancelled`; when the job was stopped because the requester's access is gone, the run ends `interrupted` with `The requester no longer has access.`
   A job that ended in any other way only fails to deliver the report: the run goes on, and `get_workflow(run_id)` returns the report in `result`.
 - A reservation whose job was never admitted when MindRoom stopped is deleted at the next start.
+  Every attempt is checked in this way when it starts, the first one of a run and one that `resume_workflow` asked for included.
 - Removing the `workflow` tool or the agent, or revoking the requester's access, ends the run `interrupted`; it is not resumed on its own.
   That holds when MindRoom was stopped at the time: the next start finds the tool or the agent gone and ends the run with `The requester no longer has access.`
 - A script process that MindRoom did not start itself, such as one that survived a restart in a worker, is stopped, and each of its requests is refused with status 409, before and after its capability is revoked, so the process exits at once.
@@ -10026,12 +10031,13 @@ A run whose script had already returned its report ends with that report and get
 ## Working Time
 
 A run may work for `max_runtime_hours` of the agent's `workflow` entry, 72 by default.
-Only time in which the run is `running` counts.
+Only time in which the run is `running` counts, up to the moment its script ended.
 At the limit the run ends `interrupted` with `The run used its 72 hours of working time. resume_workflow continues it.`, and `resume_workflow` gives it the full time again.
 An attempt that MindRoom starts on its own after an interruption keeps the time the run had left, and a run with none left gets no such attempt: it ends `interrupted` with the same sentence.
 The time a run waits for its next attempt after an interruption is not counted.
 With `max_runtime_hours: 0` a run has no limit.
 One script process runs for at most 30 days; a run with working time left then continues in a new attempt.
+- The report of a run stays saved until its job has delivered it, however long ago the run ended.
 
 ## Where The Script Runs
 
