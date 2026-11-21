@@ -2195,7 +2195,7 @@ async def test_edit_cannot_renew_notice_after_its_queued_message_flushes(tmp_pat
         {
             "m.relates_to": {"rel_type": "m.replace", "event_id": message.event_id},
             "m.new_content": {"msgtype": "m.text", "body": "after"},
-        }
+        },
     )
     target = MessageTarget.resolve(room.room_id, "$thread", message.event_id)
     runner = unwrap_extracted_collaborator(bot._response_runner)

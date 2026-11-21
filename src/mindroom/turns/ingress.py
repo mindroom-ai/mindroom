@@ -89,7 +89,6 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.identity import MatrixID
-    from mindroom.message_target import MessageTarget
     from mindroom.response_runner import ResponseRunner
     from mindroom.turn_policy import TurnPolicy
     from mindroom.turn_store import TurnStore
