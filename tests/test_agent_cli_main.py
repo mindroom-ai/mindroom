@@ -573,6 +573,17 @@ def test_workers_run_needs_a_name_a_command_and_usable_limits(argv) -> None:
         parse_arguments(argv)
 
 
+@pytest.mark.parametrize("tail", [0, -1])
+def test_workers_run_rejects_nonpositive_tail_without_submitting(tail, capsys, monkeypatch) -> None:
+    """A zero tail would print every line rather than limiting the output."""
+    result = format_shell_completion("finished", None, return_code=0)
+    sent = _worker_client(monkeypatch, _completed(f"[worker: w]\n{result}"))
+
+    assert main(["workers", "run", "w", "--tail", str(tail), "--", "true"]) == 2
+    assert sent == []
+    assert "--tail" in capsys.readouterr().err
+
+
 def test_a_background_script_cannot_run_commands_in_named_workers(capsys, monkeypatch, tmp_path) -> None:
     """Named workers belong to a reply, and a background script outlives the reply that started it."""
     _in_background_script(monkeypatch, tmp_path)

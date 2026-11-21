@@ -121,8 +121,8 @@ def _select_worker_command(parser: argparse.ArgumentParser, args: argparse.Names
     """Require the command and usable limits of `workers run`."""
     if not command:
         parser.error("workers run needs a command after `--`: mindroom-agent workers run NAME -- COMMAND")
-    if args.timeout <= 0 or args.tail < 0:
-        parser.error("--timeout must be positive and --tail nonnegative")
+    if args.timeout <= 0 or args.tail <= 0:
+        parser.error("--timeout and --tail must be positive")
     args.command = command
 
 
@@ -148,7 +148,7 @@ def _add_workers_run(groups: argparse._SubParsersAction[argparse.ArgumentParser]
         default=_WORKER_COMMAND_TIMEOUT_SECONDS,
         help=f"Seconds after which the command is stopped (default: {_WORKER_COMMAND_TIMEOUT_SECONDS})",
     )
-    run.add_argument("--tail", type=int, default=100, help="Lines of output to print (default: 100)")
+    run.add_argument("--tail", type=int, default=100, help="Positive number of lines to print (default: 100)")
 
 
 def _select_tool(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
