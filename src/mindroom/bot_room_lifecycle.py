@@ -147,11 +147,7 @@ class BotRoomLifecycle:
         self._applied_continuity_revision = -1
 
     def _lock_for_room(self, locks: dict[str, asyncio.Lock], room_id: str) -> asyncio.Lock:
-        lock = locks.get(room_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            locks[room_id] = lock
-        return lock
+        return locks.setdefault(room_id, asyncio.Lock())
 
     def _client(self) -> nio.AsyncClient:
         client = self.deps.runtime.client
