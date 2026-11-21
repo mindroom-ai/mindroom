@@ -611,7 +611,7 @@ def _check_claude_code(config: Config, runtime_paths: RuntimePaths) -> tuple[int
     """Check each Claude Code executable the ``claude_code`` models run. Returns (passed, failed, warnings).
 
     Claude Code is started as a request would start it and closed without a prompt, so the check spends nothing of
-    the subscription and reads no credential. Its directory is a temporary one, apart from a running MindRoom's.
+    the subscription and reads no credential.
     """
     from mindroom.providers.claude_code.adapter import build_provider  # noqa: PLC0415 - loads the provider families
 
@@ -625,11 +625,10 @@ def _check_claude_code(config: Config, runtime_paths: RuntimePaths) -> tuple[int
             if provider.cli_path in checked:
                 continue
             checked.add(provider.cli_path)
-            with tempfile.TemporaryDirectory() as directory:
-                asyncio.run(provider.preflight(Path(directory)))
-        except ProviderError as exc:
-            # A process that did not start may start the next time; every other refusal needs the user.
-            valid, detail = (None if exc.retryable else False), str(exc)
+            asyncio.run(provider.preflight())
+        except (ProviderError, ValueError) as exc:
+            # A process that did not start may start the next time; a refusal or a wrong setting needs the user.
+            valid, detail = (None if isinstance(exc, ProviderError) and exc.retryable else False), str(exc)
         except ImportError as exc:
             valid, detail = None, str(exc)
         else:

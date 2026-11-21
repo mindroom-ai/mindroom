@@ -1,20 +1,19 @@
 """The ``claude_code`` route: Claude on the user's own subscription, through the unmodified Claude Code CLI.
 
-Claude Code signs in and talks to Anthropic; MindRoom never reads its credentials and sends no Anthropic request of
-its own. The route drives the user's ``claude`` binary through the Claude Agent SDK with Claude Code's own tools
-off and MindRoom's tools offered through an in-process MCP server, so MindRoom keeps its history, its tool loop, and
-its approvals. A process stays alive across the requests of one tool loop (``session.py``), and any request it
-cannot continue starts a new one from MindRoom's history (``prompt.py``).
+Claude Code signs in and talks to Anthropic; MindRoom never reads its credentials. The route drives the user's
+``claude`` binary through the Claude Agent SDK with Claude Code's own tools off and MindRoom's offered through an
+in-process MCP server, so MindRoom keeps its history, its tool loop, and its approvals. A process stays alive across
+the requests of one tool loop (``session.py``); a request it cannot continue starts a new one (``prompt.py``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from mindroom.llm.messages import stable_serialize
+from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, stable_serialize
 from mindroom.llm.provider import Capabilities, ModelIdentity, TurnCompleted
 from mindroom.llm.request_identity import request_prefixes
 from mindroom.providers.assistant_turn import TurnTimer
@@ -34,7 +33,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelRequest, StreamEvent, TokenCounter
-    from mindroom.providers.claude_code.session import LiveSession
+    from mindroom.providers.claude_code.session import LiveSession, RestingKey
     from mindroom.token_counting.requests import RequestParts
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -81,10 +80,19 @@ class ClaudeCodeProvider:
         """Identify the tools and settings of ``request``, which a Claude Code process is started with."""
         return route_context_key(self.identity, self.token_counter, request, self._parts)
 
-    def _key(self, prefix: str, call_ids: Sequence[str]) -> str:
+    @property
+    def _launch(self) -> dict[str, Any]:
+        """What every Claude Code process of this model starts with."""
+        return {"model": self.identity.id, "cli_path": self.cli_path, "effort": self.settings.effort}
+
+    @property
+    def _conversation(self) -> str:
+        """Identify whose processes a request may continue or close: no request touches a process of another."""
+        return stable_serialize([self.scope, str(self.storage_root), self.cli_path])
+
+    def _key(self, prefix: str, call_ids: Sequence[str]) -> RestingKey:
         """Identify the process that answered the request ``prefix`` digests, with ``call_ids``, in this conversation."""
-        # The runtime's storage and the executable are part of it: no request continues a process of another.
-        return stable_serialize([self.scope, str(self.storage_root), self.cli_path, prefix, list(call_ids)])
+        return self._conversation, prefix, tuple(call_ids)
 
     async def _session(self, request: ModelRequest, answered: int | None, prefix: str | None) -> LiveSession:
         """Return the process that answers ``request``: the one that gave its last answer, continued, or a new one.
@@ -99,38 +107,40 @@ class ClaudeCodeProvider:
         tail = () if answered is None else messages[answered:]
         session = None
         if tail and prefix is not None:
-            session = SESSIONS.claim(self._key(prefix, [call["id"] for call in tail[0].tool_calls or ()]))
+            # Taken out of the resting ones, no other request continues it.
+            session = SESSIONS.resting.pop(self._key(prefix, [call["id"] for call in tail[0].tool_calls or ()]), None)
         try:
             continues = session is not None and not request.portable_replay and session.broken() is None
             if session is not None and session.emitted is not None and continues:
                 resume = await asyncio.to_thread(decide, session.emitted, tail, provider)
                 if resume is not None:
-                    sent = {"mode": "continue", "results": resume.results, "input": resume.blocks}
-                    await request.on_send({"model": self.identity.id, **sent})
-                    if resume.results:
-                        session.bridge.resolve(resume.results)
+                    results, blocks = resume
+                    await request.on_send(
+                        {"model": self.identity.id, "mode": "continue", "results": results, "input": blocks},
+                    )
+                # The process may have gone on meanwhile: nothing comes between this look and what continues it.
+                if resume is not None and session.broken() is None:
+                    if results:
+                        session.bridge.resolve(results)
                     else:
-                        await session.send(resume.blocks)
+                        await session.send(blocks)
                     return session
-            if session is not None:
-                SESSIONS.retire(session)
-                session = None
-            # A process that waits on a tool call this request holds as history can never be continued.
-            SESSIONS.retire_waiting_on({call["id"] for message in messages for call in message.tool_calls or ()})
+            # No request continues what this one leaves resting in its conversation.
+            held = {call["id"] for message in messages for call in message.tool_calls or ()}
+            SESSIONS.retire_superseded(self._conversation, held)
             tools = () if request.tool_choice == "none" else request.tools
             system, blocks = await asyncio.to_thread(rebuild_input, messages, provider)
-            sent = {"mode": "rebuild", "system": system, "tools": [tool.name for tool in tools], "input": blocks}
-            await request.on_send({"model": self.identity.id, **sent})
+            thinking = {"type": "adaptive", "display": "summarized"}
             session = await start(
-                model=self.identity.id,
-                cli_path=self.cli_path,
-                settings=self.settings,
-                thinking=not request.overrides.omit_thinking_setting,
+                provider=provider,
                 system=system,
                 tools=tools,
-                storage_root=self.storage_root,
-                provider=provider,
+                replaces=session,
+                thinking=None if request.overrides.omit_thinking_setting else thinking,
+                **self._launch,
             )
+            sent = {"mode": "rebuild", "system": system, "tools": [tool.name for tool in tools], "input": blocks}
+            await request.on_send({"model": self.identity.id, **sent})
             await session.send(blocks)
         except BaseException:
             if session is not None:
@@ -141,49 +151,49 @@ class ClaudeCodeProvider:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Answer ``request`` with the process that waits for it, or with a new one given the whole conversation."""
         from mindroom.providers.claude_code.session import SESSIONS  # noqa: PLC0415 - loads the SDK
-        from mindroom.providers.claude_code.turn import read_step  # noqa: PLC0415 - loads the SDK
+        from mindroom.providers.claude_code.turn import Outrun, read_step  # noqa: PLC0415 - loads the SDK
 
         timer = TurnTimer()
+        # A process that was sent a queued-message notice has read it, so here a notice counts as any other message.
+        unmarked = [
+            replace(message, provider_data={**(message.provider_data or {}), QUEUED_MESSAGE_NOTICE_MARKER_KEY: False})
+            for message in request.messages
+        ]
+        read = replace(request, messages=unmarked)
         # Digesting a long history would stall the replies that share the event loop.
-        prefixes = await asyncio.to_thread(request_prefixes, self, request)
+        prefixes = await asyncio.to_thread(request_prefixes, self, read)
         # A process rests under the identity of the request it answered, which precedes its answer in the next one.
         answered = max((i for i, message in enumerate(request.messages) if message.role == "assistant"), default=None)
-        session = await self._session(request, answered, None if answered is None else prefixes[answered])
-        rests = False
-        try:
-            async for event in read_step(session, self.identity, timer):
-                answer = session.emitted
-                # A process parked on tool calls waits for their results. An idle one waits for the next message of
-                # its conversation, which a request that could call no tool, such as a summary, never gets.
-                waits = answer is not None and (answer.calls or (self.scope and request.tool_choice != "none"))
-                if isinstance(event, TurnCompleted) and answer is not None and waits and prefixes[-1] is not None:
-                    # It rests before the turn is handed over, since the caller may stop reading there.
-                    SESSIONS.rest(self._key(prefixes[-1], answer.tool_call_ids), session)
-                    rests = True
-                yield event
-        finally:
-            if not rests:
-                # A request that failed or was abandoned leaves a process nothing can continue.
-                SESSIONS.retire(session)
+        # A process that went on without the results it waited for is replaced by one given the whole conversation.
+        for continued in (answered, None):
+            session = await self._session(request, continued, None if continued is None else prefixes[continued])
+            rests = False
+            try:
+                async for event in read_step(session, self.identity, timer):
+                    answer = session.emitted
+                    # A process parked on tool calls waits for their results. An idle one waits for the next message
+                    # of its conversation, which a request that could call no tool, such as a summary, never gets.
+                    waits = answer is not None and (answer.calls or (self.scope and request.tool_choice != "none"))
+                    if isinstance(event, TurnCompleted) and answer is not None and waits and prefixes[-1] is not None:
+                        # It rests before the turn is handed over, since the caller may stop reading there.
+                        SESSIONS.rest(self._key(prefixes[-1], answer.tool_call_ids), session)
+                        rests = True
+                    yield event
+            except Outrun:
+                if continued is None:
+                    raise
+            else:
+                return
+            finally:
+                if not rests:
+                    # A request that failed or was abandoned leaves a process nothing can continue.
+                    SESSIONS.retire(session)
 
-    async def preflight(self, storage_root: Path) -> None:
-        """Start Claude Code as a request would, send it nothing, and close it.
-
-        Raises what the request would raise before its prompt: for a missing or old Claude Code, for an environment
-        that replaces the Claude sign-in, and for an account without a Claude subscription.
-        """
+    async def preflight(self) -> None:
+        """Start Claude Code as a request would, send it nothing, and close it, raising what a request would."""
         from mindroom.providers.claude_code.session import SESSIONS, start  # noqa: PLC0415 - loads the SDK
 
-        try:
-            await start(
-                model=self.identity.id,
-                cli_path=self.cli_path,
-                settings=self.settings,
-                storage_root=storage_root,
-                provider=self.identity.provider,
-            )
-        finally:
-            await SESSIONS.close_all()
+        await SESSIONS.retire(await start(provider=self.identity.provider, **self._launch))
 
 
 def build_provider(

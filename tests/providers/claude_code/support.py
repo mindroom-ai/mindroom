@@ -12,6 +12,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ToolSpec
+from mindroom.providers.claude_code import session
 from mindroom.providers.claude_code.adapter import ClaudeCodeProvider, build_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _FAKE = Path(__file__).with_name("fake_claude.py")
+# The private directory of the route's processes.
+HOME = Path(session._HOME.name)
 LOOKUP = ToolSpec(
     name="lookup",
     description="Look up a marker by key.",
@@ -60,11 +63,6 @@ class FakeCli:
             storage_path=self.storage_root,
         )
 
-    def directories(self) -> list[Path]:
-        """Return the directories the route keeps for its processes."""
-        root = self.storage_root / "claude_code"
-        return sorted(root.iterdir()) if root.exists() else []
-
     def provider(
         self,
         *,
@@ -78,6 +76,12 @@ class FakeCli:
             extra_kwargs={"cli_path": str(self.path), **extra_kwargs},
         )
         return build_provider(model_config, self.runtime_paths, execution_identity=execution_identity)
+
+
+def left_behind() -> list[str]:
+    """Return what the route's processes left in its private directory besides their empty working directory."""
+    root = HOME
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.name != "cwd")
 
 
 def fake_cli(tmp_path: Path, *processes: dict[str, Any]) -> FakeCli:

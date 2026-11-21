@@ -7,11 +7,12 @@ per line. Every value in a scenario is invented.
 A scenario is ``{"processes": [process, ...]}``; a process past the last scripted one replays the last. A process is::
 
     {"version": "2.1.328", "account": {...}, "mcp_status": "connected", "status": [...], "init": {...},
-     "turns": [[step, ...], ...]}
+     "later_init": {...}, "status_error": "...", "status_stall": false, "turns": [[step, ...], ...]}
 
 with one turn per user message it receives. ``status`` replaces the MCP servers it reports before its first turn,
-and ``init`` replaces fields of the message that starts each turn: a null field is left out, and a null ``init``
-sends no such message. A step is one model message::
+or with null leaves them out; ``status_error`` rejects the request for them and ``status_stall`` never answers it.
+``init`` replaces fields of the message that starts each turn: a null field is left out, and a null ``init``
+sends no such message. ``later_init`` does the same for the turns after the first. A step is one model message::
 
     {"thinking": "...", "text": "...", "tools": [{"id": "toolu_a", "name": "lookup", "input": {...}}],
      "usage": {...}, "stop_reason": "end_turn", "call_before_stop": false, "result_before_stop": false,
@@ -27,7 +28,8 @@ starts its block, and ``complete_only`` sends the message whole, without streami
 tools. A tool with ``"mcp": {"name": ..., "input": ...}`` reaches the tool server as that other call, and one with
 ``"hidden": true`` reaches it without the model having made it. ``abandon`` starts each tool call and goes on
 without its result, ``cancel`` also cancels it, and ``repeat`` calls the tool of that id once more after the
-message's calls returned.
+message's calls returned. A tool with ``"denied": true`` never reaches the tool server, and one with ``raw_name``
+is written under that name as it is. A step with ``after_file`` starts once that file exists.
 """
 # ruff: noqa: D102
 
@@ -35,7 +37,9 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -58,6 +62,7 @@ class FakeClaude:
         self.messages = 0
         self.rpc_id = 10
         self.queued: list[dict[str, Any]] = []
+        self.turn_number = 0
 
     def log(self, event: str, **fields: object) -> None:
         with self.log_path.open("a") as stream:
@@ -116,12 +121,19 @@ class FakeClaude:
                 "claude_code_version": self.process.get("version", "2.1.328"),
             }
         elif request["subtype"] == "mcp_status":
+            if self.process.get("status_stall"):
+                return
+            if error := self.process.get("status_error"):
+                rejected = {"subtype": "error", "request_id": message["request_id"], "error": error}
+                self.send({"type": "control_response", "response": rejected})
+                return
             if self.tools is None:
                 self.connect_tools()
             assert self.tools is not None
             names = [{"name": tool.rpartition("__")[2]} for tool in self.tools]
             servers = [{"name": server, "status": self.status(), "tools": names} for server in self.servers()]
-            response = {"mcpServers": self.process.get("status", servers)}
+            reported = self.process.get("status", servers)
+            response = {} if reported is None else {"mcpServers": reported}
         else:
             self.log(request["subtype"])
         self.send(
@@ -160,6 +172,8 @@ class FakeClaude:
             self.connect_tools()
         assert self.tools is not None
         changed = self.process.get("init", {})
+        if self.turn_number > 1:
+            changed = self.process.get("later_init", changed)
         if changed is None:
             return
         fields = {
@@ -271,7 +285,7 @@ class FakeClaude:
             block = {
                 "type": "tool_use",
                 "id": call["id"],
-                "name": f"mcp__mindroom__{call['name']}",
+                "name": call.get("raw_name") or f"mcp__mindroom__{call['name']}",
                 "input": call.get("input", {}),
             }
             partial = {"type": "input_json_delta", "partial_json": json.dumps(block["input"])}
@@ -295,7 +309,9 @@ class FakeClaude:
         for call, request_id in early:
             self.finish_call(call, request_id)
         for call in calls[1 if step.get("call_before_stop") else 0 :]:
-            if step.get("abandon") or step.get("cancel"):
+            if call.get("denied"):
+                self.results[call["id"]] = "(denied)"
+            elif step.get("abandon") or step.get("cancel"):
                 self.abandon_call(call, with_id=with_id, cancel=bool(step.get("cancel")))
             else:
                 self.finish_call(call, self.start_call(call, with_id=with_id))
@@ -306,6 +322,8 @@ class FakeClaude:
     def turn(self, user: dict[str, Any]) -> None:
         """Answer one user message with the next scripted turn."""
         self.log("user", content=user["message"]["content"], client_composed=user.get("client_composed"))
+        self.usage = dict.fromkeys(DEFAULT_USAGE, 0)
+        self.turn_number += 1
         self.init()
         steps = next(self.turns, [{"text": "(unscripted turn)"}])
         text = ""
@@ -324,6 +342,8 @@ class FakeClaude:
             elif "result" in step:
                 result = step["result"]
             else:
+                while "after_file" in step and not Path(step["after_file"]).exists():
+                    time.sleep(0.01)
                 text = self.model_message(step)
         self.emit(
             "result",
@@ -346,12 +366,17 @@ class FakeClaude:
 
     def run(self) -> None:
         system_prompt = ""
+        modes: list[int] = []
         if "--system-prompt-file" in self.args:
-            system_prompt = Path(self.args[self.args.index("--system-prompt-file") + 1]).read_text()
+            file = Path(self.args[self.args.index("--system-prompt-file") + 1])
+            system_prompt = file.read_text()
+            modes = [stat.S_IMODE(path.stat().st_mode) for path in (file, file.parent)]
         elif "--system-prompt" in self.args:
             system_prompt = self.args[self.args.index("--system-prompt") + 1]
         timeout = os.environ.get("MCP_TOOL_TIMEOUT")
-        self.log("spawn", args=self.args, cwd=str(Path.cwd()), system_prompt=system_prompt, tool_timeout=timeout)
+        started = {"cwd": str(Path.cwd()), "system_prompt": system_prompt, "prompt_modes": modes}
+        started["background"] = os.environ.get("CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND")
+        self.log("spawn", args=self.args, tool_timeout=timeout, **started)
         while (message := self.queued.pop(0) if self.queued else self.read()) is not None:
             if message.get("type") == "control_request":
                 self.answer(message)

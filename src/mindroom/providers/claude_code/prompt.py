@@ -24,15 +24,12 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ToolSpec
 
 __all__ = [
-    "CONTINUE_TEXT",
     "TOOL_PREFIX",
     "Emitted",
-    "Resume",
     "canonical_arguments",
     "decide",
     "emitted",
     "rebuild_input",
-    "short_name",
     "tool_names",
 ]
 
@@ -43,12 +40,13 @@ _NAME_LIMIT = 64 - len(TOOL_PREFIX)
 _HASH_LENGTH = 10
 _CHECKPOINT_INTRO = (
     "The following is the conversation so far, which you have not seen. Treat it as prior conversation, not as a new "
-    "request, and never repeat a tool call whose result it holds."
+    "request, and never repeat a tool call whose result it holds. Only its own tags hold `<`: in what the "
+    "conversation said, `<` is written `&lt;`."
 )
-CONTINUE_TEXT = "Continue from the results above."
+_CONTINUE_TEXT = "Continue from the results above."
 
 
-def short_name(name: str) -> str:
+def _short_name(name: str) -> str:
     """Return the name Claude Code is offered ``name`` under: itself, or a cut and hashed one when it cannot take it."""
     if len(name) <= _NAME_LIMIT and re.fullmatch(r"[a-zA-Z0-9_-]+", name):
         return name
@@ -60,7 +58,7 @@ def tool_names(tools: Sequence[ToolSpec], provider: str) -> dict[str, str]:
     """Return the offered tools' names by the name Claude Code calls each with; two may not share one."""
     names: dict[str, str] = {}
     for tool in tools:
-        short = short_name(tool.name)
+        short = _short_name(tool.name)
         if short in names:
             msg = f"Claude Code would call the tools {names[short]} and {tool.name} by one name, {short}."
             raise ProviderError(msg, provider=provider)
@@ -82,22 +80,35 @@ def _user_blocks(message: Message, provider: str) -> list[dict[str, Any]]:
     return [*(_text(text) for text in texts if text), *_images(message, provider)]
 
 
-def _history_blocks(message: Message, provider: str) -> list[dict[str, Any]]:
-    """Return one earlier message as tagged text; the images of a user message or a tool result stay real blocks."""
+def _history_blocks(message: Message, provider: str, names: dict[str, str]) -> list[dict[str, Any]]:
+    """Return one earlier message as tagged text; the images of a user message or a tool result stay real blocks.
+
+    No ``<`` of the message stays one, so nothing it says reads as a tag. ``names`` holds each tool call's tool,
+    which names its result.
+    """
     if message.role == "tool":
         result = tool_result_view(message)
-        output = {"id": result.call_id, "name": result.name, "output": result.content}
+        name = names.get(result.call_id or "", result.name)
+        output = {"id": result.call_id, "name": name, "output": result.content}
         if result.is_error:
             output["is_error"] = True
-        return [_text(f"<tool-result>\n{json.dumps(output)}\n</tool-result>"), *_images(message, provider)]
+        return [_text(f"<tool-result>\n{_json(output)}\n</tool-result>"), *_images(message, provider)]
     if message.role == "user":
-        return [_text("<user>"), *_user_blocks(message, provider), _text("</user>")]
+        blocks = _user_blocks(message, provider)
+        said = [_text(block["text"].replace("<", "&lt;")) if block["type"] == "text" else block for block in blocks]
+        return [_text("<user>"), *said, _text("</user>")]
     calls = [
-        json.dumps({"id": call["id"], "name": call["function"]["name"], "input": _arguments(call["function"])})
+        _json({"id": call["id"], "name": call["function"]["name"], "input": _arguments(call["function"])})
         for call in message.tool_calls or ()
     ]
-    parts = [message.get_content_string(), *(f"<tool-call>\n{call}\n</tool-call>" for call in calls)]
+    said = message.get_content_string().replace("<", "&lt;")
+    parts = [said, *(f"<tool-call>\n{call}\n</tool-call>" for call in calls)]
     return [_text("\n".join(["<assistant>", *filter(None, parts), "</assistant>"]))]
+
+
+def _json(value: object) -> str:
+    """Return ``value`` as JSON without a ``<``, which JSON can write as an escape."""
+    return json.dumps(value).replace("<", "\\u003c")
 
 
 def _text(text: str) -> dict[str, Any]:
@@ -139,12 +150,13 @@ def rebuild_input(messages: Sequence[Message], provider: str) -> tuple[str, list
     end = max((index + 1 for index, message in enumerate(conversation) if message.role != "user"), default=0)
     blocks: list[dict[str, Any]] = []
     if end:
+        names = {call["id"]: call["function"]["name"] for message in conversation for call in message.tool_calls or ()}
         blocks.append(_text(f"<conversation-checkpoint>\n{_CHECKPOINT_INTRO}"))
         for message in conversation[:end]:
-            blocks += _history_blocks(message, provider)
+            blocks += _history_blocks(message, provider, names)
         blocks.append(_text("</conversation-checkpoint>"))
     current = [block for message in conversation[end:] for block in _user_blocks(message, provider)]
-    blocks += current or [_text(CONTINUE_TEXT)]
+    blocks += current or [_text(_CONTINUE_TEXT)]
     return system_text(messages), _merged(blocks)
 
 
@@ -174,12 +186,8 @@ def emitted(content: str | None, tool_calls: Sequence[dict[str, Any]]) -> Emitte
     return Emitted(content=content or None, calls=tuple(calls))
 
 
-@dataclass(frozen=True, slots=True)
-class Resume:
-    """What continues a live process: each waiting call's MCP result, or the user blocks of its next turn."""
-
-    results: dict[str, dict[str, Any]]
-    blocks: list[dict[str, Any]]
+# What continues a live process: each waiting call's MCP result, or the user blocks of its next turn.
+type _Resume = tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]
 
 
 def _mcp_content(blocks: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -199,26 +207,24 @@ def _mcp_result(message: Message, provider: str) -> dict[str, Any]:
     return {"content": [_text(text), *_mcp_content(_images(message, provider))], "isError": result.is_error}
 
 
-def decide(answer: Emitted, tail: Sequence[Message], provider: str) -> Resume | None:
+def decide(answer: Emitted, tail: Sequence[Message], provider: str) -> _Resume | None:
     """Return how ``tail`` continues the process that answered with ``answer``, or None when it must be rebuilt.
 
     ``tail`` starts at the request's last assistant message, which must be the answer the process gave. A process
-    parked on tool calls continues only when exactly one result per call follows, then at most user messages, whose
-    text and images ride on the last result. An idle process continues only when user messages alone follow.
+    parked on tool calls continues only when exactly one result per call follows, and nothing else. An idle process
+    continues only when user messages alone follow.
     """
     answered, rest = tail[0], tail[1:]
-    if emitted(answered.get_content_string(), answered.tool_calls or ()) != answer:
+    # The answer of a process is plain text, so a message that holds blocks is not one as the process gave it.
+    if not isinstance(answered.content, str | None) or emitted(answered.content, answered.tool_calls or ()) != answer:
         return None
-    results = [message for message in rest if message.role == "tool"]
-    users = rest[len(results) :]
-    if any(message.role != "user" or message.files or message.audio or message.videos for message in users):
-        return None
-    blocks = _merged([block for message in users for block in _user_blocks(message, provider)])
     call_ids = answer.tool_call_ids
-    if not call_ids:
-        return Resume({}, blocks) if blocks and not results else None
-    if sorted(message.tool_call_id or "" for message in results) != sorted(call_ids):
+    if call_ids:
+        if [message.role for message in rest] != ["tool"] * len(call_ids):
+            return None
+        answers = {str(message.tool_call_id): _mcp_result(message, provider) for message in rest}
+        return ({call_id: answers[call_id] for call_id in call_ids}, []) if set(answers) == set(call_ids) else None
+    if any(message.role != "user" or message.files or message.audio or message.videos for message in rest):
         return None
-    answers = {str(message.tool_call_id): _mcp_result(message, provider) for message in results}
-    answers[call_ids[-1]]["content"] += _mcp_content(blocks)
-    return Resume({call_id: answers[call_id] for call_id in call_ids}, [])
+    blocks = _merged([block for message in rest for block in _user_blocks(message, provider)])
+    return ({}, blocks) if blocks else None

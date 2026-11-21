@@ -7,7 +7,7 @@ process parked on those calls, or at the result that ends Claude Code's turn.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -44,7 +44,14 @@ if TYPE_CHECKING:
     from mindroom.providers.assistant_turn import TurnTimer
     from mindroom.providers.claude_code.session import LiveSession
 
-__all__ = ["read_step", "turn_failure"]
+__all__ = ["Outrun", "read_step"]
+
+# The counters of Claude's usage, which a turn's result reports summed over its model messages.
+_COUNTERS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+
+
+class Outrun(ProviderUnavailable):
+    """Claude Code's model went on before the results MindRoom gave it had reached it; none of that answer counts."""
 
 
 def _metrics(usage: dict[str, Any]) -> MessageMetrics:
@@ -55,10 +62,9 @@ def _metrics(usage: dict[str, Any]) -> MessageMetrics:
 class _Step:
     """What one step produced so far.
 
-    ``usage`` sums the model messages that ended and ``current`` is the usage of the one still streaming.
-    ``seen`` holds each model message's id with whether it streams, and ``spoke`` the id of the one whose text came
-    last. ``error`` and ``rejected`` are what Claude Code said about a request that failed, kept until its result.
-    ``stop_reason`` is set once the step ended.
+    ``usage`` sums the model messages that ended and ``current`` is the usage of the one still streaming. ``seen``
+    holds each model message's id with whether it streams, ``streaming`` the id of the one that streams now, and
+    ``spoke`` the id of the one whose text came last. ``error`` is what Claude Code said about a failed request.
     """
 
     text: list[str] = field(default_factory=list)
@@ -70,7 +76,6 @@ class _Step:
     streaming: str | None = None
     spoke: str | None = None
     error: str | None = None
-    rejected: RateLimitInfo | None = None
     stop_reason: StopReason | None = None
 
     def _reported(self) -> list[ModelEvent]:
@@ -89,33 +94,51 @@ class _Step:
         self.reasoning.append(thinking)
         return [ReasoningDelta(thinking)]
 
+    def _count(self, usage: dict[str, Any], session: LiveSession) -> None:
+        """Add the usage of a model message that ended."""
+        self.usage = add_usage(self.usage, _metrics(usage))
+        for counter in _COUNTERS:
+            session.counted[counter] = session.counted.get(counter, 0) + (usage.get(counter) or 0)
+
     def accept(self, message: ClaudeMessage, session: LiveSession, provider: str) -> list[ModelEvent]:
         """Return the events of one message of the process, raising for a turn that failed or lost its isolation."""
         if isinstance(message, SystemMessage):
             if message.subtype == "init":
                 session.inventoried = _only_mindrooms_tools(message.data, session)
         elif isinstance(message, RateLimitEvent):
-            self.rejected = message.rate_limit_info if message.rate_limit_info.status == "rejected" else None
+            session.limited(message)
         elif not session.inventoried:
             # Nothing a process says counts before it said that it runs with exactly MindRoom's tools.
             msg = "Claude Code did not start its turn with exactly MindRoom's tools, so the turn was stopped."
             raise ProviderError(msg, provider=provider)
+        elif isinstance(message, StreamEvent | AssistantMessage | ResultMessage) and session.bridge.undelivered:
+            msg = "Claude Code went on without the tool results MindRoom gave it."
+            raise Outrun(msg, provider=provider)
         elif isinstance(message, StreamEvent) and message.parent_tool_use_id is None:
-            return self._stream_event(message.event)
+            return self._stream_event(message.event, session)
         elif isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
-            return self._assistant(message, session)
+            return self._assistant(message, session, provider)
         elif isinstance(message, ResultMessage):
-            failure = turn_failure(message, error=self.error, rejected=self.rejected, provider=provider)
-            if failure is None and self.calls:
-                # Without the end of the model message that made them, the process never waited on these calls.
-                msg = "Claude Code ended its turn without waiting for MindRoom's tool results."
-                failure = ProviderError(msg, provider=provider)
-            if failure is not None:
-                raise failure
-            self.stop_reason = stop_reason_of(message.stop_reason) or "end"
+            self._end(message, session, provider)
         return []
 
-    def _stream_event(self, event: dict[str, Any]) -> list[ModelEvent]:
+    def _end(self, result: ResultMessage, session: LiveSession, provider: str) -> None:
+        """End the step with the result of Claude Code's turn, raising for a turn that failed."""
+        failure = _turn_failure(result, error=self.error, rejected=session.rejected, provider=provider)
+        if failure is None and self.calls:
+            # Without the end of the model message that made them, the process never waited on these calls.
+            msg = "Claude Code ended its turn without waiting for MindRoom's tool results."
+            failure = ProviderError(msg, provider=provider)
+        if failure is not None:
+            raise failure
+        # What the turn used beyond its model messages, such as a request Claude Code made for itself.
+        total = result.usage or {}
+        extra = {key: max(0, (total.get(key) or 0) - session.counted.get(key, 0)) for key in _COUNTERS}
+        if any(extra.values()):
+            self.usage = add_usage(replace(_metrics(extra), context=None), self.usage)
+        self.stop_reason = stop_reason_of(result.stop_reason) or "end"
+
+    def _stream_event(self, event: dict[str, Any], session: LiveSession) -> list[ModelEvent]:
         """Return the events of one piece of a model message as it streams."""
         kind = event.get("type")
         if kind == "message_start":
@@ -130,7 +153,8 @@ class _Step:
             return self._reported()
         if kind == "message_stop":
             if self.current is not None:
-                self.usage, self.current = add_usage(self.usage, _metrics(self.current)), None
+                self._count(self.current, session)
+            self.current = self.streaming = None
             if self.calls:
                 # The model message that called MindRoom's tools has ended: MindRoom's loop runs them now.
                 self.stop_reason = "tool_use"
@@ -143,7 +167,7 @@ class _Step:
                 return self._think(piece["thinking"])
         return []
 
-    def _assistant(self, message: AssistantMessage, session: LiveSession) -> list[ModelEvent]:
+    def _assistant(self, message: AssistantMessage, session: LiveSession, provider: str) -> list[ModelEvent]:
         """Keep a complete block's tool call; a message that did not stream also gives its text and its usage."""
         if message.error is not None:
             # The text of a request that failed is Claude Code's diagnostic, not an answer.
@@ -151,26 +175,36 @@ class _Step:
             return []
         if message.message_id not in self.seen:
             self.seen[message.message_id] = False
-            self.usage = add_usage(self.usage, None if message.usage is None else _metrics(message.usage))
+            if message.usage is not None:
+                self._count(message.usage, session)
         events: list[ModelEvent] = []
         for block in message.content:
             if isinstance(block, ToolUseBlock):
-                short = block.name.removeprefix(TOOL_PREFIX)
-                # Claude Code answers a call to a tool MindRoom did not offer itself, and the model goes on.
-                if block.name.startswith(TOOL_PREFIX) and (name := session.bridge.names.get(short)) is not None:
-                    session.bridge.made(block.id, short, block.input)
-                    function = {"name": name, "arguments": json.dumps(block.input)}
-                    self.calls.append({"id": block.id, "type": "function", "function": function})
+                self.calls.append(_tool_call(block, session, provider))
             elif self.seen[message.message_id]:
                 continue
             elif isinstance(block, TextBlock) and block.text:
                 events += self._say(block.text, message.message_id)
             elif isinstance(block, ThinkingBlock) and block.thinking:
                 events += self._think(block.thinking)
+        if self.calls and self.streaming is None:
+            # No end of a model message follows a call that did not stream, so the step ends with it.
+            self.stop_reason = "tool_use"
         return events
 
 
-def turn_failure(
+def _tool_call(block: ToolUseBlock, session: LiveSession, provider: str) -> dict[str, Any]:
+    """Return the call of a MindRoom tool the model wrote, which the process then waits on."""
+    short = block.name.removeprefix(TOOL_PREFIX)
+    name = session.bridge.names.get(short) if block.name.startswith(TOOL_PREFIX) else None
+    # Claude Code would answer a call MindRoom cannot run itself, and the model would go on.
+    if name is None or not session.bridge.made(block.id, short, block.input):
+        msg = f"Claude called {block.name} ({block.id}), which is not one new call of a MindRoom tool."
+        raise ProviderError(msg, provider=provider)
+    return {"id": block.id, "type": "function", "function": {"name": name, "arguments": json.dumps(block.input)}}
+
+
+def _turn_failure(
     result: ResultMessage,
     *,
     error: str | None,
