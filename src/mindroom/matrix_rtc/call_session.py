@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 import aiohttp
+import httpx
 import nio
 
 from mindroom.background_tasks import wait_for_future_until_complete
@@ -56,6 +57,31 @@ class CallJoinError(RuntimeError):
 
 class CallStartRevokedError(CallJoinError):
     """The owning runtime withdrew permission while the call was starting."""
+
+
+def _same_multi_sfu_service(url: str | None, service_url: str | None) -> bool:
+    """Return whether a ``multi_sfu`` member's service URL names ``service_url``, however it is spelled.
+
+    Scheme case and a default port are spelling. A missing or malformed URL names nothing, itself included.
+    """
+    focus = _service_focus(url)
+    return focus is not None and focus == _service_focus(service_url)
+
+
+def _service_focus(url: str | None) -> str | None:
+    try:
+        parsed = httpx.URL(url or "")
+        # Reading the host raises on malformed IDNA that parsing accepted.
+        if parsed.scheme not in {"http", "https"} or not parsed.host:
+            return None
+        if parsed.userinfo or parsed.query or parsed.fragment:
+            return None
+        # HTTPX keeps an explicit default port when the scheme was written in uppercase.
+        if parsed.port == {"http": 80, "https": 443}[parsed.scheme]:
+            parsed = parsed.copy_with(port=None)
+        return str(parsed).rstrip("/")
+    except (httpx.InvalidURL, UnicodeError):
+        return None
 
 
 def required_device_id(client: nio.AsyncClient) -> str:
@@ -166,6 +192,27 @@ class CallSession:
     def members(self) -> tuple[CallMember, ...]:
         """Return the Matrix call roster this session last applied."""
         return tuple(self._members)
+
+    def _withheld_devices(self) -> set[tuple[str, str]]:
+        """Return the roster's devices that this session shares no media and no keys with.
+
+        The manager treats an SDK 45 (``multi_sfu``) member exactly as the SDK 41 member advertising the same
+        focus. The session shares media and keys only with devices that are SDK 41 or whose every current
+        ``multi_sfu`` membership advertises the session's own service, because such a device publishes where
+        its membership says, not where the call's oldest member does.
+        """
+        service_url = self.deps.livekit_service_url
+        return {
+            (member.user_id, member.device_id)
+            for member in self._members
+            if member.multi_sfu_service_url is not None
+            and not _same_multi_sfu_service(member.multi_sfu_service_url, service_url)
+        }
+
+    def _media_members(self) -> list[CallMember]:
+        """Return the roster without the members of withheld devices."""
+        withheld = self._withheld_devices()
+        return [member for member in self._members if (member.user_id, member.device_id) not in withheld]
 
     @property
     def _local_identity(self) -> str:
@@ -296,6 +343,9 @@ class CallSession:
         )
         if member is None:
             return False
+        if (member.user_id, member.device_id) in self._withheld_devices():
+            # Consumed: the roster already says why this device's key is not installed.
+            return True
         participant_identity = f"{member.user_id}:{member.device_id}"
         inbound = self._key_manager.receive(
             received,
@@ -369,19 +419,27 @@ class CallSession:
         async with self._key_distribution_lock:
             if self._stopped:
                 return
-            members = list(self._members)
+            # A device that became withheld is absent here, so the key rotates as for one that left.
+            members = self._media_members()
             distribution = self._key_manager.update_memberships(members, self.deps.clock_ms())
             if distribution is None:
                 return
             delivered: list[CallMember] = []
             if distribution.targets:
                 self._key_manager.mark_exposed(distribution)
-                delivered = await self.deps.key_transport.send_key(
-                    room_id=self.room_id,
-                    key_base64=distribution.key_base64,
-                    key_index=distribution.key_index,
-                    targets=list(distribution.targets),
-                )
+                targets = list(distribution.targets)
+                # A roster update can withhold an SDK 45 device mid-send, so each of its sends checks again.
+                modern = any(target.multi_sfu_service_url is not None for target in targets)
+                batches = [[target] for target in targets] if modern else [targets]
+                for batch in batches:
+                    withheld = self._withheld_devices()
+                    if eligible := [t for t in batch if (t.user_id, t.device_id) not in withheld]:
+                        delivered += await self.deps.key_transport.send_key(
+                            room_id=self.room_id,
+                            key_base64=distribution.key_base64,
+                            key_index=distribution.key_index,
+                            targets=eligible,
+                        )
             self._key_manager.mark_distributed(distribution, tuple(delivered))
             delivered_members = set(delivered)
             undelivered_device_ids = frozenset(
@@ -452,9 +510,19 @@ class CallSession:
         self.deps.bridge.set_frame_key(self._local_identity, key, key_index)
 
     def _sync_bridge_participants(self) -> None:
-        """Apply the authoritative Matrix call roster to the SFU bridge."""
+        """Apply the authoritative Matrix call roster, without its withheld devices, to the SFU bridge."""
+        withheld = self._withheld_devices()
+        for member in self._members:
+            if member.multi_sfu_service_url is not None and (member.user_id, member.device_id) in withheld:
+                logger.warning(
+                    "call_media_withheld_from_member",
+                    room_id=self.room_id,
+                    user_id=member.user_id,
+                    device_id=member.device_id,
+                    advertised_url=member.livekit_service_url,
+                )
         self.deps.bridge.set_participant_identities(
-            frozenset(f"{member.user_id}:{member.device_id}" for member in self._members),
+            frozenset(f"{member.user_id}:{member.device_id}" for member in self._media_members()),
         )
 
     async def _apply_own_key_later(self, key: bytes, key_index: int, delay_ms: int) -> None:

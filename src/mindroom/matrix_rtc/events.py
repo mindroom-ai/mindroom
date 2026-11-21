@@ -27,17 +27,13 @@ _ROOM_CALL_SCOPE = "m.room"
 DEFAULT_MEMBERSHIP_EXPIRES_MS = 4 * 60 * 60 * 1000
 
 
-def _preferred_livekit_service_url(content: dict[str, Any], *, uses_multi_sfu: bool) -> str | None:
+def _preferred_livekit_service_url(content: dict[str, Any]) -> str | None:
     """Return the selected first preferred LiveKit focus URL."""
     foci = content.get("foci_preferred")
     if not isinstance(foci, list) or not foci:
         return None
     focus = foci[0]
     if not isinstance(focus, dict) or focus.get("type") != "livekit":
-        return None
-    # Deliberately refuse direct WebSocket transports in multi_sfu mode:
-    # the service URL cannot prove where these members actually publish.
-    if uses_multi_sfu and "url" in focus:
         return None
     candidate = focus.get("livekit_service_url")
     return candidate if isinstance(candidate, str) and candidate else None
@@ -65,7 +61,9 @@ class CallMember:
     created_ts: int
     expires_ms: int
     livekit_service_url: str | None = None
-    uses_multi_sfu: bool = False
+    #: The service a ``multi_sfu`` member publishes on, or ``""`` when its first transport names none.
+    #: ``None`` for an ``oldest_membership`` member, which publishes wherever the call's oldest member does.
+    multi_sfu_service_url: str | None = None
 
     def is_expired(self, now_ms: int) -> bool:
         """Whether the membership state event has outlived its validity window."""
@@ -129,14 +127,19 @@ def parse_membership_event(event_source: dict[str, Any]) -> CallMember | None:
     expires = content.get("expires")
     if not isinstance(expires, int) or isinstance(expires, bool):
         expires = DEFAULT_MEMBERSHIP_EXPIRES_MS
-    uses_multi_sfu = content["focus_active"]["focus_selection"] == "multi_sfu"
+    livekit_service_url = _preferred_livekit_service_url(content)
+    multi_sfu_service_url = None
+    if content["focus_active"]["focus_selection"] == "multi_sfu":
+        # A transport that also names an SFU directly does not show that its member publishes on the service.
+        direct = livekit_service_url is not None and "url" in content["foci_preferred"][0]
+        multi_sfu_service_url = "" if direct or livekit_service_url is None else livekit_service_url
     return CallMember(
         user_id=sender,
         device_id=device_id,
         created_ts=created_ts,
         expires_ms=expires,
-        livekit_service_url=_preferred_livekit_service_url(content, uses_multi_sfu=uses_multi_sfu),
-        uses_multi_sfu=uses_multi_sfu,
+        livekit_service_url=livekit_service_url,
+        multi_sfu_service_url=multi_sfu_service_url,
     )
 
 

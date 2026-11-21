@@ -201,26 +201,3 @@ def _normalized_service_url(url: str) -> str | None:
     ):
         return None
     return str(parsed).rstrip("/")
-
-
-def same_multi_sfu_service(url: str | None, other_url: str | None) -> bool:
-    """Return whether a ``multi_sfu`` member's service URL names the same service as another URL.
-
-    Scheme case and a default port are spelling. A missing or malformed URL names nothing, itself included.
-    """
-    focus = _multi_sfu_focus(url)
-    return focus is not None and focus == _multi_sfu_focus(other_url)
-
-
-def _multi_sfu_focus(url: str | None) -> str | None:
-    try:
-        parsed = httpx.URL(url or "")
-        # Reading the host raises on malformed IDNA that parsing accepted.
-        if not parsed.host:
-            return None
-        # HTTPX keeps an explicit default port when the scheme was written in uppercase.
-        if parsed.port == {"http": 80, "https": 443}.get(parsed.scheme):
-            parsed = parsed.copy_with(port=None)
-        return _normalized_service_url(str(parsed))
-    except (httpx.InvalidURL, UnicodeError):
-        return None

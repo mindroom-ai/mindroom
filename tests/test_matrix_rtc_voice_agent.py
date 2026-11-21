@@ -505,6 +505,24 @@ async def test_bridge_absence_watch_follows_roster_changes(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+async def test_bridge_treats_an_emptied_roster_as_an_absent_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session that shares media with no device hands over an empty roster: the ordinary absence grace ends it.
+
+    A device that stays connected without being in the roster does not count, as for any participant outside it.
+    """
+    room = _PresenceRoom(_ALICE)
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room)
+    await _settle()
+    assert terminations == []
+
+    bridge.set_participant_identities(frozenset())
+    await _settle()
+
+    assert terminations == [False]
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
 async def test_bridge_roster_update_restarts_the_absence_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     """A membership the caller just published, even from a device already in the roster, gets the full grace."""
     room = _PresenceRoom()

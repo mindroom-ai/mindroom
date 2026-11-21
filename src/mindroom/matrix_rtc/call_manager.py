@@ -35,12 +35,7 @@ from mindroom.matrix.olm_to_device import authenticated_sender_is_current
 from mindroom.matrix.personal_room_store import personal_room_ids
 from mindroom.matrix.room_membership import cached_joined_member_ids
 from mindroom.matrix_rtc.audio_process import ProcessLiveVoiceBridge, prewarm_call_audio_process
-from mindroom.matrix_rtc.call_backends import (
-    fetch_sfu_grant,
-    resolve_livekit_service,
-    resolve_voice_backend,
-    same_multi_sfu_service,
-)
+from mindroom.matrix_rtc.call_backends import fetch_sfu_grant, resolve_livekit_service, resolve_voice_backend
 from mindroom.matrix_rtc.call_origin import (
     AGENT_CALL_STATE_EVENT_TYPE,
     CALL_BRIEF_TOKEN_BUDGET,
@@ -256,8 +251,6 @@ class _RoomCallState:
     members: list[CallMember]
     agent_call_events: tuple[dict[str, Any], ...]
     joined_user_ids: frozenset[str]
-    #: The agent's other devices that publish as ``multi_sfu``: never callers, they only count toward the veto.
-    own_multi_sfu_devices: tuple[CallMember, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -820,14 +813,7 @@ class CallManager:
                         self._schedule_reconcile_retry(room, room_call)
                         return
                     members = state.members
-                    own_devices = state.own_multi_sfu_devices
-                    # Without a caller there is no call for the agent's own devices to keep it out of.
-                    self._schedule_expiry_reconcile(room, room_call, [*members, *own_devices] if members else [])
-                    if self._multi_sfu_veto(room_call, members, own_devices):
-                        room_call.clear_reconcile_retry()
-                        await room_call.stop_session()
-                        if members:
-                            return
+                    self._schedule_expiry_reconcile(room, room_call, members)
                     await self._apply_reconciled_members(
                         room,
                         room_call,
@@ -842,38 +828,6 @@ class CallManager:
                 room_id=room_id,
                 agent=self._agent_name,
             )
-
-    def _multi_sfu_veto(
-        self,
-        room_call: _RoomCall,
-        members: list[CallMember],
-        own_devices: tuple[CallMember, ...],
-    ) -> bool:
-        """Return whether a ``multi_sfu`` membership keeps the agent out of this roster's call.
-
-        Media and keys exist only while every ``multi_sfu`` membership in room state names the anchor's service.
-        The logic written for ``oldest_membership`` alone decides whether that anchor is trusted, and a roster
-        that fails this is not acted on at all: its media stops and nothing else changes.
-
-        The anchor's service is the one a session for this roster's requester runs on, else the focus of the
-        oldest member, which is the one a join would resolve. The agent's own devices never anchor.
-        """
-        session = room_call.session
-        if session is not None and (not members or session.requester_id == members[0].user_id):
-            anchor_url: str | None = session.deps.livekit_service_url
-        else:
-            anchor_url = min(members, key=lambda member: member.created_ts).livekit_service_url if members else None
-        vetoed = False
-        for member in (*members, *own_devices):
-            if member.uses_multi_sfu and not same_multi_sfu_service(member.livekit_service_url, anchor_url):
-                vetoed = True
-                logger.warning(
-                    "call_focus_not_trusted",
-                    user_id=member.user_id,
-                    device_id=member.device_id,
-                    advertised_url=member.livekit_service_url,
-                )
-        return vetoed
 
     async def _apply_reconciled_members(
         self,
@@ -1128,8 +1082,6 @@ class CallManager:
     async def _fetch_room_call_state(self, room_id: str) -> _RoomCallState | None:
         """Current, unexpired call members in the room, excluding ourselves, and its agent-call state.
 
-        The agent's other devices that publish as ``multi_sfu`` are returned apart from the members.
-
         Returns ``None`` when the room state could not be read, so callers can
         distinguish "the call is empty" from a transient homeserver error.
         """
@@ -1152,7 +1104,6 @@ class CallManager:
         )
         now_ms = self._clock_ms()
         members = []
-        own_multi_sfu_devices = []
         for raw_event in response.events:
             member = parse_membership_event(raw_event)
             if member is None or member.is_expired(now_ms):
@@ -1160,19 +1111,12 @@ class CallManager:
             if member.user_id not in joined_user_ids:
                 continue
             if member.user_id == self._client.user_id:
-                if member.uses_multi_sfu and member.device_id != self._client.device_id:
-                    own_multi_sfu_devices.append(member)
                 continue
             members.append(member)
         agent_call_events = tuple(
             event for event in response.events if event.get("type") == AGENT_CALL_STATE_EVENT_TYPE
         )
-        return _RoomCallState(
-            members=members,
-            agent_call_events=agent_call_events,
-            joined_user_ids=joined_user_ids,
-            own_multi_sfu_devices=tuple(own_multi_sfu_devices),
-        )
+        return _RoomCallState(members=members, agent_call_events=agent_call_events, joined_user_ids=joined_user_ids)
 
     async def _join(  # noqa: C901, PLR0911
         self,
