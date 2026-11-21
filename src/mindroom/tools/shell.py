@@ -571,10 +571,15 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             try:
                 command_args = _normalize_shell_args(args)
             except ValueError as exc:
+                if worker is not None:
+                    raise
                 return f"Error: {exc}"
             if timeout is not None and timeout <= 0:
                 # A model may mean "no limit" or "run in the background"; either way, stopping at once helps nobody.
-                return "Error: timeout must be a positive number of seconds; omit it for the default limit."
+                msg = "timeout must be a positive number of seconds; omit it for the default limit."
+                if worker is not None:
+                    raise ValueError(msg)
+                return f"Error: {msg}"
             subprocess_env = self._command_env()
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None
@@ -618,6 +623,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                     on_progress=report_tool_progress,
                     output_destination=output_destination,
                 )
+            if worker is not None and result.execution_error:
+                raise ValueError(result.message)
             return ToolOutputFileHandled(result.message) if result.output_file_handled else result.message
 
     return MindRoomShellTools

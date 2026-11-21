@@ -1033,6 +1033,42 @@ async def test_the_shell_in_a_worker_runs_the_command_of_a_call_that_names_it(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("supervised", [False, True])
+async def test_named_shell_launch_errors_fail_the_tool_without_matching_command_output(
+    tmp_path: Path,
+    supervised: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV  # noqa: PLC0415
+
+    process_env = {"MINDROOM_SANDBOX_RUNNER_MODE": "true"}
+    if supervised:
+        monkeypatch.setenv(SHELL_SUPERVISOR_SOCKET_ENV, str(tmp_path / "missing.sock"))
+    else:
+        monkeypatch.delenv(SHELL_SUPERVISOR_SOCKET_ENV, raising=False)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env=process_env,
+    )
+    shell = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        runs_in_worker=False,
+        worker_target=None,
+    )
+    call = _offered_entrypoint(shell, "run_shell_command")
+    command = ["definitely-not-a-binary-xyz", "arg"]
+    diagnostic = "Shell supervisor is unavailable" if supervised else "definitely-not-a-binary-xyz"
+    assert diagnostic in await call(command)
+    with pytest.raises(ValueError, match=diagnostic):
+        await call(command, worker="build")
+    if not supervised:
+        assert await call(["printf", "Error: ordinary output"], worker="build") == "Error: ordinary output"
+
+
+@pytest.mark.asyncio
 async def test_a_response_turn_owns_the_named_workers_of_its_calls(
     runtime_paths: RuntimePaths,
     backend: _FakeBackend,

@@ -223,6 +223,7 @@ class ShellRunResult:
     message: str
     handle: str | None = None
     output_file_handled: bool = False
+    execution_error: bool = False
 
 
 def shell_call_timeout(timeout: float | None) -> float | None:
@@ -374,7 +375,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
     except Exception as exc:
         if capture is not None:
             capture.close()
-        return ShellRunResult(message=f"Error: {exc}")
+        return ShellRunResult(message=f"Error: {exc}", execution_error=True)
     # A busy command, such as a build, must not take the CPU from the process that runs MindRoom; processes the
     # command starts later inherit the priority.
     with contextlib.suppress(OSError):
