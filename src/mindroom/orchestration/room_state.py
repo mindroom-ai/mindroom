@@ -95,11 +95,13 @@ class RoomStateWorker:
         def current() -> bool:
             return (
                 runtime.running
-                and not runtime.response_admission_gate.closed
                 and runtime.config is config
                 and runtime.room_steward(room_id, accepting_only=True) is steward
                 and steward.client is client
             )
+
+        def may_write() -> bool:
+            return not runtime.response_admission_gate.closed and current()
 
         args = (client, config, runtime.runtime_paths, room_id)
         steps = (
@@ -113,8 +115,7 @@ class RoomStateWorker:
             i
             for i, step in enumerate(steps)
             if (needed is None or i in needed)
-            and current()
-            and await step(may_write=current, failure_level=failure_level) is False
+            and (not may_write() or await step(may_write=may_write, failure_level=failure_level) is False)
         }
         if not current():
             # Keep the work in this room when its credential or config changes during a comparison.
@@ -151,7 +152,7 @@ class RoomStateWorker:
                 return
             if not retry[1]:
                 delay, warned = 0, False
-            elif not dirty.is_set():
+            elif not (gate.closed or dirty.is_set()):
                 delay = min(max(1, delay * 2), _MAX_RETRY_SECONDS)
                 jitter = uniform(delay * 0.5, min(delay * 1.5, _MAX_RETRY_SECONDS))  # noqa: S311 - retry timing
                 with suppress(TimeoutError):

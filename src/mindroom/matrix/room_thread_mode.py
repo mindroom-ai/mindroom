@@ -98,7 +98,7 @@ async def reconcile_room_thread_mode(  # noqa: C901, PLR0911, PLR0912 - one outc
             if put_state is not None:
                 return await put_state(room_id, _THREAD_MODE_EVENT_TYPE, content)
             if may_write is not None and not may_write():
-                return True
+                return False
             response = await client.room_put_state(room_id, _THREAD_MODE_EVENT_TYPE, content, state_key="")
             if not isinstance(response, nio.RoomPutStateResponse):
                 # A room whose power levels keep this account from sending this state refuses it on every trigger.

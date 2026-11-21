@@ -59,7 +59,7 @@ class _Room:
         self.runtime = MagicMock(agent_bots=self.bots, config=self.config, runtime_paths=self.paths, running=True)
         self.runtime.response_admission_gate = ResponseAdmissionGate()
         self.runtime.room_state = RoomStateWorker(self.runtime)
-        self.runtime.room_steward.side_effect = lambda room_id, **kwargs: room_steward(self.bots, room_id, **kwargs)
+        self.runtime.room_steward.side_effect = lambda room_id, **_: room_steward(self.bots, room_id)
         for name in names:
             self._add_bot(name)
             self.apply_power(name, {self.ids[names[0]]: 100})
@@ -119,7 +119,6 @@ class _Room:
         self.bots[name] = SimpleNamespace(
             agent_name=name,
             running=True,
-            accepting_work=True,
             client=client,
             steward_duties=StewardDuties(deps),
         )

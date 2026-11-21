@@ -90,7 +90,7 @@ async def _reconcile(  # noqa: C901, PLR0911 - roster and binding share the same
             elif not (isinstance(current, nio.RoomGetStateEventError) and current.status_code == "M_NOT_FOUND"):
                 return failed(current)
             if may_write is not None and not may_write():
-                return True
+                return False
             phase = "state_put"
             response = await client.room_put_state(room_id, kind, content, state_key=key)
             return isinstance(response, nio.RoomPutStateResponse) or failed(response)
