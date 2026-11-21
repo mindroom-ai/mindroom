@@ -7,6 +7,7 @@ import hashlib
 import json
 import typing
 import uuid
+from collections import Counter
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -92,6 +93,9 @@ def scheduled_task_state_lock(client: nio.AsyncClient, room_id: str, task_id: st
     return lock
 
 
+_logged_unmanaged_authors: set[tuple[str, str]] = set()
+
+
 def _runtime_authored_task_content(
     room_id: str,
     event: dict[str, typing.Any],
@@ -117,8 +121,8 @@ def _runtime_authored_task_content(
         # Coverage: tests/test_scheduled_task_runtime.py::test_task_saved_without_an_owner_keeps_its_writer_as_owner_through_a_rewrite.
         owner = content.get("owner")
         return {**content, "owner": owner if isinstance(owner, str) and owner else sender}
-    logger.warning(
-        "scheduled_task_state_ignored_unmanaged_author",
+    logger.debug(
+        "scheduled_task_event_ignored_unmanaged_author",
         room_id=room_id,
         task_id=event.get("state_key"),
         event_id=event.get("event_id"),
@@ -548,12 +552,16 @@ def task_records(
     """Parse runtime-authored scheduled task records from a room state response."""
     runtime_account_ids = persisted_bot_user_ids(runtime_paths)
     tasks: list[ScheduledTaskRecord] = []
+    unmanaged: Counter[str] = Counter()
     for event in state_response.events:
         if not isinstance(event, dict) or event.get("type") != SCHEDULED_TASK_EVENT_TYPE:
             continue
 
         state_key = event.get("state_key")
         content = _runtime_authored_task_content(room_id, event, runtime_account_ids)
+        sender = event.get("sender")
+        if content is None and isinstance(sender, str) and isinstance(event.get("content"), dict):
+            unmanaged[sender] += 1
         if not isinstance(state_key, str) or content is None:
             continue
         # A room keeps every finished task's state, so only the records a caller wants are parsed.
@@ -565,6 +573,11 @@ def task_records(
             continue
         tasks.append(task)
 
+    for sender, count in unmanaged.items():
+        key = (room_id, sender)
+        if key not in _logged_unmanaged_authors:
+            _logged_unmanaged_authors.add(key)
+            logger.info("scheduled_task_state_ignored_unmanaged_author", room_id=room_id, sender=sender, count=count)
     return tasks
 
 
