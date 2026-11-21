@@ -696,18 +696,21 @@ class KubernetesWorkerBackend:
             for deployment in deployments
         }
         stateless = directories - deployed
-        self._stateless_since = {name: self._stateless_since.get(name, now) for name in stateless}
+        previous = self._stateless_since
+        # A concurrent sweep may publish another snapshot; this pass only visits and updates its own names.
+        since = {name: previous.get(name, now) for name in stateless}
+        self._stateless_since = since
         for name in sorted(stateless):
-            if now - self._stateless_since[name] < _ORPHANED_STATE_GRACE_SECONDS:
+            if now - since[name] < _ORPHANED_STATE_GRACE_SECONDS:
                 continue
             try:
                 worker_key = self._left_behind_worker_key(prefix_parts, name)
             except OSError:
                 # Unreadable now, as on a storage error, so it is read again after another grace period.
-                self._stateless_since[name] = now
+                since[name] = now
                 continue
             if worker_key is None:
-                self._stateless_since[name] = math.inf
+                since[name] = math.inf
                 continue
             worker_lock = self._worker_locks.for_key(worker_key)
             if not worker_lock.acquire(blocking=False):
@@ -717,7 +720,7 @@ class KubernetesWorkerBackend:
                 orphaned = self._resources.read_deployment(self._worker_id(worker_key)) is None
                 if orphaned and not retire_pinned_worker(self._retire_worker_locked, worker_key):
                     # A removal that keeps failing is tried again only after another grace period.
-                    self._stateless_since[name] = now
+                    since[name] = now
             finally:
                 worker_lock.release()
 

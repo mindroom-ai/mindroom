@@ -4594,6 +4594,33 @@ def test_kubernetes_maintenance_drops_the_marker_of_a_removal_that_finished(tmp_
     assert named_root.is_dir()
 
 
+def test_kubernetes_orphan_sweep_keeps_its_snapshot_during_an_overlapping_sweep(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newer Deployment snapshot may drop names the first sweep is still visiting."""
+    backend, apps, _core = _named_backend(tmp_path)
+    for pin in ("a", "b"):
+        backend.ensure_worker(_named_spec(pin), now=0.0)
+    backend._retire_orphaned_pinned_workers([], now=1.0)
+    visited: list[str] = []
+    read_identity = backend._left_behind_worker_key
+    now = 1.0 + kubernetes_backend_module._ORPHANED_STATE_GRACE_SECONDS
+
+    def interleave(prefix: tuple[str, ...], name: str) -> str | None:
+        visited.append(name)
+        if len(visited) == 1:
+            # A second caller lists both Deployments while the first still uses the stale inventory.
+            backend._retire_orphaned_pinned_workers(list(apps.deployments.values()), now=now)
+        return read_identity(prefix, name)
+
+    monkeypatch.setattr(backend, "_left_behind_worker_key", interleave)
+    backend._retire_orphaned_pinned_workers([], now=now)
+
+    assert len(visited) == 2
+    assert len(apps.deployments) == 2
+
+
 def test_kubernetes_maintenance_reads_an_unreadable_manifest_again(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
