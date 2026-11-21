@@ -303,6 +303,7 @@ class _Receiver:
                 "model_catalog_dropped",
                 reason="error",
                 error_type=type(exc).__name__,
+                **({"error_message": str(exc)} if isinstance(exc, nio.LocalProtocolError) else {}),
                 **_log_context(event, request, received),
             )
         else:

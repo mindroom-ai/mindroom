@@ -665,6 +665,18 @@ async def test_work_error_logs_once_without_detail_and_releases_capacity(
 
 
 @pytest.mark.asyncio
+async def test_nio_catalog_scope_refusal_logs_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The final refusal to read a raced roster explains why no catalog was sent."""
+    callback, client, _, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    client.joined_members.side_effect = nio.LocalProtocolError("room membership changed during lookup")
+    with capture_logs() as logs:
+        await callback(request())
+    sent.assert_not_awaited()
+    assert dropped(logs) == ["error"]
+    assert logs[0]["error_message"] == "room membership changed during lookup"
+
+
+@pytest.mark.asyncio
 async def test_cancelled_request_logs_once_and_releases_capacity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
