@@ -419,7 +419,8 @@ async def test_subsequent_granted_call_publishes_exact_terminal_receipt(
         assert "auto_approve_options" not in receipt.payload
         approvals = journal.principal("router@shared").approvals
         card = await approvals.approval_card(room_id="!room:test", card_event_id=receipt_event_id)
-        assert card is not None and card.approvable is False
+        assert card is not None
+        assert card.approvable is False
         assert await pending_card(approvals, room_id="!room:test", card_event_id=receipt_event_id) is None
         continuation = await journal.principal("agent@code").approvals.approval_continuation("subsequent")
         assert continuation is not None

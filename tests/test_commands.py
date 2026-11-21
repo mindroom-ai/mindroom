@@ -397,6 +397,7 @@ def test_slash_command_keeps_original_raw_text() -> None:
 )
 @pytest.mark.parametrize(("suffix", "args_text"), [("", ""), ("  some  args ", "some  args")])
 def test_parse_args_text_commands(command_type: CommandType, suffix: str, args_text: str) -> None:
+    """Commands with optional argument text preserve the type, arguments, and raw text."""
     text = f"!{command_type.value}{suffix}"
     command = _parse(text)
     assert command is not None
