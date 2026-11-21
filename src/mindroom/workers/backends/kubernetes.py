@@ -686,8 +686,8 @@ class KubernetesWorkerBackend:
         """Remove the files a worker left behind when its removal failed after its Deployment was deleted.
 
         Idle cleanup finds workers by their Deployments, so nothing else would retry that removal. A worker directory
-        without a Deployment is removed once it has stayed that way for the grace period and either a removal of it
-        began, or its startup manifest names a subagent's or a named worker's key; every other directory is kept.
+        without a Deployment is eligible after the grace period if retirement began or its startup manifest names
+        a subagent's or a named worker's key. Keep it while any dependent might still use it.
         """
         prefix_parts = tuple(part for part in self.config.storage_subpath_prefix.strip().split("/") if part)
         directories = self._worker_directories_and_prune_finished_markers(prefix_parts)
@@ -716,9 +716,9 @@ class KubernetesWorkerBackend:
             if not worker_lock.acquire(blocking=False):
                 continue
             try:
-                # A start since the snapshot owns the directory again.
-                orphaned = self._resources.read_deployment(self._worker_id(worker_key)) is None
-                if orphaned and not retire_pinned_worker(self._retire_worker_locked, worker_key):
+                if not self._resources.worker_is_orphaned(self._worker_id(worker_key)):
+                    continue
+                if not retire_pinned_worker(self._retire_worker_locked, worker_key):
                     # A removal that keeps failing is tried again only after another grace period.
                     since[name] = now
             finally:

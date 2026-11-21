@@ -350,11 +350,19 @@ class _FakeRawResponse:
 
 def _absence_inventory(items: dict[str, object], namespace: str, **kwargs: object) -> _FakeRawResponse:
     assert namespace == "chat"
-    assert kwargs["limit"] == 1
     assert kwargs["_preload_content"] is False
     assert 0.0 < kwargs["_request_timeout"] <= 5.0
-    assert kwargs["label_selector"] == "mindroom.ai/worker-id"
-    matches = [item for item in items.values() if "mindroom.ai/worker-id" in item.metadata.labels]
+    assert kwargs["limit"] == 1
+    label, exact, worker_id = str(kwargs["label_selector"]).partition("=")
+    assert label == "mindroom.ai/worker-id"
+    matches = [
+        item
+        for item in items.values()
+        if label in item.metadata.labels and (not exact or item.metadata.labels[label] == worker_id)
+    ]
+    if "field_selector" in kwargs:
+        assert kwargs["field_selector"] == "status.phase!=Failed,status.phase!=Succeeded"
+        matches = [item for item in matches if item.status.phase not in {"Failed", "Succeeded"}]
     return _FakeRawResponse(json.dumps({"items": [{}] if matches else []}).encode())
 
 
@@ -4500,6 +4508,51 @@ def test_kubernetes_maintenance_removes_the_files_a_failed_removal_left_behind(
     backend.maintain_workers(now=11.0 + grace)
 
     assert pinned_root.exists() is False
+
+
+@pytest.mark.parametrize("blocker", ["running", "terminating", "replica_set", "lookup_fails"])
+def test_kubernetes_orphan_sweep_waits_until_worker_dependents_are_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blocker: str,
+) -> None:
+    """Deleting a Deployment externally does not make the worker's state safe to remove."""
+    backend, apps_api, core_api = _named_backend(tmp_path)
+    worker_key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32)
+    worker = backend.ensure_worker(_spec(worker_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    worker_id = worker.worker_id
+    state = backend.storage_root / backend._state_subpath(worker_key)
+    labels = apps_api.deployments.pop(worker_id).metadata.labels
+    core_api.pods["terminal"] = _to_namespace({"metadata": {"labels": labels}, "status": {"phase": "Succeeded"}})
+    core_api.pods["other"] = _to_namespace(
+        {"metadata": {"labels": {**labels, "mindroom.ai/worker-id": "other"}}, "status": {"phase": "Running"}},
+    )
+
+    def denied(*_args: object, **_kwargs: object) -> None:
+        raise _FakeApiError(403)
+
+    now = 1.0 + kubernetes_backend_module._ORPHANED_STATE_GRACE_SECONDS
+    backend.maintain_workers(now=1.0)
+    with monkeypatch.context() as patch:
+        if blocker == "lookup_fails":
+            patch.setattr(core_api, "list_namespaced_pod", denied)
+        elif blocker == "replica_set":
+            patch.setitem(apps_api.replica_sets, "dependent", _to_namespace({"metadata": {"labels": labels}}))
+        else:
+            metadata = {"labels": labels}
+            if blocker == "terminating":
+                metadata["deletionTimestamp"] = "2026-01-01T00:00:00Z"
+            pod = _to_namespace({"metadata": metadata, "status": {"phase": "Running"}})
+            patch.setitem(core_api.pods, "dependent", pod)
+        backend.maintain_workers(now=now)
+        assert state.is_dir()
+        assert worker_id in core_api.services
+        assert worker_id in core_api.secrets
+
+    backend.maintain_workers(now=now + 1)
+    assert not state.exists()
+    assert worker_id not in core_api.services
+    assert worker_id not in core_api.secrets
 
 
 def _remove_only_the_manifest(state_root: Path) -> Callable[..., None]:

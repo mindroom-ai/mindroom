@@ -829,6 +829,35 @@ class KubernetesResourceManager:
                 raise
         self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
 
+    def worker_is_orphaned(self, worker_id: str) -> bool:
+        """Only confirm an orphan when its Deployment, ReplicaSets, and non-terminal Pods are absent."""
+        try:
+            if self.read_deployment(worker_id) is not None:
+                return False
+            for list_resources, filters in (
+                (self._apps.list_namespaced_replica_set, {}),
+                (self._core.list_namespaced_pod, {"field_selector": "status.phase!=Failed,status.phase!=Succeeded"}),
+            ):
+                response = list_resources(
+                    self.config.namespace,
+                    label_selector=f"{LABEL_WORKER_ID}={worker_id}",
+                    limit=1,
+                    _preload_content=False,
+                    _request_timeout=5.0,
+                    **filters,
+                )
+                try:
+                    payload = json.loads(response.data)
+                finally:
+                    response.release_conn()
+                metadata = payload.get("metadata", {})
+                if payload["items"] != [] or not isinstance(metadata, dict) or metadata.get("continue"):
+                    return False
+        except Exception:  # An API or inventory error is not evidence of absence.
+            logger.warning("kubernetes_worker_orphan_check_failed", worker_id=worker_id, exc_info=True)
+            return False
+        return True
+
     def check_workers_absent_for_storage_upgrade(self, *, timeout_seconds: float) -> None:
         """Require all worker controllers and Pods absent throughout this namespace."""
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
