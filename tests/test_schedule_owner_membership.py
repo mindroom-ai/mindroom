@@ -925,20 +925,11 @@ def test_owner_room_view_parses_only_matrix_state() -> None:
 @pytest.mark.parametrize(
     ("members", "reader", "candidates"),
     [
-        pytest.param(
-            {_ROUTER_ID: 100, _ALPHA: 0, _BETA: 0},
-            _ALPHA,
-            # The message mentions an agent that left, then one that is joined; every agent follows by Matrix ID.
-            [_ZETA, _BETA, _ALPHA, _BETA, _ZETA],
-            id="first-mentioned-joined",
-        ),
-        pytest.param(
-            {_ROUTER_ID: 100, _BETA: 0, _ZETA: 0},
-            _BETA,
-            [_ALPHA, _BETA, _ZETA],
-            id="lowest-joined",
-        ),
+        # The message mentions an agent that left, then one that is joined; every agent follows by Matrix ID.
+        ({_ROUTER_ID: 100, _ALPHA: 0, _BETA: 0}, _ALPHA, [_ZETA, _BETA, _ALPHA, _BETA, _ZETA]),
+        ({_ROUTER_ID: 100, _BETA: 0, _ZETA: 0}, _BETA, [_ALPHA, _BETA, _ZETA]),
     ],
+    ids=["first-mentioned-joined", "lowest-joined"],
 )
 def test_router_owned_task_goes_to_an_eligible_joined_agent(
     members: dict[str, int],
