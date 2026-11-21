@@ -119,6 +119,23 @@ def _policy_dispatch(
     )
 
 
+def _text_message(
+    event_id: str,
+    body: str,
+    *,
+    sender: str = "@user:localhost",
+    content: dict[str, object] | None = None,
+) -> MagicMock:
+    """Build a text event with the routing regressions' minimal content."""
+    event = MagicMock(spec=nio.RoomMessageText)
+    event.sender = sender
+    event.body = body
+    event.event_id = event_id
+    event.server_timestamp = 1000
+    event.source = {"content": {"body": body, **(content or {})}}
+    return event
+
+
 def setup_test_bot(
     agent: AgentMatrixUser,
     storage_path: Path,
@@ -1025,17 +1042,11 @@ class TestRoutingRegression:
         }
 
         # User mentions research agent specifically
-        message_event = MagicMock(spec=nio.RoomMessageText)
-        message_event.sender = "@user:localhost"
-        message_event.body = "@mindroom_research:localhost what can you do?"
-        message_event.event_id = "$user_msg_123"
-        message_event.server_timestamp = 1000
-        message_event.source = {
-            "content": {
-                "body": "@mindroom_research:localhost what can you do?",
-                "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
-            },
-        }
+        message_event = _text_message(
+            "$user_msg_123",
+            "@mindroom_research:localhost what can you do?",
+            content={"m.mentions": {"user_ids": ["@mindroom_research:localhost"]}},
+        )
 
         # Process with research bot - SHOULD respond
         await research_bot._on_message(mock_room, message_event)
@@ -1130,16 +1141,7 @@ class TestRoutingRegression:
         }
 
         # User message with NO mentions
-        message_event = MagicMock(spec=nio.RoomMessageText)
-        message_event.sender = "@user:localhost"
-        message_event.body = "What's the latest news?"
-        message_event.event_id = "$user_msg_456"
-        message_event.server_timestamp = 1000
-        message_event.source = {
-            "content": {
-                "body": "What's the latest news?",
-            },
-        }
+        message_event = _text_message("$user_msg_456", "What's the latest news?")
 
         # Process with router bot (should handle routing)
         await router_bot._on_message(mock_room, message_event)
@@ -1245,16 +1247,7 @@ class TestRoutingRegression:
             "@mindroom_news_oldns:localhost": MagicMock(),
         }
 
-        message_event = MagicMock(spec=nio.RoomMessageText)
-        message_event.sender = "@bob:localhost"
-        message_event.body = "What's new today?"
-        message_event.event_id = "$user_msg_789"
-        message_event.server_timestamp = 1000
-        message_event.source = {
-            "content": {
-                "body": "What's new today?",
-            },
-        }
+        message_event = _text_message("$user_msg_789", "What's new today?", sender="@bob:localhost")
 
         await execute_router_relay(
             router_bot._turn_dispatcher.deps,
@@ -1331,12 +1324,7 @@ class TestRoutingRegression:
             ids["alpha"].full_id: MagicMock(),
             ids["beta"].full_id: MagicMock(),
         }
-        message_event = MagicMock(spec=nio.RoomMessageText)
-        message_event.sender = ids["alpha"].full_id
-        message_event.body = "Please route this"
-        message_event.event_id = "$managed_requester_message"
-        message_event.server_timestamp = 1000
-        message_event.source = {"content": {"body": "Please route this"}}
+        message_event = _text_message("$managed_requester_message", "Please route this", sender=ids["alpha"].full_id)
 
         await execute_router_relay(
             router_bot._turn_dispatcher.deps,
@@ -1414,17 +1402,11 @@ class TestRoutingRegression:
             ids["alpha"].full_id: MagicMock(),
             ids["beta"].full_id: MagicMock(),
         }
-        message_event = MagicMock(spec=nio.RoomMessageText)
-        message_event.sender = "@user:localhost"
-        message_event.body = "Please route this"
-        message_event.event_id = "$router_failure_message"
-        message_event.server_timestamp = 1000
-        message_event.source = {
-            "content": {
-                "body": "Please route this",
-                ORIGINAL_SENDER_KEY: "@stale:localhost",
-            },
-        }
+        message_event = _text_message(
+            "$router_failure_message",
+            "Please route this",
+            content={ORIGINAL_SENDER_KEY: "@stale:localhost"},
+        )
 
         await execute_router_relay(
             router_bot._turn_dispatcher.deps,
@@ -1579,12 +1561,7 @@ class TestRoutingRegression:
             ids["ops"].full_id: MagicMock(),
             "@user:localhost": MagicMock(),
         }
-        message_event = MagicMock(spec=nio.RoomMessageText)
-        message_event.sender = "@user:localhost"
-        message_event.body = "Who can help?"
-        message_event.event_id = "$user_msg_live_filter"
-        message_event.server_timestamp = 1000
-        message_event.source = {"content": {"body": "Who can help?"}}
+        message_event = _text_message("$user_msg_live_filter", "Who can help?")
 
         await execute_router_relay(
             router_bot._turn_dispatcher.deps,
@@ -1821,16 +1798,7 @@ class TestRoutingRegression:
             "@mindroom_facts:localhost": MagicMock(),
         }
 
-        message_event = MagicMock(spec=nio.RoomMessageText)
-        message_event.sender = "@bob:localhost"
-        message_event.body = "What's new today?"
-        message_event.event_id = "$user_msg_789_multi"
-        message_event.server_timestamp = 1000
-        message_event.source = {
-            "content": {
-                "body": "What's new today?",
-            },
-        }
+        message_event = _text_message("$user_msg_789_multi", "What's new today?", sender="@bob:localhost")
 
         await router_bot._on_message(mock_room, message_event)
         await drain_coalescing(router_bot)
@@ -1985,16 +1953,7 @@ class TestRoutingRegression:
             mock_news_agent.user_id: MagicMock(),
         }
 
-        message_event = MagicMock(spec=nio.RoomMessageText)
-        message_event.sender = "@bob:localhost"
-        message_event.body = "What's new today?"
-        message_event.event_id = "$user_msg_791"
-        message_event.server_timestamp = 1000
-        message_event.source = {
-            "content": {
-                "body": "What's new today?",
-            },
-        }
+        message_event = _text_message("$user_msg_791", "What's new today?", sender="@bob:localhost")
 
         await router_bot._on_message(mock_room, message_event)
         await drain_coalescing(router_bot)
@@ -2065,17 +2024,12 @@ class TestRoutingRegression:
             "@mindroom_facts:localhost": MagicMock(),
         }
 
-        message_event = MagicMock(spec=nio.RoomMessageText)
-        message_event.sender = "@alice:localhost"
-        message_event.body = "Can someone continue this thread?"
-        message_event.event_id = "$user_msg_790"
-        message_event.server_timestamp = 1000
-        message_event.source = {
-            "content": {
-                "body": "Can someone continue this thread?",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        }
+        message_event = _text_message(
+            "$user_msg_790",
+            "Can someone continue this thread?",
+            sender="@alice:localhost",
+            content={"m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"}},
+        )
         await seed_thread_history(
             router_bot,
             room_id=test_room_id,
@@ -2183,17 +2137,12 @@ class TestRoutingRegression:
         }
 
         # User mentions BOTH agents
-        message_event = MagicMock(spec=nio.RoomMessageText)
-        message_event.sender = f"@user:{domain}"
-        message_event.body = f"@mindroom_research:{domain} and @mindroom_news:{domain}, what do you think?"
-        message_event.event_id = "$user_msg_789"
-        message_event.server_timestamp = 1000
-        message_event.source = {
-            "content": {
-                "body": f"@mindroom_research:{domain} and @mindroom_news:{domain}, what do you think?",
-                "m.mentions": {"user_ids": [f"@mindroom_research:{domain}", f"@mindroom_news:{domain}"]},
-            },
-        }
+        message_event = _text_message(
+            "$user_msg_789",
+            f"@mindroom_research:{domain} and @mindroom_news:{domain}, what do you think?",
+            sender=f"@user:{domain}",
+            content={"m.mentions": {"user_ids": [f"@mindroom_research:{domain}", f"@mindroom_news:{domain}"]}},
+        )
 
         # Process with both bots
         await research_bot._on_message(mock_room, message_event)
@@ -2259,17 +2208,12 @@ class TestRoutingRegression:
 
         # Simulate router message from router agent mentioning research
         # The router sends its messages
-        router_message = MagicMock(spec=nio.RoomMessageText)
-        router_message.sender = "@mindroom_router:localhost"
-        router_message.body = "@research could you help with this?"
-        router_message.event_id = "$router_msg"
-        router_message.server_timestamp = 1000
-        router_message.source = {
-            "content": {
-                "body": "@research could you help with this?",
-                "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
-            },
-        }
+        router_message = _text_message(
+            "$router_msg",
+            "@research could you help with this?",
+            sender="@mindroom_router:localhost",
+            content={"m.mentions": {"user_ids": ["@mindroom_research:localhost"]}},
+        )
 
         # Process router message with research bot
         await research_bot._on_message(mock_room, router_message)
