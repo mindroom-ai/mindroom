@@ -113,15 +113,9 @@ def _delivery_exception_site(error: Exception) -> str | None:
         return None
     while frame.tb_next is not None:
         frame = frame.tb_next
-    code = frame.tb_frame.f_code
-    path = Path(code.co_filename)
-    for root in ("site-packages", "src"):
-        if root in path.parts[:-1]:
-            module_path = "/".join(path.parts[path.parts.index(root) + 1 :])
-            break
-    else:
-        module_path = path.name
-    return f"{module_path}:{frame.tb_lineno} {code.co_name}"
+    innermost = frame.tb_frame
+    module = innermost.f_globals.get("__name__", "<unknown>")
+    return f"{module}:{frame.tb_lineno} {innermost.f_code.co_name}"
 
 
 def _log_matrix_delivery_exception(

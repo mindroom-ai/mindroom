@@ -60,7 +60,7 @@ async def test_delivery_exception_logs_only_the_safe_innermost_site() -> None:
 
     assert outcome == MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "local delivery exception")
     (failure,) = [entry for entry in logs if entry["event"] == "matrix_message_delivery_exception"]
-    assert re.fullmatch(r"nio/client/base_client\.py:\d+ _assert_logged_in", failure["exception_site"])
+    assert re.fullmatch(r"nio\.client\.base_client:\d+ _assert_logged_in", failure["exception_site"])
     assert "Not logged in." not in str(failure)
 
 
