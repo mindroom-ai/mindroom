@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 
+from mindroom.providers.claude_code.settings import ClaudeCodeEffort
 from mindroom.providers.names import provider_route
 
 if TYPE_CHECKING:
@@ -42,20 +43,23 @@ def _claude_settings(level: str, extra_kwargs: dict[str, Any]) -> dict[str, Any]
     return {**settings, "output_config": {**output_config, "effort": level}}
 
 
+def _claude_code_settings(level: str, extra_kwargs: dict[str, Any]) -> dict[str, Any]:
+    if level not in get_args(ClaudeCodeEffort):
+        msg = f"provider claude_code has no {level} level"
+        raise ValueError(msg)
+    return {**extra_kwargs, "effort": level}
+
+
 def _level_settings(route: str, level: str, extra_kwargs: dict[str, Any]) -> dict[str, Any]:
     """Return ``extra_kwargs`` with ``level`` in the keys ``route`` reads; only ``off`` is translated."""
     off = level == "off"
-    if route in _EFFORT_ROUTES:
-        return {**extra_kwargs, "reasoning_effort": "none" if off else level}
-    if route in {"zai", "claude_code"}:
+    if route in _EFFORT_ROUTES or route == "zai":
         if route == "zai" and off:
             msg = "provider zai has no off level; set extra_kwargs.extra_body.thinking yourself"
             raise ValueError(msg)
-        if route == "claude_code" and level in {"off", "minimal"}:
-            msg = f"provider claude_code has no {level} level"
-            raise ValueError(msg)
-        key = "effort" if route == "claude_code" else "reasoning_effort"
-        return {**extra_kwargs, key: level}
+        return {**extra_kwargs, "reasoning_effort": "none" if off else level}
+    if route == "claude_code":
+        return _claude_code_settings(level, extra_kwargs)
     if route == "deepseek":
         settings = _without(extra_kwargs, "reasoning_effort")
         return (

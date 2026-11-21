@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import Literal, get_args
 
 from mindroom.providers.extra_kwargs import SECRET
 
-__all__ = ["ClaudeCodeSettings"]
+__all__ = ["ClaudeCodeEffort", "ClaudeCodeSettings"]
 
-if TYPE_CHECKING:
-    from claude_agent_sdk.types import EffortLevel
+ClaudeCodeEffort = Literal["low", "medium", "high", "xhigh", "max"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -24,4 +23,11 @@ class ClaudeCodeSettings:
     # Ignored; see _KEYLESS_ROUTES.
     api_key: str | None = field(default=None, metadata=SECRET)
     cli_path: str | None = None
-    effort: EffortLevel | None = None
+    effort: ClaudeCodeEffort | None = None
+
+    def __post_init__(self) -> None:
+        """Reject an effort Claude Code does not accept."""
+        efforts = get_args(ClaudeCodeEffort)
+        if self.effort is not None and self.effort not in efforts:
+            msg = f"effort must be one of {', '.join(efforts)}"
+            raise ValueError(msg)

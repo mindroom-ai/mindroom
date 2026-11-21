@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, ClassVar, get_args
-
-from claude_agent_sdk.types import EffortLevel
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from mindroom.llm.messages import stable_serialize
-from mindroom.llm.provider import Capabilities, ModelIdentity, TurnCompleted
+from mindroom.llm.provider import ModelIdentity, TurnCompleted
 from mindroom.llm.request_identity import request_prefixes
 from mindroom.providers.assistant_turn import TurnTimer
 from mindroom.providers.claude_code.prompt import plan_continuation, rebuild_input
@@ -25,7 +23,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelRequest, StreamEvent, TokenCounter
+    from mindroom.llm.provider import Capabilities, ModelRequest, StreamEvent, TokenCounter
     from mindroom.providers.claude_code.session import LiveSession
     from mindroom.providers.claude_code.settings import ClaudeCodeSettings
     from mindroom.token_counting.requests import RequestParts
@@ -42,24 +40,13 @@ class ClaudeCodeProvider:
     """
 
     identity: ModelIdentity
-    capabilities: ClassVar[Capabilities] = Capabilities(
-        structured_output="json_mode",
-        omitted_media=frozenset({"audio", "video", "file"}),
-        provider_default_sampling=True,
-    )
+    capabilities: Capabilities
     settings: ClaudeCodeSettings
     storage_root: Path
     cli_path: str | None
     scope: str | None
     # Claude Code keeps no history MindRoom relies on.
     native_history_route: ClassVar[None] = None
-
-    def __post_init__(self) -> None:
-        """Reject an effort Claude Code does not accept."""
-        efforts = get_args(EffortLevel)
-        if self.settings.effort is not None and self.settings.effort not in efforts:
-            msg = f"effort must be one of {', '.join(efforts)}"
-            raise ValueError(msg)
 
     @property
     def model_params(self) -> dict[str, Any]:
@@ -77,6 +64,7 @@ class ClaudeCodeProvider:
         parts.flag([self.settings.effort, request.tool_choice, request.overrides.omit_thinking_setting])
 
     def _token_parts(self, request: ModelRequest, start: int, parts: RequestParts) -> None:
+        """Count the rendered prompt text and the schemas of tools the route offers."""
         messages = request.messages[start:]
         if messages or not start:
             system, blocks = rebuild_input(messages, self.identity.provider)

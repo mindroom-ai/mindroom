@@ -46,6 +46,24 @@ def test_doctor_passes_a_signed_in_claude_code_without_sending_it_a_prompt(
     assert left_behind(cli) == []
 
 
+def test_doctor_uses_reasoning_instead_of_authored_effort(tmp_path: Path) -> None:
+    cli = fake_cli(tmp_path, {})
+    model = {
+        "provider": "claude_code",
+        "id": "claude-invented-1",
+        "reasoning": {"levels": ["low", "high"], "default": "low"},
+        "extra_kwargs": {"cli_path": str(cli.path), "effort": "high"},
+    }
+    config = Config.model_validate({"models": {"default": model}})
+
+    assert _check_single_provider("claude_code", config, cli.runtime_paths) == (1, 0, 0)
+
+    [spawn] = cli.events("spawn")
+    args = spawn["args"]
+    assert args[args.index("--effort") + 1] == "low"
+    assert not cli.events("user")
+
+
 def test_doctor_fails_a_claude_code_that_is_not_signed_in(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     cli = fake_cli(tmp_path, {"account": {"tokenSource": "none", "apiProvider": "firstParty"}})
 

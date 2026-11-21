@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 from typing import TYPE_CHECKING
 
+from mindroom.llm.provider import Capabilities
 from mindroom.providers.claude_code.settings import ClaudeCodeSettings
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.identity import model_identity
@@ -16,6 +17,9 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.providers.claude_code.adapter import ClaudeCodeProvider
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+__all__ = ["build_provider"]
 
 
 def build_provider(
@@ -34,6 +38,11 @@ def build_provider(
     settings = settings_from_extra_kwargs(ClaudeCodeSettings, model_config.extra_kwargs, provider=model_config.provider)
     return ClaudeCodeProvider(
         identity=model_identity(model_config),
+        capabilities=Capabilities(
+            structured_output="json_mode",
+            omitted_media=frozenset({"audio", "video", "file"}),
+            provider_default_sampling=True,
+        ),
         settings=settings,
         storage_root=storage_root,
         # Prefer the CLI the user keeps updated to the copy bundled with the SDK.

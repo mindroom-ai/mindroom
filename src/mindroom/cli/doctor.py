@@ -45,6 +45,7 @@ from mindroom.providers.credentials import model_uses_own_credential, unset_api_
 from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS
 from mindroom.providers.names import provider_route
 from mindroom.providers.ollama.settings import ollama_client_options
+from mindroom.providers.reasoning import apply_reasoning_level
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
 
@@ -621,7 +622,12 @@ def _check_claude_code(config: Config, runtime_paths: RuntimePaths) -> tuple[int
         if provider_route(model_config.provider) != "claude_code":
             continue
         try:
-            provider = build_provider(model_config, runtime_paths, execution_identity=None, auto_install=False)
+            provider = build_provider(
+                apply_reasoning_level(model_config),
+                runtime_paths,
+                execution_identity=None,
+                auto_install=False,
+            )
             if provider.cli_path in checked:
                 continue
             checked.add(provider.cli_path)
