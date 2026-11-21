@@ -17,6 +17,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.room_agent_access import room_execution_identity
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tailnet_ssh import links
@@ -753,6 +754,35 @@ async def test_disabled_shell_routes_cannot_list_or_mask_a_working_shell(
     monkeypatch.setattr(links, "_start_sshd", start_sshd)
     assert rows == [{"id": link.id, "hostname": link.hostname, "allowed_logins": ["alice@github"]}]
     assert await _connect(config, paths, link.id) == ("10.0.0.5", 2222)
+
+
+@pytest.mark.parametrize("field", ["enable_run_shell_command", "include_tools"])
+@pytest.mark.asyncio
+async def test_malformed_stored_shell_settings_only_refuse_their_own_route(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    """A broken agent's settings cannot prevent another worker's link from listing or connecting."""
+    broken = _link(paths, "mine")
+    healthy = _link(paths, "mind")
+    manager = _wire_connect(monkeypatch, tmp_path, healthy)
+    credentials = get_runtime_credentials_manager(paths).for_primary_runtime_scope(ALICE, "mine")
+    stored_value = {"invalid": "private-setting-value"}
+    credentials.save_credentials("shell", {field: stored_value})
+
+    with capture_logs() as logs:
+        rows = desired_links(config, paths, AgentReplyMembershipIndex())
+    assert rows == [{"id": healthy.id, "hostname": healthy.hostname, "allowed_logins": ["alice@github"]}]
+    assert any(log.get("agent") == "mine" and log.get("worker_key") == broken.worker_key for log in logs)
+    assert "private-setting-value" not in str(logs)
+    with pytest.raises(ConnectRefused, match="not authorized"):
+        await _connect(config, paths, broken.id)
+    assert manager.specs == []
+    assert await _connect(config, paths, healthy.id) == ("10.0.0.5", 2222)
+    assert [spec.worker_key for spec in manager.specs] == [healthy.worker_key]
 
 
 @pytest.mark.parametrize("backend", ["static_runner", "local", "docker_with_local_shell"])
