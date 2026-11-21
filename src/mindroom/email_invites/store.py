@@ -11,7 +11,7 @@ from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Collection, Iterator
 
     from mindroom.constants import RuntimePaths
 
@@ -228,20 +228,22 @@ def abandon_sending(
     paths: RuntimePaths,
     *,
     invite_id: int | None = None,
-    agent_name: str,
+    agent_name: str | None = None,
     configured: tuple[str, ...] = (),
+    rooms: Collection[str] = (),
 ) -> list[EmailInvite]:
     """Revoke one request of an entity, or at its start all, left sending with an unknown outcome; return those.
 
-    With ``configured``, also revoke those of every entity not in it.
+    Without ``agent_name``, revoke those in ``rooms`` of every entity not in ``configured``.
     """
-    others = f" OR agent_name NOT IN ({','.join('?' * len(configured))})" if configured else ""
-    where = f"sending_at IS NOT NULL AND invited_at IS NULL AND revoked = 0 AND (agent_name = ?{others})" + (
+    issuers = (agent_name,) if agent_name else configured
+    issuer = f"agent_name {'' if agent_name else 'NOT '}IN ({','.join('?' * len(issuers))})"
+    where = f"sending_at IS NOT NULL AND invited_at IS NULL AND revoked = 0 AND {issuer}" + (
         "" if invite_id is None else " AND id = ?"
     )
-    params = (agent_name, *configured, *(() if invite_id is None else (invite_id,)))
+    params = (*issuers, *(() if invite_id is None else (invite_id,)))
     with _write(paths, _now(None)) as connection:
-        rows = _select(connection, where, params)
+        rows = [row for row in _select(connection, where, params) if agent_name or row.room_id in rooms]
         connection.executemany("UPDATE email_invites SET revoked = 1 WHERE id = ?", [(row.id,) for row in rows])
     return rows
 

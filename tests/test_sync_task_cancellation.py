@@ -35,6 +35,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.email_invites import store as email_invite_store
 from mindroom.event_journal.matrix_delivery import RecoveryOutcome
 from mindroom.hooks import HookRegistry, HookRegistryState
 from mindroom.integrations import bind_integrations
@@ -1790,6 +1791,32 @@ async def test_delivery_recovery_asks_the_outbox_on_every_sync_response(
         assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     assert recover.await_count == len(outcomes)
+
+
+@pytest.mark.asyncio
+async def test_a_bots_first_sync_revokes_the_email_invite_a_removed_entity_left_sending_in_its_room(
+    tmp_path: Path,
+) -> None:
+    """Once its first sync lists its rooms, a bot revokes a removed entity's link there and posts the one notice."""
+    bot = _durable_response_bot(tmp_path)
+    request = email_invite_store.Request("!room:localhost", None, "bob@example.com", "@bas:localhost", "retired")
+    invite, _code = email_invite_store.issue_code(bot.runtime_paths, request, expiry_days=7)
+    assert email_invite_store.bind_claim(bot.runtime_paths, invite.id, "@alice:localhost")
+    assert email_invite_store.start_sending(bot.runtime_paths, invite.id, "@alice:localhost")
+    bot.client.rooms = {"!room:localhost": MagicMock(encrypted=False)}
+    notice = AsyncMock()
+
+    with (
+        patch.object(bot, "_delivery_gateway", new=SimpleNamespace(recover_deliveries=AsyncMock())),
+        patch("mindroom.email_invites.receiver.send_message_result", new=notice),
+    ):
+        for first in (True, False):
+            await bot._run_sync_response_side_effects(receipt_new=True, first_sync_response=first)
+            assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+
+    assert email_invite_store.abandon_sending(bot.runtime_paths, agent_name="retired") == []
+    notice.assert_awaited_once()
+    assert notice.await_args.args[:2] == (bot.client, "!room:localhost")
 
 
 @pytest.mark.asyncio

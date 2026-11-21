@@ -160,12 +160,7 @@ async def register_email_invite_receiver(
 ) -> None:
     """Register this account's claim receiver, revoking its links a crash left sending, before any claim."""
     receiver = _Receiver(client, agent_name, runtime_paths, config_getter)
-    configured: tuple[str, ...] = ()
-    if agent_name == ROUTER_AGENT_NAME:
-        # No receiver starts for a removed or renamed entity, so the owner account revokes its links too.
-        config = config_getter()
-        configured = (ROUTER_AGENT_NAME, *config.agents, *config.teams)
-    if abandoned := store.abandon_sending(runtime_paths, agent_name=agent_name, configured=configured):
+    if abandoned := store.abandon_sending(runtime_paths, agent_name=agent_name):
         await callback_wrapper(receiver.abandoned)(abandoned)
     wrapped = callback_wrapper(receiver.on_event)
 
@@ -174,3 +169,14 @@ async def register_email_invite_receiver(
             await wrapped(event, *claim)
 
     client.add_to_device_callback(on_event, nio.UnknownToDeviceEvent)
+
+
+async def revoke_orphaned_sends(client: nio.AsyncClient, runtime_paths: RuntimePaths, config: Config) -> None:
+    """Revoke, with its one notice, each link a crash left sending for an entity that is no longer configured.
+
+    No receiver starts for a removed or renamed entity, so an account revokes its links in the rooms that account's
+    first sync lists, where it can post the notice. A configured entity's links are left to its own receiver.
+    """
+    configured = (ROUTER_AGENT_NAME, *config.agents, *config.teams)
+    orphans = store.abandon_sending(runtime_paths, configured=configured, rooms=client.rooms)
+    await _Receiver(client, "", runtime_paths, lambda: config).abandoned(orphans)

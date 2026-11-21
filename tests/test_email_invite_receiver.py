@@ -16,7 +16,12 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.email_invites import receiver as receiver_module
 from mindroom.email_invites import store
-from mindroom.email_invites.receiver import _CLAIM_EVENT_TYPE, _RESULT_EVENT_TYPE, register_email_invite_receiver
+from mindroom.email_invites.receiver import (
+    _CLAIM_EVENT_TYPE,
+    _RESULT_EVENT_TYPE,
+    register_email_invite_receiver,
+    revoke_orphaned_sends,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix import client_delivery
 from mindroom.matrix.client_delivery import send_message_result
@@ -109,6 +114,11 @@ class Harness:
             config_getter=lambda: self.config,
             callback_wrapper=lambda callback: callback,
         )
+
+    async def first_sync(self, *room_ids: str) -> None:
+        """Run what the account does once its first sync says which rooms it is joined to."""
+        self.client.rooms = dict.fromkeys(room_ids, MagicMock(encrypted=False))
+        await revoke_orphaned_sends(self.client, self.paths, self.config)
 
     def sent_invite(self) -> tuple[store.EmailInvite, str]:
         """Store one sent invite and return it with its code."""
@@ -456,24 +466,52 @@ async def test_crash_while_sending_revokes_the_link_at_restart(harness: Harness)
     assert len(harness.notices) == 1
 
 
-@pytest.mark.asyncio
-async def test_owner_account_revokes_links_a_crash_left_sending_for_an_entity_no_longer_configured(
-    harness: Harness,
-) -> None:
-    """No receiver starts for a removed or renamed entity, so the owner account revokes its links with one notice.
-
-    A configured agent's send is left to that agent's own receiver.
-    """
+def _left_sending_by_a_removed_entity(harness: Harness) -> store.EmailInvite:
+    """Return a link a crash left sending whose entity, `retired`, is no longer configured: no receiver starts for it."""
     request = store.Request(ROOM, "$thread", "bob@example.com", BAS, "retired")
     retired, _ = store.issue_code(harness.paths, request, expiry_days=7)
+    assert store.bind_claim(harness.paths, retired.id, ALICE)
+    assert store.start_sending(harness.paths, retired.id, ALICE)
+    return retired
+
+
+@pytest.mark.asyncio
+async def test_a_joined_agent_revokes_a_removed_entitys_send_where_no_owner_account_runs(harness: Harness) -> None:
+    """An agent joined to the room revokes a removed entity's link there, once, with one notice and no invite.
+
+    A configured agent's send, this agent's own in flight too, is left to that agent's receiver.
+    """
+    retired = _left_sending_by_a_removed_entity(harness)
+    await harness.start()
     current, _ = harness.sent_invite()
-    for invite in (retired, current):
-        assert store.bind_claim(harness.paths, invite.id, ALICE)
-        assert store.start_sending(harness.paths, invite.id, ALICE)
-    await harness.start(ROUTER_AGENT_NAME)
+    assert store.bind_claim(harness.paths, current.id, ALICE)
+    assert store.start_sending(harness.paths, current.id, ALICE)
+
+    await harness.first_sync(ROOM)
+    await harness.first_sync(ROOM)
+
     assert (harness.row(retired.id).revoked, harness.row(current.id).revoked) == (True, False)
     (notice,) = harness.notices
     assert "bob@example.com may or may not have gone out" in notice["body"]
+    harness.client.room_invite.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_account_outside_the_room_leaves_a_removed_entitys_send_to_one_that_is_in_it(
+    harness: Harness,
+) -> None:
+    """The owner account, running for another room, cannot post the notice: the link waits for a joined agent."""
+    retired = _left_sending_by_a_removed_entity(harness)
+
+    await harness.start(ROUTER_AGENT_NAME)
+    await harness.first_sync("!elsewhere:example.org")
+
+    assert harness.row(retired.id).revoked is False
+    assert harness.notices == []
+    await harness.start()
+    await harness.first_sync(ROOM)
+    assert harness.row(retired.id).revoked is True
+    assert len(harness.notices) == 1
 
 
 @pytest.mark.asyncio

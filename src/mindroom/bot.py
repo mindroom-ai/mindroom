@@ -18,7 +18,7 @@ from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState, RunPhase
 from mindroom.config.resolution import entity_timezone
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
-from mindroom.email_invites.receiver import register_email_invite_receiver
+from mindroom.email_invites.receiver import register_email_invite_receiver, revoke_orphaned_sends
 from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.legacy_turn_rows import legacy_responses_file_path
 from mindroom.hooks import (
@@ -1378,6 +1378,12 @@ class AgentBot:
                 name=f"bot_ready_hooks_{self.agent_name}",
                 owner=self._runtime_view,
             )
+            if self.client is not None:
+                create_background_task(
+                    revoke_orphaned_sends(self.client, self.runtime_paths, self.config),
+                    name=f"email_invite_orphans_{self.agent_name}",
+                    owner=self._runtime_view,
+                )
         self._personal_room_lifecycle.schedule_reconciliation()
 
         if self._first_sync_done and not self._orchestrator_ready_handled:
