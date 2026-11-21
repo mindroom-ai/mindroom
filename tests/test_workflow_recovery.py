@@ -18,6 +18,7 @@ import pytest
 import pytest_asyncio
 
 from mindroom import authorization
+from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools import workflow as workflow_tool_module
 from mindroom.orchestration import tool_job_runtime as coordinator_module
 from mindroom.orchestration.script_runtime import _LiveScriptRuntimeResolver
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.script_runs.models import ScriptCallRecord, ScriptRunRecord
     from mindroom.tool_jobs.runtime import BackgroundJob
     from mindroom.workflow_runs.models import WorkflowRun
@@ -1108,6 +1110,60 @@ async def test_run_that_waits_for_an_attempt_when_its_job_is_stopped_is_ended_to
     )
 
 
+def _script_runtime(stack: WorkflowStack, config: Config | None = None) -> SimpleNamespace:
+    """Return what the workflow lifecycle uses of the script runtime: the real resolver over a bot of the stack's owner.
+
+    *config* is the live configuration, the stack's own when not given; the agents it names have a running bot.
+    """
+    config = config or stack.context.config
+    bot = SimpleNamespace(
+        running=True,
+        config=config,
+        orchestrator=SimpleNamespace(agent_reply_memberships=object()),
+        tool_runtime_support=SimpleNamespace(build_context=lambda _target, **_owner: stack.context),
+    )
+    paths = stack.context.runtime_paths
+    resolver = _LiveScriptRuntimeResolver(
+        runtime_paths=paths,
+        bot_provider=lambda name: bot if name in config.agents else None,  # type: ignore[arg-type, return-value]
+        worker_backend_provider=lambda _run: None,
+    )
+    return SimpleNamespace(
+        resolver=resolver,
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        pass_timeout_seconds=30.0,
+        retention_seconds=3600.0,
+        after_reconcile=None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agents", [{"watcher": ["counter", "shell"]}, {"other": ["workflow"]}], ids=["tool", "agent"])
+async def test_run_with_no_job_ends_when_its_agent_or_the_workflow_toolkit_was_removed_while_it_was_stopped(
+    stack: WorkflowStack,
+    agents: dict[str, list[str]],
+) -> None:
+    """The run's agent must still be offered `workflow`: what a restart finds removed ends the run, and it does not wait."""
+    removed = stack.context.config.model_copy(
+        update={"agents": {name: AgentConfig(display_name=name, tools=tools) for name, tools in agents.items()}},
+    )
+    script_runtime = _script_runtime(stack, removed)
+    await WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime).start()  # type: ignore[arg-type]
+    await stack.start(SCRIPT)
+    await _interrupt(stack, RUNTIME_RESTARTED)
+
+    await script_runtime.after_reconcile()
+
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.attempt, run.error) == (
+        WorkflowRunState.INTERRUPTED,
+        1,
+        "The requester no longer has access.",
+    )
+    assert len(stack.scripts.launched) == 1
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize("answer", ["ALLOWED", "DENIED"])
@@ -1120,25 +1176,7 @@ async def test_lifecycle_waits_for_room_membership_before_it_judges_the_owners_a
     decisions = authorization._ReplyAuthorizationDecision
     decision = [decisions.PENDING]
     monkeypatch.setattr(authorization, "_responder_reply_authorization", lambda *_args, **_options: decision[0])
-    bot = SimpleNamespace(
-        running=True,
-        config=stack.context.config,
-        orchestrator=SimpleNamespace(agent_reply_memberships=object()),
-        tool_runtime_support=SimpleNamespace(build_context=lambda _target, **_owner: stack.context),
-    )
-    paths = stack.context.runtime_paths
-    resolver = _LiveScriptRuntimeResolver(
-        runtime_paths=paths,
-        bot_provider=lambda _name: bot,  # type: ignore[arg-type, return-value]
-        worker_backend_provider=lambda _run: None,
-    )
-    script_runtime = SimpleNamespace(
-        resolver=resolver,
-        runtime_paths=paths,
-        pass_timeout_seconds=30.0,
-        retention_seconds=3600.0,
-        after_reconcile=None,
-    )
+    script_runtime = _script_runtime(stack)
     lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
     await lifecycle.start()
     await stack.start(SCRIPT)

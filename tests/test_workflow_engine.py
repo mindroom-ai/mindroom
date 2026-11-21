@@ -65,6 +65,7 @@ def _script_runtime(stack: WorkflowStack, pass_timeout_seconds: float = 30.0) ->
         pass_timeout_seconds=pass_timeout_seconds,
         runtime_paths=stack.context.runtime_paths,
         resolver=stack.resolver,
+        config_provider=lambda: stack.context.config,
     )
 
 

@@ -59,9 +59,16 @@ class WorkflowRuntimeLifecycle:
 
         The run saves its owner as its attempts do, so the script runtime's resolver answers for it, also before a
         first attempt: access that cannot be checked yet, while the owner's bot is not running or room membership
-        is still loading, is pending, and access that is gone is revoked.
+        is still loading, is pending, and access that is gone is revoked. An agent that the live configuration no
+        longer has, or no longer gives the `workflow` toolkit, is revoked whatever its bot does.
         """
         resolver, owner = self.script_runtime.resolver, cast("ScriptRunRecord", run)
+        config = self.script_runtime.config_provider()
+        if config is not None and (
+            run.agent_name not in config.agents
+            or "workflow" not in config.resolve_agent(run.agent_name).tools.tool_names
+        ):
+            return "revoked"
         try:
             authorized = resolver.is_authorized(owner, require_resolved_membership=True)
             if authorized is None:
