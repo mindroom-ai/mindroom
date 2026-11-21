@@ -2562,7 +2562,9 @@ async def test_schedule_persists_model_and_history_limit_and_edits_model(
 
     assert f"**Model:** {model_override}" in message
     assert f"Model: {model_override}" in listed
-    assert build_edited_scheduled_workflow(tasks[0].workflow, "!test:server", message="new task").model == model_override
+    assert (
+        build_edited_scheduled_workflow(tasks[0].workflow, "!test:server", message="new task").model == model_override
+    )
 
     with (
         patch(
