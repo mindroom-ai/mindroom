@@ -136,8 +136,12 @@ async def test_task_written_by_managed_bot_account_fires(tmp_path: Path, entity_
 
 
 @pytest.mark.asyncio
-async def test_creatorless_task_written_by_human_is_ignored_without_cancellation(tmp_path: Path) -> None:
+async def test_creatorless_task_written_by_human_is_ignored_without_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Human-written creatorless state is skipped on restore and in a running poll, never canceled."""
+    monkeypatch.setattr(scheduling, "_logged_unmanaged_authors", set())
     runtime_paths = schedule_runtime_paths(tmp_path)
     workflow = _workflow(created_by=None)
     client = _room_with_task(_pending_content(workflow), sender=HUMAN_ID)
