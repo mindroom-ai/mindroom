@@ -3630,7 +3630,7 @@ class TestRunErrorHandling:
         )
         provider_guidance = (
             "mindroom config init --provider "
-            "{anthropic,azure,bedrock_claude,codex,kimi,llama.cpp,ollama,openai,openrouter,vertexai_claude}"
+            "{anthropic,azure,bedrock_claude,claude_code,codex,kimi,llama.cpp,ollama,openai,openrouter,vertexai_claude}"
         )
         assert provider_guidance in result.output
         assert "mindroom run --provider" in result.output

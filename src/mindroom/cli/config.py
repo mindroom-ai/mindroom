@@ -1519,7 +1519,7 @@ def _preset_api_key_env(provider_preset: _ProviderPreset) -> str | None:
     return constants.env_key_for_provider(CONFIG_INIT_MODEL_PRESETS[provider_preset].provider)
 
 
-def _provider_env_template(  # noqa: PLR0911
+def _provider_env_template(  # noqa: C901, PLR0911
     provider_preset: _ProviderPreset,
     provider_api_key: str | None,
 ) -> str:

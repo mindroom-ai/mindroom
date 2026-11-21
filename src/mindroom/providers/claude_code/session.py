@@ -45,14 +45,14 @@ __all__ = ["NOT_SIGNED_IN", "SESSIONS", "LiveSession", "start", "startup_error"]
 logger = get_logger(__name__)
 
 # Older binaries ignore verbatim prompts, so a user's ``@path`` or ``/command`` would be read as a Claude Code command.
-MIN_VERSION = (2, 1, 248)
+_MIN_VERSION = (2, 1, 248)
 # The request metadata Claude Code sends with an MCP tool call: the id of the ``tool_use`` block that made the call.
 _TOOL_USE_ID_META = "claudecode/toolUseId"
 _SERVER_NAME = "mindroom"
 _CWD, _SYSTEM_FILE = "cwd", "system.txt"
-PARKED_TTL_SECONDS = 30 * 60.0
-IDLE_TTL_SECONDS = 5 * 60.0
-MAX_PROCESSES = 16
+_PARKED_TTL_SECONDS = 30 * 60.0
+_IDLE_TTL_SECONDS = 5 * 60.0
+_MAX_PROCESSES = 16
 _SWEEP_INTERVAL_SECONDS = 60.0
 # A tool result that holds images comes back from Claude Code as one message.
 _MAX_MESSAGE_BYTES = 32 * 1024 * 1024
@@ -76,7 +76,7 @@ _NOT_FOUND = (
 
 
 @dataclass(eq=False)
-class ToolBridge:
+class _ToolBridge:
     """The tool calls of one Claude Code process: each waits here for the result MindRoom's loop produces.
 
     ``entered`` holds the tool each call id reached the MCP server with, and ``failure`` says why the process can
@@ -145,7 +145,7 @@ class LiveSession:
     client: ClaudeSDKClient
     owner: asyncio.Task[None]
     close_requested: asyncio.Event
-    bridge: ToolBridge
+    bridge: _ToolBridge
     directory: Path
     called: dict[str, str] = field(default_factory=dict)
     emitted: Emitted | None = None
@@ -183,8 +183,8 @@ def startup_error(info: dict[str, Any] | None, provider: str) -> AuthenticationF
     match = re.match(r"(\d+)\.(\d+)\.(\d+)", version)
     account = info.get("account") or {}
     key_source, token_source = account.get("apiKeySource"), account.get("tokenSource")
-    minimum = ".".join(map(str, MIN_VERSION))
-    if match is None or tuple(map(int, match.groups())) < MIN_VERSION:
+    minimum = ".".join(map(str, _MIN_VERSION))
+    if match is None or tuple(map(int, match.groups())) < _MIN_VERSION:
         message = f"Claude Code {version} is too old; {minimum} or later is required. Run `claude update`."
     elif key_source:
         message = (
@@ -230,7 +230,7 @@ async def start(
     """Start a Claude Code process that has only ``tools``, and check that it is signed in to a subscription."""
     SESSIONS.make_room()
     directory = await asyncio.to_thread(_new_directory, storage_root / "claude_code", system)
-    bridge = ToolBridge(names=tool_names(tools))
+    bridge = _ToolBridge(names=tool_names(tools))
     options = ClaudeAgentOptions(
         model=model,
         # The SDK otherwise prefers the copy it ships over the one the user signed in with and keeps updated.
@@ -291,7 +291,7 @@ async def _close(session: LiveSession) -> None:
     await asyncio.to_thread(shutil.rmtree, session.directory, ignore_errors=True)
 
 
-class SessionRegistry:
+class _SessionRegistry:
     """Every live Claude Code process of this runtime, and the resting ones by the request each answered."""
 
     def __init__(self) -> None:
@@ -319,7 +319,7 @@ class SessionRegistry:
 
     def make_room(self) -> None:
         """Retire resting processes, idle ones first and the longest resting first, until a new one fits."""
-        while len(self.live) >= MAX_PROCESSES and self.resting:
+        while len(self.live) >= _MAX_PROCESSES and self.resting:
             key = min(self.resting, key=lambda key: (_parked(self.resting[key]), self.resting[key].rested_at))
             self.retire(self.resting.pop(key))
 
@@ -327,7 +327,7 @@ class SessionRegistry:
         """Close each resting process past its time to live, and wait until they closed."""
         now = monotonic()
         for key, session in list(self.resting.items()):
-            if now - session.rested_at > (PARKED_TTL_SECONDS if _parked(session) else IDLE_TTL_SECONDS):
+            if now - session.rested_at > (_PARKED_TTL_SECONDS if _parked(session) else _IDLE_TTL_SECONDS):
                 self.retire(self.resting.pop(key))
         await wait_for_background_tasks(owner=self)
 
@@ -350,5 +350,5 @@ def _parked(session: LiveSession) -> bool:
     return session.emitted is not None and bool(session.emitted.tool_call_ids)
 
 
-SESSIONS = SessionRegistry()
+SESSIONS = _SessionRegistry()
 close_at_process_shutdown(SESSIONS.close_all)

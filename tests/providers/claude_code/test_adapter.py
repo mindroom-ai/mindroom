@@ -348,11 +348,11 @@ async def test_a_process_past_its_time_to_live_is_closed(tmp_path: Path, monkeyp
     await complete(provider, ModelRequest(messages=[user("Hi")]))
     assert len(SESSIONS.resting) == 2
 
-    monkeypatch.setattr(session_module, "IDLE_TTL_SECONDS", 0.0)
+    monkeypatch.setattr(session_module, "_IDLE_TTL_SECONDS", 0.0)
     await SESSIONS.close_expired()
     assert [session.emitted.tool_call_ids for session in SESSIONS.resting.values()] == [("toolu_a", "toolu_b")]
 
-    monkeypatch.setattr(session_module, "PARKED_TTL_SECONDS", 0.0)
+    monkeypatch.setattr(session_module, "_PARKED_TTL_SECONDS", 0.0)
     await SESSIONS.close_expired()
     assert SESSIONS.resting == {}
     assert len(cli.events("exit")) == 2
@@ -363,7 +363,7 @@ async def test_a_new_process_past_the_limit_evicts_an_idle_one_before_a_parked_o
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(session_module, "MAX_PROCESSES", 2)
+    monkeypatch.setattr(session_module, "_MAX_PROCESSES", 2)
     cli = fake_cli(tmp_path, {"turns": [_TWO_CALLS]}, {"turns": [text_turn("Idle.")]}, {"turns": [text_turn("New.")]})
     provider = cli.provider()
     await complete(provider, ModelRequest(messages=[user("Look up a and b.")], tools=[LOOKUP]))
