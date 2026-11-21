@@ -53,6 +53,7 @@ _OPTIONS = (
 )
 _NARROWING = frozenset({"tools", "skills", "knowledge"})
 _NARROWS_WITH_SYSTEM = "tools, skills and knowledge narrow a copy only together with system=."
+_INTERRUPTED = "The agent was stopped before it started a tool call. A resume runs it again."
 _NO_ANSWER = "The agent's turn left no record of how it ended."
 # How long a wait for a job that cannot be read yet, while its requester's access resolves, sleeps before it asks again.
 _RECHECK_SECONDS = 1.0
@@ -228,7 +229,7 @@ async def await_child(
     if all(job.job_id != job_id for job in jobs.retained_jobs()):
         # A job the runtime never admitted did nothing. One it has since deleted may have done anything.
         kind = "indeterminate" if node.handle.dispatched else "interrupted"
-        return (kind, "The agent was interrupted before it started."), None, None
+        return (kind, _INTERRUPTED), None, None
     # What the turn has left of its working time, as the node's handle says: an earlier wait may have used some.
     handle, loop, timed_out, claim = node.handle, asyncio.get_running_loop(), False, None
     waiting = handle.work_left is not None
@@ -293,7 +294,7 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
         # run that cannot be found, the turn's last one included, may have made some.
         made = [tool for run in records for tool in run.tools or () if tool.confirmed or not _never_started(tool)]
         called = len(records) <= len(spent) or bool(made)
-        return ("indeterminate" if called else "interrupted", text), usage
+        return ("indeterminate", text) if called else ("interrupted", _INTERRUPTED), usage
     if job.status == "completed":
         # A turn that completed without a record to read its answer from did what nobody can say.
         return ("indeterminate", _NO_ANSWER) if record is None else ("completed", record.handover_content or ""), usage

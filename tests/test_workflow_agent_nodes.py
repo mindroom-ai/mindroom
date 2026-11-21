@@ -709,6 +709,9 @@ async def test_child_stopped_by_a_config_reload_is_not_saved_as_a_result(
 
     states = {"interrupted": WorkflowNodeState.FAILED, "indeterminate": WorkflowNodeState.INDETERMINATE}
     assert (stopped.value.kind, _node(stack).state, _node(stack).result) == (kind, states[kind], None)
+    if not tools:
+        # What the script reads says what a script can do, not what a caller in a chat could.
+        assert str(stopped.value) == "The agent was stopped before it started a tool call. A resume runs it again."
     assert stack.counting_tool.lines == (["a"] if tools else [])
 
 

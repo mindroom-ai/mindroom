@@ -69,7 +69,7 @@ class WorkflowError(RuntimeError):
 
 
 class AgentError(WorkflowError):
-    """kind: failed | cancelled | denied | timeout | schema | refused | indeterminate."""
+    """kind: failed | cancelled | denied | timeout | schema | refused | interrupted | indeterminate."""
 
 
 class ToolError(WorkflowError):
