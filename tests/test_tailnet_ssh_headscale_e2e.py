@@ -18,6 +18,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections import Counter
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any
@@ -35,7 +36,7 @@ from mindroom.workers.backends.worker_security import docker_worker_security_opt
 from mindroom.workers.models import WORKER_SSH_PORT
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from mindroom.tailnet_ssh.store import Link
@@ -62,8 +63,8 @@ grpc_listen_addr: 127.0.0.1:{grpc_port}
 noise:
   private_key_path: /var/lib/headscale/noise_private.key
 prefixes:
-  v4: {v4}
-  v6: {v6}
+  v4: 100.64.0.0/16
+  v6: fd7a:115c:a1e0:a::/64
 derp:
   urls:
     - https://controlplane.tailscale.com/derpmap/default
@@ -73,7 +74,7 @@ database:
     path: /var/lib/headscale/db.sqlite
 dns:
   magic_dns: true
-  base_domain: {base_domain}
+  base_domain: tailnet.test
   override_local_dns: false
 unix_socket: /var/run/headscale/headscale.sock
 """
@@ -167,6 +168,7 @@ class _Primary:
     port: int = field(default_factory=_free_port)
     # What GET /links answers.
     rows: list[dict[str, Any]] = field(default_factory=list)
+    list_reads: Counter[tuple[str, str]] = field(default_factory=Counter)
     # The host port each link's worker publishes its sshd on, and how long each link's connect takes.
     workers: dict[str, int] = field(default_factory=dict)
     delays: dict[str, float] = field(default_factory=dict)
@@ -187,7 +189,9 @@ class _Primary:
 
         @app.get("/links")
         def links() -> list[dict[str, Any]]:
-            return self.rows
+            rows = [row.copy() for row in self.rows]
+            self.list_reads.update((row["id"], row["access_revision"]) for row in rows)
+            return rows
 
         @app.post("/status", status_code=204)
         def status(report: dict[str, Any]) -> None:
@@ -228,7 +232,6 @@ class _Tailnet:
     folder: Path
     headscale: str
     login_server: str
-    base_domain: str
     people: dict[str, _Person]
 
 
@@ -467,8 +470,10 @@ def _start_worker(stack: _Stack, node: _Node) -> None:
     """
     name = f"{stack.prefix}-{node.link.hostname}"
     node.root = stack.tailnet.folder / name
-    (node.root / "workspace").mkdir(parents=True)
-    for folder in (node.root, node.root / "workspace"):
+    workspace = node.root / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "owner").write_text(node.owner.login, encoding="utf-8")
+    for folder in (node.root, workspace):
         folder.chmod(0o755)
     _own(node.root, "1000:1000")
     _project(stack, node)
@@ -546,59 +551,15 @@ def _set_key(stack: _Stack, node: _Node, key: str) -> None:
     node.row["access_revision"] = _revision(stack, node.owner)
 
 
-@contextmanager
-def _gateway(tailnet: _Tailnet, name: str, config: Config, *, auth_key: str) -> Iterator[_Stack]:
-    """Run the gateway image as the chart runs it, against a fake primary of its own."""
-    primary = _Primary()
-    listener = uvicorn.Config(primary.app(), host="127.0.0.1", port=primary.port, log_level="warning", ws="none")
-    served = uvicorn.Server(listener)
-    serving = threading.Thread(target=served.run, daemon=True)
-    serving.start()
-    prefix = f"{tailnet.prefix}-{name}"
-    stack = _Stack(tailnet, prefix, primary, f"{prefix}-gateway", f"{prefix}-state", config)
-    environment = {
-        "TAILNET_SSH_PRIMARY_URL": f"http://127.0.0.1:{primary.port}",
-        "TAILNET_SSH_GATEWAY_TOKEN": primary.token,
-        "TAILNET_SSH_LOGIN_SERVER": tailnet.login_server,
-        "TAILNET_SSH_AUTH_KEY": auth_key,
-    }
-    try:
-        _eventually("the fake primary to listen", lambda: served.started, seconds=10)
-        _docker(
-            *("run", "--detach", "--name", stack.gateway, "--network", "host", *_READ_ONLY_ROOT),
-            *("--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--volume", f"{stack.state}:/state"),
-            *[arg for name, value in environment.items() for arg in ("--env", f"{name}={value}")],
-            _GATEWAY_IMAGE,
-        )
-        yield stack
-    finally:
-        # Shown with a failed case: what the gateway and the workers' sshd logged.
-        for container in _docker("ps", "--all", "--filter", f"name=^{prefix}", "--format", "{{.Names}}").split():
-            print(f"--- {container}\n{_logs(container)}")
-        _remove(prefix)
-        # The test host removes its temp folders as its own user.
-        for node in stack.nodes.values():
-            if node.root is not None:
-                _own(node.root, f"{os.getuid()}:{os.getgid()}")
-        served.should_exit = True
-        serving.join(timeout=10)
-
-
-@contextmanager
-def _headscale(folder: Path, logins: Sequence[str], *, base_domain: str, v4: str, v6: str) -> Iterator[_Tailnet]:
-    """Run a Headscale of its own with a user and a Tailscale client, joined by pre-auth key, for each login."""
+@pytest.fixture(scope="module")
+def tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
+    """One Headscale with two distinct client logins and a reusable operator key for the gateway nodes."""
     prefix = f"mindroom-e2e-{secrets.token_hex(4)}"
+    folder = tmp_path_factory.mktemp("tailnet")
     port = _free_port()
     config = folder / "headscale.yaml"
     config.write_text(
-        _HEADSCALE_CONFIG.format(
-            port=port,
-            metrics_port=_free_port(),
-            grpc_port=_free_port(),
-            base_domain=base_domain,
-            v4=v4,
-            v6=v6,
-        ),
+        _HEADSCALE_CONFIG.format(port=port, metrics_port=_free_port(), grpc_port=_free_port()),
         encoding="utf-8",
     )
     headscale, login_server = f"{prefix}-headscale", f"http://127.0.0.1:{port}"
@@ -612,46 +573,69 @@ def _headscale(folder: Path, logins: Sequence[str], *, base_domain: str, v4: str
             lambda: _docker_result("exec", headscale, "headscale", "users", "list").returncode == 0,
         )
         people = {}
-        for login in logins:
+        for login in ("alice", "bob"):
             key = folder / login
             subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", login, "-f", key], check=True)
-            people[login] = _Person(login, f"@{login}:example.org", f"{prefix}-{login}", key)
+            person = people[login] = _Person(login, f"@{login}:example.org", f"{prefix}-{login}", key)
             _docker(
-                *("run", "--detach", "--name", people[login].device, "--network", "host"),
+                *("run", "--detach", "--name", person.device, "--network", "host"),
                 *("--env", f"TS_AUTHKEY={_pre_auth_key(headscale, login)}", "--env", f"TS_HOSTNAME={login}-laptop"),
                 *("--env", "TS_USERSPACE=true", "--env", f"TS_EXTRA_ARGS=--login-server={login_server}"),
                 _TAILSCALE_IMAGE,
             )
         for person in people.values():
             _eventually(f"the device of {person.login} to join", lambda device=person.device: _joined(device))
-        yield _Tailnet(prefix, folder, headscale, login_server, base_domain, people)
+        yield _Tailnet(prefix, folder, headscale, login_server, people)
     finally:
         _remove(prefix)
 
 
 @pytest.fixture(scope="module")
-def tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
-    """A tailnet with a device each of alice and bob."""
-    folder = tmp_path_factory.mktemp("tailnet")
-    domain, v4, v6 = "tailnet.test", "100.64.0.0/16", "fd7a:115c:a1e0:a::/64"
-    with _headscale(folder, ("alice", "bob"), base_domain=domain, v4=v4, v6=v6) as tailnet:
-        yield tailnet
-
-
-@pytest.fixture(scope="module")
 def stack(tailnet: _Tailnet) -> Iterator[_Stack]:
-    """Two owners and their nodes in one operator-managed tailnet."""
+    """Start just one gateway against the fake primary; both nodes join using the operator's key."""
+    primary = _Primary()
+    listener = uvicorn.Config(primary.app(), host="127.0.0.1", port=primary.port, log_level="warning", ws="none")
+    served = uvicorn.Server(listener)
+    serving = threading.Thread(target=served.run, daemon=True)
     config = Config(
         tailnet_ssh={
             "logins": {person.requester_id: person.login for person in tailnet.people.values()},
             "authorized_keys": {person.requester_id: [person.public_key] for person in tailnet.people.values()},
         },
     )
-    with _gateway(tailnet, "key", config, auth_key=_pre_auth_key(tailnet.headscale, "operator")) as stack:
+    prefix = f"{tailnet.prefix}-ssh"
+    stack = _Stack(tailnet, prefix, primary, f"{prefix}-gateway", f"{prefix}-state", config)
+    environment = {
+        "TAILNET_SSH_PRIMARY_URL": f"http://127.0.0.1:{primary.port}",
+        "TAILNET_SSH_GATEWAY_TOKEN": primary.token,
+        "TAILNET_SSH_LOGIN_SERVER": tailnet.login_server,
+        "TAILNET_SSH_AUTH_KEY": _pre_auth_key(tailnet.headscale, "operator"),
+    }
+    serving.start()
+    try:
+        _eventually("the fake primary to listen", lambda: served.started, seconds=10)
+        _docker(
+            *("run", "--detach", "--name", stack.gateway, "--network", "host", *_READ_ONLY_ROOT),
+            *("--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--volume", f"{stack.state}:/state"),
+            *[arg for name, value in environment.items() for arg in ("--env", f"{name}={value}")],
+            _GATEWAY_IMAGE,
+        )
         for person in tailnet.people.values():
             node = _add_link(stack, person, f"mind-{person.login}")
             _await_admitted(stack, node)
+            assert _in_state_volume(stack, "test", "-s", f"/state/{node.link.id}/tailscaled.state").returncode == 0
+        assert set(stack.nodes) <= _signed_in(tailnet)
         yield stack
+    finally:
+        # On failure include gateway and sshd diagnostics, then remove this run's resources.
+        for container in _docker("ps", "--all", "--filter", f"name=^{prefix}", "--format", "{{.Names}}").split():
+            print(f"--- {container}\n{_logs(container)}")
+        _remove(prefix)
+        for node in stack.nodes.values():
+            if node.root is not None:
+                _own(node.root, f"{os.getuid()}:{os.getgid()}")
+        served.should_exit = True
+        serving.join(timeout=10)
 
 
 def _sha256(path: Path) -> str:
@@ -662,9 +646,6 @@ def test_pre_auth_node_exec_uses_a_read_only_worker_projection(stack: _Stack) ->
     """The operator-enrolled node admits the configured owner to its worker's restricted SSH server."""
     alice = stack.tailnet.people["alice"]
     node = stack.nodes["mind-alice"]
-    assert node.link.hostname in _signed_in(stack.tailnet)
-    assert _in_state_volume(stack, "test", "-s", f"/state/{node.link.id}/tailscaled.state").returncode == 0
-
     # The session is the worker's user in the launch's folder, and sshd's files are that user's, who cannot write them.
     seen = f"stat --format %u:%a {_PROJECTION} {_PROJECTION}/ssh_host_ed25519_key; touch {_PROJECTION}/planted"
     done = _run_ssh(stack, node, [*_client(stack.tailnet, alice), "mind-alice", f"id -u; pwd; {seen}"])
@@ -776,9 +757,10 @@ def test_two_links_in_one_tailnet_refuse_cross_login_even_with_the_right_key(sta
         person = stack.tailnet.people[login]
         own, theirs = stack.nodes[f"mind-{login}"], stack.nodes[f"mind-{other}"]
         assert {own.link.hostname, theirs.link.hostname} <= _peers(person)
-        done = _run_ssh(stack, own, [*_client(stack.tailnet, person), own.link.hostname, "id -u"])
-        assert (done.returncode, done.stdout.strip()) == (0, "1000"), done.stderr
-        assert stack.primary.connects[-1].peer["peer_login"] == person.login
+        done = _run_ssh(stack, own, [*_client(stack.tailnet, person), own.link.hostname, "pwd; cat owner"])
+        assert (done.returncode, done.stdout.splitlines()) == (0, [_WORKSPACE, person.login]), done.stderr
+        asked = stack.primary.connects[-1]
+        assert (asked.link_id, asked.peer) == (own.link.id, {"peer_login": login, "peer_node": f"{login}-laptop"})
         _assert_turned_away(stack, person, theirs)
 
 
@@ -800,6 +782,10 @@ def test_key_removal_cuts_an_open_session(stack: _Stack, tmp_path: Path) -> None
             assert "Permission denied (publickey)." in refused.stderr
         finally:
             _set_key(stack, node, alice.public_key)
+            key = (node.link.id, node.row["access_revision"])
+            target = stack.primary.list_reads[key] + 2
+            # Reconcile is serial. A second read proves the first pass applied the restore before the next test.
+            _eventually("the restored revision to settle", lambda: stack.primary.list_reads[key] >= target)
 
 
 def test_connection_held_through_a_120s_start(stack: _Stack) -> None:
@@ -826,7 +812,6 @@ def test_connection_held_through_a_120s_start(stack: _Stack) -> None:
 def test_removing_logs_out_and_gateway_restart_keeps_others(stack: _Stack) -> None:
     """A removed link's node leaves the tailnet, also when the gateway was down, and a restart signs no node out."""
     alice = stack.tailnet.people["alice"]
-    kept = stack.nodes["mind-alice"]
     gone, late = (_add_link(stack, alice, hostname, worker=False) for hostname in ("mind-gone", "mind-late"))
     _eventually("both nodes to join", lambda: {"mind-gone", "mind-late"} <= _signed_in(stack.tailnet))
 
@@ -845,4 +830,6 @@ def test_removing_logs_out_and_gateway_restart_keeps_others(stack: _Stack) -> No
     assert _in_state_volume(stack, "test", "-e", f"/state/{late.link.id}").returncode == 1
     stack.primary.rows.remove(late.row)
 
-    _await_admitted(stack, kept)  # StrictHostKeyChecking requires the same pinned key after restart.
+    # StrictHostKeyChecking requires the same pinned host keys after restart.
+    for hostname in ("mind-alice", "mind-bob"):
+        _await_admitted(stack, stack.nodes[hostname])
