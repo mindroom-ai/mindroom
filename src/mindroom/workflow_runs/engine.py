@@ -417,8 +417,8 @@ class WorkflowEngine:
         reserving = asyncio.ensure_future(reserve())
         try:
             run, _ = await wait_for_future_until_complete(reserving)
-            await self.launch(run.run_id, context, limits)
-            return await self.wait(run.run_id)
+            # The call starts the run's attempt as a job's operation does, again while `admit` cannot answer yet.
+            return await self.wait(run.run_id, partial(self.launch, run.run_id, context, limits))
         finally:
             if not reserving.cancelled() and not reserving.exception():
                 self._inline_runs[key] = reserving.result()[0].run_id

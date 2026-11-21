@@ -127,6 +127,31 @@ async def test_every_attempt_is_admitted_by_the_one_check_right_before_it_starts
 
 
 @pytest.mark.asyncio
+async def test_call_that_waits_for_its_run_itself_asks_again_until_the_check_answers(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call inside a subagent has no job to start its run's attempt: it asks again itself, and no pass has to."""
+    first = await _started(stack)
+    await stack.end_attempt(ScriptRunState.FAILED)
+    await _ended_job(stack, first["job_id"])
+    admit, asked = stack.engine.admit, []
+
+    def answered(run: WorkflowRun, *args: Any) -> object:  # noqa: ANN401
+        asked.append(run.state)
+        unanswered = run.state is WorkflowRunState.STARTING and asked.count(WorkflowRunState.STARTING) < 3
+        return None if unanswered else admit(run, *args)
+
+    monkeypatch.setattr(stack.engine, "admit", answered)
+    call = asyncio.create_task(stack.call("resume_workflow", depth=1, run_id=stack.run_id))
+    await stack.until(lambda: _run(stack).attempt == 2)
+
+    assert (asked.count(WorkflowRunState.STARTING), len(stack.scripts.launched)) == (3, 2)
+    await stack.finish_attempt(result="the report")
+    assert await call == "the report"
+
+
+@pytest.mark.asyncio
 async def test_pass_starts_no_attempt_of_a_run_whose_job_was_stopped_before_its_operation_began(
     stack: WorkflowStack,
     monkeypatch: pytest.MonkeyPatch,

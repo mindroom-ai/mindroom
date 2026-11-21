@@ -3684,12 +3684,14 @@ async def test_stalled_workflow_maintenance_never_skips_script_pruning(tmp_path:
     runtime.bind_api("http://primary.test/api/script-gateway")
     stalled = asyncio.Event()
 
-    async def stall(_access: object) -> None:
+    async def stall(_run: object, **_options: object) -> None:
         stalled.set()
         await asyncio.Event().wait()
 
-    # An engine with no unfinished run, whose look at the ended attempts never returns.
-    engine = SimpleNamespace(reconcile=stall, store=SimpleNamespace(list_runs=lambda **_filters: []))
+    # An engine with one unfinished run, whose look at that run's ended attempt never returns.
+    run = SimpleNamespace(run_id="wf-1", job_id=None, script_run_id=None, attempt=1, created_at="")
+    runs = SimpleNamespace(list_runs=lambda **_filters: [run], get_run=lambda _run_id: run)
+    engine = SimpleNamespace(settle=stall, store=runs, started_at="")
     workflows = WorkflowRuntimeLifecycle(engine=engine, script_runtime=runtime)  # type: ignore[arg-type]
     await workflows.start()
 
