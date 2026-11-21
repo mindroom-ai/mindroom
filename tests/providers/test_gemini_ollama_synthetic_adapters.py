@@ -404,8 +404,67 @@ def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -
     assert adapter._client_params() == {
         "api_key": "test-key",
         "vertexai": False,
-        "http_options": {"timeout": 12500, "retry_options": {"attempts": 1}},
+        "http_options": {"api_version": "v1beta", "timeout": 12500, "retry_options": {"attempts": 1}},
     }
+
+
+@pytest.mark.parametrize(
+    ("http_options", "expected"),
+    [
+        (None, "v1beta"),
+        ({"api_version": "v1"}, "v1"),
+        ({"apiVersion": "v1alpha"}, "v1alpha"),
+        ({"api_version": None}, "v1beta"),
+        ({"apiVersion": None}, "v1beta"),
+        ({"retryOptions": {"attempts": 3}}, "v1beta"),
+        ({"api_version": ""}, ""),
+        ({"apiVersion": ""}, ""),
+    ],
+    ids=[
+        "unset",
+        "snake-case",
+        "camel-case-alias",
+        "snake-case-null",
+        "alias-null",
+        "retry-alias",
+        "snake-case-empty",
+        "alias-empty",
+    ],
+)
+def test_gemini_api_keeps_v1beta_unless_the_config_authors_a_version(
+    tmp_path: Path,
+    http_options: dict[str, Any] | None,
+    expected: str,
+) -> None:
+    """google-genai 3 defaults the Gemini API to v1; the client stays on v1beta unless ``http_options`` names one.
+
+    Either spelling of an option builds a client, a null version counts as unset, and an empty one is kept.
+    """
+    client_params = {} if http_options is None else {"http_options": http_options}
+    adapter = gemini_adapter.build_provider(
+        ModelConfig(**_config(GEMINI, client_params=client_params)),
+        runtime_paths_for(tmp_path),
+    )
+
+    sent = adapter._sdk_client()._api_client._http_options
+    assert sent.api_version == expected
+    assert sent.retry_options is not None
+    assert sent.retry_options.attempts == 1
+
+
+def test_vertex_ai_keeps_its_sdk_default_api_version_with_a_null_version(tmp_path: Path) -> None:
+    """Vertex AI gets no v1beta default; a null or aliased version leaves it to the SDK or the config."""
+    null = gemini_adapter.build_provider(
+        ModelConfig(**_config(GEMINI_VERTEX, client_params={"http_options": {"api_version": None}})),
+        runtime_paths_for(tmp_path),
+    )
+    aliased = gemini_adapter.build_provider(
+        ModelConfig(**_config(GEMINI_VERTEX, client_params={"http_options": {"apiVersion": "v1"}})),
+        runtime_paths_for(tmp_path),
+    )
+
+    assert null._client_params()["http_options"] == {"retry_options": {"attempts": 1}}
+    assert aliased._client_params()["http_options"] == {"api_version": "v1", "retry_options": {"attempts": 1}}
 
 
 @pytest.mark.asyncio
@@ -1338,7 +1397,7 @@ def _upload_name(mime_type: str, data: bytes) -> str:
 
 
 def _uploaded(name: str, mime_type: str) -> dict[str, Any]:
-    return {"fileData": {"fileUri": f"{_GEMINI_API}v1beta/{name}", "mimeType": mime_type}}
+    return {"fileData": {"file_uri": f"{_GEMINI_API}v1beta/{name}", "mime_type": mime_type}}
 
 
 async def _stream_media(
@@ -1384,9 +1443,9 @@ async def test_gemini_inlines_local_media_and_uploads_what_is_too_large(
     assert server.uploads == [name]
     assert _user_parts(server) == [
         {"text": "Look"},
-        {"inlineData": {"data": base64.urlsafe_b64encode(PNG).decode(), "mimeType": "image/png"}},
+        {"inlineData": {"data": base64.urlsafe_b64encode(PNG).decode(), "mime_type": "image/png"}},
         _uploaded(name, "application/pdf"),
-        {"fileData": {"fileUri": "gs://bucket/notes.pdf", "mimeType": "application/pdf"}},
+        {"fileData": {"file_uri": "gs://bucket/notes.pdf", "mime_type": "application/pdf"}},
     ]
 
 
@@ -1410,8 +1469,8 @@ async def test_gemini_inlines_small_local_audio_and_video(tmp_path: Path, monkey
     assert server.uploads == []
     assert _user_parts(server) == [
         {"text": "Summarize"},
-        {"inlineData": {"data": base64.urlsafe_b64encode(b"OggS-voice").decode(), "mimeType": "audio/ogg"}},
-        {"inlineData": {"data": base64.urlsafe_b64encode(b"mp4-clip").decode(), "mimeType": "video/mp4"}},
+        {"inlineData": {"data": base64.urlsafe_b64encode(b"OggS-voice").decode(), "mime_type": "audio/ogg"}},
+        {"inlineData": {"data": base64.urlsafe_b64encode(b"mp4-clip").decode(), "mime_type": "video/mp4"}},
     ]
 
 
@@ -1684,7 +1743,7 @@ async def test_gemini_references_an_https_file_of_known_type(tmp_path: Path, mon
     assert server.requests == server.model_requests()
     assert _user_parts(server) == [
         {"text": "Read this"},
-        {"fileData": {"fileUri": url, "mimeType": "application/pdf"}},
+        {"fileData": {"file_uri": url, "mime_type": "application/pdf"}},
     ]
 
 
@@ -1766,7 +1825,7 @@ async def test_gemini_places_the_text_first_and_each_kind_of_media_in_the_order_
         "inlineData",
         "inlineData",
     ]
-    assert [part["inlineData"]["mimeType"] for part in parts if "inlineData" in part] == [
+    assert [part["inlineData"]["mime_type"] for part in parts if "inlineData" in part] == [
         "image/png",
         "audio/wav",
         "video/webm",

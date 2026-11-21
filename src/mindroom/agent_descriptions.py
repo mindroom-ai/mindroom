@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 
 if TYPE_CHECKING:
@@ -18,13 +17,6 @@ _MAX_INSTRUCTION_LENGTH = 100
 
 def describe_agent(agent_name: str, config: Config, tools: ToolRegistry) -> str:
     """Generate a description of an agent or team based on its configuration."""
-    if agent_name == ROUTER_AGENT_NAME:
-        return (
-            "router\n"
-            "  - Route messages to the most appropriate agent based on context and expertise.\n"
-            "  - Analyzes incoming messages and determines which agent is best suited to respond."
-        )
-
     if agent_name in config.teams:
         team_config = config.teams[agent_name]
         parts = [f"{agent_name}"]

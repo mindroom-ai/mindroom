@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     """Create a mock Matrix client with one room."""
     client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@mindroom_test:localhost"
     room = MagicMock()
     room.encrypted = encrypted
     client.rooms = {"!room:localhost": room}
@@ -43,6 +45,24 @@ def _mock_client(*, encrypted: bool = False) -> AsyncMock:
         client.olm.device_id = "DEVICE"
     client.room_send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id="!room:localhost")
     return client
+
+
+@pytest.mark.asyncio
+async def test_delivery_exception_logs_only_the_safe_innermost_site() -> None:
+    """A send that raises in nio identifies the failing check without rendering the exception."""
+    room_id = "!room:localhost"
+    client = nio.AsyncClient("https://matrix.example.org", "@bot:localhost")
+    client.rooms[room_id] = nio.MatrixRoom(room_id, client.user_id)
+    try:
+        with capture_logs() as logs:
+            outcome = await send_message_outcome(client, room_id, {"body": "hello", "msgtype": "m.text"})
+    finally:
+        await client.close()
+
+    assert outcome == MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "local delivery exception")
+    (failure,) = [entry for entry in logs if entry["event"] == "matrix_message_delivery_exception"]
+    assert re.fullmatch(r"nio\.client\.base_client:\d+ _assert_logged_in", failure["exception_site"])
+    assert "Not logged in." not in str(failure)
 
 
 @pytest.mark.asyncio
@@ -76,6 +96,21 @@ async def test_send_message_result_ignores_unverified_devices_in_encrypted_room(
     await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
 
     assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_hidden_route_sent_to_an_encrypted_room_keeps_its_event_type() -> None:
+    """Nio encrypts an event under the type it is given, so a route in an encrypted room decrypts as a route."""
+    client = _mock_client(encrypted=True)
+    content = {"io.mindroom.route": {"entity": "@mindroom_general:localhost", "event_ids": ["$question"]}}
+
+    delivered = await send_message_result(client, "!room:localhost", content, message_type="io.mindroom.route")
+
+    assert delivered is not None
+    sent = client.room_send.await_args.kwargs
+    assert sent["message_type"] == "io.mindroom.route"
+    assert sent["content"] == content
+    assert sent["ignore_unverified_devices"] is True
 
 
 def test_outbound_matrix_events_use_delivery_boundary() -> None:
@@ -234,6 +269,7 @@ def test_edit_envelope_discards_thread_relation() -> None:
 def _cache_bypass_client(*, encrypted: bool | None) -> AsyncMock:
     """Create a mock client without a cached room; encryption state answers as given."""
     client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@mindroom_test:localhost"
     client.rooms = {}
     if encrypted is None:
         encryption_state = MagicMock(spec=nio.RoomGetStateEventError)
@@ -519,6 +555,7 @@ async def test_send_message_outcome_fits_for_encryption_enabled_during_sidecar_u
 async def test_uncached_room_encryption_enabled_during_upload_avoids_raw_send() -> None:
     """An uncached room enabling encryption during upload must not use the plaintext fallback."""
     client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@mindroom_test:localhost"
     client.rooms = {}
     client.olm = MagicMock()
     client.olm.device_id = "D"

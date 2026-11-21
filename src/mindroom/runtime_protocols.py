@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import EventJournalStore
-    from mindroom.hooks import HookContextSupport, HookRegistryState
+    from mindroom.hooks import HookBindings, HookRegistryState
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
     from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
@@ -109,8 +109,16 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Note that a bot admitted a conversation event in one room."""
         ...
 
-    def router_hook_context(self) -> HookContextSupport | None:
-        """Return the router bot's hook support, whose client backs what another bot's own cannot."""
+    def service_hook_bindings(self) -> HookBindings:
+        """Return the hook bindings of the runtime's own emissions, which each room's poster and steward back."""
+        ...
+
+    def room_steward(self, room_id: str) -> AgentBot | None:
+        """Return the bot that does one room's shared invisible work now."""
+        ...
+
+    def room_poster(self, room_id: str, sender: tuple[str | None, str] | None = None) -> AgentBot | None:
+        """Return the bot that posts in one room where no agent answers, for a retry only its first sender."""
         ...
 
     def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:
@@ -143,8 +151,8 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Handle a managed bot completing its first sync."""
         ...
 
-    def refresh_agent_reply_memberships(self) -> Awaitable[None]:
-        """Rebuild room-backed reply grants from the router client."""
+    def refresh_agent_reply_memberships(self) -> Awaitable[object]:
+        """Rebuild room-backed reply grants from each room's observer."""
         ...
 
     def refresh_agent_reply_memberships_when_needed(self) -> Awaitable[None]:

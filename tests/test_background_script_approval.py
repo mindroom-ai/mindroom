@@ -6,6 +6,7 @@ import asyncio
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -136,6 +137,7 @@ async def _approval_manager(
         _room_id: str,
         _thread_id: str | None,
         content: dict[str, object],
+        _sender_entity: str,
     ) -> dict[str, object]:
         return content
 
@@ -158,8 +160,8 @@ async def _approval_manager(
         prepare_approval_event=prepare_event,
         send_approval_delivery=send,
         cards=cards,
-        transport_sender_id=lambda: "@mindroom_router:localhost",
-        transport_device_id=lambda: "DEVICE",
+        sender_bot=lambda _entity_name, _room_id: object(),
+        sender_device_id=AsyncMock(return_value="DEVICE"),
     )
     return manager, journal, initial_sent
 
@@ -174,10 +176,12 @@ async def _wait_for_pending_card(journal: EventJournalStore) -> ApprovalCardView
 
 @pytest.mark.asyncio
 async def test_background_approval_fails_closed_when_room_departure_is_fenced(tmp_path: Path) -> None:
-    """A room that cannot publish a card must not hold the script call until timeout."""
+    """A room the asking account left cannot publish its card and must not hold the script call until timeout."""
     manager, journal, initial_sent = await _approval_manager(tmp_path)
     cards = journal.principal("router@shared")
-    await admit_room_membership(cards, "!room:localhost", "leave", source=DepartureSource.LOCAL)
+    manager.transport.responder_principal_id = lambda _entity_name: "watcher@shared"
+    watcher = journal.principal("watcher@shared")
+    await admit_room_membership(watcher, "!room:localhost", "leave", source=DepartureSource.LOCAL)
 
     try:
         decision = await asyncio.wait_for(

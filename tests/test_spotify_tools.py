@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import parse_qs
 
 import httpx
+import httpx2
 import pytest
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
@@ -69,17 +70,17 @@ def _publish_expiring_connection(manager: CredentialsManager) -> None:
     )
 
 
-def _serve_spotify(monkeypatch: pytest.MonkeyPatch, token_response: httpx.Response) -> list[tuple[str, str]]:
+def _serve_spotify(monkeypatch: pytest.MonkeyPatch, token_response: httpx2.Response) -> list[tuple[str, str]]:
     """Answer Spotify's token endpoint and Web API, recording each request's authorization and body or path."""
     requests: list[tuple[str, str]] = []
 
-    async def token_endpoint(request: httpx.Request) -> httpx.Response:
+    async def token_endpoint(request: httpx2.Request) -> httpx2.Response:
         requests.append((request.headers["authorization"], request.content.decode()))
         return token_response
 
     class _TokenClient(AsyncOAuth2Client):
         def __init__(self, **kwargs: object) -> None:
-            super().__init__(**kwargs, transport=httpx.MockTransport(token_endpoint))
+            super().__init__(**kwargs, transport=httpx2.MockTransport(token_endpoint))
 
     def web_api(request: httpx.Request) -> httpx.Response:
         requests.append((request.headers["authorization"], request.url.path))
@@ -101,7 +102,7 @@ def test_tool_sends_the_refreshed_oauth_token(tmp_path: Path, monkeypatch: pytes
     _publish_expiring_connection(manager)
     requests = _serve_spotify(
         monkeypatch,
-        httpx.Response(200, json={"access_token": "renewed-token", "token_type": "Bearer", "expires_in": 3600}),
+        httpx2.Response(200, json={"access_token": "renewed-token", "token_type": "Bearer", "expires_in": 3600}),
     )
 
     result = json.loads(_tool(paths, manager).get_current_user())
@@ -126,7 +127,7 @@ def test_tool_whose_refresh_spotify_rejects_asks_to_reconnect(tmp_path: Path, mo
     """A revoked refresh token turns into a reconnect prompt."""
     paths, manager = _runtime(tmp_path)
     _publish_expiring_connection(manager)
-    _serve_spotify(monkeypatch, httpx.Response(400, json={"error": "invalid_grant"}))
+    _serve_spotify(monkeypatch, httpx2.Response(400, json={"error": "invalid_grant"}))
 
     with pytest.raises(OAuthConnectionRequired) as exc_info:
         _tool(paths, manager).get_current_user()
@@ -141,7 +142,7 @@ def test_tool_whose_refresh_fails_for_now_reports_a_retryable_error(
     """A token endpoint failure a retry may fix is an error, not a reconnect prompt."""
     paths, manager = _runtime(tmp_path)
     _publish_expiring_connection(manager)
-    _serve_spotify(monkeypatch, httpx.Response(503, json={"error": "temporarily_unavailable"}))
+    _serve_spotify(monkeypatch, httpx2.Response(503, json={"error": "temporarily_unavailable"}))
 
     with pytest.raises(OAuthProviderError, match="Spotify authorization could not be refreshed") as exc_info:
         _tool(paths, manager).get_current_user()

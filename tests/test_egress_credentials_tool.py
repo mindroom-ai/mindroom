@@ -97,11 +97,19 @@ _PAGE_SERVED = {"MINDROOM_EGRESS_BROKER_PORT": "8768", "MINDROOM_TRUSTED_UPSTREA
 
 
 def _runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:
-    """Return a runtime on the Docker worker backend unless `env` names another, so `user_agent` workers are private."""
+    """Return a runtime on the Docker worker backend unless `env` names another, so `user_agent` workers are private.
+
+    The broker is off unless `env` sets its port.
+    """
     return resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
-        process_env={"MINDROOM_NAMESPACE": "", "MINDROOM_WORKER_BACKEND": "docker", **env},
+        process_env={
+            "MINDROOM_NAMESPACE": "",
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_EGRESS_BROKER_PORT": "off",
+            **env,
+        },
     )
 
 
@@ -531,7 +539,7 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
 @pytest.mark.parametrize("broker_on", [False, True])
 def test_an_agent_gets_the_tool_only_while_the_broker_is_on(tmp_path: Path, *, broker_on: bool) -> None:
     """With the broker off a config that lists the tool stays valid, and the agent's tools leave it out."""
-    runtime_paths = _runtime_paths(tmp_path, **({"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}))
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_EGRESS_BROKER_PORT="8768" if broker_on else "off")
     agent = AgentConfig(display_name="Code", tools=["shell", "egress_credentials"], worker_scope="user_agent")
     config = bind_runtime_paths(Config(agents={"code": agent}), runtime_paths)
 

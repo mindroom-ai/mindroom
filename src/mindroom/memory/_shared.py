@@ -88,24 +88,11 @@ class MemoryNotFoundError(ValueError):
 
 @dataclass(frozen=True)
 class MemoryEntrypointContext:
-    """One agent's preloaded memory entrypoint plus what the preload left out.
+    """One agent's memory entrypoint, whole; the preamble cuts what it inlines to ``defaults.max_preload_file_chars``."""
 
-    The line counts make the preload self-describing: the prompt layer can tell
-    the model that its `MEMORY.md` is already inlined, and how much of the file
-    the ``memory.file.max_entrypoint_lines`` and ``max_entrypoint_tokens`` caps withheld.
-    """
-
-    text: str = ""
     source_path: Path | None = None
-    included_lines: int = 0
-    total_lines: int = 0
-    # The file's lines, which the preload is cut from.
-    lines: tuple[str, ...] = ()
-
-    @property
-    def omitted_lines(self) -> int:
-        """Return how many entrypoint lines the preload caps withheld."""
-        return max(0, self.total_lines - self.included_lines)
+    # The file's text as read, at most its first 1 MiB, which the preload is cut from.
+    text: str = ""
 
 
 FILE_MEMORY_ENTRYPOINT = "MEMORY.md"

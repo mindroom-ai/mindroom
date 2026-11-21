@@ -803,6 +803,9 @@ def _serve_refresh(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         async def __aexit__(self, *_exc: object) -> None:
             return None
 
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
+            return None
+
         async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, Any]:
             client_ids.append(self.client_id)
             return {"access_token": "refreshed-token", "token_type": "Bearer", "expires_in": 3600}

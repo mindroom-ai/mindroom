@@ -21,7 +21,6 @@ from mindroom.approval.manager import (
 )
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
-from mindroom.event_journal import DEFAULT_ROUTER_MANAGED_ROOM_REASON
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.tool_approval_grants import grant_operation
@@ -37,7 +36,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.registry import ToolRegistry
 
 __all__ = [
-    "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "NO_APPROVER_REASON",
     "ApprovalActionResult",
     "BackgroundScriptToolOrigin",
@@ -221,8 +219,8 @@ def human_gate(
 ) -> ToolApprovalDecision | None:
     """Decide a gated call that no person needs to or can answer, or return None to ask its approver.
 
-    The approver's auto-approve window in the conversation approves it. A call no one may approve, or one in a room
-    without the router, is denied with a reason; the router's tells the agent how to invite it.
+    The approver's auto-approve window in the conversation approves it. A call no one may approve is denied with a
+    reason.
     """
     if (
         auto_approve_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=approver_id)
@@ -231,9 +229,6 @@ def human_gate(
         return ToolApprovalDecision(approved=True)
     if approver_id is None:
         return ToolApprovalDecision(approved=False, reason=NO_APPROVER_REASON)
-    manager = approval_manager.get_approval_store()
-    if room_id is not None and manager is not None and manager.transport.router_missing(room_id):
-        return ToolApprovalDecision(approved=False, reason=DEFAULT_ROUTER_MANAGED_ROOM_REASON)
     return None
 
 

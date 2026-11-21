@@ -21,7 +21,9 @@ from mindroom.server_fetch_url import validate_server_fetch_url
 
 _ENV_REFERENCE_PATTERN = re.compile(r"\$\{([^}]+)\}")
 # Tool results may exceed the SDK's default 1 MiB per-event cap, which 1.x did not have; `sse_client` has no option for it.
-mcp_sse_client.sse_within_origin = functools.partial(mcp_sse_client.sse_within_origin, max_event_size=None)
+# ty rejects the partial because it changes the parameter default.
+_unbounded_sse_within_origin = functools.partial(mcp_sse_client.sse_within_origin, max_event_size=None)
+mcp_sse_client.sse_within_origin = _unbounded_sse_within_origin  # ty: ignore[invalid-assignment]
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping

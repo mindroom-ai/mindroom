@@ -7,7 +7,6 @@ from bisect import bisect_left
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import current_entity_id, entity_identity_registry
 from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
 from mindroom.matrix.message_builder import build_message_content, markdown_fenced_code_ranges, markdown_to_html
@@ -391,8 +390,6 @@ def _find_matching_entity_name(
     """Return the configured entity name matched by one localpart candidate."""
     lower_localpart = localpart.lower()
     for entity_name in entities:
-        if entity_name == ROUTER_AGENT_NAME:
-            continue
         if entity_name.lower() == lower_localpart:
             return entity_name
     return None

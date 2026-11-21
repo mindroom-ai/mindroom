@@ -348,7 +348,7 @@ async def _paused_case(  # noqa: PLR0915
     # Hide tool anchors to keep this test focused on durable revision ownership.
     bot.config.defaults.show_tool_calls = False
 
-    async def prepare_event(_room: str, _thread: str | None, content: dict) -> dict:
+    async def prepare_event(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:
         return content
 
     async def send_delivery(_delivery: MatrixDelivery) -> str:
@@ -360,8 +360,8 @@ async def _paused_case(  # noqa: PLR0915
         send_approval_delivery=send_delivery,
         resolve_approval_delivery=AsyncMock(return_value=None),
         cards=journal_store.principal("router@shared"),
-        transport_sender_id=lambda: "@router:localhost",
-        transport_device_id=lambda: "DEVICE",
+        sender_bot=lambda _entity_name, _room_id: object(),
+        sender_device_id=AsyncMock(return_value="DEVICE"),
     )
     resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
     model = AsyncMock(side_effect=ResponsePausedForApproval(pause))

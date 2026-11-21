@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import importlib
 import json
 import re
 import time
@@ -205,6 +206,56 @@ async def test_usage_on_several_chat_chunks_adds_up(tmp_path: Path) -> None:
         (82, 13, False),
         (82, 13, True),
     ]
+
+
+@pytest.mark.parametrize(
+    ("model_config", "reply", "sdk_module", "history"),
+    [
+        (
+            _OPENAI_CHAT,
+            _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
+            "openai.resources.chat.completions.completions",
+            "messages",
+        ),
+        (
+            _OPENAI_RESPONSES,
+            _responses_reply(*_text_events("ok"), _completed()),
+            "openai.resources.responses.responses",
+            "input",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_sdk_sends_the_history_and_tools_without_walking_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model_config: dict[str, Any],
+    reply: dict[str, Any],
+    sdk_module: str,
+    history: str,
+) -> None:
+    """The SDK's walk of typed body fields, which blocks the event loop, never sees the history or the tools."""
+    module = importlib.import_module(sdk_module)
+    transform = module.async_maybe_transform
+    walked: list[dict[str, Any]] = []
+
+    async def recording(data: dict[str, Any], expected_type: object) -> object:
+        walked.append(data)
+        return await transform(data, expected_type)
+
+    monkeypatch.setattr(module, "async_maybe_transform", recording)
+    built = _Built(tmp_path, model_config, reply)
+    tool = ToolSpec(name="lookup", description="Look it up.", parameters={"type": "object"}, strict=None)
+
+    await _adapter_turn(built, ModelRequest(messages=[_user()], tools=(tool,)))
+
+    assert len(walked) == 1
+    assert not walked[0].get(history)
+    assert not walked[0].get("tools")
+    body = built.body()
+    assert body[history]
+    assert body["tools"]
+    assert body["stream"] is True
 
 
 @pytest.mark.asyncio

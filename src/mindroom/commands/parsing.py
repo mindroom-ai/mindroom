@@ -27,6 +27,7 @@ class CommandType(Enum):
     CONFIG = "config"  # Configuration command
     DESKTOP = "desktop"  # Requester-scoped Desktop pairing
     MODE = "mode"
+    COMPACT = "compact"  # Compact context before the next reply
     MODEL = "model"  # Per-thread model override command
     ROOM_MODEL = "room_model"  # Room-level model override command
     THREAD_MODE = "thread_mode"  # Room-level thread mode override command
@@ -43,6 +44,10 @@ _COMMAND_DOCS = {
     CommandType.MODE: (
         "/mode <agent> minimal|standard|show|reset",
         "Switch one agent between standard tools and a Bash-only interface",
+    ),
+    CommandType.COMPACT: (
+        "/compact [agent_or_team]",
+        "Compact the agents' context before their next reply in this conversation",
     ),
     CommandType.SCHEDULE: ("/schedule <task>", "Schedule a task"),
     CommandType.LIST_SCHEDULES: ("/list_schedules", "List scheduled tasks"),
@@ -79,6 +84,7 @@ _COMMAND_DOCS = {
     CommandType.HI: ("/hi", "Show welcome message"),
 }
 _WELCOME_COMMAND_TYPES = (CommandType.HI, CommandType.SCHEDULE, CommandType.HELP)
+_MAX_LEADING_MENTIONS = 16
 _COMPACT_COMMAND_DOC_OVERRIDES = {
     CommandType.SCHEDULE: ("/schedule <time> <message>", "Schedule tasks and reminders"),
     CommandType.HELP: ("/help [topic]", "Get detailed help"),
@@ -124,6 +130,26 @@ def get_compact_command_entries(
     ]
 
 
+COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
+    {
+        CommandType.RELOAD_PLUGINS,
+        CommandType.SCHEDULE,
+        CommandType.CANCEL_SCHEDULE,
+        CommandType.EDIT_SCHEDULE,
+        CommandType.CANCEL_JOB,
+        CommandType.DESKTOP,
+        CommandType.MODEL,
+        CommandType.MODE,
+        CommandType.COMPACT,
+        CommandType.ROOM_MODEL,
+        CommandType.THREAD_MODE,
+        CommandType.REPLY_MODE,
+        CommandType.AUTO_APPROVE,
+        CommandType.ENCRYPT,
+    },
+)
+
+
 @dataclass
 class Command:
     """Parsed command with arguments."""
@@ -131,6 +157,18 @@ class Command:
     type: CommandType
     args: dict[str, Any]
     raw_text: str
+
+
+def _without_leading_mentions(text: str, names: tuple[str, ...]) -> str:
+    """Return a command without the mentions before it, which aim it: `@Research Expert !model`."""
+    rest = text
+    for _ in range(_MAX_LEADING_MENTIONS):
+        body = rest.removeprefix("@")
+        spans = [len(n) for n in names if body[: len(n)].lower() == n.lower() and body[len(n) :][:1].isspace()]
+        if not spans:
+            break
+        rest = body[max(spans) :].lstrip()
+    return rest if rest.startswith(("!", "/")) else text
 
 
 class _CommandParser:
@@ -147,6 +185,7 @@ class _CommandParser:
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
     DESKTOP_PATTERN = re.compile(r"^!desktop(?:\s+(.+))?$", re.IGNORECASE)
     MODE_PATTERN = re.compile(r"^!mode(?:\s+(.+))?$", re.IGNORECASE)
+    COMPACT_PATTERN = re.compile(r"^!compact(?:\s+(.+))?$", re.IGNORECASE)
     MODEL_PATTERN = re.compile(r"^!model(?:\s+(.+))?$", re.IGNORECASE)
     ROOM_MODEL_PATTERN = re.compile(r"^!room[_-]?model(?:\s+(.+))?$", re.IGNORECASE)
     THREAD_MODE_PATTERN = re.compile(r"^!thread[_-]?mode(?:\s+(.+))?$", re.IGNORECASE)
@@ -156,19 +195,31 @@ class _CommandParser:
     E2EE_PATTERN = re.compile(r"^!e2ee$", re.IGNORECASE)
     HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
 
-    def parse(self, message: str) -> Command | None:  # noqa: C901, PLR0911, PLR0912, PLR0915
+    _ARGS_TEXT_COMMANDS = (
+        (CONFIG_PATTERN, CommandType.CONFIG),
+        (DESKTOP_PATTERN, CommandType.DESKTOP),
+        (MODE_PATTERN, CommandType.MODE),
+        (COMPACT_PATTERN, CommandType.COMPACT),
+        (MODEL_PATTERN, CommandType.MODEL),
+        (ROOM_MODEL_PATTERN, CommandType.ROOM_MODEL),
+        (THREAD_MODE_PATTERN, CommandType.THREAD_MODE),
+        (REPLY_MODE_PATTERN, CommandType.REPLY_MODE),
+        (AUTO_APPROVE_PATTERN, CommandType.AUTO_APPROVE),
+        (ENCRYPT_PATTERN, CommandType.ENCRYPT),
+    )
+
+    def parse(self, message: str, mention_names: tuple[str, ...] = ()) -> Command | None:  # noqa: C901, PLR0911, PLR0912
         """Parse a message for commands.
 
         Args:
             message: The message text to parse
+            mention_names: The names the agents and teams the message mentions can read as in its text
 
         Returns:
             Parsed command or None if no command found
 
         """
-        message = message.strip()
-
-        raw_text = message.removeprefix(VOICE_PREFIX)
+        raw_text = _without_leading_mentions(message.strip().removeprefix(VOICE_PREFIX), mention_names)
         # `/cmd` parses like `!cmd`, but only a known command: other `/` text (paths, `/s`) is conversation.
         is_slash = raw_text.startswith("/")
         message = f"!{raw_text[1:]}" if is_slash else raw_text
@@ -242,79 +293,9 @@ class _CommandParser:
                 raw_text=raw_text,
             )
 
-        match = self.CONFIG_PATTERN.match(message)
-        if match:
-            args_text = match.group(1).strip() if match.group(1) else ""
-            return Command(
-                type=CommandType.CONFIG,
-                args={"args_text": args_text},
-                raw_text=raw_text,
-            )
-
-        match = self.DESKTOP_PATTERN.match(message)
-        if match:
-            args_text = match.group(1).strip() if match.group(1) else ""
-            return Command(
-                type=CommandType.DESKTOP,
-                args={"args_text": args_text},
-                raw_text=raw_text,
-            )
-
-        match = self.MODE_PATTERN.match(message)
-        if match:
-            return Command(type=CommandType.MODE, args={"args_text": (match.group(1) or "").strip()}, raw_text=raw_text)
-
-        match = self.MODEL_PATTERN.match(message)
-        if match:
-            args_text = match.group(1).strip() if match.group(1) else ""
-            return Command(
-                type=CommandType.MODEL,
-                args={"args_text": args_text},
-                raw_text=raw_text,
-            )
-
-        match = self.ROOM_MODEL_PATTERN.match(message)
-        if match:
-            args_text = match.group(1).strip() if match.group(1) else ""
-            return Command(
-                type=CommandType.ROOM_MODEL,
-                args={"args_text": args_text},
-                raw_text=raw_text,
-            )
-
-        match = self.THREAD_MODE_PATTERN.match(message)
-        if match:
-            args_text = match.group(1).strip() if match.group(1) else ""
-            return Command(
-                type=CommandType.THREAD_MODE,
-                args={"args_text": args_text},
-                raw_text=raw_text,
-            )
-
-        match = self.REPLY_MODE_PATTERN.match(message)
-        if match:
-            return Command(
-                type=CommandType.REPLY_MODE,
-                args={"args_text": (match.group(1) or "").strip()},
-                raw_text=raw_text,
-            )
-
-        match = self.AUTO_APPROVE_PATTERN.match(message)
-        if match:
-            return Command(
-                type=CommandType.AUTO_APPROVE,
-                args={"args_text": (match.group(1) or "").strip()},
-                raw_text=raw_text,
-            )
-
-        match = self.ENCRYPT_PATTERN.match(message)
-        if match:
-            args_text = match.group(1).strip() if match.group(1) else ""
-            return Command(
-                type=CommandType.ENCRYPT,
-                args={"args_text": args_text},
-                raw_text=raw_text,
-            )
+        for pattern, command_type in self._ARGS_TEXT_COMMANDS:
+            if match := pattern.match(message):
+                return Command(type=command_type, args={"args_text": (match.group(1) or "").strip()}, raw_text=raw_text)
 
         if self.E2EE_PATTERN.match(message):
             return Command(type=CommandType.E2EE, args={}, raw_text=raw_text)
@@ -563,7 +544,7 @@ Usage: `/reply_mode [auto|mentions|reset|show]` - Show or switch whether agents 
 **Examples:**
 - `/reply_mode` or `/reply_mode show` - Show the reply mode this room uses
 - `/reply_mode mentions` - Answer only messages that mention an agent or team, and follow-ups in threads an agent or team already replied in or is still answering
-- `/reply_mode auto` - Also let the router or the room's only agent answer messages that mention no one
+- `/reply_mode auto` - Also let the agent or team that fits best, or the room's only one, answer messages that mention no one
 - `/reply_mode reset` - Remove the room override and use `rooms.<room>.reply_mode` from config.yaml again
 
 How it works:

@@ -660,7 +660,7 @@ async def test_repeated_cancel_preserves_async_cleanup_and_other_server_capacity
             super().__init__(name="calculator", tools=[self.work])
             self._requires_connect = True
 
-        async def connect(self) -> None:  # ty: ignore[invalid-method-override]
+        async def connect(self) -> None:  # ty: ignore[incompatible-method-override]
             pass
 
         async def work(self) -> str:
@@ -668,7 +668,7 @@ async def test_repeated_cancel_preserves_async_cleanup_and_other_server_capacity
             await asyncio.Event().wait()
             return "never"
 
-        async def close(self) -> None:  # ty: ignore[invalid-method-override]
+        async def close(self) -> None:  # ty: ignore[incompatible-method-override]
             nonlocal cleanup_cancelled
             close_started.set()
             try:
@@ -722,7 +722,7 @@ async def test_cancelled_native_cleanup_failure_is_safely_logged_and_releases_ca
             super().__init__(name="calculator", tools=[self.work])
             self._requires_connect = True
 
-        async def connect(self) -> None:  # ty: ignore[invalid-method-override]
+        async def connect(self) -> None:  # ty: ignore[incompatible-method-override]
             pass
 
         async def work(self) -> str:
@@ -730,7 +730,7 @@ async def test_cancelled_native_cleanup_failure_is_safely_logged_and_releases_ca
             await asyncio.Event().wait()
             return "never"
 
-        async def close(self) -> None:  # ty: ignore[invalid-method-override]
+        async def close(self) -> None:  # ty: ignore[incompatible-method-override]
             close_started.set()
             await close_release.wait()
             raise RuntimeError(provider_detail)

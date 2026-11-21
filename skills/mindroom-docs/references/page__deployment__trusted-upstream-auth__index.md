@@ -28,7 +28,7 @@ MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM=matrix_user_id
 | --- | --- |
 | `MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED` | Turns the mode on; default `false` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER` | Required; header carrying the JWT |
-| `MINDROOM_TRUSTED_UPSTREAM_JWKS_URL` | Required; the gateway's signing keys |
+| `MINDROOM_TRUSTED_UPSTREAM_JWKS_URL` | Required; the gateway's signing keys, at a URL that answers directly, since MindRoom refuses JWKS redirects |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE` | Required; expected `aud` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER` | Required; expected `iss` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM` | Claim holding the verified email; default `email` |

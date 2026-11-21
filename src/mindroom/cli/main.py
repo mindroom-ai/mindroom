@@ -417,7 +417,7 @@ def avatars_sync(
 ) -> None:
     """Sync room and root-space avatars to Matrix.
 
-    Uses the router account that `mindroom run` initialized.
+    Uses the owner account that `mindroom run` initialized.
     """
     from mindroom.error_handling import AvatarSyncError  # noqa: PLC0415
 

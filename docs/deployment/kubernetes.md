@@ -97,7 +97,7 @@ Optional features:
 
 ## Worker Backends
 
-Worker-routed tools such as `coding`, `docker`, `file`, `python`, and `shell` run in one of two backends.
+Worker-routed tools such as `docker`, `filesystem`, `python`, and `shell` run in one of two backends.
 Which tools are routed and how `worker_scope` shares workers are described in [Sandbox Proxy Isolation](sandbox-proxy.md).
 
 | Helm value | Behavior | Best for |

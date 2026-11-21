@@ -1085,6 +1085,39 @@ async def test_replaying_a_committed_edit_of_a_relayed_message_runs_no_hooks_aga
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("edited", ["$earlier:example.org", ORIGINAL_EVENT_ID, None])
+async def test_an_edit_of_a_message_of_a_routed_batch_regenerates_only_when_the_batch_is_that_message(
+    tmp_path: Path,
+    edited: str | None,
+) -> None:
+    """A route's responder answered one route, so an edit of one of several routed messages rewrites no answer.
+
+    The edited text is one message of the batch, and the turn keeps no text of the others to run again with.
+    A route of a single message regenerates from its edit, as a relayed message does.
+    """
+    route_event_id = "$route:example.org"
+    record = _turn_record(
+        source_event_ids=(route_event_id,),
+        discovery_event_ids=(ORIGINAL_EVENT_ID,) if edited is None else ("$earlier:example.org", ORIGINAL_EVENT_ID),
+        source_event_metadata={
+            route_event_id: SourceEventMetadata(sender=USER_ID, discovery_event_id=ORIGINAL_EVENT_ID),
+        },
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    event, event_info = _edit_event(original_event_id=edited or ORIGINAL_EVENT_ID, new_body="edited")
+
+    await _handle_edit(harness, event, event_info)
+
+    if edited is not None:
+        _assert_no_regeneration(harness)
+        harness.turn_store.register_edit_revision.assert_not_called()
+        return
+    harness.generate_response.assert_awaited_once()
+    assert harness.generate_response.await_args.args[0].prompt == "edited"
+    assert harness.turn_store.record_edit.call_args.args[0].source_event_prompts == {route_event_id: "edited"}
+
+
+@pytest.mark.asyncio
 async def test_hook_suppression_ignores_the_edit(tmp_path: Path) -> None:
     """An ingress hook that suppresses the edit leaves the turn and its answer as they were."""
     record = _turn_record()

@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING
 import nio
 from nio.api import RelationshipType
 
+from mindroom.constants import UNREADABLE_EDIT_NOTICE, UNREADABLE_SIDECAR_NOTICE
 from mindroom.event_journal import (
     HistoryRecoveryOutcome,
     HistoryRecoveryState,
@@ -75,7 +76,9 @@ from mindroom.matrix.legacy_media_edits import readable_legacy_file_edit
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar, without_sidecar_reference
 from mindroom.matrix.transport_progress import is_transport_progress_revision, is_unfinished_reply
+from mindroom.matrix_identifiers import has_agent_username
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
+from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Coroutine, Mapping, Sequence
@@ -157,9 +160,6 @@ _HYDRATION_EPOCH_ATTEMPTS = 3
 # is refused its root on every request: Tuwunel and Synapse answer 404
 # ``M_NOT_FOUND``, and ``M_FORBIDDEN`` is the other answer the spec allows.
 _HIDDEN_EVENT_ERRCODES = frozenset({"M_NOT_FOUND", "M_FORBIDDEN"})
-
-_UNREADABLE_SIDECAR_NOTICE = "[The rest of this message could not be loaded.]"
-_UNREADABLE_EDIT_NOTICE = "[A later edit of this message could not be read.]"
 
 # The Matrix message fields readers of a stored message use. An attachment holds
 # whatever its uploader wrote, and what it resolves to is stored with every
@@ -281,6 +281,9 @@ def _projected_from_event(room_id: str, event: nio.Event, *, self_sender: str) -
     """
     content = event.source.get("content")
     content = content if isinstance(content, dict) else {}
+    if has_agent_username(event.sender):
+        # A fetch stores what sync stores: an agent's reply with its tool markers in its text.
+        content = tool_markers_in_text(content)
     redacts = _redaction_target(event)
     if redacts is not None:
         return ProjectedEvent(
@@ -804,6 +807,7 @@ class ConversationHydrator:
     ) -> _Walk | None:
         """Walk one conversation and install it, returning the walk, or None if the current membership refused it."""
         epoch = await self.store.membership_epoch(room_id)
+        generation = await self.store.projection_generation(room_id)
         walk = (
             await self._fetch_thread(room_id, thread_id, edits_of=edits_of)
             if thread_id is not None
@@ -822,6 +826,7 @@ class ConversationHydrator:
             complete=walk.complete,
             attempted_policy_rank=self.policy,
             expected_membership_epoch=epoch,
+            expected_projection_generation=generation,
         )
         if not installed:
             # Membership moved while the fetch was in flight, so this view is of
@@ -859,7 +864,7 @@ class ConversationHydrator:
         missing key may never arrive, so refusing there would fail every read
         in the room for as long as the key stays missing -- an export of every
         thread included, not only the thread the event belongs to. A new
-        encrypted room routinely holds such an event: the router encrypts its
+        encrypted room routinely holds such an event: the owner account encrypts its
         welcome before it has seen the agent's device. Live sync admits an
         undecryptable event without failing any read either.
 
@@ -1082,7 +1087,7 @@ class ConversationHydrator:
                 # passing as unedited.
                 events[0] = replace(
                     root_projected,
-                    content=_with_notice(root_projected.content, _UNREADABLE_EDIT_NOTICE),
+                    content=_with_notice(root_projected.content, UNREADABLE_EDIT_NOTICE),
                 )
         missed_edits = await self._fetch_missed_edits(
             room_id,
@@ -1534,7 +1539,7 @@ class ConversationHydrator:
                 room_id=request.room_id,
                 logical_event_id=request.logical_event_id,
             )
-            content = _with_notice(content, _UNREADABLE_EDIT_NOTICE)
+            content = _with_notice(content, UNREADABLE_EDIT_NOTICE)
         elif (
             relations.ceiling_reached
             and revision.event_id == request.logical_event_id
@@ -1546,7 +1551,7 @@ class ConversationHydrator:
             # sender's surviving edits past the ceiling with edits of their
             # own. The original gets the same notice rather than passing as
             # unedited, and the debt still settles: another walk stops there too.
-            content = _with_notice(content, _UNREADABLE_EDIT_NOTICE)
+            content = _with_notice(content, UNREADABLE_EDIT_NOTICE)
         return await self.store.install_refetched_revision(
             request,
             revision_event_id=revision.event_id,
@@ -1599,7 +1604,7 @@ class ConversationHydrator:
             "conversation_refresh_sidecar_unresolved",
             event_id=event_id,
         )
-        return _with_notice(without_sidecar_reference(content), _UNREADABLE_SIDECAR_NOTICE)
+        return _with_notice(without_sidecar_reference(content), UNREADABLE_SIDECAR_NOTICE)
 
     async def resolve_refreshes(self, requests: Sequence[RefreshRequest]) -> None:
         """Repair exactly the messages one read found missing.

@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.approval.response import continuation_target
 from mindroom.config.agent import TeamConfig
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.session_context import ScopeSessionContext
@@ -41,7 +40,6 @@ from mindroom.tool_jobs.follow_ups import (
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from tests.approval_continuation_helpers import approval_continuation
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     make_turn_context,
@@ -922,19 +920,3 @@ async def test_a_ready_result_at_the_boundary_does_not_continue_the_turn(tmp_pat
         bot.admit_job_follow_up.assert_awaited_once()
     finally:
         await runtime.shutdown()
-
-
-@pytest.mark.parametrize("follow_up", [False, True])
-async def test_a_follow_ups_resumed_approval_replies_to_no_event(*, follow_up: bool) -> None:
-    """A follow-up is a runtime source, not a Matrix event, so its reply after an approval replies to nothing."""
-    source = "job-follow-up:!room:localhost:abc:0" if follow_up else "$source"
-    key = ConversationKey("general", "!room:localhost", "$thread", "@user:localhost", silent=False)
-    origin = (
-        follow_up_envelope(key, follow_up_id=source, sender_id="@mindroom_general:localhost", prompt="").origin
-        if follow_up
-        else message_origin(sender_id="@user:localhost")
-    )
-    continuation = approval_continuation(origin=origin, sources=ResponseSources((source,), (source,)))
-    assert continuation_target(continuation, reply_to_event_id=source).reply_to_event_id == (
-        None if follow_up else source
-    )

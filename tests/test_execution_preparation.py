@@ -486,6 +486,38 @@ async def test_interactive_selection_keeps_context_after_question(
         assert "$selection" not in prompt
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persisted_replay", [True, False], ids=["persisted", "fallback"])
+async def test_the_messages_a_prompt_already_holds_are_no_history_beside_it(persisted_replay: bool) -> None:
+    """A route's prompt holds every message it names, so the thread's copy of each is left out of the context."""
+
+    async def prepare_scope_history(_provisional: TurnMessages) -> PreparedScopeHistory:
+        scope = _prepared_scope_with_persisted_replay()
+        return scope if persisted_replay else replace(scope, session=None)
+
+    prepared = await _prepare_common(
+        prepare_scope_history,
+        replace(make_turn_context(reply_to_event_id="$question"), prompt_source_event_ids=("$voice", "$question")),
+        scope_context=None,
+        prompt="The release date is Thursday.\n\nWhat day did I say?",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="Planning the release", event_id="$root"),
+            make_visible_message(sender="@alice:localhost", body="recording.ogg", event_id="$voice"),
+            make_visible_message(sender="@alice:localhost", body="What day did I say?", event_id="$question"),
+        ],
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        current_event_id="$question",
+        config=_config(),
+        timezone="UTC",
+    )
+
+    rendered = render_prepared_messages_text(prepared.turn.in_request_order())
+    assert "Planning the release" in rendered
+    assert "recording.ogg" not in rendered
+    assert rendered.count("What day did I say?") == 1
+
+
 def test_scheduled_limit_zero_disables_replay_plan() -> None:
     """A zero limit disables persisted replay entirely for the scheduled turn."""
     prepared = PreparedHistoryState(

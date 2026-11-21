@@ -26,7 +26,7 @@ from mindroom.token_counting import families
 from mindroom.token_counting.counts import count
 from mindroom.token_counting.families import counter_for_model
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
-from tests.fakes.token_counter import fake_token_counter, quarter_tokens
+from tests.fakes.token_counter import fake_token_counter
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -59,10 +59,6 @@ def _setup(tmp_path: Path, **settings: object) -> tuple[Config, PromptCurationAu
     (root / "memory").mkdir()
     (root / "memory" / "2026-10-01.md").write_text("Daily note.\n", encoding="utf-8")
     return config, automation, root
-
-
-# MEMORY.md's tokens as the preload's cap counts them, each line with its newline.
-_PRELOAD_TOKENS = sum(quarter_tokens(f"{line}\n") for line in MEMORY.splitlines())
 
 
 def _plan(tmp_path: Path, **settings: object) -> tuple[_CurationPlan, Config, Path]:
@@ -167,52 +163,34 @@ def test_the_band_is_the_configured_reductions_of_the_measured_size(tmp_path: Pa
     assert (plan.upper_tokens, plan.floor_tokens) == (1034, 969)
 
 
-def test_memory_past_the_preload_line_cap_asks_for_a_cut_under_the_token_trigger(tmp_path: Path) -> None:
-    """Lines past memory.file.max_entrypoint_lines never reach the prompt, so they trigger a pass on their own."""
+def test_memory_past_its_preload_limit_asks_for_a_cut_under_the_token_trigger(tmp_path: Path) -> None:
+    """The end of a file over max_preload_file_chars never reaches the prompt, so it triggers a pass on its own."""
     config, automation, root = _setup(tmp_path, trigger_tokens=10_000)
-    config.memory.file.max_entrypoint_lines = 17
+    config.defaults.max_preload_file_chars = len(MEMORY)
     assert _plan_curation(config, root, "mind", automation, fake_token_counter()) is None
-    config.memory.file.max_entrypoint_lines = 16
+    config.defaults.max_preload_file_chars = len(MEMORY) - 1
 
     plan = _plan_curation(config, root, "mind", automation, fake_token_counter())
 
     assert plan is not None
-    assert (plan.measured_tokens, plan.memory_lines) == (1292, 17)
+    assert (plan.measured_tokens, plan.over_limit) == (1292, ("MEMORY.md",))
     assert (plan.upper_tokens, plan.floor_tokens) == (1163, 1098)
     prompt = _curation_prompt(config, plan)
-    assert (
-        f"total 1292 tokens (limit 10000), and MEMORY.md has 17 lines and {_PRELOAD_TOKENS} tokens (preload limits 16 lines"
-        in prompt
-    )
-    assert "If MEMORY.md is over either preload limit" in prompt
+    limit = len(MEMORY) - 1
+    assert f"up to its first {limit} characters; files over that limit: MEMORY.md." in prompt
+    assert f"If a file is over the {limit}-character limit, take content out of it first" in prompt
 
 
-def test_memory_past_the_preload_token_cap_asks_for_a_cut_under_the_token_trigger(tmp_path: Path) -> None:
-    """Whatever the preload withholds triggers a pass, including lines past memory.file.max_entrypoint_tokens."""
+def test_a_context_file_past_its_preload_limit_asks_for_a_cut(tmp_path: Path) -> None:
+    """Every preloaded file has the same limit, so a context file over it triggers a pass too."""
     config, automation, root = _setup(tmp_path, trigger_tokens=10_000)
-    config.memory.file.max_entrypoint_tokens = 2_000
-    assert _plan_curation(config, root, "mind", automation, fake_token_counter()) is None
-    config.memory.file.max_entrypoint_tokens = 1_000
+    config.defaults.max_preload_file_chars = len(SOUL) - 2
 
     plan = _plan_curation(config, root, "mind", automation, fake_token_counter())
 
     assert plan is not None
-    assert plan.measured_tokens == 1292
-    prompt = _curation_prompt(config, plan)
-    assert f"MEMORY.md has 17 lines and {_PRELOAD_TOKENS} tokens (preload limits 200 lines and 1000 tokens;" in prompt
-    assert "If MEMORY.md is over either preload limit, take lines out of it first" in prompt
-
-
-def test_the_prompt_shows_memory_on_the_basis_the_preload_judges_it(tmp_path: Path) -> None:
-    """MEMORY.md's tokens in the prompt are counted line by line, as the preload's token cap counts them."""
-    config, automation, root = _setup(tmp_path)
-    counter = TokenCounter(estimate=lambda text: len(text) // 4 + 1)
-    plan = _plan_curation(config, root, "mind", automation, counter)
-
-    assert plan is not None
-    per_line = sum(len(f"{line}\n") // 4 + 1 for line in MEMORY.splitlines())
-    assert per_line > counter.estimate(MEMORY)
-    assert f"MEMORY.md has 17 lines and {per_line} tokens" in _curation_prompt(config, plan)
+    assert plan.over_limit == ("MEMORY.md", "SOUL.md")
+    assert "files over that limit: MEMORY.md, SOUL.md." in _curation_prompt(config, plan)
 
 
 def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) -> None:
@@ -222,8 +200,8 @@ def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) ->
     prompt = _curation_prompt(config, plan)
 
     assert (
-        f"total 1292 tokens (limit 1000), and MEMORY.md has 17 lines and {_PRELOAD_TOKENS} tokens (preload limits 200 lines"
-        in prompt
+        "total 1292 tokens (limit 1000). Each reaches your prompt only up to its first 30000 characters; "
+        "files over that limit: none." in prompt
     )
     assert "MEMORY.md (1286 tokens), SOUL.md (4 tokens), USER.md (2 tokens)" in prompt
     assert "at most 1163 tokens in total, but not below 1098" in prompt
@@ -269,18 +247,24 @@ def test_moving_a_section_into_memory_within_bounds_is_accepted(tmp_path: Path) 
 @pytest.mark.parametrize(
     ("pointer", "findings"),
     [
-        (POINTER, ("MEMORY.md still has 17 lines, more than the 16 that reach your prompt",)),
-        ("## Topic 3: see memory/topics.md\n", ()),
+        (POINTER, ()),
+        (
+            "## Topic 3\n" + "z" * (len(SECTIONS[3]) - 12) + "\n",
+            (
+                "the files did not shrink (1292 tokens)",
+                "MEMORY.md is over the 1000-character prompt limit and did not get shorter",
+            ),
+        ),
     ],
 )
-def test_a_pass_over_the_line_cap_must_take_lines_out_of_memory(
+def test_a_pass_over_the_preload_limit_must_shorten_the_file(
     tmp_path: Path,
     pointer: str,
     findings: tuple[str, ...],
 ) -> None:
-    """A cut within the token bounds that keeps every MEMORY.md line leaves the same lines out of the prompt."""
+    """A pass that leaves a file over its limit as long as it was keeps the same text out of the prompt."""
     config, automation, root = _setup(tmp_path, trigger_tokens=10_000)
-    config.memory.file.max_entrypoint_lines = 16
+    config.defaults.max_preload_file_chars = 1000
     plan = _plan_curation(config, root, "mind", automation, fake_token_counter())
     assert plan is not None
     (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")

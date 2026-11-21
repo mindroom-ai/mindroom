@@ -229,6 +229,7 @@ def test_current_google_and_openrouter_specialist_models() -> None:
     assert model_defaults.GOOGLE_VEO == "veo-3.1-generate-001"
     assert model_defaults.GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
         "gemini-4-carbon",
+        "gemini-4-neon",
         "gemini-4-argon",
         "gemini-4-hydrogen",
         "gemini-3.8-flash",
@@ -253,11 +254,8 @@ def test_current_google_and_openrouter_specialist_models() -> None:
         "google/gemini-4-hydrogen",
         1_048_576,
     )
-    assert openrouter_alternatives["gemini_lite"] == model_defaults.ModelPreset(
-        "openrouter",
-        "google/gemini-3.5-flash-lite",
-        1_048_576,
-    )
+    assert "gemini_lite" not in openrouter_alternatives
+    assert "gemini_lite" not in model_defaults.SAAS_MODEL_PRESETS
     assert openrouter_alternatives["kimi"] == model_defaults.ModelPreset(
         "openrouter",
         "moonshotai/kimi-k3.1-pro",

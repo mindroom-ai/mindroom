@@ -7,6 +7,7 @@ agent for that caller resolves.
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.plugin_http import AgentWorkspace, RoomReader, require_room_reader
 from mindroom.runtime_resolution import ResolvedAgentRuntime, resolve_agent_runtime
+from mindroom.tool_system.catalog import ToolConfigOverrideError, get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import build_tool_execution_identity, normal_worker_key
 from tests.access_schema_support import joined_members_response
@@ -55,11 +57,10 @@ CAROL = "@carol:localhost"
 DAVE = "@dave:localhost"
 # Bob's power level keeps him from posting; Alice and Carol may post.
 POWER_LEVELS = {"users": {ALICE: 100, CAROL: 10}, "events_default": 10}
-READ_ONLY_FILE = {"file": {"enable_save_file": False, "enable_replace_file_chunk": False}}
+READ_ONLY_FILE = {"file": {"exclude_tools": ["write_file", "edit_file"]}}
 # The functions of each built-in toolkit that change the workspace's files, by writing them or by running code there.
 WRITING_FUNCTIONS = {
-    "file": ("save_file", "replace_file_chunk"),
-    "coding": ("write_file", "edit_file"),
+    "filesystem": ("write_file", "edit_file"),
     "python": (
         "run_python_code",
         "save_to_file_and_run",
@@ -103,6 +104,7 @@ class _Room:
         self.ids = {name: matrix_id.full_id for name, matrix_id in entity_ids(config, paths).items()}
         members = [ALICE, BOB, CAROL, self.ids[ROUTER_AGENT_NAME], *(self.ids[name] for name in joined)]
         self.client = SimpleNamespace(
+            user_id=self.ids[ROUTER_AGENT_NAME],
             rooms={ROOM: nio.MatrixRoom(ROOM, self.ids[ROUTER_AGENT_NAME])},
             joined_members=AsyncMock(return_value=joined_members_response(ROOM, *members)),
             joined_rooms=AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])),
@@ -126,9 +128,11 @@ class _Room:
             config_lifecycle.ApiSnapshot(1, self.paths, runtime_config=self.config),
         )
         bind_embedded_runtime(self.app, self.runtime.embedded_runtime())
-        # Another running bot in the room answers room reads while the router is down.
-        bots = {ROUTER_AGENT_NAME: self.router, "other": SimpleNamespace(client=self.client, running=True)}
-        bind_room_members(self.app, bots)  # type: ignore[arg-type]
+        # Another running bot in the room answers room reads while the router is down; each agent's own bot runs too.
+        self.other = SimpleNamespace(client=self.client, running=True, config=config)
+        self.bots = {ROUTER_AGENT_NAME: self.router, "other": self.other}
+        bind_room_members(self.app, self.bots)  # type: ignore[arg-type]
+        self.apply(config)
 
     def serve(self, config: Config) -> None:
         """Serve ``config`` from the API, as a config save does."""
@@ -137,7 +141,11 @@ class _Room:
 
     def apply(self, config: Config) -> None:
         """Run ``config`` in the runtime, as a reload does once the API serves it."""
-        self.runtime.config = self.router.config = config
+        self.runtime.config = config
+        for name in config.agents:
+            self.bots.setdefault(name, SimpleNamespace(client=self.client, running=True))
+        for bot in self.bots.values():
+            bot.config = config
 
     def refreshes(self) -> int:
         """How many grant refreshes the router's client has served."""
@@ -175,7 +183,8 @@ def _room(
     **env: str,
 ) -> _Room:
     """A room with ``agents``, all of them joined unless ``joined`` names some, under a runtime ``env`` changes."""
-    return _Room(Config(agents=agents), _paths(tmp_path, **env), joined or tuple(agents))
+    config = Config(agents=agents, server_emoji={"enabled": True})
+    return _Room(config, _paths(tmp_path, **env), joined or tuple(agents))
 
 
 async def _status(read: Awaitable[object]) -> tuple[int, object]:
@@ -303,9 +312,10 @@ async def test_agent_refuses_a_user_that_is_no_current_agent(tmp_path: Path) -> 
 @pytest.mark.parametrize(
     ("tools", "files"),
     [
-        ([{"file": {"enable_save_file": False}}], "write"),
-        ([{"file": {"all": True, **READ_ONLY_FILE["file"]}}], "write"),
+        ([{"file": {"exclude_tools": ["write_file"]}}], "write"),
         ([{"file": {"enable_delete_file": True, **READ_ONLY_FILE["file"]}}], "read"),
+        ([{"filesystem": {"enable_delete_file": True, "include_tools": ["delete_file"]}}], "read"),
+        ([{"file": READ_ONLY_FILE["file"]}], "read"),
         ([{"file": {"include_tools": ["delete_file"]}}], "none"),
         ([{"coding": {"include_tools": ["read_file", "grep"]}}], "read"),
         ([{"python": {"include_tools": ["read_file", "list_files"]}}], "read"),
@@ -538,11 +548,55 @@ async def test_a_setting_saved_on_the_dashboard_counts_like_an_authored_one(tmp_
     assert _access(await room.agents(ALICE)) == [("helper", "write", "none")]
 
     get_runtime_credentials_manager(room.paths).save_credentials(
-        "file",
-        {"exclude_tools": "save_file, replace_file_chunk"},
+        "filesystem",
+        {"exclude_tools": "write_file, edit_file"},
     )
 
     assert _access(await room.agents(ALICE)) == [("helper", "read", "none")]
+
+
+@pytest.mark.parametrize("service", ["file", "coding"])
+@pytest.mark.asyncio
+async def test_settings_stored_under_an_old_name_stop_the_toolkit_and_its_workspace_grant(
+    tmp_path: Path,
+    service: str,
+) -> None:
+    """A dashboard document saved for file or coding is never guessed at: no toolkit and no grant until it is moved."""
+    room = _room(tmp_path, {"helper": AgentConfig(display_name="Helper", tools=[service], access={"users": [ALICE]})})
+    manager = get_runtime_credentials_manager(room.paths)
+    manager.save_credentials(service, {"_source": "ui"})
+    assert _access(await room.agents(ALICE)) == [("helper", "write", "none")]
+
+    manager.save_credentials(service, {"_source": "ui", "exclude_tools": ["write_file", "edit_file"]})
+
+    assert _access(await room.agents(ALICE)) == []
+    message = f"under '{service}'.*delete them, and save any you still want under 'filesystem'"
+    with pytest.raises(ToolConfigOverrideError, match=message):
+        await room.agent(ALICE, room.ids["helper"])
+    with pytest.raises(ToolConfigOverrideError, match=message):
+        get_tool_by_name("filesystem", room.paths, tools=builtin_tool_registry(), worker_target=None)
+
+
+@pytest.mark.parametrize(
+    ("stored", "replacement"),
+    [
+        ({"enable_save_file": False}, "exclude_tools: [write_file]"),
+        ({"exclude_tools": ["save_file", "replace_file_chunk"]}, "exclude_tools: [write_file]"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_old_settings_copied_under_filesystem_stop_the_toolkit_and_its_workspace_grant(
+    tmp_path: Path,
+    stored: dict[str, object],
+    replacement: str,
+) -> None:
+    """An old document saved again as it was would be ignored, so it fails like the same settings in the config."""
+    room = _room(tmp_path, {"helper": AgentConfig(display_name="Helper", tools=["file"], access={"users": [ALICE]})})
+    get_runtime_credentials_manager(room.paths).save_credentials("filesystem", {"_source": "ui", **stored})
+
+    assert _access(await room.agents(ALICE)) == []
+    with pytest.raises(ToolConfigOverrideError, match=re.escape(replacement)):
+        get_tool_by_name("filesystem", room.paths, tools=builtin_tool_registry(), worker_target=None)
 
 
 @pytest.mark.asyncio
@@ -611,8 +665,8 @@ def _broken(room: _Room, kind: str) -> str:
         # A grant room MindRoom has not created stays unresolved.
         agents["broken"] = AgentConfig(display_name="Broken", tools=["file"], access={"members_of_rooms": ["lobby"]})
     else:
-        agents["broken"] = AgentConfig(display_name="Broken", tools=["coding"], access={"users": [ALICE]})
-        get_runtime_credentials_manager(room.paths).save_credentials("coding", {"exclude_tools": 5})
+        agents["broken"] = AgentConfig(display_name="Broken", tools=["python"], access={"users": [ALICE]})
+        get_runtime_credentials_manager(room.paths).save_credentials("python", {"exclude_tools": 5})
     config = Config(agents=agents, rooms={"lobby": {}})
     ids = entity_ids(config, room.paths)
     room.ids["broken"] = ids["broken"].full_id
@@ -690,12 +744,37 @@ async def test_a_config_save_that_removes_access_shows_on_the_next_request(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_a_room_without_a_running_router_answers_503(tmp_path: Path) -> None:
-    """The access check refreshes grants through the router, so without it nobody is admitted or refused."""
+async def test_agent_access_answers_without_the_owner_account_and_503_without_any_bot(tmp_path: Path) -> None:
+    """Any running bot serves the access check; with none running nobody is admitted or refused."""
     room = _room(tmp_path, _agents())
+    reader = await room._reader(ALICE)
+    listed = [agent.name for agent in await reader.agents()]
     room.router.running = False
+    assert [agent.name for agent in await reader.agents()] == listed != []
 
-    assert await _status(room.agents(ALICE)) == (503, "Agent access is unavailable; try again.")
+    for bot in room.bots.values():
+        bot.running = False
+    assert await _status(reader.agents()) == (503, "Agent access is unavailable; try again.")
+
+
+@pytest.mark.asyncio
+async def test_an_agent_opens_no_workspace_before_or_without_its_own_running_bot(tmp_path: Path) -> None:
+    """A saved grant opens nothing until the agent's own bot runs it; a stopped agent opens nothing while others run."""
+    room = _room(tmp_path, _agents())
+    agents = _agents()
+    agents["coder"].access = ResponderAccessConfig(users=[ALICE, BOB, CAROL])
+    saved = Config(agents=agents)
+    room.serve(saved)
+
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["notes"]
+    assert await _status(room.agent(CAROL, room.ids["coder"])) == (503, "Agent access is unavailable; try again.")
+
+    room.apply(saved)
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["coder", "notes"]
+
+    room.bots["coder"].running = False
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["notes"]
+    assert await _status(room.agent(CAROL, room.ids["coder"])) == (503, "Agent access is unavailable; try again.")
 
 
 @pytest.mark.asyncio
@@ -880,3 +959,24 @@ async def test_a_refresh_a_request_starts_while_the_router_backs_off_runs_the_ru
     assert room.refreshes() == 2
     assert not room.runtime.agent_reply_memberships.needs_refresh(room.config)
     assert sorted(room.router.follow_ups) == ["invites", "reconcile_calls", "revoke_calls", "turns"]
+
+
+@pytest.mark.asyncio
+async def test_a_bot_replaced_while_power_is_read_decides_by_its_replacement(tmp_path: Path) -> None:
+    """A replacement bot that denies the requester while the room's power is read opens no workspace."""
+    agents = _agents()
+    agents["coder"].access = ResponderAccessConfig(users=[ALICE, BOB, CAROL])
+    room = _room(tmp_path, agents)
+    denying = _agents()
+    denying["coder"].access = ResponderAccessConfig(users=[ALICE, BOB])
+    read_power = room.client.room_get_state.side_effect
+
+    async def power_while_replaced(*args: object, **kwargs: object) -> object:
+        room.bots["coder"] = SimpleNamespace(client=room.client, running=True, config=Config(agents=denying))
+        return room.client.room_get_state.return_value if read_power is None else await read_power(*args, **kwargs)
+
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["coder", "notes"]
+    room.client.room_get_state.side_effect = power_while_replaced
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["notes"]
+    room.bots["coder"].config = room.config
+    assert await _status(room.agent(CAROL, room.ids["coder"])) == (503, "Agent access is unavailable; try again.")

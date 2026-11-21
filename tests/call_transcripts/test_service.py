@@ -105,7 +105,7 @@ class FakeRoom:
         if self.on_read is not None:
             self.on_read()
 
-    def router_joined(self, room_id: str) -> bool | None:
+    def poster_joined(self, room_id: str) -> bool | None:
         """Answer from ``router_in_room`` while the router is ready."""
         del room_id
         return self.router_in_room if self.ready else None
@@ -128,7 +128,7 @@ class FakeRoom:
             return None
         return {user_id: self.names.get(user_id) for user_id in user_ids}
 
-    async def router_may_post(self, room_id: str) -> bool | None:
+    async def poster_may_post(self, room_id: str) -> bool | None:
         """Answer from ``router_posts``, or not at all while the room is unreadable or the router is away."""
         del room_id
         return self.router_posts if self.readable and self.ready else None
@@ -1460,7 +1460,7 @@ async def test_a_router_that_may_never_post_sends_nothing_and_gives_up_the_messa
     stored = world.store.call(call.id)
     assert stored is not None
     assert (stored.transcript_done_at, stored.transcript_event_id) == (START + 65, None)
-    assert [log["reason"] for log in logs if log["event"] == "call_transcript_given_up"] == ["router-may-not-post"]
+    assert [log["reason"] for log in logs if log["event"] == "call_transcript_given_up"] == ["poster-may-not-post"]
 
 
 @pytest.mark.asyncio
@@ -1486,7 +1486,7 @@ async def test_a_router_that_may_no_longer_post_by_the_end_sends_no_edit_and_giv
     stored = world.store.call(call.id)
     assert stored is not None
     assert (stored.transcript_done_at, stored.transcript_event_id, stored.row_edit) == (START + 65, None, None)
-    assert [log["reason"] for log in logs if log["event"] == "call_transcript_given_up"] == ["router-may-not-post"]
+    assert [log["reason"] for log in logs if log["event"] == "call_transcript_given_up"] == ["poster-may-not-post"]
 
 
 @pytest.mark.asyncio

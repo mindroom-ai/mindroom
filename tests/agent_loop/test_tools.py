@@ -21,6 +21,7 @@ from mindroom.agent_loop.tools import (
     _PROGRESS_FLUSH_SECONDS,
     MAX_CONSECUTIVE_TOOL_FAILURES,
     MEDIA_FOLLOW_UP_TEXT,
+    NO_OUTPUT_TEXT,
     PreparedTools,
     RefusedCall,
     ToolBatch,
@@ -391,6 +392,26 @@ def _planned(functions: dict, *calls: object) -> list[PlannedCall]:
         entity="code",
         failing_tools={},
     ).planned
+
+
+@pytest.mark.asyncio
+async def test_a_success_without_text_is_stored_saying_so() -> None:
+    """An empty success says it had no text output, and a failure keeps its own text."""
+
+    def quiet() -> str:
+        """Return nothing."""
+        return ""
+
+    def picture() -> ToolResult:
+        """Return only a picture."""
+        return ToolResult(content="", images=[AgnoImage(content=b"a", format="png")])
+
+    functions = spec(ScriptedModel([]), toolkit(quiet, picture, boom)).functions
+    results = await _dispatch(_planned(functions, tool_call("quiet", "c1"), tool_call("picture", "c2")))
+    failed = await _dispatch(_planned(functions, tool_call("boom", "c3", reason="")))
+
+    assert sorted((m.tool_call_id, m.content) for m in results) == [("c1", NO_OUTPUT_TEXT), ("c2", NO_OUTPUT_TEXT)]
+    assert [(m.tool_call_error, m.content) for m in failed] == [(True, "RuntimeError")]
 
 
 @pytest.mark.asyncio

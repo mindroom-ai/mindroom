@@ -16,10 +16,10 @@ from mindroom.requester_identity import is_managed_entity_id
 from mindroom.thread_summary import schedule
 from mindroom.thread_summary.generation import (
     GeneratedSummary,
-    clamp_generated_title,
     generate_summary,
     resolve_thread_summary_model_name,
     room_summary_instructions,
+    title_error,
 )
 from mindroom.thread_summary.notices import (
     ThreadSummaryWriteError,
@@ -71,7 +71,7 @@ _FORKED_TITLE_SUFFIX = " (forked)"
 def _keepable_title(title: str | None, *, retitle: bool) -> str | None:
     """Return the title a check may keep: one within the short-title rule, never for a retitle."""
     base = (title or "").removesuffix(_FORKED_TITLE_SUFFIX)
-    return title if base and not retitle and clamp_generated_title(base) == base else None
+    return title if base and not retitle and title_error(base) is None else None
 
 
 def _title_key(title: str) -> str:
@@ -86,7 +86,7 @@ def _title_to_deliver(
     history: Sequence[ResolvedVisibleMessage],
     thread_id: str,
 ) -> str:
-    """Return ``current`` when the model kept it, by its answer or an echo escaped or not, else the new title cut."""
+    """Return ``current`` when the model kept it, by its answer or an echo escaped or not, else the new title."""
     echoes = {_title_key(generated.summary), _title_key(unescape(generated.summary))}
     if current is not None and (generated.keep_current or _title_key(current) in echoes):
         return current
@@ -94,12 +94,12 @@ def _title_to_deliver(
 
 
 def _publishable_title(title: str, history: Sequence[ResolvedVisibleMessage], thread_id: str) -> str:
-    """Return a new title normalized and cut to the short-title limits, marked once as a fork's when it is one."""
+    """Return a new title normalized, marked once as a fork's when it is one."""
     base = normalize_thread_summary_text(title)
     if not base or fork_parent_thread_id(history, thread_id) is None:
-        return clamp_generated_title(base)
+        return base
     # The marker is outside the limits, and a fork of a fork stays "X (forked)".
-    return f"{clamp_generated_title(base.removesuffix(_FORKED_TITLE_SUFFIX))}{_FORKED_TITLE_SUFFIX}"
+    return f"{base.removesuffix(_FORKED_TITLE_SUFFIX)}{_FORKED_TITLE_SUFFIX}"
 
 
 async def _provisional_title(
@@ -113,10 +113,11 @@ async def _provisional_title(
     model_name: str,
     room_instructions: Callable[[], Awaitable[str | None]],
 ) -> str | None:
-    """Return a new thread's first title: a fork's parent's current title without a model, else its prompt's, if any."""
+    """Return a new thread's first title: a fork's parent's short title without a model, else its prompt's, if any."""
     parent_thread_id = fork_parent_thread_id(history, thread_id)
     parent_state = None if parent_thread_id is None else await parent_summary(parent_thread_id)
-    title = None if parent_state is None else parent_state.summary
+    # A parent title over the short-title limits, such as a long pin, is not copied: the fork titles its prompt.
+    title = None if parent_state is None else _keepable_title(parent_state.summary, retitle=False)
     if title is None:
         if prompt_message is None:
             return None
@@ -428,7 +429,7 @@ async def _untitled_prompt(
     )
     if state is None or state.summary_event_ids:
         return None
-    # The router's voice echo and routing relay, and a responder's reply
+    # A voice transcript echo and an old routing relay, and a responder's reply
     # placeholder, can land before a read; none is a second prompt.
     ordinary = [
         message
@@ -460,6 +461,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
     *,
     prompt_event_ids: Collection[str],
     prompt: str | None,
+    prompt_as_shown: bool = False,
     conversation_reader: ConversationReader,
     entity_name: str,
     membership_index: AgentReplyMembershipIndex,
@@ -467,6 +469,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
     """Title a new thread from its first turn's messages without advancing the post-reply schedule.
 
     ``prompt`` is None for a batch of messages starting a fork: only the parent's title can title it then.
+    It is None too with ``prompt_as_shown``, for a routed prompt whose turn holds no text: the thread's own shows it.
     """
     baselines = schedule.THREAD_SUMMARY_BASELINES
     if (prompt is not None and not prompt.strip()) or not baselines.claim_provisional_title(room_id, thread_id):
@@ -509,13 +512,16 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 runtime_paths=runtime_paths,
                 trusted_sender_ids=trusted_sender_ids,
                 authorize_human=authorize_human,
-                sole=prompt is not None,
+                sole=prompt is not None or prompt_as_shown,
             )
             if (prompt_message := await untitled_prompt(history)) is None:
                 return
+            # A routed turn holds no text: it is titled from each of its messages as the thread shows it.
+            shown = "\n".join(message.body for message in history if message.event_id in prompt_event_ids)
+            body = shown if prompt_as_shown else prompt
             model_name = resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name)
             title = await _provisional_title(
-                None if prompt is None else replace(prompt_message, body=prompt),
+                replace(prompt_message, body=body) if body is not None else None,
                 history,
                 thread_id,
                 parent_summary=partial(

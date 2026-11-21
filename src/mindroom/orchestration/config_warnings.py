@@ -29,6 +29,8 @@ def warn_about_config_risks(config: Config, runtime_paths: RuntimePaths) -> None
     warn_about_foreign_homeserver_authorities(config, runtime_paths)
     _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config, runtime_paths)
     _warn_about_agent_keys_with_only_primary_python(config, runtime_paths)
+    if "accept_invites" in config.router.model_fields_set:
+        logger.warning("router.accept_invites is deprecated and ignored: the MindRoom owner account accepts no invites")
 
 
 def _primary_tool_is_unconfined(

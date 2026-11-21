@@ -109,6 +109,7 @@ class InactiveUserService:
 
     name: str
     reason: InactiveReason
+    oauth_provider: str | None = None  # The login it names, its own or its preset's, read without validating it.
 
 
 class UserServiceConflictError(Exception):
@@ -179,7 +180,9 @@ def inactive_user_services(
                 reason = "invalid"
             else:
                 continue
-        inactive.append(InactiveUserService(name=name, reason=reason))
+        named = authored if isinstance(authored, dict) else {}
+        provider = named.get("oauth_provider", EGRESS_PRESETS.get(str(named.get("preset")), {}).get("oauth_provider"))
+        inactive.append(InactiveUserService(name, reason, provider if isinstance(provider, str) else None))
     return inactive
 
 

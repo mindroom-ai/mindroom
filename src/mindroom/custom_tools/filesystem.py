@@ -1,13 +1,7 @@
-"""Ergonomic coding tools for LLM agents.
+"""The filesystem tools for LLM agents, which the ``file`` and ``coding`` tool names also select.
 
-Provides file read/write/edit, grep, find, and ls operations with
-smart truncation, fuzzy matching, and actionable pagination hints.
-
-Unlike the generic ``file`` tool (agno's FileTools), this toolkit is
-optimised for coding agents: line-numbered reads with pagination,
-search-and-replace edits (several per call) with fuzzy matching, ripgrep-backed grep,
-and gitignore-aware file discovery. Prefer this tool over ``file`` for
-coding-heavy agents; keep ``file`` for backward compatibility.
+Line-numbered reads with pagination, search-and-replace edits (several per call) with fuzzy matching,
+ripgrep-backed grep, gitignore-aware file discovery, and an opt-in delete.
 """
 
 from __future__ import annotations
@@ -20,9 +14,11 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
+import time
 import unicodedata
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass
 from glob import has_magic
 from pathlib import Path
@@ -33,12 +29,15 @@ from pydantic import BaseModel, ConfigDict, Field, SkipValidation, TypeAdapter, 
 
 from mindroom.file_locks import wait_for_exclusive_lock
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
+from mindroom.llm.media import named_mime_type
+from mindroom.media_delivery import SUPPORTED_IMAGE_FORMATS
 from mindroom.path_confinement import is_git_metadata_path
 from mindroom.path_safety import (
     blocked_git_metadata_message,
     format_path_for_output,
     is_within_base_dir,
     read_resolved_file,
+    remove_resolved_path,
     resolve_base_dir_path,
     resolve_tool_base_dir,
     spelled_output_path,
@@ -49,7 +48,7 @@ from mindroom.shared_directories.tool_roots import no_shared_directory_roots, sh
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator, Iterable, Iterator
 
     from mindroom.config.models import FileAccess
     from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
@@ -58,6 +57,8 @@ _MAX_LINES = 2000
 _MAX_BYTES = 50 * 1024  # 50KB
 _MAX_LINE_CHARS = 500  # Per-line truncation for grep output
 _DEFAULT_GREP_LIMIT = 100
+_GREP_TIMEOUT_SECONDS = 30.0
+_CONFINED_COPY = "confined"
 _DEFAULT_FIND_LIMIT = 1000
 _DEFAULT_LS_LIMIT = 500
 _MAX_HINT_CHARS = 200
@@ -69,6 +70,16 @@ _OMITTED: Any = cast("Any", object())
 _WORKER_LOCK_TIMEOUT_SECONDS = 10.0
 _PRIMARY_LOCKS: WeakValueDictionary[Path, threading.Lock] = WeakValueDictionary()
 _PRIMARY_LOCKS_GUARD = threading.Lock()
+# The image types view_file shows, which are never text and which read_file names it for.
+_VIEWABLE_IMAGE_TYPES = frozenset(f"image/{image_format.lower()}" for image_format in SUPPORTED_IMAGE_FORMATS)
+
+
+def image_read_error(path: str) -> str | None:
+    """Return what read_file answers for ``path`` it cannot decode, if it names an image view_file shows."""
+    mime_type = named_mime_type(path)
+    if mime_type not in _VIEWABLE_IMAGE_TYPES:
+        return None
+    return f"Error: {path} is an image ({mime_type}), not text."
 
 
 @dataclass
@@ -746,12 +757,8 @@ def _read_resolved(base_dir: Path, resolved: Path, path: str) -> bytes | str:
         return f"Error reading file: {e}"
 
 
-class CodingTools(Toolkit):
-    """Ergonomic coding tools for LLM agents.
-
-    Provides file read/write/edit, grep, find, and ls operations with
-    smart truncation, fuzzy matching, and actionable pagination hints.
-    """
+class FilesystemTools(Toolkit):
+    """Read, edit, write, search, list, and optionally delete files, with pagination hints and fuzzy edits."""
 
     def __init__(
         self,
@@ -760,6 +767,7 @@ class CodingTools(Toolkit):
         shared_directory_roots: Callable[[], tuple[SharedDirectoryRoot, ...]] = no_shared_directory_roots,
         *,
         in_sandbox_request: bool = False,
+        enable_delete_file: bool = False,
     ) -> None:
         self.base_dir = resolve_tool_base_dir(base_dir)
         # Without a workspace the base dir is only the process working directory, which workspace access refuses.
@@ -767,17 +775,8 @@ class CodingTools(Toolkit):
         self.restrict_to_base_dir = file_access == "workspace"
         self.shared_directory_roots = shared_directory_roots
         self.in_sandbox_request = in_sandbox_request
-        super().__init__(
-            name="coding",
-            tools=[
-                self.read_file,
-                self.edit_file,
-                self.write_file,
-                self.grep,
-                self.find_files,
-                self.ls,
-            ],
-        )
+        functions = [self.read_file, self.edit_file, self.write_file, self.grep, self.find_files, self.ls]
+        super().__init__(name="filesystem", tools=[*functions, *([self.delete_file] if enable_delete_file else [])])
 
     def _file_lock(self, resolved: Path) -> AbstractContextManager[None]:
         return _directory_lock(resolved) if self.in_sandbox_request else _primary_file_lock(resolved)
@@ -807,7 +806,13 @@ class CodingTools(Toolkit):
         raw = _read_resolved(self.base_dir, resolved, path)
         if isinstance(raw, str):
             return raw
-        return _format_read_output(raw.decode("utf-8", errors="replace"), offset, limit)
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            if image_error := image_read_error(path):
+                return image_error
+            text = raw.decode("utf-8", errors="replace")
+        return _format_read_output(text, offset, limit)
 
     @shared_directory_aware("path", writes=True)
     def edit_file(
@@ -876,6 +881,27 @@ class CodingTools(Toolkit):
         lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         return f"Wrote {byte_count} bytes ({lines} lines) to {path}"
 
+    @shared_directory_aware("path", writes=True)
+    def delete_file(self, path: str) -> str:
+        """Delete a file or an empty directory.
+
+        Args:
+            path: File or directory path (relative to working directory or absolute).
+
+        """
+        try:
+            resolved = resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir)
+        except ValueError as e:
+            return f"Error: {e}"
+        if is_git_metadata_path(resolved):
+            return blocked_git_metadata_message("removing file", path)
+        try:
+            with self._file_lock(resolved):
+                remove_resolved_path(self.base_dir, resolved)
+        except (OSError, ValueError) as e:
+            return f"Error removing file: {e}"
+        return f"Deleted {path}"
+
     @shared_directory_aware("path", writes=False)
     def grep(
         self,
@@ -887,7 +913,7 @@ class CodingTools(Toolkit):
         context: int = 0,
         limit: int = _DEFAULT_GREP_LIMIT,
     ) -> str:
-        """Search file contents for a pattern. Uses ripgrep if available, falls back to Python re.
+        """Search file contents for a pattern.
 
         Args:
             pattern: Regex pattern (or literal string if literal=True) to search for.
@@ -920,29 +946,10 @@ class CodingTools(Toolkit):
         if validation_error:
             return validation_error
 
-        # Try ripgrep first
-        rg_result = _run_ripgrep(
-            pattern,
-            search_path,
-            self.base_dir,
-            effective_glob,
-            ignore_case,
-            literal,
-            context,
-            limit,
-        )
+        search = (pattern, search_path, self.base_dir, effective_glob, ignore_case, literal, context, limit)
+        rg_result = _run_ripgrep(*search, self.restrict_to_base_dir)
         if rg_result is None:
-            # Python fallback
-            return _python_grep_fallback(
-                pattern,
-                search_path,
-                self.base_dir,
-                effective_glob,
-                ignore_case,
-                literal,
-                context,
-                limit,
-            )
+            return _python_grep_fallback(*search, self.restrict_to_base_dir)
         return rg_result
 
     @shared_directory_aware("path", writes=False)
@@ -1065,6 +1072,78 @@ def _parse_rg_event(raw: str) -> _RgEvent | None:
     return _RgEvent(event_type=event_type, path_text=path_text, line_text=line_text, line_number=line_number)
 
 
+def _rg_candidates(args: list[str], expired: threading.Event) -> Generator[Path]:
+    """Yield the files a ``--files-with-matches --null`` ripgrep names, as it finds them, until the deadline.
+
+    Closing it stops ripgrep, so no more of its output is ever held than one chunk of names.
+    """
+    with (
+        tempfile.TemporaryFile() as errors,
+        subprocess.Popen(args, stdout=subprocess.PIPE, stderr=errors, bufsize=0) as process,
+    ):
+        timer = threading.Timer(_GREP_TIMEOUT_SECONDS, process.kill)
+        timer.start()
+        try:
+            pending = b""
+            assert process.stdout is not None
+            while chunk := process.stdout.read(1 << 16):
+                *names, pending = (pending + chunk).split(b"\0")
+                yield from (Path(os.fsdecode(name)) for name in names)
+            if (code := process.wait()) < 0:
+                expired.set()
+            elif code not in (0, 1):
+                errors.seek(0)
+                stderr = errors.read(4096).decode(errors="replace").strip()
+                raise subprocess.CalledProcessError(code, args, stderr=stderr)
+        finally:
+            timer.cancel()
+            process.kill()
+
+
+def _confined_rg_events(
+    nominate: list[str],
+    match: list[str],
+    base_dir: Path,
+    expired: threading.Event,
+) -> Generator[_RgEvent]:
+    """Yield what the ``match`` ripgrep finds in each file the ``nominate`` one names, until the deadline sets ``expired``.
+
+    Ripgrep opens files by path, so what it finds in one only nominates it: the events come from a ripgrep run in a
+    private directory on ``_CONFINED_COPY``, the bytes the capped no-follow reader returns, one file at a time, and
+    a file that reader refuses is skipped.
+    """
+    deadline = time.monotonic() + _GREP_TIMEOUT_SECONDS
+    with tempfile.TemporaryDirectory() as private, closing(_rg_candidates(nominate, expired)) as candidates:
+        for candidate in candidates:
+            try:
+                payload = read_resolved_file(base_dir, resolve_base_dir_path(base_dir, str(candidate)))
+            except (OSError, ValueError):
+                continue
+            Path(private, _CONFINED_COPY).write_bytes(payload)
+            remaining = deadline - time.monotonic()
+            try:
+                found = subprocess.run(match, check=False, cwd=private, capture_output=True, timeout=remaining)
+            except subprocess.TimeoutExpired:
+                expired.set()
+                return
+            for event in filter(None, map(_parse_rg_event, found.stdout.decode().splitlines())):
+                event.path_text = str(candidate)
+                yield event
+
+
+def _run_confined_ripgrep(nominate: list[str], match: list[str], base_dir: Path, limit: int, context: int) -> str:
+    """Return the formatted results of a workspace search, with a note when the deadline cut it short."""
+    expired = threading.Event()
+    try:
+        with closing(_confined_rg_events(nominate, match, base_dir, expired)) as events:
+            output = _format_rg_output(events, limit, context, base_dir)
+    except subprocess.CalledProcessError as error:
+        return f"Error running grep: {error.stderr}" if error.stderr else "Error running grep."
+    if not expired.is_set():
+        return output
+    return f"{output}\n\n[grep timed out after {_GREP_TIMEOUT_SECONDS:g} seconds; results are incomplete.]"
+
+
 def _run_ripgrep(
     pattern: str,
     search_path: Path,
@@ -1074,27 +1153,31 @@ def _run_ripgrep(
     literal: bool,
     context: int,
     limit: int,
+    restrict_to_base_dir: bool,
 ) -> str | None:
     """Run ripgrep and return formatted results. Returns None if rg is not available."""
     rg_binary = shutil.which("rg")
     if rg_binary is None:
         return None
 
-    args = [rg_binary, "--json", "--color=never"]
-    if ignore_case:
-        args.append("-i")
-    if literal:
-        args.append("-F")
-    if context > 0:
-        args.extend(["-C", str(context)])
-    if glob_filter:
-        args.extend(["--glob", glob_filter])
-    args.extend(["--", pattern, str(search_path)])
+    options = ["--color=never", *(["-i"] if ignore_case else []), *(["-F"] if literal else [])]
+    report = [rg_binary, "--json", *options, *(["-C", str(context)] if context > 0 else [])]
+    target = [*(["--glob", glob_filter] if glob_filter else []), "--", pattern, str(search_path)]
+    if restrict_to_base_dir:
+        nominate = [rg_binary, "--files-with-matches", "--null", *options, *target]
+        # Searched as the path is, in a directory or by name, so binary data is treated as it is in the file itself;
+        # no file's events are held past the match that shows the limit was reached.
+        copy = "." if search_path.is_dir() else _CONFINED_COPY
+        # The copy's own name is selected so a glob in ripgrep's config file, already applied in nominating, keeps it.
+        mine = ["--no-ignore", f"--glob={_CONFINED_COPY}", "--threads=1", "--max-count", str(limit + 1)]
+        match = [*report, *mine, "--", pattern, copy]
+        return _run_confined_ripgrep(nominate, match, base_dir, limit, context)
 
+    args = [*report, *target]
     try:
-        result = subprocess.run(args, check=False, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(args, check=False, capture_output=True, text=True, timeout=_GREP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
-        return "Error: grep timed out after 30 seconds."
+        return f"Error: grep timed out after {_GREP_TIMEOUT_SECONDS:g} seconds."
 
     if result.returncode == 1:
         return "No matches found."
@@ -1102,7 +1185,7 @@ def _run_ripgrep(
         stderr = result.stderr.strip()
         return f"Error running grep: {stderr}" if stderr else "Error running grep."
 
-    return _format_rg_output(result.stdout, limit, context, base_dir)
+    return _format_rg_output(filter(None, map(_parse_rg_event, result.stdout.splitlines())), limit, context, base_dir)
 
 
 def _format_rg_line(event: _RgEvent, base_dir: Path) -> str:
@@ -1132,19 +1215,15 @@ def _append_trailing_context(
     pending_context.clear()
 
 
-def _format_rg_output(stdout: str, limit: int, context: int, base_dir: Path) -> str:
-    """Parse ripgrep JSON output and format as text lines."""
+def _format_rg_output(events: Iterable[_RgEvent], limit: int, context: int, base_dir: Path) -> str:
+    """Format ripgrep's match and context events as text lines, taking no more of them than ``limit`` needs."""
     output_lines: list[str] = []
     pending_context: list[_RgEvent] = []
     match_count = 0
     was_limited = False
     last_match: _RgEvent | None = None
 
-    for raw_line in stdout.splitlines():
-        event = _parse_rg_event(raw_line)
-        if event is None:
-            continue
-
+    for event in events:
         if event.event_type == "context":
             pending_context.append(event)
             continue
@@ -1212,37 +1291,32 @@ def _grep_file(
     limit: int,
     results: list[str],
     match_count: int,
+    restrict_to_base_dir: bool,
 ) -> int:
     """Search a single file for regex matches. Returns updated match_count."""
     try:
-        text = filepath.read_text(encoding="utf-8", errors="strict")
-    except (OSError, UnicodeDecodeError):
+        resolved = resolve_base_dir_path(base_dir, str(filepath), restrict_to_base_dir)
+        text = read_resolved_file(base_dir, resolved).decode("utf-8")
+    except (OSError, ValueError):
         return match_count
 
     rel = format_path_for_output(filepath, base_dir)
 
     lines = text.splitlines()
-    emitted_lines: set[int] = set()
+    emitted_through = context_through = -1
     for i, line in enumerate(lines):
-        if match_count > limit:
-            break
-        if not regex.search(line):
-            continue
-        if match_count >= limit:
-            # Signal truncation without emitting output for the extra match.
-            return match_count + 1
-        match_count += 1
-        if context > 0:
-            start = max(0, i - context)
-            end = min(len(lines), i + context + 1)
-            for j in range(start, end):
-                if j in emitted_lines:
-                    continue
-                emitted_lines.add(j)
-                marker = ":" if j == i else "-"
-                results.append(f"{rel}{marker}{j + 1}{marker}{_truncate_line(lines[j])}")
-        else:
+        if regex.search(line):
+            if match_count >= limit:
+                # Signal truncation without emitting output for the extra match.
+                return match_count + 1
+            match_count += 1
+            before = range(max(emitted_through + 1, i - context), i)
+            results.extend(f"{rel}-{j + 1}-{_truncate_line(lines[j])}" for j in before)
             results.append(f"{rel}:{i + 1}:{_truncate_line(line)}")
+            emitted_through, context_through = i, i + context
+        elif i <= context_through:
+            results.append(f"{rel}-{i + 1}-{_truncate_line(line)}")
+            emitted_through = i
     return match_count
 
 
@@ -1306,6 +1380,7 @@ def _python_grep_fallback(
     literal: bool,
     context: int,
     limit: int,
+    restrict_to_base_dir: bool,
 ) -> str:
     """Pure Python grep fallback when ripgrep is not available."""
     if literal:
@@ -1323,7 +1398,16 @@ def _python_grep_fallback(
     results: list[str] = []
     match_count = 0
     for filepath in files_or_error:
-        match_count = _grep_file(filepath, base_dir, regex, context, limit, results, match_count)
+        match_count = _grep_file(
+            filepath,
+            base_dir,
+            regex,
+            context,
+            limit,
+            results,
+            match_count,
+            restrict_to_base_dir,
+        )
         if match_count > limit:
             break
 

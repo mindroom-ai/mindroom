@@ -80,10 +80,7 @@ class DesktopShellOutput(ShellOutputCapture):
     """Spool one command's combined output privately until the bridge transfers it."""
 
     def __init__(self, directory: str) -> None:
-        super().__init__(
-            ShellOutputDestination(workspace_root=directory, path="", max_bytes=MAX_SHELL_OUTPUT_BYTES),
-            None,
-        )
+        super().__init__(ShellOutputDestination(workspace_root=directory, path="", max_bytes=MAX_SHELL_OUTPUT_BYTES))
         self.exit_code: int | None = None
         self.completed = False
 

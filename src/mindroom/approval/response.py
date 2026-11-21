@@ -26,7 +26,6 @@ from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.events import tool_markers_match_trace
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
-from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -110,20 +109,13 @@ def continuation_response_kind(continuation: ApprovalContinuation) -> str:
     return "team" if continuation.entity_kind == "team" else "ai"
 
 
-def continuation_target(
-    continuation: ApprovalContinuation,
-    *,
-    reply_to_event_id: str | None = None,
-) -> MessageTarget:
-    """Return the canonical Matrix conversation target for one continuation."""
-    if continuation.origin.intent is TurnIntent.JOB_FOLLOW_UP and reply_to_event_id in continuation.source_event_ids:
-        # A follow-up is a runtime source, not a Matrix event to reply to.
-        reply_to_event_id = None
+def continuation_target(continuation: ApprovalContinuation) -> MessageTarget:
+    """Return the Matrix conversation target the paused turn answered, which its continuation answers too."""
     return MessageTarget(
         room_id=continuation.room_id,
         source_thread_id=continuation.thread_id,
         resolved_thread_id=continuation.thread_id,
-        reply_to_event_id=reply_to_event_id,
+        reply_to_event_id=continuation.reply_to_event_id,
         session_id=continuation.session_id,
     )
 

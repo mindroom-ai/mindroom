@@ -18,7 +18,7 @@ Send a file, image, or video in a Matrix room and mention the agent or team in t
 A media event's `body` counts as a caption only when the event also has a `filename` field with a different value, following [MSC2530](https://github.com/matrix-org/matrix-spec-proposals/pull/2530), so a body that only repeats the filename is not a caption.
 
 The responder answers only when it would answer a text message there (mention, thread participation, or DM).
-Without an `@mention`, the router uses the caption to choose among several eligible agents or teams.
+Without an `@mention`, routing uses the caption to choose among several eligible agents or teams.
 Both unencrypted and end-to-end encrypted media are supported.
 
 The responder's model receives the media directly, so it must support that input type (vision for images, file or video input for documents and videos).
@@ -125,7 +125,7 @@ Conversation history keeps up to four recently viewed images within 10 MiB in to
 ### Saving Files to the Workspace
 
 `get_attachment(attachment_id, mindroom_output_path="incoming/file.ext")` saves the file into the agent workspace and returns a receipt with the path, byte count, and SHA-256.
-Save attachments this way before processing them with `file`, `coding`, `python`, or `shell` on a worker, because attachment storage is not visible inside the worker.
+Save attachments this way before processing them with `filesystem`, `python`, or `shell` on a worker, because attachment storage is not visible inside the worker.
 The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
 Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](deployment/sandbox-proxy.md#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
 See [Sandbox Proxy](deployment/sandbox-proxy.md) for how the workspace appears as `$MINDROOM_AGENT_WORKSPACE` and `~` inside worker tools.

@@ -324,7 +324,7 @@ def test_entity_identity_registry_requires_prepared_entity_accounts(tmp_path: Pa
         runtime_paths,
     )
 
-    with pytest.raises(MissingManagedEntityAccountError, match="router"):
+    with pytest.raises(MissingManagedEntityAccountError, match="general"):
         entity_identity_registry(config, runtime_paths)
 
 

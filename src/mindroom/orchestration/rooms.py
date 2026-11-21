@@ -14,9 +14,7 @@ from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.identity import managed_account_user_id
-from mindroom.matrix.room_accounts import reconcile_room_accounts, reconcile_room_router_binding
 from mindroom.matrix.room_reconciliation import read_room_state
-from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
@@ -106,13 +104,14 @@ def warn_about_foreign_homeserver_authorities(config: Config, runtime_paths: Run
 
 @dataclass
 class RoomSetup:
-    """Create managed rooms, reconcile their policy, and bring bots into their rooms through the router."""
+    """Create managed rooms and reconcile their policy through the owner account, and bring bots into their rooms."""
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config]
-    # The router's client when it runs; managed room work runs through its account.
-    router_client: Callable[[], nio.AsyncClient | None]
-    refresh_agent_reply_memberships: Callable[[], Awaitable[None]]
+    # The owner account's client when it runs; without one no room is created or administered.
+    owner_client: Callable[[], nio.AsyncClient | None]
+    refresh_agent_reply_memberships: Callable[[], Awaitable[object]]
+    reconcile_room_states: Callable[[], Awaitable[None]]
     publication_allowed: Callable[[], bool] = field(default=lambda: True)
 
     async def setup(self, bots: list[AgentBot]) -> None:
@@ -120,6 +119,8 @@ class RoomSetup:
 
         This shared flow is used during both initial startup and config updates.
         """
+        if self.owner_client() is None:
+            logger.info("room_setup_without_owner_account")
         # Ensure all configured rooms exist before reconciling memberships.
         room_ids = await self.ensure_rooms_exist()
         await self.link_root_space(room_ids)
@@ -129,11 +130,16 @@ class RoomSetup:
         config = self.config_provider()
         self.resolve_aliases(bots, config)
 
-        # Join the router before policy and invitations, including existing private rooms.
+        # Join the owner before policy and invitations, including existing private rooms.
         for bot in bots:
             if bot.agent_name == ROUTER_AGENT_NAME:
                 await bot.ensure_rooms()
-        snapshots = await self._reconcile_room_policies(room_ids)
+        client = self.owner_client()
+        snapshots = (
+            {}
+            if client is None
+            else await reconcile_managed_rooms(client, self.config_provider(), self.runtime_paths, room_ids)
+        )
         await self._ensure_room_invitations(snapshots)
         all_rooms = load_rooms(runtime_paths=self.runtime_paths)
         all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
@@ -153,50 +159,33 @@ class RoomSetup:
         logger.info("All agents have joined their configured rooms")
 
     async def publish_room_state(self) -> None:
-        """Reconcile the thread mode, MindRoom accounts, and router binding of all router rooms after admission reopens.
+        """Reconcile the room state of every room a bot holds, through its steward, after reply admission reopens.
 
         This includes retained invited rooms.
         """
         try:
-            if self.publication_allowed() and (client := self.router_client()) is not None:
-                await asyncio.gather(
-                    *(
-                        reconcile(client, self.config_provider(), self.runtime_paths, room_id)
-                        for room_id in client.rooms
-                        for reconcile in (
-                            reconcile_room_thread_mode,
-                            reconcile_room_accounts,
-                            reconcile_room_router_binding,
-                        )
-                    ),
-                )
+            if self.publication_allowed():
+                await self.reconcile_room_states()
         except Exception:
-            logger.warning("router_room_state_publish_failed", exc_info=True)
+            logger.warning("room_state_publish_failed", exc_info=True)
 
     async def ensure_rooms_exist(self) -> dict[str, str]:
         """Ensure all configured rooms exist, creating them if necessary.
 
-        The router bot performs room creation because it holds the required permissions.
+        The owner account performs room creation because it holds the required permissions.
         """
-        client = self.router_client()
+        client = self.owner_client()
         if client is None:
             return {}
         room_ids = await ensure_all_rooms_exist(client, self.config_provider(), self.runtime_paths)
         logger.info("ensured_room_existence", room_count=len(room_ids))
         return room_ids
 
-    async def _reconcile_room_policies(self, room_ids: dict[str, str]) -> dict[str, RoomStateSnapshot]:
-        """Wire the router's fresh policy reconciliation into startup and reload."""
-        client = self.router_client()
-        if client is None:
-            return {}
-        return await reconcile_managed_rooms(client, self.config_provider(), self.runtime_paths, room_ids)
-
     async def link_root_space(self, room_ids: dict[str, str]) -> None:
         """Ensure the optional root Matrix Space exists and link the current managed rooms."""
-        client = self.router_client()
+        client = self.owner_client()
         config = self.config_provider()
-        if client is None or not config.matrix_space.enabled:
+        if client is None or not config.matrix_space.enabled or not room_ids:
             return
         root_space_id = await ensure_root_space(client, config, self.runtime_paths, room_ids, admin_user_ids=set())
         invite_user_ids = _root_space_user_ids_to_invite(config)
@@ -211,18 +200,18 @@ class RoomSetup:
         await _invite_missing(client, root_space_id, invite_user_ids, snapshot.present_user_ids())
 
     async def ensure_server_emoji_room(self) -> None:
-        """Create and maintain the optional server custom emoji room through the router."""
-        client = self.router_client()
+        """Create and maintain the optional server custom emoji room through the owner account."""
+        client = self.owner_client()
         if client is not None:
             await ensure_server_emoji_room(client, self.config_provider(), self.runtime_paths)
 
     async def _ensure_room_invitations(self, snapshots: dict[str, RoomStateSnapshot]) -> None:
         """Ensure all agents and the internal user are invited to their configured rooms.
 
-        The router client performs these invitations because it has admin privileges
+        The owner's client performs these invitations because it has admin privileges
         across the managed rooms.
         """
-        client = self.router_client()
+        client = self.owner_client()
         if client is None:
             return
         config = self.config_provider()

@@ -43,7 +43,7 @@ defaults:
 
 ### How tokens are counted
 
-Every token limit, including `context_window`, the compaction thresholds, and `memory.file.max_entrypoint_tokens`, is counted as the model that receives the text counts tokens.
+Every token limit, including `context_window` and the compaction thresholds, is counted as the model that receives the text counts tokens.
 OpenAI models with a known tokenizer, such as GPT-4o, count exactly on OpenAI's own endpoints, Codex, and OpenRouter, and on Azure when the deployment is named after the model.
 Other models use an estimate that is deliberately high, by up to about three quarters for Claude and two thirds for Gemini, so limits act early rather than late.
 Each request to the model, including the first one after an approval, is sized from the request size the provider reported for the latest answer it continues; without one, such as after a history limit dropped older messages, another model answered, or the agent's system prompt or tools changed (including on the first reply of each day, because the system prompt names the date), or right after native compaction condensed the history, it uses the estimate.
@@ -139,6 +139,12 @@ The `Compaction summary chunk` events and the `compaction_*` fields of `Dispatch
 Add the `compact_context` tool to an agent's `tools` to let it request compaction itself.
 The request runs before the next reply in the same conversation and always uses text compaction.
 It requires a summary model with a `context_window` and the same 2,000-token summary input budget; otherwise the tool returns `Error: Compaction is unavailable for this scope because ...` with the reason.
+
+You can request the same compaction from chat with `/compact` (or `!compact`).
+`/compact <agent_or_team>` requests it for one agent or configured team; `/compact` alone requests it for all of them.
+Both forms only reach agents and configured teams you may address that already have a conversation here.
+The conversation is the thread, or the whole room for an agent or team in room mode; for a thread-mode agent, send it inside the thread.
+The reply has one line per agent or team, with the reason when compaction is unavailable for it.
 
 ## Team History and Compaction
 

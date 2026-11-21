@@ -61,31 +61,31 @@ MindRoom applies this policy to new and existing managed rooms on startup and on
 
 - `invite_users` is the desired invitation list, so a listed user who leaves or is kicked is invited again; remove the user from configuration before intentionally removing access.
 - `admins` grants missing admin power but never demotes anyone, so removing a user from `admins` only stops future grants; lowering an existing admin requires a Matrix account with higher power.
-- `listed: true` requires the router to have moderator or admin power in the room.
+- `listed: true` requires the MindRoom account to have moderator or admin power in the room.
 - `encrypted: true` turns on encryption in existing rooms, and setting it back to `false` never disables it.
 
 ## Room Management
 
-The router creates and maintains managed rooms:
+The MindRoom account, which administers the rooms in `config.yaml` and answers nobody, creates and maintains managed rooms:
 
 - Creates missing rooms with the alias `#<key>:<server>` (plus the `MINDROOM_NAMESPACE` suffix when set), a topic, and a [managed avatar](https://docs.mindroom.chat/matrix/#managed-avatars).
 - Uses the room's `description` as its topic, and generates a topic with the `default` model only when the description is empty.
 - Invites the configured agents and teams and the room's `invite_users`.
 - Sets the room name from `display_name`, and adds a topic only when the room has none, so changing `description` never replaces an existing topic.
-- Lets every room member write thread tags and call membership state, which requires the router to be joined and able to edit power levels.
+- Lets every room member write thread tags and call membership state, which requires the MindRoom account to be joined and able to edit power levels.
 - Applies the [room policy](#room-policy) above.
 
 Agents and teams leave rooms they are no longer configured for, except direct-message rooms, rooms they joined by accepting an invitation, and rooms [one of their rooms lists](#rooms-under-a-room).
 
-On a shared homeserver, any account can create or repoint an alias such as `#lobby:<server>`, so MindRoom only uses an aliased room it recorded itself or one the router created and aliased.
+On a shared homeserver, any account can create or repoint an alias such as `#lobby:<server>`, so MindRoom only uses an aliased room it recorded itself or one the MindRoom account created and aliased.
 Otherwise it logs `managed_alias_target_refused`, never joins that room, and creates its own room without the alias.
 A recorded room stays in use even when its alias now points elsewhere, which logs `managed_alias_points_elsewhere`.
-If the alias of a recorded room is deleted, the router restores it, and creates a replacement room only when it can no longer read or is no longer joined to the recorded room.
+If the alias of a recorded room is deleted, the MindRoom account restores it, and creates a replacement room only when it can no longer read or is no longer joined to the recorded room.
 
 ## Rooms Under a Room
 
 A room can list other rooms under it, its sub-rooms, with `m.space.child` events, each listed room naming it back as its canonical `m.space.parent`.
-The router, agents, and teams in a room join every room it lists this way, each only when its `accept_invites` would accept an invitation from whoever listed the room.
+Agents and teams in a room join every room it lists this way, each only when its `accept_invites` would accept an invitation from whoever listed the room.
 A listed room they cannot join without an invitation, such as a private one, needs them invited.
 They leave a listed room when the room above takes it off its list, unless it is one of their configured or personal rooms.
 Rooms listed under a Space are the exception: listing a room under a Space, or taking it off, never makes them join or leave it.
@@ -93,7 +93,6 @@ A bot removed from a listed room joins it again whenever it rejoins the room abo
 An agent or team with `matrix_message` that replies in a sub-room, or in a room with sub-rooms, is told the room above, the sub-rooms beside it, and its own sub-rooms, with their room IDs, so it can read them when asked.
 It names only rooms the person it answers is in, up to 15 beside and under the room, and counts the rest without naming them.
 The note stays in the thread's history like other turn context, so a later reply in that thread, to someone else, still has the rooms it named.
-Whether the router greets a room under a room it is invited into is described under [Welcome Messages](https://docs.mindroom.chat/configuration/router/#welcome-messages).
 
 ## Room Cleanup
 

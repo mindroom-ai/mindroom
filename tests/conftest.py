@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
 from urllib.parse import unquote, urlsplit
 
+import aiohttp
+import aioresponses.core as aioresponses_core
 import httpcore
 import httpcore2
 import httpx
@@ -74,6 +76,7 @@ import mindroom.reply_turn.locked_turn as locked_turn_module
 import mindroom.reply_turn.request as reply_request_module
 import mindroom.response_runner as response_runner_module
 import mindroom.streaming as streaming_module
+import mindroom.tls_trust as tls_trust_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools.shell as shell_tool_module
@@ -87,6 +90,7 @@ from mindroom.approval.manager import (
     ToolApprovalTransportError,
     initialize_approval_store,
 )
+from mindroom.approval.transport import ApprovalMatrixTransport
 from mindroom.authorization import _ReplyAuthorizationDecision
 from mindroom.bot import AgentBot
 from mindroom.coalescing.batch import PendingEvent
@@ -96,7 +100,7 @@ from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, load_config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.config.resolution import entity_model_name
-from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
+from mindroom.constants import ROUTE_EVENT_TYPE, ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_handoff import (
     MediaDispatchEvent,
@@ -194,6 +198,7 @@ from mindroom.session_storage.store import (
     persist_to,
     runs_without,
 )
+from mindroom.steward_duties import StewardDuties
 from mindroom.thread_summary import schedule as thread_summary_schedule
 from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 from mindroom.thread_utils import decide_agent_response
@@ -212,8 +217,8 @@ from mindroom.turns.ingress import TurnIngress
 from mindroom.turns.interactive_selection import InteractiveSelections
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
+from mindroom.voice import visible_voice_echo
 from mindroom.voice.ingress import VoiceIngress
-from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backends import static_runner as static_runner_module
 from mindroom.workers.compatibility import worker_health_payload
@@ -222,6 +227,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.test_helpers import make_test_ca_pem
 
 if TYPE_CHECKING:
+    from _pytest.capture import CaptureResult
     from _typeshed import DataclassInstance
     from xdist.workermanage import WorkerController
 
@@ -240,6 +246,26 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from tests.team_turn_helpers import ProbeToolkit
 
+
+# aioresponses 0.7.9 predates aiohttp 3.14: its fake responses lack the `stream_writer` aiohttp 3.14.4 requires, and
+# their body stream has no parser for the flow control a body over 128 KiB starts. This mirrors the fix proposed
+# upstream; remove it once a release includes https://github.com/pnuckowski/aioresponses/pull/292.
+class _AioresponsesClientResponse(aiohttp.ClientResponse):
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        kwargs.setdefault("stream_writer", SimpleNamespace(output_size=0))
+        super().__init__(*args, **kwargs)
+
+
+def _aioresponses_stream_reader(loop: asyncio.AbstractEventLoop | None = None) -> aiohttp.StreamReader:
+    reader = _AIORESPONSES_STREAM_READER(loop)
+    reader._protocol._parser = MagicMock()
+    reader._protocol._parser.feed_data.return_value = ([], False, b"")
+    return reader
+
+
+_AIORESPONSES_STREAM_READER = aioresponses_core.stream_reader_factory
+aioresponses_core.ClientResponse = _AioresponsesClientResponse
+aioresponses_core.stream_reader_factory = _aioresponses_stream_reader
 
 _STRUCTLOG_CONFIGURE = structlog.configure
 _REAL_BUILD_MODEL_PROVIDER = provider_registry.build_model_provider
@@ -657,7 +683,16 @@ def live_turn_tools_for_test(
     return LiveTurnTools(owner, catalog=catalog, authorize=authorize, **(turn_options | options))
 
 
-async def _no_approval_event(_room_id: str, _thread_id: str | None, _content: dict[str, Any]) -> dict[str, Any] | None:
+async def _no_approval_event(
+    _room_id: str,
+    _thread_id: str | None,
+    _content: dict[str, Any],
+    _sender_entity: str,
+) -> dict[str, Any] | None:
+    return None
+
+
+async def _no_device(_delivery_id: str | None) -> str | None:
     return None
 
 
@@ -678,21 +713,54 @@ async def _no_sources_to_wake(_entity_name: str, _room_id: str, _source_event_id
 class FakeApprovalTransport:
     """The approval transport an approval manager uses, with the methods a test sets.
 
-    The others prepare and send nothing, find no earlier delivery, know no sender, device, or responder principal,
-    wake nothing, and find the router in every room.
+    The others prepare and send nothing, find no earlier delivery, find no card's sender in its room, know no device,
+    name each entity's principal on one shared account, and wake nothing.
     """
 
-    prepare_approval_event: Callable[[str, str | None, dict[str, Any]], Awaitable[dict[str, Any] | None]] = (
+    prepare_approval_event: Callable[[str, str | None, dict[str, Any], str], Awaitable[dict[str, Any] | None]] = (
         _no_approval_event
     )
     send_approval_delivery: Callable[[MatrixDelivery], Awaitable[str]] = _no_approval_delivery
     resolve_approval_delivery: Callable[[MatrixDelivery], Awaitable[str | None]] = _no_delivered_event
     resolve_approval_action_delivery: Callable[[str, str], Awaitable[str | None]] = _no_delivered_event
-    transport_sender_id: Callable[[], str | None] = lambda: None
-    transport_device_id: Callable[[], str | None] = lambda: None
+    sender_bot: Callable[[str | None, str], object | None] = lambda _sender, _room_id: None
+    sender_device_id: Callable[[str | None], Awaitable[str | None]] = _no_device
     wake_continuation_sources: Callable[[str, str, tuple[str, ...]], Awaitable[None]] = _no_sources_to_wake
-    responder_principal_id: Callable[[str], str | None] = lambda _entity_name: None
-    router_missing: Callable[[str], bool] = lambda _room_id: False
+    responder_principal_id: Callable[[str], str | None] = lambda entity_name: entity_name + "@shared"
+
+    async def pinned_delivery(self, delivery_id: str | None) -> tuple[Any, Any, str | None]:
+        """Return the send and adoption methods a test set, with the device it named."""
+        return self.send_approval_delivery, self.resolve_approval_delivery, await self.sender_device_id(delivery_id)
+
+
+def approval_transport_for_test(
+    bot_provider: "Callable[[str], Any]",
+    *,
+    cards: "ApprovalDeliveryView | None" = None,
+    entities: tuple[str, ...] = (ROUTER_AGENT_NAME, "code"),
+) -> ApprovalMatrixTransport:
+    """Build the approval transport over one bot lookup, with the router's bot as the poster of every room.
+
+    Its bots are the ones the lookup knows among ``entities``, each joined to the rooms its ``approval_room_ids`` name.
+    Without ``cards`` every event that names a delivery is a card the router sent.
+    """
+    if cards is None:
+        cards = MagicMock(principal_id="router@@mindroom_router:localhost")
+        cards.approvals.approval_card_sender = AsyncMock(return_value=(None, "!room:localhost"))
+        cards.approvals.unavailable_notice = AsyncMock(return_value=None)
+
+    def bots() -> dict[str, Any]:
+        found = {name: bot for name in entities if (bot := bot_provider(name)) is not None}
+        for bot in found.values():
+            if bot.client is not None:
+                bot.client.rooms = bot.approval_room_ids
+        return found
+
+    return ApprovalMatrixTransport(
+        bots=bots,
+        room_poster=lambda _room_id: bot_provider(ROUTER_AGENT_NAME),
+        cards=lambda: cards,
+    )
 
 
 def approval_manager_for_test(
@@ -1511,6 +1579,29 @@ def legacy_default_store_client(
     client = MindRoomAsyncClient(homeserver, user_id, store_path=str(store_dir), config=matrix_client_config())
     client.restore_login(user_id, device_id, access_token)
     return client
+
+
+def parsed_route(
+    content: dict[str, Any],
+    *,
+    sender: str,
+    event_id: str = "$route",
+    origin_server_ts: int = 1_001,
+    **source: object,
+) -> nio.UnknownEvent:
+    """Return a steward's hidden route event as nio parses it off the timeline."""
+    event = nio.Event.parse_event(
+        {
+            "type": ROUTE_EVENT_TYPE,
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": origin_server_ts,
+            "content": content,
+            **source,
+        },
+    )
+    assert isinstance(event, nio.UnknownEvent)
+    return event
 
 
 def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> AsyncMock:
@@ -3310,12 +3401,7 @@ def _changes_for(deps: "DataclassInstance", changes: Mapping[str, object]) -> di
     return {name: value for name, value in changes.items() if name in deps.__dataclass_fields__}
 
 
-_VOICE_READINESS_CHANGES = {
-    "normalizer": "normalizer",
-    "turn_store": "turn_store",
-    "visible_voice_echo": "visible_echo",
-    "logger": "logger",
-}
+_VOICE_READINESS_FIELDS = frozenset({"normalizer", "turn_store", "logger"})
 
 
 def _turn_owners(bot: RuntimeBot) -> tuple[TurnIngress, TurnDispatcher, InteractiveSelections, VoiceIngress]:
@@ -3341,13 +3427,13 @@ def update_turn_owner_deps(bot: RuntimeBot, **changes: object) -> None:
     In place, because the gate and the reaction dispatcher keep the owners they were built with.
     """
     owners = _turn_owners(bot)
-    known = set(_VOICE_READINESS_CHANGES) | _turn_owner_field_names(bot)
+    known = _VOICE_READINESS_FIELDS | _turn_owner_field_names(bot)
     unknown = set(changes) - known
     assert not unknown, f"not a turn owner collaborator: {sorted(unknown)}"
     for owner in owners:
         if owner_changes := _changes_for(owner.deps, changes):
             owner.deps = replace(owner.deps, **owner_changes)
-    readiness_changes = {field: changes[name] for name, field in _VOICE_READINESS_CHANGES.items() if name in changes}
+    readiness_changes = {name: changes[name] for name in _VOICE_READINESS_FIELDS if name in changes}
     if readiness_changes:
         voice = bot._voice_ingress
         voice.deps = replace(voice.deps, readiness=replace(voice.deps.readiness, **readiness_changes))
@@ -3398,16 +3484,12 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
         )
     bot._ingress_validator = rebuilt_changes["ingress"]
     visible_voice_echo = unwrap_extracted_collaborator(bot._visible_voice_echo)
-    bot._visible_voice_echo = VisibleVoiceEchoLifecycle(
-        replace(
-            visible_voice_echo.deps,
-            runtime=rebuilt_changes.get("runtime", _held_turn_collaborator(bot, "runtime")),
-            logger=rebuilt_changes.get("logger", _held_turn_collaborator(bot, "logger")),
-            agent_name=rebuilt_changes.get("agent_name", _held_turn_collaborator(bot, "agent_name")),
-            delivery_gateway=rebuilt_changes["delivery_gateway"],
-            turn_store=rebuilt_changes["turn_store"],
-            ingress=rebuilt_changes["ingress"],
-        ),
+    bot._visible_voice_echo = replace(
+        visible_voice_echo,
+        runtime=rebuilt_changes.get("runtime", _held_turn_collaborator(bot, "runtime")),
+        agent_name=rebuilt_changes.get("agent_name", _held_turn_collaborator(bot, "agent_name")),
+        delivery_gateway=rebuilt_changes["delivery_gateway"],
+        turn_store=rebuilt_changes["turn_store"],
     )
     wrap_extracted_collaborators(bot, "_visible_voice_echo")
     visible_responses = unwrap_extracted_collaborator(bot._visible_responses)
@@ -3439,7 +3521,6 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
             "runtime",
             "logger",
             "runtime_paths",
-            "agent_name",
             "normalizer",
             "turn_policy",
             "turn_store",
@@ -3452,7 +3533,6 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
             runtime=rebuilt_changes.get("runtime", _held_turn_collaborator(bot, "runtime")),
             logger=rebuilt_changes.get("logger", _held_turn_collaborator(bot, "logger")),
             runtime_paths=rebuilt_changes.get("runtime_paths", _held_turn_collaborator(bot, "runtime_paths")),
-            agent_name=rebuilt_changes.get("agent_name", _held_turn_collaborator(bot, "agent_name")),
             normalizer=rebuilt_changes["normalizer"],
             turn_policy=rebuilt_changes["turn_policy"],
             turn_store=rebuilt_changes["turn_store"],
@@ -3529,9 +3609,9 @@ def patch_response_runner_module(**changes: object) -> Generator[None]:
 
 
 def install_personal_room_shutdown_mock(bot: AgentBot) -> None:
-    """Install lifecycle cancellation for partial shutdown fixtures through one seam; they build no router duties."""
+    """Install lifecycle cancellation for partial shutdown fixtures through one seam, with idle steward duties."""
     bot._personal_room_lifecycle = MagicMock(spec=PersonalRoomLifecycle)
-    bot._router = None
+    bot.steward_duties = MagicMock(spec=StewardDuties)
 
 
 def install_shutdown_drain_mocks(
@@ -3564,6 +3644,8 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
         )
 
     bot._delivery_gateway.send_text = AsyncMock(side_effect=_send_text)
+    # A steward's hidden route is no response; tests read its content from this mock.
+    bot._delivery_gateway.send_route = AsyncMock(return_value="$route")
 
     async def _deliver_final(request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
         event_id = await send_response(
@@ -3753,6 +3835,48 @@ def loop_runs_while_blocked(loop: asyncio.AbstractEventLoop) -> bool:
     return loop_ran.wait(timeout=SETTLE_TIMEOUT_SECONDS)
 
 
+def _flush_queued_stderr_records() -> None:
+    """Write the records `setup_logging` still holds for stderr, whose writer thread would add them later."""
+    for handler in logging.getLogger().handlers:
+        # The log file's handler is left alone, so a test can stall it while reading stderr.
+        if handler.name == "console":
+            handler.flush()
+
+
+def _flush_stderr_before_reads(
+    capture: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[pytest.CaptureFixture[str]]:
+    read = capture.readouterr
+
+    def readouterr() -> "CaptureResult[str]":
+        _flush_queued_stderr_records()
+        return read()
+
+    monkeypatch.setattr(capture, "readouterr", readouterr)
+    yield capture
+    # Before the capture closes, so the writer thread never writes into its closed buffer.
+    _flush_queued_stderr_records()
+
+
+@pytest.fixture
+def capsys(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[pytest.CaptureFixture[str]]:
+    """Capture stderr with every record logged before a read in that read."""
+    yield from _flush_stderr_before_reads(capsys, monkeypatch)
+
+
+@pytest.fixture
+def capfd(
+    capfd: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[pytest.CaptureFixture[str]]:
+    """Capture file descriptors with every record logged before a read in that read."""
+    yield from _flush_stderr_before_reads(capfd, monkeypatch)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_structlog_configuration(
     monkeypatch: pytest.MonkeyPatch,
@@ -3774,6 +3898,10 @@ def _isolate_structlog_configuration(
     root_logger = logging.getLogger()
     root_handlers, root_level = root_logger.handlers[:], root_logger.level
     yield
+    for handler in set(root_logger.handlers).difference(root_handlers):
+        # Stops the writer threads of the handlers `setup_logging` added.
+        if handler.name in {"console", "file"}:
+            handler.close()
     root_logger.handlers[:] = root_handlers
     root_logger.setLevel(root_level)
     _configure_quiet_structlog()
@@ -3850,6 +3978,12 @@ def _withdraw_embedded_runtime_from_the_shared_api_app() -> Generator[None]:
     api_main = sys.modules.get("mindroom.api.main")
     if api_main is not None:
         api_main.unbind_embedded_runtime(api_main.app)
+
+
+@pytest.fixture(autouse=True)
+def _clear_shared_tls_context() -> None:
+    """Build the shared TLS context anew in each test, so a test that patches CA loading sees its patch."""
+    tls_trust_module._shared_context.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -4290,11 +4424,11 @@ def _reset_approval_manager_runtime() -> Generator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_voice_echo_barriers() -> Generator[None]:
-    """Keep cross-bot voice echo ordering state, and its loop bindings, per test."""
-    _reset_visible_voice_echo_barriers()
+def _reset_voice_transcript_locks() -> Generator[None]:
+    """Keep the per-voice-message transcript locks, and their loop bindings, per test."""
+    visible_voice_echo._posting.clear()
     yield
-    _reset_visible_voice_echo_barriers()
+    visible_voice_echo._posting.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -4371,6 +4505,15 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None]:
 @pytest.fixture
 def enforce_turn_authorization() -> None:
     """Keep final TurnPolicy authorization active for tests that exercise it."""
+
+
+@pytest.fixture
+def commands_aimed_at_bot_under_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aim every command at the bot under test, whatever its entity.
+
+    Whom a command is aimed at is `TurnPolicy.aims_command_at_me`'s own test; these tests are about what running one does.
+    """
+    monkeypatch.setattr(TurnPolicy, "aims_command_at_me", AsyncMock(return_value=True))
 
 
 @pytest.fixture

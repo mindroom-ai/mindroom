@@ -89,7 +89,7 @@ async def _run_macos_application_events() -> None:
         msg = "The macOS desktop bridge must run on the main thread."
         raise RuntimeError(msg)
 
-    from CoreFoundation import (  # noqa: PLC0415  # ty: ignore[unresolved-import]
+    from CoreFoundation import (  # noqa: PLC0415  # ty: ignore[import-not-found]
         CFRunLoopRunInMode,
         kCFRunLoopDefaultMode,
     )

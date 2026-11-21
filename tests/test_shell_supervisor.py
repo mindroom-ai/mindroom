@@ -1149,7 +1149,7 @@ async def test_toolkit_supervisor_result_includes_workspace_cwd(
     monkeypatch: pytest.MonkeyPatch,
     manager: _ShellSupervisorManager,
 ) -> None:
-    """Supervisor-backed shell results should expose the same cwd contract as local results."""
+    """Supervisor-backed shell results run in the same cwd as local results, without a cwd line."""
     monkeypatch.setenv(SHELL_SUPERVISOR_SOCKET_ENV, manager.ensure())
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1165,7 +1165,7 @@ async def test_toolkit_supervisor_result_includes_workspace_cwd(
 
     result = await run_fn(["pwd"])
 
-    assert result.splitlines() == [f"[cwd: {workspace}]", str(workspace)]
+    assert result == str(workspace)
 
 
 @pytest.mark.asyncio

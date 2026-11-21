@@ -1372,13 +1372,13 @@ SCENARIOS: dict[str, Scenario] = {
         "thread_summary",
         "mindroom.thread_summary.generation.generate_summary",
         _thread_summary,
-        json.dumps({"summary": _SUMMARY}),
+        json.dumps({"title": _SUMMARY}),
     ),
     **_structured_helper(
         "thread_enrichment",
         "mindroom.thread_summary.generation.generate_summary",
         _thread_enrichment,
-        json.dumps({"summary": _SUMMARY, "tags": ["travel"]}),
+        json.dumps({"title": _SUMMARY, "tags": ["travel"]}),
     ),
     **_structured_helper(
         "topic",

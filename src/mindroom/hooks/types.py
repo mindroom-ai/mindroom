@@ -67,6 +67,9 @@ BUILTIN_EVENT_NAMES = frozenset(
         EVENT_TURN_ENDED,
     },
 )
+type HookScope = Literal["agent", "room", "service"]
+# The events one process emits once for itself, where a hook may take the service scope.
+SERVICE_SCOPE_EVENTS = frozenset({EVENT_BOT_READY, EVENT_CONFIG_RELOADED})
 _RESERVED_EVENT_NAMESPACES = frozenset(
     {
         "message",
@@ -275,6 +278,7 @@ class RegisteredHook:
     agents: tuple[str, ...] | None
     rooms: tuple[str, ...] | None
     required: bool = False
+    scope: HookScope = "agent"
 
 
 def default_timeout_ms_for_event(event_name: str) -> int:

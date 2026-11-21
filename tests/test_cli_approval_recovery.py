@@ -600,6 +600,8 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
             progress=publish,
         )
     assert isinstance(follow_up, cli_approval_recovery.CliFollowUpTurn)
+    # The turn after the recovered call answers the event its tools answer, which a routed turn's source is not.
+    assert follow_up.ctx.reply_to_event_id == runtime.reply_to_event_id != continuation.source_event_ids[0]
     if control == "after-toolcall" and approved:
         assert follow_up.reusable_build is None
         assert follow_up.ctx.active_model_name == "new-model"

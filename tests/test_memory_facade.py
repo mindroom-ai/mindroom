@@ -30,7 +30,6 @@ from mindroom.memory.config import _Mem0Embedder, _Mem0StrictOpenAIEmbedder, mem
 from mindroom.prompts import MEMORY_CONTEXT_PROMPT_TEMPLATE
 from mindroom.tool_system.worker_routing import agent_state_root_path, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for
-from tests.fakes.token_counter import fake_token_counter
 from tests.memory_test_support import MockTeamConfig
 
 if TYPE_CHECKING:
@@ -135,7 +134,6 @@ async def build_memory_prompt_parts(
         agent_name,
         config,
         runtime_paths_for(config),
-        counter=fake_token_counter(),
     )
 
 

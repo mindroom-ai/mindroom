@@ -173,13 +173,13 @@ OPENAI_AVATAR_PROMPT = _OPENAI_GPT
 _AZURE_OPENAI_DEFAULT_DEPLOYMENT = "your-azure-openai-deployment"
 
 _GOOGLE_GEMINI_HYDROGEN = "gemini-4-hydrogen"
-_GOOGLE_GEMINI_LITE = "gemini-3.5-flash-lite"
 GOOGLE_IMAGE = "gemini-nano-banana-2.1"
 GOOGLE_VEO = "veo-3.1-generate-001"
 # Direct Gemini API models whose requests keep the provider's sampling defaults. Literal ids, like the Claude lists
 # below, because a model keeps its sampling rule after the preferred defaults move on from it.
 GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
     "gemini-4-carbon",
+    "gemini-4-neon",
     "gemini-4-argon",
     "gemini-4-hydrogen",
     "gemini-3.8-flash",
@@ -249,7 +249,6 @@ _OPENROUTER_CLAUDE_SONNET = "anthropic/claude-sonnet-5.5"
 OPENROUTER_SYSTEM_UPDATE_MODELS = frozenset({"anthropic/claude-opus-5.5"})
 _OPENROUTER_CLAUDE_HAIKU = "anthropic/claude-haiku-5.5"
 _OPENROUTER_GEMINI_HYDROGEN = f"google/{_GOOGLE_GEMINI_HYDROGEN}"
-_OPENROUTER_GEMINI_LITE = f"google/{_GOOGLE_GEMINI_LITE}"
 _OPENROUTER_OPENAI_GPT = f"openai/{_OPENAI_GPT}"
 _OPENROUTER_OPENAI_SOL = f"openai/{OPENAI_GPT_SOL}"
 OPENROUTER_OPENAI_LUNA = f"openai/{OPENAI_GPT_LUNA}"
@@ -346,7 +345,6 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
             ("opus", ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000)),
             ("haiku", ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 1_000_000)),
             ("gemini_hydrogen", ModelPreset("openrouter", _OPENROUTER_GEMINI_HYDROGEN, 1_048_576)),
-            ("gemini_lite", ModelPreset("openrouter", _OPENROUTER_GEMINI_LITE, 1_048_576)),
             ("deepseek", ModelPreset("openrouter", _OPENROUTER_DEEPSEEK, 1_048_576)),
             ("glm", ModelPreset("openrouter", _OPENROUTER_GLM, 1_048_576)),
             ("kimi", ModelPreset("openrouter", _OPENROUTER_KIMI, 1_048_576)),
@@ -405,7 +403,6 @@ SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "sonnet": ModelPreset("openrouter", _OPENROUTER_CLAUDE_SONNET, 1_000_000),
         "haiku": ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 1_000_000),
         "gemini_hydrogen": ModelPreset("openrouter", _OPENROUTER_GEMINI_HYDROGEN, 1_048_576),
-        "gemini_lite": ModelPreset("openrouter", _OPENROUTER_GEMINI_LITE, 1_048_576),
         "deepseek": ModelPreset("openrouter", _OPENROUTER_DEEPSEEK, 1_048_576),
         "glm": ModelPreset("openrouter", _OPENROUTER_GLM, 1_048_576),
         "kimi": ModelPreset("openrouter", _OPENROUTER_KIMI, 1_048_576),

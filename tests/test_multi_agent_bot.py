@@ -211,6 +211,7 @@ class TestAgentBot(AgentBotTestBase):
             call(bot._room_lifecycle.on_invite, nio.InviteEvent),
             call(bot._room_lifecycle.on_space_child, nio.RoomSpaceChildEvent),
             call(bot._on_room_state_event, nio.UnknownEvent),
+            call(bot.steward_duties.power_levels_event, nio.PowerLevelsEvent),
         ]
         assert bot._journal_dispatcher.callbacks.on_room_lifecycle == bot._on_room_member
 
@@ -412,13 +413,14 @@ class TestAgentBot(AgentBotTestBase):
         next_batch.assert_not_called()
         assert bot._first_sync_done is True
         bot._run_sync_response_side_effects.assert_awaited_once_with(
+            receipt_new=True,
             first_sync_response=True,
         )
         await bot._on_ingestion_frame_completion(True)
         assert bot._mark_sync_progress.call_count == 2
         assert bot._run_sync_response_side_effects.await_args_list == [
-            call(first_sync_response=True),
-            call(first_sync_response=False),
+            call(receipt_new=True, first_sync_response=True),
+            call(receipt_new=True, first_sync_response=False),
         ]
 
     @pytest.mark.asyncio

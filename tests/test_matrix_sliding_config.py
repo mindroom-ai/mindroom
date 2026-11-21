@@ -186,8 +186,8 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
             assert joined
             left = True
 
-        monkeypatch.setattr(bot, "join_configured_rooms", join_rooms)
-        monkeypatch.setattr(bot, "leave_unconfigured_rooms", leave_rooms)
+        monkeypatch.setattr(bot._room_lifecycle, "join_configured_rooms", join_rooms)
+        monkeypatch.setattr(bot._room_lifecycle, "leave_unconfigured_rooms", leave_rooms)
         try:
             await bot.ensure_rooms()
             assert left
@@ -199,7 +199,7 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
                 assert ["m.room.member", "$LAZY"] in request["room_subscriptions"]["!outside:example.org"][
                     "required_state"
                 ]
-                monkeypatch.setattr(bot, "join_configured_rooms", AsyncMock())
+                monkeypatch.setattr(bot._room_lifecycle, "join_configured_rooms", AsyncMock())
                 bot.rooms = []
                 await bot.ensure_rooms()
                 assert json.loads(session._sliding.request(0)[2])["room_subscriptions"] == {}
@@ -235,8 +235,8 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
             config=DurableSyncConfig(sliding=SlidingSyncConfig(room_subscriptions={"!old:example.org": {}})),
         )
         bot._ingestion_session = session
-        monkeypatch.setattr(bot, "join_configured_rooms", AsyncMock())
-        monkeypatch.setattr(bot, "leave_unconfigured_rooms", AsyncMock())
+        monkeypatch.setattr(bot._room_lifecycle, "join_configured_rooms", AsyncMock())
+        monkeypatch.setattr(bot._room_lifecycle, "leave_unconfigured_rooms", AsyncMock())
         for method in ("ensure_rooms_exist", "link_root_space", "_ensure_room_invitations"):
             monkeypatch.setattr(orchestrator._rooms, method, AsyncMock())
         monkeypatch.setattr(orchestrator, "refresh_agent_reply_memberships", AsyncMock())

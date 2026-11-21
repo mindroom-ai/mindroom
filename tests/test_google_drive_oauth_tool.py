@@ -276,11 +276,11 @@ def test_google_drive_model_functions_do_not_collide_with_local_file_tools(tmp_p
             runs_in_worker=False,
             tools=builtin_tool_registry(),
         )
-        for tool_name in ("file", "coding", "google_drive")
+        for tool_name in ("filesystem", "google_drive")
     ]
     function_names = {function.name for toolkit in toolkits for function in adapt_toolkit(toolkit).functions}
 
-    assert {"read_file", "list_files", "search_files"} <= function_names
+    assert {"read_file", "ls", "find_files"} <= function_names
     assert {
         "google_drive_list_files",
         "google_drive_search_files",

@@ -544,11 +544,49 @@ describe("SchemaFields", () => {
     fireEvent.blur(editor);
     expect(lastValue()).toEqual({ settings: { retries: 3 } });
 
+    fireEvent.change(editor, { target: { value: "# nothing yet\n" } });
+    fireEvent.blur(editor);
+    expect(lastValue()).toEqual({});
+
     fireEvent.change(editor, { target: { value: "retries: [" } });
     fireEvent.blur(editor);
     expect(
       screen.getByText(/unexpected end of the stream/i),
     ).toBeInTheDocument();
+  });
+
+  it("reads freeform YAML to the values js-yaml 4 gave", () => {
+    const { lastValue } = renderFixture();
+    const editor = screen.getByRole("textbox", { name: "Settings YAML" });
+    const settingsAfter = (draft: string) => {
+      fireEvent.change(editor, { target: { value: draft } });
+      fireEvent.blur(editor);
+      return lastValue().settings;
+    };
+
+    expect(
+      settingsAfter(
+        "defaults: &d {timeout: 30}\nclient: {<<: *d, retries: 2}\n",
+      ),
+    ).toEqual({
+      defaults: { timeout: 30 },
+      client: { timeout: 30, retries: 2 },
+    });
+    // js-yaml 4.3 kept underscore digits and integers too large for a number as strings and read signed hex, octal
+    // and binary integers as numbers. It made dates Date objects; dates now stay the strings that were typed.
+    const tooLarge = `0b${"1".repeat(1100)}`;
+    expect(
+      settingsAfter(
+        `big: 1_000\nmask: 0b101\nneg: -0x10\npos: +0o20\nhuge: ${tooLarge}\nday: 2026-01-01\n`,
+      ),
+    ).toEqual({
+      big: "1_000",
+      mask: 5,
+      neg: -16,
+      pos: 16,
+      huge: tooLarge,
+      day: "2026-01-01",
+    });
   });
 
   it("stores an explicit empty string when the default is not empty", () => {

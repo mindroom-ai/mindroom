@@ -122,9 +122,8 @@ async def test_a_terminal_starts_in_the_environment_and_workspace_of_the_agent_s
         path_prepend=("/opt/from-the-call/bin",),
     )
     with collected_tool_environment(call_environment):
-        cwd_line, _, command_listing = (await _run_shell_command(toolkit, "env | sort")).partition("\n")
+        workspace, _, command_listing = (await _run_shell_command(toolkit, "pwd; env | sort")).partition("\n")
         info = await terminals.open()
-    workspace = cwd_line.removeprefix("[cwd: ").removesuffix("]")
 
     async with terminals.attach(info.id) as stream:
         # Ctrl-T keeps its built-in binding, so it types nothing on the empty line.
@@ -155,7 +154,7 @@ async def test_a_terminal_opened_while_a_cli_grant_is_bound_starts_without_it(tm
     terminals = _terminals(toolkit)
     grant = AgentCliShellEnv(api_url="http://primary/cli", token="grant-token", bin_dir="/opt/grant/bin")  # noqa: S106
     with bound_agent_cli_shell_env(grant, window="window"):
-        command_env = _env((await _run_shell_command(toolkit, "env")).partition("\n")[2])
+        command_env = _env(await _run_shell_command(toolkit, "env"))
         info = await terminals.open()
     async with terminals.attach(info.id) as stream:
         await stream.send_input("env > terminal.env; exit\r")

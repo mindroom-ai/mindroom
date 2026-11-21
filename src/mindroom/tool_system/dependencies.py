@@ -274,7 +274,7 @@ def _install_via_uv_tool(extras: list[str]) -> bool:
     # the live environment before building, so a failed build would leave nothing behind. Without them
     # uv updates the environment in place, syncing it exactly to `extras`; callers pass the receipt's
     # extras merged with the new ones so installed extras are kept.
-    base_python = sys._base_executable  # ty: ignore[unresolved-attribute]  # typeshed omits it
+    base_python = sys._base_executable  # ty: ignore[missing-attribute]  # typeshed omits it
     cmd = ["uv", "tool", "install", package_spec, "--python", base_python, "-q"]
     result = subprocess.run(cmd, check=False, env={**os.environ, **vendor_telemetry_env_values()})
     return result.returncode == 0

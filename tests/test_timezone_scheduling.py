@@ -88,7 +88,7 @@ def test_relative_time_is_exact_in_the_repeated_fall_back_hour(
 
     class _Clock(datetime):
         @classmethod
-        def now(cls, tz: tzinfo | None = None) -> datetime:
+        def now(cls, tz: tzinfo | None = None) -> datetime:  # ty: ignore[incompatible-method-override]  # test clock
             return now.astimezone(tz)
 
     monkeypatch.setattr("mindroom.scheduling.tasks.datetime", _Clock)

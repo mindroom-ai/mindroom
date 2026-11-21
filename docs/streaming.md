@@ -99,7 +99,7 @@ MindRoom never appends an ellipsis to generated text, and clients may draw their
 
 ## Tool Calls During Streaming
 
-When an agent calls tools, MindRoom shows inline markers in the message text:
+When an agent calls tools, MindRoom builds each reply with a marker line per call:
 
 ```
 🔧 `web_search` [1] ⏳       ← tool call started
@@ -107,6 +107,16 @@ When an agent calls tools, MindRoom shows inline markers in the message text:
 ```
 
 The number in brackets counts tool calls within the message, and `io.mindroom.tool_trace.events[N-1]` in the event content holds the tool name, argument preview, result preview, and `tool_call_id` for call `[N]`.
+Live frames carry the marker lines, but messages and edits go to Matrix without them (`io.mindroom.tool_trace` version 3), so clients without tool support show only the text.
+Each call's trace entry says where its line was instead: `body_line` counts the lines of the sent `body` before it, and `at` counts the top-level HTML blocks of the sent `formatted_body` before it.
+The conversion is the last step of every send, on the whole event: an edit's fallback text is converted as its replacement is, after `* `.
+MindRoom Chat puts the lines back there and gets the version 2 message byte for byte, and so does MindRoom wherever it reads an agent's message from Matrix, so history, summaries, judges and tools read a reply as before.
+Both put the lines back for exactly the accounts whose sends MindRoom converts: those whose username starts with `mindroom_`, on any homeserver (another server's MindRoom, an agent that has left the config, and the internal user), and for no other, whatever trace a message carries.
+The lines go back as the text they were and nothing more: MindRoom reads the trace of a message the same from any sender, as it did before, and the username gives an account no trust.
+The `matrix_api` tool's `get_event` is the exception: it returns the event as Matrix holds it, so a version 3 reply's calls are in `io.mindroom.tool_trace.events` and not in its `body`.
+Search runs on the homeserver, over the text Matrix holds: a word of a reply's prose finds it, and a found reply is shown with its lines back, but a tool's name no longer finds a reply that named the tool only in a marker line, unless the reply is tool calls alone.
+A reply or an edit made of tool calls alone keeps its markers, as version 2: without them it would have no text, and a reader that puts no lines back (another client, an earlier MindRoom) would take it for no message.
+A message also keeps its markers, as version 2, whenever MindRoom is not sure of that: a marker line that is not also its own top-level paragraph in the HTML (inside a paragraph, a list item or raw HTML, or a fenced example of one), a trace with a malformed entry, a warm-up frame, a message too large for one event (whose preview draws its calls from its marker lines), and every message of an account whose username does not start with `mindroom_` (an agent with its own `matrix_username` is one), which MindRoom Chat does not take for an agent.
 A completed call that did not succeed (it errored, was refused or denied, or was cancelled or interrupted) also carries `is_error: true`, and its result preview says why; the key is omitted on a call that succeeded and on a started one, in live frames and the final event alike.
 A secret request card (`io.mindroom.secret_request`) that a reply's tool call posted names that reply's event (`response_event_id`) and the call (`tool_call_id`), so a client can draw the card at the call's line; a call made through the CLI from a Bash call has its own line, which the card names.
 Tools that start in quick succession appear together in one edit.

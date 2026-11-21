@@ -840,9 +840,13 @@ class RealtimeVoiceBridge:
         def _on_error(event: ErrorEvent) -> None:
             if self._session is not session:
                 return
-            on_error(_describe_voice_error(event))
+            if (notice := self._describe_session_error(event)) is not None:
+                on_error(notice)
 
         session.on("error", _on_error)
+
+    def _describe_session_error(self, event: ErrorEvent) -> str | None:
+        return _describe_voice_error(event)
 
     def _register_conversation_listener(self, session: AgentSession, options: CallVoiceAgentOptions) -> None:
         """Record transcript items and reconcile cascaded assistant playout."""

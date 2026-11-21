@@ -34,7 +34,10 @@ class AgnoGoogleAuthBindingMixin:
     creds: Any | None
 
     _authenticate: Callable[[], None]
-    _oauth_entrypoint: Callable[[Callable[..., object]], Callable[..., object]]
+
+    if TYPE_CHECKING:
+        # Provided by ScopedOAuthClientMixin; a method stub so the inherited signatures match.
+        def _oauth_entrypoint(self, entrypoint: Callable[..., object]) -> Callable[..., object]: ...
 
     def _resolve_creds(self) -> Any:  # noqa: ANN401
         """Route Agno's private resolver call through the owner's auth policy."""

@@ -6,12 +6,14 @@ import tempfile
 from pathlib import Path
 from typing import NoReturn
 
+import nio
 import pytest
 
 from mindroom import constants as constants_mod
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import mentions as mentions_module
 from mindroom.matrix.mentions import (
     format_message_with_mentions,
@@ -19,9 +21,10 @@ from mindroom.matrix.mentions import (
     resolve_mentioned_user_ids_from_text,
 )
 from mindroom.matrix.state import MatrixState
+from mindroom.thread_utils import check_agent_mentioned
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 from tests.cpu_budget_helpers import cpu_budget
-from tests.identity_helpers import persist_actual_entity_accounts
+from tests.identity_helpers import entity_ids, persist_actual_entity_accounts
 from tests.matrix_state_helpers import save_matrix_state
 
 _BOUND_RUNTIME_PATHS: dict[int, constants_mod.RuntimePaths] = {}
@@ -918,3 +921,37 @@ class TestMentionParsing:
 
             assert mentioned_agents == expected_agents, f"Failed for text: {text}"
             assert len(mentions) == len(expected_agents)
+
+
+def _owner_id(config: Config) -> str:
+    owner_id = entity_ids(config, _runtime_paths_for(config))[ROUTER_AGENT_NAME]
+    assert owner_id is not None
+    return owner_id.full_id
+
+
+def test_owner_is_not_mentionable() -> None:
+    """The owner account is no mention target by name, and its Matrix ID resolves to no entity."""
+    config = _make_config(_default_runtime_paths())
+    owner_id = _owner_id(config)
+
+    assert _parse_mentions_in_text("@router help", config)[:2] == ("@router help", [])
+    assert _parse_mentions_in_text(f"{owner_id} help", config)[:2] == (f"{owner_id} help", [owner_id])
+
+
+def test_owner_mention_counts_as_non_agent_mention() -> None:
+    """A message that tags the joined owner account is addressed to someone else, like a tag of any person."""
+    config = _make_config(_default_runtime_paths())
+    owner_id = _owner_id(config)
+    room = nio.MatrixRoom("!room:localhost", "@actual_general:localhost")
+    room.add_member(owner_id, None, None)
+    room.members_synced = True
+
+    facts = check_agent_mentioned(
+        {"content": {"body": "hi", "m.mentions": {"user_ids": [owner_id]}}},
+        None,
+        config,
+        _runtime_paths_for(config),
+        room=room,
+    )
+
+    assert facts == ([], False, True)

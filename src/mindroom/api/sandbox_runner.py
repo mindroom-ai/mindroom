@@ -132,6 +132,8 @@ from mindroom.workers.protocol import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
 
+    from pydantic.main import IncEx
+
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.agno_toolkits import AnyToolkit
@@ -1247,7 +1249,7 @@ def _shell_subprocess_dispatch_context(
 def _subprocess_config_yaml(config: Config, tool_name: str) -> str:
     """Serialize the validated config needed by one subprocess tool call."""
     builtin_metadata = builtin_tool_registry().get(tool_name)
-    include: dict[str, object] | None = None
+    include: dict[str, IncEx] | None = None
     if builtin_metadata is not None and ToolManagedInitArg.RUNTIME_CONFIG not in builtin_metadata.managed_init_args:
         default_fields = {"worker_grantable_credentials", "tool_output_auto_save_threshold_bytes"}
         # Plugin paths let the child register plugin tools; their settings stay out of the process running tool code.

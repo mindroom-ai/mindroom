@@ -19,7 +19,7 @@ __all__ = ["consume_one_ingestion_batch", "run_ingestion_pump", "validate_ingest
 # The longest a batch that admits nothing new may wait to wake the dispatcher,
 # counted from the last wake, so a busy agent scans at most this often for such
 # batches. Another agent's write can make this agent's pending work runnable
-# without waking it: a departing router fails the paused approvals its cards held.
+# without waking it: an account that leaves a room fails the paused approvals its cards held.
 _RECHECK_SECONDS = 20.0
 
 

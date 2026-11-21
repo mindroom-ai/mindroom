@@ -288,7 +288,7 @@ class MacAccessibilityBackend:
         self._allowed_app_ids = allowed_app_ids
         self._screen_size = screen_size
         self._services: Any = ApplicationServices
-        self._workspace: _Workspace = AppKit.NSWorkspace.sharedWorkspace()  # ty: ignore[unresolved-attribute]
+        self._workspace: _Workspace = AppKit.NSWorkspace.sharedWorkspace()  # ty: ignore[missing-attribute]
         self._states: OrderedDict[str, _StoredMacState] = OrderedDict()
 
     def availability(self) -> dict[str, object]:
@@ -1103,7 +1103,7 @@ def _request_application_activation(app_id: str) -> None:
     import AppKit  # noqa: PLC0415
 
     source = f'with timeout of 2 seconds\ntell application id "{app_id}" to activate\nend timeout'
-    script = AppKit.NSAppleScript.alloc().initWithSource_(source)  # ty: ignore[unresolved-attribute]
+    script = AppKit.NSAppleScript.alloc().initWithSource_(source)  # ty: ignore[missing-attribute]
     _result, error = script.executeAndReturnError_(None)
     if error is not None:
         msg = "Allowed application activation request failed before input."

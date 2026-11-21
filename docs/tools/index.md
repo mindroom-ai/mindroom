@@ -23,7 +23,7 @@ agents:
     role: A helpful assistant with file and web access
     model: sonnet
     tools:
-      - file
+      - filesystem
       - shell
       - github
       - duckduckgo
@@ -50,7 +50,7 @@ defaults:
 agents:
   code:
     tools:
-      - file                               # no inline settings
+      - filesystem                         # no inline settings
       - shell:                             # this agent only
           extra_env_passthrough: "DAWARICH_*"
   research:

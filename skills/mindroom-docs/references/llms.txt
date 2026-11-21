@@ -73,6 +73,7 @@
 - [Location, Commerce & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/)
 - [Access Control](https://docs.mindroom.chat/authorization/)
 - [Tool Approval](https://docs.mindroom.chat/tool-approval/)
+- [Email Invites](https://docs.mindroom.chat/email-invites/)
 - [Credentials & OAuth](https://docs.mindroom.chat/oauth-framework/)
 - [Connections Portal](https://docs.mindroom.chat/connections-portal/)
 - [Connect Google Accounts](https://docs.mindroom.chat/deployment/google-services-user-oauth/)

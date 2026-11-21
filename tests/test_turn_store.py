@@ -53,7 +53,6 @@ from mindroom.turn_record import (
     PreparedVoiceSource,
     RevisionReplay,
     SourceEventMetadata,
-    SourceVisibleEcho,
     TurnRecord,
     canonicalize_turn_record,
 )
@@ -612,7 +611,7 @@ async def test_pending_delivery_intent_does_not_require_model_history_scope(jour
     assert record.conversation_target == target
     assert record.history_scope is None
     assert record.response_event_id is None
-    assert record.visible_echoes["$source"].event_id == "$echo"
+    assert record.visible_echoes["$source"] == "$echo"
 
 
 @pytest.mark.asyncio
@@ -1960,71 +1959,7 @@ async def test_terminal_turn_can_absorb_a_source_that_only_carries_an_echo(journ
     assert first_record is not None
     assert first_record == second_record
     assert first_record.source_event_ids == ("$first", "$second")
-    assert await store.visible_echo("$second") == SourceVisibleEcho("$echo")
-
-
-@pytest.mark.asyncio
-async def test_visible_echo_is_finalized_only_after_replacement_acknowledgement(
-    journal_store: EventJournalStore,
-) -> None:
-    """A posted placeholder is finalized only once its edit succeeds, and never becomes the turn's answer."""
-    store = await _store(journal_store)
-    await store.record_visible_echo(ROOM, "$event", "$echo")
-
-    assert await store.finalized_visible_echoes(("$event",)) == ()
-
-    await store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
-
-    record = await store.get_turn_record("$event")
-    assert record is not None
-    assert not record.completed
-    assert record.response_event_id is None
-    assert await store.finalized_visible_echoes(("$event",)) == ("$echo",)
-    assert await store.visible_echo("$event") == SourceVisibleEcho("$echo", is_fallback=False)
-
-
-@pytest.mark.asyncio
-async def test_visible_echo_finalization_requires_tracked_placeholder(journal_store: EventJournalStore) -> None:
-    """An acknowledgement alone must not create a finalized visible echo."""
-    store = await _store(journal_store)
-
-    await store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
-
-    assert await store.get_turn_record("$event") is None
-
-
-@pytest.mark.asyncio
-async def test_visible_echo_finalization_cannot_overwrite_terminal_outcome(journal_store: EventJournalStore) -> None:
-    """A late edit acknowledgement preserves a concurrently completed turn."""
-    store = await _store(journal_store)
-    await store.record_visible_echo(ROOM, "$event", "$echo")
-    await store.record_turn(_in_room(TurnRecord.create(["$event"], response_event_id="$response")))
-
-    await store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
-
-    record = await store.get_turn_record("$event")
-    assert record is not None
-    assert record.completed
-    assert record.response_event_id == "$response"
-    assert await store.visible_echo("$event") == SourceVisibleEcho("$echo", is_fallback=False)
-
-
-@pytest.mark.asyncio
-async def test_finalized_visible_echo_keeps_transcript_over_fallback(journal_store: EventJournalStore) -> None:
-    """Transcript replacement upgrades a fallback and rejects a later downgrade, across a restart too."""
-    store = await _store(journal_store)
-    await store.record_visible_echo(ROOM, "$event", "$echo")
-
-    await store.record_finalized_visible_echo("$event", "$echo", is_fallback=True)
-    assert await store.visible_echo("$event") == SourceVisibleEcho("$echo", is_fallback=True)
-
-    await store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
-    transcript = SourceVisibleEcho("$echo", is_fallback=False)
-    assert await store.visible_echo("$event") == transcript
-
-    await store.record_finalized_visible_echo("$event", "$echo", is_fallback=True)
-    assert await store.visible_echo("$event") == transcript
-    assert await (await _store(journal_store)).visible_echo("$event") == transcript
+    assert await store.visible_echo("$second") == "$echo"
 
 
 @pytest.mark.asyncio
@@ -2079,7 +2014,7 @@ async def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(journal
         assert record is not None
         assert record.completed
         assert record.response_event_id == "$response"
-        assert await current.visible_echo("$event") == SourceVisibleEcho("$echo")
+        assert await current.visible_echo("$event") == "$echo"
 
 
 @pytest.mark.asyncio
@@ -2967,19 +2902,19 @@ async def test_another_login_of_the_agent_reads_its_turns_redactions_and_live_cl
 
 
 @pytest.mark.asyncio
-async def test_every_finalized_echo_of_a_coalesced_turn_is_known_after_a_restart(
+async def test_every_echo_of_a_coalesced_turn_is_known_after_a_restart(
     journal_store: EventJournalStore,
 ) -> None:
     """A routing turn of two voice messages excludes both echoes when a restart looks for its relay."""
     store = await _store(journal_store)
     for source, echo in (("$voice-1", "$echo-1"), ("$voice-2", "$echo-2")):
         await store.record_visible_echo(ROOM, source, echo)
-        await store.record_finalized_visible_echo(source, echo, is_fallback=False)
     assert await store.record_pending_turn(_in_room(TurnRecord.create(["$voice-1", "$voice-2"], completed=False)))
 
     reopened = await _store(journal_store)
 
-    assert await reopened.finalized_visible_echoes(("$voice-1", "$voice-2")) == ("$echo-1", "$echo-2")
+    assert await reopened.visible_echo("$voice-1") == "$echo-1"
+    assert await reopened.visible_echo("$voice-2") == "$echo-2"
     record = await reopened.get_turn_record("$voice-1")
     assert record is not None
     assert record.response_event_id is None, "an echo never becomes the turn's answer"

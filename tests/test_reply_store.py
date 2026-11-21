@@ -1270,7 +1270,6 @@ async def test_discarding_an_unavailable_owners_approval_ends_the_reply_it_pause
 
     effects = await alice.approvals.discard_unavailable_approval_continuation(
         "approval-1",
-        notice_principal_id="router@alice",
     )
 
     # Its effects are returned like a finish's, for whatever runs them.

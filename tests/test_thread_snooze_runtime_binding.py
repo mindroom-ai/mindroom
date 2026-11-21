@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -61,10 +62,17 @@ def _coordinator(config: Config, bots: dict[str, Any]) -> ThreadSnoozeRuntimeCoo
     )
 
 
-def _bot(*room_ids: str) -> MagicMock:
+_BOT_NUMBERS = itertools.count()
+
+
+def _bot(*room_ids: str, power: int = 0) -> MagicMock:
+    """A running bot joined to ``room_ids`` at ``power``; among equal powers the bot made first is their steward."""
     bot = MagicMock()
     bot.client = MagicMock()
-    bot.client.rooms = {room_id: MagicMock() for room_id in room_ids}
+    bot.client.user_id = f"@mindroom_bot{next(_BOT_NUMBERS):04}:localhost"
+    bot.client.rooms = {room_id: nio.MatrixRoom(room_id, bot.client.user_id) for room_id in room_ids}
+    for room in bot.client.rooms.values():
+        room.power_levels.users[bot.client.user_id] = power
     bot.hook_context.send_message = AsyncMock(return_value="$wake")
     return bot
 
@@ -146,9 +154,8 @@ async def test_restore_reads_the_room_again_when_every_bot_left_it(tmp_path: Pat
     await coordinator.restore_room(code, ROOM)
     assert router.client.room_get_state.await_count + code.client.room_get_state.await_count == 1
 
-    # Both bots leave the room, then code joins it again.
+    # The bot that read the room leaves it; code reads it again.
     router.client.rooms = {}
-    code.client.rooms = {ROOM: MagicMock()}
     code.client.room_get_state = AsyncMock(
         return_value=nio.RoomGetStateResponse(
             events=[_snooze_source(content={}), _snooze_source(root="$new")],
@@ -204,11 +211,11 @@ async def test_restore_retry_stops_when_no_bot_is_joined_and_on_stop(tmp_path: P
 
     with patch(f"{_MODULE}.SNOOZE_RETRY_DELAY", timedelta(0)):
         await coordinator.restore_room(bot, ROOM)
-        bot.client.rooms = {}
+        joined_rooms, bot.client.rooms = bot.client.rooms, {}
         await _await_restore_retries(coordinator)
     assert bot.client.room_get_state.await_count == 1
 
-    bot.client.rooms = {ROOM: MagicMock()}
+    bot.client.rooms = joined_rooms
     await coordinator.restore_room(bot, ROOM)
     await coordinator.restore_room(bot, ROOM)
     [retry] = coordinator._restore_retries.values()
@@ -531,10 +538,10 @@ async def test_a_non_matrix_exception_from_a_bot_call_is_unavailable(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_clear_tries_the_router_first_then_another_joined_bot(tmp_path: Path) -> None:
-    """A router without the power level to write tags hands the removal to the next joined bot."""
-    router, code, absent = _bot(ROOM), _bot(ROOM), _bot()
-    coordinator = _coordinator(_config(tmp_path), {"absent": absent, "code": code, "router": router})
+async def test_clear_tries_the_steward_first_then_another_joined_bot(tmp_path: Path) -> None:
+    """A steward without the power level to write tags hands the removal to the next joined bot."""
+    absent, code, steward = _bot(), _bot(ROOM), _bot(ROOM, power=50)
+    coordinator = _coordinator(_config(tmp_path), {"absent": absent, "code": code, "zeta": steward})
     calls: list[object] = []
 
     async def remove(
@@ -548,7 +555,7 @@ async def test_clear_tries_the_router_first_then_another_joined_bot(tmp_path: Pa
         assert (room_id, thread_root_id, tag) == (ROOM, ROOT, "snoozed")
         assert expected_record == _tag_state().tags["snoozed"]  # type: ignore[union-attr]
         calls.append(client)
-        if client is router.client:
+        if client is steward.client:
             msg = "power level"
             raise ThreadTagsPermissionError(msg)
         return ThreadTagsState(room_id=ROOM, thread_root_id=ROOT)
@@ -559,7 +566,7 @@ async def test_clear_tries_the_router_first_then_another_joined_bot(tmp_path: Pa
     ):
         assert await coordinator.clear(ROOM, ROOT, UNTIL) == "cleared"
 
-    assert calls == [router.client, code.client]
+    assert calls == [steward.client, code.client]
 
 
 @pytest.mark.asyncio
@@ -682,18 +689,25 @@ async def test_send_ended_mentions_only_the_snoozer_and_wakes_no_agent(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_send_ended_falls_back_to_the_next_joined_bot(tmp_path: Path) -> None:
-    """A wake message the router cannot deliver goes out through the next joined bot."""
-    router, code, team = _bot(ROOM), _bot(ROOM), _bot(ROOM)
-    router.hook_context.send_message = AsyncMock(side_effect=RuntimeError("transport"))
-    code.hook_context.send_message = AsyncMock(return_value=None)
-    coordinator = _coordinator(_config(tmp_path), {"team": team, "code": code, "router": router})
+async def test_send_ended_posts_as_the_room_poster_and_never_falls_back(tmp_path: Path) -> None:
+    """The wake message goes out as the owner where it is joined, else as the lowest Matrix ID, never as the steward."""
+    code, team, steward, owner = _bot(ROOM), _bot(ROOM), _bot(ROOM, power=100), _bot(ROOM)
+    bots = {"team": team, "code": code, "zeta": steward, "router": owner}
+    coordinator = _coordinator(_config(tmp_path), bots)
+    snooze = Snooze(ROOM, ROOT, UNTIL, None, PERSON)
 
-    assert await coordinator.send_ended(Snooze(ROOM, ROOT, UNTIL, None, PERSON)) is True
+    assert await coordinator.send_ended(snooze) is True
+    owner.hook_context.send_message.assert_awaited_once()
 
-    router.hook_context.send_message.assert_awaited_once()
+    # A post the poster cannot deliver is left to the runtime's retry, which asks for the room's poster again.
+    owner.hook_context.send_message = AsyncMock(side_effect=RuntimeError("transport"))
+    assert await coordinator.send_ended(snooze) is False
+
+    del bots["router"]
+    assert await coordinator.send_ended(snooze) is True
     code.hook_context.send_message.assert_awaited_once()
-    team.hook_context.send_message.assert_awaited_once()
+    team.hook_context.send_message.assert_not_awaited()
+    steward.hook_context.send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -71,7 +71,7 @@ class PromptCurationAutomation(_ScheduledAutomation):
         ge=1,
         description=(
             "Post the prompt once MEMORY.md and the context files total more than this many of the agent model's tokens; "
-            "a MEMORY.md the preload cannot show whole (memory.file.max_entrypoint_lines or max_entrypoint_tokens) also posts it"
+            "a file the preload cannot show whole (over defaults.max_preload_file_chars) also posts it"
         ),
     )
     min_reduction: float = Field(

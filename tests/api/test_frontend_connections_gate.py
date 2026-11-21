@@ -60,8 +60,7 @@ def gate_client(
         base_url: str = "http://localhost",
     ) -> TestClient:
         env = trusted_upstream_env() if trusted_upstream else {}
-        if broker_on:
-            env["MINDROOM_EGRESS_BROKER_PORT"] = "8768"
+        env["MINDROOM_EGRESS_BROKER_PORT"] = "8768" if broker_on else "off"
         env.update(extra_env or {})
         runtime_paths = constants.resolve_primary_runtime_paths(
             config_path=temp_config_file,

@@ -23,8 +23,9 @@ from nio.crypto.attachments import encrypt_attachment
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
-from mindroom.event_journal import DepartureSource, EventClass, EventKind, HydrationPolicy
+from mindroom.event_journal import DepartureSource, EventClass, EventKind, HydrationPolicy, journal, views
 from mindroom.event_journal.identity import journal_principal_id
+from mindroom.event_journal.principal_rows import PrincipalRows
 from mindroom.event_journal.views import ExportProjectionView
 from mindroom.matrix.conversation_hydration import (
     _MAX_FETCHED_EVENTS,
@@ -42,7 +43,7 @@ from mindroom.thread_export.projected_history import (
     export_conversation_reader,
     fetch_projected_thread_history,
 )
-from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content, tool_markers_out_of_text
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     FakeMediaResponse,
@@ -52,6 +53,7 @@ from tests.conftest import (
 )
 from tests.journal_membership_helpers import admit_room_membership
 from tests.thread_export_helpers import thread_export_config
+from tests.tool_position_helpers import _SHELL, _marked
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
@@ -343,6 +345,30 @@ async def test_a_cold_thread_hydrates_once_and_then_costs_no_history_calls(
 
     assert bodies(warm) == ["root", "first", "second"]
     assert homeserver.history_calls == 0
+
+
+async def test_an_export_reads_an_agents_reply_with_tool_calls_as_it_was_built(router: PrincipalStore) -> None:
+    """Matrix holds a reply without its tool marker lines, and the projection an export shares with turns holds them."""
+    built = _marked("Looked.\n\n🔧 `shell` [1]", [_SHELL])
+    held = tool_markers_out_of_text(built)
+    assert held["body"] == "Looked."
+    homeserver = FakeHomeserver()
+    replies = [
+        raw(f"$by{number}:example.org", "", ts=200 + number, sender=sender, thread_id=ROOT, extra_content=held)
+        for number, sender in enumerate((HELPER, ALICE))
+    ]
+    serve_thread(homeserver, raw(ROOT, "root", ts=100), replies)
+    reader = export_conversation_reader(
+        client=homeserver,  # type: ignore[arg-type]
+        config=Config(),
+        store=router,
+        self_sender=ROUTER,
+    )
+
+    assert bodies(await export(reader)) == ["root", "Looked.", "Looked."]
+
+    page = await router.read_conversation(room_id=ROOM, thread_id=ROOT, limit=10)
+    assert [message.content["body"] for message in page.messages] == ["root", built["body"], "Looked."]
 
 
 async def test_a_warm_thread_reads_locally_from_a_second_export_login(
@@ -802,6 +828,58 @@ async def test_rejoining_the_room_forces_one_fresh_hydration(router: PrincipalSt
 
     assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 2)
     assert bodies(messages) == ["root", "first", "second"]
+
+
+@pytest.mark.parametrize("departs", ["before_the_first_chunk", "after_the_first_chunk"])
+async def test_a_walk_the_account_left_the_room_under_installs_no_more_and_the_export_walks_again(
+    router: PrincipalStore,
+    monkeypatch: pytest.MonkeyPatch,
+    departs: str,
+) -> None:
+    """A departure refuses what a walk in flight still writes, so no rejoin reads the membership before.
+
+    The owner account keeps one membership epoch, so only the room's projection generation tells its memberships
+    apart: without it the walk would install the chunks the departure did not drop, or the history it fetched before
+    the departure, and mark that complete.
+    """
+    homeserver = FakeHomeserver()
+    serve_thread(
+        homeserver,
+        raw(ROOT, "root", ts=100),
+        [
+            raw("$a:example.org", "first", ts=200, thread_id=ROOT),
+            raw("$b:example.org", "second", ts=300, thread_id=ROOT),
+        ],
+    )
+    await admit_room_membership(router, ROOM, "join")
+    monkeypatch.setattr(views, "_HYDRATION_INSTALL_CHUNK_SIZE", 1)
+    write = PrincipalRows._write
+    rejoined = False
+
+    async def rejoin_once() -> None:
+        nonlocal rejoined
+        if not rejoined:
+            rejoined = True
+            await admit_room_membership(router, ROOM, "leave", source=DepartureSource.LOCAL)
+            await admit_room_membership(router, ROOM, "join")
+            homeserver.relations[ROOT] = [raw("$c:example.org", "third", ts=400, thread_id=ROOT)]
+
+    async def write_around_a_rejoin(self: PrincipalRows, operation: Any, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        installs = operation is journal.install_hydration_chunk
+        if installs and departs == "before_the_first_chunk":
+            await rejoin_once()
+        result = await write(self, operation, *args, **kwargs)
+        if installs:
+            await rejoin_once()
+        return result
+
+    monkeypatch.setattr(PrincipalRows, "_write", write_around_a_rejoin)
+    reader = reader_for(router, homeserver)
+
+    assert bodies(await export(reader)) == ["root", "third"]
+    homeserver.reset_counts()
+    assert bodies(await export(reader)) == ["root", "third"]
+    assert (homeserver.get_event_calls, homeserver.relation_calls) == (0, 0)
 
 
 async def test_a_thread_fingerprint_moves_with_every_change_its_export_shows(router: PrincipalStore) -> None:

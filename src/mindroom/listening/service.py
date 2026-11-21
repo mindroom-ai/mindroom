@@ -490,7 +490,8 @@ class ListeningService:
         Like a reply, a message is judged by whom it speaks for, as ingress classifies it: the person a trusted relay
         names rather than the relaying account. The agent's own messages and senders not allowed to reach it in the
         room are left out, as is a message marked agent-authored that an unmanaged sender's account carries. As for a
-        reply, the agent's own view of the room lets a sender it has seen join wait for the router to apply the join.
+        reply, the agent's own view of the room lets a sender it has seen join wait for the room's observer to apply the
+        join.
 
         A message whose sender's membership is still pending, or a heard reply still being written, ends both lists
         before it, as a refetch ends a page, so it is judged, or heard whole, later. One sent before ``waited_out_ms``

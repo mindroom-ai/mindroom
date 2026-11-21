@@ -6,8 +6,6 @@ from mindroom.memory._entrypoint_snapshots import (
     stamp_entrypoint_snapshot,
 )
 from mindroom.memory._file_backend import (
-    entrypoint_tokens,
-    entrypoint_withholds_lines,
     read_scope_memory_files,
     refresh_agent_memory_search,
     write_scope_markdown_file,
@@ -42,8 +40,6 @@ __all__ = [
     "conversation_entrypoint_preamble",
     "delete_agent_memory",
     "entrypoint_snapshot_path",
-    "entrypoint_tokens",
-    "entrypoint_withholds_lines",
     "get_agent_memory",
     "list_all_agent_memories",
     "read_scope_memory_files",

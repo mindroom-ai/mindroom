@@ -9,7 +9,7 @@ from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
 from time import monotonic
-from typing import ClassVar, Literal, cast, get_args
+from typing import ClassVar, Literal, get_args
 from uuid import uuid4
 
 from claude_agent_sdk import (
@@ -69,7 +69,7 @@ def _normalize_permission_mode(permission_mode: str | None) -> _PermissionMode:
     normalized = permission_mode.strip()
     if normalized not in _VALID_PERMISSION_MODES:
         return _DEFAULT_PERMISSION_MODE
-    return cast("_PermissionMode", normalized)
+    return normalized
 
 
 def _parse_int(value: int | None, *, default: int, minimum: int) -> int:

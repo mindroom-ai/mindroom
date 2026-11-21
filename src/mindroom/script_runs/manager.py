@@ -17,6 +17,7 @@ from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.config.resolution import agent_policy
+from mindroom.config.tool_aliases import TOOL_ALIASES
 from mindroom.constants import subprocess_path_with_prepends
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
@@ -302,6 +303,8 @@ class ScriptRunManager:
         if unknown_toolkits:
             names = ", ".join(sorted(unknown_toolkits))
             msg = f"Background script allowed_tools contains unknown or ineligible toolkit names: {names}."
+            if unknown_toolkits & TOOL_ALIASES.keys():
+                msg += " The file and coding toolkits are now one; name filesystem in allowed_tools to allow it."
             raise ScriptRunManagerError(msg)
         return tuple(grant for grant in launch_grants if grant.toolkit_name in allowed_tools)
 

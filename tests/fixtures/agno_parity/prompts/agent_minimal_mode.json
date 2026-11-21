@@ -70,7 +70,7 @@
       "tools": [
         {
           "name": "bash",
-          "description": "Run a Bash command and return its output.\nStart servers and other long work detached with ``nohup cmd > out.log 2>&1 &`` and read the log in later\ncommands.",
+          "description": "Run a Bash command and return its output.\nStart servers and other long work detached with ``nohup cmd > out.log 2>&1 &`` and read the log in later\ncommands. Wait for something inside one command, such as ``until <check>; do sleep 10; done`` with a\n``timeout``, not with repeated ``sleep`` calls: every call is a model turn.",
           "parameters": {
             "type": "object",
             "properties": {

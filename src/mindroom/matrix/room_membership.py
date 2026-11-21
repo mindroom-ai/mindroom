@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
     from nio.durable import SyncRecord
 
+    from mindroom.config.main import Config
+
 logger = get_logger(__name__)
 
 type _ProjectedMembers = tuple[tuple[str, str | None, str | None, bool], ...]
@@ -191,3 +193,21 @@ async def ensure_room_membership_synced(
             )
             return True
         return False
+
+
+def room_has_only(config: Config, room: nio.MatrixRoom, member_ids: set[str]) -> bool:
+    """Return whether complete membership, including every invite, is exactly ``member_ids``."""
+    # The joined-member refresh never lists invites, so invites come from the synced projection.
+    # MindRoom's classic sync filter never loads members lazily, so that projection holds every invite.
+    # Sliding sync loads members lazily, so only the server's joined and invited counts can reveal an unseen invite.
+    # Without both counts, nio's member_count falls back to the projection size.
+    summary = room.summary
+    has_server_counts = (
+        summary is not None and summary.joined_member_count is not None and summary.invited_member_count is not None
+    )
+    return (
+        room_membership_is_complete(room)
+        and (has_server_counts or config.matrix_sync.mode == "classic")
+        and room.member_count == len(member_ids)
+        and cached_member_ids(room) == member_ids
+    )

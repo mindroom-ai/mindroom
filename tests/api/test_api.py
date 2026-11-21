@@ -52,6 +52,7 @@ from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
+from mindroom.tool_system import dependencies as tool_dependencies
 from mindroom.tool_system.plugins import ConfigPlugins, config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
@@ -244,7 +245,7 @@ def test_init_supabase_auth_raises_when_auto_install_disabled(
 
     monkeypatch.setattr(auth.importlib, "import_module", _missing_supabase)
     monkeypatch.setattr(auth, "auto_install_enabled", lambda _runtime_paths: False)
-    monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", _auto_install)
+    monkeypatch.setattr(tool_dependencies, "_auto_install_optional_extra", _auto_install)
 
     with pytest.raises(ImportError, match="MINDROOM_NO_AUTO_INSTALL_TOOLS"):
         auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
@@ -267,7 +268,7 @@ def test_init_supabase_auth_raises_when_auto_install_fails(monkeypatch: pytest.M
 
     monkeypatch.setattr(auth.importlib, "import_module", _missing_supabase)
     monkeypatch.setattr(auth, "auto_install_enabled", lambda _runtime_paths: True)
-    monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", _auto_install)
+    monkeypatch.setattr(tool_dependencies, "_auto_install_optional_extra", _auto_install)
 
     with pytest.raises(ImportError, match=r"mindroom\[supabase\]") as err:
         auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
@@ -304,7 +305,7 @@ def test_init_supabase_auth_retries_import_after_auto_install(
         return True
 
     monkeypatch.setattr(auth.importlib, "import_module", import_module)
-    monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", auto_install)
+    monkeypatch.setattr(tool_dependencies, "_auto_install_optional_extra", auto_install)
 
     supabase_auth = auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
 
@@ -435,6 +436,7 @@ def test_ensure_frontend_dist_dir_builds_repo_checkout(
     monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_DIST_DIR", frontend_dist_dir)
     monkeypatch.setattr(frontend_assets, "_FRONTEND_BUILD_ATTEMPTED", False)
     monkeypatch.setattr(frontend_assets.shutil, "which", lambda name: "/usr/bin/bun" if name == "bun" else None)
+    monkeypatch.setattr(frontend_assets, "_installed_bun_version", lambda _bun: "1.4.3")
     monkeypatch.setattr(frontend_assets.subprocess, "run", _fake_run)
 
     assert frontend_assets.ensure_frontend_dist_dir(_runtime_paths(tmp_path)) == frontend_dist_dir
@@ -442,6 +444,29 @@ def test_ensure_frontend_dist_dir_builds_repo_checkout(
         (["/usr/bin/bun", "install", "--frozen-lockfile"], frontend_source_dir),
         (["/usr/bin/bun", "run", "build"], frontend_source_dir),
     ]
+
+
+def test_ensure_frontend_dist_dir_names_the_bun_version_the_lockfile_needs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A Bun too old for the dashboard lockfile should fail with the version it needs, before installing anything."""
+    frontend_source_dir = tmp_path / "frontend"
+    frontend_source_dir.mkdir()
+    (frontend_source_dir / "package.json").write_text("{}")
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(frontend_assets, "_PACKAGE_FRONTEND_DIR", tmp_path / "package-assets")
+    monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_SOURCE_DIR", frontend_source_dir)
+    monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_DIST_DIR", frontend_source_dir / "dist")
+    monkeypatch.setattr(frontend_assets, "_FRONTEND_BUILD_ATTEMPTED", False)
+    monkeypatch.setattr(frontend_assets.shutil, "which", lambda name: "/usr/bin/bun" if name == "bun" else None)
+    monkeypatch.setattr(frontend_assets, "_installed_bun_version", lambda _bun: "1.3.14")
+    monkeypatch.setattr(frontend_assets.subprocess, "run", lambda command, **_kwargs: commands.append(command))
+
+    with pytest.raises(RuntimeError, match=r"needs Bun 1\.4 or newer, but /usr/bin/bun is Bun 1\.3\.14"):
+        frontend_assets.ensure_frontend_dist_dir(_runtime_paths(tmp_path))
+    assert commands == []
 
 
 def test_ensure_frontend_dist_dir_respects_disable_flag(
@@ -1355,7 +1380,7 @@ def test_get_tools(test_client: TestClient) -> None:
     # Check that some expected tools are present
     tool_names = {tool["name"] for tool in data["tools"]}
     assert "calculator" in tool_names
-    assert "file" in tool_names
+    assert "filesystem" in tool_names
     assert "shell" in tool_names
 
     # Check that tools have the expected structure

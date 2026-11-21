@@ -16,13 +16,13 @@ from mindroom.api.computers import ComputerRuntime
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_matrix_openid
 from mindroom.orchestration.computer_runtime import _authorize_computer, _computer_browser_provider
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 from mindroom.worker_computer.sessions import ComputerError
-from tests.access_schema_support import joined_members_response
+from tests.access_schema_support import joined_members_response, refresh_memberships
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.runtime_fakes import RecordingRouter, ready_runtime
 
@@ -123,9 +123,9 @@ async def test_live_membership_policy_and_canonical_browser_scope(
         "@unknown:example.org" if denial == "unknown" else agent_id,
         config=config,
         runtime_paths=paths,
-        client=client,
+        client=lambda: client,
         memberships=memberships,
-        refresh_memberships=lambda: memberships.refresh(config, paths, client),
+        refresh_memberships=lambda: refresh_memberships(memberships, config, paths, client),
     )
     if denial:
         with pytest.raises(ComputerError) as error:
@@ -178,9 +178,9 @@ async def test_actual_membership_refresh_does_not_log_transport_urls(tmp_path: P
             agent_id,
             config=config,
             runtime_paths=paths,
-            client=client,
+            client=lambda: client,
             memberships=memberships,
-            refresh_memberships=lambda: memberships.refresh(config, paths, client),
+            refresh_memberships=lambda: refresh_memberships(memberships, config, paths, client),
         )
     assert error.value.status_code == 503
     assert "refresh-secret" not in str(logs)
@@ -274,7 +274,8 @@ def _bound_computer(
 ) -> tuple[ComputerRuntime, AsyncMock, str, RuntimePaths]:
     """Bind the runtime's Computer authorization with Alice, her bridge alias, and a writer Alice may use in ``ROOM``.
 
-    Return it, the router's client, the writer's user ID, and the runtime's paths. An ``unprepared`` agent is
+    The writer's bot is the only one that runs: there is no owner account.
+    Return it, the writer's client, the writer's user ID, and the runtime's paths. An ``unprepared`` agent is
     configured too, without its account.
     """
     writer = AgentConfig(
@@ -300,10 +301,12 @@ def _bound_computer(
         agents = {"writer": writer, unprepared: AgentConfig(display_name="Unprepared")}
         config = Config(agents=agents, authorization=config.authorization)
     client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = agent_id
+    client.rooms = {}
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=joined_rooms)
     client.joined_members.return_value = joined_members_response(ROOM, ALICE, ALIAS, agent_id)
     runtime = ready_runtime(config, paths)
-    runtime.fleet.add(ROUTER_AGENT_NAME, RecordingRouter(client, config))  # type: ignore[arg-type]
+    runtime.fleet.add("writer", RecordingRouter(client, config))  # type: ignore[arg-type]
     app = FastAPI()
     api_main.initialize_api_app(app, paths)
     monkeypatch.setattr(api_main, "app", app)
@@ -311,6 +314,33 @@ def _bound_computer(
     computer = ensure_app_state(app).computer_runtime
     assert computer is not None
     return computer, client, agent_id, paths
+
+
+@pytest.mark.asyncio
+async def test_computer_binds_without_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With one person, one agent and no owner account, the agent's own bot answers for its Computer while it runs."""
+    computer, client, agent_id, _paths = _bound_computer(tmp_path, monkeypatch, [ROOM])
+
+    target = await computer.authorize(ALICE, ROOM, agent_id)
+    assert target.spec.worker_key == f"v1:default:user_agent:~{ALICE}:writer"
+    client.joined_members.assert_any_await(ROOM)
+
+    with pytest.raises(ComputerError) as unknown:
+        await computer.authorize(ALICE, ROOM, "@stranger:example.org")
+    assert unknown.value.status_code == 403
+
+    client.joined_members.side_effect = nio.LocalProtocolError("Client session closed")
+    with pytest.raises(ComputerError) as closed:
+        await computer.authorize(ALICE, ROOM, agent_id)
+    assert closed.value.status_code == 503
+
+    client.user_id = "@mindroom_other:example.org"
+    with pytest.raises(ComputerError) as stopped:
+        await computer.authorize(ALICE, ROOM, agent_id)
+    assert (stopped.value.status_code, str(stopped.value.detail)) == (
+        503,
+        "Computer authorization runtime is unavailable.",
+    )
 
 
 @pytest.mark.asyncio

@@ -251,6 +251,7 @@ class EgressPresetResponse(BaseModel):
     display_name: str
     description: str
     oauth_provider: str | None
+    read_only_supported: bool
     rules: list[EgressRuleLocation]
     placeholder_env: dict[str, str]
 
@@ -335,6 +336,7 @@ def presets_response(oauth_providers: Mapping[str, OAuthProvider]) -> PresetsRes
                 display_name=service.display_name or preset_id,
                 description=service.description,
                 oauth_provider=service.oauth_provider,
+                read_only_supported=service.read_only is not None,
                 rules=[
                     EgressRuleLocation(host=rule.host, port=rule.port, path_prefix=rule.path_prefix)
                     for rule in service.rules

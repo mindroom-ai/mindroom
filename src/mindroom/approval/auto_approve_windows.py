@@ -102,10 +102,11 @@ def start_auto_approve(
     thread_id: str | None,
     requester_id: str,
     duration: timedelta,
+    now: datetime | None = None,
 ) -> datetime:
     """Start or replace the requester's auto-approve window in one conversation and return when it ends."""
     path = _store_path(runtime_paths)
-    now = datetime.now(UTC)
+    now = now or datetime.now(UTC)
     windows = _load_active_windows(path, now)
     expires_at = now + duration
     windows[_window_key(room_id, thread_id, requester_id)] = {

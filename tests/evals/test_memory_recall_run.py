@@ -29,7 +29,6 @@ from mindroom.memory import _semantic_file_search, build_memory_prompt_parts
 from mindroom.memory._file_backend import _RECALL_SEARCH_LIMIT, _RECALL_SELECTION, _retrieve_memories
 from mindroom.memory._semantic_file_search import search_semantic_file_memories
 from mindroom.runtime_resolution import resolve_knowledge_binding
-from tests.fakes.token_counter import fake_token_counter
 from tests.knowledge_test_support import install_knowledge_embedder
 
 if TYPE_CHECKING:
@@ -520,7 +519,6 @@ async def test_shipped_arm_matches_the_prompt_an_agent_gets(tmp_path: Path, monk
             "alpha",
             config,
             runtime_paths,
-            counter=fake_token_counter(),
         )
         expected = [hit["memory"] for hit in hits]
         lines = [line.removeprefix("- ") for line in prompt_parts.transient_turn_context.splitlines()]

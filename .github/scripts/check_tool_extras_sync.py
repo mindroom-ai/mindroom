@@ -23,6 +23,8 @@ TOOLS_DIR = REPO_ROOT / "src" / "mindroom" / "tools"
 IGNORED_GROUPS: set[str] = {
     "aws_bedrock",
     "chromadb",
+    "coding",  # Earlier name of filesystem, kept so `uv sync --extra coding` still resolves.
+    "file",  # Earlier name of filesystem, kept so `uv sync --extra file` still resolves.
     "kubernetes",
     "matrix-e2ee",
     "matrix_calls",

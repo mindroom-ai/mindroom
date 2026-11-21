@@ -432,7 +432,7 @@ class ResponseLifecycleCoordinator:
     # this instance, so it never tells the turn it waits behind, such as a job follow-up, that a newer message arrived.
     continued_sources: frozenset[str] = frozenset()
 
-    def follow_approval_holds(self, signals: ApprovalSignals, principal_id: str) -> None:
+    def follow_approval_holds(self, signals: ApprovalSignals, principal_id: str, freed: Callable[[str], None]) -> None:
         """Hold the conversation of each paused reply of ``principal_id``, from the ones paused now, until it ends.
 
         Later messages wait as they wait behind a running response. The hold
@@ -444,6 +444,7 @@ class ResponseLifecycleCoordinator:
             principal_id,
             paused=self._hold_for_approval,
             ended=self._release_approval_hold,
+            freed=freed,
         )
 
     def stop_following_approval_holds(self) -> None:

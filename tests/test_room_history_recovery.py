@@ -21,6 +21,7 @@ from mindroom.event_journal import (
     ProjectedEvent,
     RoomHistoryRecovery,
 )
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.matrix import conversation_hydration
 from mindroom.matrix.conversation_hydration import (
     _MESSAGES_PAGE_LIMIT,
@@ -1161,3 +1162,46 @@ async def test_redaction_lookup_repairs_a_room_whose_sync_skipped_a_gap(
     # A room without a skipped gap is answered from the journal alone.
     assert await bot.redacted_event_ids("!quiet:example.org", ("$kept",)) == frozenset()
     assert client.calls == 1
+
+
+@pytest.mark.parametrize("stale_write", ["chunk", "settlement"])
+async def test_a_recovery_walk_from_before_the_owner_account_left_leaves_the_next_gap_open(
+    journal_store: EventJournalStore,
+    stale_write: str,
+) -> None:
+    """A recovery walk started under one membership installs and settles nothing for the next membership's gap.
+
+    The owner account keeps one membership epoch, and a gap after the rejoin records the same obligation row again,
+    so only the projection generation the obligation carries tells the two apart.
+    """
+    owner = journal_store.principal(journal_principal_id("router", "@mindroom_router:example.org"))
+    await admit_room_membership(owner, ROOM, "join")
+    stale = await record_room_history_recovery(owner, ROOM)
+    await admit_room_membership(owner, ROOM, "leave", source=DepartureSource.LOCAL)
+    await admit_room_membership(owner, ROOM, "join")
+    current = await record_room_history_recovery(owner, ROOM)
+    assert stale is not None
+    assert current is not None
+    assert (stale.state, stale.revision, stale.attempted_policy_rank) == (
+        current.state,
+        current.revision,
+        current.attempted_policy_rank,
+    )
+
+    if stale_write == "chunk":
+        assert not await install_recovery_events(owner, stale, (projected("$before", "the membership before", ts=1),))
+    else:
+        outcome = await owner.settle_room_history_recovery(
+            stale,
+            exhausted_server=True,
+            unreadable=False,
+            attempted_policy_rank=4,
+            expected_membership_epoch=await owner.membership_epoch(ROOM),
+        )
+        assert outcome is HistoryRecoveryOutcome.SUPERSEDED
+
+    assert await owner.room_history_recovery(ROOM) == current
+    assert await bodies(owner) == []
+    assert not await owner.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+    assert await install_recovery_events(owner, current, (projected("$after", "this membership", ts=2),))
+    assert await bodies(owner) == ["this membership"]

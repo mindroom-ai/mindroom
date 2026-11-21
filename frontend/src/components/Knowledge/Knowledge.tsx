@@ -10,8 +10,8 @@ import {
 import {
   type ColumnDef,
   flexRender,
-  getCoreRowModel,
-  useReactTable,
+  tableFeatures,
+  useTable,
 } from "@tanstack/react-table";
 import { apiErrorMessageFromResponse, API_ENDPOINTS } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -304,6 +304,10 @@ const KNOWLEDGE_BASE_EDITOR_FIELDS = [
   "chunk_overlap",
   "git",
 ] as const;
+
+/** The file table only lists rows, so it needs no optional table features. */
+const fileTableFeatures = tableFeatures({});
+type FileColumn = ColumnDef<typeof fileTableFeatures, KnowledgeFile>;
 
 export function Knowledge() {
   const {
@@ -844,8 +848,8 @@ export function Knowledge() {
     }
   }, [loadData, reportFailure, selectedBase, settingsMode, toast]);
 
-  const columns: ColumnDef<KnowledgeFile>[] = useMemo(() => {
-    const baseColumns: ColumnDef<KnowledgeFile>[] = [
+  const columns: FileColumn[] = useMemo(() => {
+    const baseColumns: FileColumn[] = [
       {
         accessorKey: "name",
         header: () => <span className="font-medium">Name</span>,
@@ -902,10 +906,10 @@ export function Knowledge() {
     ];
   }, [deletingPath, handleDeleteFile, isDirty, settingsSourceType]);
 
-  const table = useReactTable({
+  const table = useTable({
+    features: fileTableFeatures,
     data: files,
     columns,
-    getCoreRowModel: getCoreRowModel(),
   });
 
   const onFileInputChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -1991,7 +1995,7 @@ export function Knowledge() {
                       ) : (
                         table.getRowModel().rows.map((row) => (
                           <tr key={row.id} className="border-b last:border-b-0">
-                            {row.getVisibleCells().map((cell) => (
+                            {row.getAllCells().map((cell) => (
                               <td
                                 key={cell.id}
                                 className="px-4 py-2.5 align-middle"

@@ -343,7 +343,7 @@ def test_a_sessions_directory_swapped_for_a_link_before_the_resolve_is_refused(t
     sessions.mkdir(parents=True)
 
     class SwappedOnFirstResolve(Path):
-        def resolve(self, strict: bool = False) -> Path:
+        def resolve(self, strict: bool = False) -> Path:  # ty: ignore[incompatible-method-override]  # returns plain Paths
             if not sessions.is_symlink():
                 sessions.rename(tmp_path / "moved")
                 sessions.symlink_to(outside, target_is_directory=True)

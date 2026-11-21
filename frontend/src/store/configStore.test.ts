@@ -5660,12 +5660,12 @@ describe("configStore", () => {
     it("clears only the diagnostics of the edited field", async () => {
       await loadBaseConfig({
         ...baseConfig,
-        defaults: { ...baseConfig.defaults, max_preload_chars: 0 },
+        defaults: { ...baseConfig.defaults, max_preload_file_chars: 0 },
       });
       const siblingIssue = {
         kind: "validation" as const,
         issue: {
-          loc: ["defaults", "max_preload_chars"],
+          loc: ["defaults", "max_preload_file_chars"],
           msg: "Input should be greater than or equal to 1",
           type: "greater_than_equal",
         },

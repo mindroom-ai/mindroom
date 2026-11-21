@@ -50,7 +50,7 @@ def _guarded_article(url: str) -> newspaper.Article:
 def install_server_fetch_guard() -> None:
     """Replace the article downloader Newspaper4kTools calls with the guarded one."""
     # AGNO_COMPAT: Newspaper4kTools downloads through newspaper4k's unguarded article helper.
-    # Reason: Agno 3.0.9 get_article_data calls newspaper.article(url), which opens file:// paths,
+    # Reason: Agno 3.2.1 get_article_data calls newspaper.article(url), which opens file:// paths,
     # follows redirects to any address, and downloads image URLs listed in the page, so model-chosen
     # URLs and fetched pages reached local files and loopback, private, and metadata targets from
     # the MindRoom process.

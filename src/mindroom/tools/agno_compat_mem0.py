@@ -82,7 +82,7 @@ class UserFilterMem0Tools(Mem0Tools):
             **kwargs,
         )
         # AGNO_COMPAT: Mem0Tools passes its user to Mem0 2 search and listing as a top-level user_id.
-        # Reason: Agno 3.0.9 search_memory and get_all_memories call client.search(query=..., user_id=...)
+        # Reason: Agno 3.2.1 search_memory and get_all_memories call client.search(query=..., user_id=...)
         # and client.get_all(user_id=...); Mem0 2.0 and later, both the local Memory and the platform
         # MemoryClient, reject top-level entity parameters there and take them in filters, so both tool
         # functions return Mem0's ValueError text instead of memories.

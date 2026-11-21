@@ -52,7 +52,7 @@ agents:
     display_name: Code
     role: Implement and debug code changes
     model: sonnet
-    tools: [coding, shell]
+    tools: [filesystem, shell]
     delegate_to: [research]  # can delegate further
 
   research:
@@ -158,7 +158,7 @@ agents:
     display_name: Lead
     delegate_to: [lead]
     dedicated_subagent_workers: true
-    worker_tools: [shell, file, python]
+    worker_tools: [shell, filesystem, python]
 ```
 
 ```python
@@ -219,7 +219,7 @@ The agent creates and edits profiles with its own file or shell tools.
 ```markdown
 ---
 description: Adversarial reviewer that returns the three biggest risks in a proposal.
-tools: [file, duckduckgo]
+tools: [filesystem, duckduckgo]
 model: haiku
 mode: standard
 ---
@@ -247,7 +247,7 @@ Authoring errors:
 ### Delegation Records
 
 Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in the child's workspace, dated by the delegation's start in UTC.
-`run.json` and `events.jsonl` update as the child runs, and `transcript.md` is written when the turn finishes.
+`events.jsonl` gets each event as the child runs, `run.json` and the caller's receipt catch up on each status change and at least every 32 events, and when the turn finishes both are rewritten and `transcript.md` is written.
 The `usage` in `run.json` reports the child turn's token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), and `time_to_first_token` and `duration` in seconds.
 It covers every model run of the turn, also across an approval pause.
 Each `usage` event of `events.jsonl` reports the same values for one model run as it stood when the event was written, so a run's last `usage` event is that run's total.
@@ -442,7 +442,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 - **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, a text `description`, and `enum`.
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
   - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
-    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `agent_manager`, `contacts`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
+    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `agent_manager`, `contacts`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
     A [`mode: minimal`](agent-cli.md#minimal-subagents) participant's `shell` must run without approval, [pre-approved](#allowing-participant-tools) like any participant tool; leave `mode` unset for a participant that needs no tools.
     Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
     It searches no knowledge bases, even when its profile lists `knowledge`.
@@ -725,7 +725,6 @@ Which functions an agent gets depends on what it is:
 
 Only an agent's owners may read or change it, and only a created agent's owner may delete it or change its co-owners.
 `create_agent`, `update_agent`, `set_avatar`, and `delete_agent` always show an [approval card](../tool-approval.md#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](../tool-approval.md#auto-approve-everything) window skips it.
-In a room without the router the call is denied, and the agent recovers with `invite_router` as described in [When the Router Is Missing](../tool-approval.md#when-the-router-is-missing).
 Scripts and workflow participants cannot call it, and it cannot be deferred.
 
 ```python

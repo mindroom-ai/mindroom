@@ -212,7 +212,12 @@ class ConfigReloadLifecycle:
         return not self._cancelled and not self.is_running() and self._fully_applied_config is None
 
     def startup_published(self, config: Config) -> None:
-        """Acknowledge startup's config, and reload at once if its files changed since startup loaded them."""
+        """Acknowledge startup's config and reopen admission, under the apply lock; reload if its files changed since."""
+        self.response_admission_gate.startup_hold = False
+        self.response_admission_gate.reopen()
+        if self._fully_applied_config is not None:
+            # A reload that ran while startup waited for first syncs keeps the last-good and incomplete records.
+            return
         self._record_applied(config)
         if self._requested_at is not None or _source_fingerprint_on_disk(config, self.runtime_paths) != (
             config.source_fingerprint
@@ -457,15 +462,24 @@ class ConfigReloadLifecycle:
             self.response_admission_gate.reopen()
 
     @asynccontextmanager
-    async def startup_publication_admission(self) -> AsyncIterator[None]:
-        """Serialize startup publication with every runtime replacement."""
-        async with self._response_admission_apply_lock:
-            self.response_admission_gate.close()
-            try:
-                yield
-            finally:
-                self.response_admission_gate.reopen()
-            await self.after_reload()
+    async def startup_publication_admission(self) -> AsyncIterator[asyncio.Lock]:
+        """Hold response admission closed until startup publishes, and reopen it between runtime replacements.
+
+        Startup's wait for first syncs does not hold the apply lock, so a reload can replace a bot that never syncs.
+        Startup publishes under the yielded apply lock, so never while a replacement is mid-apply.
+        """
+        gate = self.response_admission_gate
+        gate.startup_hold = True
+        gate.close()
+        try:
+            yield self._response_admission_apply_lock
+        finally:
+            if gate.startup_hold:
+                # Startup ended unpublished.
+                async with self._response_admission_apply_lock:
+                    gate.startup_hold = False
+                    gate.reopen()
+        await self.after_reload()
 
     async def apply_with_response_admission(
         self,

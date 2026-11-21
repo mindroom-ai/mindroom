@@ -67,7 +67,7 @@ def test_warns_when_agent_keys_cannot_reach_the_agents_commands(tmp_path: Path) 
         pytest.param({"tools": ["egress_credentials"]}, _BROKER_AND_RUNNER, id="no-command-tool"),
         pytest.param(
             {"tools": ["python", "egress_credentials"], "worker_tools": []},
-            {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test"},
+            {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test", "MINDROOM_EGRESS_BROKER_PORT": "off"},
             id="broker-off",
         ),
     ],

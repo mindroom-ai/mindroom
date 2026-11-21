@@ -116,8 +116,8 @@ async def test_output_ownership_is_independent_of_message_wording(
         },
     )
 
-    expected = display_message if start_fails else "complete"
-    assert destination.read_text().split("\n", 1)[-1] == expected
+    # The saved file holds the output alone, with no cwd line before it.
+    assert destination.read_text() == (display_message if start_fails else "complete")
 
 
 @pytest.mark.asyncio
@@ -147,23 +147,58 @@ async def test_plain_shell_output_still_honors_tail(shell_toolkit: AnyToolkit) -
     result = await _run(shell_toolkit, {"args": "printf 'one\\ntwo\\nthree\\n'", "tail": 2})
 
     assert result.status == "success"
-    assert str(result.result).splitlines()[1:] == ["two", "three"]
+    assert str(result.result).splitlines() == [
+        "[Showing the last 2 of 3 lines. Pass a larger tail, or narrow the command.]",
+        "two",
+        "three",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_nonzero_exit_leads_with_its_exit_code(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
+async def test_nonzero_exit_leads_with_its_exit_code(shell_toolkit: AnyToolkit) -> None:
     """A failed command states its exit code before both output streams, locally and on a worker."""
     result = await _run(shell_toolkit, {"args": "echo partial; echo broken >&2; exit 7"})
 
     assert result.status == "success"
-    assert str(result.result).splitlines() == [
-        f"[cwd: {tmp_path}]",
-        "Exit code 7",
-        "Output:",
-        "partial",
-        "Stderr:",
-        "broken",
-    ]
+    assert str(result.result).splitlines() == ["Exit code 7", "Output:", "partial", "Stderr:", "broken"]
+
+
+@pytest.mark.asyncio
+async def test_a_saved_success_keeps_stdout_in_the_file_and_names_its_stderr_in_the_receipt(
+    shell_toolkit: AnyToolkit,
+    tmp_path: Path,
+) -> None:
+    """The file holds stdout exactly, and the receipt says how much stderr there was and nothing else of it."""
+    result = await _run(shell_toolkit, {"args": "echo out; echo warn >&2", "mindroom_output_path": "out.txt"})
+
+    receipt = json.loads(str(result.result))["mindroom_tool_output"]
+    assert (tmp_path / "out.txt").read_text() == "out\n"
+    assert {key: value for key, value in receipt.items() if key.startswith("stderr")} == {"stderr_bytes": 5}
+    quiet = await _run(shell_toolkit, {"args": "echo out", "mindroom_output_path": "quiet.txt"})
+    assert "stderr_bytes" not in json.loads(str(quiet.result))["mindroom_tool_output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("shell_toolkit")
+async def test_a_saved_success_counts_all_its_stderr_past_the_capture_cap(tmp_path: Path) -> None:
+    """Stderr larger than the redirect cap, read in several chunks, is counted whole and the stdout file is saved."""
+    tool = shell_tools()(
+        base_dir=tmp_path,
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "storage",
+            process_env={},
+        ),
+    )
+    configure_toolkit_functions(tool, output_files=ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=64))
+    result = await _run(
+        tool,
+        {"args": "echo out; head -c 30005 /dev/zero | tr '\\0' x >&2", "mindroom_output_path": "out.txt"},
+    )
+
+    receipt = json.loads(str(result.result))["mindroom_tool_output"]
+    assert (receipt["status"], receipt["stderr_bytes"]) == ("saved_to_file", 30005)
+    assert (tmp_path / "out.txt").read_text() == "out\n"
 
 
 @pytest.mark.asyncio
@@ -179,9 +214,7 @@ async def test_redirect_preserves_stdout_receipt_on_nonzero_exit(shell_toolkit: 
 
     assert result.status == "success"
     assert json.loads(str(result.result))["mindroom_tool_output"]["exit_code"] == 3
-    assert (tmp_path / "receipt.txt").read_text().split("\n", 1)[-1] == (
-        'Exit code 3\nOutput:\n{"status":"queued","call_id":"call-1"}'
-    )
+    assert (tmp_path / "receipt.txt").read_text() == ('Exit code 3\nOutput:\n{"status":"queued","call_id":"call-1"}')
 
 
 @pytest.mark.asyncio
@@ -465,8 +498,7 @@ def test_worker_subprocess_saves_supervised_capture(tmp_path: Path) -> None:
         },
     )
     assert "saved_to_file" in status
-    saved = (workspace / "worker.txt").read_bytes().split(b"\n", 1)[1]
-    assert saved == b"0123456789012345678\n" * 125000
+    assert (workspace / "worker.txt").read_bytes() == b"0123456789012345678\n" * 125000
 
 
 @pytest.mark.asyncio
@@ -634,7 +666,7 @@ async def test_capture_includes_descendant_output_within_grace(
         },
     )
     assert "saved_to_file" in str(result.result)
-    assert (tmp_path / "descendant.txt").read_text().split("\n", 1)[-1] == "earlylate"
+    assert (tmp_path / "descendant.txt").read_text() == "earlylate"
 
 
 @pytest.mark.asyncio

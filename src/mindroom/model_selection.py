@@ -15,6 +15,7 @@ __all__ = [
     "ModelSelectionResult",
     "command_result_content_to_dict",
     "freeze_command_result_content",
+    "model_selection_names_runtime",
     "model_selection_result",
     "model_selection_targets_other_runtime",
     "parse_model_selection",
@@ -100,6 +101,12 @@ def model_selection_targets_other_runtime(content: Mapping[str, object], user_id
             ("runtime_device_id", device_id),
         )
     )
+
+
+def model_selection_names_runtime(content: Mapping[str, object], user_id: str) -> bool:
+    """Return whether a structured selection names this account, whose device answered its discovery."""
+    raw = content.get(MODEL_SELECTION_CONTENT_KEY)
+    return isinstance(raw, Mapping) and cast("Mapping[str, object]", raw).get("runtime_user_id") == user_id
 
 
 def model_selection_result(

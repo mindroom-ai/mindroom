@@ -22,27 +22,29 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
 
     from mindroom.approval.manager import ApprovalManager
-    from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView, EventJournalStore
+    from mindroom.event_journal import ApprovalContinuation, EventJournalStore
 
 logger = get_logger(__name__)
 _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS = 1.0
 _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
 _STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION = 10
 _UNAVAILABLE_OWNER_SCAN_LIMIT = 100
+_UPGRADE_REASON = "MindRoom was upgraded while this approval was pending. Ask again."
 
 
 @dataclass
 class ApprovalRecovery:
     """Retain startup gates across transport binding; the manager owns task shutdown."""
 
-    deliver_unavailable_notice: Callable[[ApprovalContinuation, str], Awaitable[ApprovalDeliveryView | None]]
+    deliver_unavailable_notice: Callable[[ApprovalContinuation, str], Awaitable[bool]]
     journal_provider: Callable[[], EventJournalStore] | None = None
     entity_configured: Callable[[str], bool] | None = None
     entity_permanently_unavailable: Callable[[str], bool] | None = None
+    # Whether the config starts no owner account, the sender of every card from before cards recorded their sender.
+    owner_absent: Callable[[], bool] | None = None
     recover_unavailable_final: Callable[[str, ApprovalContinuation], Awaitable[bool]] | None = None
     cancel_delegations: Callable[[ApprovalContinuation, str], Awaitable[None]] | None = None
     manager: ApprovalManager | None = None
-    _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_done: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
@@ -57,11 +59,7 @@ class ApprovalRecovery:
     def bind(self, manager: ApprovalManager) -> None:
         """Attach the runtime owner without losing readiness observed during bootstrap."""
         self.manager = manager
-        if (
-            self._startup_router_ready_for_cleanup
-            and self._startup_runtime_support_ready_for_cleanup
-            and not self._startup_cleanup_done
-        ):
+        if self._startup_runtime_support_ready_for_cleanup and not self._startup_cleanup_done:
             self._schedule_startup_cleanup_retry()
 
     def _unavailable_entity_reason(self, entity_name: str) -> str | None:
@@ -138,6 +136,11 @@ class ApprovalRecovery:
                 current,
             )
         manager = self.manager
+        # The bot of an owner the config no longer lists had its chance to edit its cards before it stopped; one that
+        # can never start has no bot to edit them.
+        removed = (self.entity_configured is not None and not self.entity_configured(current.entity_name)) or (
+            self.entity_permanently_unavailable is not None and self.entity_permanently_unavailable(current.entity_name)
+        )
         current = await prepare_approval_failure(
             current,
             ApprovalFailure(ApprovalFailureKind.ERROR, reason),
@@ -148,26 +151,32 @@ class ApprovalRecovery:
                 expected_generation=current.generation,
                 expected_runtime_generation=current.runtime_generation,
             ),
-            expire_cards=None if manager is None else manager.expire_continuation_cards,
+            expire_cards=None if manager is None else partial(manager.expire_continuation_cards, unedited=removed),
         )
         if current is None:
             return False
         if self.cancel_delegations is not None:
             await self.cancel_delegations(current, reason)
-        notice_store = await self.deliver_unavailable_notice(current, reason)
-        if notice_store is None:
+        if not await self.deliver_unavailable_notice(current, reason):
             return False
         # No bot of the gone entity is there to run what the discard's commit left for afterwards; the conversation
         # its approval held learns of the end from the approval signals.
-        effects = await store.approvals.discard_unavailable_approval_continuation(
-            current.approval_id,
-            notice_principal_id=notice_store.principal_id,
-        )
+        effects = await store.approvals.discard_unavailable_approval_continuation(current.approval_id)
         return effects is not None
+
+    async def _end_cards_without_sender(self) -> None:
+        """Expire every pending card the router sent before cards recorded their sender.
+
+        Each paused turn resumes as after a timeout; a later call finds only a card whose edit waits for a router bot.
+        A router the config no longer starts never edits its card, which then retires unedited, keeping its pending look.
+        """
+        # LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
+        assert self.manager is not None
+        absent = self.owner_absent is not None and self.owner_absent()
+        await self.manager.expire_cards(lambda card: card.sender_principal_id is None, _UPGRADE_REASON, absent)
 
     def reset_startup_cleanup_gate(self) -> None:
         """Reset one-shot startup approval cleanup state."""
-        self._startup_router_ready_for_cleanup = False
         self._startup_runtime_support_ready_for_cleanup = False
         self._startup_cleanup_done = False
         self._startup_cleanup_retry_delay = _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS
@@ -190,19 +199,9 @@ class ApprovalRecovery:
         self._startup_runtime_support_ready_for_cleanup = True
         await self._run_startup_cleanup_if_ready()
 
-    async def mark_router_ready(self) -> None:
-        """Record router first sync without depending on Matrix bot internals."""
-        self._startup_router_ready_for_cleanup = True
-        await self._run_startup_cleanup_if_ready()
-
     async def _run_startup_cleanup_if_ready(self) -> None:
         """Retry approval-card recovery and unavailable-owner cleanup until both finish."""
-        if (
-            self.manager is None
-            or self._startup_cleanup_done
-            or not self._startup_router_ready_for_cleanup
-            or not self._startup_runtime_support_ready_for_cleanup
-        ):
+        if self.manager is None or self._startup_cleanup_done or not self._startup_runtime_support_ready_for_cleanup:
             return
         async with self._startup_cleanup_lock:
             if self._startup_cleanup_done:
@@ -233,6 +232,7 @@ class ApprovalRecovery:
             manager = self.manager
             if manager is None:
                 return False
+            await self._end_cards_without_sender()
             sweep = await manager.recover_cards_on_startup()
         except Exception as exc:
             logger.warning(

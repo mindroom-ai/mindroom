@@ -43,8 +43,8 @@ agents:
     display_name: Researcher
     role: Research with a browser and save results.
     model: default
-    tools: [browser, shell, file]
-    worker_tools: [browser, shell, file]
+    tools: [browser, shell, filesystem]
+    worker_tools: [browser, shell, filesystem]
     worker_scope: user_agent
 ```
 
@@ -182,7 +182,7 @@ agents:
     display_name: Researcher
     role: Research with a browser and save results.
     model: default
-    tools: [browser_mcp, shell, file]
+    tools: [browser_mcp, shell, filesystem]
     worker_scope: user_agent
 ```
 

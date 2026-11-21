@@ -71,7 +71,7 @@ async def _cleanup_orphaned_bots_in_room(
 
     removed_bots = []
 
-    # The sweeping client is the current router, never a retired identity, so
+    # The sweeping client is the owner account, never a retired identity, so
     # every orphan here is another account it can kick.
     for user_id in member_ids:
         matrix_id = MatrixID.parse(user_id)
@@ -116,7 +116,7 @@ async def cleanup_all_orphaned_bots(
 ) -> dict[str, list[str]]:
     """Remove retired bot identities from all rooms the client has access to.
 
-    Called with the running router's client, which needs kick permission in
+    Called with the running owner account's client, which needs kick permission in
     the rooms it cleans and is never itself a retired identity.
     Configured entities manage their own memberships, even if startup has not
     completed or their invited-room retention records have not been restored.

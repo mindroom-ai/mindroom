@@ -19,6 +19,7 @@ from mindroom.api.dashboard_credential_scope import (
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
+from mindroom.config.tool_aliases import TOOL_ALIASES
 from mindroom.credentials.manager import (
     CredentialsManager,
     credential_layers,
@@ -254,7 +255,9 @@ def _target_primary_owns_tool_settings(service: str, target: RequestCredentialsT
     """Return whether the primary owns the scoped settings of the tool that this service configures."""
     if target.worker_scope is None or target.agent_name is None or target.tools is None:
         return False
-    return primary_owns_tool_settings(service, target.tools, runtime_paths=target.runtime_paths)
+    # A document saved under a toolkit's earlier name lives where that toolkit's settings do.
+    toolkit = TOOL_ALIASES.get(service, service)
+    return primary_owns_tool_settings(toolkit, target.tools, runtime_paths=target.runtime_paths)
 
 
 def worker_target_for_credentials_target(target: RequestCredentialsTarget) -> ResolvedWorkerTarget | None:

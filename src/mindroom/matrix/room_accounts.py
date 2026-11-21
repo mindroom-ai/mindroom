@@ -1,4 +1,4 @@
-"""Publish the router's room state that tells clients which MindRoom accounts and router are in a room."""
+"""Publish the room state that tells clients which MindRoom accounts are in a room and which one stewards it."""
 
 from __future__ import annotations
 
@@ -29,14 +29,14 @@ async def reconcile_room_accounts(
     runtime_paths: RuntimePaths,
     room_id: str,
 ) -> bool:
-    """Write the router's list of the room's joined MindRoom accounts when it changed and return whether it is current.
+    """Write the client's list of the room's joined MindRoom accounts when it changed and return whether it is current.
 
     Failures leave it to the next trigger.
 
-    The state key is the router's user ID, which Matrix lets only the router write.
+    The state key is the writing account's user ID, the room's steward, which Matrix lets only that account write.
     """
     try:
-        # The deadline covers the lock wait too, so a sync frame queued behind other triggers stalls at most 10 s.
+        # The deadline covers the lock wait too, so a trigger queued behind other triggers waits at most 10 s.
         async with asyncio.timeout(10):
             # Serialize each read and write so a slower trigger cannot replace a newer list with an older one.
             async with _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
@@ -55,7 +55,7 @@ async def reconcile_room_accounts(
                     state_key=client.user_id,
                 )
                 if not isinstance(response, nio.RoomPutStateResponse):
-                    # A room whose power levels keep the router from sending this state refuses it on every trigger.
+                    # A room whose power levels keep this account from sending this state refuses it on every trigger.
                     forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
                     log = logger.debug if forbidden else logger.warning
                     log("room_accounts_publish_failed", room_id=room_id, error=str(response))
@@ -66,16 +66,12 @@ async def reconcile_room_accounts(
         return False
 
 
-async def reconcile_room_router_binding(
-    client: nio.AsyncClient,
-    config: Config,  # noqa: ARG001 - shares the router room-state reconciler signature
-    runtime_paths: RuntimePaths,  # noqa: ARG001
-    room_id: str,
-) -> bool:
-    """Name this router as the room's router where no valid binding exists, and return whether nothing is left to do.
+async def reconcile_room_router_binding(client: nio.AsyncClient, room_id: str) -> bool:
+    """Name this account, the room's steward, in the `io.mindroom.router` binding where no valid one exists.
 
-    A binding naming another account stays, so two privileged routers cannot take turns overwriting it; a stale one
-    only leaves voice echoes as standalone rows until a room admin clears it. A room whose power levels refuse the write
+    Returns whether nothing is left to do. The binding keeps the name today's clients read: the privileged MindRoom
+    account whose room state they trust. A binding naming another account stays, so two privileged stewards cannot
+    take turns overwriting it; a stale one only leaves voice echoes as standalone rows until a room admin clears it. A room whose power levels refuse the write
     is done too, since retrying cannot help. Other failures leave it to the next trigger.
     """
     try:

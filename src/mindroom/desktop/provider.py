@@ -42,17 +42,17 @@ def request_macos_desktop_permissions() -> tuple[str, ...]:
     import ApplicationServices  # noqa: PLC0415
     import Quartz  # noqa: PLC0415
 
-    accessibility_allowed = bool(ApplicationServices.AXIsProcessTrusted())  # ty: ignore[unresolved-attribute]
+    accessibility_allowed = bool(ApplicationServices.AXIsProcessTrusted())  # ty: ignore[missing-attribute]
     if not accessibility_allowed:
         accessibility_allowed = bool(
-            ApplicationServices.AXIsProcessTrustedWithOptions(  # ty: ignore[unresolved-attribute]
-                {ApplicationServices.kAXTrustedCheckOptionPrompt: True},  # ty: ignore[unresolved-attribute]
+            ApplicationServices.AXIsProcessTrustedWithOptions(  # ty: ignore[missing-attribute]
+                {ApplicationServices.kAXTrustedCheckOptionPrompt: True},  # ty: ignore[missing-attribute]
             ),
         )
 
-    screen_recording_allowed = bool(Quartz.CGPreflightScreenCaptureAccess())  # ty: ignore[unresolved-attribute]
+    screen_recording_allowed = bool(Quartz.CGPreflightScreenCaptureAccess())  # ty: ignore[missing-attribute]
     if not screen_recording_allowed:
-        screen_recording_allowed = bool(Quartz.CGRequestScreenCaptureAccess())  # ty: ignore[unresolved-attribute]
+        screen_recording_allowed = bool(Quartz.CGRequestScreenCaptureAccess())  # ty: ignore[missing-attribute]
 
     missing: list[str] = []
     if not accessibility_allowed:
@@ -211,7 +211,7 @@ class PyAutoGuiDesktopProvider:
             msg = "Desktop bridge support is missing. Install MindRoom with the 'desktop' extra."
             raise DesktopProviderError(msg) from exc
 
-        pyautogui.FAILSAFE = False
+        pyautogui.FAILSAFE = False  # ty: ignore[invalid-assignment]  # pyautogui leaves the flag unannotated
         pyautogui.PAUSE = 0.05
         self._pyautogui: Any = pyautogui
         self._capture_screen: Callable[[], PillowImage] = (
@@ -554,11 +554,11 @@ def _capture_macos_primary_screen() -> PillowImage:
     """Capture the primary macOS display without spawning an unbounded child process."""
     import Quartz  # noqa: PLC0415
 
-    if not Quartz.CGPreflightScreenCaptureAccess():  # ty: ignore[unresolved-attribute]
+    if not Quartz.CGPreflightScreenCaptureAccess():  # ty: ignore[missing-attribute]
         msg = "macOS Screen Recording permission is required for desktop screenshots."
         raise DesktopProviderError(msg)
     try:
-        cg_image = macos_capture.capture_display(int(Quartz.CGMainDisplayID()))  # ty: ignore[unresolved-attribute]
+        cg_image = macos_capture.capture_display(int(Quartz.CGMainDisplayID()))  # ty: ignore[missing-attribute]
     except macos_capture.MacOSCaptureError as exc:
         raise DesktopProviderError(str(exc)) from exc
     return _pillow_image_from_macos_capture(cg_image)
@@ -568,7 +568,7 @@ def _capture_macos_window(process_id: int, region: DesktopRect) -> PillowImage:
     """Capture the one on-screen Core Graphics window matching the revalidated AX target."""
     import Quartz  # noqa: PLC0415
 
-    if not Quartz.CGPreflightScreenCaptureAccess():  # ty: ignore[unresolved-attribute]
+    if not Quartz.CGPreflightScreenCaptureAccess():  # ty: ignore[missing-attribute]
         msg = "macOS Screen Recording permission is required for desktop screenshots."
         raise DesktopProviderError(msg)
     window_id = _macos_window_id(process_id, region)
@@ -586,20 +586,20 @@ def _macos_window_id(process_id: int, region: DesktopRect) -> int:
     """Resolve the exact on-screen window without capturing unrelated pixels."""
     import Quartz  # noqa: PLC0415
 
-    on_screen_only = Quartz.kCGWindowListOptionOnScreenOnly  # ty: ignore[unresolved-attribute]
-    exclude_desktop = Quartz.kCGWindowListExcludeDesktopElements  # ty: ignore[unresolved-attribute]
+    on_screen_only = Quartz.kCGWindowListOptionOnScreenOnly  # ty: ignore[missing-attribute]
+    exclude_desktop = Quartz.kCGWindowListExcludeDesktopElements  # ty: ignore[missing-attribute]
     options = on_screen_only | exclude_desktop
-    window_infos = Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID)  # ty: ignore[unresolved-attribute]
+    window_infos = Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID)  # ty: ignore[missing-attribute]
     matching_window_ids: list[int] = []
     for info in window_infos:
-        if int(info.get(Quartz.kCGWindowOwnerPID, -1)) != process_id:  # ty: ignore[unresolved-attribute]
+        if int(info.get(Quartz.kCGWindowOwnerPID, -1)) != process_id:  # ty: ignore[missing-attribute]
             continue
-        if int(info.get(Quartz.kCGWindowLayer, -1)) != 0:  # ty: ignore[unresolved-attribute]
+        if int(info.get(Quartz.kCGWindowLayer, -1)) != 0:  # ty: ignore[missing-attribute]
             continue
-        raw_bounds = info.get(Quartz.kCGWindowBounds)  # ty: ignore[unresolved-attribute]
+        raw_bounds = info.get(Quartz.kCGWindowBounds)  # ty: ignore[missing-attribute]
         if raw_bounds is None:
             continue
-        converted, bounds = Quartz.CGRectMakeWithDictionaryRepresentation(raw_bounds, None)  # ty: ignore[unresolved-attribute]
+        converted, bounds = Quartz.CGRectMakeWithDictionaryRepresentation(raw_bounds, None)  # ty: ignore[missing-attribute]
         if not converted:
             continue
         candidate = DesktopRect(
@@ -609,7 +609,7 @@ def _macos_window_id(process_id: int, region: DesktopRect) -> int:
             round(bounds.size.height),
         )
         if candidate == region:
-            matching_window_ids.append(int(info[Quartz.kCGWindowNumber]))  # ty: ignore[unresolved-attribute]
+            matching_window_ids.append(int(info[Quartz.kCGWindowNumber]))  # ty: ignore[missing-attribute]
     if len(matching_window_ids) != 1:
         msg = "macOS could not bind the accessibility target to one exact on-screen application window."
         raise DesktopProviderError(msg)
@@ -621,11 +621,11 @@ def _pillow_image_from_macos_capture(cg_image: object) -> PillowImage:
     import AppKit  # noqa: PLC0415
     from PIL import Image  # noqa: PLC0415
 
-    bitmap = AppKit.NSBitmapImageRep.alloc().initWithCGImage_(cg_image)  # ty: ignore[unresolved-attribute]
+    bitmap = AppKit.NSBitmapImageRep.alloc().initWithCGImage_(cg_image)  # ty: ignore[missing-attribute]
     if bitmap is None:
         msg = "macOS could not decode the screenshot."
         raise DesktopProviderError(msg)
-    content = bitmap.representationUsingType_properties_(AppKit.NSBitmapImageFileTypePNG, {})  # ty: ignore[unresolved-attribute]
+    content = bitmap.representationUsingType_properties_(AppKit.NSBitmapImageFileTypePNG, {})  # ty: ignore[missing-attribute]
     if content is None:
         msg = "macOS could not encode the screenshot."
         raise DesktopProviderError(msg)
@@ -641,15 +641,15 @@ def _type_macos_unicode(text: str, *, before_chunk: Callable[[], None]) -> None:
         before_chunk()
         chunk = text[offset : offset + _MACOS_UNICODE_CHUNK_LENGTH]
         utf16_length = len(chunk.encode("utf-16-le")) // 2
-        key_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)  # ty: ignore[unresolved-attribute]
-        key_up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)  # ty: ignore[unresolved-attribute]
+        key_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)  # ty: ignore[missing-attribute]
+        key_up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)  # ty: ignore[missing-attribute]
         if key_down is None or key_up is None:
             msg = "macOS could not create a Unicode keyboard event."
             raise DesktopProviderError(msg)
-        Quartz.CGEventKeyboardSetUnicodeString(key_down, utf16_length, chunk)  # ty: ignore[unresolved-attribute]
-        Quartz.CGEventKeyboardSetUnicodeString(key_up, utf16_length, chunk)  # ty: ignore[unresolved-attribute]
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, key_down)  # ty: ignore[unresolved-attribute]
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, key_up)  # ty: ignore[unresolved-attribute]
+        Quartz.CGEventKeyboardSetUnicodeString(key_down, utf16_length, chunk)  # ty: ignore[missing-attribute]
+        Quartz.CGEventKeyboardSetUnicodeString(key_up, utf16_length, chunk)  # ty: ignore[missing-attribute]
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, key_down)  # ty: ignore[missing-attribute]
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, key_up)  # ty: ignore[missing-attribute]
 
 
 def _normalized_point(rect: DesktopRect, *, x: int, y: int) -> tuple[int, int]:

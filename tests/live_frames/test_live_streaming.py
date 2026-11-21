@@ -1143,6 +1143,29 @@ async def test_a_frame_loop_error_ends_frames() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ticks_of_an_unchanged_reply_render_its_markdown_once(
+    tmp_path: Path,
+    frames: _Frames,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each 100 ms tick builds the reply's live state, so an unchanged reply reuses its rendered Markdown."""
+    rendered: list[str] = []
+    render = streaming_module.visible_markdown
+
+    def counting(config: Config, runtime_paths: object, text: str) -> str:
+        rendered.append(text)
+        return render(config, runtime_paths, text)
+
+    monkeypatch.setattr(streaming_module, "visible_markdown", counting)
+    records, edits = _records(), _Edits()
+    await _run(_config(tmp_path), _stream("Hello", 0.3, " world", 0.3), records, edits)
+
+    assert len(frames.sent) >= 2
+    assert rendered.count("Hello") == 1
+    assert rendered.count("Hello world") <= 2
+
+
+@pytest.mark.asyncio
 async def test_a_failing_send_is_not_repeated_every_tick(tmp_path: Path, frames: _Frames) -> None:
     """While sends fail at once, as through a proxy during a homeserver restart, frames back off instead of resending."""
     frames.outcomes = [LiveSendOutcome.RETRY] * 100

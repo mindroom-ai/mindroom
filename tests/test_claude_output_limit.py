@@ -56,8 +56,8 @@ def _cut_off_write(contents: str = "print(1)\n") -> dict[str, Any]:
             {
                 "type": "tool_use",
                 "id": "toolu_cut",
-                "name": "save_file",
-                "input": {"file_name": "big.py", "contents": contents},
+                "name": "write_file",
+                "input": {"path": "big.py", "content": contents},
             },
         ],
         stop_reason="max_tokens",
@@ -72,8 +72,8 @@ def _small_write() -> dict[str, Any]:
             {
                 "type": "tool_use",
                 "id": "toolu_part",
-                "name": "save_file",
-                "input": {"file_name": "part1.py", "contents": "print(1)\n"},
+                "name": "write_file",
+                "input": {"path": "part1.py", "content": "print(1)\n"},
             },
         ],
         stop_reason="tool_use",

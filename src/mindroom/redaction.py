@@ -224,7 +224,7 @@ _URL_QUERY_SECRET_KEYS: frozenset[str] = frozenset(
     },
 )
 _QUERY_CONTAINER_KEYS: frozenset[str] = frozenset({"query", "query_params", "query_string", "callback_query"})
-_SECRET_KEYS_SORTED = cast("tuple[str, ...]", tuple(sorted(_SECRET_KEYS, key=len, reverse=True)))
+_SECRET_KEYS_SORTED = tuple(sorted(_SECRET_KEYS, key=len, reverse=True))
 _SECRET_KEY_VARIANTS: tuple[tuple[str, str, tuple[str, ...]], ...] = tuple(
     (key, key.replace("_", ""), tuple(key.split("_"))) for key in _SECRET_KEYS_SORTED
 )

@@ -161,6 +161,10 @@ class EditRegenerator:
             or turn_record.response_owner != self.deps.agent_name
         ):
             return None
+        if len(turn_record.discovery_event_ids) > len(turn_record.source_event_ids):
+            # A route of several messages was answered as one route: an edit of one of them is not the whole
+            # prompt, and the turn keeps no text of the others, so the answer stays as it is.
+            return None
         if turn_record.requester_id_for_source(original_event_id) != requester_user_id:
             return None
         deleted = await self.deps.turn_store.deleted_sources(turn_record)

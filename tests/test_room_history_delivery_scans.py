@@ -11,7 +11,7 @@ import pytest
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.matrix.room_history_reads import (
     _MAX_EXACT_DELIVERY_SCAN_PAGES,
-    _UnresolvedOpaqueRoomHistoryError,
+    UnresolvedOpaqueRoomHistoryError,
     find_outbox_delivery_event_id_via_room_messages,
     find_response_event_ids_via_room_messages,
     missing_outbox_delivery_copy_indices_via_room_messages,
@@ -387,7 +387,7 @@ async def test_exact_delivery_scan_cannot_prove_absence_past_opaque_bot_cipherte
     client = AsyncMock()
     client.room_messages = AsyncMock(return_value=_messages_response([opaque], end=None))
 
-    with pytest.raises(_UnresolvedOpaqueRoomHistoryError, match="exact delivery"):
+    with pytest.raises(UnresolvedOpaqueRoomHistoryError, match="exact delivery"):
         await find_response_event_ids_via_room_messages(
             client,
             _ROOM_ID,

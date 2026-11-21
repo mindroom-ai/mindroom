@@ -1035,6 +1035,21 @@ async def test_launch_allows_an_eligible_toolkit_with_no_current_functions(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_launch_rejects_an_allowlist_naming_filesystem_by_an_old_name(tmp_path: Path) -> None:
+    """A saved file or coding entry neither grants filesystem nor narrows the allowlist: the launch says what to write."""
+    manager, _backend, _client = _manager(tmp_path)
+    manager.toolkit_name_resolver = lambda _context: frozenset({"calculator", "filesystem"})
+
+    for old_name in ("file", "coding"):
+        with pytest.raises(ScriptRunManagerError, match=rf"toolkit names: {old_name}\. .*name filesystem"):
+            await manager.run(
+                _context(tmp_path),
+                source="print('ok')\n",
+                limits=ScriptRunLimits(allowed_tools=(old_name,)),
+            )
+
+
+@pytest.mark.asyncio
 async def test_launch_rejects_unknown_allowed_toolkit_before_durable_work(tmp_path: Path) -> None:
     """A typo in the authored SDK allowlist must fail clearly instead of granting an empty surface."""
     manager, backend, _client = _manager(tmp_path)

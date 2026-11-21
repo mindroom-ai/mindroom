@@ -358,7 +358,7 @@ def member_slot_id(member_ids: Collection[str], member: str | None, reported_nam
 
     A name that is not one, None included, has no slot; ``reported_name`` is how the error names it then, if given.
     """
-    if member not in member_ids:
+    if member is None or member not in member_ids:
         msg = f"Team has no frozen member slot for {reported_name or member!r}"
         raise RuntimeError(msg)
     return member

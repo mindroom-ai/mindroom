@@ -34,6 +34,7 @@ from mindroom.api.mcp_clients import client_routes
 from mindroom.api.mcp_identity import resolve_gateway_browser_owner
 from mindroom.api.mcp_scim import scim_routes
 from mindroom.api.mcp_selection import selection_routes
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.logging_config import get_logger
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp_gateway.accounts import GatewayAccounts
@@ -323,6 +324,8 @@ class GatewayRuntime:
         saved = await self.selections.get(user.owner, defaults)
         selected = {agent: tools for agent, tools in saved.items() if agent in user.gateway_agent_names}
         require_current_access = self._access_guard(request, user, require_authority)
+        if isinstance(toolkit := arguments.get("toolkit"), str):
+            arguments = {**arguments, "toolkit": canonical_tool_name(toolkit)}
 
         agent = arguments.get("agent")
         # Report membership checks, never arbitrary client-supplied agent names.

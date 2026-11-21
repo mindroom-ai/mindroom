@@ -290,8 +290,7 @@ export function VoiceConfig() {
                   Visible Router Echo
                 </Label>
                 <p className="text-sm text-muted-foreground">
-                  Post the normalized transcript or fallback text as a
-                  display-only router message before any router handoff.
+                  Post the transcript of a voice message before the reply.
                 </p>
               </div>
               <input

@@ -399,7 +399,7 @@ def test_workers_run_reads_a_failure_as_the_shell_words_it(
 
 
 @pytest.mark.parametrize("timeout", [1, 90, 3600])
-@pytest.mark.parametrize(("stdout", "stderr"), [("", ""), ("still going", ""), ("still going", "warning")])
+@pytest.mark.parametrize(("stdout", "stderr"), [("", None), ("still going", None), ("still going", "warning")])
 def test_workers_run_reads_a_stop_at_the_time_limit_as_the_shell_words_it(
     timeout,
     stdout,

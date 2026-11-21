@@ -788,7 +788,6 @@ async def test_validate_workflow_tool_policy_rejects_unknown_tool(tmp_path: Path
         "delegate",
         "dynamic_tools",
         "dynamic_workflow",
-        "invite_router",
         "memory",
         "self_config",
         "skill_manage",

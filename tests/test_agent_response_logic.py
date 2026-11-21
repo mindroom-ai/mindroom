@@ -32,7 +32,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
-from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread, is_router_only_agent_mention
+from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, _ResponderAvailability
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
@@ -883,8 +883,8 @@ class TestAgentResponseLogic:
             is False
         )
 
-    def test_explicit_router_mention_still_detected(self) -> None:
-        """Filtering router from participants must not hide explicit router mentions."""
+    def test_owner_mention_is_a_mention_of_no_agent(self) -> None:
+        """A tag of the owner account names no agent, the owner itself included, and counts as a non-agent mention."""
         router_id = entity_ids(self.config, self.runtime_paths)["router"]
         event_source = {
             "content": {
@@ -904,18 +904,9 @@ class TestAgentResponseLogic:
             room=create_mock_room(config=self.config),
         )
 
-        assert mentioned_agents == [router_id]
-        assert am_i_mentioned is True
-        assert has_non_agent_mentions is False
-        assert (
-            is_router_only_agent_mention(
-                mentioned_agents,
-                has_non_agent_mentions=has_non_agent_mentions,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-            )
-            is True
-        )
+        assert mentioned_agents == []
+        assert am_i_mentioned is False
+        assert has_non_agent_mentions is True
 
     def test_unsynced_member_cache_treats_any_human_mention_as_suppressing(self) -> None:
         """A failed membership refresh must degrade to silence, not to an interjection."""

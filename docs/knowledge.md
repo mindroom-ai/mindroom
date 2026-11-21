@@ -49,7 +49,7 @@ agents:
   assistant:
     display_name: Assistant
     role: A helpful assistant with direct file access to source docs
-    tools: [file, shell]
+    tools: [filesystem, shell]
     knowledge_bases: [source_docs]
 ```
 
@@ -513,7 +513,7 @@ agents:
   analyst:
     display_name: Analyst
     role: Answers questions from the team's knowledge bundles
-    tools: [file]
+    tools: [filesystem]
     knowledge_bases: [acme_okf]
     skills: [open-knowledge-format]
 ```

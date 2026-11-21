@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 
 import httpx
+import httpx2
 from requests import exceptions as requests_exceptions
 
 from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
@@ -30,6 +31,7 @@ from mindroom.oauth.providers import (
     OAuthProviderError,
     OAuthRefreshRejectedError,
     OAuthTokenEndpointChangedError,
+    OAuthTokenResponseBodyError,
     OAuthTokenResult,
     is_terminal_oauth_refresh_error_code,
 )
@@ -49,7 +51,16 @@ _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS = 60
 _OAUTH_REFRESH_FAILED_MESSAGE = "OAuth credential refresh failed"
 _OAUTH_TRANSACTION_REENTRY_MESSAGE = "OAuth provider adapters cannot re-enter the credential lifecycle"
 _UNRECOGNIZED_OAUTH_ERROR_CODE = "unrecognized"
+# Authlib's token client raises httpx2 errors, endpoint discovery httpx errors, and Google's refresh requests errors.
 _OAUTH_REFRESH_TRANSPORT_ERRORS = (
+    (httpx2.ConnectTimeout, "timeout"),
+    (httpx2.ReadTimeout, "timeout"),
+    (httpx2.WriteTimeout, "timeout"),
+    (httpx2.PoolTimeout, "timeout"),
+    (httpx2.TimeoutException, "timeout"),
+    (httpx2.NetworkError, "network"),
+    (httpx2.HTTPStatusError, "http_status"),
+    (httpx2.HTTPError, "transport"),
     (httpx.ConnectTimeout, "timeout"),
     (httpx.ReadTimeout, "timeout"),
     (httpx.WriteTimeout, "timeout"),
@@ -61,6 +72,7 @@ _OAUTH_REFRESH_TRANSPORT_ERRORS = (
     (TimeoutError, "timeout"),
     (json.JSONDecodeError, "invalid_response"),
     (UnicodeDecodeError, "invalid_response"),
+    (OAuthTokenResponseBodyError, "invalid_response"),
     (requests_exceptions.ConnectTimeout, "timeout"),
     (requests_exceptions.ReadTimeout, "timeout"),
     (requests_exceptions.Timeout, "timeout"),
@@ -913,7 +925,7 @@ def _oauth_refresh_failure_diagnostics(exc: BaseException) -> dict[str, str | in
                 "transport_error_category": category,
                 "transport_error_type": error_type.__name__,
             }
-            if isinstance(cause, httpx.HTTPStatusError | requests_exceptions.HTTPError):
+            if isinstance(cause, httpx2.HTTPStatusError | httpx.HTTPStatusError | requests_exceptions.HTTPError):
                 try:
                     response = cause.response
                     status_code = response.status_code if response is not None else None

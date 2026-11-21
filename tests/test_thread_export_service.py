@@ -91,11 +91,12 @@ async def test_export_threads_once_exports_invited_rooms_with_entity_account(tmp
 
     group_room_ids = [[room.room_id for room in call.kwargs["rooms"]] for call in export_group.await_args_list]
     assert group_room_ids == [
-        ["!lobby:localhost", "!dev:localhost"],
+        ["!lobby:localhost"],
+        ["!dev:localhost"],
         ["!user-room:localhost"],
     ]
-    assert [call.args[0].entity_name for call in login.call_args_list] == ["router", "general"]
-    assert stats.rooms_exported == 2
+    assert [call.args[0].entity_name for call in login.call_args_list] == [None, None, "general"]
+    assert stats.rooms_exported == 3
     client.close.assert_not_awaited()
 
 
@@ -118,10 +119,9 @@ async def test_export_threads_once_deduplicates_invited_rooms_already_in_state(t
     ):
         await export_threads_once(source_provider=_source_for_group, config=config, runtime_paths=runtime_paths)
 
-    export_group.assert_awaited_once()
-    assert [room.room_id for room in export_group.await_args.kwargs["rooms"]] == [
-        "!lobby:localhost",
-        "!dev:localhost",
+    assert [[room.room_id for room in call.kwargs["rooms"]] for call in export_group.await_args_list] == [
+        ["!lobby:localhost"],
+        ["!dev:localhost"],
     ]
 
 
@@ -188,7 +188,7 @@ async def test_export_threads_once_continues_after_one_owner_is_unavailable(tmp_
     write_invited_rooms(runtime_paths, "general", ["!user-room:localhost"])
     client = Mock()
     client.close = AsyncMock()
-    login = Mock(side_effect=[RuntimeError("owner unavailable"), client])
+    login = Mock(side_effect=[RuntimeError("owner unavailable"), RuntimeError("owner unavailable"), client])
 
     with (
         patch("tests.test_thread_export_service._client_for_group", new=login),
@@ -204,7 +204,7 @@ async def test_export_threads_once_continues_after_one_owner_is_unavailable(tmp_
             targets=(ThreadExportTarget(output_dir=tmp_path / "exports"),),
         )
 
-    assert login.call_count == 2
+    assert login.call_count == 3
     export_group.assert_awaited_once()
     assert [room.room_id for room in export_group.await_args.kwargs["rooms"]] == ["!user-room:localhost"]
     assert stats[0].rooms_exported == 1
@@ -687,7 +687,7 @@ async def test_aliased_targets_are_skipped_while_unique_target_completes(
         )
 
     assert [item.failures for item in stats] == [1, 1, 0]
-    assert stats[2].rooms_exported == 1
+    assert stats[2].rooms_exported == 2
     assert export_group.await_args.kwargs["targets"] == (targets[2],)
     assert shared_export.read_text(encoding="utf-8") == "secret"
     assert not stale_room.exists()

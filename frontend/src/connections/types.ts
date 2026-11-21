@@ -200,6 +200,8 @@ export type EgressInactiveReason = "shadowed" | "invalid";
 export interface EgressInactiveService {
   name: string;
   reason: EgressInactiveReason;
+  /** The login the entry names, its own or its preset's; absent from older servers. */
+  oauth_provider?: string | null;
 }
 
 /**
@@ -223,6 +225,16 @@ export interface EgressCredentialAgent {
   can_manage: boolean;
   services: EgressCredentialService[];
   inactive_services: EgressInactiveService[];
+  /** The presets' logins of the caller's own that a new service could use; only on a personal agent they manage, absent from older servers. */
+  oauth_logins?: EgressOAuthLogin[];
+}
+
+/** A login of the caller's, connected for the agent's tools or ready to connect. */
+export interface EgressOAuthLogin {
+  provider: string;
+  display_name: string;
+  connected: boolean;
+  account_label: string | null;
 }
 
 export interface EgressCredentialList {
@@ -281,6 +293,7 @@ export interface EgressPreset {
   description: string;
   /** The OAuth provider the preset signs in with, if any. */
   oauth_provider: string | null;
+  read_only_supported?: boolean; // As a service's; absent from older servers.
   rules: EgressRuleSummary[];
   placeholder_env: Record<string, string>;
 }

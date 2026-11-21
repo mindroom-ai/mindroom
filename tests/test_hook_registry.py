@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -11,7 +12,10 @@ from mindroom.automations import automation
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import HookOverrideConfig, PluginEntryConfig
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import (
+    EVENT_BOT_READY,
+    EVENT_CONFIG_RELOADED,
     EVENT_MESSAGE_ENRICH,
     EVENT_MESSAGE_RECEIVED,
     HookRegistry,
@@ -26,6 +30,8 @@ from tests.conftest import bind_runtime_paths, message_origin, runtime_paths_for
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.hooks.types import RegisteredHook
 
 
 def _config(tmp_path: Path) -> Config:
@@ -189,7 +195,7 @@ def test_hook_registry_scope_filtering_uses_decorator_agents_and_rooms(tmp_path:
         [_plugin("scoped-plugin", [matching_hook, wrong_agent_hook, wrong_room_hook])],
     )
 
-    eligible = _eligible_hooks(registry, EVENT_MESSAGE_RECEIVED, _message_received_context(tmp_path))
+    eligible = asyncio.run(_eligible_hooks(registry, EVENT_MESSAGE_RECEIVED, _message_received_context(tmp_path)))
 
     assert [hook.hook_name for hook in eligible] == ["matching"]
 
@@ -211,3 +217,101 @@ def test_the_plugin_snapshot_carries_the_automations_plugins_register() -> None:
     assert definition.check is digest
     assert registry.automations.get("dreaming") is not None
     assert HookRegistry.empty().automations.get("weekly_digest") is None
+
+
+def _registered(callback: object, event_name: str) -> RegisteredHook:
+    (registered,) = HookRegistry.from_plugins([_plugin("demo", [callback])]).hooks_for(event_name)
+    return registered
+
+
+def test_scope_defaults_to_agent() -> None:
+    """A hook that names no scope runs per bot, as every hook did."""
+
+    @hook(EVENT_MESSAGE_RECEIVED, agents=["code"])
+    async def per_bot(ctx: object) -> None:
+        del ctx
+
+    registered = _registered(per_bot, EVENT_MESSAGE_RECEIVED)
+
+    assert registered.scope == "agent"
+    assert registered.agents == ("code",)
+
+
+def test_room_scope_rejects_agents_filter() -> None:
+    """A room-scoped hook runs for the room, so it cannot also name agents."""
+    with pytest.raises(ValueError, match="agents"):
+        hook(EVENT_MESSAGE_RECEIVED, scope="room", agents=["code"])
+
+    @hook(EVENT_MESSAGE_RECEIVED, scope="room")
+    async def per_room(ctx: object) -> None:
+        del ctx
+
+    assert _registered(per_room, EVENT_MESSAGE_RECEIVED).scope == "room"
+
+
+def test_service_scope_rejected_on_message_received() -> None:
+    """Only the two once-per-process events take the service scope."""
+    with pytest.raises(ValueError, match="service"):
+        hook(EVENT_MESSAGE_RECEIVED, scope="service")
+
+    for event_name in (EVENT_BOT_READY, EVENT_CONFIG_RELOADED):
+
+        @hook(event_name, scope="service", name=f"service-{event_name}")
+        async def per_process(ctx: object) -> None:
+            del ctx
+
+        assert _registered(per_process, event_name).scope == "service"
+
+
+@pytest.mark.parametrize(
+    ("event_name", "agents", "rooms", "expected"),
+    [
+        # The deprecated router filter on bot:ready is the service scope.
+        (EVENT_BOT_READY, (ROUTER_AGENT_NAME,), None, ("service", None, None)),
+        # On config:reloaded it stays a filter, which never matched that event, so the hook still never runs.
+        (EVENT_CONFIG_RELOADED, (ROUTER_AGENT_NAME,), None, ("agent", (ROUTER_AGENT_NAME,), None)),
+        # On any other event it is the room scope.
+        (EVENT_MESSAGE_RECEIVED, (ROUTER_AGENT_NAME,), ["!room:localhost"], ("room", None, ("!room:localhost",))),
+        # Only the exact router filter is the alias; a longer filter stays an agent filter.
+        (EVENT_MESSAGE_RECEIVED, (ROUTER_AGENT_NAME, "code"), None, ("agent", (ROUTER_AGENT_NAME, "code"), None)),
+    ],
+    ids=["bot-ready-service", "config-reloaded-not-aliased", "message-received-room", "longer-filter-not-aliased"],
+)
+def test_router_alias_registration(
+    event_name: str,
+    agents: tuple[str, ...],
+    rooms: list[str] | None,
+    expected: tuple[object, ...],
+) -> None:
+    """The deprecated router filter is the service scope on bot:ready, the room scope elsewhere, a filter otherwise."""
+
+    @hook(event_name, agents=agents, rooms=rooms)
+    async def aliased(ctx: object) -> None:
+        del ctx
+
+    registered = _registered(aliased, event_name)
+
+    assert (registered.scope, registered.agents, registered.rooms) == expected
+
+
+def test_router_alias_warns_once_with_plugin_and_hook_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each aliased hook gets one deprecation warning that says which plugin and hook to change."""
+    warnings: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        "mindroom.hooks.registry.logger",
+        SimpleNamespace(warning=lambda message, **fields: warnings.append((message, fields))),
+    )
+
+    @hook(EVENT_MESSAGE_RECEIVED, agents=(ROUTER_AGENT_NAME,), name="once-per-message")
+    async def aliased(ctx: object) -> None:
+        del ctx
+
+    @hook(EVENT_MESSAGE_RECEIVED, scope="room")
+    async def scoped(ctx: object) -> None:
+        del ctx
+
+    HookRegistry.from_plugins([_plugin("demo", [aliased, scoped])])
+
+    ((message, fields),) = warnings
+    assert "deprecated" in message
+    assert fields == {"plugin_name": "demo", "hook_name": "once-per-message", "scope": "room"}

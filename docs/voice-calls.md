@@ -323,10 +323,10 @@ When the call ends, file memory stores a reference to the transcript, Mem0 store
 
 ## Call transcripts
 
-MindRoom transcribes calls between people in rooms where its router is a member, for people who call from MindRoom Chat.
+MindRoom transcribes calls between people in rooms where one of its agents is a member, for people who call from MindRoom Chat.
 Each person's MindRoom Chat finds stretches of speech in the microphone it already sends to the call and uploads them to MindRoom, which turns them into text, so each line is under the right name and nobody extra joins the call.
 Calls with a MindRoom agent are not transcribed this way; the agent posts its own transcript, as described in [Calling an agent about a thread](#calling-an-agent-about-a-thread).
-MindRoom Chat still shows a call with an agent live, through the same route as a call between people, also while `calls.transcripts.enabled` is off and in rooms without the router.
+MindRoom Chat still shows a call with an agent live, through the same route as a call between people, also while `calls.transcripts.enabled` is off.
 
 ```yaml
 calls:
@@ -351,12 +351,12 @@ MindRoom Chat finds MindRoom as it does for [worker computers](tools/worker-comp
 
 What people see in MindRoom Chat:
 
-- A new call gets a `Call started` row in the room, posted by the router, that lists who is in the call and offers Join and Transcript.
+- A new call gets a `Call started` row in the room, posted by MindRoom, that lists who is in the call and offers Join and Transcript.
 - Transcript opens the live transcript: each person's words under their name as they speak, and a gap for a paused or untranscribed stretch.
 - Anyone in the call can pause transcription for everyone, and anyone in it can resume it; while paused, nothing anyone says is transcribed, and the transcript shows one gap for each pause.
 - Once the call is over, the row changes to `Call ended · N min`.
-- About 30 seconds after the end, the router posts a single message in the row's thread, and the row then links to it: the full transcript under the notes (a summary, decisions, action items with their owners, and open questions), or under `Call · N min` when no notes model is set.
-- When there are notes, the router titles the row's thread from them, as it does after an agent's reply, unless someone pinned the thread's title or resolved the thread.
+- About 30 seconds after the end, MindRoom posts a single message in the row's thread, and the row then links to it: the full transcript under the notes (a summary, decisions, action items with their owners, and open questions), or under `Call · N min` when no notes model is set.
+- When there are notes, MindRoom titles the row's thread from them, as it does after an agent's reply, unless someone pinned the thread's title or resolved the thread.
 - The finished transcript holds only what was said and transcribed: it leaves out the gaps for pauses and the stretches that could not be transcribed.
 - The row and the message notify nobody and start no agent reply, and mentions in the notes ping nobody.
 
@@ -364,7 +364,7 @@ The rules:
 
 - Starting or joining a call needs permission to post messages in the room; reading the live call needs room membership.
 - A person's app stays in the call as long as it checks in at least once a minute, which it does every 20 seconds, and leaving takes it out right away.
-- A check-in from someone already in the call counts even while MindRoom cannot read the room and answers 503, so a router restart or a homeserver outage ends no call; someone who has left the room is out of the call at their first request once it can be read.
+- A check-in from someone already in the call counts even while MindRoom cannot read the room and answers 503, so a MindRoom restart or a homeserver outage ends no call; someone who has left the room is out of the call at their first request once it can be read.
 - Leaving on one device takes the person out of the call, and another device of theirs still in the call rejoins at its next check-in.
 - Only people whose MindRoom Chat takes part are in the call: people in it from other Matrix apps are neither listed nor transcribed.
 - A call ends when nobody is in it, checked when someone joins or leaves and every 15 seconds; after MindRoom starts, apps get a full minute to check in again.
@@ -382,7 +382,7 @@ Privacy:
 - Each stretch of speech goes to the speech-to-text provider, in encrypted rooms too, the transcript goes to the `notes_model` provider when notes are on, and the notes go to the thread summary model that titles the thread.
 - MindRoom keeps a call's lines only until its message is posted; the finished transcript lives in the room as that message, encrypted where the room is, readable by whoever the room's history visibility allows, and removed by redacting it.
 - Redacting the message removes it from the room, but a transcript too large for one event leaves its sidecar file in the homeserver's media store until the homeserver's operator purges it, and clients may keep copies they already loaded.
-- A message that cannot be posted, because the router has left the room or may not post in it, or for a day after the call, is dropped along with the call's lines, also when MindRoom was down for longer than that.
+- A message that cannot be posted, because no agent is in the room any more or MindRoom may not post in it, or for a day after the call, is dropped along with the call's lines, also when MindRoom was down for longer than that.
 - Speech-to-text and notes count as internal AI work under `call_transcript` in [usage](usage.md#token-usage).
 
 ### Routes for clients

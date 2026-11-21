@@ -17,6 +17,7 @@ from mindroom.llm.provider import RequestOverrides
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.providers import registry as provider_registry
+from mindroom.thread_summary.notices import normalize_thread_summary_text
 from mindroom.thread_tags import AUTOMATIC_THREAD_TAG_EXCLUSIONS, coerce_tag_name
 from mindroom.timing import timed
 from mindroom.tool_system.events import body_without_tool_markers
@@ -33,9 +34,12 @@ _MAX_INITIAL_TAGS = 3
 _MAX_MESSAGES_BEFORE_TRUNCATION = 50
 _TRUNCATION_SAMPLE_SIZE = 3
 _ROOM_INSTRUCTIONS_MAX_LENGTH = 2000
-# New generated titles are cut to these after normalization; a person's pin may use ``THREAD_SUMMARY_MAX_LENGTH``.
+# A new generated title over these after normalization goes back to the model; a person's pin may use
+# ``THREAD_SUMMARY_MAX_LENGTH``.
 GENERATED_TITLE_MAX_LENGTH = 80
 GENERATED_TITLE_MAX_WORDS = 6
+# One answer plus two retries that each see the rejected title and why.
+_TITLE_ATTEMPTS = 3
 
 logger = get_logger(__name__)
 
@@ -43,7 +47,7 @@ logger = get_logger(__name__)
 class _ThreadSummary(BaseModel):
     """Structured thread summary response."""
 
-    summary: str = Field(description="Short one-line title of the thread conversation")
+    title: str = Field(description="Short one-line title of the thread conversation")
     # ``default_factory``: strict OpenAI schemas refuse a ``default`` keyword.
     keep_current: bool = Field(
         default_factory=bool,
@@ -70,18 +74,17 @@ class GeneratedSummary:
     keep_current: bool = False
 
 
-def clamp_generated_title(title: str) -> str:
-    """Cut a normalized title to 6 words and 80 characters at a word boundary; emoji and dashes are not words."""
-    tokens: list[str] = []
-    words = 0
-    for token in title.split():
-        tokens.append(token)
-        words += any(char.isalnum() for char in token)
-        if words == GENERATED_TITLE_MAX_WORDS:
-            break
-    while len(" ".join(tokens)) > GENERATED_TITLE_MAX_LENGTH and any(c.isalnum() for t in tokens[:-1] for c in t):
-        tokens.pop()
-    return " ".join(tokens)[:GENERATED_TITLE_MAX_LENGTH].rstrip()
+def title_error(title: str) -> str | None:
+    """Return why a normalized title breaks the short-title limits, or None; emoji and dashes are not words."""
+    words = sum(any(char.isalnum() for char in token) for token in title.split())
+    if not title:
+        return "The title is empty."
+    if words > GENERATED_TITLE_MAX_WORDS or len(title) > GENERATED_TITLE_MAX_LENGTH:
+        return (
+            f"The title has {words} words and {len(title)} characters; the limit is "
+            f"{GENERATED_TITLE_MAX_WORDS} words and {GENERATED_TITLE_MAX_LENGTH} characters."
+        )
+    return None
 
 
 def _summary_provider(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelProvider:
@@ -199,24 +202,41 @@ async def generate_summary(
         current = config.render_prompt("THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE", current_title=escape(current_title))
         prompt = f"{prompt}\n\n{current}"
         instructions.append(config.get_prompt("THREAD_SUMMARY_KEEP_INSTRUCTIONS"))
-    response = await complete_prompt(
-        provider,
-        prompt,
-        instructions=instructions,
-        schema=_ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary,
-        overrides=RequestOverrides(temperature=config.defaults.thread_summary_temperature),
-    )
-    await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="thread_summary")
-    content = response.content
-    if tag_vocabulary is None:
-        if not isinstance(content, _ThreadSummary):
+    schema = _ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary
+    request = prompt
+    error = None
+    for _attempt in range(_TITLE_ATTEMPTS):
+        response = await complete_prompt(
+            provider,
+            request,
+            instructions=instructions,
+            schema=schema,
+            overrides=RequestOverrides(temperature=config.defaults.thread_summary_temperature),
+        )
+        await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="thread_summary")
+        content = response.content
+        if not isinstance(content, schema):
             return None
-        return GeneratedSummary(summary=content.summary, keep_current=content.keep_current)
-    if not isinstance(content, _ThreadEnrichment):
+        # A kept title is the current one, so only a new title is checked.
+        if current_title is not None and content.keep_current:
+            break
+        error = title_error(normalize_thread_summary_text(content.title))
+        if error is None:
+            break
+        # The rejected answer and the reason go back with the same request, so any route can retry.
+        request = f"{prompt}\n\n" + config.render_prompt(
+            "THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE",
+            rejected_title=escape(content.title),
+            error=error,
+        )
+    else:
+        logger.warning("Thread title rejected on every attempt", attempts=_TITLE_ATTEMPTS, error=error)
         return None
+    if not isinstance(content, _ThreadEnrichment):
+        return GeneratedSummary(summary=content.title, keep_current=content.keep_current)
     tags: list[str] = []
     for raw_tag in content.tags:
         tag = coerce_tag_name(raw_tag)
         if tag is not None and tag not in AUTOMATIC_THREAD_TAG_EXCLUSIONS and tag not in tags:
             tags.append(tag)
-    return GeneratedSummary(summary=content.summary, tags=tuple(tags), keep_current=content.keep_current)
+    return GeneratedSummary(summary=content.title, tags=tuple(tags), keep_current=content.keep_current)

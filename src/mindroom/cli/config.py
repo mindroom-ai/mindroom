@@ -1256,6 +1256,8 @@ agents:
         defer: true
       - name: temporary_secrets
         defer: true
+      - name: egress_credentials
+        defer: true
       - name: config_manager
         defer: true
       - name: duckduckgo
@@ -1310,7 +1312,6 @@ agents:
 
 router:
   model: {router_model}
-  accept_invites: true
 {mindroom_user_block}
 administrators:
   # MindRoom Chat pairing writes the paired owner's Matrix user ID here.
@@ -1339,8 +1340,6 @@ memory:
     provider: sentence_transformers
     config:
       model: {SENTENCE_TRANSFORMERS_DEFAULT}
-  file:
-    max_entrypoint_lines: 200
   search:
     mode: semantic
     include:
@@ -1365,10 +1364,10 @@ tool_approval:
       action: require_approval
 
 defaults:
-  # Execution tools (shell, file, python, coding, docker) run directly in the
+  # Execution tools (shell, filesystem, python, docker) run directly in the
   # MindRoom process. For isolation, run them in a sandboxed worker instead:
   # deploy the sandbox runner (Docker Compose or Kubernetes) and remove this
-  # line — or replace [] with the tools to route, e.g. [shell, file, python].
+  # line — or replace [] with the tools to route, e.g. [shell, filesystem, python].
   # See https://docs.mindroom.chat/deployment/sandbox-proxy/
   worker_tools: []
   # Lets the shell run in the MindRoom process while it has no worker.

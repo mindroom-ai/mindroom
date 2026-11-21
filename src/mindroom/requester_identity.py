@@ -88,7 +88,10 @@ def memoized_entity_identities[T](
 
 
 def _managed_entity_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
-    """Return the persisted and the generated Matrix ID of every configured router, agent, and team."""
+    """Return the persisted and the generated Matrix ID of every configured router, agent, and team.
+
+    Not the owner's generated ID while no owner account is persisted: anyone may register that name.
+    """
 
     def derive(domain: str, state: MatrixState) -> frozenset[str]:
         user_ids: set[str] = set()
@@ -96,6 +99,8 @@ def _managed_entity_ids(config: Config, runtime_paths: RuntimePaths) -> frozense
             account = state.get_account(managed_account_key(entity_name))
             if account is not None:
                 user_ids.add(matrix_account_user_id(account, domain))
+            elif entity_name == ROUTER_AGENT_NAME:
+                continue
             user_ids.add(MatrixID.from_username(agent_username_localpart(entity_name, runtime_paths), domain).full_id)
         return frozenset(user_ids)
 

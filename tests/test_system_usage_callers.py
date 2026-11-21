@@ -70,7 +70,7 @@ async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(
     elif caller == "topic":
         good_answer = json.dumps({"topic": "A room topic"})
     else:
-        good_answer = json.dumps({"summary": "A summary"})
+        good_answer = json.dumps({"title": "A summary"})
     model = ScriptedModel(
         [answer(good_answer, usage(20, 2)), answer("PRIVATE MALFORMED MODEL CONTENT", usage(30, 3))],
     )

@@ -44,6 +44,7 @@ from .context import (
     ToolResultTransformContext,
     TranscriptLine,
     TurnLifecycleContext,
+    service_hook_bindings,
 )
 from .decorators import get_hook_metadata, hook, iter_module_hooks
 from .enrichment import render_enrichment_block, render_system_enrichment_block, render_transient_context
@@ -56,6 +57,7 @@ from .execution import (
     emit_policy,
     emit_tool_result_transform,
     emit_transform,
+    service_bot_ready_emission,
 )
 from .ingress import HookIngressPolicy, hook_ingress_policy
 from .registry import HookRegistry, HookRegistryLifetime, HookRegistryPlugin, HookRegistrySource, HookRegistryState
@@ -212,6 +214,8 @@ __all__ = [
     "render_transient_context",
     "send_hook_message",
     "send_matrix_message",
+    "service_bot_ready_emission",
+    "service_hook_bindings",
     "validate_event_name",
 ]
 

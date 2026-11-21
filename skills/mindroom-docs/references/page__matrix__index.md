@@ -9,7 +9,8 @@ Every agent is an ordinary Matrix user, so you can reach it from any Matrix clie
 
 ## Agent Users
 
-Each agent, team, and the router has its own Matrix user, created automatically at startup.
+Each agent and team has its own Matrix user, created automatically at startup.
+One more account, shown as "MindRoom", administers the rooms in `config.yaml` and answers nobody.
 Account credentials are stored in `matrix_state.yaml` in the storage directory (default `mindroom_data/`).
 
 In chat, address an agent or team by its configured key, such as `@assistant`.
@@ -56,7 +57,7 @@ mindroom_user:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `username` | string | `mindroom_user` | Matrix localpart, without `@` or a domain, using lowercase letters, digits, `.`, `_`, `=`, `-`, or `/`; it must not match an agent, team, or router account |
+| `username` | string | `mindroom_user` | Matrix localpart, without `@` or a domain, using lowercase letters, digits, `.`, `_`, `=`, `-`, or `/`; it must not match an agent, team, or owner account |
 | `display_name` | string | `MindRoomUser` | Display name, changeable at any time |
 
 Set `username` before first startup.
@@ -93,7 +94,8 @@ Enable end-to-end encryption for the current room.
 
 `!encrypt` explains what enabling encryption means for the room without changing anything.
 `!encrypt confirm` enables encryption and is restricted to Matrix room admins.
-The responding bot also needs permission to change room state; if it lacks that permission, a room admin can enable encryption from their own Matrix client.
+A MindRoom account in the room also needs permission to change room state; otherwise the command answers `I need moderator rights in this room to enable encryption.`, and a room admin can enable encryption from their own Matrix client.
+Any other failure asks you to run the command again.
 People joining an encrypted room later cannot read messages sent before they joined.
 
 ### `!e2ee`

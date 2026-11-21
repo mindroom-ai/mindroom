@@ -80,6 +80,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Tools > Tool Catalog | Location, Commerce & Home | `tools/location-commerce-and-home.md` | `tools/location-commerce-and-home/index.md` | `page__tools__location-commerce-and-home__index.md` |
 | Security & Access | Access Control | `authorization.md` | `authorization/index.md` | `page__authorization__index.md` |
 | Security & Access | Tool Approval | `tool-approval.md` | `tool-approval/index.md` | `page__tool-approval__index.md` |
+| Security & Access | Email Invites | `email-invites.md` | `email-invites/index.md` | `page__email-invites__index.md` |
 | Security & Access | Credentials & OAuth | `oauth-framework.md` | `oauth-framework/index.md` | `page__oauth-framework__index.md` |
 | Security & Access | Connections Portal | `connections-portal.md` | `connections-portal/index.md` | `page__connections-portal__index.md` |
 | Security & Access | Connect Google Accounts | `deployment/google-services-user-oauth.md` | `deployment/google-services-user-oauth/index.md` | `page__deployment__google-services-user-oauth__index.md` |

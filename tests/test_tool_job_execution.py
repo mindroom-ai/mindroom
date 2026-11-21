@@ -563,7 +563,7 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(
         arguments["background_after"] = 0
     model = ScriptedModel([calls(tool_call("run_shell_command", "shell-call", **arguments)), answer("done")])
     actor = job_actor(*toolkit_job_tools(toolkit, authored_name="shell").values())
-    expected = [f"[cwd: {tmp_path}]", "Exit code 7", "Output:", "partial", "Stderr:", "broken"]
+    expected = ["Exit code 7", "Output:", "partial", "Stderr:", "broken"]
     try:
         async with execution_resources():
             with tool_runtime_context(context):

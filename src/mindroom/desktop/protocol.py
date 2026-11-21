@@ -120,7 +120,7 @@ def desktop_observation_mode(action: str, value: object = "both") -> DesktopObse
     if action == "screenshot" and value == "tree":
         msg = "The screenshot action requires a screenshot observation."
         raise DesktopProtocolError(msg)
-    return cast("DesktopObservationMode", value)
+    return value
 
 
 class DesktopProtocolError(ValueError):

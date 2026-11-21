@@ -68,7 +68,7 @@ _LocalAttachmentKind = Literal["audio", "file", "image", "video"]
 _ResolvedSendAttachment = AttachmentRecord | RuntimeEncryptedMediaAttachment
 _WORKER_ATTACHMENT_USAGE = (
     "Not in your workspace. Copy it there with get_attachment(attachment_id, mindroom_output_path=...) "
-    "before file, coding, python, or shell tools use it."
+    "before filesystem, python, or shell tools use it."
 )
 
 
@@ -716,6 +716,8 @@ class AttachmentTools(Toolkit):
         """Upload an image so it can appear inline; unencrypted rooms only.
 
         Paste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.
+        In an encrypted room, or when this refuses, send the file with ``matrix_message(attachments=[...])`` instead.
+        Never link an image to a placeholder or made-up address.
         """
         context = get_tool_runtime_context()
         if context is None:

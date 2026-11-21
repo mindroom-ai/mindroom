@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import io
 import json
 import logging
 import logging.config
@@ -15,7 +16,7 @@ import sys
 import threading
 import time
 import warnings
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, NoReturn, cast
 
 import aiohttp
 import httpx
@@ -902,7 +903,7 @@ def test_subprocess_logging_appends_to_the_parent_log_file(
 
 
 class _StallingLogStream:
-    """A log file stream whose writes wait while `writable` is clear, like a network file system that stalls."""
+    """A log stream whose writes wait while `writable` is clear, like a network file system or stderr reader that stalls."""
 
     def __init__(self, stream: TextIO) -> None:
         self._stream = stream
@@ -921,6 +922,12 @@ class _StallingLogStream:
 
     def close(self) -> None:
         self._stream.close()
+
+    def isatty(self) -> bool:
+        return False
+
+    def getvalue(self) -> str:
+        return cast("io.StringIO", self._stream).getvalue()
 
 
 @pytest.fixture
@@ -1004,7 +1011,7 @@ def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
 
     def log_during_stall(first_index: int) -> None:
         """Log seven records: one stalls in the write, two fill the queue, and four are dropped."""
-        monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_FILE_RECORDS", 2)
+        monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_RECORDS", 2)
         log_stream.writable.clear()
         log_stream.stalled.clear()
         try:
@@ -1013,7 +1020,7 @@ def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
             for index in range(first_index + 1, first_index + 6):
                 logger.info("logged_during_stall", index=index)
             # Room below the cap does not resume the file until the writer has caught up.
-            monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_FILE_RECORDS", 10)
+            monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_RECORDS", 10)
             logger.info("logged_during_stall", index=first_index + 6)
         finally:
             log_stream.writable.set()
@@ -1028,7 +1035,7 @@ def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
     logging.shutdown()
 
     records = [json.loads(line) for line in log_file.read_text().splitlines()]
-    note = ("Log file dropped records while its writes were stalled", None, 4)
+    note = ("Log output dropped records while its writes were stalled", None, 4)
     assert [(record["event"], record.get("index"), record.get("dropped_records")) for record in records] == [
         ("Logging initialized", None, None),
         ("logged_during_stall", 0, None),
@@ -1042,9 +1049,176 @@ def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
         note,
     ]
     assert records[5]["room_id"] == "!room:example.org"
-    assert {(record["logger"], record["level"], "room_id" in record) for record in (records[4], records[9])} == {
-        ("mindroom.logging_config", "warning", False),
-    }
+    assert {
+        (record["logger"], record["level"], record["log_output"], "room_id" in record)
+        for record in (records[4], records[9])
+    } == {("mindroom.logging_config", "warning", "log file", False)}
+
+
+def _wait_for_stream_lines(stream: _StallingLogStream, count: int) -> None:
+    deadline = time.monotonic() + SETTLE_TIMEOUT_SECONDS
+    while len(stream.getvalue().splitlines()) < count:
+        assert time.monotonic() < deadline, f"stream never reached {count} lines"
+        time.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_stalled_stderr_leaves_the_event_loop_running_and_notes_the_records_it_dropped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stderr write that hangs, as behind a slow log reader, blocks neither the loop nor the file, and stderr catches up.
+
+    From the queue limit until the writer has caught up, records skip stderr only, and a note there says how many.
+    """
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    stderr = _StallingLogStream(io.StringIO())
+    monkeypatch.setattr(sys, "stderr", stderr)
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    log_file = current_log_file()
+    assert log_file is not None
+    _wait_for_stream_lines(stderr, 1)
+    monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_RECORDS", 3)
+    logger = get_logger("tests.logging")
+    stderr.writable.clear()
+    # A write on the logging thread would hold the loop until this timer frees it.
+    unstall = threading.Timer(10, stderr.writable.set)
+    unstall.start()
+    try:
+        started = time.monotonic()
+        for index in range(8):
+            logger.info("logged_during_stall", index=index)
+            if index == 0:
+                assert stderr.stalled.wait(SETTLE_TIMEOUT_SECONDS)
+            # One record at a time keeps the file's own queue below the limit.
+            _wait_for_log_lines(log_file, index + 2)
+            await asyncio.sleep(0)
+        assert time.monotonic() - started < 5
+        assert not stderr.writable.is_set()
+    finally:
+        unstall.cancel()
+        stderr.writable.set()
+    # One record stalled in the write and three filled the queue; the other four were dropped.
+    _wait_for_stream_lines(stderr, 5)
+    logger.info("logged_after_stall")
+    logging.shutdown()
+
+    records = [json.loads(line) for line in stderr.getvalue().splitlines()]
+    assert [(record["event"], record.get("index"), record.get("dropped_records")) for record in records] == [
+        ("Logging initialized", None, None),
+        ("logged_during_stall", 0, None),
+        ("logged_during_stall", 1, None),
+        ("logged_during_stall", 2, None),
+        ("logged_during_stall", 3, None),
+        ("Log output dropped records while its writes were stalled", None, 4),
+        ("logged_after_stall", None, None),
+    ]
+    assert records[5]["log_output"] == "stderr"
+    file_records = [json.loads(line) for line in log_file.read_text().splitlines()]
+    assert [(record["event"], record.get("index")) for record in file_records] == [
+        ("Logging initialized", None),
+        *[("logged_during_stall", index) for index in range(8)],
+        ("logged_after_stall", None),
+    ]
+
+
+def test_stderr_stays_off_the_logging_thread_after_another_logging_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later `dictConfig`, like uvicorn's, drains stderr and leaves its next writes to the writer thread."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    stderr = _StallingLogStream(io.StringIO())
+    monkeypatch.setattr(sys, "stderr", stderr)
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})
+    # The `dictConfig` closed the handler, which wrote every record it had queued.
+    assert len(stderr.getvalue().splitlines()) == 1
+    stderr.writable.clear()
+    unstall = threading.Timer(10, stderr.writable.set)
+    unstall.start()
+    try:
+        started = time.monotonic()
+        get_logger("tests.logging").info("logged_after_another_config")
+        assert stderr.stalled.wait(SETTLE_TIMEOUT_SECONDS)
+        assert time.monotonic() - started < 5
+        assert not stderr.writable.is_set()
+    finally:
+        unstall.cancel()
+        stderr.writable.set()
+    # The `dictConfig` also took the handler off the list `logging.shutdown` closes.
+    for handler in logging.getLogger().handlers:
+        handler.close()
+
+    events = [json.loads(line)["event"] for line in stderr.getvalue().splitlines()]
+    assert events == ["Logging initialized", "logged_after_another_config"]
+
+
+def test_records_logged_before_an_uncaught_exception_precede_its_traceback(tmp_path: Path) -> None:
+    """The writer thread writes its queued records before Python prints the traceback that ends the program."""
+    child = """
+import sys
+from pathlib import Path
+
+from mindroom.constants import RuntimePaths
+from mindroom.logging_config import get_logger, setup_logging
+
+root = Path(sys.argv[1])
+setup_logging(
+    runtime_paths=RuntimePaths(
+        config_path=root / "config.yaml",
+        config_dir=root,
+        env_path=root / ".env",
+        storage_root=root / "mindroom_data",
+    ),
+)
+for index in range(2000):
+    get_logger("tests.child").info("logged_before_exception", index=index)
+raise RuntimeError("uncaught_after_logging")
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", child, str(tmp_path)],
+        env={**os.environ, "MINDROOM_LOG_FORMAT": "json"},
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 1
+    lines = result.stderr.splitlines()
+    traceback_start = lines.index("Traceback (most recent call last):")
+    records = [json.loads(line) for line in lines[:traceback_start]]
+    assert [record["event"] for record in records] == ["Logging initialized"] + ["logged_before_exception"] * 2000
+    assert lines[-1] == "RuntimeError: uncaught_after_logging"
+
+
+def test_stalled_log_file_does_not_hold_back_an_uncaught_exception_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stalling_log_files: list[_StallingLogStream],
+) -> None:
+    """The exception hook writes queued stderr records only, so a stalled log file cannot delay the traceback."""
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    [log_stream] = stalling_log_files
+    log_stream.writable.clear()
+    hooked: list[type[BaseException]] = []
+    monkeypatch.setattr(logging_config, "_previous_excepthook", lambda exc_type, *_: hooked.append(exc_type))
+    try:
+        get_logger("tests.logging").info("logged_during_file_stall")
+        assert log_stream.stalled.wait(SETTLE_TIMEOUT_SECONDS)
+        hook = threading.Thread(
+            target=logging_config._flush_logs_before_excepthook,
+            args=(RuntimeError, RuntimeError(), None),
+        )
+        hook.start()
+        hook.join(SETTLE_TIMEOUT_SECONDS)
+        assert not hook.is_alive()
+        assert hooked == [RuntimeError]
+    finally:
+        log_stream.writable.set()
+    logging.shutdown()
 
 
 def test_log_file_keeps_its_records_after_another_logging_config(tmp_path: Path) -> None:

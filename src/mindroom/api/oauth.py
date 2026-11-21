@@ -215,6 +215,19 @@ def _dynamic_client_matches_hosted_callback(
     )
 
 
+def _client_returns_to_request(
+    request: Request,
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    resolution: OAuthClientConfigResolution,
+) -> bool:
+    """Return whether an OAuth client can return to the requesting browser host."""
+    if resolution.custom or is_oauth_loopback_hostname(request.url.hostname):
+        return True
+    hostname = oauth_callback_hostname(request)
+    return _dynamic_client_matches_hosted_callback(resolution, provider, runtime_paths, hostname)
+
+
 async def _client_config_resolution_for_request(
     request: Request,
     provider: OAuthProvider,
@@ -234,17 +247,7 @@ async def _client_config_resolution_for_request(
             error_type=type(exc).__name__,
         )
         raise HTTPException(status_code=503, detail="OAuth client configuration could not be resolved") from exc
-    if (
-        resolution is None
-        or resolution.custom
-        or is_oauth_loopback_hostname(request.url.hostname)
-        or _dynamic_client_matches_hosted_callback(
-            resolution,
-            provider,
-            runtime_paths,
-            oauth_callback_hostname(request),
-        )
-    ):
+    if resolution is None or _client_returns_to_request(request, provider, runtime_paths, resolution):
         return resolution
     if reject_remote_provisioned:
         detail = (
@@ -1482,6 +1485,11 @@ async def connection_status(
             reject_remote_provisioned=False,
         )
     )
+    # A stored client counts, as a bootstrapped one does, only where it can return to this browser host.
+    if not (
+        has_service_account_config or bootstrap_client or client_config_resolution is None
+    ) and not _client_returns_to_request(request, provider, runtime_paths, client_config_resolution):
+        client_config_resolution = None
     has_client_config = client_config_resolution is not None
     credentials_usable = await _credentials_usable(provider, runtime_paths, credentials)
     if refresh and credentials_usable and has_client_config and not has_service_account_config:

@@ -17,13 +17,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Never, cast
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import pytest
 import requests
 from agno.tools import github as agno_github_module
 from agno.utils import log as agno_log_module
-from github import BadCredentialsException, Github, GithubException
+from github import Auth, BadCredentialsException, Github, GithubException
+from github.GithubRetry import GithubRetry
 from github.Requester import Requester
+from requests.adapters import HTTPAdapter
 from urllib3.response import HTTPResponse
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -237,7 +240,7 @@ class _CapturedNestedProviderFailureRepository(_FakeRepositoryStats):
 
     def get_issues(self, *, state: str) -> list[object]:
         assert state == "open"
-        raise mindroom_github_module._GithubProviderFailureRequester.createException(
+        raise mindroom_github_module._MindRoomGithubRequester.createException(
             self.status_code,
             {},
             {"message": self.sentinel},
@@ -953,18 +956,99 @@ def test_base_url_is_forwarded_to_pygithub(tmp_path: Path) -> None:
     assert captured["base_url"] == "https://github.example.test/api/v3"
 
 
-def test_pygithub_language_payload_remains_numeric_for_agno_stats() -> None:
-    client = Github(lazy=True)
+_FAKE_GITHUB_API = "https://api.github.com"
+_FAKE_REPOSITORY_URL = f"{_FAKE_GITHUB_API}/repos/example/project"
+
+
+def _fake_github_http_response(request: requests.PreparedRequest) -> requests.Response:
+    """Answer the repository endpoints the language tools read like GitHub's REST API."""
+    path = urlsplit(request.url).path
+    bodies: dict[str, object] = {
+        "/repos/example/project": {
+            "id": 1,
+            "name": "project",
+            "full_name": "example/project",
+            "owner": {"login": "example", "url": f"{_FAKE_GITHUB_API}/users/example"},
+            "url": _FAKE_REPOSITORY_URL,
+            "html_url": "https://github.com/example/project",
+            "description": None,
+            "homepage": None,
+            "language": "Python",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-02T00:00:00Z",
+            "pushed_at": "2026-01-03T00:00:00Z",
+            "size": 12,
+            "stargazers_count": 4,
+            "watchers_count": 4,
+            "forks_count": 1,
+            "open_issues_count": 0,
+            "default_branch": "main",
+            "license": None,
+            "private": False,
+            "archived": False,
+        },
+        "/repos/example/project/topics": {"names": ["example"]},
+        "/repos/example/project/languages": {"Python": 123, "Shell": 7},
+    }
+    response = requests.Response()
+    response.status_code = 200
+    response.headers["Content-Type"] = "application/json"
+    response.url = request.url
+    response.request = request
+    response._content = json.dumps(bodies.get(path, [])).encode()
+    return response
+
+
+def test_language_tools_drop_pygithub_injected_url_over_http(tmp_path: Path) -> None:
+    """PyGithub adds the GET URL to the languages map; Agno's tools must still see only byte counts."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    requested_paths: list[str] = []
+
+    def send(_adapter: object, request: requests.PreparedRequest, **_kwargs: object) -> requests.Response:
+        requested_paths.append(urlsplit(request.url).path)
+        return _fake_github_http_response(request)
+
+    with patch.object(HTTPAdapter, "send", send):
+        languages = json.loads(tool.get_repository_languages("example/project"))
+        stats = json.loads(tool.get_repository_with_stats("example/project"))
+        raw_client = Github(auth=Auth.Token(MANUAL_ACCESS_TOKEN))
+        try:
+            raw_languages = raw_client.get_repo("example/project").get_languages()
+        finally:
+            raw_client.close()
+
+    assert raw_languages == {"Python": 123, "Shell": 7, "url": f"{_FAKE_REPOSITORY_URL}/languages"}
+    assert languages == {"Python": 123, "Shell": 7}
+    assert stats["languages"] == {"Python": 123, "Shell": 7}
+    assert stats["topics"] == ["example"]
+    assert stats["stargazers_count"] == 4
+    assert "/repos/example/project/languages" in requested_paths
+
+
+def test_provider_failure_capture_keeps_github_retry_settings() -> None:
+    """Swapping in the capturing retry must keep PyGithub's rate-limit wait settings."""
+    client = Github(
+        auth=Auth.Token(MANUAL_ACCESS_TOKEN),
+        retry=GithubRetry(secondary_rate_wait=7, max_rate_limit_wait=30, total=3),
+    )
     try:
-        repo = client.get_repo("example/project", lazy=True)
-        with patch.object(
-            repo._requester,
-            "requestJson",
-            return_value=(200, {}, '{"Python": 123}'),
-        ):
-            assert repo.get_languages() == {"Python": 123}
+        mindroom_github_module._install_github_provider_failure_capture(client)
+        requester = client._Github__requester
+        retry = requester.kwargs["retry"]
     finally:
         client.close()
+
+    assert isinstance(requester, mindroom_github_module._MindRoomGithubRequester)
+    assert isinstance(retry, mindroom_github_module._GithubProviderFailureRetry)
+    assert (retry.secondary_rate_wait, retry.max_rate_limit_wait, retry.total) == (7, 30, 3)
+    assert retry.new(total=2).max_rate_limit_wait == 30
 
 
 def test_repository_stats_consumes_numeric_language_payload(tmp_path: Path) -> None:

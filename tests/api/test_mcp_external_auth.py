@@ -146,7 +146,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 
     class ClockDateTime(datetime):
         @classmethod
-        def now(cls, tz: tzinfo | None = None) -> datetime:
+        def now(cls, tz: tzinfo | None = None) -> datetime:  # ty: ignore[incompatible-method-override]  # test clock
             return datetime.fromtimestamp(now[0], tz=tz)
 
     monkeypatch.setattr(accounts, "time", SimpleNamespace(time=lambda: now[0]))

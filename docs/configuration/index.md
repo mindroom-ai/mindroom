@@ -27,8 +27,8 @@ Edits to an agent's or team's own settings, such as `instructions`, `model`, `to
 Changing `display_name` or `accept_invites`, an agent's `private` settings, whether an agent has the `desktop` tool, or which MCP tools it has restarts that agent or team.
 Removing an agent or team makes it leave its rooms, except direct messages, when the reload applies.
 An edit saved while MindRoom is still starting applies once startup finishes.
-An edit that restarts no agent, team, or router and changes no access, room, or authorization setting, such as a model definition, knowledge base, or agent instruction change, applies within seconds even while agents are replying.
-Other edits, including ones that restart an agent or team, an agent's or team's `access` or `rooms`, `administrators`, `authorization`, `room_defaults`, `rooms`, or `router.access`, first wait for active responses to finish, for at most 600 seconds.
+Most edits that start, stop, or restart no account, such as a model definition, knowledge base, or agent instruction change, apply within seconds even while agents are replying.
+Other edits, including ones that restart an agent or team, an agent's or team's `access` or `rooms`, adding or removing an agent's `contacts`, `administrators`, `authorization`, `mindroom_user`, `room_defaults`, `rooms`, or `router.access`, first wait for active responses to finish, for at most 600 seconds.
 To confirm that a reload finished, use [`mindroom config check-applied`](../deployment/config-bundles.md#config-fingerprint-and-config-check-applied).
 
 ## Minimal Configuration
@@ -81,6 +81,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](../external-triggers.md) |
 | `slack` | How Slack workspace members map to Matrix users | [Slack](../tools/slack.md#slack-configuration) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](../tool-approval.md#tool-approval) |
+| `email_invites` | Chat link, expiry, and approvers of invites to a room by email | [Email Invites](#email-invites) |
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](../deployment/egress-broker.md) |
 | `background_tool_jobs` | Background execution of tool calls, on by default | [Background Jobs](../tools/agent-orchestration.md#background-jobs) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](../personal-rooms.md#personal-rooms) |
@@ -165,6 +166,21 @@ diff before.yaml after.yaml
 When the configuration uses include tags, structured saves from the dashboard and the self-config tools are rejected, so edit the source files instead; the raw config editor still edits the top-level file's text (see [Dashboard](../dashboard.md#configurations-split-with-include)).
 `MINDROOM_CONFIG_TEMPLATE` copies only the single template file, so a template that uses includes needs its included files shipped next to the config path.
 
+## Email Invites
+
+The optional root `email_invites` block configures the [`email_invite`](../email-invites.md) tool; the feature is on for an agent when `email_invite` is in its `tools`.
+
+```yaml
+email_invites:
+  chat_url: https://chat.mindroom.chat   # origin of the Chat web app the link opens; default shown
+  expiry_days: 7                         # 1 to 30
+  approvers: []                          # Matrix user IDs who may approve in any room
+```
+
+`chat_url` must be an `https` origin, or an `http` origin on a local address, with no path.
+The mail server comes from the environment: `MINDROOM_SMTP_URL` (`smtps://[user:password@]host[:port]` or `smtp://[user:password@]host[:port]`, kept out of workers like other secrets) and `MINDROOM_SMTP_FROM`, the sender, for example `MindRoom <invites@example.org>`.
+Without both, the tool returns the link for the approver to forward by hand.
+
 ## Built-In Prompt Overrides
 
 Use the optional root `prompts` block to replace MindRoom's built-in prompts, keyed by the prompt's uppercase name:
@@ -191,7 +207,7 @@ Template prompts accept only their own `{field_name}` placeholders, and an unsup
 Placeholders are exact `{field_name}` replacements, not Jinja or Python `str.format`, so `{message.text}`, `{message!r}`, and `{message:.2f}` are rejected.
 Escape literal braces as `{{` and `}}` in overrides that use placeholders.
 Changed overrides apply through hot reload.
-Changing a prompt that agents build in when they start, such as `HIDDEN_TOOL_CALLS_PROMPT` or `AGENT_IDENTITY_CONTEXT_TEMPLATE`, restarts every agent, team, and the router; other prompt changes apply without restarts.
+Changing a prompt that agents build in when they start, such as `HIDDEN_TOOL_CALLS_PROMPT` or `AGENT_IDENTITY_CONTEXT_TEMPLATE`, restarts every agent, team, and the owner account; other prompt changes restart only an agent in an active voice call.
 
 ## Environment Variables
 
@@ -269,7 +285,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 | `MINDROOM_SANDBOX_PROXY_URL` | Sandbox proxy endpoint URL (static runner) | _(none)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy | _(none)_ |
-| `MINDROOM_EGRESS_BROKER_PORT` | Port of the [Agent Keys](../deployment/egress-broker.md#environment-variables) egress broker; setting it turns Agent Keys on, and that page lists the other `MINDROOM_EGRESS_BROKER_*` variables | _(unset; off)_ |
+| `MINDROOM_EGRESS_BROKER_PORT` | Port of the [Agent Keys](../deployment/egress-broker.md#environment-variables) egress broker for workers; `off` turns Agent Keys off, and that page lists the other `MINDROOM_EGRESS_BROKER_*` variables | _(unset; a loopback broker for shell calls in the primary)_ |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Worker-reachable background-script gateway base URL, including `/api/script-gateway` | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_PORT` | Port for a second listener that serves only the script gateway and Agent CLI routes | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | `true` attests that the Kubernetes script-gateway listener exposes only the gateway and Agent CLI routes | `false` |

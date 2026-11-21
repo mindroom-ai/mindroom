@@ -1741,14 +1741,6 @@ async def test_a_forked_review_logs_only_the_requests_it_made(tmp_path: Path) ->
     assert finished["model_requests"] == 2
 
 
-def _unmarked(message: dict[str, Any]) -> dict[str, Any]:
-    """Return a Chat message as it reads without its cache marker, which turns its text into one marked part."""
-    content = message["content"]
-    if isinstance(content, list) and len(content) == 1 and content[0]["type"] == "text":
-        return {**message, "content": content[0]["text"]}
-    return message
-
-
 @pytest.mark.asyncio
 async def test_the_fork_resends_the_final_request_as_sent_so_the_provider_reads_its_prompt_cache(
     tmp_path: Path,
@@ -1783,8 +1775,10 @@ async def test_the_fork_resends_the_final_request_as_sent_so_the_provider_reads_
     system, *conversation = main["messages"]
     assert fork["messages"][0] == system
     assert "cache_control" in system["content"][0]
-    replayed = [_unmarked(message) for message in fork["messages"][1:]]
-    assert replayed[: len(conversation)] == [_unmarked(message) for message in conversation]
+    replayed = fork["messages"][1:]
+    assert json.dumps(_without_cache_markers(replayed[: len(conversation)])) == json.dumps(
+        _without_cache_markers(conversation),
+    )
     assert [message["role"] for message in replayed[len(conversation) :]] == ["assistant", "user"]
     # The fork's markers sit on those two new messages, right after the last message the final request marked.
     assert ["cache_control" in json.dumps(message) for message in fork["messages"][1:]] == [

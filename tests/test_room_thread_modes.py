@@ -24,7 +24,6 @@ from mindroom.room_thread_modes import (
     resolve_room_thread_mode_override,
     set_room_thread_mode_override,
 )
-from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
@@ -81,6 +80,12 @@ def _thread_mode_context(tmp_path: Path, client: AsyncMock) -> CommandHandlerCon
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
     )
+
+
+@pytest.fixture
+def thread_mode_published(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the room take the thread mode state, which these tests do not look at."""
+    monkeypatch.setattr("mindroom.room_modes.reconcile_room_thread_mode", AsyncMock(return_value=True))
 
 
 def _thread_mode_event(sender: str, body: str) -> _ThreadModeEvent:
@@ -350,6 +355,7 @@ async def test_thread_mode_command_requires_room_admin_for_set(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("thread_mode_published")
 async def test_thread_mode_command_admin_sets_runtime_override_without_config_write(tmp_path: Path) -> None:
     """Room admins should set a durable runtime override without touching config.yaml."""
     client = AsyncMock()
@@ -369,12 +375,11 @@ async def test_thread_mode_command_admin_sets_runtime_override_without_config_wr
     assert "now uses `room`" in context.send_response.await_args.args[0]
     assert resolve_room_thread_mode_override(context.runtime_paths, ROOM_ID) == "room"
     assert context.runtime_paths.config_path.read_text(encoding="utf-8") == config_before
-    context.record_handled_turn.assert_called_once_with(
-        TurnRecord.create(["$event"], response_event_id="$reply"),
-    )
+    context.record_handled_turn.assert_called_once_with("$reply")
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("thread_mode_published")
 async def test_thread_mode_command_accepts_admin_sender_for_bridged_requester(tmp_path: Path) -> None:
     """The Matrix sender's room admin power must authorize a bridged requester's command."""
     client = AsyncMock()
@@ -394,6 +399,7 @@ async def test_thread_mode_command_accepts_admin_sender_for_bridged_requester(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("thread_mode_published")
 async def test_thread_mode_command_admin_reset_clears_runtime_override(tmp_path: Path) -> None:
     """Room admins should reset the runtime override back to static config behavior."""
     client = AsyncMock()

@@ -181,11 +181,14 @@ def matrix_startup_error(
 def maybe_ssl_context(
     homeserver: str,
     runtime_paths: RuntimePaths,
+    *,
+    shared: bool = True,
 ) -> ssl_module.SSLContext | None:
     """Return the configured Matrix SSL context when HTTPS requires one.
 
     MATRIX_SSL_VERIFY=false applies only to the configured MATRIX_HOMESERVER, so any other homeserver,
     such as one the desktop bridge signs in to, keeps certificate verification.
+    A verifying context is shared unless ``shared=False``, so a client that changes the context must pass that.
     """
     if homeserver.startswith("https://"):
         configured_homeserver = homeserver.rstrip("/") == runtime_matrix_homeserver(runtime_paths).rstrip("/")
@@ -194,7 +197,7 @@ def maybe_ssl_context(
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl_module.CERT_NONE
         else:
-            ssl_context = verifying_ssl_context(runtime_paths.process_env)
+            ssl_context = verifying_ssl_context(runtime_paths.process_env, shared=shared)
         return ssl_context
     return None
 

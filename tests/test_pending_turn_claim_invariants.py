@@ -19,24 +19,20 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
-import nio
 import pytest
 
 from mindroom.coalescing.gate import IngressAdmissionClosedError
 from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, ClaimRefused, TurnClaim
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.test_turns_focused import (
-    _ROOM_ID,
     _SENDER,
     _THREAD_ROOT,
     _build_harness,
-    _entity_user_id,
     _image_event,
     _replace_harness_deps,
     _room_with_members,
@@ -117,19 +113,6 @@ class _BlockingNormalizer:
         raise AssertionError(msg)
 
 
-@dataclass
-class _FailingNormalizer:
-    """Normalizer stand-in that fails if resolution is attempted."""
-
-    calls: int = 0
-
-    async def resolve_text_event(self, _request: TextNormalizationRequest) -> PreparedIngress:
-        """Resolution must never run on the path under test."""
-        self.calls += 1
-        msg = "normalization must not run on this path"
-        raise AssertionError(msg)
-
-
 def _is_live(claim: TurnClaim) -> bool:
     return claim in claim._registry._live
 
@@ -196,24 +179,6 @@ def config(tmp_path: Path) -> Config:
             },
         ),
         test_runtime_paths(tmp_path / "runtime"),
-    )
-
-
-def _mention_text_event(body: str, mentioned_user_id: str, *, event_id: str) -> nio.RoomMessageText:
-    """Build one human text event that explicitly mentions another agent."""
-    return nio.RoomMessageText.from_dict(
-        {
-            "content": {
-                "body": body,
-                "msgtype": "m.text",
-                "m.mentions": {"user_ids": [mentioned_user_id]},
-            },
-            "event_id": event_id,
-            "sender": _SENDER,
-            "origin_server_ts": 1_000_000,
-            "room_id": _ROOM_ID,
-            "type": "m.room.message",
-        },
     )
 
 
@@ -296,14 +261,14 @@ async def test_command_control_input_releases_ingress_claim_exactly_once(
 ) -> None:
     """The command-control shortcut hands its ingress claim straight to the command dispatch.
 
-    A non-router agent silently consumes ``!help``: the command dispatch merges
-    the ingress claim (taken from the ticket, so the ticket's close must not
+    An agent silently consumes a ``!help`` aimed at another: the command dispatch
+    merges the ingress claim (taken from the ticket, so the ticket's close must not
     release it again), and the merged claim is released when the consumed
     command settles.
     """
-    harness = _build_harness(config, tmp_path)
+    harness = _build_harness(config, tmp_path, agent_name="research")
     ledger = _install_claim_ledger(monkeypatch, harness.turn_store)
-    room = _room_with_members(config, "general")
+    room = _room_with_members(config, "general", "research")
     event = _text_event("!help", event_id="$command-claim:localhost")
 
     await harness.deliver(room, event)
@@ -311,39 +276,6 @@ async def test_command_control_input_releases_ingress_claim_exactly_once(
     assert harness.gate_batches == []
     assert harness.ignored_dispatch_sources == [(event.event_id,)]
     assert ledger.kinds() == ["claim", "retire", "merge", "release"]
-    _assert_claims_released_exactly_once(ledger)
-    await _assert_no_live_claim(harness.turn_store, event.event_id)
-
-
-@pytest.mark.asyncio
-async def test_router_pre_ingress_skip_releases_claim(
-    config: Config,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A router turn consumed before shared ingress work releases its claim.
-
-    When the router skips a message routed to another agent, the turn is
-    consumed after the claim but before normalization; the finally guard in
-    the message handler must release the claim exactly once.
-    """
-    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
-    ledger = _install_claim_ledger(monkeypatch, harness.turn_store)
-    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
-    event = _mention_text_event(
-        "@research investigate this",
-        _entity_user_id(config, "research"),
-        event_id="$router-skip-claim:localhost",
-    )
-    resolve_spy = _FailingNormalizer()
-    _install_normalizer(harness, resolve_spy)
-
-    outcome = await harness.ingress.handle_text_event(room, event)
-
-    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
-    assert resolve_spy.calls == 0, "the router skip must happen before normalization"
-    assert harness.gate_batches == []
-    assert ledger.kinds() == ["claim", "release"]
     _assert_claims_released_exactly_once(ledger)
     await _assert_no_live_claim(harness.turn_store, event.event_id)
 

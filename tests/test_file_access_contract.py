@@ -7,12 +7,15 @@ A tool declared ``ToolFileAccess.AGENT`` must appear here, so a new path tool ca
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, BinaryIO, Self
 
 import httpx
 import pytest
@@ -21,8 +24,8 @@ import mindroom.custom_tools.agno_compat_moviepy as moviepy_module
 import mindroom.custom_tools.attachments as attachments_module
 import mindroom.custom_tools.browser as browser_module
 import mindroom.custom_tools.chat_ui as chat_ui_module
-import mindroom.custom_tools.coding as coding_module
 import mindroom.custom_tools.e2b as e2b_module
+import mindroom.custom_tools.filesystem as filesystem_module
 import mindroom.custom_tools.gmail as gmail_module
 import mindroom.custom_tools.google_drive as google_drive_module
 import mindroom.file_access as file_access_module
@@ -31,25 +34,24 @@ import mindroom.path_safety as path_safety_module
 import mindroom.tools.agno_compat_airflow as airflow_module
 import mindroom.tools.agno_compat_groq as groq_module
 import mindroom.tools.agno_compat_openai as openai_module
-import mindroom.tools.file as file_tool_module
 from mindroom.attachments.storage import load_attachment
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
 from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachment
 from mindroom.custom_tools.chat_ui import ChatUITools
-from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.e2b import MindRoomE2BTools
+from mindroom.custom_tools.filesystem import FilesystemTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.microsoft_files import MicrosoftFilesTools
 from mindroom.custom_tools.outlook_mail import OutlookMailTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
+from mindroom.path_confinement import MAX_READ_BYTES
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tools.agno_compat_airflow import MindRoomAirflowTools
 from mindroom.tools.agno_compat_groq import MindRoomGroqTools
 from mindroom.tools.agno_compat_openai import MindRoomOpenAITools
-from mindroom.tools.file import file_tools
 from tests.chat_ui_contract_fixture import make_chat_ui_context, sent_chat_ui_content
 from tests.microsoft_graph_test_support import FakeGraph
 from tests.microsoft_graph_test_support import publish_grant as publish_microsoft_grant
@@ -72,8 +74,6 @@ from tests.test_google_drive_oauth_tool import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from types import ModuleType
-
-    from agno.tools.file import FileTools
 
     from mindroom.config.models import FileAccess
 
@@ -301,25 +301,14 @@ async def _show_canvas_path(
     return isinstance(action, dict) and action["canvas"]["html"] == _TEXT
 
 
-async def _read_with_file_tool(
+async def _read_with_filesystem_tool(
     _tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
     workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
-    tool = file_tools()(base_dir=workspace, file_access=file_access)
-    return tool.read_file(raw_path) == _TEXT
-
-
-async def _read_with_coding_tool(
-    _tmp_path: Path,
-    _monkeypatch: pytest.MonkeyPatch,
-    workspace: Path | None,
-    file_access: FileAccess,
-    raw_path: str,
-) -> bool:
-    tool = CodingTools(base_dir=None if workspace is None else str(workspace), file_access=file_access)
+    tool = FilesystemTools(base_dir=None if workspace is None else str(workspace), file_access=file_access)
     return _TEXT.strip() in tool.read_file(raw_path)
 
 
@@ -411,10 +400,9 @@ _PROBES = (
     _ToolProbe("moviepy_video_tools", "extract_audio", _extract_audio_with_moviepy, moviepy_module),
     _ToolProbe("airflow", "read_dag_file", _read_dag_file, airflow_module, "doc.txt"),
     _ToolProbe("chat_ui", "show_canvas", _show_canvas_path, chat_ui_module, "doc.txt"),
-    # `file` and `coding` resolve paths themselves and read through descriptors pinned
-    # from their base directory; their own link-swap test is below.
-    _ToolProbe("file", "read_file", _read_with_file_tool, None, "doc.txt"),
-    _ToolProbe("coding", "read_file", _read_with_coding_tool, None, "doc.txt"),
+    # `filesystem` resolves paths itself and reads through descriptors pinned
+    # from its base directory; its own link-swap test is below.
+    _ToolProbe("filesystem", "read_file", _read_with_filesystem_tool, None, "doc.txt"),
 )
 _LINK_DEFENDING_PROBES = tuple(probe for probe in _PROBES if probe.resolver_module is not None)
 _WORKER_PATH_PROBES = tuple(probe for probe in _PROBES if probe.resolver_module is None)
@@ -557,21 +545,15 @@ async def test_file_swapped_for_link_after_the_check_is_refused(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("swap", ["file", "workspace"])
-@pytest.mark.parametrize(
-    ("probe", "resolver_module"),
-    [(_PROBES[-2], file_tool_module), (_PROBES[-1], coding_module)],
-    ids=["file:read_file", "coding:read_file"],
-)
 async def test_worker_path_tool_file_swapped_for_link_after_the_check_is_refused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     workspace: Path,
     outside: Path,
-    probe: _ToolProbe,
-    resolver_module: ModuleType,
     swap: str,
 ) -> None:
-    """A file or workspace that `file` or `coding` checked and then swapped for a link is never followed."""
+    """A file or workspace that `filesystem` checked and then swapped for a link is never followed."""
+    probe, resolver_module = _PROBES[-1], filesystem_module
     resolve = resolver_module.resolve_base_dir_path
 
     def resolve_then_swap(*args: object, **kwargs: object) -> Path:
@@ -593,27 +575,25 @@ async def test_worker_path_tool_file_swapped_for_link_after_the_check_is_refused
 @pytest.mark.parametrize(
     "operation",
     [
-        lambda file_tool, _coding: file_tool.save_file("new notes", "notes/new.txt"),
-        lambda file_tool, _coding: file_tool.read_file("doc.txt"),
-        lambda file_tool, _coding: file_tool.delete_file("doc.txt"),
-        lambda _file, coding_tool: coding_tool.write_file("notes/new.txt", "new notes"),
-        lambda _file, coding_tool: coding_tool.edit_file("doc.txt", [{"old_text": "contract", "new_text": "changed"}]),
+        lambda tool: tool.read_file("doc.txt"),
+        lambda tool: tool.delete_file("doc.txt"),
+        lambda tool: tool.write_file("notes/new.txt", "new notes"),
+        lambda tool: tool.edit_file("doc.txt", [{"old_text": "contract", "new_text": "changed"}]),
     ],
-    ids=["file:save_file", "file:read_file", "file:delete_file", "coding:write_file", "coding:edit_file"],
+    ids=["read_file", "delete_file", "write_file", "edit_file"],
 )
 def test_worker_path_tool_refuses_a_workspace_replaced_by_link_after_construction(
     tmp_path: Path,
     workspace: Path,
     outside: Path,
-    operation: Callable[[FileTools, CodingTools], str],
+    operation: Callable[[FilesystemTools], str],
 ) -> None:
-    """Once built, `file` and `coding` never follow a workspace that worker code replaced with a link."""
-    file_tool = file_tools()(base_dir=workspace, enable_delete_file=True)
-    coding_tool = CodingTools(base_dir=str(workspace))
+    """Once built, `filesystem` never follows a workspace that worker code replaced with a link."""
+    tool = FilesystemTools(base_dir=str(workspace), enable_delete_file=True)
     workspace.rename(tmp_path / "moved-workspace")
     workspace.symlink_to(outside, target_is_directory=True)
 
-    result = operation(file_tool, coding_tool)
+    result = operation(tool)
 
     assert result.startswith("Error")
     assert "unrestricted" not in result
@@ -624,68 +604,85 @@ def test_worker_path_tool_refuses_a_workspace_replaced_by_link_after_constructio
 @pytest.mark.parametrize(
     "operation",
     [
-        lambda file_tool, _coding: file_tool.list_files(),
-        lambda file_tool, _coding: file_tool.search_files("*.json"),
-        lambda file_tool, _coding: file_tool.search_content("sk-"),
-        lambda file_tool, _coding: file_tool.search_content("sk-", directory="."),
-        lambda _file, coding_tool: coding_tool.ls(),
-        lambda _file, coding_tool: coding_tool.ls("."),
-        lambda _file, coding_tool: coding_tool.grep("sk-"),
-        lambda _file, coding_tool: coding_tool.grep("sk-", path="."),
-        lambda _file, coding_tool: coding_tool.find_files("*.json"),
-        lambda _file, coding_tool: coding_tool.find_files("*.json", path="."),
+        lambda tool: tool.ls(),
+        lambda tool: tool.ls("."),
+        lambda tool: tool.grep("sk-"),
+        lambda tool: tool.grep("sk-", path="."),
+        lambda tool: tool.find_files("*.json"),
+        lambda tool: tool.find_files("*.json", path="."),
     ],
-    ids=[
-        "file:list_files",
-        "file:search_files",
-        "file:search_content",
-        "file:search_content-directory",
-        "coding:ls",
-        "coding:ls-path",
-        "coding:grep",
-        "coding:grep-path",
-        "coding:find_files",
-        "coding:find_files-path",
-    ],
+    ids=["ls", "ls-path", "grep", "grep-path", "find_files", "find_files-path"],
 )
 def test_worker_path_tool_does_not_list_or_search_a_workspace_replaced_by_link(
     tmp_path: Path,
     workspace: Path,
     outside: Path,
-    operation: Callable[[FileTools, CodingTools], str],
+    operation: Callable[[FilesystemTools], str],
 ) -> None:
     """Listing and searching never reveal the target of a workspace that worker code replaced with a link."""
     (outside / "openai.json").write_text('{"api_key": "sk-SECRET-VALUE"}\n')
-    file_tool = file_tools()(base_dir=workspace)
-    coding_tool = CodingTools(base_dir=str(workspace))
+    tool = FilesystemTools(base_dir=str(workspace))
     workspace.rename(tmp_path / "moved-workspace")
     workspace.symlink_to(outside, target_is_directory=True)
 
-    result = operation(file_tool, coding_tool)
+    result = operation(tool)
 
     assert "openai.json" not in result
     assert "SECRET" not in result
     assert "unrestricted" not in result
 
 
-def test_file_tool_content_search_never_reads_a_planted_link_target(
+class _NominatingRipgrep:
+    """A ripgrep process that names these files as matching, whatever they hold when read."""
+
+    def __init__(self, names: list[Path]) -> None:
+        self.stdout = io.BytesIO(b"".join(os.fsencode(name) + b"\0" for name in names))
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def wait(self) -> int:
+        return 0
+
+    def kill(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("search", "expected"),
+    [
+        ("ripgrep", ["notes.txt:1:sk-workspace-value"]),
+        ("no-ripgrep", ["alias.txt:1:sk-workspace-value", "notes.txt:1:sk-workspace-value"]),
+        ("ripgrep-raced-through-a-link", ["notes.txt:1:sk-workspace-value"]),
+    ],
+)
+def test_grep_never_reads_a_planted_link_target(
     monkeypatch: pytest.MonkeyPatch,
     workspace: Path,
     outside: Path,
+    search: str,
+    expected: list[str],
 ) -> None:
-    """Content search never opens a primary file that worker code linked into the workspace, even beside a real twin.
+    """Workspace grep decides and reports matches only from bytes it read through the capped no-follow reader.
 
-    Agno's own check strips the trailing space from `d `, so it validated `d/x.txt` and then read `d /x.txt`.
+    Ripgrep opens files by path, so worker code swapping a directory under it can make it match a primary file:
+    what ripgrep says of a file is only a nomination, and a file that does not match as read gives no line or context.
     """
     secret = outside / "openai.json"
     secret.write_text('{"api_key": "sk-SECRET-VALUE"}\n')
     (workspace / "leak.json").symlink_to(secret)
     (workspace / "d").mkdir()
-    (workspace / "d" / "x.txt").write_text("harmless\n")
+    (workspace / "d" / "x.txt").write_text("above\nharmless\nbelow\n")
     (workspace / "d ").mkdir()
     (workspace / "d " / "x.txt").symlink_to(secret)
     (workspace / "notes.txt").write_text("sk-workspace-value\n")
     (workspace / "alias.txt").symlink_to(workspace / "notes.txt")
+    with (workspace / "huge.txt").open("w") as huge:
+        huge.write("sk-huge\n")
+        huge.truncate(MAX_READ_BYTES + 1)
     secret_stat = secret.stat()
     opened_secret: list[object] = []
     real_open = os.open
@@ -697,25 +694,31 @@ def test_file_tool_content_search_never_reads_a_planted_link_target(
         return descriptor
 
     monkeypatch.setattr(os, "open", recording_open)
-    result = json.loads(file_tools()(base_dir=workspace).search_content("sk-"))
+    if search == "no-ripgrep":
+        monkeypatch.setattr(filesystem_module.shutil, "which", lambda _name: None)
+    elif search == "ripgrep-raced-through-a-link":
+        names = [workspace / name for name in ("leak.json", "d /x.txt", "d/x.txt", "gone.txt", "notes.txt")]
+        real_popen = subprocess.Popen
 
-    assert sorted(match["file"] for match in result["files"]) == ["alias.txt", "notes.txt"]
-    assert "SECRET" not in json.dumps(result)
+        def nominating_popen(args: list[str], **kwargs: object) -> object:
+            return _NominatingRipgrep(names) if "--files-with-matches" in args else real_popen(args, **kwargs)
+
+        monkeypatch.setattr(filesystem_module.subprocess, "Popen", nominating_popen)
+    if search != "no-ripgrep" and shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    result = FilesystemTools(base_dir=str(workspace)).grep("sk-", context=1)
+
+    assert sorted(result.splitlines()) == expected
+    assert "SECRET" not in result
     assert opened_secret == []
 
 
 @pytest.mark.parametrize("swap", ["workspace-link", "ancestor-swapped-while-resolving"])
-@pytest.mark.parametrize(
-    "build",
-    [lambda base_dir: file_tools()(base_dir=base_dir), lambda base_dir: CodingTools(base_dir=str(base_dir))],
-    ids=["file", "coding"],
-)
 def test_worker_path_tool_refuses_a_base_dir_swapped_before_construction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     workspace: Path,
     outside: Path,
-    build: Callable[[Path], object],
     swap: str,
 ) -> None:
     """A workspace swapped after runtime resolution but before the toolkit pins it is refused, never adopted."""
@@ -737,40 +740,21 @@ def test_worker_path_tool_refuses_a_base_dir_swapped_before_construction(
         monkeypatch.setattr(path_safety_module, "open_directory_within_root", swap_then_open)
 
     with pytest.raises(ValueError, match="base_dir"):
-        build(base_dir)
+        FilesystemTools(base_dir=str(base_dir))
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("probe", _PROBES[-2:], ids=["file:read_file", "coding:read_file"])
 async def test_worker_path_tool_refuses_a_file_above_the_read_cap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     workspace: Path,
-    probe: _ToolProbe,
 ) -> None:
     """A huge or sparse workspace file is refused instead of being read whole into the primary."""
+    probe = _PROBES[-1]
     with (workspace / probe.filename).open("r+b") as doc:
         doc.truncate(65 << 20)
 
     assert not await probe.read(tmp_path, monkeypatch, workspace, "workspace", probe.filename)
-
-
-@pytest.mark.parametrize(
-    ("limit", "text"),
-    [({"max_file_length": 4}, "abcde"), ({"max_file_lines": 1}, "a\nb")],
-    ids=["characters", "lines"],
-)
-def test_file_tool_points_a_file_over_its_read_limits_to_chunked_reads(
-    workspace: Path,
-    limit: dict[str, int],
-    text: str,
-) -> None:
-    """A file over the configured character or line limit is not returned whole."""
-    (workspace / "long.txt").write_text(text)
-
-    assert file_tools()(base_dir=workspace, **limit).read_file("long.txt") == (
-        "Error reading file: file too long. Use read_file_chunk instead"
-    )
 
 
 @pytest.mark.parametrize("interrupted", [False, True], ids=["complete", "interrupted"])

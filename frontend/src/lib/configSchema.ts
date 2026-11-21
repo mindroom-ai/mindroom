@@ -3,11 +3,7 @@
 // nullable, $ref, and union shapes into one node kind per form widget.
 
 export type ReferenceKind =
-  | "model"
-  | "agent"
-  | "personal_room_agent"
-  | "room"
-  | "tool";
+  "model" | "agent" | "personal_room_agent" | "room" | "tool";
 
 export type ReferenceOptions = Record<ReferenceKind, string[]>;
 
