@@ -274,22 +274,6 @@ async def _confirmation_response_ids(
     return tuple(response_ids)
 
 
-async def _has_visible_confirmation_response(
-    client: nio.AsyncClient,
-    room_id: str,
-    event: nio.ReactionEvent,
-) -> bool:
-    """Return whether durable Matrix output proves this decision was consumed."""
-    return bool(
-        await _confirmation_response_ids(
-            client,
-            room_id,
-            event.reacts_to,
-            decision_event_id=event.event_id,
-        ),
-    )
-
-
 async def _already_set_up(client: nio.AsyncClient, runtime_paths: RuntimePaths, room_id: str, event_id: str) -> bool:
     """Whether the preview has a pending change, whose buttons are added again, or a visible decision.
 
@@ -452,7 +436,12 @@ async def handle_confirmation_reaction(
         if pending_change.decision_event_id is not None and pending_change.decision_event_id != event.event_id:
             return
 
-        if await _has_visible_confirmation_response(context.client, room.room_id, event):
+        if await _confirmation_response_ids(
+            context.client,
+            room.room_id,
+            preview_event_id,
+            decision_event_id=event.event_id,
+        ):
             _save_pending_change(context.runtime_paths, preview_event_id, None)
             return
 
