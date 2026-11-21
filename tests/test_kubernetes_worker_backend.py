@@ -6476,12 +6476,13 @@ _SSH_PORT = {"name": "ssh", "port": 2222, "targetPort": 2222}
 def _ssh_backend(
     tmp_path: Path,
     *,
-    ssh_agents: tuple[str, ...] = ("mine",),
+    include_alias: bool = False,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi, RuntimePaths]:
+    alias = _SSH_AGENT.replace("tailnet_ssh: true", "tailnet_ssh: false")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "agents:\n"
-        + "".join(f"  {name}:\n{_SSH_AGENT}\n" for name in ssh_agents)
+        f"agents:\n  mine:\n{_SSH_AGENT}\n"
+        + (f"  mine_:\n{alias}\n" if include_alias else "")
         + """
   helper:
     display_name: Helper
@@ -6744,9 +6745,10 @@ def test_joining_a_directory_removes_the_kubernetes_mark(tmp_path: Path) -> None
 
 def test_ambiguous_agent_name_is_never_marked(tmp_path: Path) -> None:
     """`mine` and `mine_` share one worker key, so its worker is no one agent's and is never launched with the mark."""
-    backend, apps_api, core_api, _runtime_paths = _ssh_backend(tmp_path, ssh_agents=("mine", "mine_"))
+    backend, apps_api, core_api, _runtime_paths = _ssh_backend(tmp_path, include_alias=True)
     launch = _launch_of(backend)
-    assert {name for name, agent in launch.config.agents.items() if agent.tailnet_ssh} == {"mine", "mine_"}
+    assert launch.config.agents["mine"].tailnet_ssh
+    assert not launch.config.agents["mine_"].tailnet_ssh
 
     assert (
         backend._resources.ssh_marked(
