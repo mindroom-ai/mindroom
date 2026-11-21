@@ -306,13 +306,16 @@ async def test_a_fenced_example_of_a_marker_keeps_its_line_in_the_plain_body() -
 
 
 def test_content_that_names_no_markers_to_take_out_is_sent_as_it_is() -> None:
-    """Plain messages, content already converted, a trace without HTML and a warm-up frame stay the same object."""
+    """Plain messages, content already converted, a trace without HTML and a warm-up frame stay the same object.
+
+    So does a reply whose text would keep a marker line: readers count on text without marker lines having none.
+    """
     sent = _sent(_case("calls between two paragraphs share one position"))
     plain = {"msgtype": "m.text", "body": "🔧 `shell` [1]"}
     no_html = {"msgtype": "m.text", "body": "🔧 `shell` [1]", _TRACE_KEY: {"version": 2, "events": [_SHELL]}}
     warming = {**sent, STREAM_VISIBLE_BODY_KEY: sent["body"]}
-    foreign_fallback = {**build_edit_event_content(event_id="$reply", new_content=sent, new_text="Other text.")}
-    for content in (plain, tool_markers_out_of_text(sent), no_html, warming, foreign_fallback):
+    stray = _marked("🔧 `shell` [1]\n\n🔧 `shell` [2]\n\nDone.", [_SHELL])
+    for content in (plain, tool_markers_out_of_text(sent), no_html, warming, stray):
         assert tool_markers_out_of_text(content) is content
     assert tool_markers_in_text(sent) is sent
 
@@ -695,10 +698,11 @@ def test_a_person_reading_a_reply_of_calls_alone_sees_its_calls() -> None:
 
 
 @pytest.mark.parametrize("place", [True, 1.0, -1, 9, None, "1"])
-def test_a_position_that_is_no_place_in_the_text_leaves_the_content_as_it_is(place: object) -> None:
+@pytest.mark.parametrize("keys", [("body_line", "at"), ("body_line",), ("at",)])
+def test_a_position_that_is_no_place_in_the_text_leaves_the_content_as_it_is(place: object, keys: tuple[str]) -> None:
     """The backend restores only what its write boundary wrote; MindRoom Chat alone guesses a place for the rest."""
     content = _wire(_case("calls between two paragraphs share one position"))
-    content[_TRACE_KEY]["events"][0].update(body_line=place, at=place)
+    content[_TRACE_KEY]["events"][-1].update(dict.fromkeys(keys, place))
     assert tool_markers_in_text(content) is content
 
 
