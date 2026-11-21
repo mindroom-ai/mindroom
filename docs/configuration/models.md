@@ -401,10 +401,12 @@ MindRoom runs the Claude Code CLI you signed in to, and that CLI talks to Anthro
 The agent keeps MindRoom's tools, memory, history, and approvals; Claude Code's own tools, skills, memory files, and your user and project settings and hooks are off.
 Managed settings an administrator installed for Claude Code on the machine, such as `/etc/claude-code/managed-settings.json`, still apply, including any hooks they define.
 Use it for a personal deployment that runs as the subscriber: every reply the agent gives, to anyone who may talk to it, counts toward that one subscription's limits.
+No reply is billed to an API key, but that does not mean no extra charge: Claude Code follows your Claude account's extra-usage setting.
+With extra usage turned on, replies continue past the plan's included usage and Anthropic charges the account for them; turn it off in your Claude account's usage settings if you want a hard limit.
 
 Set it up as the user that runs MindRoom:
 
-1. Install [Claude Code](https://code.claude.com/docs/en/setup) 2.1.248 or later.
+1. Install [Claude Code](https://code.claude.com/docs/en/setup) 2.1.328 or later.
 2. Run `claude auth login` and sign in with the subscription.
 3. Install the Claude Agent SDK with `pip install 'mindroom[claude_agent]'`; MindRoom installs it on first use unless auto-install is off.
 
@@ -440,10 +442,10 @@ MindRoom runs at most 8 Claude Code processes at a time; while all 8 are answeri
 
 A reply fails with a message that names the fix in these cases:
 
-- Claude Code is not installed, or is older than 2.1.248: install it or run `claude update`.
+- Claude Code is not installed, or is older than 2.1.328: install it or run `claude update`.
 - Claude Code is not signed in to a Pro, Max, Team, or Enterprise plan: run `claude auth login` as the user that runs MindRoom.
 - MindRoom's process environment sets a variable that Claude Code would use in place of the subscription sign-in, or to send it somewhere else: remove it from that environment.
-  These are every variable whose name starts with `ANTHROPIC_` or `CLAUDE_CODE_`, whatever its value, and `CLAUDE_BG_AUTH_SNAPSHOT_PATH`.
+  These are every variable whose name starts with `ANTHROPIC_` or `CLAUDE_CODE_`, whatever its value, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`, and `CLAUDE_AUTO_BACKGROUND_TASKS`.
   `CLAUDE_CODE_ENTRYPOINT` and the variables MindRoom sets for Claude Code itself are allowed.
   The same variables in the `.env` beside `config.yaml` are fine, since only MindRoom's own `anthropic` models read them there.
 - The plan's usage limit is reached: the message gives the time the limit resets when Claude Code reports it.
