@@ -26,7 +26,7 @@ from mindroom.matrix_rtc.events import (
     build_membership_content,
     membership_state_key,
 )
-from mindroom.matrix_rtc.frame_keys import _USE_KEY_DELAY_MS, FrameKeyManager
+from mindroom.matrix_rtc.frame_keys import _USE_KEY_DELAY_MS, FrameKeyManager, _KeyDistribution
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -151,6 +151,8 @@ class CallSession:
     _key_distribution_wakeup_scheduled: bool = field(default=False, init=False)
     _key_retry_attempt: int = field(default=0, init=False)
     _applied_key_generation: int = field(default=-1, init=False)
+    #: The newest own key whose deadline passed, as ``(key, key_index, generation)``.
+    _due_own_key: tuple[bytes, int, int] | None = field(default=None, init=False)
     _undelivered_key_device_ids: frozenset[str] = field(default_factory=frozenset, init=False)
     _reported_failure_codes: set[str] = field(default_factory=set, init=False)
     _preparing_agent: asyncio.Task[CallVoiceAgentOptions] | None = field(default=None, init=False)
@@ -381,15 +383,18 @@ class CallSession:
             if distribution is None:
                 return
             delivered: list[CallMember] = []
-            if distribution.targets:
-                self._key_manager.mark_exposed(distribution)
-                delivered = await self.deps.key_transport.send_key(
-                    room_id=self.room_id,
-                    key_base64=distribution.key_base64,
-                    key_index=distribution.key_index,
-                    targets=list(distribution.targets),
-                )
-            first_send = self._key_manager.mark_distributed(distribution, tuple(delivered))
+            try:
+                if distribution.targets:
+                    self._key_manager.mark_exposed(distribution)
+                    delivered = await self.deps.key_transport.send_key(
+                        room_id=self.room_id,
+                        key_base64=distribution.key_base64,
+                        key_index=distribution.key_index,
+                        targets=list(distribution.targets),
+                    )
+            finally:
+                # Fail closed: a raised send fixes the deadline too, so the old key still retires.
+                self._arm_own_key(distribution, self._key_manager.mark_distributed(distribution, tuple(delivered)))
             delivered_members = set(delivered)
             undelivered_device_ids = frozenset(
                 target.device_id for target in distribution.targets if target not in delivered_members
@@ -399,12 +404,6 @@ class CallSession:
                 self._undelivered_key_device_ids = frozenset()
             else:
                 self._schedule_key_distribution_retry(undelivered_device_ids)
-            # Each key generation activates once, on the deadline its first completed send fixed.
-            own_key = (distribution.key, distribution.key_index, distribution.generation)
-            if first_send and distribution.generation == 0:
-                self._apply_own_key(*own_key)
-            elif first_send:
-                self._spawn(self._apply_own_key_later(*own_key))
 
     def _schedule_key_distribution_retry(
         self,
@@ -455,12 +454,27 @@ class CallSession:
         self._reported_failure_codes.add(code)
         self._spawn(self.deps.on_failure(message))
 
+    def _arm_own_key(self, distribution: _KeyDistribution, first_attempt: bool) -> None:
+        """Give a key generation its one deadline when its first send attempt ends.
+
+        Any later send re-attempts a due key whose install failed, with no second delay.
+        """
+        own_key = (distribution.key, distribution.key_index, distribution.generation)
+        if first_attempt and distribution.generation == 0:
+            self._apply_own_key(*own_key)
+        elif first_attempt:
+            deadline_ms = self.deps.monotonic_ms() + _USE_KEY_DELAY_MS
+            self._spawn(self._apply_own_key_at(deadline_ms, *own_key))
+        elif self._due_own_key is not None:
+            self._apply_own_key(*self._due_own_key)
+
     def _apply_own_key(self, key: bytes, key_index: int, generation: int) -> None:
         # Only a newer generation applies, so an older key never takes slot 0 or our senders back.
         if generation <= self._applied_key_generation:
             return
-        self._applied_key_generation = generation
+        self._due_own_key = (key, key_index, generation)
         self.deps.bridge.set_frame_key(self._local_identity, key, key_index)
+        self._applied_key_generation = generation
 
     def _sync_bridge_participants(self) -> None:
         """Apply the authoritative Matrix call roster to the SFU bridge."""
@@ -468,9 +482,9 @@ class CallSession:
             frozenset(f"{member.user_id}:{member.device_id}" for member in self._members),
         )
 
-    async def _apply_own_key_later(self, key: bytes, key_index: int, generation: int) -> None:
+    async def _apply_own_key_at(self, deadline_ms: int, key: bytes, key_index: int, generation: int) -> None:
         # Outside the distribution lock: a newer key's slow send cannot postpone this one.
-        await asyncio.sleep(_USE_KEY_DELAY_MS / 1000)
+        await asyncio.sleep(max(0, deadline_ms - self.deps.monotonic_ms()) / 1000)
         if not self._stopped:
             self._apply_own_key(key, key_index, generation)
 

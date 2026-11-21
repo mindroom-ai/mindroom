@@ -125,8 +125,8 @@ def test_undelivered_member_after_grace_gets_the_same_key_again() -> None:
     assert joined.key_index == 1
 
 
-def test_rotation_whose_send_raised_arms_on_its_first_completed_retry() -> None:
-    """A raised send arms nothing; the next completed send of that key, even a partial one, does."""
+def test_a_generation_arms_when_its_first_send_attempt_ends() -> None:
+    """A send that raised still ends the attempt (reported with nothing delivered); a retry arms nothing."""
     manager = _manager()
     alice = _member("@alice:example.org")
     bob = _member("@bob:example.org")
@@ -136,14 +136,12 @@ def test_rotation_whose_send_raised_arms_on_its_first_completed_retry() -> None:
 
     rotated = manager.update_memberships([alice], now_ms=1)
     assert rotated is not None
-    manager.mark_exposed(rotated)  # the transport raised: mark_distributed is never called
+    manager.mark_exposed(rotated)
+    assert manager.mark_distributed(rotated, ())  # the transport raised
     retry = manager.update_memberships([alice], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 1)
     assert retry is not None
     assert retry.key == rotated.key
-    assert manager.mark_distributed(retry, ())
-    again = manager.update_memberships([alice], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 2)
-    assert again is not None
-    assert not manager.mark_distributed(again)
+    assert not manager.mark_distributed(retry)
 
 
 def test_leaver_rotates_key() -> None:

@@ -6140,7 +6140,7 @@ async def test_reshare_after_slow_rotation_send_keeps_the_rotation_delay(
             key_index: int,
             targets: list[CallMember],
         ) -> list[CallMember]:
-            if key_index == 1:
+            if key_index == 1 and len(targets) > 1:  # only the rotation's own send is slow
                 clock[0] += 1_200
             return await super().send_key(
                 room_id=room_id,
@@ -6279,8 +6279,8 @@ async def test_older_keys_timer_after_a_newer_key_applied_is_a_no_op(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_key_whose_send_raised_is_never_applied_once_superseded(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A rotation whose only send raised arms nothing; the next rotation activates instead."""
+async def test_raised_leave_rotation_send_still_retires_the_old_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rotation whose send raised still activates after the delay: callers hear silence, never the old key."""
     real_sleep = asyncio.sleep
 
     async def elapsed_sleep(_seconds: float) -> None:
@@ -6291,19 +6291,129 @@ async def test_key_whose_send_raised_is_never_applied_once_superseded(monkeypatc
     session = _session(_client(), bridge, _HeldKeyTransport(fail=1), [0])
     alice = _member("@alice:example.org", "ALICEDEV")
     bob = _member("@bob:example.org", "BOBDEV")
-    charlie = _member("@charlie:example.org", "CHARLIEDEV")
 
-    session._members = [alice, bob, charlie]
-    await session._distribute_keys()
     session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice]
     with pytest.raises(OSError, match="send failed"):
         await session._distribute_keys()
+    for _ in range(5):
+        await real_sleep(0)
+
+    assert _own_indices(bridge) == [0, 1]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_own_key_install_is_retried_by_the_next_completed_send(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A due key whose install raised is not recorded as applied; the next send installs it at once."""
+    real_sleep = asyncio.sleep
+
+    async def elapsed_sleep(_seconds: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", elapsed_sleep)
+
+    class FailOnceBridge(FakeBridge):
+        failed = False
+
+        def set_frame_key(self, participant_identity: str, key: bytes, key_index: int) -> None:
+            if key_index == 1 and not self.failed:
+                self.failed = True
+                msg = "install failed"
+                raise RuntimeError(msg)
+            super().set_frame_key(participant_identity, key, key_index)
+
+    bridge = FailOnceBridge()
+    session = _session(_client(), bridge, FakeKeyTransport(), [0])
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+    charlie = _member("@charlie:example.org", "CHARLIEDEV")
+
+    session._members = [alice, bob]
+    await session._distribute_keys()
     session._members = [alice]
     await session._distribute_keys()
     for _ in range(5):
         await real_sleep(0)
+    assert bridge.failed
+    assert _own_indices(bridge) == [0]
 
-    assert _own_indices(bridge) == [0, 2]
+    session._members = [alice, charlie]  # a joiner within the grace: a re-share of the same key
+    await session._distribute_keys()
+
+    assert _own_indices(bridge) == [0, 1]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("late_ms", "expected_sleep"),
+    [(1_200, 0.0), (300, 0.7)],
+)
+async def test_timer_dispatched_late_waits_only_the_rest_of_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    late_ms: int,
+    expected_sleep: float,
+) -> None:
+    """The deadline is fixed when the send ends, not when the timer task first runs."""
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recorded_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", recorded_sleep)
+    clock = [0]
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, FakeKeyTransport(), clock)
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice]
+    await session._distribute_keys()
+    clock[0] += late_ms  # the loop was busy before the timer task first ran
+    for _ in range(5):
+        await real_sleep(0)
+
+    assert delays == [pytest.approx(expected_sleep)]
+    assert _own_indices(bridge) == [0, 1]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_timer_woken_late_applies_once_without_sleeping_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timer that started on time but woke late applies the key at once."""
+    wake = asyncio.Event()
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def late_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await wake.wait()
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", late_sleep)
+    clock = [0]
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, FakeKeyTransport(), clock)
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice]
+    await session._distribute_keys()
+    await real_sleep(0)
+    clock[0] += 5_000
+    wake.set()
+    for _ in range(5):
+        await real_sleep(0)
+
+    assert delays == [1.0]
+    assert _own_indices(bridge) == [0, 1]
     await session.stop()
 
 

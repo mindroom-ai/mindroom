@@ -143,9 +143,9 @@ class FrameKeyManager:
     ) -> bool:
         """Record successful sends so unavailable targets are retried later.
 
-        Returns whether this was the key generation's first completed send, which fixes its one
-        activation deadline. A send that reached nobody still counts (callers hear silence, never
-        the old key); a raised send is never reported, so a key superseded after one never activates.
+        Returns whether this ended the key generation's first send attempt, which fixes its one
+        activation deadline. Callers report a raised send too, with nothing delivered: like a send
+        that reached nobody, it still retires the old key (callers hear silence until a retry lands).
         """
         first_send = distribution.generation > self._armed_generation
         self._armed_generation = max(self._armed_generation, distribution.generation)
