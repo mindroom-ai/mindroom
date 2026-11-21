@@ -416,6 +416,10 @@ async def test_timeout_counts_the_work_before_and_after_an_approval_and_not_the_
     receipt = await gated.submit("@0", "agent", _PROMPT, {"timeout": 4.0})
     await asyncio.wait_for(cards.posted.wait(), 10)
     await asyncio.sleep(4.5)
+    # The node keeps what the turn has left while it waits, for an attempt that finds it waiting.
+    handle = _node(gated).handle
+    assert handle is not None
+    assert (handle.work_until, 0 < (handle.work_left or 0) < 4.0 - work) == (None, True)
     cards.decision.set_result(BackgroundApprovalDecision("approved", None))
 
     while receipt.state in ("running", "waiting"):
