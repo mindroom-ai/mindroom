@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -10,6 +11,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from mindroom.config.main import Config
 from mindroom.config.tailnet_ssh import _normalize_public_key
+from mindroom.tool_system import plugins
+from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry
 from mindroom.workers.backends._dedicated_worker_common import tailnet_ssh_marked
 from mindroom.workers.runtime import build_worker_launch_config
 from tests.conftest import test_runtime_paths
@@ -115,6 +118,66 @@ def test_empty_tailnet_ssh_section_is_left_out_of_authored_config(tmp_path: Path
     config = _load(test_runtime_paths(tmp_path), data)
     assert config.tailnet_ssh.logins == {}
     assert "tailnet_ssh" not in config.authored_model_dump()
+
+
+@pytest.mark.parametrize(
+    ("tools", "opted_in", "refused"),
+    [
+        (["shell", "example_tool"], True, False),
+        (["example_tool", "shell"], True, True),
+        (["example_tool", "shell"], False, False),
+    ],
+)
+def test_tailnet_ssh_requires_native_shell_to_win(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: list[str],
+    opted_in: bool,
+    refused: bool,
+) -> None:
+    """Only the first declared owner of the shell function matters to an opted-in agent."""
+    entries = dict(builtin_tool_registry().entries)
+    entries["example_tool"] = replace(entries["calculator"], name="example_tool", function_names=("run_shell_command",))
+    monkeypatch.setattr(plugins, "candidate_tool_registry", lambda *_: (ToolRegistry(entries), ()))
+    data = _data()
+    data["agents"]["mine"] = {"display_name": "Mine", "tools": tools, "tailnet_ssh": opted_in}
+    paths = test_runtime_paths(tmp_path)
+
+    if refused:
+        with pytest.raises(ValueError, match=r"mine.*tailnet_ssh.*example_tool.*run_shell_command"):
+            _load(paths, data)
+    else:
+        assert _load(paths, data).agents["mine"].tailnet_ssh is opted_in
+
+
+@pytest.mark.parametrize(
+    ("prefix", "server_filters", "refused"),
+    [("run", {}, True), ("other", {}, False), ("run", {"exclude_tools": ["shell_command"]}, False)],
+)
+def test_tailnet_ssh_refuses_a_possible_mcp_collision(
+    tmp_path: Path,
+    prefix: str,
+    server_filters: dict[str, list[str]],
+    refused: bool,
+) -> None:
+    """Config validation uses namespace metadata only, without asking the server for its functions."""
+    data = _data()
+    data["mcp_servers"] = {
+        "example": {
+            "transport": "streamable-http",
+            "url": "https://example.org/mcp",
+            "tool_prefix": prefix,
+            **server_filters,
+        },
+    }
+    data["agents"]["mine"] = {"display_name": "Mine", "tools": ["shell", "mcp_example"], "tailnet_ssh": True}
+    paths = test_runtime_paths(tmp_path)
+
+    if refused:
+        with pytest.raises(ValueError, match=r"mine.*tailnet_ssh.*mcp_example.*run_shell_command"):
+            _load(paths, data)
+    else:
+        assert _load(paths, data).agents["mine"].tailnet_ssh
 
 
 def test_personal_agent_template_accepts_tailnet_ssh(tmp_path: Path) -> None:

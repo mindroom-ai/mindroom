@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache
 from itertools import pairwise
 from pathlib import Path
@@ -24,6 +24,7 @@ from pydantic import (
 
 from mindroom import yaml_io
 from mindroom.access_policy import resolve_responder_access
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.agent_policy import (
     PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
     PolicyInputs,
@@ -147,7 +148,7 @@ from mindroom.matrix_identifiers import (
     managed_space_alias_localpart,
     server_emoji_alias_localpart,
 )
-from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
+from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id, resolved_mcp_tool_prefix
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
 from mindroom.room_reply_modes import resolve_room_reply_mode_override
@@ -1534,6 +1535,7 @@ class Config(BaseModel):
                 tools=tools,
             )
         self._validate_listen_tools(tools)
+        self._validate_tailnet_ssh_tools(tools)
         # why-lazy: catalog pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
 
@@ -1547,6 +1549,44 @@ class Config(BaseModel):
         if (escaped := approval_rule_a_file_rename_escapes(globs, elsewhere)) is not None:
             msg = f"{escaped}, which another rule or the default now decides; rewrite the rules for the new names."
             raise ToolConfigOverrideError(msg)
+
+    def _validate_tailnet_ssh_tools(self, tools: ToolRegistry) -> None:
+        """Refuse an SSH opt-in when the turn can offer another toolkit's shell instead."""
+        # why-lazy: config loads before the runtime tool registry and its dependencies.
+        from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
+        from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+        from mindroom.tool_system.filters import tool_name_allowed  # noqa: PLC0415
+        from mindroom.tool_system.metadata import offered_functions  # noqa: PLC0415
+
+        for name, agent in self.agents.items():
+            if not agent.tailnet_ssh:
+                continue
+            entries = resolve_agent_tools(self, name, tools).candidates()
+            shell_index = next((i for i, entry in enumerate(entries) if entry.name == "shell"), None)
+            if shell_index is None:
+                continue
+            for i, entry in enumerate(entries):
+                if i == shell_index:
+                    continue
+                metadata = tools.entries[entry.name]
+                function = SHELL_FUNCTION
+                if (server_id := metadata.mcp_server_id) is not None:
+                    # MCP catalogs are live, but the namespace and remote name filters are authored.
+                    server = self.mcp_servers[server_id]
+                    function = SHELL_FUNCTION.removeprefix(f"{resolved_mcp_tool_prefix(server_id, server)}_")
+                    if function == SHELL_FUNCTION or not tool_name_allowed(
+                        function,
+                        include=server.include_tools or None,
+                        exclude=server.exclude_tools,
+                    ):
+                        continue
+                    metadata = replace(metadata, function_names=(function,))
+                elif i > shell_index and metadata.function_names:
+                    continue
+                functions, _ = offered_functions(metadata, entry.tool_config_overrides)
+                if functions is None or function in functions:
+                    msg = f"agents.{name}.tailnet_ssh: Toolkit {entry.name!r} can take precedence for {SHELL_FUNCTION}."
+                    raise ToolConfigOverrideError(msg)
 
     def _validate_listen_tools(self, tools: ToolRegistry) -> None:
         """Reject a ``listen.tools`` entry whose toolkit this config cannot build, posts, or the agent's tools leave out.

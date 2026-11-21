@@ -498,6 +498,7 @@ expose = [
 path = "mindroom.agent_cli.shell_contract"
 depends_on = []
 visibility = [
+    "mindroom.config.main",
     "mindroom.agent_cli.bash",
     "mindroom.agent_cli.cli_shell_agent",
     "mindroom.agent_cli.client",
@@ -3783,6 +3784,10 @@ depends_on = []
 [[modules]]
 path = "mindroom.config.main"
 depends_on = [
+    "mindroom.agent_cli.shell_contract",
+    "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.filters",
+    "mindroom.tool_system.metadata",
     "mindroom.config.contacts",
     "mindroom.config.judgment",
     "mindroom.agent_policy",
@@ -5787,6 +5792,7 @@ depends_on = [
 path = "mindroom.tool_system.filters"
 depends_on = []
 visibility = [
+    "mindroom.config.main",
     "mindroom.mcp.manager",
     "mindroom.mcp.toolkit",
     "mindroom.room_agent_access",
