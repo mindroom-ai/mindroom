@@ -395,7 +395,7 @@ def test_connect_rereads_the_committed_config_replaced_during_wake(
     runner.assert_not_called()
 
 
-@pytest.mark.parametrize(("method", "path", "body"), CALLS)
+@pytest.mark.parametrize(("method", "path", "body"), [call for call in CALLS if call[1] != "/status"])
 def test_config_not_loaded_answers_503(
     api_app: FastAPI,
     client: TestClient,
@@ -419,13 +419,18 @@ def test_an_unready_primary_answers_503_before_it_reads_a_body(
     path: str,
     body: bytes,
 ) -> None:
-    """A primary that cannot serve the gateway says so whatever the request carries, as it does for a good one."""
+    """An invalid config blocks admission before parsing, but authenticated status still validates its body."""
     _unload_config(api_app)
     unloaded = client.post(path, headers=AUTH, content=body)
     config_lifecycle.app_state(api_app).tailnet_ssh_status = None
     off = client.post(path, headers=AUTH, content=body)
 
-    assert (unloaded.status_code, unloaded.json()) == (503, {"detail": "MindRoom's configuration is not loaded."})
+    expected = (
+        (422, {"detail": BAD_BODY})
+        if path == "/status"
+        else (503, {"detail": "MindRoom's configuration is not loaded."})
+    )
+    assert (unloaded.status_code, unloaded.json()) == expected
     assert (off.status_code, off.json()) == (503, {"detail": "Tailnet SSH is disabled."})
 
 
@@ -557,19 +562,26 @@ def test_only_a_fresh_report_with_open_connections_holds_a_worker(api_app: FastA
 
 
 @pytest.mark.asyncio
-async def test_both_maintenance_paths_touch_ssh_workers(api_app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Both the background cleanup and the cleanup route touch a worker with an open SSH connection.
+async def test_both_maintenance_paths_keep_ssh_workers_after_failed_reload(
+    api_app: FastAPI,
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An open SSH connection keeps its worker active through a failed reload and either cleanup path."""
+    link = _stored_link(api_app)
+    paths.config_path.write_text("agents: [", encoding="utf-8")
+    assert config_lifecycle.load_config_into_app(paths, api_app).error is not None
 
-    They touch the worker a Computer viewer holds as before.
-    """
-    status = _status(api_app)
-    assert status is not None
-    status.report = (time.monotonic(), frozenset({"worker-ssh"}))
+    transport = httpx.ASGITransport(app=_gateway_app(api_app, "tok"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://gateway", headers=AUTH) as gateway:
+        report = await gateway.post("/status", json={"open_connections": {link.id: 1}})
+    assert report.status_code == 204
+    assert active_tailnet_ssh_worker_keys(api_app) == {_ALICE_MINE_KEY}
     computer_sessions = ComputerSessionStore()
     # A viewer whose stream is open holds its worker, which `authorized_target` names "worker".
     computer_sessions.create(authorized_target()).stream = asyncio.Event()
     config_lifecycle.app_state(api_app).computer_sessions = computer_sessions
-    held = ["touch:worker", "touch:worker-ssh"]
+    held = ["touch:" + key for key in sorted(("worker", _ALICE_MINE_KEY))]
     actions: list[str] = []
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()

@@ -50,7 +50,7 @@ async def _body[T: BaseModel](request: Request, model: type[T]) -> T:
 
 
 def _gateway_app(api_app: FastAPI, token: str) -> FastAPI:
-    """Build the gateway listener; check config before parsing requested bodies."""
+    """Build the gateway listener, gating admission but not activity reports on a valid config."""
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
     authorization = f"Bearer {token}".encode()
 
@@ -60,33 +60,35 @@ def _gateway_app(api_app: FastAPI, token: str) -> FastAPI:
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
         return await call_next(request)
 
+    def gateway_status() -> ssh.GatewayStatus:
+        status = config_lifecycle.app_state(api_app).tailnet_ssh_status
+        if status is None:
+            raise HTTPException(503, "Tailnet SSH is disabled.")
+        return status
+
     def read_config() -> tuple[Config, RuntimePaths]:
+        gateway_status()
         try:
             return config_lifecycle.read_app_committed_runtime_config(api_app)
         except (HTTPException, TypeError):
             raise HTTPException(503, "MindRoom's configuration is not loaded.") from None
 
-    def ready() -> tuple[Config, RuntimePaths, ssh.GatewayStatus]:
-        status = config_lifecycle.app_state(api_app).tailnet_ssh_status
-        if status is None:
-            raise HTTPException(503, "Tailnet SSH is disabled.")
-        return (*read_config(), status)
-
     @app.get("/links")
     async def links() -> list[dict[str, object]]:
-        config, paths, _ = ready()
+        config, paths = read_config()
         memberships = config_lifecycle.app_state(api_app).runtime.agent_reply_memberships
         return await asyncio.to_thread(ssh.desired_links, config, paths, memberships)
 
     @app.post("/status", status_code=204)
     async def post_status(request: Request) -> None:
-        _, paths, status = ready()
+        status = gateway_status()
+        paths = config_lifecycle.require_api_state(api_app).snapshot.runtime_paths
         report = await _body(request, ssh.StatusReport)
         await asyncio.to_thread(ssh.record_status, paths, status, report, monotonic=time.monotonic())
 
     @app.post("/links/{link_id}/connect")
     async def connect_link(link_id: str, request: Request) -> dict[str, str | int]:
-        ready()
+        read_config()
         peer = await _body(request, _Peer)
         memberships = config_lifecycle.app_state(api_app).runtime.agent_reply_memberships
         host, port = await ssh.connect(read_config, memberships, link_id, peer.peer_login, peer.peer_node)
