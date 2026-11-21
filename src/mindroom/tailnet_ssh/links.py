@@ -17,7 +17,7 @@ from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowe
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import resolve_human_requester_alias
-from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.runtime_resolution import resolve_agent_execution, resolve_agent_runtime
 from mindroom.tailnet_ssh.projection import write_projection
 from mindroom.tailnet_ssh.store import read_links, update_links
 from mindroom.terminal.resolution import agent_terminals
@@ -190,15 +190,20 @@ def _admit(  # noqa: C901 - keep the before/after wake and projection checks tog
     if link is None:
         raise ConnectRefused(404, "No such link.")
     key = link.worker_key
-    target = _roster(config, paths, memberships).get(key, {}).get(peer_login)
+    routes = _roster(config, paths, memberships).get(key, {})
+    target = routes.get(peer_login)
     if target is None:
         raise ConnectRefused(403, "This login is not authorized for this link.")
     try:
         if (lease := lease_configured_primary_worker_manager(paths)) is None:
             raise ConnectRefused(503, "A dedicated worker backend is required.")
         with lease as manager:
+            launch_target = next(iter(routes.values()))
+            launch_agent = launch_target.routing_agent_name
+            assert launch_agent is not None
+            resolve_agent_runtime(launch_agent, config, paths, launch_target.execution_identity, create=True)
             ready = manager.ensure_worker(WorkerSpec(key, private_agent_names=target.private_agent_names))
-    except WorkerBackendError:
+    except (WorkerBackendError, OSError):
         raise ConnectRefused(503, "The worker did not start.") from None
     if ready.status != "ready":
         raise ConnectRefused(503, "The worker is not ready.")

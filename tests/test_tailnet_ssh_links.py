@@ -17,6 +17,7 @@ from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowe
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.room_agent_access import room_execution_identity
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tailnet_ssh import links
 from mindroom.tailnet_ssh.links import (
     ConnectRefused,
@@ -255,6 +256,30 @@ async def test_connect_order(
     assert manager.specs == [WorkerSpec(link.worker_key, private_agent_names=private_names)]
     assert (tmp_path / "ssh" / "authorized_keys").read_text() == f"restrict,pty {PUBLIC_KEY}\n"
     assert (tmp_path / "ssh" / "ssh_host_ed25519_key").read_text() == link.host_key
+
+
+@pytest.mark.asyncio
+async def test_first_private_connect_creates_workspace_before_worker_mounts(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold worker must see the private workspace when it plans its mounts."""
+    config.agents["mine"].tailnet_ssh = False
+    link = _link(paths, "mind")
+    identity = build_requester_execution_identity(agent_name="mind", runtime_paths=paths, requester_id=ALICE)
+    workspace = resolve_agent_runtime("mind", config, paths, identity, create=False).workspace.root
+    assert not workspace.exists()
+    manager = _wire_connect(monkeypatch, tmp_path, link)
+    ensure_worker = manager.ensure_worker
+
+    def ensure_with_workspace(spec: WorkerSpec) -> WorkerHandle:
+        assert workspace.is_dir()
+        return ensure_worker(spec)
+
+    monkeypatch.setattr(manager, "ensure_worker", ensure_with_workspace)
+    assert await _connect(config, paths, link.id) == ("10.0.0.5", 2222)
 
 
 @pytest.mark.asyncio
