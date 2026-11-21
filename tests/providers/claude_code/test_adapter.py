@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import shutil
@@ -14,6 +15,7 @@ import pytest
 from claude_agent_sdk import ClaudeSDKClient, CLIConnectionError, RateLimitEvent, RateLimitInfo
 from structlog.testing import capture_logs
 
+from mindroom.agent_loop.tools import media_follow_up
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.llm.errors import (
     QUOTA_EXHAUSTED,
@@ -22,6 +24,7 @@ from mindroom.llm.errors import (
     ProviderError,
     ProviderUnavailable,
 )
+from mindroom.llm.media import Image
 from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message, read_model_provenance
 from mindroom.llm.provider import (
     ModelRequest,
@@ -55,6 +58,9 @@ if TYPE_CHECKING:
 
 
 _SYSTEM = Message(role="system", content="You are the test agent.")
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+)
 _TWO_CALLS = [{"text": "Looking.", "tools": [call("toolu_a", "a"), call("toolu_b", "b")]}]
 _OTHER = ToolSpec(name="other", description="Another tool.", parameters=LOOKUP.parameters, strict=None)
 
@@ -661,7 +667,7 @@ async def test_a_process_past_its_time_to_live_is_closed(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(session_module, "_IDLE_TTL_SECONDS", 0.0)
     await SESSIONS.close_expired()
-    assert [session.emitted.tool_call_ids for session in SESSIONS.resting.values()] == [("toolu_a", "toolu_b")]
+    assert [key[2] for key in SESSIONS.resting] == [("toolu_a", "toolu_b")]
 
     monkeypatch.setattr(session_module, "_PARKED_TTL_SECONDS", 0.0)
     await SESSIONS.close_expired()
@@ -1269,6 +1275,28 @@ async def test_a_process_that_read_a_queued_message_notice_is_not_continued_once
 
 
 @pytest.mark.asyncio
+async def test_the_images_a_tool_made_reach_the_parked_process_with_its_result(tmp_path: Path) -> None:
+    turn = [{"tools": [call("toolu_a", "a")]}, {"text": "I see it."}]
+    cli = fake_cli(tmp_path, {"turns": [turn]})
+    provider = cli.provider()
+    messages = [user("Take a screenshot.")]
+    asked = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
+    made = replace(result("toolu_a", "Captured."), images=[Image(content=_PNG, format="png")])
+    # The agent loop moves a tool's media off its result, onto a user message of its own after the results.
+    follow_up = media_follow_up([made])
+    assert follow_up is not None
+
+    messages += [asked.message, made, follow_up]
+    answer = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
+
+    assert answer.content == "I see it."
+    assert len(cli.events("spawn")) == 1
+    [delivered] = cli.events("tool_result")
+    assert [block["type"] for block in delivered["result"]["content"]] == ["text", "image"]
+    assert delivered["result"]["content"][1]["data"] == base64.b64encode(_PNG).decode()
+
+
+@pytest.mark.asyncio
 async def test_a_user_message_after_the_results_of_a_parked_turn_rebuilds_as_a_user_message(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [[{"tools": [call("toolu_a", "a")]}]]}, {"turns": [text_turn("Rebuilt.")]})
     provider = cli.provider()
@@ -1330,7 +1358,7 @@ async def test_a_parked_turn_is_not_continued_or_closed_from_another_storage(tmp
 
     assert answer.content == "Elsewhere."
     assert cli.events("tool_result") == []
-    assert [session.emitted.tool_call_ids for session in SESSIONS.resting.values()] == [("toolu_a",)]
+    assert [key[2] for key in SESSIONS.resting] == [("toolu_a",)]
 
 
 @pytest.mark.asyncio

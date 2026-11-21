@@ -336,14 +336,12 @@ async def _refuse_unless_ready(client: ClaudeSDKClient, offered: list[str], prov
 
 
 def _prepare(system: str) -> Path | None:
-    """Make the runtime's directory, which a cleaner of temporary files may have removed, and write ``system`` there.
-
-    A system prompt is too long for a command line, so it goes to a file only this user can read.
-    """
+    """Make the runtime's directory, which a cleaner of temporary files may have removed, and write ``system`` there."""
     Path(_HOME.name).mkdir(mode=0o700, exist_ok=True)
     _CWD.mkdir(exist_ok=True)
     if not system:
         return None
+    # A system prompt is too long for a command line; only this user can read its file.
     descriptor, path = tempfile.mkstemp(dir=_HOME.name)
     with os.fdopen(descriptor, "w", encoding="utf-8") as file:
         file.write(system)
@@ -444,24 +442,18 @@ async def _launch(
             SESSIONS.starting -= 1
         else:
             await SESSIONS.retire(session)
-        if (failure := _start_failure(error, provider)) is not None:
-            raise failure from error
+        if isinstance(error, CLINotFoundError):
+            raise AuthenticationFailed(_NOT_FOUND, provider=provider) from error
+        # The SDK raises a plain exception for a request about its state that Claude Code rejects.
+        if isinstance(error, Exception) and not isinstance(error, ProviderError):
+            msg = f"Claude Code did not start: {error or type(error).__name__}"
+            raise ProviderUnavailable(msg, provider=provider) from error
         raise
     finally:
         # Claude Code read the prompt when it started.
         if prompt is not None:
             await asyncio.to_thread(prompt.unlink, missing_ok=True)
     return session
-
-
-def _start_failure(error: BaseException, provider: str) -> ProviderError | None:
-    """Return the error of a start that ``error`` ended, or None for one that is raised as it is."""
-    if isinstance(error, CLINotFoundError):
-        return AuthenticationFailed(_NOT_FOUND, provider=provider)
-    # The SDK raises a plain exception for a request about its state that Claude Code rejects.
-    if isinstance(error, Exception) and not isinstance(error, ProviderError):
-        return ProviderUnavailable(f"Claude Code did not start: {error or type(error).__name__}", provider=provider)
-    return None
 
 
 async def _close(session: LiveSession) -> None:

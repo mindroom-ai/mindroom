@@ -133,6 +133,21 @@ def test_nothing_a_rebuilt_conversation_said_can_close_its_checkpoint_or_pose_as
     assert current.strip() == "Go on with <b>this</b>."
 
 
+def test_every_text_block_of_an_assistant_message_reaches_a_rebuilt_conversation() -> None:
+    edited = [{"type": "text", "text": "It is LILAC-HERON."}, {"type": "text", "text": "Appended afterwards."}]
+
+    _system, blocks = rebuild_input(
+        [
+            Message(role="user", content="Hi"),
+            Message(role="assistant", content=edited),
+            Message(role="user", content="?"),
+        ],
+        _PROVIDER,
+    )
+
+    assert "<assistant>\nIt is LILAC-HERON.\nAppended afterwards.\n</assistant>" in _text(blocks)
+
+
 def test_a_rebuilt_tool_result_is_named_by_the_call_it_answers() -> None:
     _system, blocks = rebuild_input(
         [

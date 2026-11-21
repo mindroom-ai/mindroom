@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import ProviderError
-from mindroom.llm.messages import stable_serialize, system_text, tool_result_view
+from mindroom.llm.messages import is_media_follow_up, stable_serialize, system_text, tool_result_view
 from mindroom.providers.anthropic.wire import image_block
 
 if TYPE_CHECKING:
@@ -98,10 +98,17 @@ def _history_blocks(message: Message, provider: str, names: dict[str, str]) -> l
         said = [_text(block["text"].replace("<", "&lt;")) if block["type"] == "text" else block for block in blocks]
         return [_text("<user>"), *said, _text("</user>")]
     calls = [
-        _json({"id": call["id"], "name": call["function"]["name"], "input": _arguments(call["function"])})
+        _json(
+            {
+                "id": call["id"],
+                "name": call["function"]["name"],
+                "input": _arguments(call["function"].get("arguments")),
+            },
+        )
         for call in message.tool_calls or ()
     ]
-    said = message.get_content_string().replace("<", "&lt;")
+    texts = [block["text"] for block in _user_blocks(message, provider) if block["type"] == "text"]
+    said = "\n".join(texts).replace("<", "&lt;")
     parts = [said, *(f"<tool-call>\n{call}\n</tool-call>" for call in calls)]
     return [_text("\n".join(["<assistant>", *filter(None, parts), "</assistant>"]))]
 
@@ -115,9 +122,8 @@ def _text(text: str) -> dict[str, Any]:
     return {"type": "text", "text": text}
 
 
-def _arguments(function: dict[str, Any]) -> object:
-    """Return a stored call's arguments as the value the model wrote, or as stored when they are not JSON."""
-    arguments = function.get("arguments")
+def _arguments(arguments: object) -> object:
+    """Return a call's arguments as the value the model wrote, or as stored when they are not JSON."""
     try:
         return json.loads(arguments) if isinstance(arguments, str) else arguments
     except ValueError:
@@ -126,7 +132,7 @@ def _arguments(function: dict[str, Any]) -> object:
 
 def canonical_arguments(arguments: object) -> str:
     """Return a tool call's arguments in one spelling, whichever side of the process wrote them."""
-    return stable_serialize(_arguments({"arguments": arguments}))
+    return stable_serialize(_arguments(arguments))
 
 
 def _merged(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -171,11 +177,6 @@ class Emitted:
     content: str | None
     calls: tuple[tuple[str, str, str], ...]
 
-    @property
-    def tool_call_ids(self) -> tuple[str, ...]:
-        """The ids of the tool calls the process waits on."""
-        return tuple(call_id for call_id, _name, _arguments in self.calls)
-
 
 def emitted(content: str | None, tool_calls: Sequence[dict[str, Any]]) -> Emitted:
     """Return the answer that an assistant message with ``content`` and ``tool_calls`` holds."""
@@ -190,41 +191,42 @@ def emitted(content: str | None, tool_calls: Sequence[dict[str, Any]]) -> Emitte
 type _Resume = tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]
 
 
-def _mcp_content(blocks: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return Claude content blocks as MCP tool-result content."""
-    return [
-        block
-        if block["type"] == "text"
-        else {"type": "image", "data": block["source"]["data"], "mimeType": block["source"]["media_type"]}
-        for block in blocks
-    ]
+def _mcp_images(message: Message, provider: str) -> list[dict[str, Any]]:
+    """Return a message's images as MCP tool-result content."""
+    blocks = _images(message, provider)
+    return [{"type": "image", "data": b["source"]["data"], "mimeType": b["source"]["media_type"]} for b in blocks]
 
 
 def _mcp_result(message: Message, provider: str) -> dict[str, Any]:
     """Return the MCP result of one ``tool`` message: its text, its images, and whether the call failed."""
     result = tool_result_view(message)
     text = result.content if isinstance(result.content, str) else json.dumps(result.content)
-    return {"content": [_text(text), *_mcp_content(_images(message, provider))], "isError": result.is_error}
+    return {"content": [_text(text), *_mcp_images(message, provider)], "isError": result.is_error}
 
 
 def decide(answer: Emitted, tail: Sequence[Message], provider: str) -> _Resume | None:
     """Return how ``tail`` continues the process that answered with ``answer``, or None when it must be rebuilt.
 
     ``tail`` starts at the request's last assistant message, which must be the answer the process gave. A process
-    parked on tool calls continues only when exactly one result per call follows, and nothing else. An idle process
-    continues only when user messages alone follow.
+    parked on tool calls continues only when exactly one result per call follows, and then at most the images the
+    agent loop moved off the results, which ride on the last one. An idle process continues only when user messages
+    alone follow.
     """
     answered, rest = tail[0], tail[1:]
     # The answer of a process is plain text, so a message that holds blocks is not one as the process gave it.
-    if not isinstance(answered.content, str | None) or emitted(answered.content, answered.tool_calls or ()) != answer:
+    same = isinstance(answered.content, str | None) and emitted(answered.content, answered.tool_calls or ()) == answer
+    if not same or any(message.files or message.audio or message.videos for message in rest):
         return None
-    call_ids = answer.tool_call_ids
-    if call_ids:
-        if [message.role for message in rest] != ["tool"] * len(call_ids):
-            return None
-        answers = {str(message.tool_call_id): _mcp_result(message, provider) for message in rest}
-        return ({call_id: answers[call_id] for call_id in call_ids}, []) if set(answers) == set(call_ids) else None
-    if any(message.role != "user" or message.files or message.audio or message.videos for message in rest):
+    call_ids = [call[0] for call in answer.calls]
+    if not call_ids:
+        blocks = _merged([block for message in rest for block in _user_blocks(message, provider)])
+        return ({}, blocks) if blocks and all(message.role == "user" for message in rest) else None
+    media = rest[-1] if rest and is_media_follow_up(rest[-1]) else None
+    results = [message for message in rest if message is not media]
+    answered_ids = [str(message.tool_call_id) for message in results if message.role == "tool"]
+    if len(results) != len(call_ids) or sorted(answered_ids) != sorted(call_ids):
         return None
-    blocks = _merged([block for message in rest for block in _user_blocks(message, provider)])
-    return ({}, blocks) if blocks else None
+    answers = {str(message.tool_call_id): _mcp_result(message, provider) for message in results}
+    if media is not None:
+        answers[call_ids[-1]]["content"] += _mcp_images(media, provider)
+    return {call_id: answers[call_id] for call_id in call_ids}, []

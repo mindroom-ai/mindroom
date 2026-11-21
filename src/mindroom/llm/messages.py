@@ -131,6 +131,14 @@ def is_queued_notice_message(message: Message) -> bool:
     return marker is True or marker == "persisted"
 
 
+MEDIA_FOLLOW_UP_TEXT = "The tool call above generated the attached media."
+
+
+def is_media_follow_up(message: Message) -> bool:
+    """Return whether a stored message is a media follow-up the agent loop wrote, which no person said."""
+    return message.role == "user" and message.content == MEDIA_FOLLOW_UP_TEXT
+
+
 def is_own_model_message(message: Message) -> bool:
     """Return whether a model answered ``message`` in the run that holds it.
 
@@ -419,6 +427,7 @@ def tool_result_view(message: Message) -> ToolResultView:
 __all__ = [
     "AGGREGATE_USAGE_KEY",
     "CUT_OFF_TEXT_KEY",
+    "MEDIA_FOLLOW_UP_TEXT",
     "MEDIA_MSGTYPE_KEY",
     "MODEL_PROVENANCE_KEY",
     "PROMPT_UPDATE_KEY",
@@ -427,6 +436,7 @@ __all__ = [
     "Message",
     "ModelProvenance",
     "ToolResultView",
+    "is_media_follow_up",
     "is_own_model_message",
     "is_queued_notice_message",
     "media_items",

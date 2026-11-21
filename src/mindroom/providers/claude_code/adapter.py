@@ -176,7 +176,7 @@ class ClaudeCodeProvider:
                     waits = answer is not None and (answer.calls or (self.scope and request.tool_choice != "none"))
                     if isinstance(event, TurnCompleted) and answer is not None and waits and prefixes[-1] is not None:
                         # It rests before the turn is handed over, since the caller may stop reading there.
-                        SESSIONS.rest(self._key(prefixes[-1], answer.tool_call_ids), session)
+                        SESSIONS.rest(self._key(prefixes[-1], [call[0] for call in answer.calls]), session)
                         rests = True
                     yield event
             except Outrun:
