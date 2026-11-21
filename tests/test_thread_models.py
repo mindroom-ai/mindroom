@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -85,7 +86,7 @@ _ROUTER_CLIENT = MagicMock(spec=nio.AsyncClient, user_id="@mindroom_router:local
 
 def _stored_model(runtime_paths: RuntimePaths, thread_id: str | None) -> str | None:
     record = _get_thread_model_override(runtime_paths, thread_id)
-    return None if record is None else record.get("model:test_agent")
+    return None if record is None else record.get("model:test_agent") or None
 
 
 def _config_with_models(tmp_path: Path) -> Config:
@@ -158,10 +159,119 @@ def test_root_thread_model_is_consumed_once(
             thread_models.apply_root_thread_model(
                 paths,
                 thread_id=THREAD_ID,
+                root_timestamp_ms=datetime.now(UTC).timestamp() * 1000,
                 model_name="large" if operation == "apply" else "default",
                 entity_names=names,
             )
     assert resolve_thread_model_override(paths, THREAD_ID, config=config).active == expected
+
+
+@pytest.mark.parametrize("intervening", ["set", "reset"])
+def test_opening_pick_respects_each_entitys_intervening_command(tmp_path: Path, intervening: str) -> None:
+    """A command targeting one responder must not consume another responder's pick."""
+    config = _config_with_models(tmp_path)
+    config.agents["other"] = AgentConfig(display_name="Other", model="default")
+    paths = runtime_paths_for(config)
+    if intervening == "reset":
+        clear_thread_model_override(paths, THREAD_ID, entity_names=("test_agent",), config=config)
+    else:
+        set_thread_model_override(
+            paths,
+            thread_id=THREAD_ID,
+            model_name="default",
+            entity_names=("test_agent",),
+            config=config,
+        )
+    thread_models.apply_root_thread_model(
+        paths,
+        thread_id=THREAD_ID,
+        root_timestamp_ms=datetime.now(UTC).timestamp() * 1000,
+        model_name="large",
+        entity_names=("test_agent", "other"),
+    )
+    assert [
+        resolve_turn_model(
+            config,
+            paths,
+            ModelScope(entity=name, room_id=ROOM_ID, thread_id=THREAD_ID),
+            None,
+        ).model_name
+        for name in ("test_agent", "other")
+    ] == ["default", "large"]
+
+
+@pytest.mark.parametrize("reset_first", [False, True])
+def test_eviction_cannot_reapply_an_opening_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reset_first: bool,
+) -> None:
+    """Eviction removes the selection but retains which entities have already been decided."""
+    config = _config_with_models(tmp_path)
+    paths = runtime_paths_for(config)
+    monkeypatch.setattr(thread_models, "_MAX_TRACKED_THREADS", 1)
+    names = ("test_agent",)
+    clock = MagicMock(wraps=datetime)
+    now = datetime.now(UTC)
+    clock.now.return_value = now
+    monkeypatch.setattr(thread_models, "datetime", clock)
+
+    def apply() -> None:
+        thread_models.apply_root_thread_model(
+            paths,
+            thread_id=THREAD_ID,
+            root_timestamp_ms=now.timestamp() * 1000,
+            model_name="large",
+            entity_names=names,
+        )
+
+    apply()
+    if reset_first:
+        assert clear_thread_model_override(paths, THREAD_ID, entity_names=names, config=config)
+    clock.now.return_value = now + timedelta(minutes=1)
+    set_thread_model_override(
+        paths,
+        thread_id="$newer",
+        model_name="large",
+        entity_names=names,
+        config=config,
+    )
+    assert resolve_thread_model_override(paths, THREAD_ID, config=config).active == {}
+    apply()
+    assert resolve_thread_model_override(paths, THREAD_ID, config=config).active == {}
+    assert resolve_thread_model_override(paths, "$newer", config=config).active == {"test_agent": "large"}
+    clock.now.return_value = now + timedelta(days=10)
+    clear_thread_model_override(paths, "$prune", entity_names=names, config=config)
+    assert _get_thread_model_override(paths, THREAD_ID) is None
+    apply()
+    assert _get_thread_model_override(paths, THREAD_ID) is None
+
+
+def test_noop_reset_receipts_expire_without_evicting_a_live_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reset of an untouched thread must not spend the active quota or leave a permanent row."""
+    config = _config_with_models(tmp_path)
+    paths = runtime_paths_for(config)
+    monkeypatch.setattr(thread_models, "_MAX_TRACKED_THREADS", 1)
+    clock = MagicMock(wraps=datetime)
+    now = datetime(2026, 10, 1, tzinfo=UTC)
+    clock.now.return_value = now
+    monkeypatch.setattr(thread_models, "datetime", clock)
+    set_thread_model_override(
+        paths,
+        thread_id=THREAD_ID,
+        model_name="large",
+        entity_names=("test_agent",),
+        config=config,
+    )
+    assert not clear_thread_model_override(paths, "$untouched", entity_names=("test_agent",), config=config)
+    assert resolve_thread_model_override(paths, THREAD_ID, config=config).active == {"test_agent": "large"}
+    clock.now.return_value = now + timedelta(days=10)
+    clear_thread_model_override(paths, "$another-reset", entity_names=("test_agent",), config=config)
+    assert _get_thread_model_override(paths, "$untouched") is None
+    assert resolve_thread_model_override(paths, THREAD_ID, config=config).active == {"test_agent": "large"}
 
 
 def test_copy_thread_model_override_copies_once_and_never_overwrites(tmp_path: Path) -> None:
@@ -172,7 +282,7 @@ def test_copy_thread_model_override_copies_once_and_never_overwrites(tmp_path: P
 
     def entity_models(thread_id: str) -> dict[str, str]:
         record = _get_thread_model_override(runtime_paths, thread_id) or {}
-        return {field: value for field, value in record.items() if field.startswith("model:")}
+        return {field: value for field, value in record.items() if field.startswith("model:") and value}
 
     set_thread_model_override(
         runtime_paths,
@@ -248,7 +358,7 @@ async def _dispatch_fork_turn(
         {
             "event_id": source_event_ids[-1],
             "sender": "@user:localhost",
-            "origin_server_ts": 1234567890,
+            "origin_server_ts": int(datetime.now(UTC).timestamp() * 1000),
             "content": {"msgtype": "m.text", "body": "@mindroom_code:localhost carry on"},
         },
     )
@@ -294,6 +404,7 @@ def _fork_model(bot: AgentBot) -> str:
     ],
     ids=["first-message", "coalesced-first-messages", "later-message", "explicit-pick", "invalid-pick"],
 )
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispatch(
     tmp_path: Path,
     source_event_ids: tuple[str, ...],
@@ -303,17 +414,25 @@ async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispat
     """A fork's first turn inherits the parent model unless it has a valid pick of its own."""
     bot = _fork_bot(tmp_path)
     bot.config.agents["code"].access = ResponderAccessConfig(users=["@user:localhost"])
+    bot.config.router.access = ResponderAccessConfig(current_room_members=False)
     set_thread_model_override(
         bot._turn_dispatcher.deps.runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        entity_names=("code",),
+        entity_names=("code", "router"),
         config=bot.config,
     )
 
     await _dispatch_fork_turn(bot, source_event_ids, pick=pick)
 
     assert _fork_model(bot) == inherited
+    router = resolve_turn_model(
+        bot.config,
+        runtime_paths_for(bot.config),
+        ModelScope(entity="router", room_id=ROOM_ID, thread_id=_FORK_ID),
+        None,
+    )
+    assert router.model_name == ("large" if _FORK_ID in source_event_ids else "default")
 
 
 def _join_model_test_bot(bot: AgentBot, room: nio.MatrixRoom, device_id: str = "TESTDEVICE") -> AsyncMock:
@@ -333,7 +452,7 @@ def _conversation_event(bot: AgentBot, event_id: str, body: str, **content: obje
             "type": "m.room.message",
             "event_id": event_id,
             "sender": "@user:localhost",
-            "origin_server_ts": 1234567890,
+            "origin_server_ts": int(datetime.now(UTC).timestamp() * 1000),
             "content": {
                 "msgtype": "m.text",
                 "body": body,
@@ -582,9 +701,13 @@ def test_store_prunes_oldest_entries(tmp_path: Path, monkeypatch: pytest.MonkeyP
             config=config,
         )
 
-    stored = json.loads(_store_path(runtime_paths).read_text(encoding="utf-8"))
-    assert len(stored) == 3
-    assert _stored_model(runtime_paths, "$thread-4:localhost") == "large"
+    assert [_stored_model(runtime_paths, f"$thread-{index}:localhost") for index in range(5)] == [
+        None,
+        None,
+        "large",
+        "large",
+        "large",
+    ]
 
 
 def test_store_invalidates_cached_records_when_mtime_changes(tmp_path: Path) -> None:

@@ -149,7 +149,15 @@ def _apply_root_thread_model(deps: TurnDispatchDeps, turn: PreparedTurn, thread_
     if not names:
         deps.logger.info("Ignoring root thread model choice", thread_id=thread_id, reason="no_addressable_responder")
         return
-    apply_root_thread_model(paths, thread_id=thread_id, model_name=choice.model, entity_names=names)
+    root = (turn.handled_turn.source_event_metadata or {}).get(thread_id)
+    timestamp_ms = turn.event.server_timestamp if turn.event.event_id == thread_id else None
+    apply_root_thread_model(
+        paths,
+        thread_id=thread_id,
+        root_timestamp_ms=timestamp_ms if root is None else root.timestamp_ms,
+        model_name=choice.model,
+        entity_names=names,
+    )
 
 
 def _inherit_fork_thread_models(

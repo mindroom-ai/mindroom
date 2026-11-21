@@ -122,7 +122,8 @@ Use the account and device that answered authenticated discovery for `runtime_us
 The values must be nonempty, unpadded strings: up to 255 characters for the device ID and 1024 each for the account ID and model.
 Omit the key to inherit the defaults; it is not a room-wide setting or a separate event.
 For a coalesced opening turn, the latest source from the human requester carrying the key supplies the choice, and editing a message does not change or add a choice.
-The resolved thread root must be among that turn's source events, so an ordinary reply in an existing thread cannot set it.
+The resolved thread root must be among that turn's source events and no more than seven days old, so ordinary replies and old replays cannot seed it.
+A root timestamp more than five minutes in the future is ignored.
 A valid pick applies before the first reply for the entities the sender may address under `!model` rules, takes precedence over fork inheritance, and is not reapplied after a later `!model` change or reset.
 Invalid or unauthorized picks are ignored without an acknowledgement, and the reply uses the inherited model.
 The key has the same visibility as the message it travels in.
