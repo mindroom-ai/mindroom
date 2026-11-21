@@ -190,8 +190,8 @@ def reserve(
     room_id: str,
     thread_id: str | None,
     membership_epoch: int,
-    approvable: bool,
     sender_principal_id: str | None,
+    approvable: bool = False,
 ) -> None:
     """Reserve one card's frozen INITIAL delivery in the shared Matrix delivery lifecycle, with its card row."""
     outbox.enqueue(

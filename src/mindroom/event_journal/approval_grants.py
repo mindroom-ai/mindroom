@@ -274,7 +274,6 @@ def apply_active(
         room_id=room_id,
         thread_id=thread_id,
         membership_epoch=membership_epoch,
-        approvable=False,
         sender_principal_id=card.sender_principal_id,
         payload=approval_cards.terminal_content(
             card.payload,
