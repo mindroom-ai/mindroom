@@ -37,7 +37,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
 )
 from mindroom.workers.backends._lifecycle import DEFAULT_IDLE_TIMEOUT_SECONDS
 from mindroom.workers.backends.worker_security import docker_worker_security_policy_signature
-from mindroom.workers.models import LABEL_TAILNET_SSH
+from mindroom.workers.models import LABEL_TAILNET_SSH, WORKER_SSH_PORT
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -234,6 +234,9 @@ class DockerWorkerBackendConfig:
 
     def __post_init__(self) -> None:
         """Reject an unknown security policy, reserved labels, and an invalid mount layout or endpoint host."""
+        if self.worker_port == WORKER_SSH_PORT:
+            msg = f"{_PORT_ENV} cannot be {WORKER_SSH_PORT}; that port is reserved for SSH."
+            raise WorkerBackendError(msg)
         if self.security_policy not in {"runtime_default", "computer"}:
             msg = f"{_SECURITY_POLICY_ENV} must be runtime_default or computer; got {self.security_policy!r}."
             raise WorkerBackendError(msg)

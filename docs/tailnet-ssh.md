@@ -181,4 +181,4 @@ Wait for the gateway to observe revocation before restoring access; a successful
 - A hostname can be reused after deletion, even by a different requester, but the new link has a fresh host key.
   A permitted client with the old key pinned gets a warning and must verify the replacement; the old requester is refused if the name now belongs to someone else.
 - Hosted installations need the primary and worker ingress NetworkPolicies shown above, or equivalent enforced isolation, in addition to the gateway policy; otherwise in-cluster pods can reach worker sshd directly, where access is still key-only.
-  Keep internal ports off public ingress and do not use `2222` for the worker runner port (`workers.kubernetes.port` or `MINDROOM_DOCKER_WORKER_PORT`).
+  Keep internal ports off public ingress. Both dedicated backends reject `2222` as the worker runner port (`workers.kubernetes.port` or `MINDROOM_DOCKER_WORKER_PORT`), even if tailnet SSH is disabled.

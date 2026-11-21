@@ -2645,6 +2645,12 @@ def test_kubernetes_backend_requires_configured_owner_deployment_to_exist() -> N
         backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
 
+def test_kubernetes_worker_config_refuses_ssh_port() -> None:
+    """A Kubernetes runner cannot serve on the sshd port."""
+    with pytest.raises(WorkerBackendError, match=r"2222.*reserved.*SSH"):
+        _backend(worker_port=2222)
+
+
 def test_kubernetes_backend_honors_custom_worker_port() -> None:
     """Dedicated workers should wire the configured port through env, service, and probes."""
     backend, apps_api, core_api = _backend(worker_port=9777)

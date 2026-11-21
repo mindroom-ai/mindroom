@@ -44,7 +44,7 @@ from mindroom.workers.backends.kubernetes_pod_names import (
     RESERVED_EXTRA_CONTAINER_NAMES,
     RESERVED_EXTRA_VOLUME_NAMES,
 )
-from mindroom.workers.models import LABEL_TAILNET_SSH, SCRIPT_RESOURCE_PROFILE_NAMES
+from mindroom.workers.models import LABEL_TAILNET_SSH, SCRIPT_RESOURCE_PROFILE_NAMES, WORKER_SSH_PORT
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -486,6 +486,9 @@ class KubernetesWorkerBackendConfig:
 
     def __post_init__(self) -> None:
         """Reject storage prefixes that are not strict relative descendants, and the label only MindRoom may set."""
+        if self.worker_port == WORKER_SSH_PORT:
+            msg = f"{_PORT_ENV} cannot be {WORKER_SSH_PORT}; that port is reserved for SSH."
+            raise WorkerBackendError(msg)
         if LABEL_TAILNET_SSH in self.extra_labels:
             # The label is the tailnet SSH mark, which only a launch that passed the eligibility rule carries.
             msg = f"{_EXTRA_LABELS_JSON_ENV} must not set {LABEL_TAILNET_SSH}; MindRoom sets it on eligible workers."

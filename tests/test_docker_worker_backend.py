@@ -1208,6 +1208,20 @@ def test_docker_worker_config_reads_the_env_file_under_blank_exports(tmp_path: P
     assert (config.image, config.user) == ("ghcr.io/mindroom-ai/mindroom:env", None)
 
 
+def test_docker_worker_config_refuses_ssh_port(tmp_path: Path) -> None:
+    """The Docker runner cannot use the port reserved for sshd."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+            "MINDROOM_DOCKER_WORKER_PORT": "2222",
+        },
+    )
+    with pytest.raises(WorkerBackendError, match=r"2222.*reserved.*SSH"):
+        DockerWorkerBackendConfig.from_runtime(paths)
+
+
 def test_docker_worker_host_config_path_rejects_directories(tmp_path: Path) -> None:
     """Docker host-config path must point at a file when explicitly configured."""
     config_path = tmp_path / "config.yaml"
