@@ -42,7 +42,7 @@ _MATRIX_GENERIC_DELIVERY_ERROR_MESSAGE = "Matrix delivery raised an unexpected l
 
 @dataclass(frozen=True, slots=True)
 class DeliveredMatrixEvent:
-    """One successfully delivered Matrix event plus the exact sent content payload."""
+    """One successfully delivered Matrix event plus the prepared content it sent (before tool markers left its text)."""
 
     event_id: str
     content_sent: dict[str, Any]
@@ -554,7 +554,7 @@ async def send_message_result(
     write_allowed: Callable[[], bool] | None = None,
     sidecar_required: bool = False,
 ) -> DeliveredMatrixEvent | None:
-    """Send a message to a Matrix room and return the exact delivered payload."""
+    """Send a message to a Matrix room and return the prepared delivered payload."""
     outcome = await send_message_outcome(
         client,
         room_id,
@@ -940,7 +940,7 @@ async def edit_message_result(
     extra_content: dict[str, Any] | None = None,
     transaction_id: str | None = None,
 ) -> DeliveredMatrixEvent | None:
-    """Edit an existing Matrix message and return the exact delivered payload."""
+    """Edit an existing Matrix message and return the prepared delivered payload."""
     outcome = await edit_message_outcome(
         client,
         room_id,
