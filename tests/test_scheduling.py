@@ -381,7 +381,7 @@ async def test_restore_starts_overdue_and_recurring_runners_without_firing(
     tmp_path: Path,
     schedule_type: str,
 ) -> None:
-    """Restoring an overdue one-time or a recurring task starts its runner; nothing fires during the restore."""
+    """Restore starts overdue and recurring runners without firing, and skips malformed and finished records."""
     client = AsyncMock()
     workflow = ScheduledWorkflow(
         created_by="@user:server",
@@ -395,7 +395,15 @@ async def test_restore_starts_overdue_and_recurring_runners_without_firing(
     )
     runtime, bot = _restoring_agent(client, tmp_path)
     content = {"workflow": workflow.model_dump_json(), "status": "pending", "owner": client.user_id}
-    serve_full_room_state(client, "!test:server", [scheduled_task_state_event("task_overdue", content)])
+    serve_full_room_state(
+        client,
+        "!test:server",
+        [
+            {**scheduled_task_state_event("malformed_content", {}), "content": "not a dict"},
+            scheduled_task_state_event("old_cancelled", {"status": "cancelled"}),
+            scheduled_task_state_event("task_overdue", content),
+        ],
+    )
 
     with (
         patch.object(runtime, "_start_runner", return_value=True) as start,
@@ -456,45 +464,6 @@ def _pending_once_workflow() -> ScheduledWorkflow:
         description="reminder",
         room_id="!test:server",
     )
-
-
-@pytest.mark.asyncio
-async def test_restore_room_uses_canonical_state_parser_for_mixed_records(tmp_path: Path) -> None:
-    """Restore should skip non-pending and malformed records while restoring valid pending records."""
-    client = AsyncMock()
-    runtime, bot = _restoring_agent(client, tmp_path)
-    cron_workflow = ScheduledWorkflow(
-        created_by="@user:server",
-        schedule_type="cron",
-        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
-        message="Run the daily report",
-        description="Daily report",
-        thread_id="$thread123",
-        room_id="!test:server",
-    )
-    serve_full_room_state(
-        client,
-        "!test:server",
-        [
-            {**scheduled_task_state_event("malformed_content", {}), "content": "not a dict"},
-            scheduled_task_state_event("old_cancelled", {"status": "cancelled"}),
-            scheduled_task_state_event(
-                "task_cron",
-                {
-                    "workflow": cron_workflow.model_dump_json(),
-                    "status": "pending",
-                    "created_at": datetime.now(UTC).isoformat(),
-                    "owner": client.user_id,
-                },
-            ),
-        ],
-    )
-
-    with patch.object(runtime, "_start_runner", return_value=True) as mock_start:
-        restored = await runtime.restore_room(bot, "!test:server")
-
-    assert restored == 1
-    assert [call.args[1] for call in mock_start.call_args_list] == ["task_cron"]
 
 
 @pytest.mark.asyncio
