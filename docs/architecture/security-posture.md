@@ -333,31 +333,22 @@ CORS limits which pages may read a response, not which requests reach MindRoom: 
 
 ## Tailnet SSH
 
-[Operator setup](../tailnet-ssh.md) describes the shared tailnet and deployment requirements.
-All nodes enroll in one operator-managed tailnet with one reusable auth key, held by the gateway only.
-The gateway persists each node's tailnet identity in its own volume, which workers never mount; deleting a link attempts control-plane logout and removes local node state.
+[Tailnet SSH](../tailnet-ssh.md) grants the reach of the opted-in agent's shell, including shared workers and all files their shells can see.
+It uses the worker-routed shell's responder access predicate without a conversation room; grants only through `access.current_room_members` do not apply.
+The gateway enrolls one persistent node per worker key; its node state and reusable tailnet auth key never reach workers.
 
-Under a permissive tailnet policy every member can reach every link node's TCP port 22; enrollment is not an authorization boundary between users.
-The gateway requires an exact `WhoIs` login match before contacting the primary, and refuses unknown or tagged clients.
-The primary rechecks the login, agent access, and workspace eligibility before and after waking the requester's exact marked worker.
-Only then does the gateway pipe the connection to the returned endpoint, not to a peer-supplied address or another tailnet node.
-OpenSSH authenticates separately using only that requester's public keys from `config.yaml`.
+A permissive tailnet policy can let any member reach a node's TCP port 22, so the gateway checks the exact `WhoIs` login before contacting the primary and refuses tagged or unmatched peers.
+The primary rechecks the login and agent access before and after waking the exact worker and returns its marked endpoint, never one supplied by the peer.
+The separate gateway listener checks its bearer token before routing or reading a body; only the primary and gateway hold that token.
+The gateway never calls the Docker or Kubernetes control plane.
 
-The primary's three gateway routes run on a separate listener and reject requests without its bearer token before matching a route or reading a body.
-Only the primary and gateway hold the listener token, not the worker or its shell; the gateway has no Docker or Kubernetes control-plane access.
-On Kubernetes, the gateway policy denies pod-network ingress and limits egress to the internal listener, marked workers' SSH ports, DNS, and control and relay traffic as configured.
-The primary and worker ingress policies are also needed to prevent unrelated pods from reaching the internal listener or worker sshd directly.
-Docker publishes worker sshd only on the configured non-wildcard publish host.
+The primary projects `sshd_config`, the worker's Ed25519 host private key, and `authorized_keys` into the worker read-only; the worker UID can read its host key.
+OpenSSH accepts the union of current admitted requesters' keys for that worker, not a login/key pair, with `restrict,pty` on every key and forwarding disabled.
+Worker code runs as the same UID as the SSH session, so do not forward credentials or trust code from the worker.
 
-The primary-only link ledger stores the link's Ed25519 host private key; sshd reads a read-only projection of that key, `sshd_config`, and `authorized_keys` with `restrict,pty` on every line.
-The worker's uid can read its host key but cannot write the projected keys or configuration.
-The session has the reach of the agent's worker shell; sshd disables forwarding, but worker code runs as the same uid and can control what the client talks to or what its shell starts.
-Clients must not forward credentials or trust code from the worker.
-
-If the login or set of key identities changes, or the link is omitted or retired, the next successful gateway reconcile closes the link's open transports, including connections still waiting for a worker.
-The primary refreshes admitted keys, or clears the running worker's key projection before requesting a best-effort sshd stop when there is no remaining access.
-The runner stops sshd only while the allowlist is empty, so a late stop does not undo a newer admission; stopping the listener alone is not session revocation.
-Existing sessions can survive a primary outage or a revoke and restore not observed by the gateway.
+Revocation refuses new gateway admissions but does not end established sessions or clear the projection; every admitted connect refreshes the keys.
+Docker never publishes SSH on a wildcard host address, but workers on the same bridge can reach one another's port `2222` directly, where only the projected keys are checked.
+On Kubernetes, the gateway policy denies pod-network ingress and restricts egress; the primary and worker ingress policies are also needed to deny direct access from unrelated pods.
 
 ## Known gaps
 
