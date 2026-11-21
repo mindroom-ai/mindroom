@@ -164,11 +164,13 @@ This script runs eight shards at once, each in a worker of its own, and fails if
 ```bash
 out="runs/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$out"
+pids=()
 for i in $(seq 0 7); do
   mindroom-agent workers run "shard-$i" --resource-profile large -- bash ci/shard.sh "$i" 8 > "$out/$i.log" 2>&1 &
+  pids+=("$!")
 done
 failed=0
-for pid in $(jobs -p); do wait "$pid" || failed=1; done
+for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
 exit "$failed"
 ```
 
