@@ -41,7 +41,7 @@ _DEADLINE_SECONDS = 12.0
 _MAX_IN_FLIGHT = 8
 # One Matrix account may log in any number of devices, so per-user limits keep
 # it from holding the whole shared pool.
-_MAX_USER_IN_FLIGHT = 2
+_MAX_USER_IN_FLIGHT = 4
 _MAX_USER_REQUESTS = 8
 _MAX_RATE_USERS = 1024
 _MAX_MODELS = 256
@@ -191,6 +191,8 @@ class _Receiver:
         event: nio.AuthenticatedToDeviceEvent,
         request: _Request,
         config: Config,
+        *,
+        check_root: bool,
     ) -> ModelPickerScope:
         scope = await validate_model_picker_scope(
             client=self.client,
@@ -199,7 +201,8 @@ class _Receiver:
             membership_index=self.membership_index,
             room_id=request.room_id,
             requester_user_id=event.sender,
-            thread_id=request.thread_id,
+            thread_id=request.thread_id if check_root else None,
+            for_catalog=True,
         )
         if isinstance(scope, str):
             raise _DroppedError(reason=scope)
@@ -234,9 +237,8 @@ class _Receiver:
             raise _DroppedError(reason="too_many_models")
         if not authenticated_sender_matches(self.client, event, target):
             raise _DroppedError(reason="sender_device_changed")
-        await self._scope(event, request, config)
+        scope = await self._scope(event, request, config, check_root=True)
         entries, revision = await self.catalog.snapshot(config)
-        scope = await self._scope(event, request, config)
         content: dict[str, object] = {
             "version": 1,
             "request_id": request.request_id,
@@ -256,7 +258,7 @@ class _Receiver:
         # Authorize at the NIO handoff; NIO owns preparation and delivery retries.
         if self.config_getter() is not config:
             raise _DroppedError(reason="config_changed")
-        if await self._scope(event, request, config) != scope:
+        if await self._scope(event, request, config, check_root=False) != scope:
             raise _DroppedError(reason="scope_changed")
         if self.config_getter() is not config:
             raise _DroppedError(reason="config_changed")

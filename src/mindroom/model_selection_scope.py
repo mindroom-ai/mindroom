@@ -76,9 +76,11 @@ async def validate_model_picker_scope(  # noqa: PLR0911
     room_id: str,
     requester_user_id: str,
     thread_id: str | None,
+    for_catalog: bool = False,
 ) -> ModelPickerScope | str:
     """Require the requester, the answering account and eligible agents actually joined, and an optional root.
 
+    Discovery skips the second membership read here because it rechecks the scope at send handoff.
     A denied scope returns a short stable reason for diagnostic logs.
     """
     registry = entity_identity_registry(config, runtime_paths)
@@ -91,7 +93,7 @@ async def validate_model_picker_scope(  # noqa: PLR0911
             return "not_joined"
         if thread_id is not None and (denial := await _root_denial(client, room_id, thread_id)) is not None:
             return denial
-        after = await _joined_room(client, room_id)
+        after = before if for_catalog else await _joined_room(client, room_id)
     except (nio.EncryptionError, OSError, TimeoutError):
         return "scope_check_error"
     if after is None:

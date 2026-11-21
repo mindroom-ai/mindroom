@@ -101,7 +101,7 @@ Display names may repeat and fall back to the key.
 Icons use Matrix `mxc://` URIs only; other local icon rules are on the [model configuration page](../configuration/models.md).
 
 The answering account stops processing a request after 12 seconds, but a response already handed to nio is not retracted.
-Admission caps queued/in-flight requests at eight, and at two per Matrix user across all of that user's devices, and accepts at most eight fresh requests per user in 12 seconds; concurrent duplicate requests share the active request.
+Admission caps queued/in-flight requests at eight, and at four per Matrix user across all of that user's devices, and accepts at most eight fresh requests per user in 12 seconds; concurrent duplicate requests share the active request.
 Authorization is last checked when the response is handed to nio, so a requester who loses room access while nio prepares or retries the send can still receive that already-authorized catalog.
 Clients must independently enforce current joined-agent eligibility and discard expired responses.
 
