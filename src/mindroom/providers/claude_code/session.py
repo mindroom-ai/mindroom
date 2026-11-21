@@ -12,6 +12,7 @@ import asyncio
 import os
 import re
 import shutil
+from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
 from time import monotonic
@@ -322,18 +323,15 @@ def _startup_error(info: dict[str, Any] | None, provider: str) -> Authentication
     return AuthenticationFailed(message, provider=provider, status_code=401)
 
 
-async def _refuse_unless_ready(
-    client: ClaudeSDKClient,
-    offered: list[str],
-    cli_path: str | None,
-    provider: str,
-) -> None:
+async def _refuse_unless_ready(client: ClaudeSDKClient, offered: list[str], provider: str) -> None:
     """Raise unless Claude Code may get a prompt: signed in to a subscription, with exactly the ``offered`` tools.
 
     Its tool server connects a moment after it starts, so that is awaited; no other server may be connected.
     """
     info = await client.get_server_info()
-    logger.debug("claude_code_started", cli=cli_path or "bundled", version=(info or {}).get("claude_code_version"))
+    # The rest of what Claude Code says at start-up names the account, which is never logged.
+    version = (info or {}).get("claude_code_version")
+    logger.debug("claude_code_started", cli=client.options.cli_path or "bundled", version=version)
     if (refused := _startup_error(info, provider)) is not None:
         raise refused
     wanted = {SERVER_NAME: ("connected", sorted(offered))} if offered else {}
@@ -434,7 +432,7 @@ async def start(
         owner = await open_client(client, close_requested, bridge.messages)
         session = LiveSession(client, owner, close_requested, bridge, directory, provider)
         SESSIONS.live.add(session)
-        await _refuse_unless_ready(client, list(bridge.names), cli_path, provider)
+        await _refuse_unless_ready(client, list(bridge.names), provider)
     except BaseException as error:
         if session is None:
             SESSIONS.release_after(_remove(directory, made))
@@ -452,7 +450,8 @@ async def start(
 async def _close(session: LiveSession) -> None:
     """Stop one process and remove its directory; a tool call it still waits on is never answered."""
     session.close_requested.set()
-    await asyncio.wait({session.owner})
+    with suppress(Exception):
+        await session.owner
     await asyncio.to_thread(shutil.rmtree, session.directory, ignore_errors=True)
 
 
