@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
@@ -11,7 +12,7 @@ import nio
 from mindroom.authorization import configured_responder_entities_for_room, get_available_responders_in_room
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.logging_config import get_logger
-from mindroom.matrix.room_membership import ensure_room_membership_synced
+from mindroom.matrix.room_membership import ensure_room_membership_synced, room_membership_is_complete
 from mindroom.room_thread_modes import resolve_room_thread_mode_override
 
 if TYPE_CHECKING:
@@ -33,6 +34,7 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
     room_id: str,
     *,
     put_state: Callable[..., Awaitable[bool | None]] | None = None,
+    roster_lock: asyncio.Lock | None = None,
 ) -> bool | None:
     """Compare one state event with reply-path responders and return whether it is current.
 
@@ -45,14 +47,14 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
         identities = prepared_entity_names_by_user_id(config, runtime_paths)
         # Serialize the comparison and write so concurrent triggers cannot send duplicate or stale values.
         async with _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
+            room = client.rooms[room_id]
+            responders = configured_responder_entities_for_room(room, config, runtime_paths)
+            if responders is None:
+                if not await _ensure_roster(client, room, roster_lock):
+                    logger.debug("room_thread_mode_membership_unavailable", room_id=room_id)
+                    return False
+                responders = get_available_responders_in_room(room, config, runtime_paths)
             async with asyncio.timeout(10):
-                room = client.rooms[room_id]
-                responders = configured_responder_entities_for_room(room, config, runtime_paths)
-                if responders is None:
-                    if not await ensure_room_membership_synced(client, room, sender_id=client.user_id):
-                        logger.debug("room_thread_mode_membership_unavailable", room_id=room_id)
-                        return False
-                    responders = get_available_responders_in_room(room, config, runtime_paths)
                 modes = {
                     config.get_entity_thread_mode(identities[responder.full_id], runtime_paths, room_id=room_id)
                     for responder in responders
@@ -86,6 +88,14 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
     except Exception:
         logger.warning("room_thread_mode_reconcile_failed", room_id=room_id, exc_info=True)
         return False
+
+
+async def _ensure_roster(client: nio.AsyncClient, room: nio.MatrixRoom, roster_lock: asyncio.Lock | None) -> bool:
+    """Only queue for the shared roster slot when the room needs a membership read."""
+    if room_membership_is_complete(room):
+        return True
+    async with roster_lock or nullcontext(), asyncio.timeout(10):
+        return await ensure_room_membership_synced(client, room, sender_id=client.user_id)
 
 
 async def _joined(client: nio.AsyncClient, room_id: str, user_id: str) -> bool:

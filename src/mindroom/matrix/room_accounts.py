@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
@@ -28,6 +29,8 @@ async def reconcile_room_accounts(
     config: Config,
     runtime_paths: RuntimePaths,
     room_id: str,
+    *,
+    roster_lock: asyncio.Lock | None = None,
 ) -> bool:
     """Write the client's list of the room's joined MindRoom accounts when it changed and return whether it is current.
 
@@ -38,10 +41,11 @@ async def reconcile_room_accounts(
     try:
         # Serialize each read and write so a slower trigger cannot replace a newer list with an older one.
         async with _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
-            async with asyncio.timeout(10):
+            async with roster_lock or nullcontext(), asyncio.timeout(10):
                 members = await get_room_members(client, room_id)
-                if members is None:
-                    return False
+            if members is None:
+                return False
+            async with asyncio.timeout(10):
                 accounts = members & prepared_entity_names_by_user_id(config, runtime_paths).keys()
                 content = {"accounts": sorted(accounts)}
                 current = await client.room_get_state_event(room_id, MINDROOM_ACCOUNTS_EVENT_TYPE, client.user_id)

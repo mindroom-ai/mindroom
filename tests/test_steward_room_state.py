@@ -1192,6 +1192,92 @@ async def test_accounts_failure_is_nonfatal_and_retried(room_state: RoomState, f
 
 
 @pytest.mark.asyncio
+async def test_blocked_accounts_get_does_not_delay_other_room_state(room_state: RoomState) -> None:
+    """A slow accounts state read in one room must not delay mode or binding in another."""
+    config, _, ids, _, client = room_state
+    other = "!other:localhost"
+    client.rooms[other] = nio.MatrixRoom(other, client.user_id)
+    config.agents["agent1"].rooms.append(other)
+    blocked = asyncio.Event()
+    release = asyncio.Event()
+    read = client.room_get_state_event.side_effect
+
+    async def read_state(room_id: str, event_type: str, state_key: str = "") -> object:
+        if room_id == ROOM_ID and event_type == ACCOUNTS_EVENT_TYPE:
+            blocked.set()
+            await release.wait()
+        if room_id == other and event_type == ROUTER_EVENT_TYPE:
+            return nio.RoomGetStateEventError("Absent", "M_NOT_FOUND", room_id=room_id)
+        return await read(room_id, event_type, state_key)
+
+    client.room_get_state_event.side_effect = read_state
+    duties = _router_duties(room_state)
+    duties.mark_joined_for_room_state(ROOM_ID)
+    frame = _publish_joined_rooms(duties)
+    try:
+        await asyncio.wait_for(blocked.wait(), timeout=1)
+        user_id = ids["agent1"].full_id
+        await asyncio.wait_for(
+            duties.member_event(client.rooms[other], _membership_event(user_id, "join", "leave")),
+            timeout=1,
+        )
+        assert call(other, EVENT_TYPE, {"mode": "room"}, state_key="") in _writes(client, EVENT_TYPE)
+        assert call(other, ROUTER_EVENT_TYPE, {"user_id": client.user_id}, state_key="") in _writes(
+            client,
+            ROUTER_EVENT_TYPE,
+        )
+    finally:
+        release.set()
+        await frame
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sweep", [False, True])
+async def test_waiting_room_state_work_releases_the_caller_at_ten_seconds(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+    sweep: bool,
+) -> None:
+    """The journal lane and the setup sweep leave unfinished rooms to background retries."""
+    _, _, ids, _, client = room_state
+    clock = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    blocked = asyncio.Event()
+
+    async def stalled_roster(_room_id: str) -> object:
+        blocked.set()
+        await asyncio.Future()
+
+    client.joined_members.side_effect = stalled_roster
+    bot = _owner_bot(room_state)
+    duties = bot.steward_duties
+    duties.mark_joined_for_room_state(ROOM_ID)
+    frame = _publish_joined_rooms(duties)
+    await blocked.wait()
+    if sweep:
+        other = "!other:localhost"
+        client.rooms[other] = nio.MatrixRoom(other, client.user_id)
+        work = reconcile_held_room_states(duties.deps.runtime.orchestrator)
+    else:
+        work = duties.member_event(client.rooms[ROOM_ID], _membership_event(ids["agent1"].full_id, "leave", "join"))
+    caller = asyncio.create_task(work)
+    try:
+        for tick in (0, 9, 10):
+            clock = tick
+            for _ in range(40):
+                await asyncio.sleep(0)
+            if tick < 10:
+                assert not caller.done()
+        assert caller.done()
+        await caller
+        assert duties._room_state_retries.keys() == client.rooms.keys()
+    finally:
+        duties.stopping()
+        caller.cancel()
+        await asyncio.gather(caller, frame, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_startup_serializes_durable_membership_reads_per_bot(
     room_state: RoomState,
     monkeypatch: pytest.MonkeyPatch,
