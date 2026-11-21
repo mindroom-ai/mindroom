@@ -69,14 +69,18 @@ def native_compaction_supported(
     Other gateways use text compaction unless an authored ``context_management`` supplies its own compaction policy.
     """
     request_params = settings.request_params or {}
-    # A gateway may serve a different model from a fallback list. Do not send a managed edit to an unknown model.
-    raw_policy_fields = {"context_management", "models", "fallbacks"}
+    extra_body = request_params.get("extra_body") or {}
+    # OpenRouter may serve another model from a fallback list. Do not send a managed edit to an unknown model.
+    if endpoint == ANTHROPIC_OPENROUTER_BASE_URL and any(
+        field in request_params or field in extra_body for field in ("models", "fallbacks")
+    ):
+        return False
     return (
         route in _NATIVE_COMPACTION_ROUTES
         and model_id.startswith(CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES)
         and settings.context_management is None
-        and raw_policy_fields.isdisjoint(request_params)
-        and raw_policy_fields.isdisjoint(request_params.get("extra_body") or {})
+        and "context_management" not in request_params
+        and "context_management" not in extra_body
         and (route == "vertexai_claude" or endpoint in {ANTHROPIC_BASE_URL_DEFAULT, ANTHROPIC_OPENROUTER_BASE_URL})
     )
 

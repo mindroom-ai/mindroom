@@ -480,6 +480,71 @@ async def test_a_direct_route_without_any_credential_fails_as_a_missing_key(tmp_
     assert "Connect your AI provider" in get_user_friendly_error_message(raised.value)
 
 
+@pytest.mark.parametrize(
+    "key_settings",
+    [{}, {"api_key": " "}, {"api_key": "${UNSET_OPENROUTER_TEST_KEY}"}],
+)
+def test_openrouter_messages_requires_its_own_key(tmp_path: Path, key_settings: dict[str, str]) -> None:
+    """The shared Anthropic key must never fill a missing or unresolved OpenRouter key."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={"ANTHROPIC_API_KEY": "shared-anthropic-sentinel"},
+    )
+    model = ModelConfig(
+        provider="anthropic",
+        id="claude-sonnet-5-5",
+        extra_kwargs={"base_url": "https://openrouter.ai/api/", **key_settings},
+    )
+    with pytest.raises(ValueError, match=r"OpenRouter.*api_key"):
+        build_provider(model, runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_openrouter_messages_does_not_forward_ambient_anthropic_headers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only OpenRouter's key and authored headers reach its endpoint; direct Anthropic is unchanged."""
+    wire = Wire(*[sse_reply([{"type": "text", "text": "Ok."}]) for _ in range(2)])
+    ambient_key = "shared-anthropic-sentinel"
+    ambient_header_key = "custom-header-anthropic-sentinel"
+    ambient_header = "Bearer ambient-authorization-sentinel"
+    openrouter_key = "openrouter-sentinel"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={"ANTHROPIC_API_KEY": ambient_key},
+    )
+    direct = ModelConfig(provider="anthropic", id="claude-sonnet-5-5")
+    proxied = ModelConfig(
+        provider="anthropic",
+        id=direct.id,
+        api_key=openrouter_key,
+        extra_kwargs={
+            "base_url": "https://openrouter.ai/api",
+            "default_headers": {"X-Model-Header": "authored"},
+        },
+    )
+    with isolated_provider_environment():
+        monkeypatch.setenv("ANTHROPIC_API_KEY", ambient_key)
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "ambient-token-sentinel")
+        monkeypatch.setenv(
+            "ANTHROPIC_CUSTOM_HEADERS",
+            f"Authorization: {ambient_header}\nX-Api-Key: {ambient_header_key}",
+        )
+        for model in (direct, proxied):
+            adapter = replace(build_provider(model, runtime_paths), http_client=wire.client)
+            await complete(adapter, ModelRequest(messages=_user()))
+
+    direct_request, proxied_request = wire.requests
+    assert direct_request.headers["authorization"] == ambient_header
+    assert direct_request.headers["x-api-key"] == ambient_header_key
+    assert proxied_request.headers["x-api-key"] == openrouter_key
+    assert "authorization" not in proxied_request.headers
+    assert proxied_request.headers["x-model-header"] == "authored"
+
+
 @pytest.mark.asyncio
 async def test_transport_failures_are_retryable_provider_unavailable(tmp_path: Path) -> None:
     """A connection that never reaches the provider is retryable."""
@@ -1614,26 +1679,62 @@ async def test_native_compaction_uses_the_sent_model_id(
     assert body["model"] == sent_id
     assert provider.capabilities.native_compaction is supported
     assert ("context_management" in body) is supported
-    same_model = route_provider("anthropic", tmp_path, wire, id=sent_id, extra_kwargs=endpoint)
-    assert native_settings(provider) == native_settings(same_model)
+    replay = native_settings(provider)
+    if supported:
+        same_model = route_provider("anthropic", tmp_path, wire, id=sent_id, extra_kwargs=endpoint)
+        assert replay == native_settings(same_model)
+    else:
+        assert replay is None
 
 
-@pytest.mark.parametrize("field", ["models", "fallbacks"])
-@pytest.mark.parametrize("extra_body", [False, True])
-def test_authored_model_fallbacks_disable_managed_compaction(tmp_path: Path, field: str, *, extra_body: bool) -> None:
-    """Either layer of request overrides can opt out by naming fallback models."""
-    routing = {field: ["anthropic/claude-haiku-5.5"]}
+def test_null_model_override_keeps_the_configured_checkpoint_id(tmp_path: Path) -> None:
+    """A raw null cannot become a literal model name in the checkpoint route."""
+    wire = Wire(sse_reply([]))
+    direct = route_provider("anthropic", tmp_path, wire)
+    override = route_provider("anthropic", tmp_path, wire, extra_kwargs={"request_params": {"model": None}})
+    assert native_settings(direct) is not None
+    assert native_settings(override) == native_settings(direct)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routing", [{"fallbacks": [{"model": "claude-opus-4-6"}]}, {"models": ["claude-opus-4-6"]}])
+async def test_openrouter_model_fallbacks_are_sent_without_managed_compaction(
+    tmp_path: Path,
+    routing: dict[str, Any],
+) -> None:
+    """Messages requests preserve OpenRouter's routing fields without sending a managed edit."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
     provider = route_provider(
         "anthropic",
         tmp_path,
-        Wire(sse_reply([])),
-        extra_kwargs={
-            "base_url": "https://openrouter.ai/api",
-            "request_params": {"extra_body": routing} if extra_body else routing,
-        },
+        wire,
+        id="claude-sonnet-4-6",
+        extra_kwargs={"base_url": "https://openrouter.ai/api", "request_params": {"extra_body": routing}},
     )
-    assert provider.capabilities.native_compaction is False
-    assert native_settings(provider) is None
+    replay = native_settings(provider)
+    assert replay is None
+    await claude_turn(provider, ModelRequest(messages=_user(), native_compaction=replay))
+    body = wire.body()
+    assert routing.items() <= body.items()
+    assert "context_management" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["anthropic", "vertexai_claude"])
+async def test_anthropic_and_vertex_fallbacks_keep_managed_compaction(tmp_path: Path, route: str) -> None:
+    """Sonnet 4.6 needs the managed edit to select the beta SDK method, which accepts `fallbacks`."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
+    fallbacks = [{"model": "claude-opus-4-6"}]
+    provider = route_provider(
+        route,
+        tmp_path,
+        wire,
+        id="claude-sonnet-4-6",
+        extra_kwargs={"request_params": {"fallbacks": fallbacks}},
+    )
+    await claude_turn(provider, ModelRequest(messages=_user(), native_compaction=native_settings(provider)))
+    assert wire.body()["fallbacks"] == fallbacks
+    assert wire.body()["context_management"]["edits"][0]["type"] == "compact_20260112"
 
 
 @pytest.mark.asyncio

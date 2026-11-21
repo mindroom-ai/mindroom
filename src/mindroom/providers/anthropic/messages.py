@@ -55,7 +55,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.request_context import with_request_headers
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT
+from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, ANTHROPIC_OPENROUTER_BASE_URL
 from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.anthropic.native_compaction import (
     COMPACTION_BETA,
@@ -93,7 +93,7 @@ from mindroom.providers.anthropic.wire import (
 )
 from mindroom.providers.assistant_turn import TurnTimer, stamp_finished_turn, turn_end
 from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as_dict
-from mindroom.providers.credentials import model_api_key
+from mindroom.providers.credentials import api_key_env_reference, model_api_key, own_api_key
 from mindroom.providers.errors import (
     classify_provider_error,
     media_ids,
@@ -583,7 +583,10 @@ class ClaudeProvider:
         kwargs["http_client"] = self.http_client
         kwargs["max_retries"] = 0
         if self.route == "anthropic":
-            return _with_key_header(kwargs)
+            openrouter = self.identity.endpoint == ANTHROPIC_OPENROUTER_BASE_URL
+            if openrouter:
+                kwargs["api_key"] = settings.api_key
+            return _with_key_header(kwargs, ambient_headers=not openrouter)
         if self.route == "vertexai_claude":
             client = self._vertex_client(kwargs)
         else:
@@ -764,7 +767,7 @@ def _sends_thinking_binding(params: dict[str, Any]) -> bool:
     return isinstance(thinking, dict) and thinking.get("block_binding") is not None
 
 
-def _with_key_header(kwargs: dict[str, Any]) -> AsyncAnthropic:
+def _with_key_header(kwargs: dict[str, Any], *, ambient_headers: bool) -> AsyncAnthropic:
     """Build a direct client that sends its key in ``X-Api-Key`` (``send_key_as_x_api_key``), else as SDK 1 would.
 
     The SDK takes one credential. A resolved key alone becomes an empty one, which keeps the SDK off the process env; an
@@ -778,6 +781,9 @@ def _with_key_header(kwargs: dict[str, Any]) -> AsyncAnthropic:
     elif key is not None and token is None:
         kwargs["api_key"] = ""
     client = AsyncAnthropic(**kwargs)
+    if not ambient_headers:
+        # The SDK merges ANTHROPIC_CUSTOM_HEADERS even when credentials were supplied explicitly.
+        client._custom_headers = dict(kwargs["default_headers"])
     if provider and token is not None:
         _warn_token_shadows_provider()
         client.auth_token = token
@@ -820,7 +826,8 @@ def predates_bedrock_api_2026(model_id: str) -> bool:
 def _sent_model_id(model_id: str, settings: ClaudeSettings) -> str:
     """Return the model the body names: the raw ``model`` override, ``extra_body`` first as the SDK merges, else the id."""
     request_params = settings.request_params or {}
-    return str((request_params.get("extra_body") or {}).get("model", request_params.get("model", model_id)))
+    sent_id = (request_params.get("extra_body") or {}).get("model", request_params.get("model"))
+    return str(sent_id) if sent_id is not None else model_id
 
 
 def _keeps_legacy_api_version(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> bool:
@@ -915,20 +922,19 @@ def _claude_capabilities(
     )
 
 
-def _anthropic_kwargs(authored: dict[str, Any], api_key: str | None, runtime_paths: RuntimePaths) -> dict[str, Any]:
-    """Fill the direct route's key and, unless ``base_url`` or ``client_params`` sets one, its endpoint from the runtime env."""
-    kwargs: dict[str, Any] = {**authored, "api_key": api_key} if api_key else dict(authored)
-    client_params = kwargs.get("client_params") or {}
-    if "base_url" in kwargs or "base_url" in client_params:
-        return kwargs
+def _anthropic_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dict[str, Any]:
+    """Fill the Anthropic route's endpoint from the runtime env unless the model sets it."""
+    client_params = authored.get("client_params") or {}
+    if "base_url" in authored or "base_url" in client_params:
+        return authored
     name = ENDPOINT_VARIABLES["anthropic"]
     base_url = get_secret_from_env(name, runtime_paths=runtime_paths)
     # Given no endpoint, the SDK reads the variable itself and would take an exported blank as one.
     if base_url is None and name in runtime_paths.process_env:
         base_url = ANTHROPIC_BASE_URL_DEFAULT
     if base_url is not None:
-        kwargs["client_params"] = {**client_params, "base_url": base_url}
-    return kwargs
+        return {**authored, "client_params": {**client_params, "base_url": base_url}}
+    return authored
 
 
 def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dict[str, Any]:
@@ -1010,20 +1016,27 @@ def _bedrock_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> di
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> ClaudeProvider:
     """Build the adapter for one ``anthropic``, ``vertexai_claude``, or ``bedrock_claude`` model config.
 
-    The direct route takes the model's own key, else the shared Anthropic key, unless the model authenticates
-    with ``auth_token``; Vertex and Bedrock resolve their project, region, and credentials from the runtime
-    env. A key the dashboard saved for the model arrives as ``model_config.api_key``.
+    OpenRouter Messages requires the model's own resolved key. Other Anthropic endpoints can use the shared
+    Anthropic key; Vertex and Bedrock resolve their credentials from the runtime env.
     """
     route = cast("ClaudeRouteKind", provider_route(model_config.provider))
     authored = dict(model_config.extra_kwargs or {})
     if route == "anthropic":
-        authored = _anthropic_kwargs(authored, model_api_key(model_config, runtime_paths), runtime_paths)
+        authored = _anthropic_kwargs(authored, runtime_paths)
     elif route == "vertexai_claude":
         authored = _vertex_kwargs(authored, runtime_paths)
     else:
         authored = _bedrock_kwargs(authored, runtime_paths)
     settings = parse_claude_settings(route, model_config.id, authored)
     endpoint = _route_endpoint(route, settings)
+    if endpoint == ANTHROPIC_OPENROUTER_BASE_URL:
+        key = own_api_key(model_config)
+        if not key or api_key_env_reference(model_config):
+            msg = "OpenRouter Messages requires a model-specific api_key, such as ${OPENROUTER_API_KEY}."
+            raise ValueError(msg)
+        settings = replace(settings, api_key=key)
+    elif route == "anthropic" and (key := model_api_key(model_config, runtime_paths)):
+        settings = replace(settings, api_key=key)
     identity = model_identity(model_config, endpoint=endpoint)
     capabilities = _claude_capabilities(route, model_config.id, settings, endpoint)
     if capabilities.provider_default_sampling:

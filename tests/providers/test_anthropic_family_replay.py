@@ -931,6 +931,8 @@ async def test_deferred_tool_sizing_ignores_searches_discarded_by_a_checkpoint(t
     assert provider.request_tokens(rediscovered) > provider.request_tokens(clean) + 1000
     assert provider.request_tokens(rediscovered, start=len(prefix)) > 1000
     assert provider.request_tokens(rediscovered, start=len(prefix) + len(tail)) > 1000
+    searched_again = replace(rediscovered, messages=(*rediscovered.messages, searching, _user("Thanks again.")))
+    assert provider.request_tokens(searched_again, start=len(rediscovered.messages)) < 1000
 
 
 @pytest.mark.asyncio
