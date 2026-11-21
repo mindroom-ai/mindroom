@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 
+import pytest
+
 from mindroom.matrix_rtc.events import CallMember, ReceivedFrameKey
 from mindroom.matrix_rtc.frame_keys import (
     _KEY_ROTATION_GRACE_PERIOD_MS,
@@ -37,6 +39,7 @@ def test_first_key_is_index_zero_and_immediately_usable() -> None:
     assert distribution.generation == 0
     assert distribution.targets == (alice,)
     assert base64.b64decode(distribution.key_base64) == distribution.key
+    assert len(distribution.key) == 16
     assert manager.mark_distributed(distribution)
     assert manager.update_memberships([alice], now_ms=1) is None
 
@@ -244,12 +247,58 @@ def test_receive_rejects_invalid_base64() -> None:
     assert manager.receive(bad, participant_identity="@alice:example.org:DEV") is None
 
 
-def test_receive_rejects_wrong_length_key() -> None:
-    """MatrixRTC frame keys are exactly 16 bytes."""
-    manager = _manager()
+@pytest.mark.parametrize("size", [16, 32])
+def test_receive_accepts_matrix_rtc_key_lengths(size: int) -> None:
+    """Accept SDK 41 and SDK 45 frame keys without changing their bytes."""
+    # matrix-js-sdk 45.1.0 src/matrixrtc/RTCEncryptionManager.ts:517-521 generates 32 bytes.
+    key = b"A" * size
+    inbound = _manager().receive(
+        _received(key, 0, received_at_ms=0),
+        participant_identity="@alice:example.org:DEV",
+    )
+    assert inbound is not None
+    assert inbound.key == key
+
+
+@pytest.mark.parametrize("size", [16, 32])
+def test_receive_accepts_unpadded_base64(size: int) -> None:
+    """MSC4143 specifies unpadded base64 for a media key, though SDK 41 and 45 send it padded."""
+    key = bytes(range(size))
+    # matrix-js-sdk 45.1.0 src/matrixrtc/types.ts:126-127.
+    unpadded = base64.b64encode(key).decode("ascii").rstrip("=")
+    assert len(unpadded) % 4
+
+    inbound = _manager().receive(
+        ReceivedFrameKey("@alice:example.org", "DEV", unpadded, 0, 0),
+        participant_identity="@alice:example.org:DEV",
+    )
+
+    assert inbound is not None
+    assert inbound.key == key
+
+
+@pytest.mark.parametrize(
+    "key_base64",
+    ["QUJDREVGR0hJSktMTU5PUA=", "QUJDREVGR0hJSktMTU5PUA===", "QUJDREVGR0hJSktMTU5PU", "QUJDREVGR0hJSktMTU5P UA"],
+    ids=["one-pad-short", "one-pad-over", "impossible-length", "whitespace"],
+)
+def test_receive_rejects_base64_that_is_neither_padded_nor_unpadded(key_base64: str) -> None:
+    """Only the fully padded and the unpadded spelling of a key are accepted."""
     assert (
-        manager.receive(
-            _received(b"A" * 15, 0, received_at_ms=0),
+        _manager().receive(
+            ReceivedFrameKey("@alice:example.org", "DEV", key_base64, 0, 0),
+            participant_identity="@alice:example.org:DEV",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("size", [15, 17, 24, 31, 33])
+def test_receive_rejects_wrong_length_key(size: int) -> None:
+    """Reject frame keys of every length except 16 and 32 bytes."""
+    assert (
+        _manager().receive(
+            _received(b"A" * size, 0, received_at_ms=0),
             participant_identity="@alice:example.org:DEV",
         )
         is None

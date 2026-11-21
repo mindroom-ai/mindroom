@@ -122,6 +122,7 @@ BOT_USER = "@helper:example.org"
 BOT_DEVICE = "BOTDEV"
 ROOM_ID = "!room:example.org"
 SERVICE_URL = "https://rtc.example.org"
+FOREIGN_SERVICE_URL = "https://rtc.foreign.example"
 GRANT_ROOM_ID = "!grant:example.org"
 GRANT = SfuGrant(url="wss://sfu.example.org", jwt="jwt-token")
 
@@ -265,6 +266,34 @@ def _remote_member_event(
             created_ts=created_ts,
         ),
     }
+
+
+def _caller_event(sdk: int, device: str, created_ts: int, service_url: str = SERVICE_URL) -> dict:
+    """Build one caller membership as SDK 41 or SDK 45 publishes it, so SDK 41 serves as each test's control."""
+    if sdk == 41:
+        return _remote_member_event(device=device, created_ts=created_ts, livekit_service_url=service_url)
+    user = "@alice:example.org"
+    return {
+        "type": CALL_MEMBER_EVENT_TYPE,
+        "state_key": membership_state_key(user, device),
+        "sender": user,
+        "origin_server_ts": created_ts,
+        # matrix-js-sdk 45.1.0 src/matrixrtc/MembershipManager.ts:1038-1059.
+        "content": {
+            "application": "m.call",
+            "call_id": "",
+            "scope": "m.room",
+            "device_id": device,
+            "membershipID": f"{user}:{device}",
+            "expires": 14_400_000,
+            "m.call.intent": "audio",
+            "focus_active": {"type": "livekit", "focus_selection": "multi_sfu"},
+            "foci_preferred": [{"type": "livekit", "livekit_service_url": service_url, "livekit_alias": ROOM_ID}],
+        },
+    }
+
+
+_BOTH_SDKS = pytest.mark.parametrize("sdk", [41, 45], ids=["sdk-41-control", "sdk-45"])
 
 
 def _room_member_event(user: str = "@alice:example.org", membership: str = "join") -> dict:
@@ -537,6 +566,12 @@ async def _deliver(manager: CallManager, delivery: Awaitable[None]) -> None:
         await asyncio.gather(*tasks)
 
 
+async def _reconcile_roster(manager: CallManager, client: AsyncMock, room: nio.MatrixRoom, *call_events: dict) -> None:
+    """Serve one call roster as the room's state and reconcile it."""
+    client.room_get_state.return_value = _state_response(*call_events)
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+
+
 async def _caller_leaves_sfu(manager: CallManager, bridge: FakeBridge) -> None:
     """Report what the bridge sees once a caller whose roster emptied leaves the SFU: the held session ends."""
     assert bridge.roster_vacated
@@ -599,6 +634,41 @@ def deliver_frame_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
 
 
+def _sdk_45_frame_key_event(device_id: str, key: bytes, key_index: int) -> AuthenticatedToDeviceEvent:
+    """Build one decrypted inbound frame key event as SDK 45 sends it."""
+    event = _frame_key_event(device_id=device_id)
+    member_id = f"{event.sender}:{device_id}"
+    media_key = {"index": key_index, "key": base64.b64encode(key).decode("ascii")}
+    # matrix-js-sdk 45.1.0 src/matrixrtc/ToDeviceKeyTransport.ts:91-107.
+    event.source["content"] = {
+        "room_id": ROOM_ID,
+        "member_id": member_id,
+        "media_key": media_key,
+        "keys": media_key,
+        "member": {"id": member_id, "claimed_device_id": device_id},
+    }
+    return event
+
+
+@pytest.fixture
+def sent_frame_keys(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bytes]]:
+    """Deliver every frame key, recording the device and key of each send."""
+    sent: list[tuple[str, bytes]] = []
+
+    async def send_key(
+        _self: object,
+        *,
+        key_base64: str,
+        targets: list[CallMember],
+        **_kwargs: object,
+    ) -> list[CallMember]:
+        sent.extend((target.device_id, base64.b64decode(key_base64)) for target in targets)
+        return targets
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
+    return sent
+
+
 @pytest.fixture(autouse=True)
 def _immediate_reconcile_reruns(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager._RECONCILE_MIN_INTERVAL_S", 0)
@@ -650,6 +720,90 @@ async def test_manager_joins_call_when_remote_member_appears(tmp_path: Path) -> 
     assert args[1] == CALL_MEMBER_EVENT_TYPE
     assert args[2]["device_id"] == BOT_DEVICE
     assert kwargs["state_key"] == membership_state_key(BOT_USER, BOT_DEVICE)
+
+
+@pytest.mark.asyncio
+@_BOTH_SDKS
+async def test_caller_on_the_trusted_service_starts_an_encrypted_call_under_either_sdk(
+    tmp_path: Path,
+    sent_frame_keys: list[tuple[str, bytes]],
+    sdk: int,
+) -> None:
+    """A lone caller on our service is joined, handed to the bridge and sent the agent's 16-byte key."""
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: 2_000)
+
+    try:
+        await _reconcile_roster(manager, client, _room(encrypted=True), _caller_event(sdk, "ALICEDEV", 1_000))
+
+        assert bridge.connected_grant == GRANT
+        assert bridge.agent_options is not None
+        assert bridge.participant_rosters == [frozenset({"@alice:example.org:ALICEDEV"})]
+        assert [(device, len(key)) for device, key in sent_frame_keys] == [("ALICEDEV", 16)]
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@_BOTH_SDKS
+async def test_oldest_member_on_a_foreign_service_blocks_the_call_under_either_sdk(tmp_path: Path, sdk: int) -> None:
+    """The oldest member decides the call's service: a foreign one keeps the agent out until everyone has left."""
+    client = _client()
+    manager = _manager(client, FakeBridge(), tmp_path, clock_ms=lambda: 2_000)
+    room = _room()
+    anchor = _caller_event(sdk, "ALICEDEV", 1_000, FOREIGN_SERVICE_URL)
+    younger = _caller_event(sdk, "ALICESECOND", 1_001)
+
+    try:
+        for roster in ([anchor], [anchor, younger], [younger]):
+            await _reconcile_roster(manager, client, room, *roster)
+            state = _call_state(manager)
+            assert state.session is None
+            assert state.retry_task is None
+            assert state.logical_call is not None
+            assert state.logical_call.join_blocked
+        client.get_openid_token.assert_not_awaited()
+
+        await _reconcile_roster(manager, client, room)
+        await _reconcile_roster(manager, client, room, younger)
+        assert _call_state(manager).session is not None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("anchor_sdk", [41, 45], ids=["sdk-41-anchor", "sdk-45-anchor"])
+@_BOTH_SDKS
+async def test_younger_device_on_a_foreign_service_is_a_full_call_member_under_either_sdk(
+    tmp_path: Path,
+    sent_frame_keys: list[tuple[str, bytes]],
+    anchor_sdk: int,
+    sdk: int,
+) -> None:
+    """Only the oldest member's focus is read, so a younger device naming another service shares media and keys."""
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: 2_000)
+    anchor = _caller_event(anchor_sdk, "ALICEDEV", 1_000)
+    younger = _caller_event(sdk, "ALICESECOND", 1_001, FOREIGN_SERVICE_URL)
+    key_event, received = _frame_key_event(device_id="ALICESECOND"), (b"A" * 16, 2)
+    if sdk == 45:
+        # matrix-js-sdk 45.1.0 src/matrixrtc/RTCEncryptionManager.ts:517-521 generates 32 bytes.
+        received = (bytes(range(32)), 5)
+        key_event = _sdk_45_frame_key_event("ALICESECOND", *received)
+
+    try:
+        await _reconcile_roster(manager, client, _room(encrypted=True), anchor, younger)
+        await _deliver(manager, manager.on_to_device_event(key_event))
+
+        assert bridge.connected_grant == GRANT
+        assert bridge.participant_rosters[-1] == {"@alice:example.org:ALICEDEV", "@alice:example.org:ALICESECOND"}
+        assert {(device, len(key)) for device, key in sent_frame_keys} == {("ALICEDEV", 16), ("ALICESECOND", 16)}
+        assert ("@alice:example.org:ALICESECOND", *received) in bridge.frame_keys
+        assert not bridge.closed
+    finally:
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio
