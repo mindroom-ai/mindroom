@@ -226,9 +226,13 @@ async def test_put_room_state_as_steward_returns_none_when_refused(tmp_path: Pat
     )
     assert room.state["io.mindroom.test", "k"] == {"a": 1}
     room.refusal = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
-    assert await put_room_state_as_steward(room.orchestrator.room_steward, ROOM_ID, "io.mindroom.test", {"a": 2}) is None
+    assert (
+        await put_room_state_as_steward(room.orchestrator.room_steward, ROOM_ID, "io.mindroom.test", {"a": 2}) is None
+    )
     room.bots.clear()
-    assert await put_room_state_as_steward(room.orchestrator.room_steward, ROOM_ID, "io.mindroom.test", {"a": 3}) is None
+    assert (
+        await put_room_state_as_steward(room.orchestrator.room_steward, ROOM_ID, "io.mindroom.test", {"a": 3}) is None
+    )
 
 
 def test_steward_may_write_state_reads_the_stewards_own_power() -> None:

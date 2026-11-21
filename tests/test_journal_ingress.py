@@ -269,7 +269,7 @@ def _journal_dispatcher(
     store: PrincipalStore,
     *,
     sender_is_managed: Callable[[str], bool] = lambda _sender: False,
-    **callbacks: Any,
+    **callbacks: Callable[..., object],
 ) -> JournalDispatcher:
     """Build a dispatcher whose callbacks do nothing and own nothing, except the ones a test names."""
     noop = cast("Any", _noop_callback)
