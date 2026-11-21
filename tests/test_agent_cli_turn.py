@@ -1776,6 +1776,46 @@ async def test_live_call_retains_frozen_arguments_and_bounds_terminal_output(
 
 
 @pytest.mark.asyncio
+async def test_cli_preserves_plugin_result_fields_beside_a_saved_output(tmp_path: Path) -> None:
+    from mindroom.tool_system.output_files import saved_tool_output_receipt  # noqa: PLC0415
+
+    result = {
+        "finding": "needs-review",
+        "mindroom_tool_output": saved_tool_output_receipt(path="findings.txt", byte_count=10, output_format="text"),
+    }
+
+    async def inspect_findings():
+        return result
+
+    async def authorize(key, arguments):
+        return None
+
+    catalog = await _catalog(tmp_path, [_toolkit("analysis", inspect_findings)])
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+        catalog=catalog,
+        authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    try:
+        async with owner._window("bash"):
+            queued = await owner.operation(
+                window="bash",
+                operation=ToolCallOperation(
+                    operation="tools.call",
+                    call_id=uuid4(),
+                    toolkit="analysis",
+                    function="inspect_findings",
+                ),
+            )
+            receipt = await settled_receipt(owner, queued["call_id"])
+        assert receipt["status"] == "completed"
+        assert receipt["outcome"] == str(result)
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_nested_shell_submits_child_after_outer_shell_returns(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
