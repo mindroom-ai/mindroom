@@ -427,7 +427,8 @@ class WorkflowEngine:
             if access == "pending":
                 return False
             # The attempt is over and the run is not: its nodes are settled, and it waits for its next attempt.
-            waiting = await self._end_run(run, WorkflowRunState.STARTING, None, finished_at=None)
+            same_script = {"previous_source_digest": current.source_digest}
+            waiting = await self._end_run(run, WorkflowRunState.STARTING, None, finished_at=None, **same_script)
             if waiting.script_run_id != run.script_run_id:
                 # A resume took the run since this look began: the attempt it judged says nothing about that one.
                 return False

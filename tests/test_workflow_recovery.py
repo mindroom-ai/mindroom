@@ -762,6 +762,22 @@ async def _interrupted_and_resumed(stack: WorkflowStack) -> None:
 
 
 @pytest.mark.asyncio
+async def test_changed_call_in_an_attempt_that_mindroom_started_logs_the_notice(stack: WorkflowStack) -> None:
+    """An attempt that follows an interruption runs the script the last one ran, so a changed call is told there too."""
+    await _started(stack)
+    await stack.result("@0", "tool", _A)
+    seq = stack.store.nodes(stack.run_id)[0].seq
+
+    await _interrupted_and_resumed(stack)
+    await stack.result("@0", "tool", _B)
+
+    assert stack.store.log(stack.run_id) == [
+        f"Call n{seq} changed between attempts without a script edit. It probably contains the time or a random "
+        "value; use now() or random() from mindroom.workflow.",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_rerun_of_an_ambiguous_call_survives_an_interruption_before_the_call(
     stack: WorkflowStack,
     barrier: Path,
