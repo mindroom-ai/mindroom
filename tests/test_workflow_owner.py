@@ -128,6 +128,38 @@ async def test_resume_call_delivered_again_after_a_later_resume_ended_returns_it
 
 
 @pytest.mark.asyncio
+async def test_owner_that_a_store_upgrade_left_unrecorded_is_remembered_when_the_run_is_taken_from_it(
+    stack: WorkflowStack,
+) -> None:
+    """A run from before runs remembered their takers names only its last owner: the takeover records that one too.
+
+    So the call that owned the run at the upgrade, delivered again after a later resume ended, takes nothing and
+    gets the report its own attempt ended with.
+    """
+    first = await _started(stack)
+    await stack.result("@0", "tool", _A)
+    await stack.finish_attempt(result="the first report")
+    await _ended_job(stack, first["job_id"])
+    resume = {"depth": 1, "call_id": "one-resume", "run_id": stack.run_id, "rerun": ["n1"]}
+    call = asyncio.create_task(stack.call("resume_workflow", **resume))
+    await stack.until(lambda: _run(stack).attempt == 2)
+    assert await stack.result("@0", "tool", _A) == "appended"
+    await stack.finish_attempt(result="the second report")
+    assert await call == "the second report"
+    # What the upgrade of a store without `claims` leaves: the run's owner, and no record of who took it.
+    set_run(stack.store, stack.run_id, claims={})
+    later = asyncio.create_task(stack.call("resume_workflow", depth=1, call_id="a-later-resume", run_id=stack.run_id))
+    await stack.until(lambda: _run(stack).attempt == 3)
+    assert (await stack.submit("@0", "tool", _A)).cached
+    await stack.finish_attempt(result="the third report")
+    assert await later == "the third report"
+
+    assert await asyncio.wait_for(stack.call("resume_workflow", **resume), 5) == "the second report"
+
+    assert (stack.counting_tool.lines, len(stack.scripts.launched), _run(stack).attempt) == (["a", "a"], 3, 3)
+
+
+@pytest.mark.asyncio
 async def test_invocation_that_took_a_run_before_takes_it_no_second_time_and_marks_no_call(
     stack: WorkflowStack,
 ) -> None:
@@ -144,7 +176,8 @@ async def test_invocation_that_took_a_run_before_takes_it_no_second_time_and_mar
         await stack.engine.launch(stack.run_id, stack.context, owner=owner)
         await stack.finish_attempt(result=f"the report of {owner}")
     ended = stack.engine.status(stack.run_id)
-    assert ended[0].claims == {"an-old-job": None, "a-later-job": None}
+    # The job that started the run, which the first takeover found as its owner, and the two that took it.
+    assert ended[0].claims == {first["job_id"]: None, "an-old-job": None, "a-later-job": None}
 
     with pytest.raises(WorkflowRunStoreError, match=_TAKEN.format(stack.run_id)):
         await stack.engine.reopen(stack.run_id, stack.context, owner="an-old-job", job_id="an-old-job", rerun=["n1"])

@@ -164,7 +164,10 @@ class WorkflowRunStore:
                 if taker in run.claims:
                     msg = f"Run {run_id} was taken by this invocation before."
                     raise SupersededAttemptError(msg)
-                changes["claims"] = run.claims | {taker: None}
+                # The owner it is taken from is remembered too, with its report if it waited for the run itself: a
+                # run from before runs kept their takers names nobody else.
+                left = {} if run.owner in run.claims else {run.owner: None if run.job_id else run.outcome_text()}
+                changes["claims"] = run.claims | left | {taker: None}
             _require_slot(connection, run, max_active)
             connection.executemany(
                 "UPDATE workflow_nodes SET digest = '' WHERE run_id = ? AND key = ?",
