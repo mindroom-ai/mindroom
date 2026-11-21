@@ -4,6 +4,8 @@ Date: 2026-11-19. Status: decided by Bas ("let's build it"), ready to plan.
 Code facts are from `mindroom` `origin/main` (branch `feat/tailnet-ssh`), `mindroom-chat` c65efdffe, and `mindroom-infra` `origin/main`.
 Tailscale and sshd behaviour is from the feasibility spike (`tailscale-brainstorm/spike-report.md` in the DevAgent workspace, prototype in `spike-gateway/`), cited as "spike Q1" to "spike Q6": tsnet 1.104.7, Headscale 0.29.7, OpenSSH 10.0, the hosted worker seccomp profile under Docker.
 
+> The multi-tailnet and portal parts are Later; [Single-tailnet v1 (2026-11-21)](#single-tailnet-v1-2026-11-21) supersedes them for v1.
+
 ## Intent
 
 A person's worker is their computer in the cloud, yet they reach it only through the agent, the Chat terminal, and the Computer panel.
@@ -401,3 +403,178 @@ The feature is off until the primary has the gateway token, and then still off f
 - [ ] PR 2: card and user docs.
 - [ ] PR 3: `stack.py --tailnet-ssh`, e2e spec, `live.py` flag; live run recorded.
 - [ ] PR 4: staging with two real tailnets, then production.
+
+## Single-tailnet v1 (2026-11-21)
+
+Bas decided that v1 uses one operator-managed Tailscale or Headscale tailnet for the whole installation.
+The existing operator-key mode becomes the only mode: the gateway automatically enrolls a node for every eligible worker with one reusable auth key, and the operator supplies each person's login and SSH public keys in config.
+There is no user enrollment or management UI in v1.
+
+### Link identity and data flow
+
+- **Discover workers, persist identity.** Keep the worker-discovery part of `desired_links`: on the first `GET /links` and at most once a minute thereafter, scan the dedicated backend's `list_workers()` for marked handles with `ssh_endpoint`.
+  Decode the concrete requester with `user_agent_worker_key_requester`, resolve a unique configured agent via `worker_key_agent_name` and `normalize_worker_key_part`, and prove that the normal, unpinned key for that exact pair is the discovered key and that the pair is eligible before minting a link.
+  An agent's first normal worker launch makes it discoverable; discovery does not start containers, enumerate hypothetical requesters for private agents, or use the key/login lists as a roster.
+  Missing login or keys does not prevent node enrollment but denies SSH.
+- **Keep a small primary-only ledger.** Use `tracking/tailnet_ssh.json` with one row per canonical `(requester_id, agent_name)`: `id` (16 random hex characters), `requester_id`, `agent_name`, `hostname`, `host_key` (Ed25519 private key, public half derived when needed).
+  Keep locked, durable writes only on change; derive the worker key from the pair and this instance's routing identity, and resolve the live target again on connect.
+  The ledger is smaller than adding config-based requester enumeration plus separate persistence for node IDs, hostname reservations and `known_hosts` identity.
+  A listed link can outlive the running container: neither a missing handle after idle cleanup nor a failed backend list is evidence that a stored link should disappear.
+- **Name once, reserve until deletion.** Normalize the agent name to lowercase with `_` → `-`, collapse other non-alphanumeric runs to `-`, trim edge hyphens, and fit one DNS label of at most 63 characters (fallback `worker` if empty).
+  Use that label if unreserved, e.g. `mind_bas` → `mind-bas`; if `research` is taken, `@alice:example.org` gets `research-alice`, using the part of the Matrix ID between `@` and the first `:` with the same normalization.
+  If that is taken too (e.g. `@alice:other.org`), append a short stable hash of the full Matrix ID and raw agent name, e.g. `research-alice-<8 hex>`, extending the hash if necessary and truncating the prefix to leave room for the whole suffix.
+  Resolve new claims in sorted `(agent_name, requester_id)` order and reserve names under the store lock, including names of unlisted links; existing allocations win and are never renamed on a later collision.
+  This is a gateway-local allocation rule, not a promise that other machines in the tailnet have not claimed the label: the gateway logs the link ID and chosen hostname, and the operator checks the actual MagicDNS name in the control plane if there is an external clash.
+  A DNS-label collision is not a worker-key collision: ambiguous normalized worker keys are refused, not fixed by giving the nodes different names.
+  To connect, use `ssh mindroom@mind-bas` (or the actual MagicDNS name); the operator can distribute the public half of the stored host key for `known_hosts` without sharing the private half.
+- **Enroll hands-free.** The gateway requires one reusable **non-ephemeral** `TAILNET_SSH_AUTH_KEY` and passes it to each `tsnet.Server.AuthKey`; set `Ephemeral: false` and use a key issued without the ephemeral option.
+  Optional `TAILNET_SSH_LOGIN_SERVER` (`tailnetSsh.loginServer`, `ControlURL`) selects Headscale, otherwise use Tailscale; optional `TAILNET_SSH_TAGS` (`tailnetSsh.tags`, `AdvertiseTags`) must be authorized by that key and policy and apply to server nodes, not client admission.
+  Each node calls `Start()` and listens on tailnet TCP `:22`, with its own persistent directory `<TAILNET_SSH_STATE_DIR or /state>/<id>` and existing node identity reused on restart.
+  Missing key fails startup, and an invalid/expired key, denied device approval or unsigned node is an operator problem, not a new product state or an interactive fallback.
+  The auth key goes only to the gateway; rotating it does not move nodes already enrolled in a different tailnet.
+- **List, omit, or retire.** `GET /links` has `on` for an eligible identity and `removing` only for actual deletion (an agent removed from the committed roster), not loss of access to an existing agent.
+  The rows are `{id, hostname, desired, allowed_login, access_revision}`; the primary publishes no worker key, host key or endpoint in the list.
+  If an existing agent's link becomes ineligible (opt-out, co-owner or joined directory, changed scope/target, authorization lost or unknown, unsupported backend), omit the link and refuse connects immediately against current eligibility; on the gateway's next successful 5 s reconcile it cancels the link's wakes/pipes and stops the node but keeps its directory.
+  Returning eligibility reuses the link ID, hostname, host key and node directory, even if there is no running worker yet.
+  A failed or malformed `GET /links` is not an empty list and does not mutate node state; a valid empty list stops all nodes without deleting state.
+- **Revoke worker access as well as the pipe.** For a live worker dropped from the eligible set, clear its `authorized_keys` before requesting token-gated `/ssh/stop`; do the same on deletion and on loss of the last login or key.
+  Derive the old unpinned key from the ledger identity for cleanup even if the current scope has changed, and retry a failed list or clear from that same row on a later pass rather than persisting a second worker queue.
+  Do not dial a runner for an absent worker; its next admitted connect must write the current projection before starting sshd.
+  Serialize file updates and recheck the committed policy and keys after wake, so a slow connect cannot put revoked keys back after cleanup; `/ssh/start` refuses an empty key file and a late `/ssh/stop` cannot kill a newer admission with keys restored.
+  Stops are bounded and best effort; the gateway closes session transports, since stopping sshd's listener does not itself kill its established sessions.
+  For actual deletion, omit the row until the keys are cleared (or the backend confirms no live SSH endpoint), then list it as `removing` until the gateway acknowledges `removed` after best-effort logout and successful deletion of its node directory.
+  Derive retirement from current config rather than a persisted `desired` flag, and accept an acknowledgement only for a row still marked for actual deletion by the primary; a restored agent must not lose its row to a stale acknowledgement.
+- **Keep activity and session revocation, not an enrollment status machine.** Replace `closed_before` and `seen_keys` with `access_revision`, a deterministic digest of the configured login and the sorted set of normalized SSH key identities (type and blob, not comments).
+  The gateway closes all current transports on any observed revision change, including additions, or when the link is omitted or `removing`; a primary restart cannot hide changed config from a gateway still holding sessions.
+  Refresh changed projections for live eligible workers and always project from current config before a new SSH start.
+  `POST /status` reports only `{open_connections: {link_id: count}, removed: [link_id, ...]}`; there are no `enrolled`, `running`, `ready`, `asleep` or `waking` *link* states, and no state for absence.
+  Keep one non-overlapping status publisher, reporting on change and at least every 30 s, independently of a slow reconcile; the primary uses only fresh reports (90 s) and known link IDs to touch workers in both maintenance paths.
+  Count only pipes at least 75 s past reaching sshd (`LoginGraceTime 60`), an activity heuristic, not direct observation of SSH authentication.
+  If the primary is unreachable, new connects fail; existing sessions cannot be cut by a change the gateway has not yet learned.
+- **Connect and wake.** Before any wake or pre-banner, the gateway's `carry` calls `WhoIs` on the accepted connection's remote address and `admit` compares its nonempty login exactly to `tailnet_ssh.logins[requester_id]` from the latest row.
+  Unknown peers, tagged clients, missing mappings and mismatches are refused without calling the primary; keep six connect calls per minute per link.
+  `POST /links/{id}/connect` carries only `peer_login` and `peer_node`; the bearer-authenticated primary repeats the login check against committed config and runs `link_ineligibility`, not trusting a client-supplied requester, agent, hostname or target.
+  It resolves the same requester/agent worker as a tool call, calls `ensure_worker`, checks the ready handle's `ssh_endpoint`, writes the projection and sends the normal agent-shell launch to the runner's `/ssh/start` before returning `{host, port}`.
+  The gateway sends `MindRoom: waking worker` every 3 s while waiting for sshd's first bytes, then pipes raw TCP only to that returned endpoint.
+
+### Isolation and limits
+
+The four gates stay: `config_error` at config load, `ssh_eligible_launch` on the same mount plan that generates the worker's label and ports, current `link_ineligibility` plus resolved worker key and marked endpoint at connect, and the Kubernetes NetworkPolicies granting the gateway access only to marked workers on 2222.
+The scope must be unpinned `user_agent` on Docker or Kubernetes, with `tailnet_ssh: true`; the workspace must be private per requester or belong to exactly one explicitly allowed requester with no room grants on a non-private agent.
+Requester authorization still has to succeed, and a worker with a joined shared-directory mount is refused; assigned read-only knowledge bases and an owned shared directory still qualify.
+The link ID, not its hostname or a peer-supplied target, binds the peer check and the primary's worker resolution to the same requester and agent.
+The projected `authorized_keys` contains only that requester's configured keys with `restrict,pty`; sshd requires a matching private key and serves the agent's normal workspace and shell environment, without SSH forwarding.
+Together these checks keep a session in that person's worker under the normal worker isolation and trusted operator, primary and gateway assumptions; they do not give the client a trusted shell host or protect against an operator deliberately sharing credentials.
+Unlike per-person tailnets, under a permissive tailnet ACL **everyone on the tailnet can reach every link node's `:22` at the network level**.
+A stricter ACL can reduce that exposure, but the v1 tenant gate is the `WhoIs` login check plus the SSH key check, not network invisibility.
+Keep the runner, worker ports and internal listener off public ingress, the gateway token and node-state volume out of workers, and worker egress unchanged.
+
+**Later.** Per-person tailnets, interactive login-link enrollment and a Connections portal card can return together after v1; do not build the user API, GitHub import or Task 13 now.
+A deployment that has run the branch's old enrollment mode needs an operator cutover (revoke old worker access, retire old tailnet nodes, and initialize clean gateway state and a v1 ledger), not a legacy reader or reuse of node state from another tailnet.
+Before hosted enablement, check real Tailscale `WhoIs` login strings, tag policy and auth-key expiry/recovery against the operator's policy; Headscale alone does not establish that behavior.
+
+### Deletion checklist by file
+
+These are implementation follow-ups, not changes in this design-note commit.
+Counts are rough **net lines over `origin/main`**, from `git diff --numstat origin/main...HEAD` (added minus deleted): an added file's count is its expected size, an existing file's count is only its feature delta.
+Count CI, chart, `go.mod`, dependency declarations and tooling; exclude tests (including the three kind smoke harness files), docs and generated docs, fixtures, `go.sum` and lockfiles.
+With those exclusions the current diff measures 4,283 net lines (4,833 counting the kind harness), compared with the brief's approximate 4,910 baseline.
+
+| Production file | Action | Target net lines |
+| --- | --- | ---: |
+| `src/mindroom/api/tailnet_ssh.py` | **Delete** the entire public router at `/api/connections/tailnet-ssh`: `GET` (`tailnet_ssh_overview`), `PUT /keys` (`put_keys`), `POST /keys/github` (`import_github_keys`), `PUT /agents/{agent_name}` (`connect_agent`), `POST /agents/{agent_name}/login` (`request_login`), and `DELETE /agents/{agent_name}` (`disconnect_agent`); delete `_link_row`, `_overview`, `_change_keys`, `_own_link`, `_github_login`, `_fetch_github_keys`, and their portal auth, hostname input, and login URL handling with it; leave the shared Connections and GitHub OAuth infrastructure alone. | 0 |
+| `src/mindroom/api/tailnet_ssh_gateway.py` | **Shrink** to the three internal routes, `_TokenGate`, `_link_service`, `active_tailnet_ssh_worker_keys` and `serve_tailnet_ssh_gateway_listener`; drop the portal accessor `tailnet_ssh_status` and elaborate login-URL-specific body diagnostics, keeping generic non-echoing `422`, token check before body/routing, and committed-config `503`. | 160 |
+| `src/mindroom/api/main.py` | **Shrink**: remove `tailnet_ssh_router` import and `include_router`; keep SSH activity in `_worker_cleanup_loop` / `_cleanup_workers_once`. | 1 |
+| `src/mindroom/api/app_state.py` | **Keep** the minimal `tailnet_ssh_status` app state for the fresh activity report. | 3 |
+| `src/mindroom/api/workers.py` | **Keep** `maintain_leased_workers` / `cleanup_idle_workers` touching SSH and Computer keys. | 2 |
+| `src/mindroom/api/sandbox_runner_app.py` | **Keep** worker SSH router and lifespan cleanup. | 4 |
+| `src/mindroom/api/worker_ssh.py` | **Keep** `start`, `stop`, `stop_worker_ssh`, runner auth, serialized process/readiness handling and `prepare_terminal_launch`; gate start on nonempty keys and retain the late-stop guard. | 270 |
+| `src/mindroom/config/agent.py` | **Keep** `AgentConfig.tailnet_ssh` (default `false`), reword its description for one tailnet. | 7 |
+| `src/mindroom/config/main.py` | **Keep** `Config.tailnet_ssh`, `_OPTIONAL_SECTION_NAMES`, and `validate_tailnet_ssh_agents`. | 20 |
+| `src/mindroom/config/tailnet_ssh.py` | **Shrink** wording and portal-paste diagnostics; keep `TailnetSshConfig.logins`, `.authorized_keys`, concrete Matrix ID and nonblank-login checks, and `normalize_public_key` rejecting private keys, options and malformed lines. | 85 |
+| `src/mindroom/orchestration/config_updates.py` | **Keep** the live opt-in field. | 1 |
+| `src/mindroom/orchestrator.py` | **Keep** internal listener lifecycle in `_run_api_server`. | 8 |
+| `src/mindroom/runtime_env_policy.py` | **Keep** `MINDROOM_TAILNET_SSH_GATEWAY_TOKEN` exclusions. | 2 |
+| `src/mindroom/tailnet_ssh/__init__.py` | **Keep** package marker. | 1 |
+| `src/mindroom/tailnet_ssh/eligibility.py` | **Shrink** the portal-facing suspend/pending distinction (`_Ineligible.pending`); keep `config_error`, `ssh_eligible_launch` and `link_ineligibility`, including fail-closed unresolved membership, exact worker identity and joined-mount checks. | 190 |
+| `src/mindroom/tailnet_ssh/links.py` | **Shrink** `desired_links`, `_desired`, `_allowed_login` and `record_status` to discovery/current policy/activity/retirement; delete `_UNENROLLED_SECONDS`, portal `link_state`, `refresh_projections`, `listed_workers` as a portal wrapper, and the enrollment and card-oriented `LinkReport` / `LinkStatus` fields (`state`, `login_url`, `tailnet`, `dns_name`, `login_name`, `key_expiry`, `last_error`, `StatusReport.enrollment`, `_GatewayReport.enrollment`). Retain `_resolve_target`, `_admit`, `_ready_endpoint`, `_shell_call` (including `unbound_agent_cli_shell_env`), `connect`, `_start_sshd`, active-worker freshness, and `_stop_sshd`; fold `_clear_revoked_workers` / `revoke_removed_workers` and projection refresh into the ledger-driven reconcile. | 370 |
+| `src/mindroom/tailnet_ssh/store.py` | **Shrink** `Link` to the five identity fields; remove `worker_key`, `desired`, `host_public_key`, `enrolled_login`, `closed_before`, `login_after`, `created_at`, `enrolled_at`, `park_when_removed`, and `LinkBook.keys`, `.enrollment`, `.seen_keys`, `.revoked_workers`. Delete `set_keys`, `_MAX_KEYS`, `close_sessions_of_gone_keys` and `remove_links` as state-transition helpers; simplify `finish_removal` to checked deletion, replace user hostname validation with allocation in `default_hostname`/`new_link`, and keep `read_links`, `update_links`, locking, and host-key-safe parse errors. | 115 |
+| `src/mindroom/tailnet_ssh/projection.py` | **Shrink** `signin_keys` / `authorized_key_lines` to config-only deduplication by key identity; drop the `LinkBook` argument; keep atomic `write_projection`, `clear_authorized_keys`, hardened `sshd_config`, `restrict,pty` and mode `0600` host key. | 72 |
+| `src/mindroom/tailnet_ssh/session.py` | **Keep** the stdlib `ForceCommand`, agent shell env/PATH/proxy/Agent Keys, workspace `HOME` and cwd, non-login Bash, exec and SFTP. | 60 |
+| `src/mindroom/tool_system/sandbox_proxy.py` | **Keep** `worker_call` and `worker_runner_address` for authenticated start/stop. | 9 |
+| `src/mindroom/tool_system/worker_routing.py` | **Keep** canonical requester decoding, round-trip and script/subagent pin refusal. | 31 |
+| `src/mindroom/workers/models.py` | **Keep** `LABEL_TAILNET_SSH`, `WORKER_SSH_PORT`, `WorkerSshEndpoint` and `WorkerHandle.ssh_endpoint`. | 17 |
+| `src/mindroom/workers/backends/_lifecycle.py` | **Keep** endpoint propagation through `worker_handle`. | 2 |
+| `src/mindroom/workers/backends/docker.py` | **Keep** `_ssh_marked`, shared mount plan, launch hash and `_container_host_port`/handle logic; no wildcard publish and no endpoint without the mark. | 77 |
+| `src/mindroom/workers/backends/docker_config.py` | **Keep** reserved SSH label. | 3 |
+| `src/mindroom/workers/backends/kubernetes.py` | **Keep** rendered mark → Service and handle, ready-cache mark recheck and drift handling. | 39 |
+| `src/mindroom/workers/backends/kubernetes_config.py` | **Keep** reserved SSH label validation. | 4 |
+| `src/mindroom/workers/backends/kubernetes_resources.py` | **Keep** `ssh_marked`, one mount plan, `_AppliedDeployment`, label and port rendering, and the client-37 `application/merge-patch+json` Service **and** Secret patch calls. | 36 |
+| `tailnet-gateway/main.go` | **Shrink**: delete `enrollment` selection and log field; require `TAILNET_SSH_AUTH_KEY`, keep tag parsing, server option, persistent state defaults and constrained network/log setup. | 55 |
+| `tailnet-gateway/node.go` | **Shrink** `NewTsnetNode` to noninteractive startup; delete `tsnetNode.watch`, `observe`, `filled`, `Observed`, `Relogin` / `StartLoginInteractive`, `BrowseToURL` and approval/tailnet-lock polling. Keep `Listener`, `WhoIs`, `peer`, `Logout` and `Close`; no sign-in messages or auth secrets in logs. | 76 |
+| `tailnet-gateway/primary.go` | **Shrink** `DesiredLink` (drop `LoginAfter`, replace `ClosedBefore`), delete `LinkStatus` card fields and the `PostStatus` enrollment argument, use activity counts and removal acknowledgements; keep `Links`, authenticated `Connect`, target validation, timeouts and no proxy for the primary. | 125 |
+| `tailnet-gateway/reconcile.go` | **Shrink** `Node`, `NewGateway`, `keep`, `Status`, `Run` and `Reconcile`: delete `NodeObserved`, `Gateway.enrollment`, `relogin`, the `suspended` branch and card-only `lastError` cache. Keep one status writer, early cancellation, unlisted stop/retain, `remove` and `drop`, per-ID dirs and safe handling of failed responses; log the chosen hostname. | 245 |
+| `tailnet-gateway/serve.go` | **Shrink** status-only `settle`/`lastError` bookkeeping into connect logs and cancellation checks; keep `carry`, `admit`, `wake`, `dialWorker`, pre-banner timing, rate limit, age accounting and raw TCP pipe. | 222 |
+| `tailnet-gateway/Dockerfile` | **Keep** gateway image and non-root runtime. | 23 |
+| `tailnet-gateway/go.mod` | **Keep** tsnet module; tidy dependencies after imports shrink. | 51 |
+| `cluster/k8s/runtime/templates/tailnet-ssh.yaml` | **Shrink**: remove the conditional auth-key injection/fallback; require the `auth-key` Secret ref on the gateway only; retain ClusterIP listener Service, token Secret, persistent volume, one hardened Recreate Deployment and all three NetworkPolicies. | 250 |
+| `cluster/k8s/runtime/templates/deployment.yaml` | **Keep** primary listener port and token wiring only. | 15 |
+| `cluster/k8s/runtime/templates/validate.yaml` | **Keep** backend/port/egress checks and require nonblank `tailnetSsh.authKeySecret` when enabled. | 14 |
+| `cluster/k8s/runtime/values.yaml` | **Keep** `tailnetSsh.enabled` default `false` and `authKeySecret: ""` as the disabled default only, not login-link mode; keep `port`, `image`, `persistence`, `loginServer`, `tags`, `resources`, `httpsProxy`, `extraEgress`. | 16 |
+| `.github/workflows/build-mindroom.yml` | **Keep** gateway image build and publishing. | 4 |
+| `.github/workflows/tailnet-gateway.yml` | **Keep** Go race tests and the Headscale image/test job. | 137 |
+| `.github/workflows/smoke-stacks.yml` | **Keep** kind SSH worker smoke step. | 7 |
+| `local/instances/deploy/Dockerfile.mindroom` | **Keep** `openssh-server` and `rsync`. | 1 |
+| `pyproject.toml` | **Keep** `kubernetes>=37` (one line replaced). | 0 |
+| `tach.toml` | **Shrink**: delete `mindroom.api.tailnet_ssh` module, main dependency, gateway visibility and portal-only dependency/visibility edges; remove the store's config-key import edge, and reconcile remaining edges without widening visibility. | 68 |
+| `vulture_whitelist.py` | **Shrink**: remove the six portal callback entries and keep the config validators, internal gateway callbacks, runner stderr callbacks and removal of obsolete Kubernetes `call_api` arguments. | 0 |
+| **Expected production total** | **Budget: ≤ 3,000 net lines** | **2,898** |
+
+#### Tests, fixtures and non-production wiring (excluded from line total)
+
+| File | Action |
+| --- | --- |
+| `tests/api/test_tailnet_ssh_api.py` | **Delete** the portal suite (including login URL visibility, key paste/import, Connect/Reconnect/Disconnect, `off`, card states); carry its security outcomes for own-worker routing, key revocation and clearing/stopping into the internal and link tests, not the deleted routes. |
+| `tests/test_tailnet_ssh_store.py` | **Shrink**: delete portal paste/cap test `test_set_keys_splits_pasted_lines_dedupes_and_caps_at_twenty` and old `test_removing_a_key_sets_closed_before_adding_does_not`; remove park branch from `test_remove_links_then_finish_drops_or_parks`; keep host key, durable round-trip/write-on-change, safe parse errors, pair uniqueness; replace `test_default_hostname` with suffix, cross-domain/normalization/truncation collisions and reservation stability. |
+| `tests/test_tailnet_ssh_links.py` | **Shrink**: delete `test_first_running_report_pins_enrolled_login`, `test_operator_key_enrolment_pins_no_login`, `test_operator_mode_survives_a_primary_restart`, `test_a_node_waiting_for_approval_is_not_dropped_at_a_day`, `test_link_state_names_what_the_card_shows`, `test_a_stored_operator_mode_adds_no_link_before_the_gateway_reports`, `test_login_mode_adds_no_links`, `test_a_key_still_in_the_portal_or_already_closed_for_closes_nothing_more`, and the URL-specific assertion in `test_connect_logs_peer_but_never_a_login_url`. Remove `off`/24 h/removal-on-authorization-loss and `suspended` expectations; replace with unlisted-while-ineligible, restored same ID/name/key, true deletion/ack, automatic marked-worker discovery without a status bootstrap, and installed-link persistence across worker absence and backend-list failures. **Must keep** own-worker resolution, ambiguous-key denial, wrong/missing/empty login and pending membership refusal before wake, no runner call without `ssh_endpoint`, shell worker-key match and connect ordering, key-change/primary-restart revocation, key rewrite versus stale connect, clear/stop retries and late-stop guard, and the fresh status activity window/atomic snapshot. |
+| `tests/api/test_tailnet_ssh_gateway_api.py` | **Shrink**: replace `test_get_links_suspends_a_room_granted_link_while_membership_is_pending` with omission, strip old status/enrollment and login-URL-specific validation fixtures; keep non-echoing errors, token-before-body, precisely three routes, configured/unconfigured listener, connect endpoint/refusal, key cleanup, wire fixtures, no token in worker env, and both maintenance paths. |
+| `tests/test_tailnet_ssh_eligibility.py` | **Keep** load/launch matrix, another person's key, ambiguous keys, private/concrete-user cases, pending authorization denial in link tests, joined versus owned/knowledge directories, non-dedicated and pinned-worker refusals, key validation; update obsolete `suspended` language. |
+| `tests/test_tailnet_ssh_projection.py` | **Shrink** `test_authorized_keys_are_restricted_and_merged` to config-only keys, deduped and isolated per requester; keep content/modes, host-key match, rewrite and clear. |
+| `tests/api/test_worker_ssh.py` | **Keep** token, env/workspace, startup, concurrency, failure/cancellation, stop and late-stop assertions; give start fixtures projected keys and cover start refusal after a clear. |
+| `tests/test_docker_worker_backend.py` | **Keep** SSH mark, endpoint requires label/running container, restricted publish address, mount drift and pinned-worker denials. |
+| `tests/test_kubernetes_worker_backend.py` | **Keep** marked/unmarked pod and Service ports in both directions, endpoint/label and ready-cache checks, foreign-mount/ambiguous/pinned denials, and `test_installed_client_sends_secret_and_service_patches_as_merge_patches`. |
+| `tests/test_dedicated_worker_launch_goldens.py` | **Keep** positive `user_agent_tailnet_ssh` and negative unmarked, shared/user/unscoped and script cases. |
+| `tests/fixtures/dedicated_worker_launch/docker_user_agent_tailnet_ssh.json` | **Keep** marked launch golden. |
+| `tests/fixtures/dedicated_worker_launch/kubernetes_user_agent_tailnet_ssh.json` | **Keep** marked launch golden. |
+| `tests/test_runtime_chart_tailnet_ssh.py` | **Shrink** `test_auth_key_login_server_tags_and_proxy_are_optional_env`: key secret now required when enabled; Headscale/tags/proxy stay optional. Supply a dummy secret ref in render fixtures and test missing ref explicitly; **keep** port conflicts, mark/namespace selection, isolated listener, no gateway ingress, bounded egress and unchanged worker egress/Squid. |
+| `tests/test_tailnet_ssh_headscale_e2e.py` | **Shrink**: delete `test_enrol_by_login_url_then_exec`, `_enrol`, `_login_stack`, login-URL registration/redaction checks, `other_tailnet` and `stack_other_tailnet`; use one Headscale and one gateway with one pre-auth key for Alice's and Bob's nodes. Replace the two-tailnet test with both users demonstrably reaching both nodes at TCP level but each doing authenticated exec only in their own uniquely marked workspace; the other login must get no primary connect call even if it presents the right SSH key. **Must keep** pre-auth enrollment, wrong key/password refused even from the correct login, read-only projection/uid/0600 checks moved out of the deleted interactive test, exec/PTY/scp/sftp/rsync, forwarding refusal, key removal cuts live sessions, 120 s delayed wake, logout/removal and restart preserving other nodes. |
+| `tailnet-gateway/node_test.go` | **Shrink**: delete `TestObserveMapsTsnetStatesToTheContracts`, `TestObserveSeesANodeItsTailnetsLockKeepsOutAsWaitingForApproval` and `TestObserveReadsTheTailnetFromTheStatus`; keep `TestPeerOfATaggedDeviceHasNoLogin`. Drop unauthenticated-start assumptions from `TestTsnetNodeStartsWithoutALoginServer`; test missing-key rejection without network and default control URL separately from Headscale enrollment. |
+| `tailnet-gateway/primary_test.go` | **Shrink** old wire fields and mode assertions; **keep** bearer, failed/null lists, status `204`, connect/refusal/target validation, timeouts and no-proxy coverage. |
+| `tailnet-gateway/reconcile_test.go` | **Shrink**: delete `TestSuspendedKeepsItsNode`, `TestLoginAfterChangeCallsRelogin`, `TestNeedsLoginAfterRunningCallsReloginOnce`, `TestFailedReloginIsTriedAgain`, `TestStatusReportsWhatTheNodeSees`, `TestGatewayWithoutLinksStillSaysHowItEnrols` and `TestStatusCarriesALinksLastErrorWhileItIsListed`; remove enrollment assertions from `TestStatusPostedOnChangeAndCarriesEnrollment` and convert suspended/cut cases to omitted/revised. **Must keep** independent dirs, startup retry, invalid IDs, early cancellation before slow node calls, unlisted state retained, failed/null vs empty replies, removed acknowledgements, 75 s counts and status during slow passes/retry/no overlap. |
+| `tailnet-gateway/serve_test.go` | **Shrink**: replace `TestSuspendedRefusesNewAndClosesOpen` with omitted-link coverage and `TestClosedBeforeChangeClosesAllOpenConnections` with revision change; drop `last_error` assertions, not refusal/timeout cases. **Must keep** wrong/unknown/tagged peer and nil-login refusal before primary, rate limit, pre-banner timing, pipe, revoke during wake/dial, removing refusal and activity counting. |
+| `tailnet-gateway/testdata/connect.json` | **Keep** `{peer_login, peer_node}` fixture; no target fields from the peer. |
+| `tailnet-gateway/testdata/links.json` | **Shrink**: remove `login_after`, replace `closed_before` with `access_revision`, keep `on` and `removing` rows. |
+| `tailnet-gateway/testdata/status.json` | **Shrink** to the connection-count map and removed IDs (no `enrollment`, node state, URL, metadata or last error); keep shared Go/Python contract tests. |
+| `cluster/k8s/kind/smoke_tailnet_ssh_worker.py` | **Keep** named kind-context and owned-namespace guards, chart pod/label derivation and diagnostics; add a dummy `authKeySecret` reference for rendering only, with no real tailnet credential in the smoke. |
+| `cluster/k8s/kind/tailnet_ssh_gateway_stand_in.py` | **Keep** the chart-labelled stand-in reading sshd's banner through the worker Service; omit unused auth-key env from this test pod (it does not enroll). |
+| `cluster/k8s/kind/tailnet_ssh_worker_probe.py` | **Keep** real API mark/unmark and Service UID/port patch checks, hardened pod and sshd start/banner probe; adapt `new_link` / projection setup to the small ledger model. |
+| `tests/test_smoke_tailnet_ssh_worker.py` | **Keep** context/cleanup, chart rendering, actual pod identity and stand-in tests; update dummy secret fixture/env. |
+| `tests/api/test_api.py`, `tests/api/test_computers.py` | **Keep** `held_worker_keys` maintenance coverage and the existing Computer behavior. |
+| `tests/test_ci_release_dispatch.py`, `tests/test_ci_workflow_permissions.py` | **Keep** release matrix, job permissions, and pinned workflow action coverage. |
+| `tests/test_mindroom_dockerfiles.py`, `tests/test_orchestrator_runtime.py` | **Keep** image packages and internal-listener lifecycle tests. |
+| `frontend/src/test/fixtures/config-schema.json` | **Keep/regenerate** `AgentConfig.tailnet_ssh`, the root section and both `TailnetSshConfig` maps with new config descriptions; this is schema, not a portal card. |
+| `tailnet-gateway/go.sum`, `uv.lock` | **Keep** generated dependencies and Kubernetes 37 pin; regenerate as needed, do not revert the fix. |
+
+#### Docs and deferred files (excluded from line total)
+
+| File | Action |
+| --- | --- |
+| `docs/baspowers/specs/2026-11-19-tailnet-ssh-design.md` | **Keep** the original record plus this superseding section. |
+| `docs/baspowers/plans/2026-11-19-tailnet-ssh.md` | **Shrink/update in the implementation pass**: drop Task 8 and Task 13, the user contract and login-link steps, update Tasks 2/6/7/9/10/11/12 and the test/live rollout for one operator key; Task 14 is operator setup/docs, not a card guide. |
+| `cluster/k8s/runtime/README.md` | **Shrink**: replace the two enrollment modes with mandatory reusable non-ephemeral key setup, optional server/tags, both config maps, hostname/collision rule, access limits, and operator revocation/recovery. |
+| `cluster/k8s/kind/README.md` | **Keep** kind smoke instructions and its real Service/sshd assertions. |
+| `docs/architecture/code-map.md` | **Shrink**: delete the `api/tailnet_ssh.py` row and update link store, eligibility and gateway entries. |
+| `docs/architecture/security-posture.md` | **Shrink**: remove portal, old enrollment and URL handling claims; record same-tailnet reachability, config-only keys, credential custody, revocation and remaining isolation guarantees. |
+| `skills/mindroom-docs/references/page__architecture__security-posture__index.md`, `skills/mindroom-docs/references/llms-full.txt` | **Regenerate** from corrected posture docs, not independently. |
+| `frontend/src/connections/TailnetSsh.tsx`, `frontend/src/connections/TailnetSsh.test.tsx`, `frontend/src/connections/Connections.tsx` | **Do not add** the planned component, tests, or mount point; the card is not in the current branch diff. |
+| `docs/tailnet-ssh.md`, `docs/connections-portal.md`, `docs/deployment/docker.md`, `docs/deployment/kubernetes.md`, `zensical.toml` | **Drop** the planned card instructions and portal link; keep only applicable single-tailnet operator setup and deployment pointers in the implementation pass. |
