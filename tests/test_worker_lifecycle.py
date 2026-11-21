@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import threading
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, TextIO
 
 import pytest
@@ -11,6 +14,7 @@ from mindroom.workers.backend import effective_idle_status, filter_and_sort_work
 from mindroom.workers.backends import local as local_module
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
+    WorkerLocks,
     mark_worker_failed,
     mark_worker_idle,
     touch_worker_lifecycle,
@@ -18,6 +22,7 @@ from mindroom.workers.backends._lifecycle import (
 from mindroom.workers.backends._metadata_store import save_worker_metadata
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,6 +39,30 @@ def _handle(worker_key: str, *, status: WorkerStatus, last_used_at: float) -> Wo
         last_used_at=last_used_at,
         created_at=0.0,
     )
+
+
+def test_worker_lock_is_shared_with_waiters_and_freed_after_they_finish() -> None:
+    """Waiters keep the same live lock, but a finished key does not remain in the backend forever."""
+    locks = WorkerLocks()
+    worker_key = "test-worker"
+    held = locks.for_key(worker_key)
+    reference = weakref.ref(held)
+    ready = threading.Event()
+
+    def wait_for_lock() -> bool:
+        lock = locks.for_key(worker_key)
+        ready.set()
+        with lock:
+            return lock is reference()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with held:
+            waiter = pool.submit(wait_for_lock)
+            assert ready.wait(timeout=SETTLE_TIMEOUT_SECONDS)
+            assert locks.for_key(worker_key) is held
+        assert waiter.result(timeout=SETTLE_TIMEOUT_SECONDS)
+    del held
+    assert reference() is None
 
 
 def test_effective_idle_status_only_marks_ready_workers_idle_at_timeout_boundary() -> None:

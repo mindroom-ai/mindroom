@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, replace
+from weakref import WeakValueDictionary
 
 from mindroom.workers.models import WorkerHandle, WorkerStatus
 
@@ -145,7 +146,8 @@ class WorkerLocks:
     """One lock per worker, created on first use, that serializes that worker's lifecycle in this process."""
 
     def __init__(self) -> None:
-        self._locks: dict[str, threading.Lock] = {}
+        # Holders and waiters keep strong references; finished worker keys need no permanent lock.
+        self._locks: WeakValueDictionary[str, threading.Lock] = WeakValueDictionary()
         self._guard = threading.Lock()
 
     def for_key(self, key: str) -> threading.Lock:
