@@ -53,6 +53,19 @@ def _job_permissions(workflow: dict[str, Any], job: str) -> dict[str, str]:
     return permissions
 
 
+def test_headscale_e2e_triggers_on_shell_admission_and_worker_changes() -> None:
+    """Changes to the worker route or its admission should run the PR's tailnet checks."""
+    paths = _load_workflow("tailnet-gateway.yml")["on"]["pull_request"]["paths"]
+    assert {
+        "src/mindroom/authorization.py",
+        "src/mindroom/tool_system/worker_routing.py",
+        "src/mindroom/tool_system/sandbox_proxy.py",
+        "src/mindroom/workers/backends/**",
+        "src/mindroom/tailnet_ssh/**",
+        "src/mindroom/api/*ssh*.py",
+    }.issubset(paths)
+
+
 @pytest.mark.parametrize("workflow_path", sorted(WORKFLOW_DIR.glob("*.yml")), ids=lambda path: path.name)
 def test_every_workflow_job_declares_token_permissions(workflow_path: Path) -> None:
     """A job without a permissions block would get whatever the repository default grants."""
