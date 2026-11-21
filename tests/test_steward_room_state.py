@@ -224,6 +224,51 @@ async def test_review_worker_survives_replacement_admission_closure(
 
 
 @pytest.mark.asyncio
+async def test_review_gate_closing_mid_retry_preserves_the_pending_step_only(
+    room_state: RoomState,
+    worker_runtime: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pause between GET and PUT resumes the interrupted step, not an earlier forbidden write."""
+    _, _, _, _, client = room_state
+    clock = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    gate = worker_runtime.response_admission_gate
+    read, put = client.room_get_state_event.side_effect, client.room_put_state.side_effect
+
+    async def pause(room_id: str, kind: str, state_key: str = "") -> object:
+        if kind == ACCOUNTS_EVENT_TYPE and clock == 1:
+            gate.close()
+            client.room_get_state_event.side_effect = read
+        return await read(room_id, kind, state_key)
+
+    async def fail(room_id: str, kind: str, content: dict, **kwargs: object) -> object:
+        if kind == EVENT_TYPE:
+            return nio.RoomPutStateError("Denied", "M_FORBIDDEN")
+        if kind == ACCOUNTS_EVENT_TYPE and clock == 0:
+            raise TimeoutError
+        return await put(room_id, kind, content, **kwargs)
+
+    client.room_get_state_event.side_effect = pause
+    client.room_put_state.side_effect = fail
+    worker = RoomStateWorker(worker_runtime)
+    try:
+        worker.mark(ROOM_ID)
+        await _yield_loop(40)
+        clock = 1
+        await _yield_loop(40)
+        assert gate.closed
+        assert len(_writes(client, ACCOUNTS_EVENT_TYPE)) == 1
+        gate.reopen()
+        await _yield_loop(40)
+        assert _accounts(room_state) is not None
+        assert len(_writes(client, EVENT_TYPE)) == 1
+    finally:
+        worker.stop()
+        await _yield_loop(10)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["M_FORBIDDEN", "M_UNKNOWN"])
 async def test_review_accounts_does_not_put_when_comparison_fails(
     room_state: RoomState,
