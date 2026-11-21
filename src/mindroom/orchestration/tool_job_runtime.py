@@ -268,7 +268,10 @@ class ToolJobRuntimeCoordinator:
                 or runs is False
             ):
                 return "denied"
-            entities.add(child_name)
+            if grant != "workflow" or child_name != owner.agent_name:
+                # A run's copy of its own agent keeps the access the requester has to that agent, as its dispatch
+                # said (`authorize_delegation`): possibly only through the team that answers.
+                entities.add(child_name)
         elif not (
             # A run's job answers for the run, not for one call: its agent must still have the toolkit.
             toolkit_offered(config, owner, tools=tools, name="workflow", depth=job.depth)

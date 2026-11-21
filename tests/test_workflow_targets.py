@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.delegation.lifecycle import (
@@ -217,6 +217,36 @@ def test_job_runtime_grants_the_job_of_a_runs_agent_by_the_same_rule(
         # The same child with no run is an ordinary subagent, which needs the `delegate_to` entry.
         plain = replace(job, adapter={"child": asdict(_child(tmp_path, target))})
         assert coordinator._grant(plain) == "denied"
+
+
+@pytest.mark.parametrize(("target", "granted"), [("dev", "allowed"), ("reviewer", "allowed"), ("secret", "denied")])
+def test_job_runtime_grants_a_team_members_own_copy_to_a_requester_of_the_team(
+    tmp_path: Path,
+    target: str,
+    granted: str,
+) -> None:
+    """Alice reaches `dev` only through its team: the run's copy of `dev` keeps that access, as its dispatch said.
+
+    Any other agent of the run must answer Alice itself, under the team's bot as under the agent's own.
+    """
+    config, paths = _config(), _runtime_paths(tmp_path)
+    config.teams["crew"] = TeamConfig(display_name="Crew", role="Builds things.", agents=["dev"])
+    with_responder_access(config, "crew", users=[_ALICE])
+    with_responder_access(config, "dev", users=["@bob:example.org"])
+    rooms = {name: SimpleNamespace(rooms=dict.fromkeys(joined)) for name, joined in _ROOMS.items()}
+    bots = {name: SimpleNamespace(first_sync_complete=True, client=client) for name, client in rooms.items()}
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        bot_provider=bots.get,  # type: ignore[arg-type]
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=lambda: None,  # type: ignore[arg-type,return-value]
+    )
+    of_team = replace(_IDENTITY, transport_agent_name="crew")
+    of_run = replace(_child(tmp_path, target), workflow_run_id="wf-" + "a" * 32, workflow_node_key="@0")
+    job = BackgroundJob("job", of_team, target, 0, kind="delegation", adapter={"child": asdict(of_run)})
+
+    assert coordinator._grant(job) == granted
 
 
 def test_old_child_snapshot_reads_without_the_new_fields(tmp_path: Path) -> None:
