@@ -356,6 +356,28 @@ async def test_an_unreadable_router_binding_is_not_claimed(room_state: RoomState
 
 
 @pytest.mark.asyncio
+async def test_a_forbidden_router_binding_read_needs_no_retry(room_state: RoomState) -> None:
+    """Do not claim an unreadable binding or keep retrying a forbidden read."""
+    *_, client = room_state
+    read = client.room_get_state_event.side_effect
+
+    async def refuse_binding(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == ROUTER_EVENT_TYPE:
+            return nio.RoomGetStateEventError("Forbidden", "M_FORBIDDEN", room_id=room_id)
+        return await read(room_id, event_type, state_key)
+
+    client.room_get_state_event.side_effect = refuse_binding
+    duties = _router_duties(room_state)
+    try:
+        duties.mark_joined_for_room_state(ROOM_ID)
+        await _publish_joined_rooms(duties)
+        assert not _writes(client, ROUTER_EVENT_TYPE)
+        assert not duties._room_state_reruns
+    finally:
+        duties.stopping()
+
+
+@pytest.mark.asyncio
 async def test_router_binding_leaves_another_routers_binding_alone(room_state: RoomState) -> None:
     """Two privileged routers must not take turns overwriting one room's binding."""
     *_, events, client = room_state
@@ -1286,6 +1308,12 @@ async def test_blocked_accounts_get_does_not_delay_other_room_state(room_state: 
         await frame
 
 
+async def _yield_loop(turns: int) -> None:
+    """Let ready tasks run without advancing the fake clock or waiting indefinitely."""
+    for _ in range(turns):
+        await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sweep", [False, True])
 async def test_waiting_room_state_work_releases_the_caller_at_ten_seconds(
@@ -1308,19 +1336,20 @@ async def test_waiting_room_state_work_releases_the_caller_at_ten_seconds(
     duties = bot.steward_duties
     duties.mark_joined_for_room_state(ROOM_ID)
     frame = _publish_joined_rooms(duties)
-    await blocked.wait()
-    if sweep:
-        other = "!other:localhost"
-        client.rooms[other] = nio.MatrixRoom(other, client.user_id)
-        work = reconcile_held_room_states(duties.deps.runtime.orchestrator)
-    else:
-        work = duties.member_event(client.rooms[ROOM_ID], _membership_event(ids["agent1"].full_id, "leave", "join"))
-    caller = asyncio.create_task(work)
+    caller = None
     try:
+        await _yield_loop(40)
+        assert blocked.is_set(), "The frame did not start its roster lookup"
+        if sweep:
+            other = "!other:localhost"
+            client.rooms[other] = nio.MatrixRoom(other, client.user_id)
+            work = reconcile_held_room_states(duties.deps.runtime.orchestrator)
+        else:
+            work = duties.member_event(client.rooms[ROOM_ID], _membership_event(ids["agent1"].full_id, "leave", "join"))
+        caller = asyncio.create_task(work)
         for tick in (0, 9, 10):
             clock = tick
-            for _ in range(40):
-                await asyncio.sleep(0)
+            await _yield_loop(40)
             if tick < 10:
                 assert not caller.done()
         assert caller.done()
@@ -1328,8 +1357,9 @@ async def test_waiting_room_state_work_releases_the_caller_at_ten_seconds(
         assert duties._room_state_retries.keys() == client.rooms.keys()
     finally:
         duties.stopping()
-        caller.cancel()
-        await asyncio.gather(caller, frame, return_exceptions=True)
+        if caller is not None:
+            caller.cancel()
+        await asyncio.gather(*(task for task in (caller, frame) if task is not None), return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1631,8 +1661,8 @@ async def test_ad_hoc_room_publishes_mixed_mode_on_its_first_retry(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["reload", "handover", "left"])
-async def test_retry_rechecks_room_inputs_after_a_slow_mode_turn(
+@pytest.mark.parametrize("change", ["reload", "handover", "left", "shutdown-asleep", "shutdown-in-flight"])
+async def test_retry_rechecks_room_inputs_after_a_slow_mode_turn(  # noqa: PLR0915 - drive each phase of the same interleaving
     room_state: RoomState,
     monkeypatch: pytest.MonkeyPatch,
     change: str,
@@ -1663,23 +1693,25 @@ async def test_retry_rechecks_room_inputs_after_a_slow_mode_turn(
     retry = duties._room_state_retries[ROOM_ID]
     sweep = None
     try:
-        for tick in (0, 1):
-            clock = tick
-            for _ in range(40):
-                await asyncio.sleep(0)
-        assert mode_paused.is_set()
+        await asyncio.sleep(0)  # Let the retry start sleeping at t=0.
+        if change == "shutdown-asleep":
+            runtime.phase = RunPhase.SHUTTING_DOWN
+        clock = 1
+        await _yield_loop(40)
+        assert mode_paused.is_set() == (change != "shutdown-asleep")
         if change == "reload":
             runtime.config = config.model_copy(deep=True)
             del runtime.config.agents["agent2"]
             sweep = asyncio.create_task(reconcile_held_room_states(runtime.orchestrator))
-            for _ in range(50):
-                await asyncio.sleep(0)
+            await _yield_loop(50)
             assert _accounts(room_state) is not None
             assert removed_member not in (_accounts(room_state) or ())
         elif change == "handover":
             runtime.orchestrator.room_steward.return_value = MagicMock(agent_name="agent1")
-        else:
+        elif change == "left":
             del client.rooms[ROOM_ID]
+        elif change == "shutdown-in-flight":
+            runtime.phase = RunPhase.SHUTTING_DOWN
         release.set()
         await retry
         if sweep is not None:
@@ -1983,15 +2015,17 @@ async def test_later_terminal_accounts_result_retires_older_pending_retry(
     monkeypatch: pytest.MonkeyPatch,
     forbidden: bool,
 ) -> None:
-    """A later success or power refusal supersedes a queued retry of that same operation."""
-    _, _, _, _, client = room_state
+    """After a sweep succeeds or gets a power refusal, a new outage gets its own backoff."""
+    _, _, _, events, client = room_state
     clock = 0.0
     monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
     write = client.room_put_state.side_effect
+    attempts = []
 
     async def put_state(room_id: str, event_type: str, content: dict, **kwargs: object) -> object:
         if event_type == ACCOUNTS_EVENT_TYPE:
-            if clock == 0:
+            attempts.append(clock)
+            if clock in (0, 1, 1.5):
                 raise TimeoutError
             if forbidden:
                 return nio.RoomPutStateError("Forbidden", "M_FORBIDDEN")
@@ -2000,15 +2034,14 @@ async def test_later_terminal_accounts_result_retires_older_pending_retry(
     client.room_put_state.side_effect = put_state
     duties = _router_duties(room_state)
     try:
-        for tick in (0.0, 0.25):
+        for tick in (0, 1, 1.25, 1.5, 2.5):
             clock = tick
-            duties.mark_joined_for_room_state(ROOM_ID)
-            await _publish_joined_rooms(duties)
-            await asyncio.sleep(0)
-        clock = 2
-        for _ in range(30):
-            await asyncio.sleep(0)
-        assert client.joined_members.await_count == len(_writes(client, ACCOUNTS_EVENT_TYPE)) == 2
+            if tick in (0, 1.25, 1.5):
+                events.pop((ACCOUNTS_EVENT_TYPE, client.user_id), None)
+                duties.mark_joined_for_room_state(ROOM_ID)
+                await _publish_joined_rooms(duties)
+            await _yield_loop(30)
+        assert attempts == [0, 1, 1.25, 1.5, 2.5]
         assert not duties._room_state_reruns
         assert not duties._room_state_retries
     finally:
@@ -2016,16 +2049,20 @@ async def test_later_terminal_accounts_result_retires_older_pending_retry(
 
 
 @pytest.mark.asyncio
-async def test_stale_success_does_not_discard_a_newer_queued_failure(
+@pytest.mark.parametrize("retry_in_flight", [False, True])
+async def test_stale_success_does_not_discard_a_newer_queued_failure(  # noqa: PLR0915 - drive each phase of the same interleaving
     room_state: RoomState,
     monkeypatch: pytest.MonkeyPatch,
+    retry_in_flight: bool,
 ) -> None:
-    """A fresh trigger that finishes late must not retire the failure from a later membership change."""
+    """Keep a newer failure queued and its warning latched when an older trigger finishes late."""
     _, _, ids, events, client = room_state
     departing = ids["agent2"].full_id
     clock = 0.0
     monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
     release = asyncio.Event()
+    retry_put = asyncio.Event()
+    release_retry = asyncio.Event()
     read = client.room_get_state_event.side_effect
     write = client.room_put_state.side_effect
 
@@ -2035,8 +2072,14 @@ async def test_stale_success_does_not_discard_a_newer_queued_failure(
         return await read(room_id, event_type, state_key)
 
     async def write_state(room_id: str, event_type: str, content: dict, **kwargs: object) -> object:
-        if event_type == ACCOUNTS_EVENT_TYPE and clock in (0, 0.5):
-            raise TimeoutError
+        if event_type == ACCOUNTS_EVENT_TYPE:
+            if clock == 0:
+                raise TimeoutError
+            if clock == 1 and retry_in_flight:
+                retry_put.set()
+                await release_retry.wait()
+            if clock in (0.5, 1):
+                return nio.RoomPutStateError("Unavailable", "M_UNKNOWN")
         return await write(room_id, event_type, content, **kwargs)
 
     client.room_get_state_event.side_effect = read_state
@@ -2048,19 +2091,29 @@ async def test_stale_success_does_not_discard_a_newer_queued_failure(
     duties.mark_joined_for_room_state(ROOM_ID)
     old = _publish_joined_rooms(duties)
     try:
-        for _ in range(30):
-            await asyncio.sleep(0)
+        await _yield_loop(30)
         assert not old.done()
         assert departing in (_accounts(room_state) or ())
-        events["m.room.member", departing] = {"membership": "leave"}
-        clock = 0.5
-        await duties.member_event(client.rooms[ROOM_ID], _membership_event(departing, "leave", "join"))
-        assert departing in (_accounts(room_state) or ())  # The newer write failed.
-        release.set()
-        await old
-        clock = 1
-        for _ in range(30):
-            await asyncio.sleep(0)
+        with capture_logs() as logs:
+            events["m.room.member", departing] = {"membership": "leave"}
+            clock = 0.5
+            await duties.member_event(client.rooms[ROOM_ID], _membership_event(departing, "leave", "join"))
+            assert departing in (_accounts(room_state) or ())  # The newer write failed.
+            if retry_in_flight:
+                clock = 1
+                await _yield_loop(30)
+                assert retry_put.is_set()
+            release.set()
+            await old
+            clock = 1
+            release_retry.set()
+            await _yield_loop(30)
+        assert [log["log_level"] for log in logs if log["event"] == "room_accounts_publish_failed"] == [
+            "warning",
+            "debug",
+        ]
+        clock = 3
+        await _yield_loop(30)
         assert _accounts(room_state) == sorted(ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1"))
         assert not duties._room_state_retries
     finally:

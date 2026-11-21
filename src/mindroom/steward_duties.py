@@ -161,6 +161,8 @@ class StewardDuties:
     _room_state_warned: set[str] = field(default_factory=set, init=False, repr=False)
     # One backoff loop per failed room.
     _room_state_retries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
+    # Retire a sleeping timer on recovery, but do not interrupt an attempt already in progress.
+    _room_state_retrying: set[str] = field(default_factory=set, init=False, repr=False)
     # Pending operations, including fresh failures that race an in-flight retry.
     _room_state_reruns: dict[str, set[str]] = field(default_factory=dict, init=False, repr=False)
 
@@ -235,7 +237,10 @@ class StewardDuties:
         if queued is not None and self._room_state_reruns.get(room_id) is queued:
             del self._room_state_reruns[room_id]
         if not failed:
-            self._room_state_warned.discard(room_id)
+            if room_id not in self._room_state_reruns and room_id not in self._room_state_retrying:
+                self._room_state_warned.discard(room_id)
+                if (timer := self._room_state_retries.pop(room_id, None)) is not None:
+                    timer.cancel()
             return
         if self.deps.runtime.phase is not RunPhase.ACCEPTING:
             return
@@ -257,12 +262,19 @@ class StewardDuties:
 
     async def _retry_room_state(self, room_id: str) -> None:
         """Retry failed operations with capped backoff, including failures that arrive mid-attempt."""
+        runtime = self.deps.runtime
         delay = 1
-        while room_id in self._room_state_reruns:
+        while runtime.phase is RunPhase.ACCEPTING and room_id in self._room_state_reruns:
             await asyncio.sleep(uniform(delay * 0.5, min(delay * 1.5, 60)))  # noqa: S311 - retry timing, not security
+            if runtime.phase is not RunPhase.ACCEPTING:
+                return
             if not (needed := self._room_state_reruns.pop(room_id, None)):
                 break
-            failed = await self._reconcile_room_state(room_id, needed, delay)
+            self._room_state_retrying.add(room_id)
+            try:
+                failed = await self._reconcile_room_state(room_id, needed, delay)
+            finally:
+                self._room_state_retrying.discard(room_id)
             if failed:
                 self._room_state_reruns[room_id] = self._room_state_reruns.get(room_id, set()) | failed
             delay = min(delay * 2, 60)
@@ -305,6 +317,7 @@ class StewardDuties:
                 check
                 for check in ("mode", "accounts", "binding")
                 if check in needed
+                and runtime.phase is RunPhase.ACCEPTING
                 and (run := room_checks().get(check)) is not None
                 and await run(failure_level=failure_level) is False
             }

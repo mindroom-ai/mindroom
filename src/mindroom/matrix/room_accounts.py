@@ -86,7 +86,7 @@ async def reconcile_room_router_binding(
     Returns whether nothing is left to do. The binding keeps the name today's clients read: the privileged MindRoom
     account whose room state they trust. A binding naming another account stays, so two privileged stewards cannot
     take turns overwriting it; a stale one only leaves voice echoes as standalone rows until a room admin clears it.
-    A room whose power levels refuse the write is done too. The steward retries transient failures in the background.
+    A room that forbids the read or write is done too. The steward retries transient failures in the background.
     """
     phase = "state_get"
     try:
@@ -101,9 +101,10 @@ async def reconcile_room_router_binding(
                     return True
             elif not (isinstance(current, nio.RoomGetStateEventError) and current.status_code == "M_NOT_FOUND"):
                 # An unreadable binding may name another router, so only absent or malformed state is claimed.
-                level = failure_level(False)
+                forbidden = isinstance(current, nio.RoomGetStateEventError) and current.status_code == "M_FORBIDDEN"
+                level = logging.DEBUG if forbidden else failure_level(False)
                 logger.log(level, "room_router_binding_publish_failed", room_id=room_id, error=str(current))
-                return False
+                return forbidden
             if may_claim is not None and not may_claim():
                 return True
             phase = "state_put"
