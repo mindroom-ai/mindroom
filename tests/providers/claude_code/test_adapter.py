@@ -12,6 +12,7 @@ import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+import claude_agent_sdk
 import pytest
 from claude_agent_sdk import ClaudeSDKClient, CLIConnectionError, RateLimitEvent, RateLimitInfo
 from structlog.testing import capture_logs
@@ -910,12 +911,15 @@ async def test_inherited_claude_settings_are_removed_only_from_the_child(
     inherited = {
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_FUTURE,CLAUDE_CONFIG_DIR",
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_BG_AUTH_SNAPSHOT_PATH",
         "CLAUDE_AUTO_BACKGROUND_TASKS",
     }
-    kept = {"CLAUDE_CODE_ENTRYPOINT", *session_module._ISOLATION_ENV}
-    for name in inherited | kept | {"CLAUDE_CONFIG_DIR"}:
+    kept = {"CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CONFIG_DIR", *session_module._ISOLATION_ENV}
+    launcher_names = {"MINDROOM_CLAUDE_CODE_CLI", "MINDROOM_CLAUDE_CODE_SCRUB"}
+    parent_names = inherited | kept | launcher_names
+    for name in parent_names:
         monkeypatch.setenv(name, "inherited")
     cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
 
@@ -923,10 +927,9 @@ async def test_inherited_claude_settings_are_removed_only_from_the_child(
 
     [spawn] = cli.events("spawn")
     child_names = set(spawn["env_names"])
-    assert child_names.isdisjoint(inherited)
-    assert child_names.issuperset(kept | {"CLAUDE_CONFIG_DIR"})
-    assert not any(name.startswith("MINDROOM_CLAUDE_CODE_") for name in child_names)
-    assert all(os.environ[name] == "inherited" for name in inherited | kept)
+    assert child_names.isdisjoint(inherited | launcher_names)
+    assert child_names.issuperset(kept)
+    assert all(os.environ[name] == "inherited" for name in parent_names)
 
 
 async def test_two_starts_reuse_the_same_private_launcher(tmp_path: Path) -> None:
@@ -963,6 +966,23 @@ async def test_a_claude_code_older_than_the_one_this_route_was_run_against_gets_
     assert isinstance(error, AuthenticationFailed)
     assert "2.1.328" in str(error)
     assert "claude update" in str(error)
+
+
+async def test_use_the_sdk_bundled_cli_when_claude_is_not_on_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = fake_cli(tmp_path / "_bundled", {"turns": [text_turn("Bundled.")]})
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(claude_agent_sdk, "__file__", str(tmp_path / "__init__.py"))
+    provider = cli.provider(cli_path=None)
+
+    with capture_logs() as logs:
+        answer = await complete(provider, ModelRequest(messages=[user("Hi")]))
+
+    assert answer.content == "Bundled."
+    assert provider.cli_path is None
+    assert [entry["cli"] for entry in logs if entry["event"] == "claude_code_started"] == [str(cli.path)]
 
 
 @pytest.mark.parametrize("exists", [False, True], ids=["missing", "not executable"])

@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import os
 import re
+import shlex
+import sys
 import tempfile
 from contextlib import suppress
 from contextvars import Context
@@ -13,6 +17,7 @@ from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
+import claude_agent_sdk
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKError,
@@ -22,10 +27,12 @@ from claude_agent_sdk import (
 )
 
 from mindroom import __version__
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.claude_sdk_process import ClaudeProcess, user_message
 from mindroom.llm.errors import AuthenticationFailed, ProviderError, ProviderUnavailable
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root
 from mindroom.providers.claude_code.bridge import SERVER_NAME, TOOL_PREFIX, ToolBridge, tool_names
 from mindroom.runtime_shutdown import close_at_process_shutdown
 
@@ -68,10 +75,26 @@ _ISOLATION_ENV = {
     "MCP_TOOL_TIMEOUT": str(int((_PARKED_TTL_SECONDS + 10 * _SWEEP_INTERVAL_SECONDS) * 1000)),
 }
 # Claude Code reads its sign-in, where it sends requests, and what it adds to them from variables named like these.
-_REFUSED_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_")
-_REFUSED_NAMES = {"CLAUDE_BG_AUTH_SNAPSHOT_PATH", "CLAUDE_AUTO_BACKGROUND_TASKS"}
+_SCRUB_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_")
+_SCRUB_NAMES = {"CLAUDE_BG_AUTH_SNAPSHOT_PATH", "CLAUDE_AUTO_BACKGROUND_TASKS"}
 # The Claude Agent SDK and MindRoom set these for the process themselves, whatever MindRoom inherited.
 _SET_FOR_THE_PROCESS = {"CLAUDE_CODE_ENTRYPOINT", *_ISOLATION_ENV}
+_CLI_ENV = "MINDROOM_CLAUDE_CODE_CLI"
+_SCRUB_ENV = "MINDROOM_CLAUDE_CODE_SCRUB"
+_LAUNCHER = f"""\
+import csv, io, os, sys
+from contextlib import suppress
+
+try:
+    real = os.environ[{_CLI_ENV!r}]
+    names = next(csv.reader(io.StringIO(os.environ[{_SCRUB_ENV!r}])))
+    for name in (*names, {_CLI_ENV!r}, {_SCRUB_ENV!r}):
+        with suppress(KeyError):
+            del os.environ[name]
+    os.execv(real, [real, *sys.argv[1:]])
+except (KeyError, OSError, ValueError, StopIteration, csv.Error):
+    sys.exit("MindRoom's Claude Code launcher could not exec Claude Code.")
+"""
 # How Claude Code names the plans of a Claude subscription; an account without one is "Claude API".
 _PLAN = re.compile(r"Claude (Pro|Team|Enterprise|Max( \d+x)?)")
 _SIGN_IN_HINT = "Run `claude auth login` as the user that runs MindRoom."
@@ -143,8 +166,8 @@ def _startup_error(info: dict[str, Any] | None, provider: str) -> Authentication
         message = NOT_SIGNED_IN
     elif other not in (None, "claude.ai"):
         message = (
-            f"Claude Code would use a credential from {other} instead of your Claude sign-in. Remove it from "
-            "MindRoom's environment and run `claude auth login`, or use `provider: anthropic` to pay with a key."
+            f"Claude Code would use a credential from {other} instead of your Claude sign-in. Remove it and "
+            "run `claude auth login`, or use `provider: anthropic` to pay with a key."
         )
     elif account.get("apiProvider") != "firstParty" or not _PLAN.fullmatch(str(account.get("subscriptionType"))):
         message = f"Claude Code is not signed in to a Claude subscription. {_SIGN_IN_HINT}"
@@ -153,7 +176,7 @@ def _startup_error(info: dict[str, Any] | None, provider: str) -> Authentication
     return AuthenticationFailed(message, provider=provider, status_code=401)
 
 
-async def _refuse_unless_ready(client: ClaudeSDKClient, bridge: ToolBridge, provider: str) -> None:
+async def _refuse_unless_ready(client: ClaudeSDKClient, bridge: ToolBridge, provider: str, cli: Path) -> None:
     """Raise unless Claude Code may get a prompt: signed in to a subscription, with exactly the tools MindRoom offers.
 
     Its tool server connects a moment after it starts, so that is awaited.
@@ -161,7 +184,7 @@ async def _refuse_unless_ready(client: ClaudeSDKClient, bridge: ToolBridge, prov
     info = await client.get_server_info()
     # The rest of what Claude Code says at start-up names the account, which is never logged.
     version = (info or {}).get("claude_code_version")
-    logger.debug("claude_code_started", cli=client.options.cli_path or "bundled", version=version)
+    logger.debug("claude_code_started", cli=str(cli), version=version)
     if (refused := _startup_error(info, provider)) is not None:
         raise refused
     wanted = bridge.expected_inventory()
@@ -208,6 +231,29 @@ def _prepare(storage_root: Path, system: str, provider: str) -> tuple[Path, Path
     return cwd, prompt
 
 
+def _resolve_cli(configured_or_on_path: str | None, provider: str) -> Path:
+    """Use the builder's choice of executable, falling back to the SDK's bundled CLI only if unset."""
+    bundled_name = "claude.exe" if os.name == "nt" else "claude"
+    bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / bundled_name
+    cli = Path(configured_or_on_path or bundled).absolute()
+    if not cli.is_file() or not os.access(cli, os.X_OK):
+        raise AuthenticationFailed(_NOT_FOUND, provider=provider)
+    return cli
+
+
+def _prepare_launcher(home: Path, provider: str) -> Path:
+    """Publish a stable executable without rewriting the file another start may be executing."""
+    launcher = (home / "exec-claude").absolute()
+    payload = f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -IS -c {shlex.quote(_LAUNCHER)} "$@"\n'.encode()
+    if launcher.is_symlink() or not launcher.is_file() or launcher.read_bytes() != payload:
+        with open_directory_within_root(home) as directory:
+            atomic_write_bytes_at(directory, launcher.name, payload, file_mode=0o700)
+    if not os.access(launcher, os.X_OK):
+        msg = f"Claude Code launcher is not executable: {launcher}. Check its permissions and the storage mount."
+        raise ProviderUnavailable(msg, provider=provider)
+    return launcher
+
+
 type _RestKey = tuple[str, str, tuple[str, ...]]
 
 
@@ -238,19 +284,6 @@ class _SessionRegistry:
 
         Cancellation cannot cut short startup: only at its end do we know whether the process holds the slot.
         """
-        # MindRoom's environment is judged by the names of its variables alone, never by their values.
-        refused = sorted(
-            name
-            for name in os.environ
-            if (name.startswith(_REFUSED_PREFIXES) or name in _REFUSED_NAMES) and name not in _SET_FOR_THE_PROCESS
-        )
-        if refused:
-            msg = (
-                f"MindRoom's environment sets {', '.join(refused)}, which Claude Code could use in place of your Claude "
-                "sign-in or to send it somewhere else. Remove it from the environment MindRoom starts in (the `.env` "
-                "beside `config.yaml` is fine), or use `provider: anthropic`."
-            )
-            raise AuthenticationFailed(msg, provider=provider, status_code=401)
         freed = self._reserve(provider, replaces)
         starting = create_background_task(
             self._launch(freed, provider, storage_root, system, tools, options),
@@ -280,6 +313,7 @@ class _SessionRegistry:
         try:
             if freed is not None:
                 await freed
+            cli = _resolve_cli(options.get("cli_path"), provider)
             bridge = ToolBridge(names=tool_names(tools, provider))
             cwd, prompt = await asyncio.to_thread(_prepare, storage_root, system, provider)
             sdk_options = ClaudeAgentOptions(
@@ -295,22 +329,30 @@ class _SessionRegistry:
                 # Without it a user's ``@/path`` would make Claude Code read that file.
                 verbatim_prompts=True,
                 include_partial_messages=True,
-                env=_ISOLATION_ENV,
                 extra_args={"no-session-persistence": None},
                 max_buffer_size=_MAX_MESSAGE_BYTES,
                 client_app=f"mindroom/{__version__}",
                 stderr=lambda line: logger.debug("claude_code_stderr", line=line),
             )
+            sdk_options.cli_path = _prepare_launcher(cwd.parent, provider)
             if tools:
                 server = bridge.server(tools)
                 sdk_options.mcp_servers = {SERVER_NAME: {"type": "sdk", "name": SERVER_NAME, "instance": server}}
                 sdk_options.allowed_tools = [f"{TOOL_PREFIX}*"]
+            # The SDK merges options.env into the inherited environment; only the launcher can remove names.
+            names = io.StringIO()
+            csv.writer(names).writerow(
+                name
+                for name in os.environ
+                if (name.startswith(_SCRUB_PREFIXES) or name in _SCRUB_NAMES) and name not in _SET_FOR_THE_PROCESS
+            )
+            sdk_options.env = {**_ISOLATION_ENV, _CLI_ENV: str(cli), _SCRUB_ENV: names.getvalue()}
             process = await ClaudeProcess.open(sdk_options, messages=bridge.messages)
             session = LiveSession(process, bridge, provider)
             self.starting -= 1
             self.live.add(session)
             async with asyncio.timeout(_READY_SECONDS):
-                await _refuse_unless_ready(process.client, bridge, provider)
+                await _refuse_unless_ready(process.client, bridge, provider, cli)
         except BaseException as error:
             if session is None:
                 self.starting -= 1
