@@ -236,7 +236,7 @@ class _KubernetesRawResponse(Protocol):
 
 
 class _AppsApiProtocol(Protocol):
-    def read_namespaced_deployment(self, name: str, namespace: str) -> KubernetesDeployment: ...
+    def read_namespaced_deployment(self, name: str, namespace: str, **kwargs: object) -> KubernetesDeployment: ...
 
     def create_namespaced_deployment(self, namespace: str, body: dict[str, object]) -> KubernetesDeployment: ...
 
@@ -691,10 +691,10 @@ class KubernetesResourceManager:
             raise WorkerBackendError(msg)
         return [_deployment_snapshot(item) for item in payload["items"]]
 
-    def read_deployment(self, deployment_name: str) -> KubernetesDeployment | None:
+    def read_deployment(self, name: str, *, request_timeout: float | None = None) -> KubernetesDeployment | None:
         """Read one Deployment, returning ``None`` for 404s."""
         try:
-            return self._apps.read_namespaced_deployment(deployment_name, self.config.namespace)
+            return self._apps.read_namespaced_deployment(name, self.config.namespace, _request_timeout=request_timeout)
         except self.api_exception as exc:
             if exc.status == 404:
                 return None

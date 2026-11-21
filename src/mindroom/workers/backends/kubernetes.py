@@ -6,6 +6,7 @@ import logging
 import math
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -77,7 +78,7 @@ from .kubernetes_config import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from mindroom.constants import RuntimePaths
 
@@ -90,6 +91,7 @@ __all__ = [
 ]
 
 _READY_WORKER_REVALIDATE_SECONDS = 300.0
+_NAMED_WORKER_REQUEST_TIMEOUT_SECONDS = 5.0
 # When this process started. No reply can reach a named worker an earlier process created, because its key holds a
 # digest only that process's memory could produce.
 _PROCESS_STARTED_AT = time.time()
@@ -109,6 +111,17 @@ _RESTART_RUNTIME_HINT = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _named_worker_admission_read() -> Iterator[float]:
+    from urllib3 import exceptions  # noqa: PLC0415 - Keep the optional Kubernetes transport off the import path.
+
+    try:
+        yield _NAMED_WORKER_REQUEST_TIMEOUT_SECONDS
+    except (TimeoutError, exceptions.TimeoutError, exceptions.MaxRetryError) as exc:
+        msg = f"Kubernetes Deployment read failed during named worker admission: {exc}"
+        raise WorkerBackendError(msg) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,7 +483,8 @@ class KubernetesWorkerBackend:
 
     def has_named_worker(self, worker_key: str) -> bool:
         """Check one deployed named worker without listing the fleet."""
-        deployment = self._resources.read_deployment(self._worker_id(worker_key))
+        with _named_worker_admission_read() as timeout:
+            deployment = self._resources.read_deployment(self._worker_id(worker_key), request_timeout=timeout)
         if (
             deployment is None
             or deployment.metadata.deletion_timestamp is not None
@@ -486,9 +500,11 @@ class KubernetesWorkerBackend:
 
     def named_worker_keys(self) -> frozenset[str]:
         """Return the key of every named worker that exists, running or stopped, and is not being removed."""
+        with _named_worker_admission_read() as timeout:
+            deployments = self._resources.list_deployments(request_timeout=timeout)
         keys = (
             (deployment.metadata.annotations or {}).get(resources.ANNOTATION_WORKER_KEY, "")
-            for deployment in self._resources.list_deployments()
+            for deployment in deployments
             if deployment.metadata.deletion_timestamp is None
         )
         return frozenset(key for key in keys if pinned_worker_kind(key) == "named")

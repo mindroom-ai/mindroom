@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import pytest
+from urllib3.exceptions import ReadTimeoutError
 
 from mindroom import agents
 from mindroom.agent_cli.minimal_agent import minimal_turn
@@ -37,6 +38,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers import named as named_module
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends import kubernetes as kubernetes_backend_module
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from mindroom.workers.named import (
     NamedWorkerCall,
@@ -502,6 +504,40 @@ async def test_reusing_a_named_worker_does_not_depend_on_the_deployment_list(
         backend.workers.pop(worker.worker_key)
         with pytest.raises(WorkerBackendError, match="cannot list Deployments"):
             _run(backend, call)
+
+
+@pytest.mark.parametrize("method", ["list_namespaced_deployment", "read_namespaced_deployment"])
+@pytest.mark.asyncio
+async def test_kubernetes_admission_read_timeout_releases_the_lock(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+) -> None:
+    """Each admission read has a bounded request timeout, and a stall cannot wedge future calls."""
+    kubernetes, apps, _core = _named_backend(tmp_path)
+    monkeypatch.setattr(kubernetes_backend_module, "_NAMED_WORKER_REQUEST_TIMEOUT_SECONDS", 0.02, raising=False)
+    stall = threading.Event()
+    timeouts: list[float | None] = []
+
+    def stalled(*_args: object, _request_timeout: float | None = None, **_kwargs: object) -> object:
+        timeouts.append(_request_timeout)
+        assert not stall.wait(_request_timeout if _request_timeout is not None else 0.1)
+        msg = "Deployment read timed out"
+        raise ReadTimeoutError(None, "/apis/apps/v1", msg)
+
+    async with execution_resources(response=True):
+        warm = _call(runtime_paths, "warm")
+        first = _run(kubernetes, warm)
+        request = _call(runtime_paths, "new") if method.startswith("list_") else warm
+        with monkeypatch.context() as patch:
+            patch.setattr(apps, method, stalled)
+            with pytest.raises(WorkerBackendError, match=r"named worker admission.*read timed out"):
+                await asyncio.wait_for(asyncio.to_thread(_run, kubernetes, request), SETTLE_TIMEOUT_SECONDS)
+        assert timeouts == [0.02]
+        reused = await asyncio.wait_for(asyncio.to_thread(_run, kubernetes, warm), SETTLE_TIMEOUT_SECONDS)
+        assert (reused.worker_key, reused.incarnation) == (first.worker_key, first.incarnation)
+        assert reused.status == "ready"
 
 
 @pytest.mark.asyncio

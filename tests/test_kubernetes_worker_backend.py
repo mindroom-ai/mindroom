@@ -211,7 +211,13 @@ class _FakeAppsApi:
         self._active_delete_read_lag_by_name: dict[str, int] = {}
         self._created_count = 0
 
-    def read_namespaced_deployment(self, name: str, namespace: str) -> object:
+    def read_namespaced_deployment(
+        self,
+        name: str,
+        namespace: str,
+        *,
+        _request_timeout: float | None = None,
+    ) -> object:
         _ = namespace
         self.read_names.append(name)
         deployment = self.deployments.get(name)
