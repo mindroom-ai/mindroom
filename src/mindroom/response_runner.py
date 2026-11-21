@@ -123,6 +123,7 @@ from mindroom.teams.members import allow_direct_private_team_agents
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_models import set_thread_model_override
 from mindroom.timing import bind_reply_pipeline_timing, timed
+from mindroom.tool_jobs.conversation import unheld_jobs
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.agent_tools import room_turn_offers
@@ -840,10 +841,13 @@ class ResponseRunner:
             key.requester_id,
         )
         runtime = get_background_runtime(self.deps.runtime_paths)
-        if not waiting and runtime is not None and follow_up_jobs(await runtime.ended_jobs(key)):
-            return True
+        replies = self.deps.replies.store.replies
+        if not waiting and runtime is not None:
+            jobs = follow_up_jobs(await runtime.ended_jobs(key))
+            if await unheld_jobs(jobs, replies):
+                return True
         # A follow-up whose own reply a restart cut short answers again, though that reply collected the jobs.
-        reply = await self.deps.replies.store.replies.for_sources((request.response_envelope.source_event_id,))
+        reply = await replies.for_sources((request.response_envelope.source_event_id,))
         return reply is not None and not reply.terminal
 
     def _job_follow_up_request(self, key: ConversationKey, follow_up_id: str) -> ResponseRequest:

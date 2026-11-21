@@ -5,14 +5,16 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from mindroom import reply_lifecycle as rl
 from mindroom.config.agent import TeamConfig
+from mindroom.custom_tools.job import JobTools
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.event_journal.models import EventClass, EventKind, InboundEvent
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.reply_presentation import Presentation, encode_presentation
@@ -38,6 +40,7 @@ from mindroom.tool_jobs.follow_ups import (
     follow_up_event,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.notices import JobNotices, _turn_start_job_note, job_notice_context
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.bot_helpers import unique_room_send_responses
@@ -133,6 +136,7 @@ async def _ended(
     *,
     owner: ToolExecutionIdentity | None = None,
     source_event_id: str | None = None,
+    reply_id: str | None = None,
 ) -> None:
     """Start a job that ends with ``outcome`` at once, as the turn ``source_event_id`` started it."""
 
@@ -148,6 +152,7 @@ async def _ended(
         owner=owner or job_owner(),
         operation=operation,
         source_event_id=source_event_id,
+        reply_id=reply_id,
     )
     await wait_for_status(runtime, job_id, outcome.status)
 
@@ -586,6 +591,75 @@ async def _follow_up(principal: PrincipalStore, key: ConversationKey, follow_up_
     return event
 
 
+async def _admit_message(principal: PrincipalStore, key: ConversationKey, source: str) -> None:
+    await principal.admit(
+        InboundEvent(
+            event_id=source,
+            room_id=key.room_id,
+            thread_id=key.thread_id,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender=key.requester_id,
+            origin_server_ts=1,
+            source={"content": {"msgtype": "m.text", "body": "hello"}},
+        ),
+    )
+
+
+async def _claim_reply(
+    principal: PrincipalStore,
+    key: ConversationKey,
+    source: str,
+    *,
+    generation: str = "gen-1",
+) -> tuple[rl.Reply, rl.Span]:
+    await principal.replies.write_generation(generation)
+    claimed = (
+        await principal.replies.claim(
+            rl.ClaimRequest(
+                span_id=f"{source}:{generation}",
+                delivery_id=source,
+                sources=ResponseSources((source,), (source,)),
+                bot_generation=generation,
+                now_ns=10,
+                new_reply_id=f"reply:{source}",
+                entity_name=key.recipient,
+                room_id=key.room_id,
+                thread_id=key.thread_id,
+                membership_epoch=0,
+                empty_presentation=encode_presentation(Presentation()),
+            ),
+        )
+    ).transition
+    assert claimed.reply is not None
+    assert claimed.claimed is not None
+    return claimed.reply, claimed.claimed
+
+
+async def _end_span_for_replay(
+    principal: PrincipalStore,
+    span: rl.Span,
+    outcome: Literal[rl.SpanOutcome.LOST, rl.SpanOutcome.RELEASED, rl.SpanOutcome.SUPERSEDED] = rl.SpanOutcome.LOST,
+) -> None:
+    if outcome is rl.SpanOutcome.LOST:
+        await principal.replies.write_generation("gen-2")
+        await principal.replies.owner_lost("gen-2", now_ns=20)
+    else:
+        await principal.replies.decide(
+            reply_id=span.reply_id,
+            span_id=span.span_id,
+            decide=lambda reply, live: rl.release(reply, live, now_ns=20, outcome=outcome),
+        )
+    ended = await principal.replies.span(span.span_id)
+    assert ended is not None
+    assert ended.outcome is outcome
+    reply = await principal.replies.load(span.reply_id)
+    assert reply is not None
+    assert reply.state is rl.ReplyState.ACTIVE
+    assert reply.current_span_id is None
+    assert await principal.is_pending(span.sources.pending_event_ids[0])
+
+
 async def _runner_runtime(bot: AgentBot, tmp_path: Path) -> ToolJobRuntime:
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(bot.config, bot.runtime_paths)
@@ -737,6 +811,177 @@ async def test_a_follow_up_gives_way_to_a_message_already_waiting(tmp_path: Path
         await runtime.shutdown()
 
 
+@pytest.mark.parametrize("capped", [False, True])
+@pytest.mark.parametrize("outcome", [rl.SpanOutcome.LOST, rl.SpanOutcome.RELEASED, rl.SpanOutcome.SUPERSEDED])
+async def test_an_open_reply_holds_its_ended_jobs_until_it_ends(  # noqa: PLR0915 - Trace one reply through replay and settlement.
+    tmp_path: Path,
+    outcome: Literal[rl.SpanOutcome.LOST, rl.SpanOutcome.RELEASED, rl.SpanOutcome.SUPERSEDED],
+    *,
+    capped: bool,
+) -> None:
+    """A reply awaiting replay holds only its own jobs, even from the follow-up limit notice."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    key = _runner_key(bot)
+    principal = bot.journal_principal()
+    admitting = _admitting_bot()
+    admitting.journal_principal.return_value = principal
+    source = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT) if capped else "$human"
+    if capped:
+        await _follow_up(principal, key, source)
+    else:
+        await _admit_message(principal, key, source)
+    reply, span = await _claim_reply(principal, key, source)
+    runtime = await _runner_runtime(bot, tmp_path)
+    coordinator = job_coordinator(tmp_path, runtime, admitting)
+    owner = _runner_owner(key)
+    try:
+        for job in ("a", "b"):
+            await _ended(
+                runtime,
+                job,
+                BackgroundOutcome("completed", job),
+                owner=owner,
+                source_event_id=source,
+                reply_id=reply.reply_id,
+            )
+        await _end_span_for_replay(principal, span, outcome)
+        parent_jobs = await runtime.ended_jobs(key)
+        assert [job.job_id for job in parent_jobs] == ["a", "b"]
+        with patch(_SEND, AsyncMock()) as send:
+            await coordinator._admit_follow_ups(runtime)
+            assert admitting.admit_job_follow_up.await_count == 0
+            send.assert_not_awaited()
+            if not capped:
+                event = await _follow_up(principal, key, "job-follow-up:already-admitted")
+                request = runner._job_follow_up_request(key, event.event_id)
+                assert await runner._generate_job_follow_up(request) == Unclaimed(UnclaimedReason.NOT_DUE)
+
+                await _ended(
+                    runtime,
+                    "orphan",
+                    BackgroundOutcome("completed", "done"),
+                    owner=owner,
+                    reply_id="missing-reply",
+                )
+                assert await principal.replies.load("missing-reply") is None
+                orphan = next(job for job in await runtime.ended_jobs(key) if job.job_id == "orphan")
+                await coordinator._admit_follow_ups(runtime)
+                admitting.admit_job_follow_up.assert_awaited_once_with(key, _follow_up_event_id(key, (orphan,), 1))
+                collected = await runtime.wait("orphan", owner=owner, depth=0, timeout=0)
+                await runtime.acknowledge_wait("orphan", collected.claim)
+
+            replay, live = await _claim_reply(principal, key, source, generation="gen-2")
+            assert replay.reply_id == reply.reply_id
+            await coordinator._admit_follow_ups(runtime)
+            assert admitting.admit_job_follow_up.await_count == (0 if capped else 1)
+            send.assert_not_awaited()
+            ended = await principal.replies.decide(
+                reply_id=replay.reply_id,
+                span_id=live.span_id,
+                decide=lambda row, current: rl.suppress(row, current, reason="suppressed", now_ns=30),
+            )
+            assert ended.transition.reply is not None
+            assert ended.transition.reply.terminal
+            await coordinator._admit_follow_ups(runtime)
+            if capped:
+                send.assert_awaited_once()
+                admitting.admit_job_follow_up.assert_not_awaited()
+            else:
+                assert admitting.admit_job_follow_up.await_count == 2
+                assert admitting.admit_job_follow_up.await_args.args == (key, _follow_up_event_id(key, parent_jobs, 1))
+                send.assert_not_awaited()
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.parametrize("viewer", ["replay", "other", "no_span", "no_store"])
+async def test_ended_jobs_of_a_lost_reply_are_visible_to_its_replay(tmp_path: Path, viewer: str) -> None:
+    """Other turns with a reply store neither announce nor batch-collect a reply's held jobs."""
+    bot = _bot(tmp_path)
+    key = _runner_key(bot)
+    principal = bot.journal_principal()
+    owner = _runner_owner(key)
+    await _admit_message(principal, key, "$human")
+    reply, span = await _claim_reply(principal, key, "$human")
+    runtime = await _runner_runtime(bot, tmp_path)
+    try:
+        await _ended(
+            runtime,
+            "work",
+            BackgroundOutcome("completed", "the result"),
+            owner=owner,
+            reply_id=reply.reply_id,
+        )
+        await _end_span_for_replay(principal, span)
+        context = replace(
+            job_context(tmp_path, owner),
+            runtime_paths=bot.runtime_paths,
+            membership=None if viewer == "no_store" else principal,
+        )
+        async with bot._reply_runtime.span_scope() as slot:
+            if viewer in {"replay", "other"}:
+                source = "$human" if viewer == "replay" else "$other"
+                if viewer == "other":
+                    await _admit_message(principal, key, source)
+                current, live = await _claim_reply(principal, key, source, generation="gen-2")
+                assert (current.reply_id == reply.reply_id) == (viewer == "replay")
+                slot.handle = SpanHandle(bot._reply_runtime, live, current, Presentation())
+            with tool_runtime_context(context), job_notice_context(JobNotices()):
+                note = await _turn_start_job_note()
+                result = await JobTools(bot.runtime_paths).job(action="collect")
+        if viewer in {"replay", "no_store"}:
+            assert note is not None
+            assert "work" in note
+            assert 'job(action="collect")' in note
+            assert "the result" in result
+        else:
+            assert note is None
+            assert result == "No ended background jobs."
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_paused_parent_reply_does_not_hold_its_ended_jobs(tmp_path: Path) -> None:
+    """A reply waiting on approval still lets a follow-up report its jobs."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    key = _runner_key(bot)
+    principal = bot.journal_principal()
+    admitting = _admitting_bot()
+    admitting.journal_principal.return_value = principal
+    await _admit_message(principal, key, "$human")
+    reply, span = await _claim_reply(principal, key, "$human")
+    paused = await principal.replies.decide(
+        reply_id=reply.reply_id,
+        span_id=span.span_id,
+        decide=lambda row, live: rl.pause(
+            row,
+            live,
+            rl.PauseWrite(row.presentation, row.revision, None),
+            in_place=True,
+            now_ns=20,
+        ),
+    )
+    assert paused.transition.reply is not None
+    assert paused.transition.reply.state is rl.ReplyState.PAUSED
+    runtime = await _runner_runtime(bot, tmp_path)
+    try:
+        await _ended(
+            runtime,
+            "work",
+            BackgroundOutcome("completed", "done"),
+            owner=_runner_owner(key),
+            reply_id=reply.reply_id,
+        )
+        await job_coordinator(tmp_path, runtime, admitting)._admit_follow_ups(runtime)
+        admitting.admit_job_follow_up.assert_awaited_once()
+        request = runner._job_follow_up_request(key, admitting.admit_job_follow_up.await_args.args[1])
+        assert await runner._follow_up_due(request)
+    finally:
+        await runtime.shutdown()
+
+
 async def test_a_follow_up_does_not_give_way_to_another_persons_message(tmp_path: Path) -> None:
     """Another person's waiting message gets a reply that lists only their jobs, so the follow-up still reports these."""
     bot = _bot(tmp_path)
@@ -772,8 +1017,9 @@ async def test_a_follow_up_is_not_due_for_jobs_past_the_limit(tmp_path: Path) ->
         await runtime.shutdown()
 
 
-async def test_a_follow_up_a_restart_cut_short_answers_again(tmp_path: Path) -> None:
-    """A follow-up whose reply a restart cut short runs again, though that reply already collected its jobs."""
+@pytest.mark.parametrize("waiting", [False, True])
+async def test_a_follow_up_a_restart_cut_short_answers_again(tmp_path: Path, *, waiting: bool) -> None:
+    """A follow-up can resume its own reply even when no jobs are available for a new reply."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     key = _runner_key(bot)
@@ -783,30 +1029,34 @@ async def test_a_follow_up_a_restart_cut_short_answers_again(tmp_path: Path) -> 
     try:
         await _ended(runtime, "work", BackgroundOutcome("completed", "done"), owner=owner)
         await _follow_up(principal, key, "job-follow-up:1")
-        await principal.replies.write_generation("gen-1")
-        claimed = (
-            await principal.replies.claim(
-                rl.ClaimRequest(
-                    span_id="span-1",
-                    delivery_id="job-follow-up:1",
-                    sources=ResponseSources(("job-follow-up:1",), ("job-follow-up:1",)),
-                    bot_generation="gen-1",
-                    now_ns=10,
-                    new_reply_id="reply-1",
-                    entity_name=key.recipient,
-                    room_id=key.room_id,
-                    thread_id=key.thread_id,
-                    membership_epoch=0,
-                    empty_presentation=encode_presentation(Presentation()),
-                ),
+        _, span = await _claim_reply(principal, key, "job-follow-up:1")
+        if not waiting:
+            await _ended(
+                runtime,
+                "own",
+                BackgroundOutcome("completed", "done"),
+                owner=owner,
+                source_event_id="job-follow-up:1",
+                reply_id=span.reply_id,
             )
-        ).transition
-        assert claimed.reply is not None
+        await _end_span_for_replay(principal, span)
         collected = await runtime.wait("work", owner=owner, depth=0, timeout=0)
         await runtime.acknowledge_wait("work", collected.claim)
-        # Its own unfinished reply answers before a waiting message of the same requester does.
-        _wait_for_next_turn(runner, key, requester_id=key.requester_id)
+        if waiting:
+            _wait_for_next_turn(runner, key, requester_id=key.requester_id)
+            assert await runtime.ended_jobs(key) == ()
+        else:
+            assert [job.job_id for job in await runtime.ended_jobs(key)] == ["own"]
+            another = runner._job_follow_up_request(key, "job-follow-up:2")
+            assert not await runner._follow_up_due(another)
         request = runner._job_follow_up_request(key, "job-follow-up:1")
+        assert (
+            runner.lifecycle_coordinator.has_waiting_messages_from(
+                request.response_envelope.target,
+                key.requester_id,
+            )
+            is waiting
+        )
         assert await runner._follow_up_due(request)
     finally:
         await runtime.shutdown()
