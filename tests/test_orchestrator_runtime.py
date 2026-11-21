@@ -1214,7 +1214,6 @@ class TestAgentBot(AgentBotTestBase):
             process_env={"MINDROOM_TAILNET_SSH_GATEWAY_TOKEN": "tok", "MINDROOM_TAILNET_SSH_PORT": str(port)},
         )
         answers: list[tuple[int, object]] = []
-        statuses: list[object] = []
 
         class ReturningServer:
             should_exit = True
@@ -1231,7 +1230,7 @@ class TestAgentBot(AgentBotTestBase):
                 del on_started
 
             async def serve(self) -> None:
-                statuses.append(api_config_lifecycle.app_state(api_main.app).tailnet_ssh_status)
+                assert api_config_lifecycle.app_state(api_main.app).tailnet_ssh_status == GatewayStatus()
                 async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
                     for headers in ({}, {"Authorization": "Bearer tok"}):
                         answer = await client.get("/links", headers=headers)
@@ -1244,7 +1243,6 @@ class TestAgentBot(AgentBotTestBase):
             await _run_api_server("127.0.0.1", 8765, "INFO", _serving_runtime(runtime_paths), shutdown_requested)
 
         assert answers == [(401, {"detail": "Unauthorized"}), (200, [])]
-        assert statuses == [GatewayStatus()]
         assert api_config_lifecycle.app_state(api_main.app).tailnet_ssh_status is None
         socket.create_server(("127.0.0.1", port)).close()
 
