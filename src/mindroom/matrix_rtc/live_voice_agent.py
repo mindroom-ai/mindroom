@@ -230,6 +230,7 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             self._provider_close_task: asyncio.Task[None] | None = None
             self._last_recovered_content_close: float | None = None
             self._recovery_deadline: asyncio.TimerHandle | None = None
+            self._awaiting_replacement_start = False
             self._exiting = False
             self._exit_task: asyncio.Task[None] | None = None
             self._voice_started_at = time.time()
@@ -249,11 +250,13 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             session.on("openai_client_event_queued", self._on_client_event)
 
         def _on_delegation(self, event: GPTLiveDelegation) -> None:
-            # The closed socket cannot start more work while we wait for the replacement.
+            # A delegation can follow the accepted start in the same receive-loop turn.
+            self._confirm_replacement_started()
             if self._delegations is not None and self._recovery_deadline is None:
                 self._delegations.submit(event, self.chat_ctx)
 
         def _on_reconnected(self, _event: RealtimeSessionReconnectedEvent) -> None:
+            self._awaiting_replacement_start = self._recovery_deadline is not None
             if self._delegations is not None:
                 self._delegations.on_reconnected()
 
@@ -266,8 +269,10 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             if event_type == "session.commentary.appended" and self._delegations is not None:
                 self._delegations.on_commentary_acked(event)
             if event_type == "session.started":
-                self._cancel_recovery_deadline()
                 self._voice_started_at = time.time()
+                if self._awaiting_replacement_start:
+                    # The SDK handles this event synchronously after the raw callback.
+                    asyncio.get_running_loop().call_soon(self._confirm_replacement_started)
             if event_type in {"session.usage.updated", "session.closed"}:
                 self._capture_usage(event)
             if event_type == "session.closed":
@@ -316,12 +321,21 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             if not ending:
                 self._end_provider_session(retryable=retryable)
 
+        def _confirm_replacement_started(self) -> None:
+            # The SDK resets session_id on reconnect and assigns it only after accepting session.started.
+            if self._awaiting_replacement_start and self._live_session is not None and self._live_session.session_id:
+                self._cancel_recovery_deadline()
+
         def _cancel_recovery_deadline(self) -> None:
+            self._awaiting_replacement_start = False
             if self._recovery_deadline is not None:
                 self._recovery_deadline.cancel()
                 self._recovery_deadline = None
 
         def _on_recovery_timeout(self) -> None:
+            self._confirm_replacement_started()
+            if self._recovery_deadline is None:
+                return
             logger.warning("call_live_session_recovery_timed_out")
             self._end_provider_session(retryable=True)
 

@@ -641,14 +641,15 @@ async def test_live_sdk_ends_content_close_when_commentary_is_still_queued(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("send_close_frame", [False, True], ids=["close-frame-stalls", "session-start-stalls"])
+@pytest.mark.parametrize("stall", ["close-frame-stalls", "missing-ack", "malformed-ack"])
 async def test_live_sdk_ends_stalled_content_close_recovery(
     provider: _ProviderHTTP,
     monkeypatch: pytest.MonkeyPatch,
-    send_close_frame: bool,
+    stall: str,
 ) -> None:
     """A graceful close without a successful replacement handshake cannot strand the call."""
-    monkeypatch.setattr(live_voice_agent, "_CONTENT_CLOSE_RECOVERY_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(live_voice_agent, "_CONTENT_CLOSE_RECOVERY_TIMEOUT_SECONDS", 0.2)
+    send_close_frame = stall != "close-frame-stalls"
     provider.acknowledge_reconnect = False
     respond = AsyncMock(return_value=CallAgentResponse("Do not send this."))
     terminated: list[bool] = []
@@ -672,6 +673,11 @@ async def test_live_sdk_ends_stalled_content_close_recovery(
         await bridge.start_agent(options)
         await provider.socket.next_event("session.start")
         provider.socket.content_close(send_close_frame=send_close_frame)
+        if stall == "malformed-ack":
+            await asyncio.wait_for(provider.connected_again.wait(), 2)
+            replacement = provider.sockets[1]
+            await replacement.next_event("session.start")
+            replacement.feed({"type": "session.started", "session": []})
         if not send_close_frame:
             provider.socket.feed(
                 {"type": "session.delegation.created", "delegation": {"id": "late", "target": "client"}},
