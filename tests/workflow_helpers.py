@@ -76,6 +76,7 @@ from tests.tool_job_helpers import (
     call_job_tool,
     continue_stopped_jobs,
     job_actor,
+    stopped_job_coordinator,
     tool_job_runtime,
     toolkit_job_tools,
 )
@@ -751,6 +752,18 @@ class WorkflowStack:
         """Run the job coordinator's pass that continues the jobs a restart stopped, with the owner's access granted."""
         config = with_responder_access(self.context.config, self.context.agent_name, users=[self.context.requester_id])
         await continue_stopped_jobs(self.jobs, config, self.context.runtime_paths, self.context)
+
+    async def follow_ups(self) -> list[str]:
+        """Run the job coordinator's follow-up pass and return the IDs of the follow-up turns it admits.
+
+        A follow-up delivers the ended jobs nobody collected to their conversation. Its ID names the conversation and
+        those jobs, and the journal admits one ID once, so the same ID from two passes or two primaries is one delivery.
+        """
+        config = with_responder_access(self.context.config, self.context.agent_name, users=[self.context.requester_id])
+        coordinator = stopped_job_coordinator(self.jobs, config, self.context.runtime_paths, self.context)
+        await coordinator._admit_follow_ups(self.jobs)
+        admitted = coordinator.bot_provider(self.context.agent_name).admit_job_follow_up
+        return [call.args[1] for call in admitted.await_args_list]
 
     async def until(self, predicate: Callable[[], object]) -> None:
         """Wait until *predicate* holds."""

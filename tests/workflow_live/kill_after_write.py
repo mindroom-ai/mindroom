@@ -9,9 +9,13 @@ asks the Helper to start a run whose only call appends one line to a file.
 It waits for the barrier's own `.reached` file, never for the line, so the write is certain to have happened.
 Then it kills the backend with SIGKILL, starts it again without the barrier, waits for the run to end, and prints
 
-    lines=<lines in the file> node=<state of the call> reports=<replies in the thread that carry the run's result>
+    lines=<lines in the file> node=<state of the call> attempt=<attempts of the run> run=<how the run ended>
+    deliveries=<follow-up turns that delivered the run's job> reports=<replies that carry the run's result>
 
-Expected: `lines=1 node=indeterminate reports=0` for before-receipt, `lines=1 node=cached reports=1` for after-receipt.
+Expected for before-receipt: `lines=1 node=indeterminate attempt=2 run=failed deliveries=1 reports=0`.
+Expected for after-receipt: `lines=1 node=cached attempt=2 run=completed deliveries=1 reports=1`.
+`attempt=2` shows that the run was replayed after the kill, and `deliveries` is counted from the journal's follow-up
+events for the run's job, not from the text of a reply.
 It exits 0 when the line it printed is the expected one.
 Standard library only; Linux only, because it reads the backend's command and environment from /proc.
 """
@@ -20,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import secrets
@@ -40,7 +45,10 @@ if TYPE_CHECKING:
 _SLOTS = Path("/tmp/mindroom-slots")  # noqa: S108  # where `just live up` keeps a slot's state
 _STACKS = Path(os.environ.get("E2E_AGENT_STACK_ROOT") or "/tmp/mindroom-client-agents")  # noqa: S108
 _ENDED_RUN_STATES = frozenset({"completed", "failed", "cancelled", "interrupted"})
-_EXPECTED = {"before-receipt": "lines=1 node=indeterminate reports=0", "after-receipt": "lines=1 node=cached reports=1"}
+_EXPECTED = {
+    "before-receipt": "lines=1 node=indeterminate attempt=2 run=failed deliveries=1 reports=0",
+    "after-receipt": "lines=1 node=cached attempt=2 run=completed deliveries=1 reports=1",
+}
 # The engine's barrier that stands for each of the two states; the earlier one is released for the later one.
 _BARRIERS = {"before-receipt": "before_receipt", "after-receipt": "before_settle"}
 
@@ -139,11 +147,12 @@ class Deployment:
         return Backend(self, pid, command, directory, dict(pairs))
 
     def give_workflow_toolkit(self) -> None:
-        """Give the Helper `workflow`, and let its shell and scripts run on this machine when no worker is routed."""
+        """Give the Helper `workflow` and `file`, and let its shell and scripts run here when no worker is routed."""
         path = self.directory / "config.yaml"
         text = path.read_text()
-        if "      - workflow\n" not in text:
-            text = text.replace("      - shell\n", "      - shell\n      - workflow\n", 1)
+        for toolkit in ("workflow", "file"):
+            if f"      - {toolkit}\n" not in text:
+                text = text.replace("      - shell\n", f"      - shell\n      - {toolkit}\n", 1)
         if "allow_shell_without_worker" not in text and "worker_tools" not in text:
             text = text.replace("defaults:\n", "defaults:\n  allow_shell_without_worker: true\n", 1)
         path.write_text(text)
@@ -206,6 +215,20 @@ class Deployment:
                 return None
             nodes = connection.execute("SELECT * FROM workflow_nodes WHERE run_id = ? ORDER BY seq", (run["run_id"],))
             return dict(run), [dict(node) for node in nodes]
+
+    def deliveries(self, job_id: str) -> int:
+        """Count the follow-up turns the journal admitted to deliver *job_id* alone, one row per delivery.
+
+        A follow-up's event ID is `job-follow-up:<conversation>:<digest of its jobs>:<how many in a row>`.
+        """
+        digest = hashlib.sha256(job_id.encode()).hexdigest()[:16]
+        journal = self.directory / "storage" / "tracking" / "event_journal.db"
+        with contextlib.closing(sqlite3.connect(f"file:{journal}?mode=ro", uri=True, timeout=10)) as connection:
+            count = connection.execute(
+                "SELECT COUNT(DISTINCT event_id) FROM journal_events WHERE event_id LIKE ?",
+                (f"job-follow-up:%:{digest}:%",),
+            ).fetchone()
+        return int(count[0])
 
     def ended_run(self, token: str, timeout: float) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Wait until the run of *token* reached a terminal state and return it with its nodes."""
@@ -318,6 +341,11 @@ def node_state(run: dict[str, Any], node: dict[str, Any]) -> str:
     return "cached" if reused else str(node["state"])
 
 
+def outcome(deployment: Deployment, run: dict[str, Any]) -> str:
+    """Name how the run ended and how often its job was delivered, as the result line shows it."""
+    return f"attempt={run['attempt']} run={run['state']} deliveries={deployment.deliveries(str(run['job_id']))}"
+
+
 def main() -> int:
     """Run the fault once and print its result line; exit 0 when it is the expected one."""
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 1)[0])
@@ -353,8 +381,10 @@ def main() -> int:
     run, nodes = deployment.ended_run(token, 600)
     time.sleep(args.settle)
     say(f"processes of the killed backend still running: {backend.survivors(killed) or 'none'}")
-    reports = deployment.replies_with(root, report)
-    line = f"lines={counter_lines(deployment, counter)} node={node_state(run, nodes[0])} reports={reports}"
+    line = (
+        f"lines={counter_lines(deployment, counter)} node={node_state(run, nodes[0])} {outcome(deployment, run)} "
+        f"reports={deployment.replies_with(root, report)}"
+    )
     print(line, flush=True)
     say(f"run {run['run_id']} ended {run['state']} on attempt {run['attempt']}; expected `{_EXPECTED[args.barrier]}`")
     return 0 if line == _EXPECTED[args.barrier] else 1

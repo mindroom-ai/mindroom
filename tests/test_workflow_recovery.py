@@ -7,7 +7,9 @@ A killed primary is the harness's `restart(kill=True)`: its tasks stop where the
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import sqlite3
 import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -35,6 +37,7 @@ from mindroom.workflow_runs.store import WorkflowRunNotFoundError
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.tool_job_helpers import wait_for_status
 from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflow_stack
+from tests.workflow_live import kill_after_write
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -98,13 +101,24 @@ async def _killed_at(stack: WorkflowStack, barrier: Path, name: str, monkeypatch
     monkeypatch.delenv("MINDROOM_WORKFLOW_FAULT_DIR")
 
 
+async def _delivery(stack: WorkflowStack, job_id: str) -> tuple[list[str], str, object]:
+    """Return what reaches the conversation of an ended job nobody collected: the follow-ups, its status, its payload."""
+    follow_ups = await stack.follow_ups()
+    [job] = [job for job in stack.jobs.retained_jobs() if job.job_id == job_id]
+    return follow_ups, job.status, await stack.collect(job)
+
+
 @pytest.mark.asyncio
 async def test_crash_after_the_write_and_its_receipt_copies_the_result_and_writes_once(
     stack: WorkflowStack,
     barrier: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The acceptance test, receipt saved: the node was never settled, and the replay reads the receipt instead."""
+    """The acceptance test, receipt saved: one write, the result read back in attempt 2, one successful report.
+
+    The node was never settled, and the replay reads the receipt instead. The report is delivered once, also when
+    the primary is killed again after the delivery and before the conversation acknowledged it.
+    """
     handle = await _started(stack)
     await _killed_at(stack, barrier, "before_settle", monkeypatch)
     node = stack.store.get_node(stack.run_id, "@0")
@@ -115,11 +129,30 @@ async def test_crash_after_the_write_and_its_receipt_copies_the_result_and_write
     receipt = await stack.submit("@0", "tool", _A)
 
     assert (receipt.state, receipt.result, receipt.cached) == ("completed", "appended", True)
-    assert stack.counting_tool.lines == ["a"]
     await stack.finish_attempt(result="report")
-    job = await _ended_job(stack, handle["job_id"])
-    assert (job.status, await stack.collect(job)) == ("completed", "report")
+    await wait_for_status(stack.jobs, handle["job_id"], "completed")
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.attempt, run.result, run.job_id) == (
+        WorkflowRunState.COMPLETED,
+        2,
+        "report",
+        handle["job_id"],
+    )
+    [follow_up], status, payload = await _delivery(stack, handle["job_id"])
+    assert (status, payload) == ("completed", "report")
+
+    # Delivered and not acknowledged yet: a second kill here delivers the same follow-up, and starts nothing.
+    await stack.restart(kill=True)
+    assert await stack.recover() == []
+    await stack.continue_jobs()
+    assert await _delivery(stack, handle["job_id"]) == ([follow_up], "completed", "report")
+    claimed = await stack.jobs.wait(handle["job_id"], owner=stack.context.execution_identity, depth=0)
+    await stack.jobs.acknowledge_wait(handle["job_id"], claimed.claim)
+    assert await stack.follow_ups() == []
+
     assert [job.job_id for job in stack.jobs.retained_jobs()] == [handle["job_id"]]
+    assert (stack.store.get_run(stack.run_id).attempt, len(stack.script_store.list_runs())) == (2, 2)
+    assert stack.counting_tool.lines == ["a"]
 
 
 @pytest.mark.asyncio
@@ -128,7 +161,10 @@ async def test_crash_after_the_write_without_a_receipt_is_indeterminate_and_writ
     barrier: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The acceptance test, no receipt: the write happened and nothing says so, so the call is never issued again."""
+    """The acceptance test, no receipt: one write, one delivery of the failure in attempt 2, no successful report.
+
+    The write happened and nothing says so, so the call is never issued again without `rerun`.
+    """
     handle = await _started(stack)
     await _killed_at(stack, barrier, "before_receipt", monkeypatch)
     assert not (barrier / "before_settle.reached").exists()
@@ -138,9 +174,46 @@ async def test_crash_after_the_write_without_a_receipt_is_indeterminate_and_writ
 
     assert receipt.error is not None
     assert (receipt.state, receipt.error["kind"], stack.counting_tool.lines) == ("failed", "indeterminate", ["a"])
-    await stack.finish_attempt(error="ToolError: This call may already have run")
-    job = await _ended_job(stack, handle["job_id"])
-    assert job.status == "failed"
+    failure = f"ToolError: {receipt.error['message']}"
+    await stack.finish_attempt(error=failure)
+    await wait_for_status(stack.jobs, handle["job_id"], "failed")
+    run = stack.store.get_run(stack.run_id)
+    node = stack.store.get_node(stack.run_id, "@0")
+    assert node is not None
+    assert (run.state, run.attempt, run.result, node.state) == (
+        WorkflowRunState.FAILED,
+        2,
+        None,
+        WorkflowNodeState.INDETERMINATE,
+    )
+    [follow_up], status, payload = await _delivery(stack, handle["job_id"])
+    assert (status, payload) == ("failed", failure)
+    assert await stack.follow_ups() == [follow_up]
+    assert [job.status for job in stack.jobs.retained_jobs()] == ["failed"]
+    assert (len(stack.script_store.list_runs()), stack.counting_tool.lines) == (2, ["a"])
+
+
+@pytest.mark.asyncio
+async def test_kill_after_the_node_was_settled_and_before_the_script_reported_reuses_it_and_reports_once(
+    stack: WorkflowStack,
+) -> None:
+    """The node holds its result and the run has no report yet: attempt 2 reads the node back and reports once."""
+    handle = await _started(stack)
+    assert await stack.result("@0", "tool", _A) == "appended"
+    settled = stack.store.get_node(stack.run_id, "@0")
+    assert settled is not None
+
+    await stack.restart(kill=True)
+    await stack.next_primary()
+
+    receipt = await stack.submit("@0", "tool", _A)
+    node = stack.store.get_node(stack.run_id, "@0")
+    assert node is not None
+    assert (settled.state, receipt.cached, node.generation, node.attempt) == (WorkflowNodeState.COMPLETED, True, 1, 2)
+    await stack.finish_attempt(result="report")
+    await wait_for_status(stack.jobs, handle["job_id"], "completed")
+    [_], status, payload = await _delivery(stack, handle["job_id"])
+    assert (status, payload, stack.store.get_run(stack.run_id).attempt) == ("completed", "report", 2)
     assert stack.counting_tool.lines == ["a"]
 
 
@@ -953,3 +1026,52 @@ async def test_resume_that_was_admitted_and_killed_before_it_took_the_run_takes_
     await stack.finish_attempt(result="the second report")
     job = await _ended_job(stack, resumed["job_id"])
     assert (await stack.collect(job), stack.counting_tool.lines) == ("the second report", ["a", "a"])
+
+
+@pytest.mark.asyncio
+async def test_live_fault_script_counts_the_follow_ups_of_one_job(stack: WorkflowStack, tmp_path: Path) -> None:
+    """`tests/workflow_live` reads deliveries from the journal by the ID the runtime gives a job's follow-up."""
+    handle = await _started(stack)
+    await stack.finish_attempt(result="report")
+    await wait_for_status(stack.jobs, handle["job_id"], "completed")
+    [first] = await stack.follow_ups()
+    slot = tmp_path / "slot"
+    (slot / "storage" / "tracking").mkdir(parents=True)
+    with contextlib.closing(sqlite3.connect(slot / "storage" / "tracking" / "event_journal.db")) as journal:
+        journal.execute("CREATE TABLE journal_events (principal_id TEXT, event_id TEXT)")
+        other = "job-follow-up:0123456789abcdef:0123456789abcdef:1"
+        journal.executemany("INSERT INTO journal_events VALUES ('helper', ?)", [(first,), (other,)])
+        journal.commit()
+    deployment = kill_after_write.Deployment(50, {}, slot)
+
+    assert first.startswith("job-follow-up:")
+    assert (deployment.deliveries(handle["job_id"]), deployment.deliveries("another-job")) == (1, 0)
+
+
+def test_live_fault_script_finds_a_slot_that_only_the_agent_stack_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Docker-worker stack has no `just live` state: the stack's own `state.json` names the same account."""
+    state = {
+        "homeserver": "http://127.0.0.1:28141",
+        "tester": {"userId": "@tester:matrix.localhost", "username": "tester", "accessToken": "placeholder"},
+        "rooms": {"lobby": "!lobby:matrix.localhost", "space": "!space:matrix.localhost"},
+    }
+    (tmp_path / "slot-41").mkdir()
+    (tmp_path / "slot-41" / "state.json").write_text(json.dumps(state))
+    monkeypatch.setattr(kill_after_write, "_SLOTS", tmp_path / "no-live-slots")
+    monkeypatch.setattr(kill_after_write, "_STACKS", tmp_path)
+
+    deployment = kill_after_write.Deployment.find(41)
+
+    assert (deployment.directory, deployment.live["lobby"]["roomId"]) == (
+        tmp_path / "slot-41",
+        "!lobby:matrix.localhost",
+    )
+    assert (deployment.live["homeserver"], deployment.live["userId"]) == (
+        state["homeserver"],
+        "@tester:matrix.localhost",
+    )
+    with pytest.raises(kill_after_write.LiveError, match="no ready live deployment on slot 42"):
+        kill_after_write.Deployment.find(42)

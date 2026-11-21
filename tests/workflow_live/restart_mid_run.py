@@ -9,9 +9,10 @@ most of the time.
 When `--after` calls have completed the script stops the backend with SIGTERM, starts it again, waits for the run to
 end, and prints
 
-    lines=<lines in the file> nodes=<completed calls>/<calls> attempts=<attempts of the run> reports=<replies with its result>
+    lines=<lines in the file> nodes=<completed calls>/<calls> attempt=<attempts of the run> run=<how the run ended>
+    deliveries=<follow-up turns that delivered the run's job> reports=<replies with its result>
 
-Expected with the defaults: `lines=6 nodes=6/6 attempts=2 reports=1`.
+Expected with the defaults: `lines=6 nodes=6/6 attempt=2 run=completed deliveries=1 reports=1`.
 It exits 0 when every write happened once, the run completed on a second attempt, and one reply carries its result.
 Standard library only; Linux only.
 """
@@ -28,6 +29,7 @@ from tests.workflow_live.kill_after_write import (
     LiveError,
     add_send_options,
     counter_lines,
+    outcome,
     say,
     start_run,
     until,
@@ -83,12 +85,12 @@ def main() -> int:
     time.sleep(args.settle)
     completed = sum(node["state"] == "completed" for node in nodes)
     line = (
-        f"lines={counter_lines(deployment, counter)} nodes={completed}/{len(nodes)} "
-        f"attempts={run['attempt']} reports={deployment.replies_with(root, report)}"
+        f"lines={counter_lines(deployment, counter)} nodes={completed}/{len(nodes)} {outcome(deployment, run)} "
+        f"reports={deployment.replies_with(root, report)}"
     )
     print(line, flush=True)
-    say(f"run {run['run_id']} ended {run['state']}")
-    return 0 if line == f"lines={args.writes} nodes={args.writes}/{args.writes} attempts=2 reports=1" else 1
+    writes = args.writes
+    return 0 if line == f"lines={writes} nodes={writes}/{writes} attempt=2 run=completed deliveries=1 reports=1" else 1
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ from mindroom.script_runs.worker_client import ScriptWorkerClient
 from mindroom.workflow_runs.engine import WorkflowEngine
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, bound_worker_launch_config
+from tests.tool_job_helpers import wait_for_status
 from tests.workflow_helpers import WorkflowStack, workflow_stack
 
 if TYPE_CHECKING:
@@ -191,7 +192,8 @@ async def test_real_run_killed_after_the_receipt_resumes_writes_once_and_reports
     handle, first = await _kill_at(local_stack, tmp_path, "before_settle", monkeypatch)
 
     await local_stack.next_primary()
-    job = await _ended_job(local_stack, handle["job_id"])
+    await wait_for_status(local_stack.jobs, handle["job_id"], "completed")
+    [job] = local_stack.jobs.retained_jobs()
 
     run, [node] = local_stack.engine.status(local_stack.run_id)
     attempt = local_stack.script_store.get_run(first)
@@ -200,7 +202,10 @@ async def test_real_run_killed_after_the_receipt_resumes_writes_once_and_reports
     assert (node.state, node.generation, node.attempt) == (WorkflowNodeState.COMPLETED, 1, 2)
     assert (run.state, run.result, run.attempt) == (WorkflowRunState.COMPLETED, {"appended": "appended"}, 2)
     assert (job.status, json.loads(str(await local_stack.collect(job)))) == ("completed", {"appended": "appended"})
-    assert [job.job_id for job in local_stack.jobs.retained_jobs()] == [handle["job_id"]]
+    # One job, and one follow-up that delivers it, however often the pass that admits follow-ups runs.
+    [follow_up] = await local_stack.follow_ups()
+    assert (job.job_id, await local_stack.follow_ups()) == (handle["job_id"], [follow_up])
+    assert len(local_stack.script_store.list_runs()) == 2
 
 
 @pytest.mark.asyncio
@@ -216,12 +221,16 @@ async def test_real_run_killed_before_the_receipt_is_indeterminate_and_writes_on
     handle, _ = await _kill_at(local_stack, tmp_path, "before_receipt", monkeypatch)
 
     await local_stack.next_primary()
-    job = await _ended_job(local_stack, handle["job_id"])
+    await wait_for_status(local_stack.jobs, handle["job_id"], "failed")
+    [job] = local_stack.jobs.retained_jobs()
 
     run, [node] = local_stack.engine.status(local_stack.run_id)
     assert local_stack.counting_tool.lines == ["a"]
     assert (node.state, node.generation) == (WorkflowNodeState.INDETERMINATE, 1)
-    assert (run.state, run.result, job.status) == (WorkflowRunState.FAILED, None, "failed")
+    # The second attempt ran and failed at the call: the failure is delivered once, and no report is.
+    assert (run.state, run.result, run.attempt, job.status) == (WorkflowRunState.FAILED, None, 2, "failed")
+    assert len(await local_stack.follow_ups()) == 1
+    assert await local_stack.collect(job) == run.error
     assert run.error is not None
     assert (
         f'ToolError: This call may already have run (attempt 1). Check its effect; to run it again call resume_workflow(run_id, rerun=["n{node.seq}"]).'
