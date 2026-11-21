@@ -4611,14 +4611,14 @@ class TestStoreFailuresBelongToTheLane:
     """A lane owns every store call it makes, not only the handler between them."""
 
     @pytest.mark.parametrize(
-        ("failure", "attempted"),
-        [({"fail_is_pending": {"$m"}}, ["$m"]), ({"fail_settle": {"$m"}}, ["$m", "$m"])],
+        ("field", "attempted"),
+        [("fail_is_pending", ["$m"]), ("fail_settle", ["$m", "$m"])],
         ids=["read-before-the-handler", "settlement"],
     )
     async def test_a_store_call_that_fails_once_is_retried(
         self,
         alice: PrincipalStore,
-        failure: dict[str, set[str]],
+        field: str,
         attempted: list[str],
     ) -> None:
         """A lane must record failed store calls and schedule its own retries.
@@ -4636,7 +4636,7 @@ class TestStoreFailuresBelongToTheLane:
             return True
 
         await admit_message(alice, text_event("$m"))
-        store = _FlakyReplayView(alice, **failure)
+        store = _FlakyReplayView(alice, **{field: {"$m"}})
         worker = PendingEventWorker(store=cast("Any", store), handle=handle)
         worker._retry_delay_seconds = 0.01
         worker.start()
