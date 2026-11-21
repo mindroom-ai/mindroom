@@ -6,7 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, Mock, call
+from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
 import nio
 import pytest
@@ -360,6 +360,53 @@ async def test_reconciliation_leaves_an_onboarding_room_to_its_own_steward(coord
         ("@carol:localhost", "!other:localhost"),
     }
     assert coordination.owner.ensure.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("regained", ["during the pass", "after the pass"])
+async def test_a_lobby_lost_before_a_pass_read_it_is_backfilled_once_it_is_stewarded_again(
+    coordination: Coordination,
+    regained: str,
+) -> None:
+    """A pass settles only the lobbies it read: one it lost before reading it is still owed its backfill.
+
+    The bot stewards both lobbies when the pass begins and loses one while it reads its records.
+    Whenever it gets that lobby back, the next pass reads it and onboards who is already there.
+    """
+    lifecycle = coordination.lifecycle
+    config = lifecycle.runtime.config
+    config.rooms["other"] = config.rooms["lobby"].model_copy()
+    config.personal_rooms.onboarding_rooms = ["other", "lobby"]
+    config.personal_rooms.backfill = True
+    state = MatrixState.load(lifecycle.runtime_paths)
+    state.add_room("other", "!other:localhost", "#other:localhost", "Other")
+    save_matrix_state(state, lifecycle.runtime_paths)
+    stewarded = {"!lobby:localhost", "!other:localhost"}
+    lifecycle.is_steward = stewarded.__contains__
+    recorded_intent = lifecycle._recorded_intent
+
+    def lose_the_other_lobby(settings: object) -> tuple[set[tuple[str, str]], bool]:
+        stewarded.discard("!other:localhost")
+        return recorded_intent(settings)
+
+    async def members(room_id: str) -> nio.JoinedMembersResponse:
+        if regained == "during the pass":
+            stewarded.add("!other:localhost")
+        user_id = "@alice:localhost" if room_id == "!lobby:localhost" else "@bob:localhost"
+        return joined_members_response(room_id, user_id)
+
+    lifecycle.runtime.client.joined_members = AsyncMock(side_effect=members)
+    with patch.object(lifecycle, "_recorded_intent", lose_the_other_lobby):
+        await lifecycle._reconcile()
+    assert lifecycle.runtime.client.joined_members.await_args_list == [call("!lobby:localhost")]
+    stewarded.add("!other:localhost")
+
+    await lifecycle._reconcile()
+
+    assert call("!other:localhost") in lifecycle.runtime.client.joined_members.await_args_list
+    onboarded = [attempt.args[0] for attempt in coordination.owner.ensure.await_args_list]
+    assert onboarded == ["@alice:localhost", "@bob:localhost"]
+    assert lifecycle._settled()
 
 
 @pytest.mark.asyncio

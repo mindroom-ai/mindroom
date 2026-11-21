@@ -115,8 +115,8 @@ class PersonalRoomLifecycle:
     # A live join and a reconciliation pass can both reach one user; only one may register the account.
     _provisioning: set[tuple[str, str]] = field(default_factory=set, init=False)
     _reconciled: bool = field(default=False, init=False)
-    # The onboarding rooms this bot stewarded when the pass that set ``_reconciled`` began; a room it takes over after
-    # is read by another pass.
+    # The onboarding rooms this bot stewarded all through the pass that set ``_reconciled``, which read them; a room
+    # it takes over after is read by another pass.
     _reconciled_rooms: frozenset[str] = field(default=frozenset(), init=False)
     _config_revision: int = field(default=0, init=False)
     _completed_candidates: set[tuple[str, str]] = field(default_factory=set, init=False)
@@ -536,12 +536,13 @@ class PersonalRoomLifecycle:
             failed |= recorded_failed
         return candidates, failed
 
-    async def _backfill_candidates(self, onboarding_rooms: list[str]) -> tuple[set[tuple[str, str]], bool]:
-        """Collect lobby members without losing recorded intent when a lobby is unavailable."""
+    async def _backfill_candidates(self, onboarding_rooms: list[str]) -> tuple[set[tuple[str, str]], bool, set[str]]:
+        """Collect lobby members without losing recorded intent when a lobby is unavailable; name the lobbies read too."""
         assert self.runtime.client is not None
         candidates: set[tuple[str, str]] = set()
-        failed = False
+        failed, read = False, set[str]()
         for room_id in filter(self.is_steward, resolve_room_aliases(onboarding_rooms, self.runtime_paths)):
+            read.add(room_id)
             try:
                 members = await get_room_members(self.runtime.client, room_id)
             except Exception:
@@ -553,7 +554,7 @@ class PersonalRoomLifecycle:
                 failed = True
                 continue
             candidates.update((user_id, room_id) for user_id in members)
-        return candidates, failed
+        return candidates, failed, read
 
     async def _reconcile(self) -> None:
         """Retry recorded intent and optional lobby backfill once the serving agents have synced.
@@ -571,11 +572,14 @@ class PersonalRoomLifecycle:
             return
         candidates, failed = await asyncio.to_thread(self._recorded_intent, settings)
         if settings.backfill:
-            backfill, backfill_failed = await self._backfill_candidates(settings.onboarding_rooms)
+            backfill, backfill_failed, read = await self._backfill_candidates(settings.onboarding_rooms)
             candidates.update(backfill)
             failed |= backfill_failed
+            stewarded &= read
         # An onboarding room that another bot stewards is that bot's to read and settle, but not a trigger this bot took.
         candidates = {candidate for candidate in candidates if self.is_steward(candidate[1])}
+        # So this pass settles only the rooms it stewarded throughout; one it lost meanwhile is owed a pass on takeover.
+        stewarded &= self._stewarded_onboarding_rooms()
         candidates.update(self._retry_candidates)
         if not failed:
             # Forget what requesters whose intent is gone last reported.
