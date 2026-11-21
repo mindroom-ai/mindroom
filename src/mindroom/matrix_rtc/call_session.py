@@ -26,7 +26,7 @@ from mindroom.matrix_rtc.events import (
     build_membership_content,
     membership_state_key,
 )
-from mindroom.matrix_rtc.frame_keys import _USE_KEY_DELAY_MS, FrameKeyManager, _KeyDistribution
+from mindroom.matrix_rtc.frame_keys import _USE_KEY_DELAY_MS, FrameKeyManager
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -151,8 +151,7 @@ class CallSession:
     _key_distribution_wakeup_scheduled: bool = field(default=False, init=False)
     _key_retry_attempt: int = field(default=0, init=False)
     _applied_key_generation: int = field(default=-1, init=False)
-    #: The newest own key whose deadline passed, as ``(key, key_index, generation)``.
-    _due_own_key: tuple[bytes, int, int] | None = field(default=None, init=False)
+    _agent_options: CallVoiceAgentOptions | None = field(default=None, init=False)
     _undelivered_key_device_ids: frozenset[str] = field(default_factory=frozenset, init=False)
     _reported_failure_codes: set[str] = field(default_factory=set, init=False)
     _preparing_agent: asyncio.Task[CallVoiceAgentOptions] | None = field(default=None, init=False)
@@ -223,7 +222,7 @@ class CallSession:
                 self._require_start_allowed()
             self._spawn(self._membership_refresh_loop())
             # Shielded: a cancelled start leaves the media at once instead of after an agent build drains.
-            options = await asyncio.shield(preparing)
+            options = self._agent_options = await asyncio.shield(preparing)
             self._require_start_allowed()
             try:
                 await self.deps.bridge.start_agent(options)
@@ -263,7 +262,7 @@ class CallSession:
 
     def _require_start_allowed(self) -> None:
         """Abort before the next call-start side effect when ownership was revoked or the agent's preparation failed."""
-        if not self.deps.start_is_allowed():
+        if self._stopped or not self.deps.start_is_allowed():
             raise CallStartRevokedError
         preparing = self._preparing_agent
         if preparing is not None and preparing.done():
@@ -383,6 +382,7 @@ class CallSession:
             if distribution is None:
                 return
             delivered: list[CallMember] = []
+            raised = True
             try:
                 if distribution.targets:
                     self._key_manager.mark_exposed(distribution)
@@ -392,18 +392,26 @@ class CallSession:
                         key_index=distribution.key_index,
                         targets=list(distribution.targets),
                     )
+                raised = False
             finally:
-                # Fail closed: a raised send fixes the deadline too, so the old key still retires.
-                self._arm_own_key(distribution, self._key_manager.mark_distributed(distribution, tuple(delivered)))
-            delivered_members = set(delivered)
-            undelivered_device_ids = frozenset(
-                target.device_id for target in distribution.targets if target not in delivered_members
-            )
-            if not undelivered_device_ids:
-                self._key_retry_attempt = 0
-                self._undelivered_key_device_ids = frozenset()
-            else:
-                self._schedule_key_distribution_retry(undelivered_device_ids)
+                first_attempt = self._key_manager.mark_distributed(distribution, tuple(delivered))
+                delivered_members = set(delivered)
+                undelivered_device_ids = frozenset(
+                    target.device_id for target in distribution.targets if target not in delivered_members
+                )
+                if not undelivered_device_ids:
+                    self._key_retry_attempt = 0
+                    self._undelivered_key_device_ids = frozenset()
+                else:
+                    self._schedule_key_distribution_retry(undelivered_device_ids)
+                # One deadline per key generation, fixed when its first send attempt ends. A raised send
+                # fixes it too (fail closed), so the old key still retires.
+                own_key = (distribution.key, distribution.key_index, distribution.generation)
+                if first_attempt and not self._stopped and (raised or distribution.generation):
+                    delay_ms = _USE_KEY_DELAY_MS if distribution.generation else 0
+                    self._spawn(self._apply_own_key_at(self.deps.monotonic_ms() + delay_ms, *own_key))
+            if first_attempt and distribution.generation == 0:
+                self._apply_own_key(*own_key)
 
     def _schedule_key_distribution_retry(
         self,
@@ -454,26 +462,23 @@ class CallSession:
         self._reported_failure_codes.add(code)
         self._spawn(self.deps.on_failure(message))
 
-    def _arm_own_key(self, distribution: _KeyDistribution, first_attempt: bool) -> None:
-        """Give a key generation its one deadline when its first send attempt ends.
-
-        Any later send re-attempts a due key whose install failed, with no second delay.
-        """
-        own_key = (distribution.key, distribution.key_index, distribution.generation)
-        if first_attempt and distribution.generation == 0:
-            self._apply_own_key(*own_key)
-        elif first_attempt:
-            deadline_ms = self.deps.monotonic_ms() + _USE_KEY_DELAY_MS
-            self._spawn(self._apply_own_key_at(deadline_ms, *own_key))
-        elif self._due_own_key is not None:
-            self._apply_own_key(*self._due_own_key)
-
     def _apply_own_key(self, key: bytes, key_index: int, generation: int) -> None:
         # Only a newer generation applies, so an older key never takes slot 0 or our senders back.
-        if generation <= self._applied_key_generation:
+        if self._stopped or generation <= self._applied_key_generation:
             return
-        self._due_own_key = (key, key_index, generation)
-        self.deps.bridge.set_frame_key(self._local_identity, key, key_index)
+        try:
+            self.deps.bridge.set_frame_key(self._local_identity, key, key_index)
+        except Exception:
+            # Fail closed: end the call rather than keep sending on a key that should have retired.
+            logger.exception("call_own_key_install_failed", room_id=self.room_id, key_index=key_index)
+            self._stopped = True
+            options = self._agent_options
+            if options is None or options.on_session_terminated is None:
+                raise
+            if options.on_session_error is not None:
+                options.on_session_error("Encrypted call error: the agent left because it could not switch keys.")
+            options.on_session_terminated(True)
+            return
         self._applied_key_generation = generation
 
     def _sync_bridge_participants(self) -> None:
@@ -485,8 +490,7 @@ class CallSession:
     async def _apply_own_key_at(self, deadline_ms: int, key: bytes, key_index: int, generation: int) -> None:
         # Outside the distribution lock: a newer key's slow send cannot postpone this one.
         await asyncio.sleep(max(0, deadline_ms - self.deps.monotonic_ms()) / 1000)
-        if not self._stopped:
-            self._apply_own_key(key, key_index, generation)
+        self._apply_own_key(key, key_index, generation)
 
     async def _publish_membership(self, *, initial: bool, expires_iteration: int | None = None) -> bool:
         """Publish or refresh our membership state event; returns success."""

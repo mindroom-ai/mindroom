@@ -6305,48 +6305,6 @@ async def test_raised_leave_rotation_send_still_retires_the_old_key(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_failed_own_key_install_is_retried_by_the_next_completed_send(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A due key whose install raised is not recorded as applied; the next send installs it at once."""
-    real_sleep = asyncio.sleep
-
-    async def elapsed_sleep(_seconds: float) -> None:
-        await real_sleep(0)
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", elapsed_sleep)
-
-    class FailOnceBridge(FakeBridge):
-        failed = False
-
-        def set_frame_key(self, participant_identity: str, key: bytes, key_index: int) -> None:
-            if key_index == 1 and not self.failed:
-                self.failed = True
-                msg = "install failed"
-                raise RuntimeError(msg)
-            super().set_frame_key(participant_identity, key, key_index)
-
-    bridge = FailOnceBridge()
-    session = _session(_client(), bridge, FakeKeyTransport(), [0])
-    alice = _member("@alice:example.org", "ALICEDEV")
-    bob = _member("@bob:example.org", "BOBDEV")
-    charlie = _member("@charlie:example.org", "CHARLIEDEV")
-
-    session._members = [alice, bob]
-    await session._distribute_keys()
-    session._members = [alice]
-    await session._distribute_keys()
-    for _ in range(5):
-        await real_sleep(0)
-    assert bridge.failed
-    assert _own_indices(bridge) == [0]
-
-    session._members = [alice, charlie]  # a joiner within the grace: a re-share of the same key
-    await session._distribute_keys()
-
-    assert _own_indices(bridge) == [0, 1]
-    await session.stop()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("late_ms", "expected_sleep"),
     [(1_200, 0.0), (300, 0.7)],
@@ -6441,6 +6399,101 @@ async def test_inbound_key_aliasing_the_agents_identity_is_dropped() -> None:
     assert accepted is True
     assert bridge.frame_keys == []
     await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_own_key_install_failure_ends_the_session_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the bridge cannot install our new key, the call ends instead of sending on a retired key."""
+    timers: list[asyncio.Event] = []
+    real_sleep = asyncio.sleep
+
+    async def held_sleep(_seconds: float) -> None:
+        timer = asyncio.Event()
+        timers.append(timer)
+        await timer.wait()
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", held_sleep)
+
+    class FailingBridge(FakeBridge):
+        def set_frame_key(self, participant_identity: str, key: bytes, key_index: int) -> None:
+            if key_index == 2:
+                msg = "install failed"
+                raise RuntimeError(msg)
+            super().set_frame_key(participant_identity, key, key_index)
+
+    bridge = FailingBridge()
+    session = _session(_client(), bridge, FakeKeyTransport(), [0])
+    errors: list[str] = []
+    terminated: list[bool] = []
+    session._agent_options = VoiceAgentOptions(
+        instructions="hi",
+        model="gpt-realtime-2.1",
+        api_key="sk-test",
+        on_session_error=errors.append,
+        on_session_terminated=terminated.append,
+    )
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+    charlie = _member("@charlie:example.org", "CHARLIEDEV")
+
+    session._members = [alice, bob, charlie]
+    await session._distribute_keys()
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice]
+    await session._distribute_keys()
+    await real_sleep(0)
+    timers[1].set()  # generation 2 is due first; its install fails
+    for _ in range(5):
+        await real_sleep(0)
+    timers[0].set()  # the older generation 1 must not install afterwards
+    for _ in range(5):
+        await real_sleep(0)
+    await session.on_members_changed([alice, charlie])
+
+    assert _own_indices(bridge) == [0]
+    assert len(errors) == 1
+    assert terminated == [True]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_raised_send_schedules_the_delivery_retry_and_re_raises() -> None:
+    """A raised send counts as undelivered, schedules the retry, and its exception propagates unchanged."""
+    session = _session(_client(), FakeBridge(), _HeldKeyTransport(fail=1), [0])
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice]
+    with pytest.raises(OSError, match="send failed"):
+        await session._distribute_keys()
+
+    assert session._key_distribution_retry_scheduled
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_send_finishing_after_stop_arms_nothing() -> None:
+    """A rotation send that returns after stop() spawns no timer and installs nothing."""
+    transport = _HeldKeyTransport(hold=1)
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, transport, [0])
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice]
+    rotation = asyncio.create_task(session._distribute_keys())
+    await asyncio.sleep(0)
+    await session.stop()
+    transport.release.set()
+    await rotation
+
+    assert session._tasks == set()
+    assert _own_indices(bridge) == [0]
 
 
 @pytest.mark.asyncio
