@@ -580,6 +580,24 @@ async def test_working_time_does_not_count_while_waiting(timed: WorkflowStack) -
 
 
 @pytest.mark.asyncio
+async def test_call_that_waits_for_an_approval_uses_none_of_the_runs_time(timed: WorkflowStack) -> None:
+    """The engine shows the run waiting itself: the time before the wait is charged, and the time of the wait is not."""
+    timed.now += 600
+    timed.resolver.hold_approvals = asyncio.Event()
+    await timed.submit("@0", "tool", _A)
+    await timed.until(lambda: timed.store.get_run(timed.run_id).state is WorkflowRunState.WAITING)
+    timed.now += 80 * 3600
+    await asyncio.sleep(0.05)
+    timed.resolver.hold_approvals.set()
+
+    assert await timed.result("@0", "tool", _A) == "appended"
+    timed.now += 300
+    await timed.until(lambda: _left(timed) == 2700)
+
+    assert timed.store.get_run(timed.run_id).state is WorkflowRunState.RUNNING
+
+
+@pytest.mark.asyncio
 async def test_working_time_is_saved_when_the_attempt_ends(
     timed: WorkflowStack,
     monkeypatch: pytest.MonkeyPatch,
