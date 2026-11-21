@@ -296,9 +296,7 @@ class TurnPolicy:
     @staticmethod
     def _select_response_owner(response_owners: list[MatrixID]) -> MatrixID | None:
         """Return the stable visible owner from one candidate set."""
-        if not response_owners:
-            return None
-        return min(response_owners, key=lambda value: value.full_id)
+        return min(response_owners, key=lambda value: value.full_id, default=None)
 
     @staticmethod
     def _eligible_responder_owners(
