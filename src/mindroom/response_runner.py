@@ -852,10 +852,11 @@ class ResponseRunner:
                 fold,
                 runtime.wait_for_admission_or_shutdown,
             )
-        except (ReplyMembershipPendingError, ResponseAdmissionRefusedError):
-            raise  # The inbox returns this source to the journal worker for replay.
-        except Exception:
-            self.deps.logger.exception("manual_compaction_preparation_failed", source=event.event_id)
+        except ResponseAdmissionRefusedError:
+            raise  # Replacement must replay the pending source.
+        except Exception as error:
+            if not isinstance(error, ReplyMembershipPendingError):
+                self.deps.logger.exception("manual_compaction_preparation_failed", source=event.event_id)
             notice = _COMPACTION_DEFERRED
         if notice:
             with suppress(Exception):  # Best-effort notice only; transport failure must not retry this row.
@@ -874,10 +875,8 @@ class ResponseRunner:
         except TimeoutError:
             return None
         row_owner = await store.admitted_membership_owner(source)
-        epoch = await store.membership_epoch(room)
-        if row_owner == (room, epoch) and (owner == row_owner or (not wait and owner is None)):
-            return epoch
-        return None
+        epoch = await store.active_membership_epoch(room)
+        return epoch if owner == row_owner == (room, epoch) else None
 
     async def _fold_compaction(self, target: MessageTarget, requester: str, origin: str, source: str) -> str | None:  # noqa: PLR0911
         runtime = self.deps.runtime
@@ -895,14 +894,13 @@ class ResponseRunner:
             return None
         scope = self.deps.state_writer.history_scope()
         identity = self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester)
-        read = self._read_queued_forced_compaction
-        probe = partial(read, session_id=target.session_id, scope=scope, execution_identity=identity)
-        if not await run_blocking_until_complete(probe):
+        due = await run_blocking_until_complete(self._read_queued_forced_compaction, target.session_id, scope, identity)
+        if not due:
             return None
         if await store.room_history_recovery(room) is not None:
             return _COMPACTION_DEFERRED
         if (epoch := await self._compaction_epoch(room, origin, source, wait=True)) is None:
-            return _COMPACTION_DEFERRED
+            return None
         if thread is not None and is_thread_history_degraded(
             await self.deps.resolver.fetch_thread_history(room, thread),
         ):
@@ -918,7 +916,7 @@ class ResponseRunner:
             return None
         redactions = partial(self.deps.redacted_history_events, target)
         await remove_history_of_redacted_events(context.storage, session, redactions)
-        if await store.room_history_recovery(room) is not None or epoch != await store.membership_epoch(room):
+        if await store.room_history_recovery(room) is not None or epoch != await store.active_membership_epoch(room):
             return _COMPACTION_DEFERRED
         build = partial(provider_registry.build_model_provider, config, paths, model_name, execution_identity=identity)
         tool_context = self.deps.tool_runtime.build_turn_context(
@@ -1007,10 +1005,9 @@ class ResponseRunner:
         Every turn pays for this before its placeholder is sent, so it reads
         one session row, without its runs, on a thread.
         """
-        read = self._read_queued_forced_compaction
         try:
             return await asyncio.to_thread(
-                read,
+                self._read_queued_forced_compaction,
                 session_id=session_id,
                 scope=scope,
                 execution_identity=execution_identity,
@@ -1026,7 +1023,6 @@ class ResponseRunner:
 
     def _read_queued_forced_compaction(
         self,
-        *,
         session_id: str,
         scope: HistoryScope,
         execution_identity: ToolExecutionIdentity | None,

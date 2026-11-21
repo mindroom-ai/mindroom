@@ -15,7 +15,6 @@ import nio
 import pytest
 
 from mindroom import response_runner as runner_module
-from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.commands.compact_commands import handle_compact_command
 from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import (
@@ -832,13 +831,14 @@ async def test_compaction_waits_for_paused_approval(
 
 
 @pytest.mark.asyncio
-async def test_compaction_retries_when_a_pending_grant_becomes_ready(
+async def test_pending_compaction_grant_does_not_delay_another_thread(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, paths = _config(tmp_path)
-    config.agents["code"].access = ResponderAccessConfig(current_room_members=True)
+    config.agents["code"].access = ResponderAccessConfig(current_room_members=True, users=[BOB])
     _, target, room, command = _compact_pair(config, paths)
+    room.add_member(BOB, "Bob", None)
     await _hydrate(target)
     index = target.orchestrator.agent_reply_memberships
     target.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[ROOM])
@@ -855,22 +855,23 @@ async def test_compaction_retries_when_a_pending_grant_becomes_ready(
     fold = await _start_fold(target)
     index.invalidate(config, reason="observer_refreshing")
     coordinator._release_approval_hold("held")
-    with pytest.raises(ReplyMembershipPendingError):
-        await asyncio.wait_for(fold, 30)
+    await asyncio.wait_for(fold, 30)
     store = target.journal_principal()
-    assert await store.is_pending(_ROW_ID)
+    _assert_deferred(target)
+    assert target.client.room_send.await_count == 2  # Command acknowledgement and one deferral.
+    assert _queued(config, paths, "code")
+    assert not await store.is_pending(_ROW_ID)
     assert not model.requests
     gate = target.orchestrator.response_admission_gate
     assert gate.close_if_idle()
     gate.reopen()
-    dispatcher = target._journal_dispatcher
-    assert await dispatcher.drain_once() == 0  # The failed source is paced, not immediately re-admitted.
-    await refresh_memberships(index, config, paths, target.client)
-    await asyncio.wait_for(dispatcher._worker._room_retries[ROOM].task, 30)
-    await asyncio.wait_for(await _start_fold(target), 30)
-    assert _summaries(config, paths, "code") == ["after refresh"]
-    assert len(model.requests) == 1
-    assert not await store.is_pending(_ROW_ID)
+    bob = _addressed(target, "/help", "$unrelated")
+    bob.sender = bob.source["sender"] = BOB
+    bob.source["content"]["m.relates_to"]["event_id"] = "$other-thread"
+    await _dispatch_message(target, room, bob)
+    assert not await store.is_pending(bob.event_id)
+    assert target.client.room_send.await_count == 3
+    assert not target._journal_dispatcher._worker._room_is_backing_off(ROOM)
 
 
 @pytest.mark.asyncio
@@ -1418,7 +1419,7 @@ async def test_compaction_defers_when_target_history_is_not_ready(  # noqa: C901
         record_gap.assert_awaited_once()
     assert _queued(config, paths, "code")
     assert _ROW_ID not in await store.unsettled_event_ids()
-    if boundary == "rejoin_during_read":
+    if boundary in {"origin_timeout", "rejoin_during_read"}:
         target.client.room_send.assert_not_awaited()
     else:
         _assert_deferred(target)
@@ -1465,6 +1466,64 @@ async def test_duplicate_compaction_row_only_promises_immediate_work_when_pendin
     expected = "before its next reply" if settled else "compacting now"
     assert expected in str(owner.client.room_send.await_args_list)
     assert await store.unsettled_event_ids() == (set() if settled else {_ROW_ID})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_row", [False, True])
+async def test_departed_target_with_stale_client_room_does_not_fold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_row: bool,
+) -> None:
+    config, paths = _config(tmp_path)
+    runtime = ready_runtime(config, paths)
+    owner, target = _live_bot(runtime, "docs"), _live_bot(runtime, "lobby")
+    room = _room_with_members(ALICE, owner.matrix_id.full_id, target.matrix_id.full_id, room_id=ROOM)
+    room.members_synced = True
+    target.client.rooms[ROOM] = room
+    _seed_history(config, paths, "lobby", room_mode=True)
+    store = target.journal_principal()
+    await admit_room_membership(store, ROOM, "join")
+    epoch = await admit_room_membership(store, ROOM, "leave")
+    command = _addressed(owner, "/compact lobby", "$command")
+    del command.source["content"]["m.relates_to"]
+    # A fenced observation keeps the origin's identity, not live work.
+    await admit_dispatch_event(target._journal_dispatcher, room, command, EventKind.MESSAGE, EventClass.CONTEXT_ONLY)
+    assert await store.admitted_membership_owner(command.event_id) == (ROOM, epoch)
+    source = "compact:$command:lobby"
+    if legacy_row:
+        event = InboundEvent(
+            event_id=source,
+            room_id=ROOM,
+            thread_id=None,
+            kind=EventKind.COMPACTION,
+            event_class=EventClass.ACTIONABLE,
+            sender=target.matrix_id.full_id,
+            origin_server_ts=1,
+            source={"requester_id": ALICE, "origin_event_id": command.event_id},
+        )
+        await store._write(journal._admit, event, None)  # A row admitted by the old binary while fenced.
+        assert await store.admitted_membership_owner(source) == (ROOM, epoch)
+    await _dispatch_message(owner, room, command)
+    build, called = MagicMock(), AsyncMock()
+    monkeypatch.setattr(runner_module.provider_registry, "build_model_provider", build)
+
+    @hook(EVENT_COMPACTION_BEFORE, scope="agent", agents=["lobby"])
+    async def before(ctx: CompactionHookContext) -> None:
+        await called(ctx)
+
+    target.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("fenced", [before])])
+    if legacy_row:
+        await asyncio.wait_for(await _start_fold(target), 30)
+    else:
+        assert await target._journal_dispatcher.drain_once() == 0
+        assert await store.load_event(source) is None
+    build.assert_not_called()
+    called.assert_not_awaited()
+    target.client.room_send.assert_not_awaited()
+    assert _queued(config, paths, "lobby", room_mode=True)
+    assert not await store.is_pending(source)
+    assert "before its next reply" in str(owner.client.room_send.await_args_list)
 
 
 @pytest.mark.asyncio

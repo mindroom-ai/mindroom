@@ -110,6 +110,7 @@ class AdmissionResult(StrEnum):
 
     ADMITTED = "admitted"
     DUPLICATE = "duplicate"
+    MEMBERSHIP_FENCED = "membership_fenced"
 
 
 class IngestionRecordDisposition(StrEnum):

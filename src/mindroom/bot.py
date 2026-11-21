@@ -1044,8 +1044,8 @@ class AgentBot:
                 source={"requester_id": requester_id, "origin_event_id": origin},
             ),
         )
-        if result is AdmissionResult.DUPLICATE:
-            return await store.is_pending(source)
+        if result is not AdmissionResult.ADMITTED:
+            return result is AdmissionResult.DUPLICATE and await store.is_pending(source)
         self._journal_dispatcher.wake()
         return True
 

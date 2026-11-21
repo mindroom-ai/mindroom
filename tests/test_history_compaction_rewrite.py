@@ -1513,7 +1513,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
         tool_runtime_context(runtime_context),
         patch(
             "mindroom.history.compaction._rewrite_working_session_for_compaction",
-            new=AsyncMock(return_value=False),
+            new=AsyncMock(return_value=None),
         ),
     ):
         prepared = await prepare_history_for_run_for_test(

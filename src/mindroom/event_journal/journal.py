@@ -39,6 +39,7 @@ from . import (
     turn_rows,
 )
 from .identity import agent_of_principal, decode_thread_id, encode_thread_id
+from .membership_state import claim_active_membership_epoch as claim_active
 from .membership_state import claim_membership_epoch, current_membership_epoch, projection_generation
 from .models import (
     TURN_BACKED_KINDS,
@@ -918,6 +919,8 @@ def admit_snapshotting_source(
 
     Batch admission snapshots only the actionable events it admits, after their disposition, so it calls ``_admit``.
     """
+    if event.kind is EventKind.COMPACTION and claim_active(transaction, principal_id, room_id=event.room_id) is None:
+        return AdmissionResult.MEMBERSHIP_FENCED
     result = _admit(transaction, principal_id, event, projected)
     if result is AdmissionResult.ADMITTED:
         _snapshot_interactive_source(transaction, principal_id, event)
