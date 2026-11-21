@@ -27,6 +27,7 @@ _USE_KEY_DELAY_MS = 1000
 _KEY_ROTATION_GRACE_PERIOD_MS = 10_000
 
 _OUTBOUND_KEY_SIZE_BYTES = 16
+_INBOUND_KEY_SIZES = frozenset({16, 32})
 _KEY_INDEX_MODULUS = 256
 
 
@@ -176,7 +177,7 @@ class FrameKeyManager:
             key = base64.b64decode(received.key_base64, validate=True)
         except ValueError:
             return None
-        if len(key) not in (16, 32):
+        if len(key) not in _INBOUND_KEY_SIZES:
             return None
         # Record the dedup timestamp only for keys that validate, so a
         # malformed payload cannot poison the filter against a good retry.
