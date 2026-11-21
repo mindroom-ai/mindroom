@@ -105,6 +105,8 @@ def _sanitized_delivery_error_message(error: Exception) -> str:
     """Return a log-safe Matrix delivery failure message."""
     if isinstance(error, OlmTrustError):
         return _MATRIX_TRUST_DELIVERY_ERROR_MESSAGE
+    if isinstance(error, nio.LocalProtocolError):
+        return str(error)
     return _MATRIX_GENERIC_DELIVERY_ERROR_MESSAGE
 
 

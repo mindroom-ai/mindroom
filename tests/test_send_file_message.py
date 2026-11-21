@@ -750,12 +750,23 @@ class TestSendMessageResult:
         assert "url" not in inner
 
     @pytest.mark.asyncio
-    async def test_unexpected_room_send_exception_logs_generic_sanitized_message(self) -> None:
-        """Unexpected local delivery exceptions should log type plus a safe generic message."""
+    @pytest.mark.parametrize(
+        ("error", "detail"),
+        [
+            (
+                RuntimeError("failed token=supersecret for @private:localhost via https://matrix.example/private"),
+                "Matrix delivery raised an unexpected local exception.",
+            ),
+            (
+                nio.LocalProtocolError("outbound group session changed while sharing"),
+                "outbound group session changed while sharing",
+            ),
+        ],
+    )
+    async def test_room_send_exception_logs_safe_detail(self, error: Exception, detail: str) -> None:
+        """Nio refusals name the reason without exposing arbitrary exceptions or device trust details."""
         client = _mock_client()
-        client.room_send.side_effect = RuntimeError(
-            "failed token=supersecret for @private:localhost via https://matrix.example/private",
-        )
+        client.room_send.side_effect = error
 
         with patch("mindroom.matrix.client_delivery.logger.error") as mock_error:
             result = await send_message_result(
@@ -766,8 +777,8 @@ class TestSendMessageResult:
 
         assert result is None
         assert mock_error.call_args.args == ("matrix_message_delivery_exception",)
-        assert mock_error.call_args.kwargs["exception_type"] == "RuntimeError"
-        assert mock_error.call_args.kwargs["error_message"] == "Matrix delivery raised an unexpected local exception."
+        assert mock_error.call_args.kwargs["exception_type"] == type(error).__name__
+        assert mock_error.call_args.kwargs["error_message"] == detail
 
 
 @pytest.mark.asyncio
