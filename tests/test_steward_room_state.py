@@ -67,7 +67,7 @@ type RoomState = tuple[Config, RuntimePaths, dict[str, MatrixID], dict[tuple[str
 @pytest.fixture
 def room_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RoomState:
     """Keep a mutable homeserver and use nominal delays unless a test supplies its own jitter draws."""
-    monkeypatch.setattr("mindroom.steward_duties.uniform", lambda low, high: min(low * 2, high), raising=False)
+    monkeypatch.setattr("mindroom.steward_duties.uniform", lambda low, high: min(low * 2, high))
     config = Config(
         agents={
             "agent1": AgentConfig(display_name="Agent 1", rooms=[ROOM_ID], thread_mode="room"),
@@ -1542,8 +1542,8 @@ async def test_healthy_room_gets_a_turn_between_slow_roster_retries(
     healthy = "!healthy:localhost"
     client.rooms[healthy] = nio.MatrixRoom(healthy, client.user_id)
     config.agents["agent1"].rooms.append(healthy)
-    draws = iter((1.5, 0.5))  # A backs off longer; B backs off less.
-    monkeypatch.setattr("mindroom.steward_duties.uniform", lambda _low, high: next(draws, high), raising=False)
+    take_high = iter((True, False))  # A takes its upper bound; B takes its lower bound.
+    monkeypatch.setattr("mindroom.steward_duties.uniform", lambda low, high: high if next(take_high, True) else low)
     clock = 0.0
     monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
     crypto = asyncio.Lock()
@@ -1574,6 +1574,60 @@ async def test_healthy_room_gets_a_turn_between_slow_roster_retries(
     finally:
         duties.stopping()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_ad_hoc_room_publishes_mixed_mode_on_its_first_retry(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Give mode its own roster turn before accounts consumes the client's crypto lock again."""
+    config, _, _, events, client = room_state
+    for agent in config.agents.values():
+        agent.rooms = []
+    events[EVENT_TYPE, ""] = {"mode": "room"}
+    clock = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    crypto = asyncio.Lock()
+    roster = client.joined_members.side_effect
+    read = client.room_get_state_event.side_effect
+    write = client.room_put_state.side_effect
+    steps: list[tuple[int, str]] = []
+
+    async def slow_roster(room_id: str) -> nio.JoinedMembersResponse:
+        steps.append((clock, "roster"))
+        async with crypto:
+            await asyncio.sleep(6)
+            return await roster(room_id)
+
+    async def read_state(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == ACCOUNTS_EVENT_TYPE:
+            await asyncio.sleep(5)
+        return await read(room_id, event_type, state_key)
+
+    async def write_state(room_id: str, event_type: str, content: dict, **kwargs: object) -> object:
+        if event_type == EVENT_TYPE:
+            steps.append((clock, "mode"))
+        return await write(room_id, event_type, content, **kwargs)
+
+    client.joined_members.side_effect = slow_roster
+    client.room_get_state_event.side_effect = read_state
+    client.room_put_state.side_effect = write_state
+    duties = _router_duties(room_state)
+    duties.mark_joined_for_room_state(ROOM_ID)
+    frame = _publish_joined_rooms(duties)
+    try:
+        for tick in range(18):
+            clock = tick
+            for _ in range(30):
+                await asyncio.sleep(0)
+            if clock == 10:
+                assert frame.done()  # The foreground has not inherited the retry's sequential budget.
+        assert events[EVENT_TYPE, ""] == {"mode": "mixed"}
+        assert steps == [(0, "roster"), (0, "roster"), (11, "roster"), (17, "mode"), (17, "roster")]
+    finally:
+        duties.stopping()
+        await asyncio.gather(frame, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1895,6 +1949,60 @@ async def test_later_terminal_accounts_result_retires_older_pending_retry(
         assert not duties._room_state_retries
     finally:
         duties.stopping()
+
+
+@pytest.mark.asyncio
+async def test_stale_success_does_not_discard_a_newer_queued_failure(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh trigger that finishes late must not retire the failure from a later membership change."""
+    _, _, ids, events, client = room_state
+    departing = ids["agent2"].full_id
+    clock = 0.0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    release = asyncio.Event()
+    read = client.room_get_state_event.side_effect
+    write = client.room_put_state.side_effect
+
+    async def read_state(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == ROUTER_EVENT_TYPE and clock == 0.25:
+            await release.wait()
+        return await read(room_id, event_type, state_key)
+
+    async def write_state(room_id: str, event_type: str, content: dict, **kwargs: object) -> object:
+        if event_type == ACCOUNTS_EVENT_TYPE and clock in (0, 0.5):
+            raise TimeoutError
+        return await write(room_id, event_type, content, **kwargs)
+
+    client.room_get_state_event.side_effect = read_state
+    client.room_put_state.side_effect = write_state
+    duties = _router_duties(room_state)
+    duties.mark_joined_for_room_state(ROOM_ID)
+    await _publish_joined_rooms(duties)  # Seed the older pending set and its sleeping timer.
+    clock = 0.25
+    duties.mark_joined_for_room_state(ROOM_ID)
+    old = _publish_joined_rooms(duties)
+    try:
+        for _ in range(30):
+            await asyncio.sleep(0)
+        assert not old.done()
+        assert departing in (_accounts(room_state) or ())
+        events["m.room.member", departing] = {"membership": "leave"}
+        clock = 0.5
+        await duties.member_event(client.rooms[ROOM_ID], _membership_event(departing, "leave", "join"))
+        assert departing in (_accounts(room_state) or ())  # The newer write failed.
+        release.set()
+        await old
+        clock = 1
+        for _ in range(30):
+            await asyncio.sleep(0)
+        assert _accounts(room_state) == sorted(ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1"))
+        assert not duties._room_state_retries
+    finally:
+        release.set()
+        duties.stopping()
+        await asyncio.gather(old, return_exceptions=True)
 
 
 @pytest.mark.asyncio

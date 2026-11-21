@@ -277,7 +277,7 @@ class StewardDuties:
         return steward is not None
 
     async def _reconcile_room_state(self, room_id: str, needed: set[str] | None = None, delay: int = 0) -> set[str]:
-        """Return only the operations that still need a retry in this room."""
+        """Return failed operations; run retries in order so they do not compete for nio's crypto lock."""
         runtime = self.deps.runtime
         client = runtime.client
         if not self._may_publish_room_state(room_id) or client is None or room_id not in client.rooms:
@@ -298,9 +298,14 @@ class StewardDuties:
             "mode": partial(reconcile_room_thread_mode, *args),
             "binding": partial(reconcile_room_router_binding, client, room_id, may_claim=may_claim),
         }
-        names = checks.keys() if needed is None else needed
-        results = await asyncio.gather(*(checks[check](failure_level=failure_level) for check in names))
-        return {check for check, result in zip(names, results, strict=True) if result is False}
+        if needed is not None:
+            return {
+                check
+                for check in ("mode", "accounts", "binding")
+                if check in needed and await checks[check](failure_level=failure_level) is False
+            }
+        results = await asyncio.gather(*(check(failure_level=failure_level) for check in checks.values()))
+        return {check for check, result in zip(checks, results, strict=True) if result is False}
 
     async def member_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
         """Refresh responder presentation, the room's MindRoom accounts and the welcome, and emit human membership hooks."""
