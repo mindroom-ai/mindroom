@@ -16,6 +16,7 @@ from mindroom.api.sandbox_exec import runner_dedicated_worker_root
 from mindroom.api.sandbox_runner import app_runtime_paths, prepare_terminal_launch, validate_runner_token
 from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import sandbox_startup_manifest_path
+from mindroom.previews.listeners import group_listens
 from mindroom.tailnet_ssh import session
 from mindroom.terminal.session import TerminalError
 from mindroom.workers.models import WORKER_SSH_PORT
@@ -95,10 +96,11 @@ async def _port_accepts() -> bool:
 async def _accepts(sshd: asyncio.subprocess.Process) -> bool:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _START_SECONDS
-    while sshd.returncode is None and loop.time() < deadline:
-        if await _port_accepts():
-            return sshd.returncode is None
-        await asyncio.sleep(0.1)
+    with suppress(OSError):
+        while sshd.returncode is None and loop.time() < deadline:
+            if await asyncio.to_thread(group_listens, WORKER_SSH_PORT, sshd.pid):
+                return sshd.returncode is None
+            await asyncio.sleep(0.1)
     return False
 
 
@@ -118,6 +120,7 @@ async def _ensure_sshd(app: FastAPI, state: _WorkerSsh) -> None:
                 *_sshd_argv(projection_dir),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
             )
         except OSError:
             raise HTTPException(503, _START_FAILED) from None

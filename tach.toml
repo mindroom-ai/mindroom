@@ -3836,6 +3836,7 @@ depends_on = [
     "mindroom.tailnet_ssh.projection",
     "mindroom.tailnet_ssh.store",
     "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
@@ -8808,6 +8809,7 @@ depends_on = [
     "mindroom.api.sandbox_runner",
     "mindroom.atomic_file",
     "mindroom.constants",
+    "mindroom.previews.listeners",
     "mindroom.tailnet_ssh.session",
     "mindroom.terminal.session",
 ]

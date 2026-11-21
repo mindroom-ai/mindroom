@@ -148,7 +148,12 @@ class _FakeSshd:
         self.processes: list[asyncio.subprocess.Process] = []
         self._monkeypatch = monkeypatch
 
-    async def spawn(self, *argv: str, **_kwargs: object) -> asyncio.subprocess.Process:
+    async def spawn(
+        self,
+        *argv: str,
+        start_new_session: bool = False,
+        **_kwargs: object,
+    ) -> asyncio.subprocess.Process:
         self.argvs.append(list(argv))
         with socket.socket() as reserved:
             reserved.bind(("127.0.0.1", 0))
@@ -163,6 +168,7 @@ class _FakeSshd:
                 *self.program[1:],
                 stdin=asyncio.subprocess.DEVNULL,
                 pass_fds=(descriptor,),
+                start_new_session=start_new_session,
             )
         self.processes.append(process)
         return process
@@ -333,6 +339,39 @@ async def test_start_refuses_an_occupied_port(
         response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
 
     assert (response.status_code, response.json()) == (503, {"detail": "The worker's SSH server did not start."})
+    assert sandbox_runner_app.app.state.worker_ssh.sshd is None
+
+
+@pytest.mark.asyncio
+async def test_start_requires_the_spawned_sshd_to_own_the_listener(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listener appearing during spawn is not readiness if it does not belong to the child."""
+    with socket.socket() as unrelated:
+        unrelated.bind(("127.0.0.1", 0))
+        monkeypatch.setattr(worker_ssh, "WORKER_SSH_PORT", unrelated.getsockname()[1])
+        monkeypatch.setattr(worker_ssh, "_START_SECONDS", 0.5)
+
+        async def spawn(
+            *_argv: str,
+            start_new_session: bool = False,
+            **_kwargs: object,
+        ) -> asyncio.subprocess.Process:
+            unrelated.listen()
+            return await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                "import sys; sys.stdin.read()",
+                stdin=asyncio.subprocess.PIPE,
+                start_new_session=start_new_session,
+            )
+
+        monkeypatch.setattr(worker_ssh, "create_subprocess_exec", spawn)
+        response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "The worker's SSH server did not start."}
     assert sandbox_runner_app.app.state.worker_ssh.sshd is None
 
 
