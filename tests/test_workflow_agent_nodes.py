@@ -34,7 +34,7 @@ from tests.delegation_helpers import offered_tools
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.scripted_agent_helpers import raising
 from tests.tool_job_helpers import JobApprovalCards, wait_for_status
-from tests.workflow_helpers import NodeFailed, WorkflowStack, workflow_stack
+from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -751,6 +751,35 @@ async def test_child_that_needs_approval_waits_and_resumes(gated: WorkflowStack)
     assert await gated.result("@0", "agent", _PROMPT) == "sent"
     assert (gated.counting_tool.lines, _node(gated).waiting_on) == (["a"], None)
     assert gated.store.get_run(gated.run_id).state is WorkflowRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_run_whose_agent_waits_for_a_person_is_running_while_a_tool_of_it_works(
+    gated: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run waits only while nothing of it works: a tool that starts beside the waiting agent makes it running."""
+    cards: JobApprovalCards = gated.cards  # type: ignore[attr-defined]
+    gated.child_script(calls(tool_call("append", "c1", line="a")), answer("sent"))
+    await gated.submit("@0", "agent", _PROMPT)
+    await gated.until(lambda: gated.store.get_run(gated.run_id).state is WorkflowRunState.WAITING)
+    release, broker = asyncio.Event(), type(gated.engine.broker)
+    execute = broker.execute_for_workflow
+
+    async def held(*args: Any, **options: Any) -> object:  # noqa: ANN401
+        await release.wait()
+        return await execute(*args, **options)
+
+    monkeypatch.setattr(broker, "execute_for_workflow", held)
+
+    # A call that asks nobody, so nothing but its start says that the run works again.
+    await gated.submit("@1", "tool", tool_args("counter", "count"))
+
+    assert gated.store.get_run(gated.run_id).state is WorkflowRunState.RUNNING
+    release.set()
+    await gated.until(lambda: gated.store.get_run(gated.run_id).state is WorkflowRunState.WAITING)
+    cards.decision.set_result(BackgroundApprovalDecision("approved", None))
+    assert await gated.result("@0", "agent", _PROMPT) == "sent"
 
 
 @pytest.mark.asyncio

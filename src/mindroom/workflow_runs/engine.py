@@ -643,6 +643,8 @@ class WorkflowEngine:
         handle = DispatchHandle("broker", f"{attempt.run_id}:{call_id}", dispatched=False, same_as=same_as)
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle)
         node = await asyncio.to_thread(partial(self.store.put_node, node, run.epoch, dirty_after=same_as is None))
+        # A run that waited for a person works again from here.
+        await self._restate(run.run_id)
         kept = cast("list[str] | None", (run.persona or {}).get("tools"))
         call = partial(
             self.broker.execute_for_workflow,
