@@ -82,7 +82,7 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
    The client instead scans the newest 40 messages; the bundle agrees with it whenever the question is still the thread's newest event apart from title notices, which is the case until someone answers.
    Divergences, each of which turns a `question` row into the row its other facts give, most often `your_turn`:
    - a room that is encrypted, or a homeserver without the bundle, yields no question;
-   - any thread event after the question hides it in the backend, while in the client a counted message from any sender clears it if sent after the question was asked;
+   - another reply that replaces the question in `io.mindroom.latest_reply` hides it in the backend, while in the client a counted message from any sender clears it if sent after the question was asked;
    - a thread an agent started, in which the person later wrote, yields no question, where the client counts it;
    - for the seconds between a reaction that answers the question and the agent's next reply, the row still says `question`.
 9. **One case file, committed identically in both repositories.**
