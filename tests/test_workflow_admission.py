@@ -1,7 +1,7 @@
-"""Tests for who may start an attempt of a workflow run, and who stops it.
+"""Tests for who may start an attempt of a workflow run, who stops it, and which job receives which report.
 
 One check admits every attempt (`WorkflowEngine.admit`); while a run's job is unfinished only that job's operation
-starts one; and a Stop wins against a launch.
+starts one; a Stop wins against a launch; and a run's report goes to the job that owns the run and to no other.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from mindroom.workflow_runs.engine import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowRunState
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.tool_job_helpers import wait_for_status
-from tests.workflow_helpers import WorkflowStack, owner_context, tool_args, workflow_stack
+from tests.workflow_helpers import CallFailed, WorkflowStack, owner_context, set_run, tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -193,6 +193,67 @@ async def test_cancel_that_a_launch_overtakes_stops_the_attempt_that_launch_star
     assert (cancelled.state, cancelled.error) == (WorkflowRunState.CANCELLED, "Cancelled by the agent.")
     assert stack.script_store.get_run(str(launched.script_run_id)).state is ScriptRunState.CANCELLED
     assert _run(stack) == cancelled
+
+
+@pytest.mark.asyncio
+async def test_resume_waits_until_the_report_of_the_runs_job_is_saved_and_each_job_delivers_its_own(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job whose end could not be saved is still running for the journal: a restart continues it with its report.
+
+    So no resume takes its run before that end is saved, and each of the two reports reaches exactly one job.
+    """
+    first = await _started(stack)
+    save = ToolJobStore.save
+
+    async def failing(store: ToolJobStore, job_id: str, job_json: str, *args: Any, **options: Any) -> None:  # noqa: ANN401
+        if '"completed"' in job_json:
+            msg = "The disk is full."
+            raise OSError(msg)
+        await save(store, job_id, job_json, *args, **options)
+
+    monkeypatch.setattr(ToolJobStore, "save", failing)
+    await stack.finish_attempt(result="the first report")
+    await stack.until(lambda: [job.status for job in stack.jobs.retained_jobs()] == ["completed"])
+    ended = _run(stack)
+
+    with pytest.raises(CallFailed, match="is still delivering its report"):
+        await stack.call("resume_workflow", run_id=stack.run_id)
+    assert _run(stack) == ended
+
+    # Both stores are opened again before the save could be tried again: the journal holds the job as running.
+    await stack.restart(kill=True)
+    monkeypatch.setattr(ToolJobStore, "save", save)
+    assert await stack.recover() == []
+    await stack.continue_jobs()
+    old = await _ended_job(stack, first["job_id"])
+    assert (old.status, await stack.collect(old), _run(stack)) == ("completed", "the first report", ended)
+
+    handle = json.loads(await stack.call("resume_workflow", run_id=stack.run_id))
+    await stack.until(lambda: _run(stack).attempt == 2)
+    await stack.finish_attempt(result="the second report")
+    new = await _ended_job(stack, handle["job_id"])
+    [old] = [job for job in stack.jobs.retained_jobs() if job.job_id == first["job_id"]]
+    assert (new.status, await stack.collect(new)) == ("completed", "the second report")
+    assert (old.status, await stack.collect(old)) == ("completed", "the first report")
+
+
+@pytest.mark.asyncio
+async def test_continued_job_never_waits_for_a_run_that_another_job_took(stack: WorkflowStack) -> None:
+    """A job that a restart continues owns its run or nothing: it does not deliver the report of the job that has it."""
+    first = await _started(stack)
+    await stack.restart(kill=True)
+    assert await stack.recover() == []
+    # As if a resume had taken the run while this job still read `running` in the journal.
+    set_run(stack.store, stack.run_id, job_id="the-job-of-a-resume")
+
+    await stack.continue_jobs()
+    old = await _ended_job(stack, first["job_id"])
+
+    assert (old.status, await stack.collect(old)) == ("failed", f"Run {stack.run_id} was resumed by another call.")
+    run = _run(stack)
+    assert (run.state, run.job_id, stack.scripts.launched) == (WorkflowRunState.STARTING, "the-job-of-a-resume", [])
 
 
 @pytest.mark.asyncio

@@ -371,10 +371,13 @@ def _run_job(
 
     async def operation() -> BackgroundOutcome:
         try:
-            if resume is not None and engine.store.get_run(run_id).job_id != job_id:
+            if engine.store.get_run(run_id).job_id != job_id:
+                if resume is None:
+                    msg = f"Run {run_id} was resumed by another call."
+                    raise WorkflowRunStoreError(msg)  # noqa: TRY301
                 await engine.reopen(run_id, context, limits=limits, job_id=job_id, **resume)
         except WorkflowRunStoreError as exc:
-            # Another resume took the run first: this job owns nothing of it and says so.
+            # Another call took the run: this job owns nothing of it, waits for none of its reports, and says so.
             return BackgroundOutcome("failed", str(exc), encode_result_payload(ToolResultPayload(value=str(exc))))
         outcome = _workflow_job_outcome(await engine.wait(run_id, partial(engine.launch, run_id, context, limits)))
         if after is not None:
@@ -427,7 +430,8 @@ def workflow_job_standing(runtime_paths: RuntimePaths, job_id: str) -> str:
 
     `unknown` while there is no job runtime to ask, `absent` when it holds no such job, `waiting` for a job a restart
     stopped that is not granted again and cannot cancel its run yet, `stopping` once a cancel was requested, `live`
-    otherwise while unfinished. An ended job was `stopped` by a Stop or a denial, or `ended` in any other way.
+    otherwise while unfinished. An ended job was `stopped` by a Stop or a denial, or `ended` in any other way; one
+    whose end is not saved yet is unfinished, since a restart would find it so and deliver its report again.
     """
     runtime = get_background_runtime(runtime_paths)
     if runtime is None:
@@ -435,7 +439,7 @@ def workflow_job_standing(runtime_paths: RuntimePaths, job_id: str) -> str:
     job = next((job for job in runtime.retained_jobs() if job.job_id == job_id), None)
     if job is None:
         return "absent"
-    if job.status in TERMINAL_STATUSES:
+    if job.status in TERMINAL_STATUSES and runtime.outcome_saved(job_id):
         return "stopped" if job.status in ("cancelled", "denied") else "ended"
     if job.status == "cancel_requested":
         return "stopping"

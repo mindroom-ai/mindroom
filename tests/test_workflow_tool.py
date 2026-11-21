@@ -1155,12 +1155,23 @@ def test_job_standing_says_what_the_job_runtime_knows(
     waits: bool,
     standing: str,
 ) -> None:
-    """Only a Stop or a denial stopped a job; one that is being stopped or waits to be continued has not ended."""
+    """Only a Stop or a denial stopped a job; one that is being stopped or waits to be continued has not ended.
+
+    Neither has one whose end the journal does not hold yet: a restart would find it unfinished.
+    """
     job, paths = SimpleNamespace(job_id="job-1", status=status), stack.context.runtime_paths
-    runtime = SimpleNamespace(retained_jobs=lambda: (job,), awaiting_continuation=lambda: (job,) if waits else ())
+    saved = [True]
+    runtime = SimpleNamespace(
+        retained_jobs=lambda: (job,),
+        awaiting_continuation=lambda: (job,) if waits else (),
+        outcome_saved=lambda _job_id: saved[0],
+    )
     monkeypatch.setattr(workflow_tool_module, "get_background_runtime", lambda _paths: runtime)
 
     assert workflow_tool_module.workflow_job_standing(paths, "job-1") == standing
+    saved[0] = False
+    unsaved = "live" if standing in ("stopped", "ended") else standing
+    assert workflow_tool_module.workflow_job_standing(paths, "job-1") == unsaved
     assert workflow_tool_module.workflow_job_standing(paths, "job-2") == "absent"
     monkeypatch.setattr(workflow_tool_module, "get_background_runtime", lambda _paths: None)
     assert workflow_tool_module.workflow_job_standing(paths, "job-1") == "unknown"
