@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from copy import deepcopy
 from dataclasses import replace
@@ -323,6 +324,45 @@ async def test_connect_refuses_replacement_between_wake_and_runner_lookup(
     assert refused.value.status_code == 409
     assert manager.calls == ["ensure_worker", "touch_worker"]
     assert not (tmp_path / "ssh" / "authorized_keys").exists()
+
+
+@pytest.mark.asyncio
+async def test_list_can_finish_while_connect_touches_worker(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow worker lookup must not hold up link reconciliation."""
+    config.agents["mind"].tailnet_ssh = False
+    link = _link(paths)
+    handle = _handle(link.worker_key, tmp_path / "ssh")
+    manager = _manager(monkeypatch, handle)
+    touching = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def slow_touch(key: str) -> WorkerHandle:
+        assert key == link.worker_key
+        loop.call_soon_threadsafe(touching.set)
+        assert release.wait(10)
+        return handle
+
+    async def start_sshd(_call: WorkerCall) -> None:
+        pass
+
+    monkeypatch.setattr(manager, "touch_worker", slow_touch)
+    monkeypatch.setattr(sandbox_proxy, "lease_worker_manager", lambda *_: manager)
+    monkeypatch.setattr(links, "_start_sshd", start_sshd)
+    serving = asyncio.create_task(_connect(config, paths, link.id))
+    try:
+        async with asyncio.timeout(2):
+            await touching.wait()
+            [row] = await asyncio.to_thread(desired_links, config, paths, AgentReplyMembershipIndex())
+            assert row["id"] == link.id
+    finally:
+        release.set()
+        assert await serving == ("10.0.0.5", 2222)
 
 
 @pytest.mark.asyncio

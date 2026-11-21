@@ -165,7 +165,7 @@ def _shell_call(config: Config, paths: RuntimePaths, worker_key: str, target: Re
     identity = target.execution_identity
     assert identity is not None
     assert identity.agent_name is not None
-    terminals = agent_terminals(identity.agent_name, config, paths, identity, create=True)
+    terminals = agent_terminals(identity.agent_name, config, paths, identity, create=False)
     if terminals is None:
         raise ConnectRefused(409, _NO_SHELL)
     try:
@@ -198,6 +198,7 @@ def _admit(  # noqa: C901 - keep the before/after wake and projection checks tog
         if (lease := lease_configured_primary_worker_manager(paths)) is None:
             raise ConnectRefused(503, "A dedicated worker backend is required.")
         with lease as manager:
+            # Use a stable workspace for this worker, independent of the connecting peer.
             launch_target = next(iter(routes.values()))
             launch_agent = launch_target.routing_agent_name
             assert launch_agent is not None
@@ -211,7 +212,11 @@ def _admit(  # noqa: C901 - keep the before/after wake and projection checks tog
     if ready.worker_key != key or endpoint is None:
         raise ConnectRefused(409, "This worker has no marked SSH endpoint.")
 
-    # Wake can span a config change; serialize the recheck and projection with other connects.
+    # Don't build against an already stale snapshot or hold the ledger lock across a worker touch.
+    snapshot, snapshot_paths = read_config()
+    call = _shell_call(config, paths, key, launch_target) if snapshot is config and snapshot_paths == paths else None
+
+    # Serialize the recheck and projection with other connects.
     with update_links(paths) as book:
         current, current_paths = read_config()
         if current_paths != paths or book.by_id(link_id) != link:
@@ -219,11 +224,13 @@ def _admit(  # noqa: C901 - keep the before/after wake and projection checks tog
         routes = _roster(current, paths, memberships).get(key, {})
         if (current_target := routes.get(peer_login)) is None:
             raise ConnectRefused(403, "This login is not authorized for this link.")
-        if current_target != target:
+        if (
+            call is None
+            or current is not config
+            or current_target != target
+            or next(iter(routes.values())) != launch_target
+        ):
             raise ConnectRefused(409, "This link's shell route changed during wake.")
-        # Use a stable workspace for the worker, independent of which peer is connecting.
-        launch_target = next(iter(routes.values()))
-        call = _shell_call(current, paths, key, launch_target)
         handle = call.handle
         # Touching the worker changes its last-use timestamp, not its generation or addresses.
         if handle is None or replace(handle, last_used_at=ready.last_used_at) != ready:
