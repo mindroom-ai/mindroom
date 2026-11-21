@@ -8,12 +8,13 @@ if TYPE_CHECKING:
     from .backend import Transaction
 
 
-def _claim_membership_row(
+def claim_active_membership_epoch(
     transaction: Transaction,
     principal_id: str,
+    *,
     room_id: str,
-) -> tuple[int, bool]:
-    """Materialize and lock one membership row, returning its epoch and fence."""
+) -> int | None:
+    """Lock the membership row and return its epoch only while the membership is active."""
     row = transaction.fetchone(
         """
         INSERT INTO room_membership (principal_id, room_id, membership_epoch)
@@ -27,18 +28,7 @@ def _claim_membership_row(
     if row is None:
         msg = f"Room membership for {room_id!r} is missing immediately after it was claimed"
         raise RuntimeError(msg)
-    return int(row["epoch"]), bool(row["departure_fenced"])
-
-
-def claim_active_membership_epoch(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    room_id: str,
-) -> int | None:
-    """Return the current epoch only while the room membership is active."""
-    epoch, departure_fenced = _claim_membership_row(transaction, principal_id, room_id)
-    return None if departure_fenced else epoch
+    return None if row["departure_fenced"] else int(row["epoch"])
 
 
 def current_membership_epoch(
@@ -83,9 +73,9 @@ def claim_membership_epoch(
     exist orders nothing. The inserted row says exactly what absence said while
     giving the first departure a durable row to fence against.
     """
-    current_epoch, departure_fenced = _claim_membership_row(transaction, principal_id, room_id)
+    active_epoch = claim_active_membership_epoch(transaction, principal_id, room_id=room_id)
     # The owner account's epoch never advances, so a history walk also claims the projection it started under.
     generation = expected_projection_generation
     if generation is not None and generation != projection_generation(transaction, principal_id, room_id):
         return False
-    return current_epoch == expected_membership_epoch and not departure_fenced
+    return active_epoch == expected_membership_epoch
