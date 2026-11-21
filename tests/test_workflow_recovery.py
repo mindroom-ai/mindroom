@@ -1423,6 +1423,39 @@ async def test_resume_that_was_admitted_and_killed_before_it_took_the_run_takes_
 
 
 @pytest.mark.asyncio
+async def test_accepted_resume_waits_for_the_owners_access_instead_of_failing_its_job(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh call is refused while the access cannot be answered; a job that was accepted keeps its request.
+
+    Until the answer comes it takes nothing and marks no call, and then it takes the run as it was accepted.
+    """
+    first = await _started(stack)
+    await stack.result("@0", "tool", _A)
+    await stack.finish_attempt(result="the first report")
+    await _ended_job(stack, first["job_id"])
+    monkeypatch.setattr(stack.engine, "reopen", lambda *_args, **_options: asyncio.Event().wait())
+    resumed = json.loads(await stack.call("resume_workflow", run_id=stack.run_id, rerun=["n1"]))
+    await stack.restart(kill=True)
+    stack.access = "pending"
+
+    await stack.continue_jobs()
+    await asyncio.sleep(0.3)
+    waiting = stack.store.get_run(stack.run_id)
+    [job] = [job for job in stack.jobs.retained_jobs() if job.job_id == resumed["job_id"]]
+    assert (waiting.state, waiting.job_id, job.status) == (WorkflowRunState.COMPLETED, first["job_id"], "running")
+    stack.access = None
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+
+    assert stack.store.get_run(stack.run_id).job_id == resumed["job_id"]
+    assert await stack.result("@0", "tool", _A) == "appended"
+    await stack.finish_attempt(result="the second report")
+    job = await _ended_job(stack, resumed["job_id"])
+    assert (await stack.collect(job), stack.counting_tool.lines) == ("the second report", ["a", "a"])
+
+
+@pytest.mark.asyncio
 async def test_live_fault_script_counts_the_follow_ups_of_one_job(stack: WorkflowStack, tmp_path: Path) -> None:
     """`tests/workflow_live` reads deliveries from the journal by the ID the runtime gives a job's follow-up."""
     handle = await _started(stack)

@@ -335,12 +335,14 @@ class WorkflowEngine:
         of *rerun* are marked. A run that is *owner*'s already was taken by this same invocation, delivered again,
         and is returned as it is. *epoch* is the one the run had when the resume was accepted: a run that another
         resume took since, also one whose attempt never started, is refused, as is one over its owner's limit of
-        live runs.
+        live runs. A job was accepted with its request, so it waits here while `admit` cannot answer yet.
         """
         limits = limits or WorkflowLimits()
         run = self.store.get_run(run_id)
         if owner is not None and run.owner == owner:
             return run, False
+        while job_id is not None and self.admit(run, context, limits) is None:  # noqa: ASYNC110 - access has no event
+            await asyncio.sleep(_RECHECK_SECONDS)
         text = run.source if source is None else source
         take = partial(
             self.store.update_run,
