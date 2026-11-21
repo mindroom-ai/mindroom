@@ -3832,7 +3832,6 @@ depends_on = []
 path = "mindroom.tailnet_ssh.links"
 depends_on = [
     "mindroom.agent_cli.shell_contract",
-    "mindroom.bounded_bytes",
     "mindroom.runtime_resolution",
     "mindroom.tailnet_ssh.projection",
     "mindroom.tailnet_ssh.store",

@@ -248,7 +248,7 @@ async def test_start_writes_launch_0600_and_spawns_sshd(
     """A start keeps the shell's launch for the session module and runs sshd on the projection the primary wrote."""
     response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
 
-    assert (response.status_code, response.json()) == (200, {"port": fake_sshd.port})
+    assert (response.status_code, response.content) == (204, b"")
     assert stat.S_IMODE(session.LAUNCH_PATH.stat().st_mode) == 0o600
     assert stat.S_IMODE(session.LAUNCH_PATH.parent.stat().st_mode) == 0o700
     assert [entry.name for entry in session.LAUNCH_PATH.parent.iterdir()] == ["launch.json"]
@@ -283,7 +283,7 @@ async def test_start_keeps_the_latest_launch_while_sshd_runs(
 
     response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
 
-    assert response.status_code == 200
+    assert response.status_code == 204
     assert json.loads(session.LAUNCH_PATH.read_text(encoding="utf-8"))["env"] == {"PATH": "/later"}
     assert len(fake_sshd.argvs) == 1
 
@@ -344,7 +344,7 @@ async def test_concurrent_starts_spawn_one_sshd(client: httpx.AsyncClient, fake_
         client.post("/api/sandbox-runner/ssh/start", json=_BODY),
     )
 
-    assert [response.status_code for response in responses] == [200, 200]
+    assert [response.status_code for response in responses] == [204, 204]
     assert len(fake_sshd.argvs) == 1
 
 
@@ -358,7 +358,7 @@ async def test_start_restarts_sshd_that_exited(client: httpx.AsyncClient, fake_s
     response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
 
     # The port is the second stand-in's own, which only it opens.
-    assert (response.status_code, response.json()) == (200, {"port": fake_sshd.port})
+    assert (response.status_code, response.content) == (204, b"")
     assert len(fake_sshd.argvs) == 2
     assert fake_sshd.processes[1].returncode is None
 
@@ -521,12 +521,12 @@ async def test_listener_cleanup_does_not_wait_for_sessions(
     app = sandbox_runner_app.app
     try:
         async with asyncio.timeout(5), app.router.lifespan_context(app):
-            assert (await client.post("/api/sandbox-runner/ssh/start", json=_BODY)).status_code == 200
+            assert (await client.post("/api/sandbox-runner/ssh/start", json=_BODY)).status_code == 204
             listener = fake.processes[0]
             if operation == "restart":
                 listener.kill()
                 await _exited(listener)
-                assert (await client.post("/api/sandbox-runner/ssh/start", json=_BODY)).status_code == 200
+                assert (await client.post("/api/sandbox-runner/ssh/start", json=_BODY)).status_code == 204
                 assert fake.processes[1].returncode is None
         assert listener.returncode == -signal.SIGKILL
         os.kill(int((tmp_path / str(listener.pid)).read_text()), 0)

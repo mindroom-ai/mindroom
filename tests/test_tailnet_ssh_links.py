@@ -484,7 +484,7 @@ async def test_a_connect_waits_for_its_worker_on_a_pool_of_its_own(
     assert [name.startswith("mindroom-tailnet-ssh-connect") for name in threads] == [True]
 
 
-@pytest.mark.parametrize("status", [200, 400, 503])
+@pytest.mark.parametrize("status", [200, 204, 400, 503])
 @pytest.mark.asyncio
 async def test_runner_receives_the_shell_call_and_returns_generic_refusal(
     config: Config,
@@ -514,7 +514,7 @@ async def test_runner_receives_the_shell_call_and_returns_generic_refusal(
         _wire_connect(monkeypatch, tmp_path, link, call=call)
         monkeypatch.setattr(links, "_start_sshd", start_sshd)
 
-        if status == 200:
+        if status in {200, 204}:
             assert await _connect(config, paths, link.id) == ("10.0.0.5", 2222)
         else:
             with pytest.raises(ConnectRefused) as refused:

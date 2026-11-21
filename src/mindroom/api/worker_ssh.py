@@ -8,10 +8,9 @@ import os
 import sys
 from asyncio import create_subprocess_exec
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Request
 
 from mindroom.api.sandbox_exec import runner_dedicated_worker_root
 from mindroom.api.sandbox_runner import app_runtime_paths, prepare_terminal_launch, validate_runner_token
@@ -28,10 +27,6 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/sandbox-runner/ssh", tags=["worker-ssh"])
 _START_SECONDS = 15.0
 _START_FAILED = "The worker's SSH server did not start."
-
-
-class _Start(BaseModel):
-    request: ExecuteRequest
 
 
 class _WorkerSsh:
@@ -147,16 +142,15 @@ async def stop_worker_ssh(app: FastAPI) -> None:
         await _stop(state)
 
 
-@router.post("/start", dependencies=[Depends(validate_runner_token)])
-async def start(request: Request, payload: _Start) -> dict[str, int]:
-    """Refresh the session launch and return sshd's listening port."""
+@router.post("/start", status_code=204, dependencies=[Depends(validate_runner_token)])
+async def start(http: Request, request: Annotated[ExecuteRequest, Body(embed=True)]) -> None:
+    """Refresh the session launch and confirm sshd is listening."""
     try:
-        await asyncio.to_thread(_store_launch, request.app, payload.request)
+        await asyncio.to_thread(_store_launch, http.app, request)
     except TerminalError as error:
         raise HTTPException(status_code=error.status_code, detail=error.detail) from None
     except OSError:
         raise HTTPException(503, _START_FAILED) from None
-    state = _worker_ssh(request.app)
+    state = _worker_ssh(http.app)
     async with state.lock:
-        await _ensure_sshd(request.app, state)
-    return {"port": WORKER_SSH_PORT}
+        await _ensure_sshd(http.app, state)

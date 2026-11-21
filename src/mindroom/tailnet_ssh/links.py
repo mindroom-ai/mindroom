@@ -14,7 +14,6 @@ from pydantic import BaseModel, ConfigDict, NonNegativeInt
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
-from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.runtime_resolution import resolve_agent_execution, resolve_agent_runtime
@@ -248,12 +247,10 @@ async def _start_sshd(call: WorkerCall) -> None:
                 allow_redirects=False,
             ) as response,
         ):
-            await collect_bounded_bytes(response.content.iter_chunked(16384), max_bytes=16384)
-            status = response.status
-    except (aiohttp.ClientError, TimeoutError, ByteLimitExceededError) as error:
+            if response.status not in {200, 204}:
+                raise ConnectRefused(503, "The worker's SSH server did not start.")
+    except (aiohttp.ClientError, TimeoutError) as error:
         raise ConnectRefused(503, f"The worker's SSH server is unreachable: {type(error).__name__}") from None
-    if status != 200:
-        raise ConnectRefused(503, "The worker's SSH server did not start.")
 
 
 async def connect(
