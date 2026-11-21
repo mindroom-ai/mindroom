@@ -1490,6 +1490,7 @@ async def test_edit_scheduled_task_forwards_stored_placement_and_history_overrid
         new_thread=new_thread,
     )
     serve_stored_task(client, "!test:server", "task123", {"status": "pending", "workflow": workflow.model_dump_json()})
+    overrides = {} if history_limit is None else {"history_limit": history_limit}
 
     with patch(
         "mindroom.scheduling.tasks.schedule_task",
@@ -1506,7 +1507,7 @@ async def test_edit_scheduled_task_forwards_stored_placement_and_history_overrid
             task_id="task123",
             full_text="tomorrow at 9am updated task",
             scheduled_by="@user:server",
-            history_limit=history_limit,
+            **overrides,
         )
 
     assert "✅ Updated task `task123`." in result
