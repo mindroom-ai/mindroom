@@ -274,6 +274,11 @@ A large gap between `pod_ready_ms` and `wait_ms` points at the worker's Service 
 Many `tool` records for the same `worker` mean it is used less often than its idle timeout, such as [`workers.kubernetes.idleTimeoutSeconds`](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings), so it scales down between uses.
 A `timeout` means the worker did not become ready within [`workers.kubernetes.readyTimeoutSeconds`](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) or `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS`; the call that waited fails, and for a tool call a [`tool_call_failed`](#tool_call_failed) record carries the error.
 
+### `pinned_worker_retire_failed`
+
+Previously named `subagent_worker_retire_failed`. This warning now covers failed cleanup of both dedicated subagent and named workers, and `worker` is the worker's log ID.
+If it repeats for the same worker, check the accompanying exception for a worker backend or storage error.
+
 ### `oauth_credentials_refresh_failed`
 
 Logged when MindRoom cannot refresh the access token of a stored [OAuth connection](https://docs.mindroom.chat/oauth-framework/), for a tool or an MCP server.
