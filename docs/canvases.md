@@ -57,9 +57,7 @@ Use a canvas when seeing or clicking beats reading or typing; for a quick choice
 
 ## Turn canvases on
 
-Canvases need two switches, and both are off by default.
-
-First, give the agent the [`chat_ui`](tools/chat-ui.md) toolkit with `enable_show_canvas: true`:
+MindRoom Chat ships with canvases on, so an agent needs only the [`chat_ui`](tools/chat-ui.md) toolkit with `enable_show_canvas: true`:
 
 ```yaml
 agents:
@@ -74,21 +72,19 @@ agents:
 
 `enable_show_canvas` (boolean, default `false`) adds the `show_canvas` function; the rest of `chat_ui` works without it.
 It can also be set in the `chat_ui` tool's saved settings for every agent that uses `chat_ui`; an agent's own entry wins, as described in [How Settings Combine](tools/index.md#how-settings-combine).
-`mindroom config init` and newly provisioned hosted instances already turn it on for the starter Mind agent, so Mind needs only the Chat switch.
+`mindroom config init` and newly provisioned hosted instances already turn it on for the starter Mind agent, so Mind can show canvases without any setup.
 
-Second, enable canvases in the MindRoom Chat deployment's runtime `config.json`:
+A MindRoom Chat deployment can turn canvases off in its runtime `config.json`:
 
 ```json
 {
   "mindroom": {
     "canvas": {
-      "enabled": true
+      "enabled": false
     }
   }
 }
 ```
-
-The shipped MindRoom Chat configuration sets `enabled` to `false`, so only whoever deploys Chat can turn canvases on.
 
 ### Let pages load libraries
 
@@ -187,8 +183,7 @@ When the panel cannot open, the **Open canvas** button is disabled and a message
 
 | Message | Cause |
 |---|---|
-| Interactive panels are turned off in this app. | The Chat deployment has not enabled canvases. |
-| Interactive panels are not available in the app yet. Open this conversation in a browser. | The native mobile app does not show canvases; Chat in a browser does. |
+| Interactive panels are turned off in this app. | The Chat deployment has turned canvases off. |
 | End the call to open interactive panels. | Chat does not run canvases during a call. |
 
 Other people in the room who use MindRoom Chat on the agent's homeserver see the title and **Open canvas**, not the inline page, and can answer in the panel; everyone else sees only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
