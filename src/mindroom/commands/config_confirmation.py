@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from contextlib import asynccontextmanager, suppress
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
+from weakref import WeakValueDictionary
 
 import nio
 
@@ -22,7 +23,7 @@ from mindroom.requester_identity import is_platform_administrator, resolve_human
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -134,32 +135,12 @@ class _PendingConfigChange:
 _pending_changes: dict[str, _PendingConfigChange] = {}
 
 
-@dataclass
-class _PendingChangeLock:
-    """One borrowed per-preview serialization lock."""
-
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    borrowers: int = 0
+_pending_change_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 
 
-_pending_change_locks: dict[str, _PendingChangeLock] = {}
-
-
-@asynccontextmanager
-async def _pending_change_lock(event_id: str) -> AsyncIterator[None]:
-    """Serialize one preview while retaining locks only for active borrowers."""
-    entry = _pending_change_locks.get(event_id)
-    if entry is None:
-        entry = _PendingChangeLock()
-        _pending_change_locks[event_id] = entry
-    entry.borrowers += 1
-    try:
-        async with entry.lock:
-            yield
-    finally:
-        entry.borrowers -= 1
-        if entry.borrowers == 0 and _pending_change_locks.get(event_id) is entry:
-            _pending_change_locks.pop(event_id)
+def _pending_change_lock(event_id: str) -> asyncio.Lock:
+    """Return the preview's lock, which lives only while someone holds or waits for it."""
+    return _pending_change_locks.setdefault(event_id, asyncio.Lock())
 
 
 def _store_path(runtime_paths: RuntimePaths) -> Path:
