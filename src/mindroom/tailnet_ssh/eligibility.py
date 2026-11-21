@@ -7,9 +7,8 @@ another agent owns. ``worker_scope`` is a reuse rule, not a data partition, so t
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING
 
 from mindroom.access_policy import resolve_responder_access
 from mindroom.config.resolution import agent_policy
@@ -29,24 +28,11 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.shared_directories.store import SharedDirectory
+    from mindroom.workers.backends._dedicated_worker_common import SharedDirectoryMount
     from mindroom.workers.models import WorkerLaunchConfig
 
-_Reason = Literal["backend", "not_enabled", "scope", "shared_workspace", "joined_directory", "not_authorized"]
 
-
-@dataclass(frozen=True)
-class _Ineligible:
-    """The first condition a link fails; unresolved membership is retryable on connect."""
-
-    reason: _Reason
-    pending: bool = False
-
-
-class _SharedMount(Protocol):
-    """A shared directory a worker mounts; the rule reads only whether it is read-only."""
-
-    @property
-    def read_only(self) -> bool: ...
+MEMBERSHIP_PENDING = "Agent membership is not yet known; retry shortly."
 
 
 def _concrete_users_alone(config: Config, agent_name: str) -> tuple[str, ...] | None:
@@ -85,12 +71,6 @@ def _key_agent(worker_key: str, agent_names: Iterable[str]) -> str | None:
     return names[0] if len(names) == 1 else None
 
 
-def _has_joined_directory(config: Config, agent_name: str, directories: Iterable[SharedDirectory]) -> bool:
-    """Whether the agent mounts a shared directory it does not own."""
-    shareable = partial(is_shareable_agent, config)
-    return any(shared_directory_access(directory, (agent_name,), shareable) is False for directory in directories)
-
-
 def config_error(config: Config, agent_name: str) -> str | None:
     """Reject opt-in that cannot work; the sole-user requirement is checked at launch and connect."""
     if not config.agents[agent_name].tailnet_ssh:
@@ -116,14 +96,14 @@ def _not_authorized(
     agent_name: str,
     worker_key: str,
     membership_index: AgentReplyMembershipIndex,
-) -> _Ineligible | None:
+) -> str | None:
     """Return ``not_authorized`` unless the key is the person's and they may use the agent, pending while not known."""
     # why-lazy: authorization loads nio; the worker backends import this module for the launch rule, and the
     # sandbox runner imports them.
     from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder  # noqa: PLC0415
 
     if user_agent_worker_key_requester(worker_key) != requester_id:
-        return _Ineligible("not_authorized")
+        return "not_authorized"
     try:
         allowed = is_sender_allowed_for_responder(
             requester_id,
@@ -135,8 +115,8 @@ def _not_authorized(
             require_resolved_membership=True,
         )
     except ReplyMembershipPendingError:
-        return _Ineligible("not_authorized", pending=True)
-    return None if allowed else _Ineligible("not_authorized")
+        return MEMBERSHIP_PENDING
+    return None if allowed else "not_authorized"
 
 
 def link_ineligibility(
@@ -147,13 +127,13 @@ def link_ineligibility(
     worker_key: str | None,
     membership_index: AgentReplyMembershipIndex,
     directories: Sequence[SharedDirectory] | None = None,
-) -> _Ineligible | None:
+) -> str | None:
     """Return the first failed link check, optionally reusing a shared-directory snapshot."""
     if not worker_backend_kind(runtime_paths).dedicated:
-        return _Ineligible("backend")
+        return "backend"
     agent = config.agents.get(agent_name)
     if agent is None or not agent.tailnet_ssh:
-        return _Ineligible("not_enabled")
+        return "not_enabled"
     policy = agent_policy(config, agent_name)
     if (
         policy.effective_execution_scope != "user_agent"
@@ -161,28 +141,26 @@ def link_ineligibility(
         or worker_key is None
         or _key_agent(worker_key, config.agents) != agent_name
     ):
-        return _Ineligible("scope")
+        return "scope"
     denied = _not_authorized(config, runtime_paths, requester_id, agent_name, worker_key, membership_index)
     if denied is not None:
         return denied
     if not policy.is_private and not _sole_workspace_user(config, agent_name, requester_id):
-        return _Ineligible("shared_workspace")
+        return "shared_workspace"
     if directories is None:
         directories = load_shared_directories(runtime_paths)
-    return _Ineligible("joined_directory") if _has_joined_directory(config, agent_name, directories) else None
+    shareable = partial(is_shareable_agent, config)
+    joined = any(shared_directory_access(directory, (agent_name,), shareable) is False for directory in directories)
+    return "joined_directory" if joined else None
 
 
 def ssh_eligible_launch(
     worker_key: str,
     launch: WorkerLaunchConfig,
     private_agent_names: frozenset[str] | None,
-    shared_mounts: Sequence[_SharedMount],
+    shared_mounts: Sequence[SharedDirectoryMount],
 ) -> bool:
-    """Return whether a worker about to launch with ``shared_mounts`` gets the tailnet SSH mark.
-
-    The person is the key's requester and the agent the one launch agent whose name the key's agent part encodes;
-    a private agent must be one the worker may see. A read-only shared mount is a directory another agent owns.
-    """
+    """Require the worker to see its agent's private workspace or own a sole-user workspace, with no joined mounts."""
     agent_name = _key_agent(worker_key, launch.agent_policies)
     if agent_name is None or normalize_worker_key_part(agent_name) != agent_name:
         return False

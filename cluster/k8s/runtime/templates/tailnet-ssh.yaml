@@ -77,7 +77,6 @@ spec:
               valueFrom:
                 secretKeyRef: {name: {{ $ssh.authKeySecret | trim | quote }}, key: auth-key}
             - {name: TAILNET_SSH_STATE_DIR, value: /state}
-            - {name: TS_NO_LOGS_NO_SUPPORT, value: "true"}
             {{- range $key, $value := dict "TAILNET_SSH_LOGIN_SERVER" $ssh.loginServer "TAILNET_SSH_TAGS" (join "," $ssh.tags) "HTTPS_PROXY" $ssh.httpsProxy }}
             {{- with $value }}
             - {name: {{ $key }}, value: {{ . | quote }}}

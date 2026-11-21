@@ -746,26 +746,8 @@ Connecting accounts also needs the providers' [OAuth clients](../../../docs/oaut
 
 ## Tailnet SSH
 
-Create a Secret in the release namespace with key `auth-key` holding a reusable, non-ephemeral Tailscale auth key for the operator's tailnet. Then set:
-
-```yaml
-workers:
-  backend: kubernetes
-tailnetSsh:
-  enabled: true
-  authKeySecret: mindroom-tailnet-key
-```
-
-Optionally set `loginServer` for Headscale and `tags` for the enrolled nodes. Only the gateway reads the auth key; the internal listener token is shared only with the primary.
-Opt in eligible agents with `tailnet_ssh: true` and set each requester's login in `tailnet_ssh.logins` and public keys in `tailnet_ssh.authorized_keys`. There is no user enrollment or key management UI.
-Connect from the operator tailnet with `ssh mindroom@<hostname>` using the node's MagicDNS name and verify its SSH host key. The gateway checks the tailnet login before waking the worker; sshd separately checks the configured key.
-
-For hosted use, enable `networkPolicy.create` and `workers.kubernetes.networkPolicy.create` or enforce equivalent isolation. Keep the internal listener and worker port `2222` off public ingress, and never use `2222` as the worker runner port.
-If using `tailnetSsh.httpsProxy`, admit it with `extraEgress`; do not use the workers' Squid. See [values.yaml](values.yaml) for the chart settings.
-
-Keep the gateway PVC across restarts. Replace an expired key in the Secret and restart the gateway for new enrollments; rotating the key does not move existing nodes to another tailnet.
-Reassigning a sole-user agent hands over its workspace. Disable SSH and let revocation finish before moving workers to another backend, tenant or namespace. A reused hostname gets a fresh host key.
-See [Tailnet SSH](../../../docs/tailnet-ssh.md) for the MindRoom config example, eligibility, hostname rules, and revocation.
+Enable `tailnetSsh.enabled` with the Kubernetes worker backend and set `tailnetSsh.authKeySecret` to a release Secret containing `auth-key`.
+See [Kubernetes Tailnet SSH](../../../docs/tailnet-ssh.md#kubernetes) for setup, network policies, and the GitOps token caveat, and [values.yaml](values.yaml) for all chart settings.
 
 ## Matrix Managed Account Authentication
 

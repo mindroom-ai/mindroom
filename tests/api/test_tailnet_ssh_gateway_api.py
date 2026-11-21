@@ -49,12 +49,7 @@ from mindroom.runtime_env_policy import (
     worker_extra_env,
 )
 from mindroom.tailnet_ssh import links as link_service
-from mindroom.tailnet_ssh.links import (
-    ConnectRefused,
-    GatewayStatus,
-    StatusReport,
-    _worker_key,
-)
+from mindroom.tailnet_ssh.links import ConnectRefused, GatewayStatus, StatusReport
 from mindroom.tailnet_ssh.store import Link, new_link, read_links, update_links
 from mindroom.worker_computer.sessions import ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
@@ -66,6 +61,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
 ALICE = "@alice:example.org"
+_ALICE_MINE_KEY = "v1:default:user_agent:~@alice:example.org:mine"
 AUTH = {"Authorization": "Bearer tok"}
 PEER = {"peer_login": "alice@github", "peer_node": "laptop"}
 # One well-formed call of each route.
@@ -232,13 +228,13 @@ def test_get_links_clears_the_keys_of_a_removed_links_worker(
 
     Its sshd's stop is left to run apart from the answer.
     """
-    config, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
+    config, _ = config_lifecycle.read_app_committed_runtime_config(api_app)
     moved = _stored_link(api_app)
     del config.agents["mine"]
     ssh_dir = tmp_path / "ssh"
     link_service.write_projection(ssh_dir, moved, [f"restrict,pty {PUBLIC_KEY}"])
     handle = SimpleNamespace(
-        worker_key=_worker_key(paths, ALICE, "mine"),
+        worker_key=_ALICE_MINE_KEY,
         ssh_endpoint=SimpleNamespace(projection_dir=ssh_dir),
     )
     handle.status = "ready"
@@ -306,8 +302,7 @@ def test_status_is_stored_and_answers_204(
 
     assert (response.status_code, response.content) == (204, b"")
     assert on_event_loop == [False]
-    paths = config_lifecycle.read_app_committed_runtime_config(api_app)[1]
-    assert active_tailnet_ssh_worker_keys(api_app) == {_worker_key(paths, ALICE, "mine")}
+    assert active_tailnet_ssh_worker_keys(api_app) == {_ALICE_MINE_KEY}
 
 
 @pytest.mark.parametrize(
@@ -420,7 +415,7 @@ def test_the_go_gateways_fixtures_are_what_this_listener_takes_and_answers(
     status = StatusReport.model_validate_json(status_body)
     assert status.open_connections == {link_id: 2}
     assert read_links(paths).links == [link]
-    assert active_tailnet_ssh_worker_keys(api_app) == {_worker_key(paths, ALICE, "mine")}
+    assert active_tailnet_ssh_worker_keys(api_app) == {_ALICE_MINE_KEY}
     connected = client.post(f"/links/{link_id}/connect", headers=AUTH, content=connect_body)
     assert (connected.status_code, connected.json()) == (200, {"host": "10.0.0.5", "port": 2222})
     assert peers == [(link_id, "bas@github", "laptop")]
@@ -450,7 +445,7 @@ def test_connect_rereads_the_committed_config_replaced_during_wake(
     manager.__enter__.return_value = manager
 
     def wake(spec: WorkerSpec) -> SimpleNamespace:
-        assert spec.worker_key == _worker_key(paths, ALICE, "mine")
+        assert spec.worker_key == _ALICE_MINE_KEY
         with state.config_lock:
             state.snapshot = config_lifecycle.ApiSnapshot(2, paths, runtime_config=changed)
         return SimpleNamespace(

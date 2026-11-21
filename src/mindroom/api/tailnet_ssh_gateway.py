@@ -68,10 +68,6 @@ def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
         return await call_next(request)
 
-    @app.exception_handler(ssh.ConnectRefused)
-    async def refused(_request: Request, error: ssh.ConnectRefused) -> JSONResponse:
-        return JSONResponse({"detail": error.detail}, status_code=error.status_code)
-
     read_config = partial(_read_config, api_app)
 
     def ready() -> tuple[RuntimePaths, ssh.GatewayStatus]:

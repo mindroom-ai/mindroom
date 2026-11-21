@@ -304,7 +304,7 @@ class KubernetesWorkerBackend:
             auth_secret_applied = True
             replacing_stale_worker = False
             while True:
-                applied = self._resources.apply_deployment(
+                recreated, ssh = self._resources.apply_deployment(
                     worker_key=worker_key,
                     worker_id=worker_id,
                     state_subpath=state_subpath,
@@ -316,7 +316,6 @@ class KubernetesWorkerBackend:
                     resource_profile=spec.resource_profile,
                     recreate=replacing_stale_worker,
                 )
-                recreated = applied.recreated
                 startup_triggered = should_restart or recreated
                 destructive_failure_allowed = destructive_failure_allowed or startup_triggered
                 if startup_triggered and reporter is None:
@@ -331,7 +330,7 @@ class KubernetesWorkerBackend:
                     self._resources.patch_deployment(worker_id, annotations=annotations)
                 self._sync_shared_credentials(spec, launch)
                 # The Service follows the mark of the template just rendered, never a second reading of the plan.
-                self._resources.apply_service(worker_id, ssh=applied.ssh)
+                self._resources.apply_service(worker_id, ssh=ssh)
                 deployment = self._resources.wait_for_ready(
                     worker_id,
                     timeout_seconds=self.config.ready_timeout_seconds,
@@ -794,20 +793,6 @@ class KubernetesWorkerBackend:
             agent_policies=launch.agent_policies,
         )
 
-    def _ssh_marked(
-        self,
-        spec: WorkerSpec,
-        launch: WorkerLaunchConfig,
-        shared_directory_mounts: tuple[SharedDirectoryMount, ...],
-    ) -> bool:
-        return self._resources.ssh_marked(
-            spec.worker_key,
-            launch=launch,
-            private_agent_names=spec.private_agent_names,
-            state_scope_worker_key=spec.state_scope_worker_key,
-            shared_mounts=shared_directory_mounts,
-        )
-
     def _reuse_cached_ready_worker(
         self,
         spec: WorkerSpec,
@@ -831,10 +816,12 @@ class KubernetesWorkerBackend:
         # Shared directories change at runtime, so the Deployment is re-applied whenever their mounts differ.
         # So it is when the tailnet SSH mark differs, which follows config the launch digest leaves out.
         shared_directory_mounts = self._plan_shared_directory_mounts(spec, launch)
-        if entry.shared_directory_mounts != shared_directory_mounts or entry.ssh != self._ssh_marked(
-            spec,
-            launch,
-            shared_directory_mounts,
+        if entry.shared_directory_mounts != shared_directory_mounts or entry.ssh != self._resources.ssh_marked(
+            spec.worker_key,
+            launch=launch,
+            private_agent_names=spec.private_agent_names,
+            state_scope_worker_key=spec.state_scope_worker_key,
+            shared_mounts=shared_directory_mounts,
         ):
             self._invalidate_ready_worker(spec.worker_key)
             return None

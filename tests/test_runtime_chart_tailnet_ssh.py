@@ -165,7 +165,7 @@ def test_gateway_deployment_is_single_recreate_and_hardened() -> None:
     assert "storageClassName" not in claim["spec"]
 
 
-def test_gateway_env_points_at_primary_and_never_logs_to_tailscale() -> None:
+def test_gateway_env_points_at_primary() -> None:
     """The gateway reaches the primary's listener by its Service and holds the token from the shared Secret."""
     docs = _render(*ENABLED, "tailnetSsh.port=9100")
     env = _gateway_env(docs)
@@ -184,7 +184,6 @@ def test_gateway_env_points_at_primary_and_never_logs_to_tailscale() -> None:
             "valueFrom": {"secretKeyRef": {"name": "tailnet-key", "key": "auth-key"}},
         },
         "TAILNET_SSH_STATE_DIR": {"name": "TAILNET_SSH_STATE_DIR", "value": "/state"},
-        "TS_NO_LOGS_NO_SUPPORT": {"name": "TS_NO_LOGS_NO_SUPPORT", "value": "true"},
     }
     service = _resource(docs, "Service", NAME)
     assert service["spec"]["type"] == "ClusterIP"

@@ -192,14 +192,6 @@ class KubernetesDeployment(Protocol):
     def status(self) -> _KubernetesDeploymentStatus | None: ...  # noqa: D102
 
 
-@dataclass(frozen=True, slots=True)
-class _AppliedDeployment:
-    """What applying one worker Deployment did; ``ssh`` says the template it rendered has the tailnet SSH mark."""
-
-    recreated: bool
-    ssh: bool
-
-
 @dataclass(slots=True)
 class _DeploymentMetadataSnapshot:
     name: str
@@ -774,7 +766,7 @@ class KubernetesResourceManager:
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
         recreate: bool = False,
-    ) -> _AppliedDeployment:
+    ) -> tuple[bool, bool]:
         """Create-or-patch one worker Deployment, recreating it for pod-template drift or when asked.
 
         Returns whether the Deployment was recreated, and the tailnet SSH mark of the template rendered for it,
@@ -802,7 +794,7 @@ class KubernetesResourceManager:
                 or existing_annotations.get(ANNOTATION_TEMPLATE_HASH) != desired_annotations[ANNOTATION_TEMPLATE_HASH]
             ):
                 self._recreate_deployment(worker_id, manifest, timeout_seconds=self.config.ready_timeout_seconds)
-                return _AppliedDeployment(recreated=True, ssh=ssh)
+                return True, ssh
         self._apply_object(
             read_fn=self._apps.read_namespaced_deployment,
             create_fn=self._apps.create_namespaced_deployment,
@@ -810,7 +802,7 @@ class KubernetesResourceManager:
             resource_name=worker_id,
             manifest=manifest,
         )
-        return _AppliedDeployment(recreated=False, ssh=ssh)
+        return False, ssh
 
     def patch_deployment(
         self,
@@ -1206,12 +1198,9 @@ class KubernetesResourceManager:
         shared_mounts: Sequence[SharedDirectoryMount],
     ) -> bool:
         """Return whether a launch with ``shared_mounts`` gets the tailnet SSH mark; a pinned worker never does."""
-        return resolve_state_scope_worker_key(worker_key, state_scope_worker_key) == worker_key and ssh_eligible_launch(
-            worker_key,
-            launch,
-            private_agent_names,
-            shared_mounts,
-        )
+        if resolve_state_scope_worker_key(worker_key, state_scope_worker_key) != worker_key:
+            return False
+        return ssh_eligible_launch(worker_key, launch, private_agent_names, shared_mounts)
 
     def _pod_template(
         self,
@@ -1416,9 +1405,7 @@ class KubernetesResourceManager:
             "metadata": metadata,
             "spec": {
                 "replicas": replicas,
-                "selector": {
-                    "matchLabels": _labels(extra_labels=self.config.extra_labels, worker_id=worker_id),
-                },
+                "selector": {"matchLabels": _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)},
                 "template": template,
             },
         }

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Never, Self
 import pytest
 import pytest_asyncio
 from aiohttp import web
+from fastapi import HTTPException
 from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -24,7 +25,6 @@ from mindroom.tailnet_ssh.links import (
     ConnectRefused,
     GatewayStatus,
     StatusReport,
-    _resolve_target,
     active_worker_keys,
     connect,
     desired_links,
@@ -241,7 +241,10 @@ def _recorded[**P, T](calls: list[str], name: str, function: Callable[P, T]) -> 
 def _worker_call(worker_key: str, api_root: str = "http://10.0.0.5:8766/api/sandbox-runner") -> WorkerCall:
     request = ExecuteRequest(protocol=1, worker_key=worker_key, tool_name="shell", function_name="run_shell_command")
     return WorkerCall(
-        request=request, api_root=api_root, headers={"x-mindroom-sandbox-token": "runner-token"}, handle=None
+        request=request,
+        api_root=api_root,
+        headers={"x-mindroom-sandbox-token": "runner-token"},
+        handle=None,
     )
 
 
@@ -339,14 +342,6 @@ async def _connect(
     )
 
 
-def test_resolve_target_is_the_persons_own_worker(config: Config, paths: RuntimePaths) -> None:
-    """A link's worker is the one a turn of the agent for that person runs in."""
-    assert _resolve_target(config, paths, ALICE, "mine").worker_key == _key(ALICE, "mine")
-    private = _resolve_target(config, paths, ALICE, "mind")
-    assert private.worker_key == _key(ALICE, "mind")
-    assert private.private_agent_names == frozenset({"mind"})
-
-
 @pytest.mark.asyncio
 async def test_discovery_uses_exact_marked_worker_keys_without_a_status_report(
     config: Config,
@@ -379,6 +374,25 @@ async def test_discovery_uses_exact_marked_worker_keys_without_a_status_report(
     manager.handles += [_handle(_key(ALICE, "mine"), ssh)]
     assert await _rows(config, paths, status, monotonic=59) == rows
     assert [row["hostname"] for row in await _rows(config, paths, status, monotonic=60)] == ["mind", "mind-bob", "mine"]
+
+
+@pytest.mark.asyncio
+async def test_list_retries_if_config_changes_during_inventory(
+    config: Config,
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A list built from a stale config is an HTTP retry, not a connect refusal."""
+    _manager(monkeypatch)
+    snapshots = iter((config, config.model_copy()))
+    status = GatewayStatus()
+
+    with pytest.raises(HTTPException, match="retry the link list") as retry:
+        await desired_links(lambda: (next(snapshots), paths), paths, AgentReplyMembershipIndex(), status, monotonic=0)
+
+    assert type(retry.value) is HTTPException
+    assert retry.value.status_code == 503
+    assert status.discovered_at == float("-inf")
 
 
 @pytest.mark.asyncio
@@ -724,21 +738,24 @@ async def test_missing_or_empty_configured_login_admits_nobody(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("agent", "private_names"), [("mind", frozenset({"mind"})), ("mine", frozenset())])
 async def test_connect_order(
     config: Config,
     paths: RuntimePaths,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    agent: str,
+    private_names: frozenset[str],
 ) -> None:
     """A connect checks the link, wakes its worker, writes sshd's files, starts sshd, and only then names the port."""
-    link = _link(agent="mind")
+    link = _link(agent=agent)
     _store(paths, link)
     manager = _wire_connect(monkeypatch, tmp_path, link)
 
     assert await _connect(config, paths, link.id) == ("10.0.0.5", 2222)
 
     assert manager.calls == ["eligibility", "ensure_worker", "eligibility", "projection", "ssh_start"]
-    assert manager.specs == [WorkerSpec(_link_key(link), private_agent_names=frozenset({"mind"}))]
+    assert manager.specs == [WorkerSpec(_link_key(link), private_agent_names=private_names)]
     assert (tmp_path / "ssh" / "authorized_keys").read_text() == f"restrict,pty {PUBLIC_KEY}\n"
     assert (tmp_path / "ssh" / "ssh_host_ed25519_key").read_text() == link.host_key
 
@@ -753,6 +770,7 @@ async def test_connect_refuses_replacement_between_wake_and_runner_lookup(
     *,
     marked: bool,
 ) -> None:
+    """Refuse a changed handle before projecting keys or starting a runner."""
     link = _link()
     _store(paths, link)
     config.agents["mine"].tools = ["shell"]

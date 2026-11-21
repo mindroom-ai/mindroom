@@ -17,7 +17,7 @@ from mindroom.config.tailnet_ssh import normalize_public_key
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
-from mindroom.tailnet_ssh.eligibility import _Ineligible, link_ineligibility, ssh_eligible_launch
+from mindroom.tailnet_ssh.eligibility import link_ineligibility, ssh_eligible_launch
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     resolve_unscoped_worker_key,
@@ -112,7 +112,7 @@ def _ineligibility(
     requester: str,
     agent: str,
     worker_key: str | None = None,
-) -> _Ineligible | None:
+) -> str | None:
     key = _key(requester, agent) if worker_key is None else worker_key
     return link_ineligibility(config, paths, requester, agent, key, AgentReplyMembershipIndex())
 
@@ -143,36 +143,35 @@ def _public_key() -> str:
 def test_link_ineligibility_matrix(tmp_path: Path, agent: str, requester: str, reason: str | None) -> None:
     """Only a private agent or one whose workspace is the requester's alone is eligible, and only for its user."""
     paths = _paths(tmp_path)
-    result = _ineligibility(paths, _matrix_config(paths), requester, agent)
-    assert (None if result is None else result.reason) == reason
+    assert _ineligibility(paths, _matrix_config(paths), requester, agent) == reason
 
 
 def test_alice_key_for_mine_is_the_documented_shape(tmp_path: Path) -> None:
     """The key a link stores is the one worker routing resolves for the requester and agent."""
     assert _key(ALICE, "mine") == _ALICE_MINE_KEY
     paths = _paths(tmp_path)
-    assert _ineligibility(paths, _load(paths), BOB, "mine", _ALICE_MINE_KEY) == _Ineligible("not_authorized")
+    assert _ineligibility(paths, _load(paths), BOB, "mine", _ALICE_MINE_KEY) == "not_authorized"
 
 
 def test_another_persons_key_is_not_authorized(tmp_path: Path) -> None:
     """A requester the agent admits still cannot link to a worker key that names someone else."""
     paths = _paths(tmp_path)
-    assert _ineligibility(paths, _load(paths), ALICE, "mind", _key(BOB, "mind")) == _Ineligible("not_authorized")
+    assert _ineligibility(paths, _load(paths), ALICE, "mind", _key(BOB, "mind")) == "not_authorized"
 
 
 def test_static_runner_backend_is_backend(tmp_path: Path) -> None:
     """Without a dedicated backend nothing is eligible, and that is reported before any other reason."""
     paths = _paths(tmp_path, backend=None)
     config = _load(paths)
-    assert _ineligibility(paths, config, ALICE, "mine") == _Ineligible("backend")
-    assert _ineligibility(paths, config, BOB, "plain") == _Ineligible("backend")
+    assert _ineligibility(paths, config, ALICE, "mine") == "backend"
+    assert _ineligibility(paths, config, BOB, "plain") == "backend"
 
 
 def test_subagent_pinned_key_is_scope(tmp_path: Path) -> None:
     """A subagent's pinned worker is not the person's own worker."""
     paths = _paths(tmp_path)
     pinned = subagent_worker_key(_ALICE_MINE_KEY, "a" * 32)
-    assert _ineligibility(paths, _load(paths), ALICE, "mine", pinned) == _Ineligible("scope")
+    assert _ineligibility(paths, _load(paths), ALICE, "mine", pinned) == "scope"
 
 
 def test_scope_refusals(tmp_path: Path) -> None:
@@ -180,9 +179,9 @@ def test_scope_refusals(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     config = _load(paths)
     membership = AgentReplyMembershipIndex()
-    assert link_ineligibility(config, paths, ALICE, "mine", None, membership) == _Ineligible("scope")
-    assert _ineligibility(paths, config, ALICE, "mine", _key(ALICE, "mine", "user")) == _Ineligible("scope")
-    assert _ineligibility(paths, config, ALICE, "mine", _key(ALICE, "other")) == _Ineligible("scope")
+    assert link_ineligibility(config, paths, ALICE, "mine", None, membership) == "scope"
+    assert _ineligibility(paths, config, ALICE, "mine", _key(ALICE, "mine", "user")) == "scope"
+    assert _ineligibility(paths, config, ALICE, "mine", _key(ALICE, "other")) == "scope"
 
 
 def test_joined_directory_is_ineligible(tmp_path: Path) -> None:
@@ -191,7 +190,7 @@ def test_joined_directory_is_ineligible(tmp_path: Path) -> None:
     config = _load(paths)
     create_shared_directory(paths, owner="other", name="specs")
     add_shared_directory_member(paths, owner="other", name="specs", member="mine")
-    assert _ineligibility(paths, config, ALICE, "mine") == _Ineligible("joined_directory")
+    assert _ineligibility(paths, config, ALICE, "mine") == "joined_directory"
 
 
 def test_owned_directory_and_knowledge_base_pass(tmp_path: Path) -> None:
@@ -406,11 +405,12 @@ def test_ssh_eligible_launch_matrix(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("other_admission", ["team", "other-admin", "requester-admin"])
 def test_non_private_agent_has_no_other_ingress(tmp_path: Path, other_admission: str) -> None:
+    """Both launch and connect require exclusive use through all ingress paths."""
     paths = _paths(tmp_path)
     data = _data()
     if other_admission == "team":
         data["teams"] = {
-            "crew": {"display_name": "Crew", "role": "Help", "agents": ["mine"], "access": {"users": [BOB]}}
+            "crew": {"display_name": "Crew", "role": "Help", "agents": ["mine"], "access": {"users": [BOB]}},
         }
     else:
         data["administrators"] = [BOB if other_admission == "other-admin" else ALICE]
@@ -427,8 +427,8 @@ def test_names_that_share_a_key_are_no_ones(tmp_path: Path) -> None:
     data["agents"]["mine_"] = _mine_like(tailnet_ssh=False)
     config = _load(paths, data)
     assert _key(ALICE, "mine_") == _key(ALICE, "mine") == _ALICE_MINE_KEY
-    assert _ineligibility(paths, config, ALICE, "mine") == _Ineligible("scope")
-    assert _ineligibility(paths, config, ALICE, "mine_") == _Ineligible("not_enabled")
+    assert _ineligibility(paths, config, ALICE, "mine") == "scope"
+    assert _ineligibility(paths, config, ALICE, "mine_") == "not_enabled"
     launch = _launch(config)
     assert ssh_eligible_launch(_ALICE_MINE_KEY, launch, None, ()) is False
     assert ssh_eligible_launch(_key(ALICE, "nobody"), launch, None, ()) is False
@@ -447,4 +447,4 @@ def test_lone_private_agent_name_must_round_trip_at_load_and_launch(tmp_path: Pa
     config.agents["mine_"].tailnet_ssh = True  # Bypass load validation, as a stale launch could.
     assert _key(ALICE, "mine_") == _ALICE_MINE_KEY
     assert not ssh_eligible_launch(_ALICE_MINE_KEY, _launch(config), frozenset({"mine_"}), ())
-    assert _ineligibility(paths, config, ALICE, "mine_") == _Ineligible("scope")
+    assert _ineligibility(paths, config, ALICE, "mine_") == "scope"

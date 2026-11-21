@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import aiohttp
+from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, NonNegativeInt
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION, unbound_agent_cli_shell_env
@@ -18,12 +19,13 @@ from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.shared_directories.store import load_shared_directories
-from mindroom.tailnet_ssh.eligibility import link_ineligibility
+from mindroom.tailnet_ssh.eligibility import MEMBERSHIP_PENDING, link_ineligibility
 from mindroom.tailnet_ssh.projection import authorized_key_lines, clear_authorized_keys, signin_keys, write_projection
 from mindroom.tailnet_ssh.store import new_link, read_links, update_links
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.tool_system import worker_routing
 from mindroom.tool_system.sandbox_proxy import worker_call, worker_runner_address
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerSpec
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
@@ -36,7 +38,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tailnet_ssh.store import Link, LinkBook
     from mindroom.tool_system.sandbox_proxy import WorkerCall
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
     from mindroom.workers.models import WorkerHandle, WorkerSshEndpoint
 
     type ReadConfig = Callable[[], tuple[Config, RuntimePaths]]
@@ -66,55 +68,27 @@ class GatewayStatus:
     discovered_at: float = float("-inf")
 
 
-class ConnectRefused(Exception):  # noqa: N818 - a refusal the gateway is answered with, not a failure
-    """Why a connection gets no worker."""
-
-    def __init__(self, status_code: int, detail: str) -> None:
-        super().__init__(detail)
-        self.status_code = status_code
-        self.detail = detail
+class ConnectRefused(HTTPException):
+    """An SSH connect was refused; the gateway receives only its safe detail."""
 
 
-def _resolve_target(config: Config, paths: RuntimePaths, requester: str, agent: str) -> ResolvedWorkerTarget:
-    identity = worker_routing.build_requester_execution_identity(
-        agent_name=agent,
-        runtime_paths=paths,
-        requester_id=requester,
-    )
-    return resolve_agent_execution(agent, config, paths, execution_identity=identity).worker_target
-
-
-def _worker_key(paths: RuntimePaths, requester_id: str, agent_name: str) -> str:
-    # Derive from the ledger pair even after the agent is deleted or its scope changes.
-    identity = worker_routing.build_requester_execution_identity(
-        agent_name=agent_name,
-        runtime_paths=paths,
-        requester_id=requester_id,
-    )
+def _worker_identity(paths: RuntimePaths, requester: str, agent: str) -> tuple[ToolExecutionIdentity, str]:
+    # Derive the normal key even after deletion or a scope change.
+    identity = build_requester_execution_identity(agent_name=agent, runtime_paths=paths, requester_id=requester)
     key = worker_routing.resolve_worker_key("user_agent", identity)
     assert key is not None
-    return key
+    return identity, key
 
 
 def _list_workers(runtime_paths: RuntimePaths) -> list[WorkerHandle] | None:
     try:
-        lease = lease_configured_primary_worker_manager(runtime_paths)
-        if lease is None:
+        if (lease := lease_configured_primary_worker_manager(runtime_paths)) is None:
             return []
         with lease as manager:
             return manager.list_workers()
     except WorkerBackendError as error:
         logger.warning("tailnet_ssh_workers_not_listed", error=str(error))
         return None
-
-
-def _candidate_pairs(handles: Mapping[str, WorkerHandle]) -> set[tuple[str, str]]:
-    return {
-        (agent, requester)
-        for key in handles
-        if (agent := worker_routing.worker_key_agent_name(key))
-        and (requester := worker_routing.user_agent_worker_key_requester(key))
-    }
 
 
 def _sync_keys(link: Link, keys: dict[str, str], handle: WorkerHandle | None, cleared: list[WorkerHandle]) -> None:
@@ -126,15 +100,13 @@ def _sync_keys(link: Link, keys: dict[str, str], handle: WorkerHandle | None, cl
         old = (projection / "authorized_keys").read_bytes().strip()
     except FileNotFoundError:
         return
-    if not old:
-        return
-    if not keys:
+    if old and keys:
+        lines = authorized_key_lines(keys)
+        if old != "\n".join(lines).encode():
+            write_projection(projection, link, lines)
+    elif old:
         clear_authorized_keys(projection)
         cleared.append(handle)
-        return
-    lines = authorized_key_lines(keys)
-    if old != "\n".join(lines).encode():
-        write_projection(projection, link, lines)
 
 
 def _reconcile(
@@ -145,7 +117,8 @@ def _reconcile(
     monotonic: float,
 ) -> tuple[list[dict[str, object]], list[WorkerHandle]]:
     config, _ = read_config()
-    discover = monotonic - status.discovered_at >= 60
+    discovered_at = status.discovered_at
+    discover = monotonic - discovered_at >= 60
     listed = _list_workers(paths) if discover or read_links(paths).links else None
     handles = {h.worker_key: h for h in listed or [] if h.ssh_endpoint is not None}
     cleared: list[WorkerHandle] = []
@@ -154,18 +127,23 @@ def _reconcile(
         # Don't use a list taken before a different config opened or revoked a connection.
         current, current_paths = read_config()
         if current is not config or paths != current_paths:
-            raise ConnectRefused(503, "Configuration changed; retry the link list.")
+            raise HTTPException(503, "Configuration changed; retry the link list.")
         directories = load_shared_directories(paths)
         stored = {(link.agent_name, link.requester_id): link for link in book.links}
         reserved = {link.hostname for link in book.links}
         candidates = set()
-        if listed is not None and monotonic - status.discovered_at >= 60:
-            candidates = _candidate_pairs(handles) - stored.keys()
+        if listed is not None and discover and status.discovered_at == discovered_at:
+            candidates = {
+                (agent, requester)
+                for key in handles
+                if (agent := worker_routing.worker_key_agent_name(key))
+                and (requester := worker_routing.user_agent_worker_key_requester(key))
+            } - stored.keys()
             status.discovered_at = monotonic
         rows = []
         for agent, requester in (*stored, *sorted(candidates)):
             link = stored.get((agent, requester))
-            key = _worker_key(paths, requester, agent)
+            _, key = _worker_identity(paths, requester, agent)
             # Only the exact normal key is a discovery candidate; compute eligibility once per pair.
             denied = link_ineligibility(config, paths, requester, agent, key, memberships, directories)
             if link is None:
@@ -234,29 +212,11 @@ def record_status(paths: RuntimePaths, status: GatewayStatus, payload: StatusRep
     status.report = (
         monotonic,
         frozenset(
-            _worker_key(paths, link.requester_id, link.agent_name)
+            _worker_identity(paths, link.requester_id, link.agent_name)[1]
             for link in book.links
             if link.id not in book.retiring_ids and payload.open_connections.get(link.id, 0) > 0
         ),
     )
-
-
-def _ready_worker(runtime_paths: RuntimePaths, target: ResolvedWorkerTarget) -> WorkerHandle:
-    worker_key = target.worker_key
-    assert worker_key is not None
-    try:
-        lease = lease_configured_primary_worker_manager(runtime_paths)
-        if lease is None:
-            raise ConnectRefused(503, "A dedicated worker backend is required.")
-        with lease as manager:
-            handle = manager.ensure_worker(WorkerSpec(worker_key, private_agent_names=target.private_agent_names))
-    except WorkerBackendError:
-        raise ConnectRefused(503, "The worker did not start.") from None
-    if handle.status != "ready":
-        raise ConnectRefused(503, "The worker is not ready.")
-    if handle.worker_key != worker_key or handle.ssh_endpoint is None:
-        raise ConnectRefused(409, "This worker has no marked SSH endpoint.")
-    return handle
 
 
 def _shell_call(config: Config, paths: RuntimePaths, link: Link, target: ResolvedWorkerTarget) -> WorkerCall:
@@ -292,12 +252,11 @@ def _admission(
     login = config.tailnet_ssh.logins.get(link.requester_id)
     if not login or not login.strip() or peer_login != login:
         raise ConnectRefused(403, "This link admits another Tailscale login.")
-    key = _worker_key(paths, link.requester_id, link.agent_name)
+    identity, key = _worker_identity(paths, link.requester_id, link.agent_name)
     denied = link_ineligibility(config, paths, link.requester_id, link.agent_name, key, memberships)
     if denied is not None:
-        detail = "Agent membership is not yet known; retry shortly." if denied.pending else denied.reason
-        raise ConnectRefused(503 if denied.pending else 409, detail)
-    target = _resolve_target(config, paths, link.requester_id, link.agent_name)
+        raise ConnectRefused(503 if denied == MEMBERSHIP_PENDING else 409, denied)
+    target = resolve_agent_execution(link.agent_name, config, paths, execution_identity=identity).worker_target
     if target.worker_key != key:
         raise ConnectRefused(409, "This link's worker is no longer the agent's.")
     lines = authorized_key_lines(signin_keys(config, link.requester_id))
@@ -315,7 +274,18 @@ def _admit(
     config, paths = read_config()
 
     link, target, _ = _admission(read_links(paths), config, paths, memberships, link_id, peer_login)
-    ready = _ready_worker(paths, target)
+    assert target.worker_key is not None
+    try:
+        if (lease := lease_configured_primary_worker_manager(paths)) is None:
+            raise ConnectRefused(503, "A dedicated worker backend is required.")
+        with lease as manager:
+            ready = manager.ensure_worker(WorkerSpec(target.worker_key, private_agent_names=target.private_agent_names))
+    except WorkerBackendError:
+        raise ConnectRefused(503, "The worker did not start.") from None
+    if ready.status != "ready":
+        raise ConnectRefused(503, "The worker is not ready.")
+    if ready.worker_key != target.worker_key or ready.ssh_endpoint is None:
+        raise ConnectRefused(409, "This worker has no marked SSH endpoint.")
 
     def project(book: LinkBook) -> tuple[WorkerSshEndpoint, WorkerCall]:
         # A slow wake can span a committed config replacement. Recheck while serialized with revocation.
