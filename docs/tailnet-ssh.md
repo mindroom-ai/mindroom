@@ -55,6 +55,7 @@ agents:
 - Use `private.per: user_agent` for a [private agent](configuration/agents.md#private-instances), without setting `worker_scope` on it, or use effective `worker_scope: user_agent` and grant access to exactly one concrete Matrix user with no room grants, as above.
   No team may list a non-private agent, and if administrators can bypass its access rules, there must be no administrator other than the requester.
 - The requester must still be allowed to use the agent under its [access rules](authorization.md#responder-access); if room membership is not yet known, retry after it resolves.
+  After a primary restart, unresolved memberships can temporarily omit links from the list, cutting their sessions until membership resolves.
 - The worker cannot mount another agent's shared directory as a read-only join; an owned shared directory or an assigned read-only knowledge base does not disqualify it.
 - The configured agent name must be unchanged by worker-key normalization and unambiguous.
   For valid agent names (letters, digits, and underscores), this means no leading or trailing `_`; `mine_` is refused, and it would collide with `mine` if both were configured.
@@ -176,9 +177,11 @@ Wait for the gateway to observe revocation before restoring access; a successful
 ## Operating limits
 
 - On a shared tailnet with a permissive policy, every member can reach every enrolled node's `:22`; the gateway's `WhoIs` login check and the worker's public-key check enforce access.
+- Docker workers' sshd is reachable from the worker network, even when its published host port binds to loopback.
+  Such a connection still needs the requester's private SSH key, but it bypasses the gateway login check and the gateway cannot cancel it.
 - Reassigning a non-private, sole-user agent hands its existing workspace to the new user, including through SSH; move or wipe that data first if it should not transfer.
 - Set the affected agents' `tailnet_ssh: false` and let revocation finish **before** changing the worker backend, tenant, or namespace; new connections only use the current backend, and old workers' keys are not cleared after the move.
-- A hostname can be reused after deletion, even by a different requester, but the new link has a fresh host key.
+- A hostname can be reused after deletion, even by a different requester. A new link has a fresh host key, but delete and recreate between polls can keep the old key for the same requester and agent.
   A permitted client with the old key pinned gets a warning and must verify the replacement; the old requester is refused if the name now belongs to someone else.
 - Hosted installations need the primary and worker ingress NetworkPolicies shown above, or equivalent enforced isolation, in addition to the gateway policy; otherwise in-cluster pods can reach worker sshd directly, where access is still key-only.
   Keep internal ports off public ingress. Both dedicated backends reject `2222` as the worker runner port (`workers.kubernetes.port` or `MINDROOM_DOCKER_WORKER_PORT`), even if tailnet SSH is disabled.

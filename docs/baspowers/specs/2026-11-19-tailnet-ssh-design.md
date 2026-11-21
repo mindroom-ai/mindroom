@@ -427,8 +427,9 @@ There is no user enrollment or management UI in v1.
 - **List, omit, or retire.** `GET /links` returns `{id, hostname, desired, allowed_login, access_revision}` with `on` for eligible links.
   Omit an ineligible link; the gateway cancels its wakes and pipes on the next successful 5 s reconcile and stops the node without deleting its state.
   When eligibility returns, reuse its ID, hostname, host key and state directory, even if its worker is asleep.
-  An actual roster deletion is final for that link ID: record its ID durably in `retiring_ids`, omit it until keys are cleared or there is no live SSH endpoint, then send `removing` until the gateway acknowledges `removed` after best-effort logout and successful state-directory deletion.
+  A roster deletion observed by reconciliation is final for that link ID: record its ID durably in `retiring_ids`, omit it until keys are cleared or there is no live SSH endpoint, then send `removing` until the gateway acknowledges `removed` after best-effort logout and successful state-directory deletion.
   A restored agent never reactivates a retiring ID; once that retirement completes, discover it as a new link with a fresh ID and host key, so an old acknowledgement cannot delete it.
+  Deleting and recreating the agent between polls may keep the link ID and host key, but that link still serves only the same (requester, agent) pair.
   Reject a failed or unparseable response as a whole, leaving node state unchanged and not renewing the two-minute lease; in a decoded list from the trusted primary, skip a bad row (invalid ID or unknown `desired`) and reconcile the valid rows.
   A valid empty list stops all nodes but keeps state.
 - **Revoke worker access and close pipes.** When a live current-backend worker loses eligibility, is deleted, or loses its last login/key, clear `authorized_keys` before requesting the token-gated `/ssh/stop`; derive its unpinned key from the ledger even if scope changed, and retry failed lists or clears while the row is present.
@@ -453,6 +454,7 @@ At both config load and launch, refuse opt-in if `normalize_worker_key_part(agen
 Rename such an agent before opting in.
 Reject ambiguous worker keys independently of hostname allocation.
 Require an unpinned `user_agent` Docker or Kubernetes worker and `tailnet_ssh: true`, with a per-requester private workspace or exactly one concrete user and no room grants for a non-private agent.
+For the non-private case no team may list the agent, and no administrator other than the requester may bypass its access rules.
 Require requester authorization and no joined shared-directory mounts; assigned read-only knowledge bases and owned shared directories still qualify.
 Under permissive ACLs, every tailnet member can reach every link node's `:22`; isolation depends on `WhoIs` before wake, eligibility and binding by link ID to the exact worker, and only that requester's config keys in `authorized_keys` (`restrict,pty`).
 SSH reaches what the agent's shell reaches, with the same environment/workspace and no forwarding; the operator and control plane are trusted, and neither the gateway token nor its node volume goes to workers.
@@ -463,7 +465,7 @@ The operator setup page must state:
 
 - Reassigning a non-private sole-user agent hands its existing workspace to the new user, through SSH as well as through the agent; wipe or move the data first if that is not intended.
 - Turn off `tailnet_ssh` and let revocation finish before switching worker backend, tenant or namespace; new connects dial only current-backend endpoints and v1 does not clear stale keys from old workers.
-- A hostname can be reused after deletion, including by another requester; the new link gets a fresh ID and host key.
+- A hostname can be reused after deletion, including by another requester. A new link gets a fresh ID and host key; reuse of the old link is limited to its original (requester, agent) pair.
   SSH warns if a permitted client has the old key pinned, and `WhoIs` refuses the old requester if the name now belongs to someone else.
 - Hosted enablement needs both the primary and worker ingress NetworkPolicies, or equivalent enforced isolation, in addition to the gateway policy; otherwise in-cluster pods can reach worker sshd (still key-only).
   The runner port must not be `2222`, and none of the internal ports belong on public ingress.
