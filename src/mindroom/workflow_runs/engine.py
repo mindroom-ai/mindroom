@@ -710,7 +710,8 @@ class WorkflowEngine:
             (kind, text), usage, claim = await await_child(run, node, runtime, on_waiting=waits)
         except Exception as exc:
             logger.exception("workflow_agent_outcome_unreadable", run_id=node.run_id, key=node.key)
-            (kind, text), usage, claim = ("failed", str(exc)), None, None
+            # What the turn did is unknown, so its call is not one to run again without being asked to.
+            (kind, text), usage, claim = ("indeterminate", str(exc)), None, None
         outcome: _Outcome = WorkflowNodeState.FAILED, None, {"kind": kind, "message": text}
         if kind == "completed":
             outcome = WorkflowNodeState.COMPLETED, text, None

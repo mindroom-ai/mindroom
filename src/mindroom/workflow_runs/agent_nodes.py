@@ -255,7 +255,12 @@ async def await_child(
         else:
             # The job cannot be read while its requester's access resolves.
             await asyncio.sleep(_RECHECK_SECONDS)
-    outcome, usage = await _job_outcome(job, runtime)
+    try:
+        outcome, usage = await _job_outcome(job, runtime)
+    except BaseException:
+        # Nothing was read, so nothing is this wait's to save: the outcome is the next reader's.
+        await jobs.release_wait(job_id, claim)
+        raise
     if timed_out and outcome[0] == "cancelled":
         outcome = ("timeout", "The agent did not finish in time and was stopped.")
     return outcome, usage, claim
@@ -285,12 +290,13 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
     if job.status == "interrupted" or stopped:
         # A run is saved before its first tool call starts, so a turn none of whose runs holds a call made none. A
         # call that waited for a person's decision when the restart came had not started, and its run says so. A
-        # run that was cut short and cannot be read may have made some.
+        # run that cannot be found, the turn's last one included, may have made some.
         made = [tool for run in records for tool in run.tools or () if tool.confirmed or not _never_started(tool)]
-        called = len(records) < len(spent) + (record is not None) or bool(made)
+        called = len(records) <= len(spent) or bool(made)
         return ("indeterminate" if called else "interrupted", text), usage
     if job.status == "completed":
-        return ("completed", (record.handover_content if record is not None else None) or ""), usage
+        # A turn that completed without a record to read its answer from did what nobody can say.
+        return ("indeterminate", _NO_ANSWER) if record is None else ("completed", record.handover_content or ""), usage
     return (job.status, text), usage
 
 

@@ -277,6 +277,45 @@ async def test_outcome_that_the_node_could_not_take_is_given_back_to_its_job(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("read", ["fails", "finds nothing"])
+async def test_agent_whose_record_cannot_be_read_after_it_wrote_is_not_run_again(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+    read: str,
+) -> None:
+    """Without the record of the turn nobody knows what it did: the call is indeterminate.
+
+    A read that failed took nothing from the job, whose outcome stays the next reader's; a record that is not there
+    is the job's whole outcome, which the node has taken.
+    """
+
+    async def unreadable(*_args: object, **_options: object) -> None:
+        if read == "fails":
+            msg = "The session store is locked."
+            raise OSError(msg)
+
+    monkeypatch.setattr(agent_nodes, "read_child_run", unreadable)
+    stack.child_script(calls(tool_call("append", "c1", line="a")), answer("appended it"))
+
+    with pytest.raises(NodeFailed) as unknown:
+        await stack.result("@0", "agent", _PROMPT)
+
+    assert (unknown.value.kind, _node(stack).state, _node(stack).result) == (
+        "indeterminate",
+        WorkflowNodeState.INDETERMINATE,
+        None,
+    )
+    await stack.until(lambda: not stack.engine._tasks.get(stack.run_id))
+    waited = await stack.jobs.wait(stack.node_job("@0").job_id, owner=stack.context.execution_identity, depth=0)
+    assert (waited.claim is not None, waited.job.consumed) == (True, read == "finds nothing")
+    await stack.jobs.release_wait(waited.job.job_id, waited.claim)
+    await stack.end_attempt(ScriptRunState.FAILED)
+    await stack.resume(stack.run_id)
+    again = await stack.submit("@0", "agent", _PROMPT)
+    assert (again.state, _node(stack).generation, stack.counting_tool.lines) == ("failed", 1, ["a"])
+
+
+@pytest.mark.asyncio
 async def test_job_that_was_started_and_is_gone_leaves_its_call_indeterminate(
     stack: WorkflowStack,
     monkeypatch: pytest.MonkeyPatch,
