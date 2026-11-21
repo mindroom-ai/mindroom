@@ -120,7 +120,6 @@ from mindroom.workers.worker_retirement import open_worker_state_root
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
 
-    from mindroom.workers.backends._dedicated_worker_common import SharedDirectoryMount
     from mindroom.workers.models import (
         ProgressSink,
         WorkerHandle,
@@ -924,14 +923,7 @@ class DockerWorkerBackend:
         image_id = self._configured_image_id()
         if container is None:
             return _WorkerContainerState(container=None, current=False, image_id=image_id, mounts=[])
-        shared_mounts = self._shared_directory_mounts(spec, launch)
-        mounts = self._worker_mounts(
-            paths,
-            spec=spec,
-            launch=launch,
-            shared_mounts=shared_mounts,
-            materialize_projection=False,
-        )
+        mounts = self._worker_mounts(paths, spec=spec, launch=launch, materialize_projection=False)
         render_image_id = image_id or self._container_image_id(container)
         current = (
             mounts is not None
@@ -956,11 +948,7 @@ class DockerWorkerBackend:
         startup_manifest_hash: str,
         ssh: bool,
     ) -> _DockerLaunch:
-        """Return the ``containers.run`` call that starts the worker's container from ``image_id`` now.
-
-        With ``ssh`` the container carries the tailnet SSH mark: the label, and its sshd port published beside the
-        runner's.
-        """
+        """Render the container launch, adding the SSH label and port only if marked."""
         container_name = self._container_name_for_worker(worker_key)
         labels = {
             LABEL_COMPONENT: "worker",
@@ -1036,14 +1024,7 @@ class DockerWorkerBackend:
         if image_id is None:
             image_id = self._pull_configured_image()
         startup_manifest_hash = self._write_startup_manifest(paths, spec=spec, launch=launch)
-        shared_mounts = self._shared_directory_mounts(spec, launch)
-        mounts = self._worker_mounts(
-            paths,
-            spec=spec,
-            launch=launch,
-            shared_mounts=shared_mounts,
-            materialize_projection=True,
-        )
+        mounts = self._worker_mounts(paths, spec=spec, launch=launch, materialize_projection=True)
         assert mounts is not None, "a materialized config projection is ready"
         self._prepare_nested_storage_mount_targets(paths, (mount[1] for mount in mounts))
         rendered = self._render_launch(
@@ -1276,11 +1257,10 @@ class DockerWorkerBackend:
         *,
         spec: WorkerSpec,
         launch: WorkerLaunchConfig,
-        shared_mounts: Sequence[SharedDirectoryMount],
         materialize_projection: bool,
     ) -> list[tuple[Path, str, bool]] | None:
         """Return a worker's bind mounts in container order, or None while its config projection is not written."""
-        storage_mounts = self._scoped_storage_mount_specs(spec, launch, shared_mounts)
+        storage_mounts = self._scoped_storage_mount_specs(spec, launch)
         config_mounts, projection = self._projection_manager.config_mount_specs(
             paths.state,
             launch=launch,
@@ -1315,46 +1295,30 @@ class DockerWorkerBackend:
                 msg = f"Docker worker mount target must be a real directory: {paths.state.root / relative_path}"
                 raise WorkerBackendError(msg) from exc
 
-    def _shared_directory_mounts(
-        self,
-        spec: WorkerSpec,
-        launch: WorkerLaunchConfig,
-    ) -> tuple[SharedDirectoryMount, ...]:
-        """Return the shared directories the worker mounts, planned once per launch."""
-        return plan_shared_directory_mounts(
-            worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
-            runtime_paths=self._runtime_paths,
-            worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
-            resolved_agent_policies=launch.agent_policies,
-        )
-
-    def _ssh_marked(
-        self,
-        spec: WorkerSpec,
-        launch: WorkerLaunchConfig,
-    ) -> bool:
+    def _ssh_marked(self, spec: WorkerSpec, launch: WorkerLaunchConfig) -> bool:
         # Publish sshd only on a literal, non-wildcard address.
         try:
-            if ipaddress.ip_address(self.config.publish_host).is_unspecified:
-                return False
+            address = ipaddress.ip_address(self.config.publish_host)
         except ValueError:
             return False
-        return tailnet_ssh_marked(spec.worker_key, launch, spec.state_scope_worker_key)
+        return not address.is_unspecified and tailnet_ssh_marked(spec.worker_key, launch, spec.state_scope_worker_key)
 
-    def _scoped_storage_mount_specs(
-        self,
-        spec: WorkerSpec,
-        launch: WorkerLaunchConfig,
-        shared_mounts: Sequence[SharedDirectoryMount],
-    ) -> list[tuple[Path, str, bool]]:
+    def _scoped_storage_mount_specs(self, spec: WorkerSpec, launch: WorkerLaunchConfig) -> list[tuple[Path, str, bool]]:
         resolved_agent_policies = launch.agent_policies
         state_scope_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
+        mounted_storage_root = Path(self.config.storage_mount_path)
+        shared_mounts = plan_shared_directory_mounts(
+            worker_key=state_scope_key,
+            runtime_paths=self._runtime_paths,
+            worker_visible_shared_storage_root=mounted_storage_root,
+            resolved_agent_policies=resolved_agent_policies,
+        )
         mount_specs = [
             (workspace_mount.local_path, str(workspace_mount.worker_visible_path), False)
             for workspace_mount in plan_scoped_workspace_mounts(
                 worker_key=state_scope_key,
                 local_shared_storage_root=self._storage_root,
-                worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
+                worker_visible_shared_storage_root=mounted_storage_root,
                 private_agent_names=spec.private_agent_names,
                 resolved_agent_policies=resolved_agent_policies,
             )

@@ -23,6 +23,7 @@ import os
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -73,7 +74,7 @@ from mindroom.workers.backends.kubernetes_pod_names import (
 from mindroom.workers.models import LABEL_TAILNET_SSH, WORKER_SSH_PORT
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
 
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.config.main import Config
@@ -710,20 +711,12 @@ class KubernetesResourceManager:
             raise
 
     def apply_service(self, worker_id: str, *, ssh: bool) -> None:
-        """Create-or-patch one worker Service, with the sshd port when the worker has the tailnet SSH mark.
-
-        The patch is a JSON merge patch, which replaces the port list.
-        The client's default strategic merge keeps a port the manifest no longer names, such as a lost mark's 2222.
-        """
+        """Create or patch a worker Service, with sshd's port only if marked."""
         self._apply_object(
             read_fn=self._core.read_namespaced_service,
             create_fn=self._core.create_namespaced_service,
-            patch_fn=lambda name, namespace, body: self._core.patch_namespaced_service(
-                name,
-                namespace,
-                body,
-                _content_type=_MERGE_PATCH_CONTENT_TYPE,
-            ),
+            # Replace the port list: strategic merge would leave 2222 after opt-out.
+            patch_fn=partial(self._core.patch_namespaced_service, _content_type=_MERGE_PATCH_CONTENT_TYPE),
             resource_name=worker_id,
             manifest=self._service_manifest(worker_id, ssh=ssh),
         )
@@ -1221,11 +1214,6 @@ class KubernetesResourceManager:
             raise WorkerBackendError(msg)
         template_annotations[_ANNOTATION_RUNNER_TOKEN_HASH] = token_hash
         container_ports: list[dict[str, object]] = [{"containerPort": self.config.worker_port, "name": "api"}]
-        shared_mounts = self.plan_shared_directory_mounts(
-            worker_key,
-            state_scope_worker_key=state_scope_worker_key,
-            agent_policies=launch.agent_policies,
-        )
         if tailnet_ssh_marked(worker_key, launch, state_scope_worker_key):
             worker_labels[LABEL_TAILNET_SSH] = "true"
             container_ports.append({"containerPort": WORKER_SSH_PORT, "name": "ssh"})
@@ -1260,7 +1248,6 @@ class KubernetesResourceManager:
                         state_subpath,
                         private_agent_names,
                         launch=launch,
-                        shared_mounts=shared_mounts,
                         state_scope_worker_key=state_scope_worker_key,
                     ),
                     "readinessProbe": {
@@ -1498,10 +1485,14 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None,
         *,
         launch: WorkerLaunchConfig,
-        shared_mounts: Sequence[SharedDirectoryMount],
         state_scope_worker_key: str | None = None,
     ) -> list[dict[str, object]]:
         agent_policies = launch.agent_policies
+        shared_mounts = self.plan_shared_directory_mounts(
+            worker_key,
+            state_scope_worker_key=state_scope_worker_key,
+            agent_policies=agent_policies,
+        )
         mounts = self._scoped_storage_mounts(
             worker_key,
             state_subpath,
