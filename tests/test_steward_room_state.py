@@ -1647,6 +1647,55 @@ async def test_slow_refused_roster_writer_leaves_a_full_budget_for_the_steward(
 
 
 @pytest.mark.asyncio
+async def test_steward_roster_spends_the_same_budget_on_lock_wait_and_io(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acquiring the lock just before the deadline must not extend an inline membership callback."""
+    config, paths, ids, _, client = room_state
+    duties = _owner_bot(room_state).steward_duties
+    clock = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    started, release, stalled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    read_members = client.joined_members.side_effect
+
+    async def members(room_id: str) -> nio.JoinedMembersResponse:
+        if started.is_set():
+            stalled.set()
+            return await asyncio.Future()
+        started.set()
+        await release.wait()
+        return await read_members(room_id)
+
+    client.joined_members.side_effect = members
+    first = asyncio.create_task(reconcile_room_accounts(client, config, paths, ROOM_ID))
+    event = _membership_event(ids["agent1"].full_id, "join", "leave")
+    callback = asyncio.create_task(duties.member_event(client.rooms[ROOM_ID], event))
+    try:
+        await _yield_loop(40)
+        assert started.is_set()
+        assert not stalled.is_set()
+        assert not callback.done()
+        clock = 9
+        release.set()
+        await _yield_loop(40)
+        assert first.done()
+        assert await first is True
+        assert stalled.is_set()
+        assert not callback.done()
+        clock = 10
+        await _yield_loop(40)
+        assert callback.done(), "The lock wait and the first writer must share one deadline"
+        await callback
+        assert duties._room_state_reruns[ROOM_ID] == {"accounts"}
+    finally:
+        duties.stopping()
+        first.cancel()
+        callback.cancel()
+        await asyncio.gather(first, callback, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_setup_sweep_logs_a_real_roster_deadline(room_state: RoomState, monkeypatch: pytest.MonkeyPatch) -> None:
     """An in-flight request takes the retry path and logs its own deadline, not silent caller cancellation."""
     _, _, _, _, client = room_state
