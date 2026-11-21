@@ -133,7 +133,8 @@ async def find_response_event_ids_via_room_messages(
             )
             event_info = EventInfo.from_event(event_source)
             # This sender's reply reached Matrix without its tool markers, and its outbox row holds it with them.
-            content = event_source.get("content") if event_source.get("sender") == response_sender else None
+            own = response_content is not None and event_source.get("sender") == response_sender
+            content = event_source.get("content") if own else None
             exact_content = isinstance(content, dict) and tool_markers_in_text(content) == response_content
             replies_to_source = (
                 not event_info.is_edit and not event_info.is_thread_fallback and event_info.reply_to_event_id in sources
