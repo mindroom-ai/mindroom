@@ -124,6 +124,10 @@ class _FakeBackend:
                 self.workers[spec.worker_key] = existing
             return existing
 
+    def has_named_worker(self, worker_key: str) -> bool:
+        with self._lock:
+            return worker_key in self.workers
+
     def named_worker_keys(self) -> frozenset[str]:
         with self._lock:
             listed = frozenset(self.workers)
@@ -472,6 +476,29 @@ async def test_a_start_that_finishes_while_the_workers_are_counted_still_counts(
             await asyncio.to_thread(_run, backend, _call(runtime_paths, "b", config=config))
         await first
         assert len(backend.workers) == 1
+
+
+@pytest.mark.asyncio
+async def test_reusing_a_named_worker_does_not_depend_on_the_deployment_list(
+    runtime_paths: RuntimePaths,
+    backend: _FakeBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with reply_named_workers(_TURN):
+        call = _call(runtime_paths, "a")
+        worker = _run(backend, call)
+
+        def list_unavailable() -> frozenset[str]:
+            msg = "cannot list Deployments"
+            raise WorkerBackendError(msg)
+
+        monkeypatch.setattr(backend, "named_worker_keys", list_unavailable)
+        assert _run(backend, call) == worker
+        with pytest.raises(WorkerBackendError, match="cannot list Deployments"):
+            _run(backend, _call(runtime_paths, "new"))
+        backend.workers.pop(worker.worker_key)
+        with pytest.raises(WorkerBackendError, match="cannot list Deployments"):
+            _run(backend, call)
 
 
 @pytest.mark.asyncio

@@ -78,6 +78,9 @@ class NamedWorkerError(RuntimeError):
 class _NamedWorkerBackend(Protocol):
     """What a backend whose ``named_workers_max`` is above 0 adds to run named workers."""
 
+    def has_named_worker(self, worker_key: str) -> bool:
+        """Return whether one named worker exists and is not being removed."""
+
     def named_worker_keys(self) -> frozenset[str]:
         """Return the key of every named worker that exists, running or stopped, and is not being removed."""
 
@@ -307,8 +310,11 @@ def ensure_named_worker(
         # Read before the workers that exist, so a start that ends in between is counted there, never nowhere.
         with _lock:
             starting = frozenset(_starting)
-        counted = _named_backend(backend).named_worker_keys() | starting
-        if worker_key not in counted:
+            already_admitted = worker_key in call._fleet.workers
+        named_backend = _named_backend(backend)
+        existing = worker_key in starting or (already_admitted and named_backend.has_named_worker(worker_key))
+        counted = None if existing else named_backend.named_worker_keys() | starting
+        if counted is not None and worker_key not in counted:
             mine = sum(pinned_worker_state_scope_key(key) == normal_worker_key for key in counted)
             if mine >= call.agent_limit:
                 msg = (

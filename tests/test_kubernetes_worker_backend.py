@@ -228,6 +228,7 @@ class _FakeAppsApi:
         _ = namespace
         self.created_bodies.append(body)
         deployment = _to_namespace(body)
+        deployment.metadata.deletion_timestamp = None
         deployment.metadata.generation = 1
         # Every object the API server creates gets a UID of its own, also one that reuses a deleted object's name.
         self._created_count += 1

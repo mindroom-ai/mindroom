@@ -473,6 +473,15 @@ class KubernetesWorkerBackend:
         ]
         return filter_and_sort_worker_handles(handles, include_idle)
 
+    def has_named_worker(self, worker_key: str) -> bool:
+        """Check one deployed named worker without listing the fleet."""
+        deployment = self._resources.read_deployment(self._worker_id(worker_key))
+        return (
+            deployment is not None
+            and deployment.metadata.deletion_timestamp is None
+            and (deployment.metadata.annotations or {}).get(resources.ANNOTATION_WORKER_KEY) == worker_key
+        )
+
     def named_worker_keys(self) -> frozenset[str]:
         """Return the key of every named worker that exists, running or stopped, and is not being removed."""
         keys = (
