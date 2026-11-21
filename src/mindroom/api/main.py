@@ -61,7 +61,6 @@ from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.api.secret_requests import router as secret_requests_router
 from mindroom.api.skills import router as skills_router
-from mindroom.api.tailnet_ssh import router as tailnet_ssh_router
 from mindroom.api.tailnet_ssh_gateway import active_tailnet_ssh_worker_keys
 from mindroom.api.thread_exports import router as thread_exports_router
 from mindroom.api.tools import router as tools_router
@@ -500,7 +499,6 @@ app.include_router(connections_native_router)
 app.include_router(connections_router)
 app.include_router(connections_contacts_router)
 app.include_router(egress_credentials_router)
-app.include_router(tailnet_ssh_router)
 install_gateway_routes(app)
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
 app.include_router(egress_broker_router, dependencies=[Depends(verify_user)])
