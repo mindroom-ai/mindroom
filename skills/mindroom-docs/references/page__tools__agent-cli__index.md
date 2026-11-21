@@ -148,7 +148,7 @@ mindroom-agent workers run NAME [--resource-profile small|standard|large] [--tim
 
 The command is everything after `--`. Multiple arguments run as the exact argument list. A single argument runs as an executable unless it contains whitespace or shell syntax, in which case Bash interprets it as a command line.
 For shell builtins or syntax, pass Bash explicitly, for example `mindroom-agent workers run build -- bash -c 'cd src && pwd'`.
-The CLI waits until the command ends. `--tail` (default 100) selects the last lines of each stream for the shell result; for a failed command, the result puts stdout under `Output:` and stderr under `Stderr:`.
+The CLI waits until the command ends. `--tail` (default 100) selects the last lines of stdout, and of stderr when the command succeeds; for a failed or timed-out command, the result puts stdout under `Output:` and all of stderr under `Stderr:`.
 If the shell result is [auto-saved](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files), the CLI prints its preview to stdout and the saved file's path to stderr. The preview may not include the last lines.
 `--timeout` (default 3600 seconds) stops the command, and `--resource-profile` sizes the worker when its name is first used.
 If the CLI loses the submission response or cannot read a running command’s receipt, it retries reading the receipt for up to a minute. It never submits the command twice.
