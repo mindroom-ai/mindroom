@@ -108,7 +108,7 @@ def _roster(  # noqa: C901 - keep the ordered route checks together
                 continue
             identity = build_requester_execution_identity(agent_name=agent, runtime_paths=paths, requester_id=requester)
             try:
-                target = resolve_agent_execution(agent, config, paths, identity).worker_target
+                target = resolve_agent_execution(agent, config, paths, execution_identity=identity).worker_target
             except ValueError:
                 # The ordinary shell route can refuse an unresolved execution identity.
                 continue

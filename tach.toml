@@ -5795,7 +5795,6 @@ visibility = [
     "mindroom.config.main",
     "mindroom.mcp.manager",
     "mindroom.mcp.toolkit",
-    "mindroom.room_agent_access",
     "mindroom.tool_jobs.authorization",
     "mindroom.tool_system.metadata",
 ]
