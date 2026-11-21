@@ -381,6 +381,12 @@ async def test_waiting_for_access_after_an_attempt_ended_uses_no_working_time(st
     stack.access = None
     assert await stack.maintain() == [stack.run_id]
 
-    assert (waiting.state, waiting.runtime_seconds_left) == (WorkflowRunState.STARTING, 3000.0)
+    # Less the real milliseconds between the script's end and the engine's look at it.
+    left = pytest.approx(3000, abs=1)
+    assert (waiting.state, waiting.runtime_seconds_left) == (WorkflowRunState.STARTING, left)
     run = _run(stack)
-    assert (run.state, run.attempt, run.runtime_seconds_left) == (WorkflowRunState.RUNNING, 2, 3000.0)
+    assert (run.state, run.attempt, run.runtime_seconds_left) == (
+        WorkflowRunState.RUNNING,
+        2,
+        waiting.runtime_seconds_left,
+    )

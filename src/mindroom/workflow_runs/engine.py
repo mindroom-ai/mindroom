@@ -746,19 +746,25 @@ class WorkflowEngine:
                     run = await asyncio.to_thread(partial(self.store.update_run, run_id, epoch, **charge))
                 left = run.runtime_seconds_left
             if left is not None:
+                # An attempt that had ended already is judged as the pass judges it, before the run is stopped.
+                await self.settle(self.store.get_run(run_id), replay=True)
                 out_of_time = _OUT_OF_TIME.format(hours=hours)
                 await self.cancel(run_id, reason=out_of_time, state=WorkflowRunState.INTERRUPTED, epoch=epoch)
 
     def _time_left(self, run: WorkflowRun) -> dict[str, object]:
         """Return, as a change to save, the working time *run* has left after what it used since the last charge.
 
-        Only a running run uses any: time spent waiting for a person, starting or ended is not charged.
+        Only a running run uses any, up to where its script ended: time spent waiting for a person, starting or
+        ended is not charged, and neither is the time until somebody looked at a script that had ended.
         """
         now = self._clock()
         since, self._charged[run.run_id] = self._charged.get(run.run_id, now), now
         if run.state is not WorkflowRunState.RUNNING or run.runtime_seconds_left is None:
             return {}
-        return {"runtime_seconds_left": max(0.0, run.runtime_seconds_left - (now - since))}
+        with suppress(ScriptRunNotFoundError):
+            if ended := self.scripts.store.get_run(run.script_run_id or "").finished_at:
+                now -= (datetime.now(UTC) - datetime.fromisoformat(ended)).total_seconds()
+        return {"runtime_seconds_left": max(0.0, run.runtime_seconds_left - max(0.0, now - since))}
 
     async def _observe_exit(self, script_run_id: str) -> None:
         """End the run soon after its script reported: look for the exit instead of waiting for the next pass."""

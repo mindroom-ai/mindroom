@@ -735,7 +735,8 @@ async def test_automatic_resume_keeps_the_used_time(stack: WorkflowStack) -> Non
 
     await _next_attempt(stack)
 
-    assert (full, stack.store.get_run(stack.run_id).runtime_seconds_left) == (72 * 3600, 72 * 3600 - 600)
+    # Less the real milliseconds between the script's end and the engine's look at it.
+    assert (full, stack.store.get_run(stack.run_id).runtime_seconds_left) == (72 * 3600, pytest.approx(258600, abs=1))
 
 
 @pytest.mark.asyncio

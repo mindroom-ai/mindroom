@@ -8,13 +8,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
 import pytest_asyncio
 
-from mindroom.script_runs.models import ScriptRunState
+from mindroom.script_runs.models import ScriptRunState, utc_timestamp
 from mindroom.script_runs.reasons import PLUGIN_TOOLS_CHANGED, RUNTIME_RESTARTED
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.engine import SupersededAttemptError, WorkflowLimits
@@ -500,6 +500,50 @@ def _left(stack: WorkflowStack) -> float | None:
     return stack.store.get_run(stack.run_id).runtime_seconds_left
 
 
+_OUT_OF_TIME = "The run used its 1 hours of working time. resume_workflow continues it."
+
+
+@pytest.mark.asyncio
+async def test_time_after_the_script_ended_is_no_working_time_and_the_run_gets_its_next_attempt(
+    timed: WorkflowStack,
+) -> None:
+    """A plugin reload stopped the script with a second of working time left, and the engine looked ten minutes later.
+
+    The run is charged up to where its script ended, so it has that second still and goes on like any other.
+    """
+    set_run(timed.store, timed.run_id, runtime_seconds_left=1.0)
+    attempt = await timed.scripts.end(timed.attempt.run_id, ScriptRunState.INTERRUPTED, reason=PLUGIN_TOOLS_CHANGED)
+    ended = utc_timestamp(datetime.fromisoformat(str(attempt.finished_at)) - timedelta(seconds=600))
+    with timed.script_store._write_transaction() as connection:
+        connection.execute("UPDATE script_runs SET finished_at = ?", (ended,))
+    timed.now += 600
+    await asyncio.sleep(0.1)
+
+    assert await timed.maintain() == [timed.run_id]
+    run = timed.store.get_run(timed.run_id)
+    assert (run.state, run.attempt, run.runtime_seconds_left) == (WorkflowRunState.RUNNING, 2, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_run_out_of_time_whose_script_had_been_stopped_for_a_reload_ends_as_out_of_time(
+    timed: WorkflowStack,
+) -> None:
+    """The time ran out before the script was stopped, and nothing had looked at the stopped script yet.
+
+    The run ends as any run that waits for an attempt with no time left: with the sentence that says how it continues.
+    """
+    set_run(timed.store, timed.run_id, runtime_seconds_left=1.0)
+    timed.now += 2
+    await timed.scripts.end(timed.attempt.run_id, ScriptRunState.INTERRUPTED, reason=PLUGIN_TOOLS_CHANGED)
+
+    await timed.until(lambda: timed.store.get_run(timed.run_id).state is WorkflowRunState.STARTING)
+    assert await timed.maintain() == []
+
+    run = timed.store.get_run(timed.run_id)
+    assert (run.state, run.error, run.runtime_seconds_left) == (WorkflowRunState.INTERRUPTED, _OUT_OF_TIME, 0)
+    assert len(timed.scripts.launched) == 1
+
+
 @pytest.mark.asyncio
 async def test_working_time_limit_interrupts_and_resume_continues(timed: WorkflowStack) -> None:
     """At its limit the run and its attempt stop, and a person's resume gives it the full time again."""
@@ -548,7 +592,8 @@ async def test_working_time_is_saved_when_the_attempt_ends(
 
     await timed.end_attempt(ScriptRunState.FAILED)
 
-    assert _left(timed) == 2700
+    # Less the real milliseconds between the script's end and the engine's look at it.
+    assert _left(timed) == pytest.approx(2700, abs=1)
 
 
 @pytest.mark.asyncio
