@@ -114,9 +114,11 @@ The next attempt runs the script from the top, and each call gets its saved resu
 - A call named in `rerun`, and the calls after one that ran again, stay marked until they have run, also when an interruption ends the attempt first.
 - Every attempt runs in the room and thread the run was started in, also when `resume_workflow` is called from another one by the same requester; the report goes to where it was called.
 
-One resume takes a run.
-Of two calls made at the same time, the second ends `failed` with `Run <id> was resumed by another call.` and changes nothing.
-While the job of the last attempt has not delivered its report yet, a resume is refused with `Run <id> is still delivering its report. Try again in a moment.`
+One resume takes a run, and it takes it in one step: the run, its new script and the calls named in `rerun` change together or not at all.
+Of two calls made at the same time, the second ends `failed` with `Run <id> was resumed by another call.` and changes nothing, also when the first one took the run and its attempt could not start.
+A resume that is cancelled or refused before it took the run leaves the run, its report and its saved calls as they were.
+That includes a resume from another room or thread while the run's own conversation is closed to the requester, which is refused with `The requester no longer has access.` or `The run's agent is not ready in the run's room yet. Try again in a moment.`
+While the job of the last attempt has not ended yet, a resume is refused with `Run <id> is still delivering its report. Try again in a moment.`
 The accepted script and `rerun` list are saved with the job, so a restart of MindRoom before the attempt starts loses neither.
 
 Only the calls are saved.
@@ -134,14 +136,19 @@ A run whose script had already returned its report ends with that report and get
 - The next attempt starts once the requester's access to the agent is confirmed; while MindRoom cannot check it yet, for example because room membership is still loading after a start, the run waits as the interruption left it.
   When the access is gone, the run ends `interrupted` with `The requester no longer has access.`
 - After a restart of MindRoom, the run's job is first checked again as every background job that a restart stopped is, and only then does the next attempt start.
-  A Stop or a cancel in between ends the run and starts nothing.
+  A Stop or a cancel in between ends the run and starts nothing, also while the Stop is still being carried out.
+- While MindRoom cannot tell how the run's job stands, for example because background jobs are turned off, the run and its reservation stay as they are.
+- A script process that cannot start yet because MindRoom is still cleaning up after its own start leaves the run `starting`; it starts within about a minute.
+- What the interrupted attempt left is settled at once: a report it had returned ends the run without waiting for any of the above.
 - After 5 attempts in a row that finish no call, the run ends `interrupted` with `Stopped resuming after 5 attempts that finished nothing. Fix the script and call resume_workflow.`
 - A run with no job, which is one that `start_workflow` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.
   When the call that waited for it is gone, nothing delivers the report; `get_workflow(run_id)` returns it in `result`.
 - A run that MindRoom stopped while its script process was starting stays `starting`, and the next start launches it.
-- A run whose job has ended, because it was stopped or lost its access, gets no further attempt: it ends `interrupted` with the reason, and `resume_workflow` continues it.
+- A run whose job was stopped, by a Stop or because it lost its access, gets no further attempt: it ends with the reason, and `resume_workflow` continues it.
+  A job that ended in any other way only fails to deliver the report: the run goes on, and `get_workflow(run_id)` returns the report in `result`.
 - A reservation whose job was never admitted when MindRoom stopped is deleted at the next start.
 - Removing the `workflow` tool or the agent, or revoking the requester's access, ends the run `interrupted`; it is not resumed on its own.
+  That holds when MindRoom was stopped at the time: the next start finds the tool or the agent gone and ends the run with `The requester no longer has access.`
 - A script process that MindRoom did not start itself, such as one that survived a restart in a worker, is stopped, and each of its requests is refused with status 409, before and after its capability is revoked, so the process exits at once.
 
 ## Working Time
