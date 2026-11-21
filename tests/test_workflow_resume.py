@@ -149,6 +149,41 @@ async def test_cached_false_runs_again_and_an_equal_result_keeps_the_lane_clean(
 
 
 @pytest.mark.asyncio
+async def test_edited_cached_false_call_with_an_equal_result_keeps_the_lane_clean(stack: WorkflowStack) -> None:
+    """The check's arguments changed and its answer did not, so what follows it saw nothing new and is reused."""
+    await stack.result("@0", "tool", _TEXT, _EVERY_TIME)
+    await stack.result("@1", "tool", _A)
+
+    await _resume(stack)
+    assert await stack.result("@0", "tool", tool_args("counter", "text", size=1, note="edited"), _EVERY_TIME) == "x"
+    after_equal = await stack.submit("@1", "tool", _A)
+
+    assert (_node(stack, "@0").generation, after_equal.cached, stack.counting_tool.lines) == (2, True, ["a"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", ["dirty", "rerun", "cached_before"])
+async def test_edited_call_reruns_what_follows_unless_it_is_an_unforced_check_in_a_clean_lane(
+    stack: WorkflowStack,
+    cause: str,
+) -> None:
+    """An equal answer keeps the lane clean only for a check that ran because it always runs, not for another reason."""
+    await stack.result("@0", "tool", _B)
+    await stack.result("@1", "tool", _TEXT, None if cause == "cached_before" else _EVERY_TIME)
+    await stack.result("@2", "tool", _A)
+    first, check = _node(stack, "@0"), _node(stack, "@1")
+
+    await _resume(stack, rerun=[f"n{check.seq}"] if cause == "rerun" else [])
+    edited_first = tool_args("counter", "append", line="c") if cause == "dirty" else _B
+    await stack.result("@0", "tool", edited_first)
+    edited = tool_args("counter", "text", size=1, note="edited")
+    assert await stack.result("@1", "tool", edited, _EVERY_TIME if cause != "cached_before" else None) == "x"
+
+    assert await stack.result("@2", "tool", _A) == "appended"
+    assert (first.generation, _node(stack, "@1").handle.same_as) == (1, None)  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
 async def test_cached_false_with_another_result_reruns_what_follows(stack: WorkflowStack) -> None:
     """The check answered something else, so the call after it may see something else: it runs again."""
     await stack.result("@0", "tool", _COUNT, _EVERY_TIME)
@@ -370,16 +405,18 @@ async def test_resume_of_a_run_that_still_runs_is_refused(stack: WorkflowStack) 
 
 
 @pytest.mark.asyncio
-async def test_resume_refuses_an_unknown_call_in_rerun_by_name(stack: WorkflowStack) -> None:
-    """A wrong ID starts nothing and leaves the run as it ended."""
+@pytest.mark.parametrize("unknown", ["n7", "x1", "1", "n01", "n", "n1 ", "n\uff11"])
+async def test_resume_refuses_an_unknown_call_in_rerun_by_name(stack: WorkflowStack, unknown: str) -> None:
+    """Only the exact ID of a saved call names it: any other starts nothing and leaves the run and its calls as they ended."""
     await stack.result("@0", "tool", _A)
     await stack.end_attempt(ScriptRunState.FAILED)
+    before = stack.engine.status(stack.run_id)
 
     with pytest.raises(WorkflowRunStoreError) as refusal:
-        await stack.engine.resume(stack.context, stack.run_id, rerun=["n1", "n7"])
+        await stack.engine.resume(stack.context, stack.run_id, rerun=["n1", unknown])
 
-    assert str(refusal.value) == f"Run {stack.run_id} has no call n7."
-    assert stack.store.get_run(stack.run_id).state is WorkflowRunState.FAILED
+    assert str(refusal.value) == f"Run {stack.run_id} has no call {unknown}."
+    assert stack.engine.status(stack.run_id) == before
     assert len(stack.scripts.launched) == 1
 
 

@@ -563,7 +563,8 @@ class WorkflowEngine:
         )
         if kind == "tool":
             same_as = None
-            if previous is not None and not changed:
+            if previous is not None and not cached:
+                # A check that runs on every resume, also one whose arguments were edited, in a lane that was clean.
                 same_as = result_digest(await asyncio.to_thread(self.store.whole_result, previous))
             return await self._dispatch_tool(run, attempt, node, lanes, same_as)
         if kind == "value":
@@ -698,7 +699,9 @@ class WorkflowEngine:
         return run
 
     def _node(self, run_id: str, node_id: str) -> WorkflowNode:
-        node = self.store.node_by_seq(run_id, int(node_id[1:])) if node_id[1:].isdecimal() else None
+        seq = int(node_id[1:]) if node_id[1:].isdecimal() else 0
+        # Only the ID a call is shown with names it: `n` and its sequence number, written as `get_workflow` writes it.
+        node = self.store.node_by_seq(run_id, seq) if node_id == f"n{seq}" else None
         if node is None:
             msg = f"Run {run_id} has no call {node_id}."
             raise LookupError(msg)

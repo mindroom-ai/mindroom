@@ -298,8 +298,9 @@ class CountingTool:
                 msg = "The counter failed."
                 raise RuntimeError(msg)
 
-            def text(self, size: int) -> str:
-                """Return a text of *size* characters."""
+            def text(self, size: int, note: str = "") -> str:
+                """Return a text of *size* characters, whatever the *note* says."""
+                del note
                 counter.calls += 1
                 return "x" * size
 
