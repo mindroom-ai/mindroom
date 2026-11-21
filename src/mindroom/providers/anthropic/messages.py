@@ -287,7 +287,7 @@ class ClaudeProvider:
         assert self.identity.endpoint is not None
         route = native_compaction_route(
             provider=self.identity.provider,
-            model_id=_sent_model_id(self.identity.id, self.settings),
+            model_id=self.identity.id,
             endpoint=self.identity.endpoint,
             history_generation=history_generation,
         )

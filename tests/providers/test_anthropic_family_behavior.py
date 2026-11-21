@@ -1598,26 +1598,27 @@ def test_native_compaction_checkpoints_are_bound_to_the_endpoint(tmp_path: Path)
         ),
     ],
 )
-async def test_native_compaction_uses_the_sent_model_id(
+async def test_native_compaction_eligibility_uses_the_sent_model_id(
     tmp_path: Path,
     request_params: dict[str, Any],
     sent_id: str,
     *,
     supported: bool,
 ) -> None:
-    """The winning model override determines both managed eligibility and checkpoint identity."""
+    """The model override determines eligibility without changing the configured model's checkpoint route."""
     wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
     endpoint = {"base_url": "https://openrouter.ai/api"}
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={**endpoint, "request_params": request_params})
-    await claude_turn(provider, ModelRequest(messages=_user(), native_compaction=native_settings(provider)))
+    replay = native_settings(provider)
+    await claude_turn(provider, ModelRequest(messages=_user(), native_compaction=replay))
     body = wire.body()
     assert body["model"] == sent_id
     assert provider.capabilities.native_compaction is supported
     assert ("context_management" in body) is supported
-    replay = native_settings(provider)
     if supported:
-        same_model = route_provider("anthropic", tmp_path, wire, id=sent_id, extra_kwargs=endpoint)
-        assert replay == native_settings(same_model)
+        assert replay is not None
+        configured_model = route_provider("anthropic", tmp_path, wire, extra_kwargs=endpoint)
+        assert replay == native_settings(configured_model)
     else:
         assert replay is None
 
