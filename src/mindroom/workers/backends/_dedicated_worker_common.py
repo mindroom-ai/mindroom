@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.constants import RuntimePaths
-    from mindroom.workers.models import WorkerHandle
+    from mindroom.workers.models import WorkerHandle, WorkerLaunchConfig
 
 __all__ = [
     "ScopedWorkspaceMount",
@@ -50,6 +50,7 @@ __all__ = [
     "stable_json_digest",
     "stable_signature_json",
     "subagent_worker_expired",
+    "tailnet_ssh_marked",
     "validate_dedicated_worker_extra_env",
     "validate_private_user_agent_visibility",
     "validate_unique_worker_visible_paths",
@@ -315,6 +316,14 @@ def agent_names_addressed_by_worker_key(
         msg = f"Worker '{worker_log_id(worker_key)}' has an ambiguous normalized agent name."
         raise WorkerBackendError(msg)
     return matches
+
+
+def tailnet_ssh_marked(worker_key: str, launch: WorkerLaunchConfig, state_scope_worker_key: str | None) -> bool:
+    """Mark dedicated workers serving an opted-in agent, not transient pinned workers."""
+    return resolve_state_scope_worker_key(worker_key, state_scope_worker_key) == worker_key and any(
+        launch.config.agents[name].tailnet_ssh
+        for name in agent_names_addressed_by_worker_key(worker_key, launch.agent_policies)
+    )
 
 
 @dataclass(frozen=True, slots=True)

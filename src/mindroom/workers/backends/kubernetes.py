@@ -32,6 +32,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     retire_subagent_worker,
     stable_json_digest,
     subagent_worker_expired,
+    tailnet_ssh_marked,
 )
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
@@ -816,12 +817,10 @@ class KubernetesWorkerBackend:
         # Shared directories change at runtime, so the Deployment is re-applied whenever their mounts differ.
         # So it is when the tailnet SSH mark differs, which follows config the launch digest leaves out.
         shared_directory_mounts = self._plan_shared_directory_mounts(spec, launch)
-        if entry.shared_directory_mounts != shared_directory_mounts or entry.ssh != self._resources.ssh_marked(
+        if entry.shared_directory_mounts != shared_directory_mounts or entry.ssh != tailnet_ssh_marked(
             spec.worker_key,
-            launch=launch,
-            private_agent_names=spec.private_agent_names,
-            state_scope_worker_key=spec.state_scope_worker_key,
-            shared_mounts=shared_directory_mounts,
+            launch,
+            spec.state_scope_worker_key,
         ):
             self._invalidate_ready_worker(spec.worker_key)
             return None

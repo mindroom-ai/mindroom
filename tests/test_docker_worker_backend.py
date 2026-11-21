@@ -6558,7 +6558,7 @@ def test_docker_handle_endpoint_needs_label_and_running_container(
     )
     assert unmarked.ssh_endpoint is None
 
-    # A binding alone is not the mark: the label is what the launch's mount plan decided.
+    # A binding alone is not the mark: the label is what the opted-in config produced.
     unmarked_container = fake_client.containers.by_name[unmarked.worker_id]
     unmarked_container.attrs["NetworkSettings"]["Ports"]["2222/tcp"] = [{"HostIp": "127.0.0.1", "HostPort": "45000"}]
     touched = backend.touch_worker(other_key, now=11.0)
@@ -6575,7 +6575,7 @@ def test_joining_a_directory_changes_the_docker_launch_hash(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A directory another agent owns mounts read-only, so the worker is replaced by one without the mark."""
+    """A new read-only mount replaces the worker without changing its SSH mark."""
     backend, fake_client = _ssh_backend(monkeypatch, tmp_path)
     create_shared_directory(backend._runtime_paths, owner="other", name="report")
     first = backend.ensure_worker(_spec(backend, _SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
@@ -6588,21 +6588,20 @@ def test_joining_a_directory_changes_the_docker_launch_hash(
     assert first_container.removed == 1
     marked, joined = fake_client.containers.run_calls
     assert marked["labels"][_SSH_LABEL] == "true"
-    assert _SSH_LABEL not in joined["labels"]
-    assert "2222/tcp" not in joined["ports"]
+    assert joined["labels"][_SSH_LABEL] == "true"
+    assert joined["ports"]["2222/tcp"] == ("127.0.0.1", None)
     assert marked["labels"]["mindroom.ai/launch-config-hash"] != joined["labels"]["mindroom.ai/launch-config-hash"]
     share = str((tmp_path / "shared_directories" / "other" / "report").resolve())
     assert _volumes_by_source(joined["volumes"])[share]["mode"] == "ro"
-    assert second.ssh_endpoint is None
+    assert second.ssh_endpoint is not None
 
 
-def test_docker_pinned_worker_is_refused_the_mark_before_the_eligibility_rule(
+def test_docker_pinned_worker_has_no_mark(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A run pinned to a person's worker mounts that worker's state, so the backend denies it whatever the rule says."""
+    """Pinning a run to a worker does not make the run an SSH target."""
     backend, fake_client = _ssh_backend(monkeypatch, tmp_path)
-    monkeypatch.setattr(docker_backend_module, "ssh_eligible_launch", lambda *_args: True)
     script_key = script_worker_key_for_run(_SSH_WORKER_KEY, f"script-{'a' * 32}")
 
     spec = _spec(backend, script_key, private_agent_names=frozenset(), state_scope_worker_key=_SSH_WORKER_KEY)

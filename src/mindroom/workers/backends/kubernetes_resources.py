@@ -40,7 +40,6 @@ from mindroom.runtime_env_policy import (
     isolated_worker_runtime_env,
     worker_extra_env,
 )
-from mindroom.tailnet_ssh.eligibility import ssh_eligible_launch
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,
     worker_log_id,
@@ -54,6 +53,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     plan_shared_directory_mounts,
     resolve_state_scope_worker_key,
     stable_json_digest,
+    tailnet_ssh_marked,
     validate_unique_worker_visible_paths,
 )
 from mindroom.workers.backends._lifecycle import WorkerLifecycleState
@@ -1188,20 +1188,6 @@ class KubernetesResourceManager:
         recorded_hash = dict(deployment.metadata.annotations or {}).get(ANNOTATION_TEMPLATE_HASH)
         return recorded_hash != _template_hash(template)
 
-    def ssh_marked(
-        self,
-        worker_key: str,
-        *,
-        launch: WorkerLaunchConfig,
-        private_agent_names: frozenset[str] | None,
-        state_scope_worker_key: str | None,
-        shared_mounts: Sequence[SharedDirectoryMount],
-    ) -> bool:
-        """Return whether a launch with ``shared_mounts`` gets the tailnet SSH mark; a pinned worker never does."""
-        if resolve_state_scope_worker_key(worker_key, state_scope_worker_key) != worker_key:
-            return False
-        return ssh_eligible_launch(worker_key, launch, private_agent_names, shared_mounts)
-
     def _pod_template(
         self,
         *,
@@ -1235,19 +1221,12 @@ class KubernetesResourceManager:
             raise WorkerBackendError(msg)
         template_annotations[_ANNOTATION_RUNNER_TOKEN_HASH] = token_hash
         container_ports: list[dict[str, object]] = [{"containerPort": self.config.worker_port, "name": "api"}]
-        # One plan gives the shared mounts and the SSH mark, so a marked pod never mounts another agent's directory.
         shared_mounts = self.plan_shared_directory_mounts(
             worker_key,
             state_scope_worker_key=state_scope_worker_key,
             agent_policies=launch.agent_policies,
         )
-        if self.ssh_marked(
-            worker_key,
-            launch=launch,
-            private_agent_names=private_agent_names,
-            state_scope_worker_key=state_scope_worker_key,
-            shared_mounts=shared_mounts,
-        ):
+        if tailnet_ssh_marked(worker_key, launch, state_scope_worker_key):
             worker_labels[LABEL_TAILNET_SSH] = "true"
             container_ports.append({"containerPort": WORKER_SSH_PORT, "name": "ssh"})
         template_spec: dict[str, object] = {

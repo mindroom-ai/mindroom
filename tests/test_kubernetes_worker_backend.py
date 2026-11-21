@@ -6548,7 +6548,7 @@ def test_unmarked_scopes_have_no_ssh_port_or_label(
     worker_key: str,
     state_scope_worker_key: str | None,
 ) -> None:
-    """Only a person's own worker for one agent is marked, so every other worker stays as it was."""
+    """Without an opted-in route, the worker and Service have only the runner port."""
     backend, apps_api, core_api, _runtime_paths = _ssh_backend(tmp_path)
 
     spec = _spec(worker_key, private_agent_names=frozenset(), state_scope_worker_key=state_scope_worker_key)
@@ -6650,29 +6650,6 @@ def test_installed_client_sends_secret_and_service_patches_as_merge_patches(tmp_
     assert service["spec"]["ports"] == [_API_PORT, _SSH_PORT]
 
 
-def test_kubernetes_service_follows_the_mark_the_pod_was_rendered_with(tmp_path: Path) -> None:
-    """A membership change during provisioning cannot leave the Service and the pod disagreeing about SSH."""
-    backend, apps_api, core_api, runtime_paths = _ssh_backend(tmp_path)
-    create_shared_directory(runtime_paths, owner="code", name="report")
-    plan_for_cache = backend._plan_shared_directory_mounts
-
-    def plan_then_join(spec: WorkerSpec, launch: WorkerLaunchConfig) -> object:
-        mounts = plan_for_cache(spec, launch)
-        if not mounts:
-            add_shared_directory_member(runtime_paths, owner="code", name="report", member="mine")
-        return mounts
-
-    backend._plan_shared_directory_mounts = plan_then_join  # type: ignore[method-assign]
-
-    handle = backend.ensure_worker(_spec(_SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
-
-    [body] = apps_api.created_bodies
-    assert _share_mounts(body)[0]["readOnly"] is True
-    assert _SSH_LABEL not in body["spec"]["template"]["metadata"]["labels"]
-    assert core_api.created_bodies[0]["spec"]["ports"] == [_API_PORT]
-    assert handle.ssh_endpoint is None
-
-
 @pytest.mark.parametrize("value", ["true", "false"])
 def test_kubernetes_config_reserves_the_tailnet_ssh_label(tmp_path: Path, value: str) -> None:
     """An operator label cannot mark a worker, because only an eligible launch sets the tailnet SSH label."""
@@ -6722,8 +6699,8 @@ def test_kubernetes_ready_cache_rechecks_the_ssh_mark(tmp_path: Path) -> None:
     assert plain_again.ssh_endpoint is None
 
 
-def test_joining_a_directory_removes_the_kubernetes_mark(tmp_path: Path) -> None:
-    """A directory another agent owns mounts read-only, so the cached worker is replaced by one without the mark."""
+def test_joining_a_directory_keeps_the_kubernetes_mark(tmp_path: Path) -> None:
+    """A new read-only mount replaces the cached worker without changing its SSH mark."""
     backend, apps_api, core_api, runtime_paths = _ssh_backend(tmp_path)
     create_shared_directory(runtime_paths, owner="code", name="report")
     first = backend.ensure_worker(_spec(_SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
@@ -6740,13 +6717,12 @@ def test_joining_a_directory_removes_the_kubernetes_mark(tmp_path: Path) -> None
         != (joined["metadata"]["annotations"][ANNOTATION_TEMPLATE_HASH])
     )
     assert _share_mounts(joined)[0]["readOnly"] is True
-    assert _SSH_LABEL not in joined["metadata"]["labels"]
-    assert _SSH_LABEL not in joined["spec"]["template"]["metadata"]["labels"]
-    assert _container_ports(joined) == [{"containerPort": 8766, "name": "api"}]
-    # The running worker's Service is patched, not recreated, and the patch replaces its ports.
-    assert [port.name for port in core_api.services[first.worker_id].spec.ports] == ["api"]
-    assert second.ssh_endpoint is None
-    assert cached.ssh_endpoint is None
+    assert joined["metadata"]["labels"][_SSH_LABEL] == "true"
+    assert joined["spec"]["template"]["metadata"]["labels"][_SSH_LABEL] == "true"
+    assert _container_ports(joined) == [{"containerPort": 8766, "name": "api"}, {"containerPort": 2222, "name": "ssh"}]
+    assert [port.name for port in core_api.services[first.worker_id].spec.ports] == ["api", "ssh"]
+    assert second.ssh_endpoint is not None
+    assert cached.ssh_endpoint == second.ssh_endpoint
 
 
 def test_ambiguous_agent_name_is_never_marked(tmp_path: Path) -> None:
@@ -6756,16 +6732,6 @@ def test_ambiguous_agent_name_is_never_marked(tmp_path: Path) -> None:
     assert launch.config.agents["mine"].tailnet_ssh
     assert not launch.config.agents["mine_"].tailnet_ssh
 
-    assert (
-        backend._resources.ssh_marked(
-            _SSH_WORKER_KEY,
-            launch=launch,
-            private_agent_names=None,
-            state_scope_worker_key=None,
-            shared_mounts=(),
-        )
-        is False
-    )
     # The mount planner refuses the key before any template is rendered, so no container exists to carry a mark.
     with pytest.raises(WorkerBackendError, match="ambiguous normalized agent name"):
         backend.ensure_worker(_spec(_SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
@@ -6773,13 +6739,9 @@ def test_ambiguous_agent_name_is_never_marked(tmp_path: Path) -> None:
     assert core_api.created_bodies == []
 
 
-def test_kubernetes_pinned_worker_is_refused_the_mark_before_the_eligibility_rule(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A run pinned to a person's worker mounts that worker's state, so the backend denies it whatever the rule says."""
+def test_kubernetes_pinned_worker_has_no_mark(tmp_path: Path) -> None:
+    """Pinning a run to a worker does not make the run an SSH target."""
     backend, apps_api, core_api, _runtime_paths = _ssh_backend(tmp_path)
-    monkeypatch.setattr(kubernetes_resources_module, "ssh_eligible_launch", lambda *_args: True)
     script_key = script_worker_key_for_run(_SSH_WORKER_KEY, f"script-{'a' * 32}")
 
     spec = _spec(script_key, private_agent_names=frozenset(), state_scope_worker_key=_SSH_WORKER_KEY)

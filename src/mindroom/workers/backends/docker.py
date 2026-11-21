@@ -30,7 +30,6 @@ from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.tailnet_ssh.eligibility import ssh_eligible_launch
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,
@@ -53,6 +52,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     retire_subagent_worker,
     stable_json_digest,
     subagent_worker_expired,
+    tailnet_ssh_marked,
     validate_dedicated_worker_extra_env,
     validate_unique_worker_visible_paths,
 )
@@ -942,7 +942,7 @@ class DockerWorkerBackend:
                 image_id=render_image_id,
                 mounts=mounts,
                 startup_manifest_hash=self._startup_manifest_hash(spec, launch),
-                ssh=self._ssh_marked(spec, launch, shared_mounts),
+                ssh=self._ssh_marked(spec, launch),
             ).launch_hash
         )
         return _WorkerContainerState(container=container, current=current, image_id=image_id, mounts=mounts or [])
@@ -1051,7 +1051,7 @@ class DockerWorkerBackend:
             image_id=image_id,
             mounts=mounts,
             startup_manifest_hash=startup_manifest_hash,
-            ssh=self._ssh_marked(spec, launch, shared_mounts),
+            ssh=self._ssh_marked(spec, launch),
         )
         container = self._client.containers.run(rendered.image, **rendered.arguments)
         return self._published_container(container, worker_key=spec.worker_key)
@@ -1320,7 +1320,7 @@ class DockerWorkerBackend:
         spec: WorkerSpec,
         launch: WorkerLaunchConfig,
     ) -> tuple[SharedDirectoryMount, ...]:
-        """Return the shared directories the worker mounts, planned once per launch for its mounts and its SSH mark."""
+        """Return the shared directories the worker mounts, planned once per launch."""
         return plan_shared_directory_mounts(
             worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
             runtime_paths=self._runtime_paths,
@@ -1332,21 +1332,14 @@ class DockerWorkerBackend:
         self,
         spec: WorkerSpec,
         launch: WorkerLaunchConfig,
-        shared_mounts: Sequence[SharedDirectoryMount],
     ) -> bool:
-        """Return whether a launch with ``shared_mounts`` gets the tailnet SSH mark.
-
-        A run pinned to a person's worker never does, nor any worker when the publish host is every interface;
-        a publish host that is a name may resolve to one, so it counts as such.
-        """
-        if resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key) != spec.worker_key:
-            return False
+        # Publish sshd only on a literal, non-wildcard address.
         try:
             if ipaddress.ip_address(self.config.publish_host).is_unspecified:
                 return False
         except ValueError:
             return False
-        return ssh_eligible_launch(spec.worker_key, launch, spec.private_agent_names, shared_mounts)
+        return tailnet_ssh_marked(spec.worker_key, launch, spec.state_scope_worker_key)
 
     def _scoped_storage_mount_specs(
         self,
