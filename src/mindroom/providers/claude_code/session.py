@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-import csv
-import io
 import os
 import re
 import shlex
+import shutil
+import stat
 import sys
 import tempfile
 from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
-import claude_agent_sdk
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKError,
@@ -25,6 +25,7 @@ from claude_agent_sdk import (
     RateLimitEvent,
     SystemMessage,
 )
+from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
 from mindroom import __version__
 from mindroom.atomic_file import atomic_write_bytes_at
@@ -66,6 +67,8 @@ _ISOLATION_ENV = {
     "DISABLE_AUTO_COMPACT": "1",
     "ENABLE_TOOL_SEARCH": "false",
     "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
+    # The SDK only defaults this when it did not inherit a value, so set it explicitly.
+    "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
     # A call that waits long is not moved to the background, where the model would go on without its result.
     "CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND": "1",
     "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS": "0",
@@ -77,23 +80,25 @@ _ISOLATION_ENV = {
 # Claude Code reads its sign-in, where it sends requests, and what it adds to them from variables named like these.
 _SCRUB_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_")
 _SCRUB_NAMES = {"CLAUDE_BG_AUTH_SNAPSHOT_PATH", "CLAUDE_AUTO_BACKGROUND_TASKS"}
-# The Claude Agent SDK and MindRoom set these for the process themselves, whatever MindRoom inherited.
+# Fail safe: only these trusted names survive the scrub, even if the SDK adds other prefixed settings.
 _SET_FOR_THE_PROCESS = {"CLAUDE_CODE_ENTRYPOINT", *_ISOLATION_ENV}
 _CLI_ENV = "MINDROOM_CLAUDE_CODE_CLI"
-_SCRUB_ENV = "MINDROOM_CLAUDE_CODE_SCRUB"
+_LAUNCHER_LOCK = Lock()
 _LAUNCHER = f"""\
-import csv, io, os, sys
-from contextlib import suppress
+import os
+import sys
 
 try:
     real = os.environ[{_CLI_ENV!r}]
-    names = next(csv.reader(io.StringIO(os.environ[{_SCRUB_ENV!r}])))
-    for name in (*names, {_CLI_ENV!r}, {_SCRUB_ENV!r}):
-        with suppress(KeyError):
+    del os.environ[{_CLI_ENV!r}]
+    keep = frozenset({tuple(sorted(_SET_FOR_THE_PROCESS))!r})
+    for name in tuple(os.environ):
+        if name not in keep and (name.startswith({_SCRUB_PREFIXES!r}) or name in {tuple(sorted(_SCRUB_NAMES))!r}):
             del os.environ[name]
     os.execv(real, [real, *sys.argv[1:]])
-except (KeyError, OSError, ValueError, StopIteration, csv.Error):
-    sys.exit("MindRoom's Claude Code launcher could not exec Claude Code.")
+except (KeyError, OSError, ValueError) as error:
+    detail = f": {{error.strerror}}" if isinstance(error, OSError) and error.strerror else ""
+    sys.exit(f"MindRoom's Claude Code launcher could not exec Claude Code ({{type(error).__name__}}{{detail}}).")
 """
 # How Claude Code names the plans of a Claude subscription; an account without one is "Claude API".
 _PLAN = re.compile(r"Claude (Pro|Team|Enterprise|Max( \d+x)?)")
@@ -203,9 +208,10 @@ async def _refuse_unless_ready(client: ClaudeSDKClient, bridge: ToolBridge, prov
         await asyncio.sleep(0.05)
 
 
-def _prepare(storage_root: Path, system: str, provider: str) -> tuple[Path, Path | None]:
-    """Use a primary-only empty working directory and, while starting, a private system-prompt file beside it."""
-    home = storage_root / "claude_code"
+def _prepare(root: Path, system: str, provider: str, cli_path: str | None) -> tuple[Path, Path | None, Path, Path]:
+    """Resolve the CLI and prepare its private launcher, empty working directory, and optional prompt file."""
+    cli = _resolve_cli(cli_path, provider)
+    home = root / "claude_code"
     cwd = home / "cwd"
     for directory in (home, cwd):
         if directory.is_symlink():
@@ -216,8 +222,9 @@ def _prepare(storage_root: Path, system: str, provider: str) -> tuple[Path, Path
     if any(cwd.iterdir()):
         msg = f"Claude Code working directory is not empty: {cwd}"
         raise ProviderError(msg, provider=provider)
+    launcher = _prepare_launcher(home, provider)
     if not system:
-        return cwd, None
+        return cwd, None, launcher, cli
     # A system prompt is too long for a command line.
     descriptor, path = tempfile.mkstemp(dir=home)
     prompt = Path(path)
@@ -228,26 +235,35 @@ def _prepare(storage_root: Path, system: str, provider: str) -> tuple[Path, Path
         with suppress(OSError):
             prompt.unlink(missing_ok=True)
         raise
-    return cwd, prompt
+    return cwd, prompt, launcher, cli
 
 
-def _resolve_cli(configured_or_on_path: str | None, provider: str) -> Path:
-    """Use the builder's choice of executable, falling back to the SDK's bundled CLI only if unset."""
-    bundled_name = "claude.exe" if os.name == "nt" else "claude"
-    bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / bundled_name
-    cli = Path(configured_or_on_path or bundled).absolute()
-    if not cli.is_file() or not os.access(cli, os.X_OK):
-        raise AuthenticationFailed(_NOT_FOUND, provider=provider)
-    return cli
+def _resolve_cli(cli_path: str | None, provider: str) -> Path:
+    """Resolve a configured path or command, or use the SDK's fallback discovery if the builder found none."""
+    if not cli_path:
+        # Reuse the SDK's bundled and standard-install lookup without starting its transport.
+        cli_path = SubprocessCLITransport("", ClaudeAgentOptions())._find_cli()
+    elif os.sep not in cli_path:
+        cli_path = shutil.which(cli_path)
+    if cli_path is not None:
+        cli = Path(cli_path).absolute()
+        if cli.is_file() and os.access(cli, os.X_OK):
+            return cli
+    raise AuthenticationFailed(_NOT_FOUND, provider=provider)
 
 
 def _prepare_launcher(home: Path, provider: str) -> Path:
     """Publish a stable executable without rewriting the file another start may be executing."""
     launcher = (home / "exec-claude").absolute()
     payload = f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -IS -c {shlex.quote(_LAUNCHER)} "$@"\n'.encode()
-    if launcher.is_symlink() or not launcher.is_file() or launcher.read_bytes() != payload:
-        with open_directory_within_root(home) as directory:
-            atomic_write_bytes_at(directory, launcher.name, payload, file_mode=0o700)
+    with _LAUNCHER_LOCK:
+        if (
+            not launcher.is_file(follow_symlinks=False)
+            or stat.S_IMODE(launcher.lstat().st_mode) != 0o700
+            or launcher.read_bytes() != payload
+        ):
+            with open_directory_within_root(home) as directory:
+                atomic_write_bytes_at(directory, launcher.name, payload, file_mode=0o700)
     if not os.access(launcher, os.X_OK):
         msg = f"Claude Code launcher is not executable: {launcher}. Check its permissions and the storage mount."
         raise ProviderUnavailable(msg, provider=provider)
@@ -313,9 +329,14 @@ class _SessionRegistry:
         try:
             if freed is not None:
                 await freed
-            cli = _resolve_cli(options.get("cli_path"), provider)
             bridge = ToolBridge(names=tool_names(tools, provider))
-            cwd, prompt = await asyncio.to_thread(_prepare, storage_root, system, provider)
+            cwd, prompt, launcher, cli = await asyncio.to_thread(
+                _prepare,
+                storage_root,
+                system,
+                provider,
+                options.get("cli_path"),
+            )
             sdk_options = ClaudeAgentOptions(
                 **options,
                 system_prompt={"type": "file", "path": str(prompt)} if prompt else "",
@@ -329,24 +350,17 @@ class _SessionRegistry:
                 # Without it a user's ``@/path`` would make Claude Code read that file.
                 verbatim_prompts=True,
                 include_partial_messages=True,
+                env={**_ISOLATION_ENV, _CLI_ENV: str(cli)},
                 extra_args={"no-session-persistence": None},
                 max_buffer_size=_MAX_MESSAGE_BYTES,
                 client_app=f"mindroom/{__version__}",
                 stderr=lambda line: logger.debug("claude_code_stderr", line=line),
             )
-            sdk_options.cli_path = _prepare_launcher(cwd.parent, provider)
+            sdk_options.cli_path = launcher
             if tools:
                 server = bridge.server(tools)
                 sdk_options.mcp_servers = {SERVER_NAME: {"type": "sdk", "name": SERVER_NAME, "instance": server}}
                 sdk_options.allowed_tools = [f"{TOOL_PREFIX}*"]
-            # The SDK merges options.env into the inherited environment; only the launcher can remove names.
-            names = io.StringIO()
-            csv.writer(names).writerow(
-                name
-                for name in os.environ
-                if (name.startswith(_SCRUB_PREFIXES) or name in _SCRUB_NAMES) and name not in _SET_FOR_THE_PROCESS
-            )
-            sdk_options.env = {**_ISOLATION_ENV, _CLI_ENV: str(cli), _SCRUB_ENV: names.getvalue()}
             process = await ClaudeProcess.open(sdk_options, messages=bridge.messages)
             session = LiveSession(process, bridge, provider)
             self.starting -= 1

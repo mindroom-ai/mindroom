@@ -428,22 +428,20 @@ defaults:
 
 The `id` is any model ID or alias Claude Code takes for `--model`, such as `claude-opus-5-5` or `opus`, within what the plan includes.
 `extra_kwargs` accepts `cli_path`, the `claude` executable to run, and `effort`, one of `low`, `medium`, `high`, `xhigh`, or `max`.
-Without `cli_path`, MindRoom runs the `claude` on its `PATH`, and when there is none, the copy the Claude Agent SDK ships, which uses the same sign-in.
+Without `cli_path`, MindRoom runs the `claude` on its `PATH` or falls back to the Claude Agent SDK's lookup, which checks its bundled copy and standard install locations.
+MindRoom's storage directory must allow executing files for this provider.
 MindRoom never reads Claude Code's credentials, ignores an authored `api_key`, and does not accept a token, endpoint, or headers for this provider.
+MindRoom removes inherited `ANTHROPIC_*`, `CLAUDE_CODE_*`, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`, and `CLAUDE_AUTO_BACKGROUND_TASKS` variables from Claude Code's environment (except settings MindRoom explicitly allows), so Claude Code never uses an `ANTHROPIC_API_KEY` exported for other models.
 The provider supports text and image input; the model is told when an audio, video, or file attachment was left out.
 Use [reasoning levels](#reasoning-levels) to select effort with a model reference like `opus@high`.
 These conversations do not appear in Claude Code's own session history.
 MindRoom runs at most 8 Claude Code processes at a time; while all 8 are answering, another reply is retried and fails if none finishes meanwhile.
-[`mindroom doctor`](https://docs.mindroom.chat/cli/#doctor) starts Claude Code without sending it a prompt and reports the first three cases below.
+[`mindroom doctor`](https://docs.mindroom.chat/cli/#doctor) starts Claude Code without sending it a prompt to check the installation and sign-in.
 
 A reply fails with a message that names the fix in these cases:
 
 - Claude Code or the Claude Agent SDK is missing, or Claude Code is older than 2.1.328: install the required dependency or run `claude update`.
 - Claude Code is not signed in to a Pro, Max, Team, or Enterprise plan: run `claude auth login` as the user that runs MindRoom.
-- MindRoom's process environment sets a variable that Claude Code would use in place of the subscription sign-in, or to send it somewhere else: remove it from that environment.
-  These are every variable whose name starts with `ANTHROPIC_` or `CLAUDE_CODE_`, whatever its value, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`, and `CLAUDE_AUTO_BACKGROUND_TASKS`.
-  `CLAUDE_CODE_ENTRYPOINT` and the variables MindRoom sets for Claude Code itself are allowed.
-  The same variables in the `.env` beside `config.yaml` are fine, since only MindRoom's own `anthropic` models read them there.
 - The plan's usage limit is reached: the message gives the time the limit resets when Claude Code reports it.
 
 ## OpenRouter Provider Routing

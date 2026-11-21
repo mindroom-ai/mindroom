@@ -8554,7 +8554,9 @@ depends_on = ["mindroom.providers.extra_kwargs"]
 [[modules]]
 path = "mindroom.providers.claude_code"
 depends_on = [
+    "mindroom.atomic_file",
     "mindroom.llm",
+    "mindroom.path_confinement",
     "mindroom.providers.anthropic.wire",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.errors",
