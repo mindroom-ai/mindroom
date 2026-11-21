@@ -6,7 +6,7 @@ Level: engine harness (`WorkflowStack`) with the real job runtime and real deleg
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import pytest_asyncio
@@ -24,6 +24,7 @@ from mindroom.tool_jobs.publication import _jobs_state_content
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.models import DispatchHandle, WorkflowNodeState, WorkflowRunState
+from mindroom.workflow_runs.store import SupersededAttemptError
 from tests.delegation_helpers import offered_tools
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.scripted_agent_helpers import raising
@@ -224,6 +225,52 @@ async def test_job_that_was_never_started_ends_its_call_as_safe_to_run_again(
     await stack.resume(stack.run_id)
     stack.child_script(answer("second try"))
     assert await stack.result("@0", "agent", _PROMPT) == "second try"
+
+
+@pytest.mark.asyncio
+async def test_request_cancelled_while_its_agent_starts_leaves_a_call_that_is_waited_for(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A script's request can be cut off after the job started: the job is the node's, and its answer still arrives."""
+    start = stack.jobs.start
+
+    async def started_then_cancelled(job_id: str, **options: Any) -> None:  # noqa: ANN401 - the runtime's own options.
+        _, claim = await start(job_id, **options)
+        await stack.jobs.release_wait(job_id, claim)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(stack.jobs, "start", started_then_cancelled)
+    stack.child_script(answer("still answered"))
+    with pytest.raises(asyncio.CancelledError):
+        await stack.submit("@0", "agent", _PROMPT)
+    monkeypatch.setattr(stack.jobs, "start", start)
+
+    assert await stack.result("@0", "agent", _PROMPT) == "still answered"
+    assert len(_node_jobs(stack)) == 1
+
+
+@pytest.mark.asyncio
+async def test_outcome_that_the_node_could_not_take_is_given_back_to_its_job(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wait whose run moved on saves nothing and keeps nothing: the job's outcome is the next reader's."""
+
+    def moved_on(*_args: object, **_options: object) -> bool:
+        msg = "The run moved on."
+        raise SupersededAttemptError(msg)
+
+    monkeypatch.setattr(stack.store, "settle_node", moved_on)
+    stack.child_script(answer("for the next reader"))
+    await stack.submit("@0", "agent", _PROMPT)
+    job_id = stack.node_job("@0").job_id
+    await wait_for_status(stack.jobs, job_id, "completed")
+    await stack.until(lambda: not stack.engine._tasks.get(stack.run_id))
+
+    waited = await stack.jobs.wait(job_id, owner=stack.context.execution_identity, depth=0)
+
+    assert (waited.claim is not None, waited.job.consumed) == (True, False)
 
 
 @pytest.mark.asyncio

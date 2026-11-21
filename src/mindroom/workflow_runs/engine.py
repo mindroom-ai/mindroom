@@ -679,9 +679,10 @@ class WorkflowEngine:
                 refused = replace(node, **end, ended_at=utc_timestamp())
                 await asyncio.to_thread(partial(self.store.put_node, refused, run.epoch, dirty_after=True))
             return _receipt(cast("WorkflowNode", self.store.get_node(run.run_id, node.key)))
-        except Exception:
-            # The start failed in some other way. A node that names its job already is settled from that job, which
-            # ran nothing if it never started; the request itself fails, and the script's SDK sends it again.
+        except BaseException:
+            # The start failed in some other way, or the request was cancelled. A node that names its job already
+            # is settled from that job, which ran nothing if it never started; the request itself fails, and the
+            # script's SDK sends it again.
             saved = self.store.get_node(run.run_id, node.key)
             if saved is not None and saved.generation == node.generation and saved.handle is not None:
                 self._spawn(run.run_id, self._run_agent_node(run, saved, run.epoch, timeout))
@@ -720,15 +721,20 @@ class WorkflowEngine:
             outcome = WorkflowNodeState.COMPLETED, text, None
         elif kind in ("cancelled", "indeterminate"):
             outcome = _indeterminate(node) if kind == "indeterminate" else (WorkflowNodeState.CANCELLED, *outcome[1:])
-        if usage is not None:
-            add = partial(self.store.add_usage, node.run_id, node.key, node.generation, 1, run.attempt, usage)
-            await asyncio.to_thread(add)
         state, result, error = outcome
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
-        with suppress(SupersededAttemptError):
-            await asyncio.to_thread(partial(settle, state=state, result=result, error=error))
-            if claim is not None:
-                await runtime.jobs.acknowledge_wait(node.handle.ref, claim)
+        try:
+            if usage is not None:
+                add = partial(self.store.add_usage, node.run_id, node.key, node.generation, 1, run.attempt, usage)
+                await asyncio.to_thread(add)
+            with suppress(SupersededAttemptError):
+                await asyncio.to_thread(partial(settle, state=state, result=result, error=error))
+                if claim is not None:
+                    await runtime.jobs.acknowledge_wait(node.handle.ref, claim)
+        finally:
+            # An outcome this wait did not save, because the run moved on or the wait was cancelled, is the next
+            # reader's. After the acknowledgement there is no claim left to give back.
+            await runtime.jobs.release_wait(node.handle.ref, claim)
 
     async def _node_waits(self, node: WorkflowNode, epoch: int, on: str | None) -> None:
         """Show a node as waiting for a person, for what *on* says, or as running again with None; its run follows."""
