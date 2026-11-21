@@ -146,5 +146,5 @@ Removal does not clear the worker's `authorized_keys`; the next admitted gateway
   If access depends on room membership, retry after membership has resolved; check gateway logs and the tailnet control plane for enrollment or policy problems.
 - **Node visible but SSH closes or stalls:** Check that the tailnet policy permits TCP `22` from the client and the gateway can reach the primary and worker endpoints.
   On Docker, a wildcard or non-IP publish host can leave the link listed without a worker SSH endpoint.
-  After repeated attempts, wait a minute before retrying; the gateway limits new connections per worker.
+  After repeated attempts, wait a minute before retrying; the per-worker connection limit is shared by all tailnet logins for that worker.
 - **`Permission denied (publickey)`:** Use the private key matching a configured `.pub` line for the worker; check the SSH username is `mindroom`.
