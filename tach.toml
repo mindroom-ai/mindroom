@@ -2863,6 +2863,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.history.manual"
 depends_on = [
+    "mindroom.history.runtime",
     "mindroom.history.policy",
     "mindroom.history.session_context",
     "mindroom.history.storage",
@@ -3147,6 +3148,7 @@ visibility = [
 [[modules]]
 path = "mindroom.history.runtime"
 depends_on = [
+    "mindroom.constants",
     "mindroom.session_storage.lanes",
     "mindroom.history.compaction",
     "mindroom.history.native",
@@ -3545,6 +3547,10 @@ expose = ["InboxResponses"]
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.history.manual",
+    "mindroom.history.runtime",
+    "mindroom.history.session_context",
+    "mindroom.providers.registry",
     "mindroom.agent_modes",
     "mindroom.agent_run_context",
     "mindroom.ai",
@@ -5181,6 +5187,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.contacts.turns",
     "mindroom.email_invites.receiver",
     "mindroom.agent_cli.cli_approval_waits",
     "mindroom.approval.continuation_runner",
@@ -8396,6 +8403,7 @@ depends_on = [
     "mindroom.history.team_scope",
 ]
 visibility = [
+    "mindroom.response_runner",
     "mindroom.ai",
     "mindroom.api.openai_compat",
     "mindroom.approval.execution",

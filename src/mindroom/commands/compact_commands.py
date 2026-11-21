@@ -1,4 +1,4 @@
-"""Ask agents and teams to compact their context before their next reply in one conversation."""
+"""Request history compaction from the agents and teams of one conversation."""
 
 from __future__ import annotations
 
@@ -13,10 +13,14 @@ from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.turn_model import TurnBudget
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+
+type AdmitCompaction = Callable[[str, MessageTarget, str], Awaitable[bool]]
 
 logger = get_logger(__name__)
 
@@ -30,6 +34,7 @@ async def handle_compact_command(
     requester_id: str,
     membership_index: AgentReplyMembershipIndex,
     budget_monitor: BudgetMonitor | None = None,
+    admit_compaction: AdmitCompaction | None = None,
 ) -> str:
     """Compact an addressable agent or team, or all of them, if they have a session in this conversation."""
     words = args_text.split()
@@ -68,7 +73,7 @@ async def handle_compact_command(
                 return f"Access denied for `{name}`."
             continue
         try:
-            reply = await _compact(name, config, runtime_paths, target, budget)
+            reply = await _compact(name, config, runtime_paths, target, budget, admit_compaction)
         except Exception:
             logger.exception("Could not request compaction", entity=name, room_id=target.room_id)
             reply = f"❌ `{name}`: its history could not be read."
@@ -82,6 +87,7 @@ async def _compact(
     runtime_paths: RuntimePaths,
     target: MessageTarget,
     budget: TurnBudget,
+    admit_compaction: AdmitCompaction | None,
 ) -> str | None:
     """Request compaction for ``name`` in this conversation; None when it has no session here to compact."""
     room_mode = config.get_entity_thread_mode(name, runtime_paths, room_id=target.room_id) == "room"
@@ -128,4 +134,7 @@ async def _compact(
     )
     if unavailable is not None:
         return f"❌ `{name}` cannot compact its context because {unavailable}."
+    assert budget.requester_id is not None
+    if admit_compaction is not None and await admit_compaction(name, target, budget.requester_id):
+        return f"✅ `{name}` is compacting now."
     return f"✅ `{name}` compacts its context before its next reply in this {'room' if room_mode else 'thread'}."

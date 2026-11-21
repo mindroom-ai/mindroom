@@ -48,6 +48,7 @@ async def _rewrite_with_summary_model(
         max_summary_tokens=None,
         before_persist=AsyncMock(),
         after_persist=AsyncMock(),
+        report=AsyncMock(),
         model=ScriptedModel([]),
     )
 

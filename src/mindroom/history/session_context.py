@@ -88,7 +88,6 @@ def resolve_bound_team_scope(
 
 
 def load_scope_session(
-    *,
     scope: HistoryScope,
     session_id: str,
     runtime_paths: RuntimePaths,

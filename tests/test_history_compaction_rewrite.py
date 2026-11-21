@@ -150,6 +150,7 @@ async def _rewrite_single_run(
         max_summary_tokens=None,
         before_persist=AsyncMock(),
         after_persist=after_persist,
+        report=AsyncMock(),
         model=ScriptedModel([]),
     )
 
@@ -1854,6 +1855,7 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
             max_summary_tokens=None,
             before_persist=AsyncMock(),
             after_persist=AsyncMock(),
+            report=AsyncMock(),
             model=ScriptedModel([]),
         )
     assert rewrite_result is not None

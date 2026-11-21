@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.failure_text import failure_text
 from mindroom.history.compaction import (
     ConversationChangedError,
@@ -341,6 +342,64 @@ async def prepare_scope_history(
         # A compaction rewrote the history that request held.
         request_size=request_size if compaction_decision.mode != "required" else None,
     )
+
+
+async def compact_scope_now(
+    context: ScopeSessionContext,
+    inputs: HistoryPreparationInputs,
+    model: ModelProvider,
+    lifecycle: CompactionLifecycle,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Fold a stored manual request without building a reply's prompt."""
+    session = context.session
+    if session is None or not (state := read_scope_state(session)).force_compact_before_next_run:
+        return
+    runs = scope_visible_runs(session)
+    cap = _manual_summary_cap(runs, inputs.execution_plan.limit_tokens or 0, model.identity)
+    before = await asyncio.to_thread(
+        estimate_prompt_visible_history_tokens,
+        session=session,
+        history_settings=inputs.history_settings,
+        model=model,
+    )
+    await _run_scope_compaction_with_lifecycle(
+        mode=state.compaction_mode,
+        session_id=session.session_id,
+        scope=context.scope,
+        execution_plan=inputs.execution_plan,
+        history_budget=cap,
+        current_history_tokens=before,
+        runs_before=len(runs),
+        compaction_lifecycle=lifecycle,
+        compact=partial(
+            _compact_before_reply,
+            storage=context.storage,
+            session=session,
+            state=state,
+            resolved_inputs=inputs,
+            history_budget=cap,
+            max_summary_tokens=cap,
+            before_tokens=before,
+            model=model,
+            config=config,
+            runtime_paths=runtime_paths,
+        ),
+    )
+
+
+def _manual_summary_cap(runs: Sequence[AnyRunRecord], limit: int, identity: ModelIdentity) -> int:
+    for run in reversed(runs):
+        if (run.model, run.model_provider) != (identity.id, identity.provider):
+            continue
+        match (run.metadata or {}).get(AI_RUN_METADATA_KEY):
+            case {
+                "prepared_context": {"tokens": int(total)},
+                "compaction": {"replay_plan": {"estimated_tokens": int(history)}},
+            } if 0 <= history <= total:
+                return min(limit // 2, max(0, limit - (total - history)))
+    return limit // 2
 
 
 # Runs one compaction under the lifecycle wrapper, given the callbacks that report its progress and its success.
