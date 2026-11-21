@@ -60,6 +60,61 @@ from tests.turn_dispatch_helpers import make_test_turn
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.attachments.storage import AttachmentRecord
+
+
+def _owner_user() -> AgentMatrixUser:
+    """Create the owner account used by the router dispatch tests."""
+    return AgentMatrixUser(
+        agent_name="router",
+        user_id="@mindroom_router:localhost",
+        display_name="Router Agent",
+        password=TEST_PASSWORD,
+        access_token="mock_test_token",  # noqa: S106
+    )
+
+
+def _config(tmp_path: Path, *names: str) -> Config:
+    """Bind a test config with the named agents in the same room."""
+    return _runtime_bound_config(
+        with_current_room_member_access(
+            Config(
+                agents={
+                    name: AgentConfig(display_name=f"{name.title()}Agent", rooms=["!test:localhost"]) for name in names
+                },
+                authorization={},
+            ),
+        ),
+        tmp_path,
+    )
+
+
+def _candidates(config: Config, *names: str) -> ResponderCandidatePermissions:
+    """Allow the named candidates to respond, in the order given."""
+    ids = entity_ids(config, runtime_paths_for(config))
+    return ResponderCandidatePermissions([ids[name] for name in names], [])
+
+
+def _registered_pdf(tmp_path: Path, room_id: str, event_id: str) -> AttachmentRecord:
+    """Register a local PDF for a file event without a thread scope."""
+    media_path = tmp_path / "incoming_media" / f"{event_id.removeprefix('$')}.pdf"
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    media_path.write_bytes(b"%PDF")
+    record = register_local_attachment(
+        tmp_path,
+        media_path,
+        kind="file",
+        attachment_id=_attachment_id_for_event(event_id),
+        filename="report.pdf",
+        mime_type="application/pdf",
+        room_id=room_id,
+        thread_id=None,
+        source_event_id=event_id,
+        sender="@user:localhost",
+    )
+    assert record is not None
+    return record
+
 
 @pytest.fixture
 def mock_agent_user() -> AgentMatrixUser:
@@ -76,13 +131,7 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Router should call _handle_ai_routing for images in multi-responder rooms."""
-        agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token="mock_test_token",  # noqa: S106
-        )
+        agent_user = _owner_user()
 
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
@@ -124,13 +173,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
-            mock_get_available.return_value = ResponderCandidatePermissions(
-                [
-                    entity_ids(config, runtime_paths_for(config))["general"],
-                    entity_ids(config, runtime_paths_for(config))["calculator"],
-                ],
-                [],
-            )
+            mock_get_available.return_value = _candidates(config, "general", "calculator")
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
 
@@ -214,13 +257,7 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Startup room joins should cache the room locally before sending a welcome."""
-        agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token="mock_test_token",  # noqa: S106
-        )
+        agent_user = _owner_user()
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         install_runtime_journal_support(bot)
@@ -263,13 +300,7 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Router should pass sender metadata when routing file messages."""
-        agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token="mock_test_token",  # noqa: S106
-        )
+        agent_user = _owner_user()
 
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
@@ -298,22 +329,7 @@ class TestAgentBot(AgentBotTestBase):
                 },
             },
         )
-        local_media_path = tmp_path / "incoming_media" / "file_route.pdf"
-        local_media_path.parent.mkdir(parents=True, exist_ok=True)
-        local_media_path.write_bytes(b"%PDF")
-        attachment_record = register_local_attachment(
-            tmp_path,
-            local_media_path,
-            kind="file",
-            attachment_id=_attachment_id_for_event("$file_route"),
-            filename="report.pdf",
-            mime_type="application/pdf",
-            room_id=room.room_id,
-            thread_id=None,
-            source_event_id="$file_route",
-            sender="@user:localhost",
-        )
-        assert attachment_record is not None
+        attachment_record = _registered_pdf(tmp_path, room.room_id, event.event_id)
 
         with (
             patch(
@@ -331,13 +347,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=attachment_record,
             ) as mock_register_file,
         ):
-            mock_get_available.return_value = ResponderCandidatePermissions(
-                [
-                    entity_ids(config, runtime_paths_for(config))["general"],
-                    entity_ids(config, runtime_paths_for(config))["calculator"],
-                ],
-                [],
-            )
+            mock_get_available.return_value = _candidates(config, "general", "calculator")
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
 
@@ -356,13 +366,7 @@ class TestAgentBot(AgentBotTestBase):
         caption_in_upload_thread: bool,
     ) -> None:
         """An upload whose caption names an agent must not also be routed elsewhere."""
-        agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token="mock_test_token",  # noqa: S106
-        )
+        agent_user = _owner_user()
 
         config = self._config_for_storage(tmp_path)
         # A top-level caption joins its upload only when sent within the debounce window of it.
@@ -428,13 +432,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch.object(TurnDispatcher, "_apply_turn_plan", new=record_plan),
         ):
-            mock_get_available.return_value = ResponderCandidatePermissions(
-                [
-                    entity_ids(config, runtime_paths_for(config))["general"],
-                    entity_ids(config, runtime_paths_for(config))["calculator"],
-                ],
-                [],
-            )
+            mock_get_available.return_value = _candidates(config, "general", "calculator")
             await bot._on_media_message(room, upload)
             await bot._on_message(room, caption)
             await drain_coalescing(bot)
@@ -448,13 +446,7 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Router should register routed file attachments using the outgoing thread scope."""
-        agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token="mock_test_token",  # noqa: S106
-        )
+        agent_user = _owner_user()
 
         config = _runtime_bound_config(
             Config(
@@ -487,22 +479,7 @@ class TestAgentBot(AgentBotTestBase):
                 },
             },
         )
-        media_path = tmp_path / "incoming_media" / "file_route.pdf"
-        media_path.parent.mkdir(parents=True, exist_ok=True)
-        media_path.write_bytes(b"%PDF")
-        attachment_record = register_local_attachment(
-            tmp_path,
-            media_path,
-            kind="file",
-            attachment_id=_attachment_id_for_event("$file_route"),
-            filename="report.pdf",
-            mime_type="application/pdf",
-            room_id=room.room_id,
-            thread_id=None,
-            source_event_id="$file_route",
-            sender="@user:localhost",
-        )
-        assert attachment_record is not None
+        attachment_record = _registered_pdf(tmp_path, room.room_id, event.event_id)
 
         with (
             patch(
@@ -693,22 +670,7 @@ class TestAgentBot(AgentBotTestBase):
             },
         )
 
-        media_path = tmp_path / "incoming_media" / "file_once.pdf"
-        media_path.parent.mkdir(parents=True, exist_ok=True)
-        media_path.write_bytes(b"%PDF")
-        attachment_record = register_local_attachment(
-            tmp_path,
-            media_path,
-            kind="file",
-            attachment_id=_attachment_id_for_event("$file_once"),
-            filename="report.pdf",
-            mime_type="application/pdf",
-            room_id=router_room.room_id,
-            thread_id=None,
-            source_event_id="$file_once",
-            sender="@user:localhost",
-        )
-        assert attachment_record is not None
+        attachment_record = _registered_pdf(tmp_path, router_room.room_id, file_event.event_id)
 
         with (
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
@@ -740,25 +702,8 @@ class TestAgentBot(AgentBotTestBase):
     @pytest.mark.asyncio
     async def test_router_dispatch_parity_text_and_image_route_under_same_conditions(self, tmp_path: Path) -> None:
         """Router should route both text and image when the decision context is equivalent."""
-        agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token="mock_test_token",  # noqa: S106
-        )
-        config = _runtime_bound_config(
-            with_current_room_member_access(
-                Config(
-                    agents={
-                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                        "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-                    },
-                    authorization={},
-                ),
-            ),
-            tmp_path,
-        )
+        agent_user = _owner_user()
+        config = _config(tmp_path, "calculator", "general")
         bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
@@ -792,13 +737,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
                 "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
-                return_value=ResponderCandidatePermissions(
-                    [
-                        entity_ids(config, runtime_paths_for(config))["calculator"],
-                        entity_ids(config, runtime_paths_for(config))["general"],
-                    ],
-                    [],
-                ),
+                return_value=_candidates(config, "calculator", "general"),
             ),
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
@@ -819,25 +758,8 @@ class TestAgentBot(AgentBotTestBase):
     @pytest.mark.asyncio
     async def test_router_relays_scheduled_history_limit_to_selected_agent(self, tmp_path: Path) -> None:
         """A scheduled fire routed by the router carries its history cap through the handoff."""
-        agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token="mock_test_token",  # noqa: S106
-        )
-        config = _runtime_bound_config(
-            with_current_room_member_access(
-                Config(
-                    agents={
-                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                        "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-                    },
-                    authorization={},
-                ),
-            ),
-            tmp_path,
-        )
+        agent_user = _owner_user()
+        config = _config(tmp_path, "calculator", "general")
         bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
@@ -877,18 +799,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
                 "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
-                return_value=ResponderCandidatePermissions(
-                    [
-                        entity_ids(config, runtime_paths_for(config))["calculator"],
-                        entity_ids(config, runtime_paths_for(config))["general"],
-                    ],
-                    [],
-                ),
-            ),
-            patch(
-                "mindroom.router.relay.suggest_responder_for_message",
-                new_callable=AsyncMock,
-                return_value=ResponderSelection("general"),
+                return_value=_candidates(config, "calculator", "general"),
             ),
         ):
             await bot._on_message(room, event)
@@ -905,22 +816,8 @@ class TestAgentBot(AgentBotTestBase):
     @pytest.mark.asyncio
     async def test_scheduled_router_handoff_carries_the_task_in_its_body(self, tmp_path: Path) -> None:
         """The selected responder must receive the scheduled task as its current prompt."""
-        agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token="mock_test_token",  # noqa: S106
-        )
-        config = _runtime_bound_config(
-            with_current_room_member_access(
-                Config(
-                    agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
-                    authorization={},
-                ),
-            ),
-            tmp_path,
-        )
+        agent_user = _owner_user()
+        config = _config(tmp_path, "general")
         bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
@@ -956,22 +853,8 @@ class TestAgentBot(AgentBotTestBase):
     @pytest.mark.asyncio
     async def test_router_delivery_without_event_raises_for_durable_retry(self, tmp_path: Path) -> None:
         """A route without a Matrix event must return the source to durable retry."""
-        agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token="mock_test_token",  # noqa: S106
-        )
-        config = _runtime_bound_config(
-            with_current_room_member_access(
-                Config(
-                    agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
-                    authorization={},
-                ),
-            ),
-            tmp_path,
-        )
+        agent_user = _owner_user()
+        config = _config(tmp_path, "general")
         bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
@@ -1004,22 +887,8 @@ class TestAgentBot(AgentBotTestBase):
     @pytest.mark.asyncio
     async def test_router_dispatch_parity_text_and_image_skip_under_same_conditions(self, tmp_path: Path) -> None:
         """Router should skip routing both text and image in single-agent-visible rooms."""
-        agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token="mock_test_token",  # noqa: S106
-        )
-        config = _runtime_bound_config(
-            with_current_room_member_access(
-                Config(
-                    agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
-                    authorization={},
-                ),
-            ),
-            tmp_path,
-        )
+        agent_user = _owner_user()
+        config = _config(tmp_path, "calculator")
         bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
@@ -1047,10 +916,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
                 "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
-                return_value=ResponderCandidatePermissions(
-                    [entity_ids(config, runtime_paths_for(config))["calculator"]],
-                    [],
-                ),
+                return_value=_candidates(config, "calculator"),
             ),
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
@@ -1065,13 +931,7 @@ class TestAgentBot(AgentBotTestBase):
     @pytest.mark.asyncio
     async def test_a_mention_of_only_the_owner_account_gets_no_message(self, tmp_path: Path) -> None:
         """The owner account posts no guidance: a message that mentions only it gets nothing from it."""
-        agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token="mock_test_token",  # noqa: S106
-        )
+        agent_user = _owner_user()
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
