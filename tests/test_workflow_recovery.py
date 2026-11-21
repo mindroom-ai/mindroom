@@ -1175,6 +1175,29 @@ async def test_cancel_of_a_run_that_waits_for_its_next_attempt_cancels_it(stack:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("restarted", [True, False])
+async def test_run_whose_job_was_stopped_for_the_access_its_owner_lost_ends_interrupted_with_that_reason(
+    stack: WorkflowStack,
+    restarted: bool,
+) -> None:
+    """The job runtime stops a job whose requester lost the access, also one a restart left waiting: the run says why."""
+    handle = await _started(stack)
+    if restarted:
+        await stack.restart(kill=True)
+        assert await stack.recover() == []
+    stack.access = "revoked"
+    stack.refuse_admission()
+
+    await stack.jobs.cancel_revoked()
+    # The job ends as its run did, where that had an attempt to stop.
+    await wait_for_status(stack.jobs, handle["job_id"], "cancelled" if restarted else "interrupted")
+    assert await stack.maintain() == []
+
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.error) == (WorkflowRunState.INTERRUPTED, "The requester no longer has access.")
+
+
+@pytest.mark.asyncio
 async def test_run_that_waits_for_an_attempt_when_its_job_is_stopped_is_ended_too(stack: WorkflowStack) -> None:
     """A run with no process and no job would wait for ever and count against its owner's limit."""
     handle = await _started(stack)

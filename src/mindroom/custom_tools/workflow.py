@@ -421,8 +421,9 @@ async def stopped_workflow_job(
         return None
     run_id = str(job.adapter.get("workflow"))
     try:
-        cancel = partial(engine.cancel, run_id, reason="The run's job was cancelled.", owner=job.job_id)
-        run = await cancel() if live else engine.store.get_run(run_id)
+        run = engine.store.get_run(run_id)
+        if live:
+            run = await engine.cancel(run_id, owner=job.job_id, **engine.job_stop(run, "The run's job was cancelled."))
     except WorkflowRunNotFoundError:
         return None
     # A run of another owner is left: a resume that never took it, or a job whose run was resumed since.

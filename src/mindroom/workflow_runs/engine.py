@@ -289,6 +289,12 @@ class WorkflowEngine:
             run = await self._end_run(run, *outcome)
         return run
 
+    def job_stop(self, run: WorkflowRun, reason: str) -> dict[str, Any]:
+        """Return how the run of a stopped job ends: with *reason*, or interrupted for the access its owner lost."""
+        if self.owner_access(run) == "revoked":
+            return {"state": WorkflowRunState.INTERRUPTED, "reason": NO_ACCESS}
+        return {"reason": reason}
+
     def resumable(
         self,
         run_id: str,

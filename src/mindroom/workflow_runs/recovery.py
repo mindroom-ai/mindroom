@@ -72,7 +72,7 @@ async def recover_runs(
             standing = "ended" if run.job_id is None else job_standing(run.job_id)
             if standing == "stopped":
                 # Only while the run is still that job's: a resume may have given it to another one.
-                await engine.cancel(run.run_id, reason=_JOB_STOPPED, owner=run.owner)
+                await engine.cancel(run.run_id, owner=run.owner, **engine.job_stop(run, _JOB_STOPPED))
             elif standing == "absent" and run.attempt == 0:
                 # Taken with no wait since the job was asked about, so no delivery of its call is in between.
                 if not (lock := admission(str(run.job_id))).locked():
