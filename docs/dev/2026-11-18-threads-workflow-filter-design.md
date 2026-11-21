@@ -46,7 +46,7 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
    A row keeps its fields and gains `workflow`: `needs_you`, `working`, `later` or `done`.
    A needs-you row has `why`: `approval`, `question` or `your_turn`.
    A later row has `back_at`, a millisecond timestamp, when the return time is known; a thread that waits on a recurring task has none, as in the client.
-   `all` returns every row, resolved ones included, labelled `done`; there is no `done` filter.
+   `all` returns every row, resolved ones included, labelled `done` unless a foreground approval asked after the resolve still waits; there is no `done` filter.
 3. **The group is the Threads page's combination of the two client rules, in this order.**
    A pending approval card for the requester, or a background approval in an unresolved thread, is `needs_you` with `approval`.
    A resolved thread is `done`; otherwise a pending question is `needs_you` with `question`.
