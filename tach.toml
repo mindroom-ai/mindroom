@@ -2504,6 +2504,7 @@ expose = [
     "decide",
     "node_digest",
     "parent_group",
+    "result_digest",
     "split_key",
     "stale_keys",
 ]

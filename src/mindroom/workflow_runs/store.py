@@ -290,6 +290,12 @@ class WorkflowRunStore:
             _count_progress(connection, run_id, state)
         return True
 
+    def whole_result(self, node: WorkflowNode) -> object:
+        """Return the node's whole result, read from its file when the row keeps only the start of it."""
+        if node.result_file is None:
+            return node.result
+        return json.loads((self.directory / node.result_file).read_bytes())
+
     def mark_stale(self, run_id: str, keys: Iterable[str]) -> None:
         """Take the nodes at *keys* out of the run's current view."""
         with self._write_transaction() as connection:

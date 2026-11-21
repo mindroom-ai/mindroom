@@ -160,6 +160,44 @@ async def test_cached_false_with_another_result_reruns_what_follows(stack: Workf
 
 
 @pytest.mark.asyncio
+async def test_cached_false_with_an_equal_result_over_the_inline_limit_keeps_the_lane_clean(
+    stack: WorkflowStack,
+) -> None:
+    """A result that lives in a file is compared whole, not by the part of it its row keeps."""
+    large = tool_args("counter", "text", size=8 * 1024 * 1024 + 1)
+    await stack.result("@0", "tool", large, _EVERY_TIME)
+    await stack.result("@1", "tool", _A)
+
+    await _resume(stack)
+    await stack.result("@0", "tool", large, _EVERY_TIME)
+    after_equal = await stack.submit("@1", "tool", _A)
+
+    assert _node(stack, "@0").result_file is not None
+    assert (_node(stack, "@0").generation, after_equal.cached, stack.counting_tool.lines) == (2, True, ["a"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("first", "second"), [(1, True), (1, 1.0), ({"n": 0}, {"n": False})])
+async def test_cached_false_with_the_same_value_of_another_json_type_reruns_what_follows(
+    stack: WorkflowStack,
+    first: object,
+    second: object,
+) -> None:
+    """Python calls 1, 1.0 and True equal; the script may not, so the saved JSON decides."""
+    assert first == second
+    stack.counting_tool.answers = [first, second]
+    answer = tool_args("counter", "answer")
+    await stack.result("@0", "tool", answer, _EVERY_TIME)
+    await stack.result("@1", "tool", _A)
+
+    await _resume(stack)
+    await stack.result("@0", "tool", answer, _EVERY_TIME)
+    assert await stack.result("@1", "tool", _A) == "appended"
+
+    assert stack.counting_tool.lines == ["a", "a"]
+
+
+@pytest.mark.asyncio
 async def test_changed_call_reruns_itself_and_the_calls_after_it_in_its_lane(stack: WorkflowStack) -> None:
     """Calls before the first changed call are reused; that call and the ones after it run again."""
     for key in ("@0", "@1", "@2"):

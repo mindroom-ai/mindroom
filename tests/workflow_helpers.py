@@ -243,6 +243,7 @@ class CountingTool:
         self.path = path
         self.calls = 0
         self.failures = 0
+        self.answers: list[object] = []
         self.before_effect: Callable[[], object] | None = None
         self.after_effect: Callable[[], Awaitable[object]] | None = None
         """Awaited after the line is written and before the tool answers; one that never returns leaves the call open."""
@@ -252,13 +253,13 @@ class CountingTool:
         """The lines the tool has appended so far."""
         return self.path.read_text(encoding="utf-8").splitlines() if self.path.exists() else []
 
-    def toolkit(self) -> type[Toolkit]:
+    def toolkit(self) -> type[Toolkit]:  # noqa: C901  # one small function per tool
         """Return the toolkit class to register as `counter`."""
         counter = self
 
         class CounterTools(Toolkit):
             def __init__(self) -> None:
-                tools = [self.append, self.fail, self.fail_once, self.text, self.count]
+                tools = [self.append, self.fail, self.fail_once, self.text, self.count, self.answer]
                 super().__init__(name="counter", tools=tools)
 
             async def append(self, line: str) -> str:
@@ -296,6 +297,11 @@ class CountingTool:
                 """Return a text of *size* characters."""
                 counter.calls += 1
                 return "x" * size
+
+            def answer(self) -> object:
+                """Return the next of the answers the test queued."""
+                counter.calls += 1
+                return counter.answers.pop(0)
 
         return CounterTools
 

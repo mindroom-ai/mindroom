@@ -41,7 +41,7 @@ from mindroom.workflow_runs.models import (
     WorkflowRunState,
 )
 from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS
-from mindroom.workflow_runs.replay import DirtyLanes, decide, node_digest, split_key, stale_keys
+from mindroom.workflow_runs.replay import DirtyLanes, decide, node_digest, result_digest, split_key, stale_keys
 from mindroom.workflow_runs.store import WorkflowRunStoreError
 
 if TYPE_CHECKING:
@@ -497,7 +497,9 @@ class WorkflowEngine:
             started_at=utc_timestamp(),
         )
         if kind == "tool":
-            same_as = _RAN if previous is None or changed else previous.result
+            same_as: object = _RAN
+            if previous is not None and not changed:
+                same_as = result_digest(await asyncio.to_thread(self.store.whole_result, previous))
             return await self._dispatch_tool(run, attempt, node, replay, same_as)
         if kind == "value":
             node = replace(node, result=_value(request.args))
@@ -650,7 +652,8 @@ class WorkflowEngine:
     ) -> None:
         """Run one tool call and settle its node; *kept* is the tool list of the narrowed agent that started the run.
 
-        *same_as* is the saved result of a call that runs on every resume: its lane stays clean when it answers that.
+        *same_as* is the digest of the saved result of a call that runs on every resume: its lane stays clean when
+        the call answers the same again, compared whole and as JSON.
         """
         try:
             _require_kept(kept, grant)
@@ -658,7 +661,8 @@ class WorkflowEngine:
         except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
             # Refused before any claim: the rate limit, a revoked attempt, a broker that takes no calls now.
             state, result, error = WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(exc)}
-        if same_as is not _RAN and (state is not WorkflowNodeState.COMPLETED or result != same_as):
+        equal = state is WorkflowNodeState.COMPLETED and await asyncio.to_thread(result_digest, result) == same_as
+        if same_as is not _RAN and not equal:
             # Before the node shows its end, so the script's next call already finds the lane dirty.
             replay.dirty.mark(node.key)
         await hold("before_settle")

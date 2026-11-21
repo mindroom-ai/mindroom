@@ -23,6 +23,11 @@ def node_digest(kind: str, args: dict[str, object]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def result_digest(result: object) -> str:
+    """Return the SHA-256 of a result in canonical JSON, which tells 1 from 1.0 and from true as the script may."""
+    return hashlib.sha256(json.dumps(result, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def split_key(key: str) -> tuple[str, int]:
     """Split a node key `lane@index` into its lane and index."""
     lane, _, index = key.rpartition("@")
