@@ -115,6 +115,7 @@ class _Room:
         self.bots[name] = SimpleNamespace(
             agent_name=name,
             running=True,
+            accepting_work=True,
             client=client,
             steward_duties=StewardDuties(deps),
         )

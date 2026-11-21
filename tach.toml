@@ -4325,7 +4325,6 @@ visibility = [
     "mindroom.custom_tools.matrix_api",
     "mindroom.contacts.federation",
     "mindroom.contacts.flow",
-    "mindroom.matrix.room_accounts",
     "mindroom.room_tree.note",
     "mindroom.email_invites.policy",
     "mindroom.custom_tools.email_invite",
@@ -10619,10 +10618,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.room_accounts"
-depends_on = [
-    "mindroom.entity_resolution",
-    "mindroom.matrix.client_room_admin",
-]
+depends_on = ["mindroom.entity_resolution"]
 
 [[modules]]
 path = "mindroom.matrix.room_thread_mode"

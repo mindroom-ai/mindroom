@@ -313,6 +313,7 @@ class StewardDuties:
                     other.user_id: other
                     for bot in runtime.orchestrator.agent_bots.values()
                     if bot.running
+                    and bot.accepting_work
                     and (other := bot.client) is not None
                     and other.user_id != steward_id
                     and (room := other.rooms.get(room_id)) is not None
