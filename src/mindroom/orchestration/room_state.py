@@ -66,11 +66,11 @@ class RoomStateWorker:
     async def _attempt(
         self,
         room_id: str,
-        needed: set[int] | None,
+        retry: tuple[str, set[int]] | None,
         dirty: asyncio.Event,
         failure_level: Callable[[bool], int],
-    ) -> set[int] | None:
-        """Compare each needed step; None means no eligible client or closed admission."""
+    ) -> tuple[str, set[int]] | None:
+        """Return the writer and failed steps, or None when there is no eligible client."""
         if not self._accepting():
             return None
         runtime = self._runtime
@@ -93,6 +93,8 @@ class RoomStateWorker:
             partial(reconcile_room_accounts, *args),
             partial(reconcile_room_router_binding, client, room_id),
         )
+        # A different writer has its own roster key and must compare all three steps.
+        needed = retry[1] if retry is not None and retry[0] == client.user_id else None
         failed = {
             i
             for i, step in enumerate(steps)
@@ -103,10 +105,10 @@ class RoomStateWorker:
         if self._accepting() and not current():
             # Keep the work in this room when its credential or config changes during a comparison.
             dirty.set()
-        return failed
+        return client.user_id, failed
 
     async def _run(self, room_id: str, dirty: asyncio.Event) -> None:
-        needed: set[int] | None = None
+        retry: tuple[str, set[int]] | None = None
         delay, warned = 0, False
 
         def failure_level(_timed_out: bool) -> int:
@@ -121,12 +123,12 @@ class RoomStateWorker:
         while self._accepting():
             async with self._slots:
                 if dirty.is_set():
-                    needed = None
+                    retry = None
                     dirty.clear()
-                needed = await self._attempt(room_id, needed, dirty, failure_level)
-            if needed is None:
+                retry = await self._attempt(room_id, retry, dirty, failure_level)
+            if retry is None:
                 return
-            if not needed:
+            if not retry[1]:
                 delay, warned = 0, False
                 if not dirty.is_set():
                     return

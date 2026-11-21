@@ -168,10 +168,10 @@ async def test_slow_first_frame_side_effect_does_not_delay_a_stewards_dispatch( 
         entered.set()
         await release.wait()
 
-    async def slow_reconcile(*_args: object) -> set[int]:
+    async def slow_reconcile(*_args: object) -> tuple[str, set[int]]:
         entered.set()
         await release.wait()
-        return set()
+        return bot.agent_user.user_id, set()
 
     if slow_side_effect == "bot_ready_hook":
         bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(

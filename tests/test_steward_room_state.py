@@ -400,6 +400,30 @@ async def test_worker_stop_cancels_in_flight_and_queued_rooms(worker_runtime: Ma
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_stop_cancels_the_room_state_worker(room_state: RoomState) -> None:
+    """Process shutdown cancels room-state I/O even without a bot stop to cancel it."""
+    config, paths, _, _, client = room_state
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=paths, config=config)
+    orchestrator.running = True
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def blocked(*_args: object, **_kwargs: object) -> None:
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    client.room_get_state_event.side_effect = blocked
+    with patch.object(orchestrator, "room_steward", return_value=MagicMock(client=client)):
+        orchestrator.room_state.mark(ROOM_ID)
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        await orchestrator.stop()
+    assert cancelled.is_set()
+    assert await wait_for_background_tasks(timeout=2, owner=orchestrator.room_state)
+
+
+@pytest.mark.asyncio
 async def test_worker_caps_jitter_and_retries_only_transient_steps(
     worker_runtime: MagicMock,
     room_state: RoomState,
