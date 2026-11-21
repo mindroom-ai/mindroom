@@ -1264,7 +1264,7 @@ Both return the message's event ID, and post in the thread `thread_id` names, el
 `content` adds namespaced keys of the plugin's own to the message, such as a card under one of its [reserved namespaces](#reserved-namespaces).
 It answers 400 and sends nothing when `content` sets a key of Matrix's own, one without a namespace such as `body` or `msgtype` or one under `m.` or `org.matrix.`, or, anywhere in it, a key under `com.mindroom.`, `io.mindroom.`, MindRoom Chat's `chat.mindroom.`, or a namespace another loaded plugin reserves and the posting plugin does not, so a route may pass a client's content through without letting it change the text, edit another message, forge another plugin's card, or claim to be someone else.
 Plugins that reserve the same namespace, such as a family of plugins sharing one, can each post keys in it, but a narrower namespace another plugin reserves inside it, such as `com.example.cards.` inside `com.example.`, stays refused.
-`relay()` answers 400 unless `mentions` names at least one agent or team and only agents and teams joined to the room, never a person or the router.
+`relay()` answers 400 unless `mentions` names at least one agent or team and only agents and teams joined to the room, never a person or the owner account.
 Just before it sends, `relay()` checks the caller again, with the answers of `require_room_member` and `power()`: 401 once their session has ended, 403 once they have left the room or may no longer send `m.room.message` there, and 503 when either cannot be read.
 Both answer 503 with `No MindRoom agent is running; try again.` while none runs, with `No MindRoom agent is in this room.` in a room none has joined, or for `relay()` while the first one it mentions is not running there, and with `The message could not be sent; try again.` when Matrix refuses the message or the posting bot stops before it is sent.
 A plugin that uses `require_room_messenger` states `"mindroom_plugin_api": "1.12"` in its manifest, and `"1.15"` when it posts keys in a namespace another plugin also reserves.
@@ -2096,11 +2096,11 @@ They read the Matrix accounts MindRoom keeps in the primary's storage, so a tool
 
 | Function | Returns |
 |----------|---------|
-| `entity_directory(config, runtime_paths)` | A mapping from the current Matrix user ID of the router and each configured agent and team to its `ManagedEntity` |
-| `is_human_user(user_id, config, runtime_paths)` | `False` for the router, an agent, a team, the [internal user](https://docs.mindroom.chat/matrix/#internal-user), and the [`bot_accounts`](https://docs.mindroom.chat/authorization/#bot-accounts), and `True` for anyone else |
+| `entity_directory(config, runtime_paths)` | A mapping from the current Matrix user ID of the owner account and each configured agent and team to its `ManagedEntity` |
+| `is_human_user(user_id, config, runtime_paths)` | `False` for the owner account, an agent, a team, the [internal user](https://docs.mindroom.chat/matrix/#internal-user), and the [`bot_accounts`](https://docs.mindroom.chat/authorization/#bot-accounts), and `True` for anyone else |
 | `is_platform_administrator(user_id, config, runtime_paths)` | Whether the user is in `administrators` or is a person's [bridge alias](https://docs.mindroom.chat/authorization/#bridge-aliases) for one |
 
-A `ManagedEntity` has the entity's config `name`, its `kind` (`"router"`, `"agent"`, or `"team"`), its `display_name`, and, for an agent, the `tool_names` its config gives it: the toolkits its `tools` and the defaults it takes name, a preset replaced by its toolkits, with the toolkits those imply, less those its settings turn off, such as `memory` when its memory backend is `none`, and with those its settings add, such as `delegate` for `delegate_to`.
+A `ManagedEntity` has the entity's config `name`, its `kind` (`"router"` for the owner account, `"agent"`, or `"team"`), its `display_name`, and, for an agent, the `tool_names` its config gives it: the toolkits its `tools` and the defaults it takes name, a preset replaced by its toolkits, with the toolkits those imply, less those its settings turn off, such as `memory` when its memory backend is `none`, and with those its settings add, such as `delegate` for `delegate_to`.
 The directory leaves out an entity whose Matrix account MindRoom has not created yet, such as one a config reload just added.
 A tool name grants nothing, so never decide what a caller may do from one.
 

@@ -69,13 +69,14 @@ from mindroom.providers.pipeline.wrapped import WrappedProvider
 from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.scripted_model import Await, scripted_body
 from tests.fakes.token_counter import fake_token_counter
+from tests.providers.bare_adapter import drain, drain_into
 from tests.providers.golden_support import pipeline_provider
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.llm.provider import ModelProvider, StreamEvent, TokenCounter
+    from mindroom.llm.provider import StreamEvent, TokenCounter
 
 _PROMPT = "Use the attached image."
 _FALLBACK_PROMPT = "Media was not inspected."
@@ -141,16 +142,6 @@ def _malformed() -> ProviderError:
     return ProviderError(message, provider="Scripted", code=MALFORMED_TOOL_CALL)
 
 
-async def _drain(provider: WrappedProvider, request: ModelRequest) -> list[StreamEvent]:
-    return [event async for event in provider.stream(request)]
-
-
-async def _drain_into(events: list[StreamEvent], provider: ModelProvider, request: ModelRequest) -> None:
-    """Drain the request's stream into ``events``, which keep what a stream that fails yielded before its failure."""
-    async for event in provider.stream(request):
-        events.append(event)  # noqa: PERF401
-
-
 @pytest.fixture(autouse=True)
 def _no_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
@@ -176,7 +167,7 @@ async def test_transient_failure_before_output_is_retried_and_its_usage_carried(
     )
     provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
 
-    events = await _drain(provider, ModelRequest(messages=[_user()]))
+    events = await drain(provider, ModelRequest(messages=[_user()]))
 
     assert len(inner.requests) == 2
     assert inner.closed == 2
@@ -201,7 +192,7 @@ async def test_a_retried_turn_keeps_the_answering_attempt_s_context() -> None:
     inner = _ScriptedProvider([[UsageReported(usage(40)), _transient()], [TextDelta("done"), _turn(usage=usage(90))]])
     provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
 
-    finished = (await _drain(provider, ModelRequest(messages=[_user()])))[-1]
+    finished = (await drain(provider, ModelRequest(messages=[_user()])))[-1]
 
     assert isinstance(finished, TurnCompleted)
     assert finished.message.metrics.context == TokenCounts(input_tokens=90)
@@ -216,7 +207,7 @@ async def test_a_transient_failure_is_reissued_after_its_backoff(monkeypatch: py
     loop = asyncio.get_running_loop()
     started = loop.time()
 
-    await _drain(provider, ModelRequest(messages=[_user()]))
+    await drain(provider, ModelRequest(messages=[_user()]))
 
     assert (len(inner.requests), loop.time() - started >= 0.2) == (2, True)
 
@@ -232,7 +223,7 @@ async def test_a_retry_after_hint_of_at_most_a_minute_replaces_the_backoff(hint:
     started = loop.time()
 
     with capture_logs() as logs:
-        await _drain(provider, ModelRequest(messages=[_user()]))
+        await drain(provider, ModelRequest(messages=[_user()]))
 
     assert [entry["delay_seconds"] for entry in logs if entry["event"] == "provider_request_retried"] == [delay]
     assert (len(inner.requests), loop.time() - started >= delay) == (2, True)
@@ -244,7 +235,7 @@ async def test_failure_after_visible_output_is_not_retried() -> None:
     provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
 
     with pytest.raises(ProviderUnavailable):
-        await _drain(provider, ModelRequest(messages=[_user()]))
+        await drain(provider, ModelRequest(messages=[_user()]))
 
     assert len(inner.requests) == 1
 
@@ -255,7 +246,7 @@ async def test_tool_call_counts_as_visible_output() -> None:
     provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
 
     with pytest.raises(ProviderUnavailable):
-        await _drain(provider, ModelRequest(messages=[_user()]))
+        await drain(provider, ModelRequest(messages=[_user()]))
 
     assert len(inner.requests) == 1
 
@@ -265,7 +256,7 @@ async def test_progress_events_are_not_visible_output() -> None:
     inner = _ScriptedProvider([[StreamProgress(), _transient()], [_turn()]])
     provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
 
-    events = await _drain(provider, ModelRequest(messages=[_user()]))
+    events = await drain(provider, ModelRequest(messages=[_user()]))
 
     assert (len(inner.requests), events[0]) == (2, StreamProgress())
 
@@ -282,7 +273,7 @@ async def test_a_failure_after_a_hosted_tool_committed_the_attempt_is_final(fail
     provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=0.05))
 
     with pytest.raises(ProviderUnavailable):
-        await _drain(provider, ModelRequest(messages=[_user()]))
+        await drain(provider, ModelRequest(messages=[_user()]))
 
     assert len(inner.requests) == 1
 
@@ -317,7 +308,7 @@ async def test_non_retryable_failure_propagates_at_once() -> None:
     provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
 
     with pytest.raises(InvalidRequest):
-        await _drain(provider, ModelRequest(messages=[_user()]))
+        await drain(provider, ModelRequest(messages=[_user()]))
 
     assert len(inner.requests) == 1
 
@@ -328,7 +319,7 @@ async def test_transient_retries_are_bounded() -> None:
     provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
 
     with pytest.raises(ProviderUnavailable):
-        await _drain(provider, ModelRequest(messages=[_user()]))
+        await drain(provider, ModelRequest(messages=[_user()]))
 
     assert len(inner.requests) == 5
 
@@ -339,7 +330,7 @@ async def test_silent_stream_is_retried_once_then_fails_as_stalled() -> None:
     provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=0.01))
 
     with pytest.raises(ProviderUnavailable, match="stalled") as info:
-        await _drain(provider, ModelRequest(messages=[_user()]))
+        await drain(provider, ModelRequest(messages=[_user()]))
 
     assert (info.value.status_code, info.value.code, len(inner.requests)) == (504, "stream_stalled", 2)
 
@@ -351,7 +342,7 @@ async def test_a_timeout_the_provider_raises_is_not_reported_as_a_stall() -> Non
     provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=60.0))
 
     with pytest.raises(TimeoutError, match="read timed out"):
-        await _drain(provider, ModelRequest(messages=[_user()]))
+        await drain(provider, ModelRequest(messages=[_user()]))
 
     assert len(inner.requests) == 1
 
@@ -368,7 +359,7 @@ async def test_a_failed_attempt_without_tokens_leaves_the_finished_turn_unmarked
     )
     provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
 
-    events = await _drain(provider, ModelRequest(messages=[_user()]))
+    events = await drain(provider, ModelRequest(messages=[_user()]))
 
     finished = events[-1]
     assert isinstance(finished, TurnCompleted)
@@ -394,7 +385,7 @@ async def test_a_request_whose_every_attempt_failed_after_billing_input_reports_
     events: list[StreamEvent] = []
 
     with pytest.raises(ProviderUnavailable):
-        await _drain_into(events, provider, ModelRequest(messages=[_user()]))
+        await drain_into(events, provider, ModelRequest(messages=[_user()]))
 
     reports = [event for event in events if isinstance(event, UsageReported)]
     marks = [(event.final, event.sums_attempts) for event in reports]
@@ -429,7 +420,7 @@ async def test_usage_that_sums_attempts_stays_marked_when_an_outer_stage_forward
     events: list[StreamEvent] = []
 
     with pytest.raises(InvalidRequest, match="rejected"):
-        await _drain_into(events, pipeline_provider(inner), ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+        await drain_into(events, pipeline_provider(inner), ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
 
     assert len(inner.requests) == 3
     received = ReportedUsage()
@@ -452,7 +443,7 @@ async def test_media_the_route_omits_is_replaced_by_the_fallback_note() -> None:
     provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
     audio = Audio(content=b"RIFF", mime_type="audio/wav")
 
-    await _drain(provider, ModelRequest(messages=[_user(_PROMPT, audio=[audio], images=[_image()])]))
+    await drain(provider, ModelRequest(messages=[_user(_PROMPT, audio=[audio], images=[_image()])]))
 
     sent = inner.requests[0].messages[0]
     assert sent.audio is None
@@ -469,7 +460,7 @@ async def test_rejected_media_is_removed_for_one_retry_and_remembered_for_the_ro
     provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
     request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
 
-    events = await _drain(provider, request)
+    events = await drain(provider, request)
 
     retried = inner.requests[1].messages[0]
     assert (retried.images, retried.content) == (None, f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}")
@@ -478,7 +469,7 @@ async def test_rejected_media_is_removed_for_one_retry_and_remembered_for_the_ro
     assert finished.message.metrics.tokens.input_tokens == 5
     assert finished.message.provider_data["mindroom_aggregate_usage"] is True
     # The capability gap is learned, so the next request leaves the image out up front.
-    await _drain(provider, request)
+    await drain(provider, request)
     assert len(inner.requests) == 3
     assert inner.requests[2].messages[0].images is None
 
@@ -490,7 +481,7 @@ async def test_a_media_free_retry_that_is_rejected_too_ends_the_request() -> Non
     provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
 
     with pytest.raises(InvalidRequest):
-        await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+        await drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
 
     assert len(inner.requests) == 2
 
@@ -503,8 +494,8 @@ async def test_input_specific_rejection_retries_without_learning() -> None:
     provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
     request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
 
-    retried = (await _drain(provider, request))[-1]
-    sent_as_asked = (await _drain(provider, request))[-1]
+    retried = (await drain(provider, request))[-1]
+    sent_as_asked = (await drain(provider, request))[-1]
 
     assert inner.requests[1].messages[0].images is None
     assert inner.requests[2].messages[0].images == [_image()]
@@ -519,7 +510,7 @@ async def test_a_plain_retry_resends_the_request_and_marks_nothing() -> None:
     inner = _ScriptedProvider([[_transient()], [_turn()]])
     provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
 
-    finished = (await _drain(provider, ModelRequest(messages=[_user()])))[-1]
+    finished = (await drain(provider, ModelRequest(messages=[_user()])))[-1]
 
     assert isinstance(finished, TurnCompleted)
     assert REWRITTEN_ATTEMPT_KEY not in (finished.message.provider_data or {})
@@ -538,7 +529,7 @@ async def test_a_learned_media_limit_changes_the_size_and_identity_of_a_request(
     request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
     size, key = provider.request_tokens(request), provider.context_key(request)
 
-    await _drain(provider, request)
+    await drain(provider, request)
 
     assert provider.context_key(request) != key
     assert provider.request_tokens(request) < size
@@ -559,8 +550,8 @@ async def test_a_payload_rejection_retries_without_learning() -> None:
     provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
     request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
 
-    await _drain(provider, request)
-    await _drain(provider, request)
+    await drain(provider, request)
+    await drain(provider, request)
 
     assert inner.requests[1].messages[0].images is None
     assert inner.requests[2].messages[0].images == [_image()]
@@ -580,8 +571,8 @@ async def test_audio_rejection_preserves_viewed_image_and_learns_only_audio() ->
         ],
     )
 
-    await _drain(_fallback_stage(inner), request)
-    await _drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
 
     assert len(inner.requests) == 3
     for attempt in inner.requests[1:]:
@@ -619,8 +610,8 @@ async def test_named_media_kind_aliases_retry_and_learn_only_that_kind(error: st
         "video": None if removed == "video" else [video],
     }
 
-    await _drain(_fallback_stage(inner), request)
-    await _drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
 
     assert len(inner.requests) == 3
     for attempt in inner.requests[1:]:
@@ -656,8 +647,8 @@ async def test_coordinated_media_rejection_preserves_images_and_learns_all_rejec
     video = Video(content=b"video", mime_type="video/mp4")
     request = ModelRequest(messages=[_user(_PROMPT, images=[_image()], audio=[_CLIP], videos=[video], files=[_REPORT])])
 
-    await _drain(_fallback_stage(inner), request)
-    await _drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
 
     assert len(inner.requests) == 3
     for attempt in inner.requests[1:]:
@@ -682,8 +673,8 @@ async def test_affirmative_clause_after_unsupported_kind_keeps_its_kind(error: s
     inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
     request = ModelRequest(messages=[_user(_PROMPT, images=[_image()], audio=[_CLIP])])
 
-    await _drain(_fallback_stage(inner), request)
-    await _drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
 
     assert len(inner.requests) == 3
     for attempt in inner.requests[1:]:
@@ -703,8 +694,8 @@ async def test_kind_retry_failure_uses_backstop_without_learning_unrelated_image
     )
     request = ModelRequest(messages=[_user(images=[_image()], audio=[_CLIP])])
 
-    await _drain(_fallback_stage(inner), request)
-    await _drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
 
     assert [(r.messages[0].images, r.messages[0].audio) for r in inner.requests] == [
         ([_image()], [_CLIP]),
@@ -720,8 +711,8 @@ async def test_unnamed_media_errors_strip_all_without_learning(error: str) -> No
     inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
     request = ModelRequest(messages=[_user(images=[_image()], audio=[_CLIP])])
 
-    await _drain(_fallback_stage(inner), request)
-    await _drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
 
     assert (inner.requests[1].messages[0].images, inner.requests[1].messages[0].audio) == (None, None)
     assert (inner.requests[2].messages[0].images, inner.requests[2].messages[0].audio) == ([_image()], [_CLIP])
@@ -744,8 +735,8 @@ async def test_media_learning_requires_a_named_capability_gap_not_an_input_error
     inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
     request = ModelRequest(messages=[_user(audio=[_CLIP])])
 
-    await _drain(_fallback_stage(inner), request)
-    await _drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
 
     assert inner.requests[1].messages[0].audio is None
     assert inner.requests[2].messages[0].audio == [_CLIP]
@@ -760,8 +751,8 @@ async def test_unsupported_payload_retries_only_named_kind_without_learning(erro
     inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
     request = ModelRequest(messages=[_user(images=[_image()], audio=[_CLIP], files=[_REPORT])])
 
-    await _drain(_fallback_stage(inner), request)
-    await _drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
 
     assert len(inner.requests) == 3
     retry = inner.requests[1].messages[0]
@@ -794,7 +785,7 @@ async def test_unsuccessful_kind_retry_does_not_teach_capabilities(end: str) -> 
     provider = _fallback_stage(inner)
 
     if end == "cancelled":
-        task = asyncio.create_task(_drain(provider, request))
+        task = asyncio.create_task(drain(provider, request))
         await waiting.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -805,8 +796,8 @@ async def test_unsuccessful_kind_retry_does_not_teach_capabilities(end: str) -> 
         await stream.aclose()
     else:
         with pytest.raises(ProviderError):
-            await _drain(provider, request)
-    await _drain(provider, request)
+            await drain(provider, request)
+    await drain(provider, request)
 
     assert inner.requests[-1].messages[0].images == [_image()]
     assert inner.requests[-1].messages[0].audio == [_CLIP]
@@ -820,8 +811,8 @@ async def test_a_learned_media_limit_stays_with_its_endpoint() -> None:
     other = _ScriptedProvider([[_turn()]], identity=replace(_IDENTITY, endpoint="http://two/v1"))
     request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
 
-    await _drain(WrappedProvider(first, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT)), request)
-    await _drain(WrappedProvider(other, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT)), request)
+    await drain(WrappedProvider(first, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT)), request)
+    await drain(WrappedProvider(other, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT)), request)
 
     assert other.requests[0].messages[0].images == [_image()]
 
@@ -833,7 +824,7 @@ async def test_a_rejection_after_a_hosted_tool_committed_the_attempt_is_not_rese
     provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
 
     with pytest.raises(InvalidRequest):
-        await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+        await drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
 
     assert len(inner.requests) == 1
 
@@ -848,7 +839,7 @@ async def test_retryable_failures_and_visible_output_are_not_media_retries() -> 
 
     for inner in (transient, visible):
         with pytest.raises(ProviderError):
-            await _drain(WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt="x")), request)
+            await drain(WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt="x")), request)
         assert len(inner.requests) == 1
 
 
@@ -867,7 +858,7 @@ async def test_removed_viewed_image_marks_its_receipt_unsupported() -> None:
     ]
     inner = _ScriptedProvider([[_turn()]], capabilities=Capabilities(omitted_media=frozenset({"image"})))
 
-    await _drain(
+    await drain(
         WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt="x")),
         ModelRequest(messages=messages),
     )
@@ -917,7 +908,7 @@ def _fallback_stage(inner: _ScriptedProvider) -> WrappedProvider:
 async def test_a_rejection_that_names_some_media_retries_without_only_those_and_names_them() -> None:
     inner = _ScriptedProvider([[_rejection("att_photo", "att_report")], [_turn()]])
 
-    await _drain(_fallback_stage(inner), _media_request())
+    await drain(_fallback_stage(inner), _media_request())
 
     earlier, retried = inner.requests[1].messages
     assert _sent([earlier]) == _MEDIA_FREE[:1]
@@ -937,7 +928,7 @@ async def test_a_rejection_that_names_no_part_of_the_media_retries_without_any_o
     """The retry is the media-free request the stage always sent, byte for byte, note included."""
     inner = _ScriptedProvider([[_rejection(*rejected)], [_turn()]])
 
-    await _drain(_fallback_stage(inner), _media_request())
+    await drain(_fallback_stage(inner), _media_request())
 
     assert _sent(inner.requests[1].messages) == _MEDIA_FREE
     assert len(inner.requests) == 2
@@ -954,7 +945,7 @@ async def test_explicitly_rejected_items_take_precedence_over_a_named_kind() -> 
     )
     inner = _ScriptedProvider([[rejection], [_turn()]])
 
-    await _drain(_fallback_stage(inner), _media_request())
+    await drain(_fallback_stage(inner), _media_request())
 
     assert _sent(inner.requests[1].messages) == _MEDIA_FREE
 
@@ -970,7 +961,7 @@ async def test_a_request_too_large_for_the_window_retries_without_any_media_what
     )
     inner = _ScriptedProvider([[too_large], [_turn()]])
 
-    await _drain(_fallback_stage(inner), _media_request())
+    await drain(_fallback_stage(inner), _media_request())
 
     assert _sent(inner.requests[1].messages) == _MEDIA_FREE
 
@@ -980,7 +971,7 @@ async def test_a_named_retry_that_is_rejected_too_is_sent_once_more_without_any_
     """A wrong or partial naming costs one request: the media-free request still answers."""
     inner = _ScriptedProvider([[_rejection("att_photo")], [_rejection("att_scan")], [_turn("answered")]])
 
-    events = await _drain(_fallback_stage(inner), _media_request())
+    events = await drain(_fallback_stage(inner), _media_request())
 
     assert inner.requests[1].messages[1].images == [_image("att_scan")]
     assert _sent(inner.requests[2].messages) == _MEDIA_FREE
@@ -994,7 +985,7 @@ async def test_a_third_rejection_ends_the_request() -> None:
     inner = _ScriptedProvider([[_rejection("att_photo")], [_rejection()], [_rejection()], [_turn()]])
 
     with pytest.raises(InvalidRequest):
-        await _drain(_fallback_stage(inner), _media_request())
+        await drain(_fallback_stage(inner), _media_request())
 
     assert len(inner.requests) == 3
 
@@ -1012,7 +1003,7 @@ async def test_a_named_retry_ends_at_a_failure_the_media_cannot_have_caused(fail
     inner = _ScriptedProvider([[_rejection("att_photo")], [failure], [_turn()]])
 
     with pytest.raises(ProviderError) as raised:
-        await _drain(_fallback_stage(inner), _media_request())
+        await drain(_fallback_stage(inner), _media_request())
 
     assert raised.value is failure
     assert len(inner.requests) == 2
@@ -1025,8 +1016,8 @@ async def test_a_named_retry_that_answers_teaches_the_route_nothing() -> None:
     inner = _ScriptedProvider([[_rejection("att_photo", message=gap)], [_turn()], [_turn()]])
     request = ModelRequest(messages=[_user(_PROMPT, images=[_image("att_photo"), _image("att_scan")])])
 
-    await _drain(_fallback_stage(inner), request)
-    await _drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
 
     assert inner.requests[1].messages[0].images == [_image("att_scan")]
     assert inner.requests[2].messages[0].images == [_image("att_photo"), _image("att_scan")]
@@ -1038,8 +1029,8 @@ async def test_a_capability_gap_is_learned_once_the_media_free_backstop_answers(
     inner = _ScriptedProvider([[_rejection("att_photo", message=gap)], [_rejection(message=gap)], [_turn()], [_turn()]])
     request = ModelRequest(messages=[_user(_PROMPT, images=[_image("att_photo"), _image("att_scan")])])
 
-    await _drain(_fallback_stage(inner), request)
-    await _drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
 
     assert [len(attempt.messages[0].images or ()) for attempt in inner.requests] == [2, 1, 0, 0]
     assert len(inner.requests) == 4
@@ -1052,8 +1043,8 @@ async def test_openrouters_missing_audio_endpoint_is_learned() -> None:
     inner = _ScriptedProvider([[gap], [_turn()], [_turn()]])
     request = ModelRequest(messages=[_user(_PROMPT, audio=[_CLIP])])
 
-    await _drain(_fallback_stage(inner), request)
-    await _drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
 
     assert [attempt.messages[0].audio for attempt in inner.requests] == [[_CLIP], None, None]
 
@@ -1066,7 +1057,7 @@ async def test_a_named_retry_leaves_the_media_the_route_omits_out_and_names_it_t
         capabilities=Capabilities(omitted_media=frozenset({"audio"})),
     )
 
-    await _drain(_fallback_stage(inner), _media_request())
+    await drain(_fallback_stage(inner), _media_request())
 
     sent = inner.requests[0].messages[1]
     assert (sent.audio, sent.content) == (None, f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}")
@@ -1093,7 +1084,7 @@ async def test_a_named_viewed_image_removes_every_image_and_marks_the_receipts()
     ]
     inner = _ScriptedProvider([[_rejection(viewed.id)], [_turn()]])
 
-    await _drain(_fallback_stage(inner), ModelRequest(messages=messages))
+    await drain(_fallback_stage(inner), ModelRequest(messages=messages))
 
     retried = inner.requests[1].messages
     assert json.loads(retried[1].content)["view_status"] == "unsupported"
@@ -1110,7 +1101,7 @@ async def test_the_note_names_each_removed_item_by_its_file_name_or_kind() -> No
     message = _user(_PROMPT, images=[_image("att_photo")], files=[_REPORT, unnamed], audio=[clip, _CLIP])
     inner = _ScriptedProvider([[_rejection("tool-file", "generated-clip", "att_report")], [_turn()]])
 
-    await _drain(_fallback_stage(inner), ModelRequest(messages=[message]))
+    await drain(_fallback_stage(inner), ModelRequest(messages=[message]))
 
     retried = inner.requests[1].messages[0]
     named = "Not sent: audio, report.pdf (att_report), file."
@@ -1148,7 +1139,7 @@ async def test_portable_tool_search_hides_deferred_tools_behind_call_tool() -> N
         deferred_tools=DeferredTools(names=frozenset({"lookup_order"}), portable=True),
     )
 
-    await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
+    await drain(WrappedProvider(inner, portable_tool_search_stream), request)
 
     sent = inner.requests[0]
     assert [tool.name for tool in sent.tools] == ["call_tool", "tool_search"]
@@ -1176,7 +1167,7 @@ async def test_native_tool_search_routes_receive_the_deferred_names() -> None:
         deferred_tools=DeferredTools(names=frozenset({"lookup_order"})),
     )
 
-    await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
+    await drain(WrappedProvider(inner, portable_tool_search_stream), request)
 
     assert inner.requests[0] is request
 
@@ -1198,8 +1189,8 @@ async def test_portable_tool_search_projects_stored_calls_byte_stably() -> None:
         deferred_tools=DeferredTools(names=frozenset({"lookup_order"}), portable=True),
     )
 
-    await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
-    await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
+    await drain(WrappedProvider(inner, portable_tool_search_stream), request)
+    await drain(WrappedProvider(inner, portable_tool_search_stream), request)
 
     first, second = (sent.messages for sent in inner.requests)
     assert first[0].tool_calls == second[0].tool_calls
@@ -1229,7 +1220,7 @@ async def test_portable_tool_search_wraps_stored_arguments_as_an_object(stored: 
         deferred_tools=DeferredTools(names=frozenset({"lookup_order"}), portable=True),
     )
 
-    await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
+    await drain(WrappedProvider(inner, portable_tool_search_stream), request)
 
     wrapped = inner.requests[0].messages[0].tool_calls[0]["function"]["arguments"]
     assert json.loads(wrapped) == {"name": "lookup_order", "arguments": arguments}
@@ -1314,7 +1305,7 @@ async def test_a_malformed_tool_call_is_retried_with_guidance_on_the_retried_req
     conversation = [message]
     request = ModelRequest(messages=conversation)
 
-    events = await _drain(WrappedProvider(inner, guidance_retry_stream), request)
+    events = await drain(WrappedProvider(inner, guidance_retry_stream), request)
 
     first, retried = inner.requests
     *resent, guidance = retried.messages
@@ -1338,7 +1329,7 @@ async def test_only_a_malformed_tool_call_before_output_gets_guidance(attempt: l
     inner = _ScriptedProvider([attempt, [_turn()]])
 
     with pytest.raises(ProviderError):
-        await _drain(WrappedProvider(inner, guidance_retry_stream), ModelRequest(messages=[_user()]))
+        await drain(WrappedProvider(inner, guidance_retry_stream), ModelRequest(messages=[_user()]))
 
     assert len(inner.requests) == 1
 
@@ -1358,7 +1349,7 @@ async def test_request_log_records_the_request_and_its_usage(tmp_path: Path) -> 
     )
     request = ModelRequest(messages=[Message(role="system", content="Be brief."), _user()], tools=[_tool("search")])
 
-    await _drain(WrappedProvider(inner, partial(logged_stream, log=log)), request)
+    await drain(WrappedProvider(inner, partial(logged_stream, log=log)), request)
 
     (log_file,) = tmp_path.glob("llm-requests-*.jsonl")
     request_record, response_record = (json.loads(line) for line in log_file.read_text().splitlines())
@@ -1383,7 +1374,7 @@ async def test_the_request_record_is_written_before_the_request_is_sent(tmp_path
 
     inner = _ScriptedProvider([[Await(read_log), _turn()]])
 
-    await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
+    await drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
 
     assert seen_before_reply == _log_records(tmp_path)
     assert [record["body"] for record in seen_before_reply] == [scripted_body(_IDENTITY, _request())]
@@ -1395,7 +1386,7 @@ async def test_a_request_that_is_never_sent_logs_only_its_usage_line(tmp_path: P
     unsent = _ScriptedProvider([[InvalidRequest("unreadable file", provider="Scripted")]], sends=False)
 
     with capture_logs() as logs, pytest.raises(InvalidRequest, match="unreadable file"):
-        await _drain(WrappedProvider(unsent, partial(logged_stream, log=_request_log(tmp_path))), _request())
+        await drain(WrappedProvider(unsent, partial(logged_stream, log=_request_log(tmp_path))), _request())
 
     assert not list(tmp_path.glob("llm-requests-*.jsonl"))
     assert [entry["usage_available"] for entry in logs if entry["event"] == "LLM usage"] == [False]
@@ -1420,7 +1411,7 @@ async def test_request_log_names_the_deferred_tools(
         deferred_tools=DeferredTools(names=deferred),
     )
 
-    await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
+    await drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
 
     [record] = _log_records(tmp_path)
     assert record["deferred_tool_names"] == expected
@@ -1443,7 +1434,7 @@ async def test_request_log_builds_the_record_off_the_event_loop(
     monkeypatch.setattr(request_log_stage, "_write_request_record", record_build_thread)
     request = ModelRequest(messages=[_user("hi")], tools=[_tool("search")])
 
-    await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
+    await drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
 
     [record] = _log_records(tmp_path)
     assert record["body"] == scripted_body(_IDENTITY, request)
@@ -1472,7 +1463,7 @@ async def test_request_log_masks_credentials_before_writing(tmp_path: Path) -> N
     request = ModelRequest(messages=[_user(leaked)])
 
     with bind_llm_request_log_context(callback_url="https://example.test/cb?code=code-secret&keep=1"):
-        await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
+        await drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
 
     [record] = _log_records(tmp_path)
     assert record["body"]["messages"][0]["content"] == (
@@ -1497,7 +1488,7 @@ async def test_request_log_names_the_model_config_and_takes_the_agent_from_the_c
     inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
 
     with bind_llm_request_log_context(**context):
-        await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
+        await drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
 
     records = _log_records(tmp_path)
     assert [(record.get("record"), record.get("model_name"), record.get("agent_id")) for record in records] == [
@@ -1534,7 +1525,7 @@ async def test_usage_telemetry_is_logged_without_the_request_log(
     log = _request_log(tmp_path, enabled=False, provider=provider.lower())
 
     with capture_logs() as logs, bind_llm_request_log_context(correlation_id="corr-1", full_prompt="private"):
-        await _drain(WrappedProvider(inner, partial(logged_stream, log=log)), ModelRequest(messages=[_user()]))
+        await drain(WrappedProvider(inner, partial(logged_stream, log=log)), ModelRequest(messages=[_user()]))
 
     assert list(tmp_path.iterdir()) == []
     assert [entry for entry in logs if entry["event"] == "LLM usage"] == [
@@ -1571,7 +1562,7 @@ async def test_usage_telemetry_logs_a_compacted_claude_request_s_final_iteration
     log = _request_log(tmp_path, enabled=False, provider="anthropic")
 
     with capture_logs() as logs:
-        await _drain(WrappedProvider(inner, partial(logged_stream, log=log)), ModelRequest(messages=[_user()]))
+        await drain(WrappedProvider(inner, partial(logged_stream, log=log)), ModelRequest(messages=[_user()]))
 
     [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
     fields = ("input_tokens", "cache_read_tokens", "context_input_tokens", "uncached_input_tokens", "cache_read_ratio")
@@ -1592,7 +1583,7 @@ async def test_usage_telemetry_logs_no_context_for_a_request_that_reported_no_in
     log = _request_log(tmp_path, enabled=False)
 
     with capture_logs() as logs:
-        await _drain(WrappedProvider(inner, partial(logged_stream, log=log)), _request())
+        await drain(WrappedProvider(inner, partial(logged_stream, log=log)), _request())
 
     [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
     fields = ("output_tokens", "context_input_tokens", "uncached_input_tokens", "cache_read_ratio")
@@ -1612,7 +1603,7 @@ async def test_usage_telemetry_bounds_over_reported_cache_reads_to_the_context(t
     log = _request_log(tmp_path, enabled=False)
 
     with capture_logs() as logs:
-        await _drain(WrappedProvider(inner, partial(logged_stream, log=log)), _request())
+        await drain(WrappedProvider(inner, partial(logged_stream, log=log)), _request())
 
     [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
     fields = ("cache_read_tokens", "context_input_tokens", "uncached_input_tokens", "cache_read_ratio")
@@ -1636,7 +1627,7 @@ async def test_a_request_without_usage_is_reported_and_writes_no_response_record
     inner = _ScriptedProvider([[*reports, TurnCompleted(message=served, stop_reason="end")]])
 
     with capture_logs() as logs:
-        await _drain(
+        await drain(
             WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))),
             ModelRequest(messages=[_user()]),
         )
@@ -1662,9 +1653,9 @@ async def test_a_failing_request_log_neither_fails_the_request_nor_hides_its_err
     failed = _ScriptedProvider([[InvalidRequest("bad request", provider="Scripted", status_code=400)]])
 
     with capture_logs() as logs:
-        events = await _drain(WrappedProvider(answered, partial(logged_stream, log=_request_log(tmp_path))), _request())
+        events = await drain(WrappedProvider(answered, partial(logged_stream, log=_request_log(tmp_path))), _request())
         with pytest.raises(InvalidRequest, match="bad request"):
-            await _drain(WrappedProvider(failed, partial(logged_stream, log=_request_log(tmp_path))), _request())
+            await drain(WrappedProvider(failed, partial(logged_stream, log=_request_log(tmp_path))), _request())
 
     assert isinstance(events[-1], TurnCompleted)
     assert [entry["usage_available"] for entry in logs if entry["event"] == "LLM usage"] == [True, False]
@@ -1698,7 +1689,7 @@ async def test_a_response_record_that_cannot_be_written_is_reported_and_the_answ
     inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
 
     with capture_logs() as logs:
-        events = await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
+        events = await drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
 
     assert isinstance(events[-1], TurnCompleted)
     assert [record.get("record") for record in _log_records(tmp_path)] == [None]
@@ -1773,7 +1764,7 @@ async def test_a_failed_attempt_logs_the_partial_usage_it_reported(tmp_path: Pat
     inner = _ScriptedProvider([[UsageReported(usage, final=False), _transient()]])
 
     with capture_logs() as logs, pytest.raises(ProviderUnavailable):
-        await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
+        await drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
 
     [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
     assert (usage_log["usage_available"], usage_log["cache_read_tokens"]) == (True, 42)
@@ -1834,7 +1825,7 @@ async def test_reported_usage_always_sums_to_the_finished_turn(rejection: Provid
     )
     provider = pipeline_provider(inner)
 
-    events = await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+    events = await drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
 
     reported = sum(event.usage.tokens.input_tokens for event in events if isinstance(event, UsageReported))
     finished = events[-1]
@@ -1881,7 +1872,7 @@ async def test_a_failed_attempts_partial_usage_is_counted_once_in_the_retried_tu
     )
     provider = pipeline_provider(inner)
 
-    events = await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+    events = await drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
 
     reports = [(event.usage, event.final, event.sums_attempts) for event in events if isinstance(event, UsageReported)]
     # The retry's reports are marked, since with them the request's reports add up both attempts.

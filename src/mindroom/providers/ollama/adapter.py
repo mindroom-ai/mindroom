@@ -18,7 +18,7 @@ from uuid import uuid4
 from ollama import AsyncClient
 
 from mindroom.credentials.sync import get_ollama_api_key, get_ollama_host
-from mindroom.llm.messages import tool_result_view, with_joined_system
+from mindroom.llm.messages import stored_tool_call, tool_result_view, with_joined_system
 from mindroom.llm.provider import Capabilities, ModelIdentity, ReasoningDelta, TextDelta, ToolCallReady, UsageReported
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
@@ -291,11 +291,7 @@ def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
     if chunk.done:
         events.extend(reply.add_text(reply.think.finish()))
     for tool_call in message.tool_calls or ():
-        call = {
-            "id": str(uuid4()),
-            "type": "function",
-            "function": {"name": tool_call.function.name, "arguments": json.dumps(tool_call.function.arguments)},
-        }
+        call = stored_tool_call(str(uuid4()), tool_call.function.name, json.dumps(tool_call.function.arguments))
         reply.tool_calls.append(call)
         events.append(ToolCallReady(call))
     return events

@@ -1638,7 +1638,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
             room,
             "@mindroom_router:localhost",
         )
-        handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
+        handled = await bot._turn_ingress._normalize_and_dispatch_text(
             room,
             sidecar_event,
             bot._ingress_validator.classify(sidecar_event, room_id=room.room_id),
@@ -1707,7 +1707,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
             room,
             "@mindroom_router:localhost",
         )
-        handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
+        handled = await bot._turn_ingress._normalize_and_dispatch_text(
             room,
             sidecar_event,
             bot._ingress_validator.classify(sidecar_event, room_id=room.room_id),

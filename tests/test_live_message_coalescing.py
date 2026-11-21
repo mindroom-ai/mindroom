@@ -28,6 +28,7 @@ from mindroom.coalescing.batch import (
 )
 from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
+from mindroom.commands.parsing import CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -70,6 +71,7 @@ from mindroom.event_journal import (
     EventKind,
     JournalEvent,
     PendingTurnView,
+    PrincipalStore,
 )
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
@@ -100,6 +102,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from mindroom.turns.dispatch import TurnDispatcher, _attachment_parts
+from mindroom.turns.facts import command_for
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -2177,6 +2180,128 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
         (research_requester, "@test_agent please check this for alice"),
         ("@alice:localhost", "alice last"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_edit_cannot_renew_notice_after_its_queued_message_flushes(tmp_path: Path) -> None:
+    """A slow journal write must not make an already claimed message look like a waiting follow-up."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    gate = bot._coalescing_gate
+    ingress = bot._turn_ingress
+    message = _text_event(event_id="$queued", body="before", thread_id="$thread")
+    edit = _text_event(event_id="$edit", body="* after", server_timestamp=1001)
+    edit.source["content"].update(
+        {
+            "m.relates_to": {"rel_type": "m.replace", "event_id": message.event_id},
+            "m.new_content": {"msgtype": "m.text", "body": "after"},
+        },
+    )
+    target = MessageTarget.resolve(room.room_id, "$thread", message.event_id)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    signal = runner.lifecycle_coordinator._get_or_create_queued_signal(target)
+    revision_started = asyncio.Event()
+    release_revision = asyncio.Event()
+    dispatched_bodies: list[str] = []
+
+    async def hold_revision(_event_id: str, _content: object) -> None:
+        revision_started.set()
+        await release_revision.wait()
+
+    async def dispatch(turn: PreparedTurn) -> bool:
+        dispatched_bodies.append(turn.event.body)
+        signal.begin_response_turn()
+        return True
+
+    signal.begin_response_turn()
+    try:
+        with (
+            patch.object(PrincipalStore, "revise_pending", new=AsyncMock(side_effect=hold_revision)),
+            patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock(side_effect=dispatch)),
+        ):
+            key = active_follow_up_coalescing_key(room.room_id, "$thread")
+            await _admit_ready(gate, key, make_pending_event(message, room, source_kind=MESSAGE_SOURCE_KIND))
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS), asyncio.TaskGroup() as tasks:
+                edited = tasks.create_task(ingress._edit_queued_message(room, edit, EventInfo.from_event(edit.source)))
+                await revision_started.wait()
+                signal.finish_response_turn()
+                await gate.drain_all()
+                release_revision.set()
+            assert edited.result()
+        assert dispatched_bodies == ["after"]
+        assert signal.has_active_response_turn()
+        assert signal.pending_human_messages == 0
+    finally:
+        signal.finish_response_turn()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("before", "after", "body", "expected_type"),
+    [
+        (None, "agent", "@TestAgent !help", CommandType.HELP),
+        ("agent", None, "@TestAgent !help", None),
+        (None, "owner", "!help", None),
+        ("owner", None, "!help", CommandType.HELP),
+    ],
+    ids=["add-agent-pill", "drop-agent-pill", "add-owner-pill", "drop-owner-pill"],
+)
+async def test_queued_edit_uses_edited_mentions_to_classify_the_command(
+    tmp_path: Path,
+    before: str | None,
+    after: str | None,
+    body: str,
+    expected_type: CommandType | None,
+) -> None:
+    """A live flush classifies the command the same way as replay of the edited content."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    gate = bot._coalescing_gate
+    ingress = bot._turn_ingress
+    validator = ingress.deps.ingress
+    registry = entity_identity_registry(bot.config, bot.runtime_paths)
+    mention_ids = {"agent": bot.matrix_id.full_id, "owner": registry.current_id(ROUTER_AGENT_NAME).full_id}
+    message = _text_event(event_id="$queued", body="hello", thread_id="$thread")
+    if before is not None:
+        message.source["content"]["m.mentions"] = {"user_ids": [mention_ids[before]]}
+    new_content = {
+        "msgtype": "m.text",
+        "body": body,
+        "m.mentions": {"user_ids": [] if after is None else [mention_ids[after]]},
+    }
+    edit = _text_event(event_id="$edit", body=f"* {body}", server_timestamp=1001)
+    edit.source["content"].update(
+        {
+            "m.relates_to": {"rel_type": "m.replace", "event_id": message.event_id},
+            "m.new_content": new_content,
+        },
+    )
+    await _admit_pending_thread_event(bot, message.source)
+    facts = validator.classify(message, room_id=room.room_id)
+    pending = make_pending_event(message, room, source_kind=MESSAGE_SOURCE_KIND, facts=facts)
+    target = MessageTarget.resolve(room.room_id, "$thread", message.event_id)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    signal = runner.lifecycle_coordinator._get_or_create_queued_signal(target)
+    dispatch = AsyncMock(return_value=True)
+
+    signal.begin_response_turn()
+    try:
+        with patch.object(TurnDispatcher, "dispatch_turn", new=dispatch):
+            key = requester_coalescing_key(room.room_id, "$thread", message.sender)
+            await _admit_ready(gate, key, pending)
+            assert await ingress._edit_queued_message(room, edit, EventInfo.from_event(edit.source))
+            signal.finish_response_turn()
+            await gate.drain_all()
+    finally:
+        signal.finish_response_turn()
+
+    dispatch.assert_awaited_once()
+    assert dispatch.await_args is not None
+    turn = dispatch.await_args.args[0]
+    edited_facts = validator.classify_source(message.sender, {"content": new_content}, room_id=room.room_id)
+    expected = command_for(edited_facts, body)
+    assert (None if expected is None else expected.type) is expected_type
+    assert turn.command == expected
 
 
 @pytest.mark.asyncio
@@ -7597,7 +7722,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         ),
     ):
         ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
-        handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
+        handled = await bot._turn_ingress._normalize_and_dispatch_text(
             room,
             sidecar_event,
             make_ingress_facts(sidecar_event.sender, requester_user_id="@user:localhost"),
@@ -7761,7 +7886,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
         ),
     ):
         ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, sidecar.sender)
-        outcome = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
+        outcome = await bot._turn_ingress._normalize_and_dispatch_text(
             room,
             sidecar,
             make_ingress_facts(sidecar.sender, requester_user_id=sidecar.sender),

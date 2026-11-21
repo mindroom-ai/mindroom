@@ -43,7 +43,7 @@ from mindroom.thread_export.projected_history import (
     export_conversation_reader,
     fetch_projected_thread_history,
 )
-from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content, tool_markers_out_of_text
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     FakeMediaResponse,
@@ -53,6 +53,7 @@ from tests.conftest import (
 )
 from tests.journal_membership_helpers import admit_room_membership
 from tests.thread_export_helpers import thread_export_config
+from tests.tool_position_helpers import _SHELL, _marked
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
@@ -344,6 +345,30 @@ async def test_a_cold_thread_hydrates_once_and_then_costs_no_history_calls(
 
     assert bodies(warm) == ["root", "first", "second"]
     assert homeserver.history_calls == 0
+
+
+async def test_an_export_reads_an_agents_reply_with_tool_calls_as_it_was_built(router: PrincipalStore) -> None:
+    """Matrix holds a reply without its tool marker lines, and the projection an export shares with turns holds them."""
+    built = _marked("Looked.\n\n🔧 `shell` [1]", [_SHELL])
+    held = tool_markers_out_of_text(built)
+    assert held["body"] == "Looked."
+    homeserver = FakeHomeserver()
+    replies = [
+        raw(f"$by{number}:example.org", "", ts=200 + number, sender=sender, thread_id=ROOT, extra_content=held)
+        for number, sender in enumerate((HELPER, ALICE))
+    ]
+    serve_thread(homeserver, raw(ROOT, "root", ts=100), replies)
+    reader = export_conversation_reader(
+        client=homeserver,  # type: ignore[arg-type]
+        config=Config(),
+        store=router,
+        self_sender=ROUTER,
+    )
+
+    assert bodies(await export(reader)) == ["root", "Looked.", "Looked."]
+
+    page = await router.read_conversation(room_id=ROOM, thread_id=ROOT, limit=10)
+    assert [message.content["body"] for message in page.messages] == ["root", built["body"], "Looked."]
 
 
 async def test_a_warm_thread_reads_locally_from_a_second_export_login(

@@ -195,7 +195,20 @@ class _CommandParser:
     E2EE_PATTERN = re.compile(r"^!e2ee$", re.IGNORECASE)
     HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
 
-    def parse(self, message: str, mention_names: tuple[str, ...] = ()) -> Command | None:  # noqa: C901, PLR0911, PLR0912, PLR0915
+    _ARGS_TEXT_COMMANDS = (
+        (CONFIG_PATTERN, CommandType.CONFIG),
+        (DESKTOP_PATTERN, CommandType.DESKTOP),
+        (MODE_PATTERN, CommandType.MODE),
+        (COMPACT_PATTERN, CommandType.COMPACT),
+        (MODEL_PATTERN, CommandType.MODEL),
+        (ROOM_MODEL_PATTERN, CommandType.ROOM_MODEL),
+        (THREAD_MODE_PATTERN, CommandType.THREAD_MODE),
+        (REPLY_MODE_PATTERN, CommandType.REPLY_MODE),
+        (AUTO_APPROVE_PATTERN, CommandType.AUTO_APPROVE),
+        (ENCRYPT_PATTERN, CommandType.ENCRYPT),
+    )
+
+    def parse(self, message: str, mention_names: tuple[str, ...] = ()) -> Command | None:  # noqa: C901, PLR0911, PLR0912
         """Parse a message for commands.
 
         Args:
@@ -280,87 +293,9 @@ class _CommandParser:
                 raw_text=raw_text,
             )
 
-        match = self.CONFIG_PATTERN.match(message)
-        if match:
-            args_text = match.group(1).strip() if match.group(1) else ""
-            return Command(
-                type=CommandType.CONFIG,
-                args={"args_text": args_text},
-                raw_text=raw_text,
-            )
-
-        match = self.DESKTOP_PATTERN.match(message)
-        if match:
-            args_text = match.group(1).strip() if match.group(1) else ""
-            return Command(
-                type=CommandType.DESKTOP,
-                args={"args_text": args_text},
-                raw_text=raw_text,
-            )
-
-        match = self.MODE_PATTERN.match(message)
-        if match:
-            return Command(type=CommandType.MODE, args={"args_text": (match.group(1) or "").strip()}, raw_text=raw_text)
-
-        match = self.COMPACT_PATTERN.match(message)
-        if match:
-            return Command(
-                type=CommandType.COMPACT,
-                args={"args_text": (match.group(1) or "").strip()},
-                raw_text=raw_text,
-            )
-
-        match = self.MODEL_PATTERN.match(message)
-        if match:
-            args_text = match.group(1).strip() if match.group(1) else ""
-            return Command(
-                type=CommandType.MODEL,
-                args={"args_text": args_text},
-                raw_text=raw_text,
-            )
-
-        match = self.ROOM_MODEL_PATTERN.match(message)
-        if match:
-            args_text = match.group(1).strip() if match.group(1) else ""
-            return Command(
-                type=CommandType.ROOM_MODEL,
-                args={"args_text": args_text},
-                raw_text=raw_text,
-            )
-
-        match = self.THREAD_MODE_PATTERN.match(message)
-        if match:
-            args_text = match.group(1).strip() if match.group(1) else ""
-            return Command(
-                type=CommandType.THREAD_MODE,
-                args={"args_text": args_text},
-                raw_text=raw_text,
-            )
-
-        match = self.REPLY_MODE_PATTERN.match(message)
-        if match:
-            return Command(
-                type=CommandType.REPLY_MODE,
-                args={"args_text": (match.group(1) or "").strip()},
-                raw_text=raw_text,
-            )
-
-        match = self.AUTO_APPROVE_PATTERN.match(message)
-        if match:
-            return Command(
-                type=CommandType.AUTO_APPROVE,
-                args={"args_text": (match.group(1) or "").strip()},
-                raw_text=raw_text,
-            )
-
-        match = self.ENCRYPT_PATTERN.match(message)
-        if match:
-            args_text = match.group(1).strip() if match.group(1) else ""
-            return Command(
-                type=CommandType.ENCRYPT,
-                args={"args_text": args_text},
-                raw_text=raw_text,
-            )
+        for pattern, command_type in self._ARGS_TEXT_COMMANDS:
+            if match := pattern.match(message):
+                return Command(type=command_type, args={"args_text": (match.group(1) or "").strip()}, raw_text=raw_text)
 
         if self.E2EE_PATTERN.match(message):
             return Command(type=CommandType.E2EE, args={}, raw_text=raw_text)

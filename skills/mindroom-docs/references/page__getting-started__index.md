@@ -93,7 +93,7 @@ uvx mindroom run
 ```
 
 The generated `.env` lists the credentials the chosen preset needs; set them before running.
-See [`config init`](https://docs.mindroom.chat/cli/#config-init) for every option and the extra steps for the `codex`, `kimi`, `ollama`, and `llama.cpp` presets, and [Model Environment Variables](https://docs.mindroom.chat/configuration/models/#environment-variables) for each provider's credentials.
+See [`config init`](https://docs.mindroom.chat/cli/#config-init) for every option and the extra steps for the `codex`, `kimi`, `claude_code`, `ollama`, and `llama.cpp` presets, and [Model Environment Variables](https://docs.mindroom.chat/configuration/models/#environment-variables) for each provider's credentials.
 
 
 

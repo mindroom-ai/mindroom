@@ -41,7 +41,7 @@ from mindroom.dispatch_source import (
 from mindroom.hooks import MessageEnvelope, hook_ingress_policy
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.media import is_matrix_media_dispatch_event, is_matrix_media_msgtype
+from mindroom.matrix.media import is_matrix_media_msgtype
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_forks import fork_parent_thread_id
@@ -335,10 +335,7 @@ class TurnDispatcher:
             ) as allowed:
                 if not allowed:
                     return
-                if await self._blocked_before_plan(
-                    turn.room,
-                    prepared,
-                ):
+                if await self._blocked_before_plan(prepared):
                     return
                 if dispatch_timing is not None:
                     dispatch_timing.mark("dispatch_plan_start")
@@ -352,7 +349,7 @@ class TurnDispatcher:
                 # Only a turn this agent or its team answers; a routed one gets its title from its responder.
                 if plan.response_action is not None and plan.response_action.kind in {"individual", "team"}:
                     self._queue_prompt_summary(prepared)
-                await self._apply_turn_plan(turn.room, prepared, plan, take_claim=take_claim)
+                await self._apply_turn_plan(prepared, plan, take_claim=take_claim)
         finally:
             if held is not None:
                 held.release()
@@ -461,11 +458,8 @@ class TurnDispatcher:
             dispatch_started_at=dispatch_started_at,
         )
 
-    async def _blocked_before_plan(
-        self,
-        room: nio.MatrixRoom,
-        prepared: _PreparedTextDispatch,
-    ) -> bool:
+    async def _blocked_before_plan(self, prepared: _PreparedTextDispatch) -> bool:
+        room = prepared.turn.room
         requester_user_id = prepared.turn.facts.run_requester_id
         event = prepared.turn.event
         visible_responses = self.deps.visible_responses
@@ -542,19 +536,19 @@ class TurnDispatcher:
 
     async def _apply_turn_plan(
         self,
-        room: nio.MatrixRoom,
         prepared: _PreparedTextDispatch,
         plan: DispatchPlan,
         *,
         take_claim: Callable[[], TurnClaim],
     ) -> None:
+        room = prepared.turn.room
         visible_responses = self.deps.visible_responses
         if plan.kind == "ignore":
             await visible_responses.settle_source_events_ignored(prepared.handled_turn)
             return
         message_attachment_ids, trusted_attachment_ids, route_extra_content = _attachment_parts(prepared)
         if plan.kind == "route":
-            if not await self._execute_route_plan(room, prepared, route_extra_content or None):
+            if not await self._execute_route_plan(prepared, route_extra_content or None):
                 return
             # The steward selected itself, so it answers as if the message had named it.
             self._queue_prompt_summary(prepared)
@@ -666,7 +660,6 @@ class TurnDispatcher:
 
     async def _execute_route_plan(
         self,
-        room: nio.MatrixRoom,
         prepared: _PreparedTextDispatch,
         extra_content: dict[str, Any] | None,
     ) -> bool:
@@ -674,23 +667,18 @@ class TurnDispatcher:
         turn = prepared.turn
         ids = prepared.handled_turn.source_event_ids
         route_event = turn.media_events[0] if turn.media_events and len(ids) == 1 else turn.event
-        single_direct_media_route = (
-            is_matrix_media_dispatch_event(route_event)
-            and turn.media_events == (route_event,)
-            and ids == (turn.event.event_id,)
-        )
         # Config application waits until the selection and its relay delivery finish.
         async with self.deps.runtime.admission_fence():
             return await execute_router_relay(
                 self.deps,
-                room,
+                turn.room,
                 route_event,
                 prepared.dispatch.context.thread_history,
                 prepared.dispatch.target.resolved_thread_id,
                 message=turn.event.body if turn.media_events else None,
                 requester_user_id=prepared.dispatch.requester_user_id,
                 extra_content=extra_content,
-                media_events=None if single_direct_media_route else list(turn.media_events) or None,
+                media_events=list(turn.media_events) or None,
                 handled_turn=None
                 if ids in ((), (turn.event.event_id,), (route_event.event_id,))
                 else prepared.handled_turn,

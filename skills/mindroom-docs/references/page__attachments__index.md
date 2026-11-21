@@ -14,7 +14,7 @@ Send a file, image, or video in a Matrix room and mention the agent or team in t
 A media event's `body` counts as a caption only when the event also has a `filename` field with a different value, following [MSC2530](https://github.com/matrix-org/matrix-spec-proposals/pull/2530), so a body that only repeats the filename is not a caption.
 
 The responder answers only when it would answer a text message there (mention, thread participation, or DM).
-Without an `@mention`, the router uses the caption to choose among several eligible agents or teams.
+Without an `@mention`, routing uses the caption to choose among several eligible agents or teams.
 Both unencrypted and end-to-end encrypted media are supported.
 
 The responder's model receives the media directly, so it must support that input type (vision for images, file or video input for documents and videos).

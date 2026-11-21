@@ -57,7 +57,7 @@ mindroom_user:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `username` | string | `mindroom_user` | Matrix localpart, without `@` or a domain, using lowercase letters, digits, `.`, `_`, `=`, `-`, or `/`; it must not match an agent, team, or router account |
+| `username` | string | `mindroom_user` | Matrix localpart, without `@` or a domain, using lowercase letters, digits, `.`, `_`, `=`, `-`, or `/`; it must not match an agent, team, or owner account |
 | `display_name` | string | `MindRoomUser` | Display name, changeable at any time |
 
 Set `username` before first startup.

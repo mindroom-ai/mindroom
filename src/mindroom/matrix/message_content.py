@@ -25,6 +25,8 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.media import decrypt_media_bytes, download_mxc_bytes
 from mindroom.matrix.sidecar_content import sidecar_content_to_resolve, sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
+from mindroom.matrix_identifiers import has_agent_username
+from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
     from collections.abc import Collection
@@ -140,9 +142,11 @@ async def _resolve_event_content(
     """Return one event's canonical content plus whether resolving it changed anything."""
     preview_content = _normalized_content_dict(event_source.get("content", {}))
     resolved_content = await _resolve_canonical_content(preview_content, client)
-    if resolved_content is preview_content:
-        return preview_content, False
-    return _with_event_marker(_with_event_relation(resolved_content, preview_content), preview_content), True
+    if resolved_content is not preview_content:
+        resolved_content = _with_event_marker(_with_event_relation(resolved_content, preview_content), preview_content)
+    if has_agent_username(event_source.get("sender")):
+        resolved_content = tool_markers_in_text(resolved_content)
+    return resolved_content, resolved_content is not preview_content
 
 
 async def _download_mxc_text(

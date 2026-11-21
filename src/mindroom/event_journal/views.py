@@ -434,30 +434,17 @@ class HydrationView(_MembershipEpochView, _HydrationMarkerView):
         """Install a point-refetched revision if its refresh token still holds, returning its stored size."""
         return await self._write(
             projection.install_refetched_revision,
-            room_id=request.room_id,
-            logical_event_id=request.logical_event_id,
+            request,
             revision_event_id=revision_event_id,
             revision_ts=revision_ts,
             revision_sender=revision_sender,
             revision_transaction_id=revision_transaction_id,
             content=content,
-            expected_revision_event_id=request.revision_event_id,
-            expected_refresh_token=request.refresh_token,
-            expected_membership_epoch=request.membership_epoch,
-            expected_projection_generation=request.projection_generation,
         )
 
     async def drop_refetched_message(self, request: RefreshRequest) -> bool:
         """Remove a logical message the server has no remaining revision of."""
-        return await self._write(
-            projection.drop_refetched_message,
-            room_id=request.room_id,
-            logical_event_id=request.logical_event_id,
-            expected_revision_event_id=request.revision_event_id,
-            expected_refresh_token=request.refresh_token,
-            expected_membership_epoch=request.membership_epoch,
-            expected_projection_generation=request.projection_generation,
-        )
+        return await self._write(projection.drop_refetched_message, request)
 
 
 class ExportProjectionView(ConversationReadView, HydrationView):

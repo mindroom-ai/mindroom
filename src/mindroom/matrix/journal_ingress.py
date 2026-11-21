@@ -7,7 +7,7 @@ acknowledgement belong to matrix/durable_ingestion.py.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, TypeIs, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import nio
 
@@ -28,6 +28,8 @@ from mindroom.matrix.media import (
     parse_matrix_media_event_source,
 )
 from mindroom.matrix.transport_progress import is_transport_progress_revision, is_unfinished_reply
+from mindroom.matrix_identifiers import has_agent_username
+from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -39,7 +41,15 @@ logger = get_logger(__name__)
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 _BACKGROUND_JOB_CANCEL_EVENT_TYPE = "io.mindroom.background_job_cancel"
 _SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
-_RTC_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE})
+# Custom events reach nio as `UnknownEvent`, so only their type string tells them apart.
+_UNKNOWN_EVENT_KINDS = {
+    SILENT_SCHEDULE_EVENT_TYPE: EventKind.SCHEDULE_TRIGGER,
+    ROUTE_EVENT_TYPE: EventKind.ROUTE,
+    CALL_MEMBER_EVENT_TYPE: EventKind.RTC,
+    RTC_NOTIFICATION_EVENT_TYPE: EventKind.RTC,
+    _TOOL_APPROVAL_RESPONSE_EVENT_TYPE: EventKind.APPROVAL,
+    _BACKGROUND_JOB_CANCEL_EVENT_TYPE: EventKind.JOB_CANCEL,
+}
 # Kinds only an account MindRoom manages may send; anyone else's is settled without work.
 _MANAGED_SENDER_KINDS = frozenset({EventKind.SCHEDULE_TRIGGER, EventKind.ROUTE})
 # Kinds whose events carry conversation content, and so update the projection.
@@ -72,36 +82,9 @@ class _RoomIdEvent(Protocol):
     room_id: str
 
 
-def _is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
-    """Return whether one event is a tool-approval response."""
-    return isinstance(event, nio.UnknownEvent) and event.type == _TOOL_APPROVAL_RESPONSE_EVENT_TYPE
-
-
-def _is_background_job_cancel(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
-    """Return whether one event asks to cancel background jobs."""
-    return isinstance(event, nio.UnknownEvent) and event.type == _BACKGROUND_JOB_CANCEL_EVENT_TYPE
-
-
-def _is_silent_schedule_trigger(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
-    """Return whether one event is an internal silent schedule trigger."""
-    return isinstance(event, nio.UnknownEvent) and event.type == SILENT_SCHEDULE_EVENT_TYPE
-
-
-def _is_route(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
-    """Return whether one event is a steward's hidden route to the responder it selected."""
-    return isinstance(event, nio.UnknownEvent) and event.type == ROUTE_EVENT_TYPE
-
-
-def _is_rtc_event(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
-    """Return whether one event is a supported MatrixRTC room event."""
-    return isinstance(event, nio.UnknownEvent) and event.type in _RTC_EVENT_TYPES
-
-
 # Ordered: the first matching rule owns the event. Media is matched before the
 # general message rule because every media class subclasses `RoomMessage` and
-# would otherwise be swallowed by it, and both are matched before the approval
-# predicate because they are concrete nio classes while an approval is an
-# `UnknownEvent` distinguished only by its type string.
+# would otherwise be swallowed by it.
 _KIND_RULES: tuple[tuple[Callable[[nio.Event], bool], EventKind], ...] = (
     (lambda event: isinstance(event, nio.RedactionEvent), EventKind.REDACTION),
     (lambda event: isinstance(event, nio.ReactionEvent), EventKind.REACTION),
@@ -119,11 +102,6 @@ _KIND_RULES: tuple[tuple[Callable[[nio.Event], bool], EventKind], ...] = (
     # `TEXTUAL_MESSAGE_EVENT_TYPE`'s. Generalizing here while `journal_dispatch`
     # still enumerated dropped emotes a second time, one layer further in.
     (lambda event: isinstance(event, nio.RoomMessage), EventKind.MESSAGE),
-    (_is_silent_schedule_trigger, EventKind.SCHEDULE_TRIGGER),
-    (_is_route, EventKind.ROUTE),
-    (_is_rtc_event, EventKind.RTC),
-    (_is_tool_approval_response, EventKind.APPROVAL),
-    (_is_background_job_cancel, EventKind.JOB_CANCEL),
     (lambda event: isinstance(event, nio.MegolmEvent), EventKind.OPAQUE_HISTORY),
 )
 
@@ -138,7 +116,7 @@ def _event_kind(event: nio.Event) -> EventKind | None:
     for matches, kind in _KIND_RULES:
         if matches(event):
             return kind
-    return None
+    return _UNKNOWN_EVENT_KINDS.get(event.type) if isinstance(event, nio.UnknownEvent) else None
 
 
 def _happened_while_member(provenance: nio.TimelineEventProvenance) -> bool:
@@ -332,6 +310,8 @@ def ingestion_timeline_views(
 ) -> tuple[InboundEvent, ProjectedEvent | None] | None:
     """Classify one durable timeline input, or return its compatibility fate."""
     message = "Unsupported ingestion event"
+    if isinstance(content := source.get("content"), dict) and has_agent_username(source.get("sender")):
+        source = {**source, "content": tool_markers_in_text(cast("dict[str, object]", content))}
     parsed = parse_matrix_media_event_source(source) if is_encrypted_media_event_source(source) else None
     if not isinstance(parsed, MATRIX_MEDIA_EVENT_TYPES):
         parsed = nio.Event.parse_event(dict(source))

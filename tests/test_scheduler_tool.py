@@ -81,6 +81,13 @@ def test_extract_mentioned_agents_from_text() -> None:
     assert result == [expected_agent]
 
 
+def test_no_scheduled_mentions_need_no_prepared_accounts(tmp_path: Path) -> None:
+    """Plain scheduling text does not require looking up any Matrix accounts."""
+    config = Config(agents={"general": AgentConfig(display_name="General Agent")})
+
+    assert _extract_mentioned_agents_from_text("remind me tomorrow", config, test_runtime_paths(tmp_path)) == []
+
+
 def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
     """The model-facing schema must not silently choose a delivery scope."""
     function = toolkit_offers(SchedulerTools(), "schedule")

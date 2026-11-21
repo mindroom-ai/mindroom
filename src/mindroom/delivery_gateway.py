@@ -130,6 +130,7 @@ from mindroom.streaming import (
     send_streaming_response,
     stream_progress_edits,
 )
+from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -738,6 +739,8 @@ class DeliveryGateway:
         if not isinstance(content, dict):
             msg = f"Matrix returned delivered event {event_id!r} without content"
             raise _DeliveryObservationError(msg)
+        # This account sent the event, and the projection holds its replies with their tool markers in their text.
+        content = tool_markers_in_text(content)
         return ProjectedEvent(
             event_id=event_id,
             room_id=room_id,

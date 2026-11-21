@@ -4482,7 +4482,7 @@ requires-dist = [
     { name = "cartesia", marker = "extra == 'cartesia'" },
     { name = "certifi", specifier = ">=2026.4.22" },
     { name = "chromadb", marker = "extra == 'chromadb'", specifier = ">=1.5.8" },
-    { name = "claude-agent-sdk", marker = "extra == 'claude-agent'", specifier = ">=0.2.140" },
+    { name = "claude-agent-sdk", marker = "extra == 'claude-agent'", specifier = ">=0.2.181" },
     { name = "click", specifier = "<8.5" },
     { name = "composio-agno", marker = "extra == 'composio'" },
     { name = "crawl4ai", marker = "extra == 'crawl4ai'", specifier = ">=0.7.3" },
@@ -4565,7 +4565,7 @@ requires-dist = [
     { name = "mcp", extras = ["cli"], specifier = ">=2.3,<3" },
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=2.2.1" },
-    { name = "mindroom-nio", extras = ["e2e"], specifier = "==1.4.2" },
+    { name = "mindroom-nio", extras = ["e2e"], specifier = "==1.4.3" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4702,7 +4702,7 @@ dev = [
 
 [[package]]
 name = "mindroom-nio"
-version = "1.4.2"
+version = "1.4.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -4714,9 +4714,9 @@ dependencies = [
     { name = "pycryptodome" },
     { name = "unpaddedbase64" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3d/f8/18f94a0e68cc0a3007f3a019df0c525ffeee0cb18cd66f619584238eb99d/mindroom_nio-1.4.2.tar.gz", hash = "sha256:cd180ba2484ca5922bba18b2608a0b2fa51f612da42a7b0253ee3ce09454dda7", size = 221861, upload-time = "2026-11-19T03:12:16.058Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8a/c4/436758d9e59df39041f8450ddc86277ee1da03891294ae86b4df3f139027/mindroom_nio-1.4.3.tar.gz", hash = "sha256:d12edfb19eb5ddae030406afa6fc3d75e34b471b4c416ac460a729dfc00938b0", size = 222231, upload-time = "2026-11-21T16:01:46.104Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bc/01/be2211558626e40ac2e8f5564d052cd533788da43ed2c927924d9c81d1bd/mindroom_nio-1.4.2-py3-none-any.whl", hash = "sha256:bf5262b3c2a2bb256ed5212581efe5418711c9884b5409ef213e0bd8cdab6c13", size = 258080, upload-time = "2026-11-19T03:12:14.714Z" },
+    { url = "https://files.pythonhosted.org/packages/71/1a/46baf865aef608dd6a128ad964c8c1821b4fd151e84201df8962534e14d7/mindroom_nio-1.4.3-py3-none-any.whl", hash = "sha256:052824d26789df29a48638896caa1e8385e4644453bfa270a41f316f1314608d", size = 258435, upload-time = "2026-11-21T16:01:44.566Z" },
 ]
 
 [package.optional-dependencies]

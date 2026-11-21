@@ -176,14 +176,22 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     return clock
 
 
-def record_intent(lifecycle: PersonalRoomLifecycle, user: str) -> None:
-    """Retain one requester's onboarding intent from the lobby."""
+def record_intent(
+    lifecycle: PersonalRoomLifecycle,
+    user: str,
+    *,
+    agent: str = "helper",
+    source_room_id: str = "!lobby:localhost",
+    room_id: str | None = None,
+) -> None:
+    """Retain one requester's onboarding intent and any already recorded room."""
     write_personal_room(
-        personal_room_record_path(lifecycle.runtime_paths, "helper", f"@{user}:localhost"),
+        personal_room_record_path(lifecycle.runtime_paths, agent, f"@{user}:localhost"),
         PersonalRoomRecord(
             user_id=f"@{user}:localhost",
             alias=f"#personal_{user}:localhost",
-            source_room_id="!lobby:localhost",
+            source_room_id=source_room_id,
+            room_id=room_id,
         ),
     )
 
@@ -342,14 +350,7 @@ async def test_reconciliation_leaves_an_onboarding_room_to_its_own_steward(coord
     state.add_room("other", "!other:localhost", "#other:localhost", "Other")
     save_matrix_state(state, lifecycle.runtime_paths)
     lifecycle.is_steward = lambda room_id: room_id == "!lobby:localhost"
-    write_personal_room(
-        personal_room_record_path(lifecycle.runtime_paths, "helper", "@bob:localhost"),
-        PersonalRoomRecord(
-            user_id="@bob:localhost",
-            alias="#personal_bob:localhost",
-            source_room_id="!other:localhost",
-        ),
-    )
+    record_intent(lifecycle, "bob", source_room_id="!other:localhost")
     lifecycle._retry_candidates[("@carol:localhost", "!other:localhost")] = False
 
     await lifecycle._reconcile()
@@ -1677,16 +1678,7 @@ async def test_disabled_provisioning_retains_only_recorded_ids_for_rejoin(coordi
     lifecycle.agent_name = "helper"
     lifecycle.runtime.config.personal_rooms = None
     for user, room_id in [("alice", "!owned:localhost"), ("bob", None)]:
-        user_id = f"@{user}:localhost"
-        write_personal_room(
-            personal_room_record_path(lifecycle.runtime_paths, "helper", user_id),
-            PersonalRoomRecord(
-                user_id=user_id,
-                alias=f"#personal_{user}:localhost",
-                source_room_id="!lobby:localhost",
-                room_id=room_id,
-            ),
-        )
+        record_intent(lifecycle, user, room_id=room_id)
     assert lifecycle.retained_room_ids() == {"!owned:localhost"}
     assert await lifecycle.cleanup_exclusions() == {"!owned:localhost", "!pending:localhost"}
     await lifecycle._onboard("@alice:localhost", "!lobby:localhost")
@@ -1780,14 +1772,7 @@ async def test_template_reconciliation_retries_intent_recorded_by_each_users_age
     """A personal room recorded by the user's own agent is retried from its source room, not only the roster's."""
     lifecycle = template_coordination.lifecycle
     add_alices_agent(lifecycle, source_room_id="!retired:localhost")
-    write_personal_room(
-        personal_room_record_path(lifecycle.runtime_paths, "mind_alice", "@alice:localhost"),
-        PersonalRoomRecord(
-            user_id="@alice:localhost",
-            alias="#personal_alice:localhost",
-            source_room_id="!lobby:localhost",
-        ),
-    )
+    record_intent(lifecycle, "alice", agent="mind_alice")
     await lifecycle._reconcile()
     assert template_coordination.target.ensure.await_args_list == [
         _ensured("@alice:localhost", "!lobby:localhost", lifecycle.runtime.client),

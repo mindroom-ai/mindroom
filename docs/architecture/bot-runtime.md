@@ -49,7 +49,7 @@ Requester identity is split into several identities because each protects a diff
 The crash guarantee is durable callback acceptance with retryable callback execution, then durable turn ownership and terminal deduplication once the turn record exists.
 
 A physical source event ID is an exclusive turn claim, while a discovery alias is only an advisory settlement key.
-Aliases stay separate from canonical source identity so recovery can index every triggering event, such as an interactive selection or the human sources of a coalesced router relay, and later edits and redactions reach the owned prompt, without making one message look coalesced.
+Aliases stay separate from canonical source identity so recovery can index every triggering event, such as an interactive selection or the human sources of a coalesced route, and later edits and redactions reach the owned prompt, without making one message look coalesced.
 
 Approval replies and reactions can have several semantic consumers, so a durable claim selects exactly one before any side effect, and recovery routes only to the claimed consumer instead of rediscovering intent from mutable runtime state.
 Each consumer owns the replay semantics of its own side effects; generic reaction hooks, for example, are at-least-once.
@@ -80,7 +80,7 @@ A subagent job's child is the exception: its job asks for its approvals and resu
 An interrupted edit regeneration also stays pending: a retry of the same edit recovers its attempts as above, and a newer edit's regeneration starts fresh, because it replaced the prompt the stopped attempts answered; a regeneration's approved resume that was cut short continues below what it showed, as an interrupted turn does.
 
 A chat command runs on the bot it is aimed at, which `TurnPolicy.aims_command_at_me` decides from the bot's own copy of the room and the room's joined candidates.
-A Desktop agent alone with the requester runs `/desktop`; a command that mentions agents or teams goes to the lowest Matrix ID among the mentioned candidates; a command in a thread with one agent goes to that agent; any other command goes to the lowest Matrix ID among the room's candidates, whatever the reply mode, where `router.access` admits the requester.
+A structured model selection runs on the account and device it names; a Desktop agent alone with the requester runs `/desktop`; a command that mentions agents or teams goes to the lowest Matrix ID among the mentioned candidates; a command in a thread where exactly one of the room's candidates appears as a sender in the thread history, root included, goes to that candidate; any other command goes to the lowest Matrix ID among the room's candidates, whatever the reply mode, where `router.access` admits the requester.
 Bots can disagree while a join or a thread reaches them, so the first bot that decides saves the owner per event (`claim_room_event`, purpose `command`), and only the saved owner runs the command or says that its conversation is not resolved yet.
 A saved owner that never receives the command leaves it unanswered.
 A command that changes room state writes through the room's steward (`put_room_state_as_steward`), and answers `moderator_rights_message` when the room refuses the write.

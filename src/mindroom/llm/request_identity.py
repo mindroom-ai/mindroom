@@ -29,15 +29,21 @@ REQUEST_IDENTITY_KEY = "mindroom_request"
 _UNSENT_FIELDS = frozenset({"id", "created_at", "from_history", "metrics"})
 
 
-def request_prefixes(model: ModelProvider, request: ModelRequest) -> list[str | None]:
+def request_prefixes(
+    model: ModelProvider,
+    request: ModelRequest,
+    *,
+    count_queued_notices: bool = False,
+) -> list[str | None]:
     """Return, for each index ``i`` up to ``len(request.messages)``, the identity of what precedes message ``i``.
 
-    None from the first message that has no identity on.
+    None from the first message that has no identity on. ``count_queued_notices`` includes notices by their text.
     """
     digest = hashlib.sha256(model.context_key(request).encode())
     identities: list[str | None] = [digest.hexdigest()]
     for message in request.messages:
-        if identities[-1] is None or (piece := message_digest(message)) is None:
+        piece = None if identities[-1] is None else message_digest(message, count_queued_notices=count_queued_notices)
+        if piece is None:
             identities.append(None)
             continue
         digest.update(piece)
@@ -45,13 +51,15 @@ def request_prefixes(model: ModelProvider, request: ModelRequest) -> list[str | 
     return identities
 
 
-def message_digest(message: Message) -> bytes | None:
-    """Return the digest of what ``message`` can give a model, empty for a queued-message notice.
+def message_digest(message: Message, *, count_queued_notices: bool = False) -> bytes | None:
+    """Return the digest of what ``message`` can give a model, empty for a queued notice unless counted by text.
 
     None when its content cannot be known here: a media item at a URL, or a local file that is gone.
     """
     if is_queued_notice_message(message):
-        return b""
+        if not count_queued_notices:
+            return b""
+        message = replace(message, provider_data=None)
     without_media = replace(message, images=None, audio=None, videos=None, files=None)
     fields = {key: value for key, value in without_media.to_dict().items() if key not in _UNSENT_FIELDS}
     media: list[object] = []

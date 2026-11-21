@@ -380,6 +380,32 @@ def test_slash_command_keeps_original_raw_text() -> None:
     assert command.raw_text == "/schedule tomorrow check"
 
 
+@pytest.mark.parametrize(
+    "command_type",
+    [
+        CommandType.CONFIG,
+        CommandType.DESKTOP,
+        CommandType.MODE,
+        CommandType.COMPACT,
+        CommandType.MODEL,
+        CommandType.ROOM_MODEL,
+        CommandType.THREAD_MODE,
+        CommandType.REPLY_MODE,
+        CommandType.AUTO_APPROVE,
+        CommandType.ENCRYPT,
+    ],
+)
+@pytest.mark.parametrize(("suffix", "args_text"), [("", ""), ("  some  args ", "some  args")])
+def test_parse_args_text_commands(command_type: CommandType, suffix: str, args_text: str) -> None:
+    """Commands with optional argument text preserve the type, arguments, and raw text."""
+    text = f"!{command_type.value}{suffix}"
+    command = _parse(text)
+    assert command is not None
+    assert command.type is command_type
+    assert command.args == {"args_text": args_text}
+    assert command.raw_text == text.strip()
+
+
 def test_get_command_help() -> None:
     """Test help text generation."""
     # General help
@@ -387,7 +413,6 @@ def test_get_command_help() -> None:
     assert "Available Commands" in help_text
     assert "/schedule" in help_text
     assert "/help" in help_text
-    assert "/schedule" in help_text
     assert "/list_schedules" in help_text
     assert "/cancel_schedule" in help_text
     assert "/edit_schedule" in help_text
@@ -397,11 +422,6 @@ def test_get_command_help() -> None:
     schedule_help = get_command_help("schedule")
     assert "Schedule Command" in schedule_help
     assert "Usage:" in schedule_help
-    assert "Reminders" in schedule_help or "Workflows" in schedule_help
-
-    # Schedule command help
-    schedule_help = get_command_help("schedule")
-    assert "Schedule Command" in schedule_help
     assert "Simple Reminders:" in schedule_help
     assert "Agent and Team Workflows:" in schedule_help
     assert "in 5 minutes" in schedule_help

@@ -21,6 +21,9 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
   The Stop cancels such jobs instead of only denying their calls, because a subagent job told its child's call was denied would resume the child and keep working.
   Jobs are found by the reply record whose call started them, not by the reply event their cards name, because a reply may not show an event yet when its call starts a job; the link is saved with the job, because a subagent job outlives a restart and its reply's Stop must still reach it.
 - An ended job reaches the agent as a notice it acknowledges with `collect`, and gets a follow-up only when no reply collected it, so results arrive without a message per job.
+  A running reply, or one that will replay its pending messages, keeps its ended jobs to itself: neither another turn nor a follow-up reports them.
+  A reply awaiting replay holds those jobs until it settles.
+  If the reply ends without collecting those jobs, they can get a follow-up; a reply paused for approval does not hold them.
   Work that follow-ups start can chain at most 20 follow-ups without a human message, so follow-ups cannot keep each other going.
   A follow-up gives way to its requester's messages already waiting in its conversation, because the reply to one reports the jobs in its start note; answering first kept that message waiting and made the follow-up stop for a message older than itself.
   A cancellation gets no follow-up, since the person who cancelled already knows and no cancel, a Stop included, may make the agent speak; a silent schedule's jobs get none, so the schedule stays silent.
@@ -81,7 +84,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - Each outcome has one active result claim, and only the parent run's saved tool call acknowledges it, so a result is read once and a reply that fails before saving leaves it to be reported again.
 - Cancellation is saved before cleanup and stays pending until owned work settles, so a crash during cleanup still reports the job cancelled.
   Only work that a shutdown, restart, or event-loop teardown cut short is interrupted, and a child settlement saved before a crash stands.
-- A job's cancel request denies its open approval cards in the commit that saves the request, and its end denies any card a request still in flight posted after that, so no card of a stopping or ended job stays answerable, even while the router cannot post the denial yet.
+- A job's cancel request denies its open approval cards in the commit that saves the request, and its end denies any card a request still in flight posted after that, so no card of a stopping or ended job stays answerable, even while the card's sender cannot post the denial yet.
 - A job-gated call never runs inline: one that cannot become a job fails, and the agent CLI never offers it, because such a function asks for no confirmation of its own and its job's approval phase is its only approval gate.
 - A gated job durably leaves `awaiting_approval` before its call runs, so a stop says a call did not run only when it never started.
 - A reply's Stop is checked where a job asks for or takes an approval, not where the job stands when the Stop arrives, so no order of the Stop and the job's own awaits lets an approval through.

@@ -542,6 +542,8 @@ depends_on = [
     "mindroom.reply_lifecycle",
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_record",
+    "mindroom.matrix_identifiers",
+    "mindroom.tool_system.events",
 ]
 visibility = [
     "mindroom.agent_cli.delegation",
@@ -632,6 +634,8 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.matrix.agent_authored",
     "mindroom.matrix.transport_progress",
+    "mindroom.tool_system.events",
+    "mindroom.matrix_identifiers",
 ]
 visibility = [
     "mindroom.journal_dispatch",
@@ -688,6 +692,8 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.sidecar_content",
     "mindroom.matrix.transport_progress",
+    "mindroom.tool_system.events",
+    "mindroom.matrix_identifiers",
 ]
 visibility = [
     "mindroom.bot",
@@ -2618,6 +2624,8 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.visible_body",
+    "mindroom.tool_system.events",
+    "mindroom.matrix_identifiers",
 ]
 visibility = ["mindroom.custom_tools.matrix_user", "mindroom.custom_tools.matrix_user_writes"]
 
@@ -2798,6 +2806,7 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.interactive",
     "mindroom.stop",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -3010,7 +3019,7 @@ depends_on = [
     "mindroom.providers.claude_wire_blocks",
     "mindroom.providers.media_files",
 ]
-visibility = ["mindroom.providers.anthropic.messages"]
+visibility = ["mindroom.providers.anthropic.messages", "mindroom.providers.claude_code"]
 
 [[modules]]
 path = "mindroom.providers.cache_ladder"
@@ -3572,6 +3581,7 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.teams",
     "mindroom.thread_models",
+    "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.follow_ups",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.events",
@@ -4177,6 +4187,8 @@ depends_on = [
     "mindroom.matrix.reserved_content",
     "mindroom.matrix.thread_mutation_impact",
     "mindroom.tool_system.authoring",
+    "mindroom.tool_system.events",
+    "mindroom.matrix_identifiers",
 ]
 
 [[modules]]
@@ -4203,7 +4215,12 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.client_delivery"
-depends_on = ["mindroom.llm", "mindroom.matrix.guarded_rooms"]
+depends_on = [
+    "mindroom.llm",
+    "mindroom.matrix.guarded_rooms",
+    "mindroom.matrix_identifiers",
+    "mindroom.tool_system.events",
+]
 visibility = [
     "mindroom.commands.encryption_commands",
     "mindroom.bot_room_lifecycle",
@@ -4723,6 +4740,8 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.sidecar_content",
     "mindroom.matrix.visible_body",
+    "mindroom.tool_system.events",
+    "mindroom.matrix_identifiers",
 ]
 
 [[modules]]
@@ -4734,6 +4753,7 @@ path = "mindroom.matrix.room_history_reads"
 depends_on = [
     "mindroom.constants",
     "mindroom.matrix.event_info",
+    "mindroom.tool_system.events",
 ]
 visibility = [
     "mindroom.approval.transport",
@@ -5329,6 +5349,7 @@ depends_on = [
     "mindroom.matrix.provisioning_env",
     "mindroom.matrix.state",
     "mindroom.matrix.users",
+    "mindroom.providers.claude_code",
     "mindroom.providers.credentials",
     "mindroom.providers.key_checks",
     "mindroom.providers.names",
@@ -5593,7 +5614,6 @@ depends_on = [
     "mindroom.commands.reply_mode_commands",
     "mindroom.commands.auto_approve_commands",
     "mindroom.entity_resolution",
-    "mindroom.turn_record",
     "mindroom.matrix.event_info",
     "mindroom.scheduling.tasks",
     "mindroom.tool_system.agent_tools",
@@ -5981,7 +6001,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.events"
-depends_on = []
+depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.tool_system.approval_exemptions"
@@ -7721,7 +7741,9 @@ expose = [
     "strip_visible_tool_markers",
     "tool_args_chat_preview",
     "tool_marker_text",
+    "tool_markers_in_text",
     "tool_markers_match_trace",
+    "tool_markers_out_of_text",
     "with_stored_calls",
 ]
 from = ["mindroom.tool_system.events"]
@@ -8387,7 +8409,6 @@ visibility = [
 [[modules]]
 path = "mindroom.history.conversation_text"
 depends_on = [
-    "mindroom.agent_loop",
     "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.history.interrupted_replay",
@@ -8450,7 +8471,7 @@ visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.par
 [[modules]]
 path = "mindroom.providers.tool_policy"
 depends_on = []
-visibility = ["mindroom.providers.gemini", "mindroom.providers.ollama.adapter", "mindroom.providers.openai"]
+visibility = ["mindroom.providers.claude_code", "mindroom.providers.gemini", "mindroom.providers.ollama.adapter", "mindroom.providers.openai"]
 
 # Owned provider adapters (stream-only, over mindroom.llm); the provider registry wires them in.
 [[modules]]
@@ -8459,6 +8480,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.settings",
+    "mindroom.providers.claude_code",
     "mindroom.providers.credentials",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.gemini",
@@ -8528,6 +8550,22 @@ visibility = ["mindroom.embeddings.ollama_embedder", "mindroom.memory.config", "
 [[modules]]
 path = "mindroom.providers.ollama.settings"
 depends_on = ["mindroom.providers.extra_kwargs"]
+
+# Claude on the user's own subscription, through the Claude Code CLI; the SDK loads when its model is built.
+[[modules]]
+path = "mindroom.providers.claude_code"
+depends_on = [
+    "mindroom.atomic_file",
+    "mindroom.llm",
+    "mindroom.path_confinement",
+    "mindroom.providers.anthropic.wire",
+    "mindroom.providers.assistant_turn",
+    "mindroom.providers.errors",
+    "mindroom.providers.extra_kwargs",
+    "mindroom.providers.identity",
+    "mindroom.providers.tool_policy",
+    "mindroom.tool_system.dependencies",
+]
 
 [[modules]]
 path = "mindroom.providers.synthetic_adapter"
@@ -9742,6 +9780,8 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_jobs.conversation"
 depends_on = [
+    "mindroom.reply_lifecycle",
+    "mindroom.reply_scope",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.runtime_context",
@@ -9750,6 +9790,7 @@ depends_on = [
 visibility = [
     "mindroom.custom_tools.job",
     "mindroom.orchestration.tool_job_runtime",
+    "mindroom.response_runner",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.follow_ups",
     "mindroom.tool_jobs.notices",

@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from .backend import Row, Transaction
+    from .models import RefreshRequest
 
 _RELATES_TO = "m.relates_to"
 _REL_TYPE = "rel_type"
@@ -590,18 +591,13 @@ def scrub_redacted_projection(
 def install_refetched_revision(
     transaction: Transaction,
     principal_id: str,
+    request: RefreshRequest,
     *,
-    room_id: str,
-    logical_event_id: str,
     revision_event_id: str,
     revision_ts: int,
     revision_sender: str,
     revision_transaction_id: str | None,
     content: Mapping[str, object],
-    expected_revision_event_id: str,
-    expected_refresh_token: int,
-    expected_membership_epoch: int,
-    expected_projection_generation: int,
 ) -> int | None:
     """Install a refetched revision only if nothing changed underneath it.
 
@@ -633,34 +629,25 @@ def install_refetched_revision(
     membership_is_current = claim_membership_epoch(
         transaction,
         principal_id,
-        room_id=room_id,
-        expected_membership_epoch=expected_membership_epoch,
-        expected_projection_generation=expected_projection_generation,
+        room_id=request.room_id,
+        expected_membership_epoch=request.membership_epoch,
+        expected_projection_generation=request.projection_generation,
     )
     if not membership_is_current or not event_belongs_to_membership(
         transaction,
         principal_id,
-        room_id=room_id,
+        room_id=request.room_id,
         event_id=revision_event_id,
-        membership_epoch=expected_membership_epoch,
+        membership_epoch=request.membership_epoch,
         sender=revision_sender,
         transaction_id=revision_transaction_id,
         content=content,
     ):
-        dropped = drop_refetched_message(
-            transaction,
-            principal_id,
-            room_id=room_id,
-            logical_event_id=logical_event_id,
-            expected_revision_event_id=expected_revision_event_id,
-            expected_refresh_token=expected_refresh_token,
-            expected_membership_epoch=expected_membership_epoch,
-            expected_projection_generation=expected_projection_generation,
-        )
+        dropped = drop_refetched_message(transaction, principal_id, request)
         return 0 if dropped else None
     if holds_unresolved_sidecar(content):
         return None
-    if is_redacted(transaction, principal_id, room_id, revision_event_id):
+    if is_redacted(transaction, principal_id, request.room_id, revision_event_id):
         return None
     content_json = _dumps(content)
     row = transaction.fetchone(
@@ -676,11 +663,11 @@ def install_refetched_revision(
             revision_ts,
             content_json,
             principal_id,
-            room_id,
-            logical_event_id,
-            expected_revision_event_id,
-            expected_refresh_token,
-            expected_membership_epoch,
+            request.room_id,
+            request.logical_event_id,
+            request.revision_event_id,
+            request.refresh_token,
+            request.membership_epoch,
         ),
     )
     if row is None:
@@ -688,8 +675,8 @@ def install_refetched_revision(
     record_projected_prompt(
         transaction,
         principal_id,
-        room_id=room_id,
-        question_event_id=logical_event_id,
+        room_id=request.room_id,
+        question_event_id=request.logical_event_id,
         revision_event_id=revision_event_id,
         sender=str(row["sender"]),
         membership_epoch=int(row["membership_epoch"]),
@@ -702,17 +689,11 @@ def install_refetched_revision(
 def drop_refetched_message(
     transaction: Transaction,
     principal_id: str,
-    *,
-    room_id: str,
-    logical_event_id: str,
-    expected_revision_event_id: str,
-    expected_refresh_token: int,
-    expected_membership_epoch: int,
-    expected_projection_generation: int,
+    request: RefreshRequest,
 ) -> bool:
     """Remove a logical message and revoke the coverage that included it."""
     # A walk after a rejoin projects the same revision and token again, which this refetch never read.
-    if expected_projection_generation != projection_generation(transaction, principal_id, room_id):
+    if request.projection_generation != projection_generation(transaction, principal_id, request.room_id):
         return False
     row = transaction.fetchone(
         """
@@ -723,11 +704,11 @@ def drop_refetched_message(
         """,
         (
             principal_id,
-            room_id,
-            logical_event_id,
-            expected_revision_event_id,
-            expected_refresh_token,
-            expected_membership_epoch,
+            request.room_id,
+            request.logical_event_id,
+            request.revision_event_id,
+            request.refresh_token,
+            request.membership_epoch,
         ),
     )
     if row is None:
@@ -737,7 +718,7 @@ def drop_refetched_message(
         DELETE FROM conversation_hydration
         WHERE principal_id = ? AND room_id = ? AND thread_id = ?
         """,
-        (principal_id, room_id, row["thread_id"]),
+        (principal_id, request.room_id, row["thread_id"]),
     )
     return True
 

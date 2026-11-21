@@ -2584,7 +2584,6 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
                     room,
                     event,
                     facts=make_ingress_facts(event.sender),
-                    target=target,
                     envelope=envelope,
                     coalescing_thread_id="$thread",
                     ticket=ticket,

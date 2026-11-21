@@ -76,7 +76,9 @@ from mindroom.matrix.legacy_media_edits import readable_legacy_file_edit
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar, without_sidecar_reference
 from mindroom.matrix.transport_progress import is_transport_progress_revision, is_unfinished_reply
+from mindroom.matrix_identifiers import has_agent_username
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
+from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Coroutine, Mapping, Sequence
@@ -279,6 +281,9 @@ def _projected_from_event(room_id: str, event: nio.Event, *, self_sender: str) -
     """
     content = event.source.get("content")
     content = content if isinstance(content, dict) else {}
+    if has_agent_username(event.sender):
+        # A fetch stores what sync stores: an agent's reply with its tool markers in its text.
+        content = tool_markers_in_text(content)
     redacts = _redaction_target(event)
     if redacts is not None:
         return ProjectedEvent(

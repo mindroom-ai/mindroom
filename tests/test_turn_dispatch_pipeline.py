@@ -1920,7 +1920,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
-            handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
+            handled = await bot._turn_ingress._normalize_and_dispatch_text(
                 room,
                 sidecar_event,
                 bot._ingress_validator.classify(sidecar_event, room_id=room.room_id),
@@ -2025,7 +2025,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
-            handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
+            handled = await bot._turn_ingress._normalize_and_dispatch_text(
                 room,
                 sidecar_event,
                 bot._ingress_validator.classify(sidecar_event, room_id=room.room_id),

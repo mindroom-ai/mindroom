@@ -7,6 +7,7 @@ import hashlib
 import json
 import typing
 import uuid
+from collections import Counter
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -92,6 +93,9 @@ def scheduled_task_state_lock(client: nio.AsyncClient, room_id: str, task_id: st
     return lock
 
 
+_logged_unmanaged_authors: set[tuple[str, str]] = set()
+
+
 def _runtime_authored_task_content(
     room_id: str,
     event: dict[str, typing.Any],
@@ -117,8 +121,8 @@ def _runtime_authored_task_content(
         # Coverage: tests/test_scheduled_task_runtime.py::test_task_saved_without_an_owner_keeps_its_writer_as_owner_through_a_rewrite.
         owner = content.get("owner")
         return {**content, "owner": owner if isinstance(owner, str) and owner else sender}
-    logger.warning(
-        "scheduled_task_state_ignored_unmanaged_author",
+    logger.debug(
+        "scheduled_task_event_ignored_unmanaged_author",
         room_id=room_id,
         task_id=event.get("state_key"),
         event_id=event.get("event_id"),
@@ -548,12 +552,16 @@ def task_records(
     """Parse runtime-authored scheduled task records from a room state response."""
     runtime_account_ids = persisted_bot_user_ids(runtime_paths)
     tasks: list[ScheduledTaskRecord] = []
+    unmanaged: Counter[str] = Counter()
     for event in state_response.events:
         if not isinstance(event, dict) or event.get("type") != SCHEDULED_TASK_EVENT_TYPE:
             continue
 
         state_key = event.get("state_key")
         content = _runtime_authored_task_content(room_id, event, runtime_account_ids)
+        sender = event.get("sender")
+        if content is None and isinstance(sender, str) and isinstance(event.get("content"), dict):
+            unmanaged[sender] += 1
         if not isinstance(state_key, str) or content is None:
             continue
         # A room keeps every finished task's state, so only the records a caller wants are parsed.
@@ -565,6 +573,11 @@ def task_records(
             continue
         tasks.append(task)
 
+    for sender, count in unmanaged.items():
+        key = (room_id, sender)
+        if key not in _logged_unmanaged_authors:
+            _logged_unmanaged_authors.add(key)
+            logger.info("scheduled_task_state_ignored_unmanaged_author", room_id=room_id, sender=sender, count=count)
     return tasks
 
 
@@ -969,25 +982,16 @@ def _extract_mentioned_agents_from_text(
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Extract valid agent mentions from scheduling text."""
-    _, mentioned_user_ids, _ = parse_mentions_in_text(
-        full_text,
-        config,
-        runtime_paths,
-    )
-    mentioned_agents: list[MatrixID] = []
-
-    for user_id in mentioned_user_ids:
-        matrix_id = MatrixID.parse(user_id)
-        if (
-            entity_identity_registry(config, runtime_paths).current_entity_name_for_user_id(
-                matrix_id.full_id,
-                include_router=False,
-            )
-            and matrix_id not in mentioned_agents
-        ):
-            mentioned_agents.append(matrix_id)
-
-    return mentioned_agents
+    mentioned_user_ids = parse_mentions_in_text(full_text, config, runtime_paths)[1]
+    # Text without mentions does not need prepared Matrix accounts.
+    if not mentioned_user_ids:
+        return []
+    registry = entity_identity_registry(config, runtime_paths)
+    return [
+        MatrixID.parse(user_id)
+        for user_id in mentioned_user_ids
+        if registry.current_entity_name_for_user_id(user_id, include_router=False)
+    ]
 
 
 def _history_limit_display(history_limit: int) -> str:
@@ -1511,9 +1515,6 @@ async def list_scheduled_tasks(  # noqa: C901
 
     if not tasks and not tasks_in_other_threads and not new_thread_tasks:
         return "No scheduled tasks found."
-
-    if not tasks and tasks_in_other_threads and not new_thread_tasks:
-        return f"No scheduled tasks in this thread.\n\n📌 {len(tasks_in_other_threads)} task(s) scheduled in other threads. Use /list_schedules in those threads to see details."
 
     # Sort by execution time (one-time tasks) or put recurring tasks at the end
     def _sort_key(r: ScheduledTaskRecord) -> tuple[bool, datetime]:

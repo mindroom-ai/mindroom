@@ -8,6 +8,7 @@ import pytest
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.model_usage import ContextTokens, message_context_tokens, uncached_input_tokens_from_counts
+from mindroom.providers.names import ROUTE_PROVIDERS
 
 
 def _assistant(metrics: MessageMetrics) -> Message:
@@ -32,6 +33,27 @@ def test_message_context_tokens_add_cache_tokens_only_where_reported_outside_inp
         configured_provider="openai",
         model_id="m",
     ) == ContextTokens(100, cache_read_tokens=90)
+
+
+@pytest.mark.parametrize(
+    ("provider", "configured_provider"),
+    [(ROUTE_PROVIDERS["claude_code"], "claude_code"), (ROUTE_PROVIDERS["claude_code"], None), (None, "claude_code")],
+    ids=["a configured model", "a stored run", "only the configured route"],
+)
+def test_a_claude_code_response_reports_its_cache_tokens_outside_its_input(
+    provider: str | None,
+    configured_provider: str | None,
+) -> None:
+    answer = _assistant(
+        MessageMetrics(tokens=TokenCounts(input_tokens=10, cache_read_tokens=90, cache_write_tokens=5)),
+    )
+
+    assert message_context_tokens(
+        answer,
+        provider=provider,
+        configured_provider=configured_provider,
+        model_id="claude-sonnet-5-5",
+    ) == ContextTokens(105, cache_read_tokens=90, cache_write_tokens=5)
 
 
 @pytest.mark.parametrize("stored", [False, True], ids=["reported", "stored-under-provider-metrics"])

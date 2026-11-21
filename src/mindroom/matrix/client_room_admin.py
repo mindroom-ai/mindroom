@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, MutableMapping
 from enum import StrEnum
@@ -854,17 +855,21 @@ async def resolve_room_reference(
     return response.room_id if isinstance(response, nio.RoomResolveAliasResponse) else response
 
 
-async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str] | None:
+async def get_room_members(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    failure_level: Callable[[bool], int] = lambda _: logging.WARNING,
+) -> set[str] | None:
     """Get the current members of a room, or ``None`` when the fetch fails."""
     try:
         response = await read_joined_members(client, room_id)
     except nio.LocalProtocolError as error:
-        # The durable client refuses a member list, as one that concurrent membership changes kept making stale.
-        logger.warning("matrix_room_members_fetch_failed", room_id=room_id, error=str(error))
-        return None
+        # The durable client can refuse a roster that concurrent membership changes made stale.
+        response = error
     if isinstance(response, nio.JoinedMembersResponse):
         return {member.user_id for member in response.members}
-    logger.warning("matrix_room_members_fetch_failed", room_id=room_id, error=str(response))
+    logger.log(failure_level(False), "matrix_room_members_fetch_failed", room_id=room_id, error=str(response))
     return None
 
 

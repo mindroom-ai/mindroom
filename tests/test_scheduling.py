@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextvars
 import json
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -71,6 +72,8 @@ from tests.scheduling_helpers import (
 from tests.tool_approval_helpers import scheduled_call_approvals
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
@@ -378,7 +381,7 @@ async def test_restore_starts_overdue_and_recurring_runners_without_firing(
     tmp_path: Path,
     schedule_type: str,
 ) -> None:
-    """Restoring an overdue one-time or a recurring task starts its runner; nothing fires during the restore."""
+    """Restore starts overdue and recurring runners without firing, and skips malformed and finished records."""
     client = AsyncMock()
     workflow = ScheduledWorkflow(
         created_by="@user:server",
@@ -392,7 +395,15 @@ async def test_restore_starts_overdue_and_recurring_runners_without_firing(
     )
     runtime, bot = _restoring_agent(client, tmp_path)
     content = {"workflow": workflow.model_dump_json(), "status": "pending", "owner": client.user_id}
-    serve_full_room_state(client, "!test:server", [scheduled_task_state_event("task_overdue", content)])
+    serve_full_room_state(
+        client,
+        "!test:server",
+        [
+            {**scheduled_task_state_event("malformed_content", {}), "content": "not a dict"},
+            scheduled_task_state_event("old_cancelled", {"status": "cancelled"}),
+            scheduled_task_state_event("task_overdue", content),
+        ],
+    )
 
     with (
         patch.object(runtime, "_start_runner", return_value=True) as start,
@@ -453,45 +464,6 @@ def _pending_once_workflow() -> ScheduledWorkflow:
         description="reminder",
         room_id="!test:server",
     )
-
-
-@pytest.mark.asyncio
-async def test_restore_room_uses_canonical_state_parser_for_mixed_records(tmp_path: Path) -> None:
-    """Restore should skip non-pending and malformed records while restoring valid pending records."""
-    client = AsyncMock()
-    runtime, bot = _restoring_agent(client, tmp_path)
-    cron_workflow = ScheduledWorkflow(
-        created_by="@user:server",
-        schedule_type="cron",
-        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
-        message="Run the daily report",
-        description="Daily report",
-        thread_id="$thread123",
-        room_id="!test:server",
-    )
-    serve_full_room_state(
-        client,
-        "!test:server",
-        [
-            {**scheduled_task_state_event("malformed_content", {}), "content": "not a dict"},
-            scheduled_task_state_event("old_cancelled", {"status": "cancelled"}),
-            scheduled_task_state_event(
-                "task_cron",
-                {
-                    "workflow": cron_workflow.model_dump_json(),
-                    "status": "pending",
-                    "created_at": datetime.now(UTC).isoformat(),
-                    "owner": client.user_id,
-                },
-            ),
-        ],
-    )
-
-    with patch.object(runtime, "_start_runner", return_value=True) as mock_start:
-        restored = await runtime.restore_room(bot, "!test:server")
-
-    assert restored == 1
-    assert [call.args[1] for call in mock_start.call_args_list] == ["task_cron"]
 
 
 @pytest.mark.asyncio
@@ -667,8 +639,10 @@ async def test_list_scheduled_tasks_tasks_in_other_threads(tmp_path: Path) -> No
         config=Config(),
     )
 
-    assert "No scheduled tasks in this thread" in result
-    assert "1 task(s) scheduled in other threads" in result
+    assert result == (
+        "No scheduled tasks in this thread.\n\n"
+        "📌 1 task(s) scheduled in other threads. Use /list_schedules in those threads to see details."
+    )
 
 
 @pytest.mark.asyncio
@@ -762,8 +736,8 @@ async def test_run_once_task_stops_when_cancelled_via_matrix_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_once_task_executes_latest_state_workflow() -> None:
-    """One-time tasks should execute using the latest persisted workflow data."""
+async def test_run_once_task_executes_latest_state_workflow_and_marks_it_completed() -> None:
+    """One-time tasks run the latest persisted workflow and mark it completed on success."""
     client = make_matrix_client_mock()
     client.room_get_state_event.side_effect = joined_member_state
     client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!test:server")
@@ -787,11 +761,10 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
         thread_id="$thread123",
     )
 
-    async def _fetch_task(*_args: object, **_kwargs: object) -> ScheduledTaskRecord:
-        return _record("task_once_updated", updated_workflow)
+    record = _record("task_once_updated", updated_workflow)
 
     with (
-        patch("mindroom.scheduling.runtime.get_scheduled_task", side_effect=_fetch_task),
+        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
         patch(
             "mindroom.scheduling.executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
@@ -810,6 +783,14 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
     executed_workflow = execute_mock.await_args.args[1]
     assert executed_workflow.message == "Updated message"
     assert executed_workflow.description == "Updated description"
+    client.room_put_state.assert_awaited_once()
+    put_kwargs = client.room_put_state.await_args.kwargs
+    assert put_kwargs["room_id"] == "!test:server"
+    assert put_kwargs["event_type"] == SCHEDULED_TASK_EVENT_TYPE
+    assert put_kwargs["state_key"] == "task_once_updated"
+    assert put_kwargs["content"]["status"] == "completed"
+    assert put_kwargs["content"]["workflow"] == updated_workflow.model_dump_json()
+    assert put_kwargs["content"]["created_at"] == record.created_at.isoformat()
 
 
 @pytest.mark.asyncio
@@ -882,54 +863,6 @@ async def test_run_once_task_retries_transient_state_read_failure(tmp_path: Path
     execute.assert_awaited_once()
     failure_notice.assert_not_awaited()
     assert client.room_put_state.await_args.kwargs["content"]["status"] == "completed"
-
-
-@pytest.mark.asyncio
-async def test_run_once_task_marks_completed_after_success() -> None:
-    """One-time tasks should overwrite pending state with completed after firing."""
-    client = make_matrix_client_mock()
-    client.room_get_state_event.side_effect = joined_member_state
-    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!test:server")
-    config = Config()
-    workflow = ScheduledWorkflow(
-        created_by="@user:server",
-        schedule_type="once",
-        execute_at=datetime.now(UTC) - timedelta(seconds=1),
-        message="Run once",
-        description="One-time success",
-        room_id="!test:server",
-        thread_id="$thread123",
-    )
-    pending_record = _record("task_once_completed", workflow)
-
-    with (
-        patch(
-            "mindroom.scheduling.runtime.get_scheduled_task",
-            new=AsyncMock(side_effect=[pending_record, pending_record]),
-        ),
-        patch(
-            "mindroom.scheduling.executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
-        ) as execute_mock,
-    ):
-        await run_once_task(
-            client,
-            "task_once_completed",
-            workflow,
-            config,
-            _runtime_paths(),
-            make_conversation_reader_mock(),
-        )
-
-    execute_mock.assert_awaited_once()
-    client.room_put_state.assert_awaited_once()
-    put_kwargs = client.room_put_state.await_args.kwargs
-    assert put_kwargs["room_id"] == "!test:server"
-    assert put_kwargs["event_type"] == SCHEDULED_TASK_EVENT_TYPE
-    assert put_kwargs["state_key"] == "task_once_completed"
-    assert put_kwargs["content"]["status"] == "completed"
-    assert put_kwargs["content"]["workflow"] == workflow.model_dump_json()
-    assert put_kwargs["content"]["created_at"] == pending_record.created_at.isoformat()
 
 
 @pytest.mark.asyncio
@@ -1011,11 +944,10 @@ async def test_run_cron_task_executes_latest_state_workflow(tmp_path: Path) -> N
     )
     admin = object()
 
-    async def _fetch_task(*_args: object, **_kwargs: object) -> ScheduledTaskRecord:
-        return _record("task_cron_updated", updated_workflow)
+    record = _record("task_cron_updated", updated_workflow)
 
     with (
-        patch("mindroom.scheduling.runtime.get_scheduled_task", side_effect=_fetch_task),
+        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
         patch(
             "mindroom.scheduling.executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
@@ -1037,6 +969,7 @@ async def test_run_cron_task_executes_latest_state_workflow(tmp_path: Path) -> N
     assert executed_workflow.message == "Updated recurring message"
     assert executed_workflow.description == "Updated recurring description"
     assert execute_mock.await_args.args[7] is admin
+    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1102,56 +1035,6 @@ async def test_a_task_whose_run_raises_reports_why_it_failed(
 
 
 @pytest.mark.asyncio
-async def test_run_cron_task_keeps_pending_state_after_success(tmp_path: Path) -> None:
-    """Recurring tasks should keep their pending state after firing."""
-    client = AsyncMock()
-    client.room_get_state_event.side_effect = joined_member_state
-    client.room_put_state = AsyncMock()
-    config = Config()
-    client.homeserver = "https://example.org"
-    client.user_id = "@router:example.org"
-    client.device_id = "TEST_DEVICE"
-    workflow = ScheduledWorkflow(
-        created_by="@user:server",
-        schedule_type="cron",
-        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
-        message="Recurring message",
-        description="Recurring description",
-        room_id="!test:server",
-        thread_id="$thread123",
-    )
-    pending_record = _record("task_cron_pending", workflow)
-
-    occurrence = RecurringOccurrence(
-        tmp_path / "checkpoint.json",
-        _RecurringCheckpoint("workflow", datetime.now(UTC) - timedelta(seconds=1)),
-    )
-
-    with (
-        patch(
-            "mindroom.scheduling.runtime.get_scheduled_task",
-            new=AsyncMock(side_effect=[pending_record, pending_record]),
-        ),
-        patch(
-            "mindroom.scheduling.executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
-        ) as execute_mock,
-        patch("mindroom.scheduling.runtime.plan_recurring_occurrence", return_value=occurrence),
-    ):
-        await run_cron_task(
-            client,
-            "task_cron_pending",
-            workflow,
-            config,
-            schedule_runtime_paths(tmp_path),
-            make_conversation_reader_mock(),
-        )
-
-    execute_mock.assert_awaited_once()
-    client.room_put_state.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_run_cron_task_stops_when_cancelled_via_matrix_state() -> None:
     """Recurring tasks should stop without executing once state is cancelled."""
     client = AsyncMock()
@@ -1188,12 +1071,21 @@ async def test_run_cron_task_stops_when_cancelled_via_matrix_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_scheduled_task_persists_through_the_room_steward(
+@pytest.mark.parametrize(
+    ("cancel", "expected"),
+    [
+        (partial(cancel_scheduled_task, task_id="task1"), "✅ Cancelled task `task1`"),
+        (cancel_all_scheduled_tasks, "✅ Cancelled 1 scheduled task(s)"),
+    ],
+    ids=["single", "all"],
+)
+async def test_scheduled_task_cancellation_persists_through_the_room_steward(
     tmp_path: Path,
+    cancel: Callable[..., Awaitable[str]],
+    expected: str,
 ) -> None:
-    """Cancelling a task writes its state through the room's steward, not through the client that asked."""
+    """Cancellation writes through the room's steward, not the asking client."""
     client = AsyncMock()
-    serve_task_state_events(client)
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
     room_state: dict[str, dict[str, Any]] = {}
     state_writers, router = _recording_state_writer(room_state)
@@ -1201,40 +1093,28 @@ async def test_cancel_scheduled_task_persists_through_the_room_steward(
         schedule_type="once",
         created_by="@user:server",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
-        message="cancel me",
-        description="cancel me",
+        message="cancel all",
+        description="cancel all",
         room_id="!test:server",
         thread_id="$thread",
     )
-    client.room_get_state_event = AsyncMock(
-        return_value=nio.RoomGetStateEventResponse(
-            content={
-                "task_id": "taskcancel",
-                "workflow": workflow.model_dump_json(),
-                "status": "pending",
-                "created_at": datetime(2026, 1, 1, 12, 0, tzinfo=UTC).isoformat(),
-            },
-            event_type=SCHEDULED_TASK_EVENT_TYPE,
-            state_key="taskcancel",
-            room_id="!test:server",
-        ),
-    )
+    content = {"task_id": "task1", "workflow": workflow.model_dump_json(), "status": "pending"}
+    serve_room_schedule_state(client, "!test:server", [scheduled_task_state_event("task1", content)])
 
     with patch.object(state_writers, "cancel_runner") as cancel_runner:
-        result = await cancel_scheduled_task(
+        result = await cancel(
             client=client,
             room_id="!test:server",
-            task_id="taskcancel",
             runtime_paths=schedule_runtime_paths(tmp_path),
             task_runtime=state_writers,
         )
 
-    assert result == "✅ Cancelled task `taskcancel`"
-    cancel_runner.assert_called_once_with("taskcancel")
+    assert result == expected
+    cancel_runner.assert_called_once_with("task1")
     client.room_put_state.assert_not_awaited()
     router.room_put_state.assert_awaited_once()
-    assert room_state["taskcancel"]["content"]["status"] == "cancelled"
-    assert room_state["taskcancel"]["content"]["workflow"] == workflow.model_dump_json()
+    assert room_state["task1"]["content"]["status"] == "cancelled"
+    assert room_state["task1"]["content"]["workflow"] == workflow.model_dump_json()
 
 
 @pytest.mark.asyncio
@@ -1359,41 +1239,6 @@ async def test_a_task_stored_without_a_status_is_pending_to_listing_and_cancel_a
     assert [task.task_id for task in listed] == ["statusless"]
     assert result == "✅ Cancelled 1 scheduled task(s)"
     assert client.room_put_state.await_args.kwargs["content"]["status"] == "cancelled"
-
-
-@pytest.mark.asyncio
-async def test_cancel_all_scheduled_tasks_persists_through_the_room_steward(
-    tmp_path: Path,
-) -> None:
-    """Cancel-all writes each cancellation through the room's steward too."""
-    client = AsyncMock()
-    client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
-    room_state: dict[str, dict[str, Any]] = {}
-    state_writers, router = _recording_state_writer(room_state)
-    workflow = ScheduledWorkflow(
-        schedule_type="once",
-        created_by="@user:server",
-        execute_at=datetime.now(UTC) + timedelta(minutes=5),
-        message="cancel all",
-        description="cancel all",
-        room_id="!test:server",
-        thread_id="$thread",
-    )
-    content = {"task_id": "task1", "workflow": workflow.model_dump_json(), "status": "pending"}
-    serve_room_schedule_state(client, "!test:server", [scheduled_task_state_event("task1", content)])
-
-    with patch.object(state_writers, "cancel_runner") as cancel_runner:
-        result = await cancel_all_scheduled_tasks(
-            client=client,
-            room_id="!test:server",
-            runtime_paths=schedule_runtime_paths(tmp_path),
-            task_runtime=state_writers,
-        )
-
-    assert result == "✅ Cancelled 1 scheduled task(s)"
-    cancel_runner.assert_called_once_with("task1")
-    router.room_put_state.assert_awaited_once()
-    assert room_state["task1"]["content"]["status"] == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -1617,10 +1462,20 @@ async def test_cancel_all_scheduled_tasks_no_tasks(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_edit_scheduled_task_reuses_existing_thread(tmp_path: Path) -> None:
-    """Editing should keep the task ID and original thread context."""
+@pytest.mark.parametrize(
+    ("thread_id", "new_thread", "history_limit"),
+    [("$original_thread", False, None), ("$original_thread", False, 2), (None, True, None)],
+    ids=["existing-thread", "history-override", "new-thread"],
+)
+async def test_edit_scheduled_task_forwards_stored_placement_and_history_override(
+    tmp_path: Path,
+    thread_id: str | None,
+    *,
+    new_thread: bool,
+    history_limit: int | None,
+) -> None:
+    """Editing forwards the task's placement and any history override to scheduling."""
     client = AsyncMock()
-    serve_task_state_events(client)
     room = MagicMock()
     config = MagicMock()
     workflow = ScheduledWorkflow(
@@ -1629,16 +1484,12 @@ async def test_edit_scheduled_task_reuses_existing_thread(tmp_path: Path) -> Non
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
         message="Initial message",
         description="Initial task",
-        thread_id="$original_thread",
+        thread_id=thread_id,
         room_id="!test:server",
+        new_thread=new_thread,
     )
-    state_response = nio.RoomGetStateEventResponse(
-        content={"status": "pending", "workflow": workflow.model_dump_json()},
-        event_type=SCHEDULED_TASK_EVENT_TYPE,
-        state_key="task123",
-        room_id="!test:server",
-    )
-    client.room_get_state_event = AsyncMock(return_value=state_response)
+    serve_stored_task(client, "!test:server", "task123", {"status": "pending", "workflow": workflow.model_dump_json()})
+    overrides = {} if history_limit is None else {"history_limit": history_limit}
 
     with patch(
         "mindroom.scheduling.tasks.schedule_task",
@@ -1655,6 +1506,7 @@ async def test_edit_scheduled_task_reuses_existing_thread(tmp_path: Path) -> Non
             task_id="task123",
             full_text="tomorrow at 9am updated task",
             scheduled_by="@user:server",
+            **overrides,
         )
 
     assert "✅ Updated task `task123`." in result
@@ -1662,15 +1514,15 @@ async def test_edit_scheduled_task_reuses_existing_thread(tmp_path: Path) -> Non
     call_kwargs = mock_schedule.await_args.kwargs
     assert call_kwargs["runtime"].client is client
     assert call_kwargs["room_id"] == "!test:server"
-    assert call_kwargs["thread_id"] == "$original_thread"
+    assert call_kwargs["thread_id"] == thread_id
     assert call_kwargs["scheduled_by"] == "@user:server"
     assert call_kwargs["full_text"] == "tomorrow at 9am updated task"
     assert call_kwargs["runtime"].config is config
     assert call_kwargs["runtime"].room is room
-    assert call_kwargs["new_thread"] is False
+    assert call_kwargs["new_thread"] is new_thread
     assert call_kwargs["existing_task"].task_id == "task123"
-    assert call_kwargs["existing_task"].workflow.thread_id == "$original_thread"
-    assert call_kwargs["history_limit"] is None
+    assert call_kwargs["existing_task"].workflow.thread_id == thread_id
+    assert call_kwargs["history_limit"] == history_limit
     assert call_kwargs["silent"] is None
 
 
@@ -1800,93 +1652,6 @@ async def test_parsed_schedule_never_carries_a_call_approval(tmp_path: Path) -> 
     assert saved is not None
     assert saved.workflow.description == "Edited"
     assert saved.workflow.pre_approved_call is False
-
-
-@pytest.mark.asyncio
-async def test_edit_scheduled_task_forwards_history_limit_override(tmp_path: Path) -> None:
-    """An explicit history limit on edit must reach the shared scheduling backend."""
-    client = AsyncMock()
-    serve_task_state_events(client)
-    workflow = ScheduledWorkflow(
-        created_by="@user:server",
-        schedule_type="once",
-        execute_at=datetime.now(UTC) + timedelta(minutes=5),
-        message="Initial message",
-        description="Initial task",
-        thread_id="$original_thread",
-        room_id="!test:server",
-    )
-    state_response = nio.RoomGetStateEventResponse(
-        content={"status": "pending", "workflow": workflow.model_dump_json()},
-        event_type=SCHEDULED_TASK_EVENT_TYPE,
-        state_key="task123",
-        room_id="!test:server",
-    )
-    client.room_get_state_event = AsyncMock(return_value=state_response)
-
-    with patch(
-        "mindroom.scheduling.tasks.schedule_task",
-        new=AsyncMock(return_value="✅ Scheduled"),
-    ) as mock_schedule:
-        result = await edit_scheduled_task(
-            runtime=_scheduling_runtime(client=client, runtime_paths=schedule_runtime_paths(tmp_path)),
-            room_id="!test:server",
-            task_id="task123",
-            full_text="keep the same schedule",
-            scheduled_by="@user:server",
-            history_limit=2,
-        )
-
-    assert "✅ Updated task `task123`." in result
-    assert mock_schedule.await_args.kwargs["history_limit"] == 2
-
-
-@pytest.mark.asyncio
-async def test_edit_scheduled_task_preserves_new_thread_mode(tmp_path: Path) -> None:
-    """Editing a new-thread schedule should not repopulate thread_id from the editor context."""
-    client = AsyncMock()
-    serve_task_state_events(client)
-    room = MagicMock()
-    config = MagicMock()
-    workflow = ScheduledWorkflow(
-        created_by="@user:server",
-        schedule_type="once",
-        execute_at=datetime.now(UTC) + timedelta(minutes=5),
-        message="Initial message",
-        description="Initial task",
-        thread_id=None,
-        room_id="!test:server",
-        new_thread=True,
-    )
-    state_response = nio.RoomGetStateEventResponse(
-        content={"status": "pending", "workflow": workflow.model_dump_json()},
-        event_type=SCHEDULED_TASK_EVENT_TYPE,
-        state_key="task123",
-        room_id="!test:server",
-    )
-    client.room_get_state_event = AsyncMock(return_value=state_response)
-
-    with patch(
-        "mindroom.scheduling.tasks.schedule_task",
-        new=AsyncMock(return_value="✅ Scheduled"),
-    ) as mock_schedule:
-        result = await edit_scheduled_task(
-            runtime=_scheduling_runtime(
-                client=client,
-                config=config,
-                runtime_paths=schedule_runtime_paths(tmp_path),
-                room=room,
-            ),
-            room_id="!test:server",
-            task_id="task123",
-            full_text="tomorrow at 9am updated task",
-            scheduled_by="@user:server",
-        )
-
-    assert "✅ Updated task `task123`." in result
-    call_kwargs = mock_schedule.await_args.kwargs
-    assert call_kwargs["thread_id"] is None
-    assert call_kwargs["new_thread"] is True
 
 
 @pytest.mark.asyncio
@@ -2390,68 +2155,6 @@ async def test_schedule_task_persists_through_the_room_steward(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_explicit_history_limit_overrides_parse_and_round_trips(tmp_path: Path) -> None:
-    """An explicit history limit wins over the parse, persists to Matrix state, and surfaces in listings."""
-    client = AsyncMock()
-    client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
-    room_state: dict[str, dict[str, Any]] = {}
-    client.room_get_state = AsyncMock(side_effect=lambda room_id: _room_state_response(room_id, room_state))
-    state_writers, _router = _recording_state_writer(room_state)
-    room = _matrix_room("!test:server")
-    runtime_paths = schedule_runtime_paths(tmp_path)
-    config, ids = _assistant_config(runtime_paths)
-    workflow = ScheduledWorkflow(
-        schedule_type="cron",
-        cron_schedule=CronSchedule(minute="*/25"),
-        message="poll the queue",
-        description="Queue poller",
-    )
-
-    with (
-        patch(
-            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
-            return_value=[ids["assistant"]],
-        ),
-        patch("mindroom.scheduling.tasks._extract_mentioned_agents_from_text", return_value=[]),
-        patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
-        patch.object(ScheduledTaskRuntime, "start_new_task"),
-        patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
-    ):
-        message = await schedule_task(
-            runtime=_scheduling_runtime(
-                client=client,
-                config=config,
-                runtime_paths=runtime_paths,
-                room=room,
-                task_runtime=state_writers,
-            ),
-            room_id="!test:server",
-            thread_id="$thread",
-            scheduled_by="@alice:server",
-            full_text="every 25 minutes poll the queue with only the last 5 messages",
-            history_limit=5,
-            silent=True,
-        )
-
-    assert "**Task ID:** `task1234`" in message
-    assert "**History:** last 5 messages" in message
-    assert "**Mode:** Silent" in message
-    tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", runtime_paths=runtime_paths)
-    assert [task.task_id for task in tasks] == ["task1234"]
-    assert tasks[0].workflow.history_limit == 5
-    assert tasks[0].workflow.silent is True
-    listed = await list_scheduled_tasks(
-        client=client,
-        room_id="!test:server",
-        runtime_paths=runtime_paths,
-        thread_id="$thread",
-        config=config,
-    )
-    assert "History: last 5 messages" in listed
-    assert "Mode: Silent" in listed
-
-
-@pytest.mark.asyncio
 async def test_schedule_task_keeps_parse_produced_history_limit(tmp_path: Path) -> None:
     """Without an explicit override, the parse-produced history limit persists and surfaces."""
     client = AsyncMock()
@@ -2776,8 +2479,17 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
 
 
 @pytest.mark.asyncio
-async def test_schedule_model_persists_and_edits(tmp_path: Path) -> None:
-    """The chosen model survives state storage and edits, and can be cleared."""
+@pytest.mark.parametrize(
+    ("model_override", "history_limit"),
+    [(None, 5), ("cheap", None), ("cheap", 5)],
+    ids=["history-only", "model-only", "model-and-history"],
+)
+async def test_schedule_persists_model_and_history_limit_and_edits_model(
+    tmp_path: Path,
+    model_override: str | None,
+    history_limit: int | None,
+) -> None:
+    """The model and the history limit each round-trip alone or together, and the model can be changed or cleared."""
     client = AsyncMock()
     serve_task_state_events(client)
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
@@ -2802,6 +2514,11 @@ async def test_schedule_model_persists_and_edits(tmp_path: Path) -> None:
         description="Queue poller",
     )
 
+    overrides: dict[str, Any] = {}
+    if model_override is not None:
+        overrides["model"] = model_override
+    if history_limit is not None:
+        overrides["history_limit"] = history_limit
     with (
         patch(
             "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
@@ -2827,17 +2544,17 @@ async def test_schedule_model_persists_and_edits(tmp_path: Path) -> None:
             thread_id="$thread",
             scheduled_by="@alice:server",
             full_text="every 25 minutes poll the queue with only the last 5 messages",
-            model="cheap",
             silent=True,
+            **overrides,
         )
 
     assert "**Task ID:** `task1234`" in message
-    assert "**Model:** cheap" in message
+    assert ("**History:** last 5 messages" in message) is (history_limit is not None)
     assert "**Mode:** Silent" in message
     tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", runtime_paths=runtime_paths)
     assert [task.task_id for task in tasks] == ["task1234"]
-    assert tasks[0].workflow.model == "cheap"
-    assert build_edited_scheduled_workflow(tasks[0].workflow, "!test:server", message="new task").model == "cheap"
+    assert tasks[0].workflow.model == model_override
+    assert tasks[0].workflow.history_limit == history_limit
     assert tasks[0].workflow.silent is True
     listed = await list_scheduled_tasks(
         client=client,
@@ -2846,8 +2563,16 @@ async def test_schedule_model_persists_and_edits(tmp_path: Path) -> None:
         thread_id="$thread",
         config=config,
     )
-    assert "Model: cheap" in listed
+    assert ("History: last 5 messages" in listed) is (history_limit is not None)
     assert "Mode: Silent" in listed
+    if model_override is None:
+        return
+
+    assert f"**Model:** {model_override}" in message
+    assert f"Model: {model_override}" in listed
+    assert (
+        build_edited_scheduled_workflow(tasks[0].workflow, "!test:server", message="new task").model == model_override
+    )
 
     with (
         patch(
@@ -2865,7 +2590,7 @@ async def test_schedule_model_persists_and_edits(tmp_path: Path) -> None:
             ),
         ),
     ):
-        for model, expected in [(None, "cheap"), ("default", "default"), ("", None)]:
+        for model, expected in [(None, model_override), ("default", "default"), ("", None)]:
             result = await edit_scheduled_task(
                 runtime=_scheduling_runtime(
                     client=client,

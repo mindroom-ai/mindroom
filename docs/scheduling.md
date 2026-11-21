@@ -229,7 +229,8 @@ Recurring schedules cannot pre-approve calls.
 ## Timezone
 
 The top-level `timezone` setting (default `UTC`) is the IANA timezone MindRoom uses for the current date in agent prompts, message timestamps, file-memory daily notes, automation `cron` times, and interpreting and displaying scheduled times.
-An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones; the router and chat commands such as `!schedule` use the top-level setting.
+An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones.
+A new schedule created with the `!schedule` command uses the top-level setting, even when the agent handling the command has its own `timezone`.
 A team reply uses the timezone of the account that posts it: a configured team uses the top-level setting, and an [ad hoc team](configuration/teams.md#ad-hoc-teams) uses the timezone of the agent whose account posts its reply.
 An unknown timezone name fails config validation.
 
@@ -263,13 +264,14 @@ A run waits rather than proceeding when membership cannot be confirmed.
 
 Schedules are stored in Matrix room state and survive restarts.
 In a room MindRoom did not create, a room admin may need to raise one MindRoom account's power level to the room's state-event level, usually 50, before schedules can be saved; the account with the most power in the room stores the schedules of every agent there, and an agent that cannot save one answers `I need moderator rights in this room to save schedules.`
-MindRoom only acts on schedule state written by its own router, agent, or team accounts; schedule state written by any other account, including a room admin, is ignored and logged.
+MindRoom only acts on schedule state written by its own owner, agent, or team accounts; schedule state written by any other account, including a room admin, is ignored and logged.
 The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16), as Synapse, Tuwunel, and Dendrite do; otherwise reading tasks fails.
 
 ### Scheduled Task Restoration
 
 The agent or team that saved a schedule runs it: it posts the trigger when the schedule is due.
-A schedule saved by an earlier release that the router ran moves to the first agent or team its message mentions that is in the room, else to the one with the lowest Matrix ID.
+A schedule saved by an earlier release that the router ran moves to the first agent or team its message mentions that is joined to the room and may post its trigger, else to the one with the lowest Matrix ID that may.
+It stays pending while no agent or team in the room may post its trigger.
 Every agent restores the schedules it runs in a room when it joins that room, at startup, when it accepts an invitation, or when it joins a [room listed under one of its rooms](rooms.md#rooms-under-a-room), and its own pending configuration previews when `/config` is enabled.
 Schedules keep running when their agent restarts, for example after a config edit: a one-time task that came due during the restart runs once the agent is back, and a recurring task runs the occurrence that came due if it is still within the catch-up window.
 A one-time task missed by less than 24 hours runs once its agent's Matrix sync is ready; an older one is marked failed instead.
