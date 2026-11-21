@@ -39,6 +39,7 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_requester_execution_identity,
     resolve_worker_key,
+    worker_log_id,
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerSshEndpoint
@@ -776,7 +777,13 @@ async def test_malformed_stored_shell_settings_only_refuse_their_own_route(
     with capture_logs() as logs:
         rows = desired_links(config, paths, AgentReplyMembershipIndex())
     assert rows == [{"id": healthy.id, "hostname": healthy.hostname, "allowed_logins": ["alice@github"]}]
-    assert any(log.get("agent") == "mine" and log.get("worker_key") == broken.worker_key for log in logs)
+    assert any(
+        log["event"] == "tailnet_ssh_shell_settings_invalid"
+        and log.get("agent") == "mine"
+        and log.get("worker") == worker_log_id(broken.worker_key)
+        for log in logs
+    )
+    assert broken.worker_key not in str(logs)
     assert "private-setting-value" not in str(logs)
     with pytest.raises(_ConnectRefused, match="not authorized"):
         await _connect(config, paths, broken.id)
