@@ -34,6 +34,7 @@ from mindroom.background_tasks import create_background_task, wait_for_backgroun
 from mindroom.claude_sdk_process import open_client
 from mindroom.llm.errors import AuthenticationFailed, ProviderError, ProviderUnavailable
 from mindroom.logging_config import get_logger
+from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT
 from mindroom.providers.claude_code.prompt import TOOL_PREFIX, canonical_arguments, tool_names
 from mindroom.runtime_shutdown import close_at_process_shutdown
 
@@ -105,7 +106,6 @@ ENVIRONMENT_OVERRIDES = [
     "CLAUDE_CODE_USE_ANTHROPIC_AWS",
     "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
 ]
-_ANTHROPIC_URL = "https://api.anthropic.com"
 # How Claude Code names the plans of a Claude subscription; an account without one is "Claude API".
 _PLANS = ("Claude Pro", "Claude Max", "Claude Team", "Claude Enterprise")
 NOT_SIGNED_IN = "Claude Code is not signed in. Run `claude auth login` as the user that runs MindRoom."
@@ -276,7 +276,8 @@ def _environment_error(provider: str) -> AuthenticationFailed | None:
     found = [
         name
         for name in ENVIRONMENT_OVERRIDES
-        if (value := os.environ.get(name)) and (name, value.rstrip("/")) != ("ANTHROPIC_BASE_URL", _ANTHROPIC_URL)
+        if (value := os.environ.get(name))
+        and (name, value.rstrip("/")) != ("ANTHROPIC_BASE_URL", ANTHROPIC_BASE_URL_DEFAULT)
     ]
     if not found:
         return None
