@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +22,10 @@ if TYPE_CHECKING:
     from mindroom.providers.claude_code.adapter import ClaudeCodeProvider
 
 _FAKE = Path(__file__).with_name("fake_claude.py")
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+)
+MARKERS = {"a": "LILAC-HERON", "b": "LEMON-IBIS", "c": "COPPER-OTTER"}
 LOOKUP = ToolSpec(
     name="lookup",
     description="Look up a marker by key.",
@@ -101,6 +107,21 @@ def text_turn(text: str, **step: object) -> list[dict[str, Any]]:
 def call(call_id: str, key: str) -> dict[str, Any]:
     """Return a scripted ``lookup`` call."""
     return {"id": call_id, "name": "lookup", "input": {"key": key}}
+
+
+def lookup(key: str) -> str:
+    """Look up a marker by key.
+
+    Args:
+        key: The marker's key.
+
+    """
+    return MARKERS[key]
+
+
+def tagged_json(text: str, tag: str) -> list[dict[str, Any]]:
+    """Decode the JSON payloads enclosed in the renderer's matching history tags."""
+    return [json.loads(body) for body in re.findall(rf"<{tag}>\n(.*?)\n</{tag}>", text, flags=re.DOTALL)]
 
 
 def user(text: str) -> Message:

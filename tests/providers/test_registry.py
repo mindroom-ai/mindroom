@@ -48,7 +48,7 @@ from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_G
 from mindroom.providers.registry import build_model_provider, stream_idle_timeout_seconds
 from mindroom.providers.synthetic_adapter import SyntheticProvider
 from tests.agno_parity.golden_files import render
-from tests.providers.bare_adapter import bare_adapter
+from tests.providers.bare_adapter import bare_adapter, drain_into
 from tests.providers.golden_support import (
     FIXTURE_ROOT,
     Wire,
@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider, StreamEvent
+    from mindroom.llm.provider import StreamEvent
 
 _GOOGLE_TOKEN = "parity-google-token"  # noqa: S105 - synthetic SDK credential
 _BAD_REQUEST = {"type": "error", "error": {"type": "invalid_request_error", "message": "bad", "code": 400}}
@@ -95,12 +95,6 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 def _user(text: str = "Hi", **media: Any) -> Message:  # noqa: ANN401 - media fields
     return Message(role="user", content=text, **media)
-
-
-async def _collect(provider: ModelProvider, request: ModelRequest, events: list[StreamEvent]) -> None:
-    """Append each event of one request to ``events``, which keeps them when the request fails."""
-    async for event in provider.stream(request):
-        events.append(event)  # noqa: PERF401 - a comprehension would lose the events when the stream raises
 
 
 def _texts(gemini_body: dict[str, Any]) -> list[str]:
@@ -187,7 +181,7 @@ _ROUTES: dict[str, tuple[dict[str, Any], type, str]] = {
     "claude_code": (
         {"provider": "claude_code", "id": "claude-sonnet-5-5", "extra_kwargs": {"effort": "low"}},
         ClaudeCodeProvider,
-        "Claude subscription (Claude Code)",
+        "Anthropic (Claude Code)",
     ),
 }
 
@@ -876,7 +870,9 @@ _LEVELS = {"levels": ["low", "high"], "default": "low"}
 
 @pytest.mark.parametrize(("reference", "level"), [("target", "low"), ("target@high", "high")])
 def test_claude_code_reasoning_level_overrides_authored_effort(
-    runtime_paths: RuntimePaths, reference: str, level: str
+    runtime_paths: RuntimePaths,
+    reference: str,
+    level: str,
 ) -> None:
     """Claude Code uses the selected reasoning level, not an authored effort for the same model."""
     model = ModelConfig(provider="claude_code", id="m", reasoning=_LEVELS, extra_kwargs={"effort": "max"})
@@ -1131,7 +1127,7 @@ async def test_a_refusal_fails_the_request_once_and_its_usage_is_counted(
     events: list[StreamEvent] = []
 
     with capture_logs() as logs, pytest.raises(ModelSafeguardRefusal) as raised:
-        await _collect(provider, request, events)
+        await drain_into(events, provider, request)
 
     assert len(wire.requests) == 1
     assert (raised.value.provider, raised.value.retryable) == ("Anthropic", False)

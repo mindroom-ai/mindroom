@@ -43,15 +43,19 @@ from mindroom.providers.claude_code import bridge as bridge_module
 from mindroom.providers.claude_code import session as session_module
 from mindroom.providers.claude_code.prompt import rebuild_input
 from mindroom.providers.claude_code.session import SESSIONS
-from mindroom.token_counting.counts import count
-from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
+from mindroom.providers.names import ROUTE_PROVIDERS
+from tests.fakes.scripted_model import tool_call
+from tests.providers.bare_adapter import completed as completed_turn
+from tests.providers.bare_adapter import drain, drain_into
 from tests.providers.claude_code.support import (
     CONVERSATION,
     LOOKUP,
+    PNG,
     call,
     fake_cli,
     left_behind,
     result,
+    tagged_json,
     text_turn,
     user,
 )
@@ -59,25 +63,14 @@ from tests.providers.claude_code.support import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.llm.provider import ModelProvider, StreamEvent
+    from mindroom.llm.provider import StreamEvent
 
+
+pytestmark = pytest.mark.asyncio
 
 _SYSTEM = Message(role="system", content="You are the test agent.")
-_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-)
 _TWO_CALLS = [{"text": "Looking.", "tools": [call("toolu_a", "a"), call("toolu_b", "b")]}]
 _OTHER = ToolSpec(name="other", description="Another tool.", parameters=LOOKUP.parameters, strict=None)
-
-
-async def _events(provider: ModelProvider, request: ModelRequest) -> list[StreamEvent]:
-    return [event async for event in provider.stream(request)]
-
-
-def _turn(events: list[StreamEvent]) -> TurnCompleted:
-    completed = events[-1]
-    assert isinstance(completed, TurnCompleted)
-    return completed
 
 
 async def _closed() -> None:
@@ -92,43 +85,25 @@ async def _resting_process_breaks() -> None:
             await asyncio.sleep(0.01)
 
 
-def test_request_tokens_count_rendered_text_but_not_disabled_tools(tmp_path: Path) -> None:
-    provider = fake_cli(tmp_path).provider()
-    request = ModelRequest(
-        messages=[_SYSTEM, user("Hi"), Message(role="assistant", content="Hello"), user("More?")],
-        tools=[LOOKUP],
-        tool_choice="none",
-    )
-    system, blocks = rebuild_input(request.messages, provider.identity.provider)
-    rendered = system + "".join(block["text"] for block in blocks)
-
-    assert provider.request_tokens(request) == count(provider.token_counter, rendered)
-    assert provider.request_tokens(request, start=3) == count(provider.token_counter, "More?")
-    image = Message(role="user", images=[Image(content=_PNG)])
-    with_image = replace(request, messages=[*request.messages, image])
-    assert provider.request_tokens(with_image) == provider.request_tokens(request) + MEDIA_ALLOWANCE_TOKENS
-
-
 # --- one answer -------------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_a_text_answer_streams_its_reasoning_and_text_and_reports_usage_once(tmp_path: Path) -> None:
     usage = {"input_tokens": 3, "cache_creation_input_tokens": 40, "cache_read_input_tokens": 200, "output_tokens": 9}
     cli = fake_cli(tmp_path, {"turns": [[{"thinking": "Greet them.", "text": "Hello, Alice.", "usage": usage}]]})
 
-    events = await _events(cli.provider(), ModelRequest(messages=[_SYSTEM, user("Hi")]))
+    events = await drain(cli.provider(), ModelRequest(messages=[_SYSTEM, user("Hi")]))
 
     assert "".join(event.text for event in events if isinstance(event, ReasoningDelta)) == "Greet them."
     assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Hello, Alice."
-    completed = _turn(events)
+    completed = completed_turn(events)
     assert completed.stop_reason == "end"
     assert completed.message.content == "Hello, Alice."
     assert completed.message.reasoning_content == "Greet them."
     assert completed.message.tool_calls is None
     provenance = read_model_provenance(completed.message.provider_data)
     assert provenance is not None
-    assert (provenance.model_id, provenance.provider) == ("claude-invented-1", "Claude subscription (Claude Code)")
+    assert (provenance.model_id, provenance.provider) == ("claude-invented-1", ROUTE_PROVIDERS["claude_code"])
     final = [event for event in events if isinstance(event, UsageReported) and event.final]
     assert len(final) == 1
     tokens = final[0].usage.tokens
@@ -141,7 +116,6 @@ async def test_a_text_answer_streams_its_reasoning_and_text_and_reports_usage_on
     assert any(isinstance(event, UsageReported) and not event.final for event in events)
 
 
-@pytest.mark.asyncio
 async def test_claude_code_starts_isolated_with_mindroom_system_prompt_and_the_user_text_verbatim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -181,16 +155,10 @@ async def test_claude_code_starts_isolated_with_mindroom_system_prompt_and_the_u
     assert sent["client_composed"] is True
 
 
-def test_an_effort_claude_code_does_not_know_fails_the_model_build(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="effort must be one of low, medium, high, xhigh, max"):
-        fake_cli(tmp_path, {}).provider(effort="ultra")
-
-
 # --- tool calls -------------------------------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("call_before_stop", [False, True], ids=["call after the message", "call before it ends"])
-@pytest.mark.asyncio
 async def test_a_tool_turn_parks_the_process_and_its_results_continue_the_same_turn(
     tmp_path: Path,
     call_before_stop: bool,
@@ -205,14 +173,14 @@ async def test_a_tool_turn_parks_the_process_and_its_results_continue_the_same_t
     provider = cli.provider()
     messages = [_SYSTEM, user("Look up a and b.")]
 
-    events = await _events(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
+    events = await drain(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
 
-    asked = _turn(events)
+    asked = completed_turn(events)
     assert asked.stop_reason == "tool_use"
     assert asked.message.content == "Looking."
     assert asked.message.tool_calls == [
-        {"id": "toolu_a", "type": "function", "function": {"name": "lookup", "arguments": '{"key": "a"}'}},
-        {"id": "toolu_b", "type": "function", "function": {"name": "lookup", "arguments": '{"key": "b"}'}},
+        tool_call("lookup", "toolu_a", key="a"),
+        tool_call("lookup", "toolu_b", key="b"),
     ]
     assert [event.call for event in events if isinstance(event, ToolCallReady)] == asked.message.tool_calls
     assert asked.message.metrics.tokens.output_tokens == 20
@@ -241,7 +209,6 @@ async def test_a_tool_turn_parks_the_process_and_its_results_continue_the_same_t
     assert args[args.index("--allowedTools") + 1] == "mcp__mindroom__*"
 
 
-@pytest.mark.asyncio
 async def test_a_failed_tool_result_reaches_claude_code_as_an_error(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [[{"tools": [call("toolu_a", "a")]}, {"text": "It failed."}]]})
     provider = cli.provider()
@@ -256,7 +223,6 @@ async def test_a_failed_tool_result_reaches_claude_code_as_an_error(tmp_path: Pa
     assert entry["result"]["content"] == [{"type": "text", "text": "no such key"}]
 
 
-@pytest.mark.asyncio
 async def test_a_request_that_no_longer_matches_the_parked_turn_rebuilds_in_a_new_process(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [_TWO_CALLS]}, {"turns": [text_turn("Rebuilt.")]})
     provider = cli.provider(execution_identity=CONVERSATION)
@@ -280,11 +246,9 @@ async def test_a_request_that_no_longer_matches_the_parked_turn_rebuilds_in_a_ne
     assert [session.answer.text for session in SESSIONS.resting.values() if session.answer] == ["Rebuilt."]
     rebuilt = cli.events("user")[1]["content"][0]["text"]
     assert rebuilt.startswith("<conversation-checkpoint>")
-    assert '"output": "LILAC-HERON"' in rebuilt
-    assert '"output": "LEMON-IBIS"' in rebuilt
+    assert [item["output"] for item in tagged_json(rebuilt, "tool-result")] == ["LILAC-HERON", "LEMON-IBIS"]
 
 
-@pytest.mark.asyncio
 async def test_results_that_do_not_answer_every_parked_call_rebuild_and_retire_the_process(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [_TWO_CALLS]}, {"turns": [text_turn("Rebuilt.")]})
     provider = cli.provider()
@@ -301,7 +265,6 @@ async def test_results_that_do_not_answer_every_parked_call_rebuild_and_retire_t
     assert len(cli.events("exit")) == 2
 
 
-@pytest.mark.asyncio
 async def test_a_parked_turn_edited_under_the_same_call_id_is_rebuilt_and_its_process_closed(tmp_path: Path) -> None:
     turn = [{"tools": [call("toolu_a", "a")]}, {"text": "never"}]
     cli = fake_cli(tmp_path, {"turns": [turn]}, {"turns": [text_turn("Rebuilt.")]})
@@ -321,7 +284,6 @@ async def test_a_parked_turn_edited_under_the_same_call_id_is_rebuilt_and_its_pr
     assert '"input": {"key": "z"}' in cli.events("user")[1]["content"][0]["text"]
 
 
-@pytest.mark.asyncio
 async def test_a_request_that_replays_its_history_explicitly_starts_a_new_process(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("One.")]}, {"turns": [text_turn("Two.")]})
     provider = cli.provider(execution_identity=CONVERSATION)
@@ -345,7 +307,6 @@ async def test_a_request_that_replays_its_history_explicitly_starts_a_new_proces
     [{"input": {"key": "a"}}, {"name": "other"}],
     ids=["with other arguments", "for another tool"],
 )
-@pytest.mark.asyncio
 async def test_a_call_that_reaches_the_tool_server_unlike_the_model_made_it_gets_no_result(
     tmp_path: Path,
     presented: dict[str, Any],
@@ -369,7 +330,6 @@ async def test_a_call_that_reaches_the_tool_server_unlike_the_model_made_it_gets
     assert len(cli.events("exit")) == 1
 
 
-@pytest.mark.asyncio
 async def test_a_call_that_already_returned_is_not_answered_a_second_time(tmp_path: Path) -> None:
     turn = [{**_TWO_CALLS[0], "repeat": "toolu_a"}, {"text": "never"}]
     cli = fake_cli(tmp_path, {"turns": [turn]})
@@ -388,7 +348,6 @@ async def test_a_call_that_already_returned_is_not_answered_a_second_time(tmp_pa
     assert cli.log.read_text().count("LILAC-HERON") == 1
 
 
-@pytest.mark.asyncio
 async def test_a_call_the_model_never_made_gets_no_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(bridge_module, "_UNMADE_CALL_SECONDS", 0.05)
     turn = [{"tools": [call("toolu_a", "a"), {**call("toolu_x", "b"), "hidden": True}]}, {"text": "never"}]
@@ -406,7 +365,6 @@ async def test_a_call_the_model_never_made_gets_no_result(tmp_path: Path, monkey
     assert all(entry["result"]["isError"] for entry in cli.events("tool_result")[1:])
 
 
-@pytest.mark.asyncio
 async def test_a_parked_process_with_a_call_the_model_never_made_is_rebuilt_at_once(tmp_path: Path) -> None:
     # Claude Code brings a call the model did not write to the tool server before the model message ends.
     step = {"tools": [{**call("toolu_x", "b"), "hidden": True}, call("toolu_a", "a")], "call_before_stop": True}
@@ -422,7 +380,6 @@ async def test_a_parked_process_with_a_call_the_model_never_made_is_rebuilt_at_o
     assert cli.events("tool_result") == []
 
 
-@pytest.mark.asyncio
 async def test_a_result_for_a_call_claude_code_gave_up_meanwhile_is_dropped() -> None:
     bridge = bridge_module.ToolBridge(names={"lookup": "lookup"})
     bridge.made("toolu_a", "lookup", {"key": "a"})
@@ -443,7 +400,6 @@ async def test_a_result_for_a_call_claude_code_gave_up_meanwhile_is_dropped() ->
     ],
     ids=["it went on by itself", "it cancelled the call"],
 )
-@pytest.mark.asyncio
 async def test_a_parked_process_that_did_not_wait_for_mindrooms_results_is_rebuilt_from_them(
     tmp_path: Path,
     turn: list[dict[str, Any]],
@@ -459,10 +415,10 @@ async def test_a_parked_process_that_did_not_wait_for_mindrooms_results_is_rebui
 
     assert answered.content == "Rebuilt."
     assert len(cli.events("spawn")) == 2
-    assert '"output": "LILAC-HERON"' in cli.events("user")[1]["content"][0]["text"]
+    rebuilt = cli.events("user")[1]["content"][0]["text"]
+    assert [item["output"] for item in tagged_json(rebuilt, "tool-result")] == ["LILAC-HERON"]
 
 
-@pytest.mark.asyncio
 async def test_a_tool_call_without_claude_codes_call_id_fails_the_request_and_retires_the_process(
     tmp_path: Path,
 ) -> None:
@@ -482,7 +438,6 @@ async def test_a_tool_call_without_claude_codes_call_id_fails_the_request_and_re
     assert SESSIONS.resting == {}
 
 
-@pytest.mark.asyncio
 async def test_a_parked_process_whose_call_came_without_a_call_id_is_rebuilt_not_continued(tmp_path: Path) -> None:
     step = {"tools": [call("toolu_a", "a")], "omit_tool_use_id": True}
     cli = fake_cli(tmp_path, {"turns": [[step, {"text": "never"}]]}, {"turns": [text_turn("Rebuilt.")]})
@@ -497,10 +452,10 @@ async def test_a_parked_process_whose_call_came_without_a_call_id_is_rebuilt_not
 
     assert answered.content == "Rebuilt."
     assert [entry["result"]["isError"] for entry in cli.events("tool_result")] == [True]
-    assert '"output": "LILAC-HERON"' in cli.events("user")[1]["content"][0]["text"]
+    rebuilt = cli.events("user")[1]["content"][0]["text"]
+    assert [item["output"] for item in tagged_json(rebuilt, "tool-result")] == ["LILAC-HERON"]
 
 
-@pytest.mark.asyncio
 async def test_a_request_without_tool_choice_offers_claude_code_no_tools(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("No tools.")]})
     provider = cli.provider(execution_identity=CONVERSATION)
@@ -516,7 +471,6 @@ async def test_a_request_without_tool_choice_offers_claude_code_no_tools(tmp_pat
     assert len(cli.events("exit")) == 1
 
 
-@pytest.mark.asyncio
 async def test_a_summary_request_starts_claude_code_without_a_thinking_setting(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("Summary.")]})
     provider = cli.provider()
@@ -530,7 +484,6 @@ async def test_a_summary_request_starts_claude_code_without_a_thinking_setting(t
     assert provider.context_key(plain) != provider.context_key(summary)
 
 
-@pytest.mark.asyncio
 async def test_a_tool_description_claude_code_would_cut_is_cut_with_one_warning(tmp_path: Path) -> None:
     long = replace(LOOKUP, name="long_lookup", description="d" * 3000)
     cli = fake_cli(tmp_path, {"turns": [text_turn("One.")]})
@@ -549,7 +502,6 @@ async def test_a_tool_description_claude_code_would_cut_is_cut_with_one_warning(
 # --- what an answer holds ---------------------------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_a_message_that_arrives_whole_is_answered_with_its_text_and_its_tokens(tmp_path: Path) -> None:
     usage = {"input_tokens": 3, "cache_creation_input_tokens": 40, "cache_read_input_tokens": 200, "output_tokens": 9}
     cli = fake_cli(tmp_path, {"turns": [[{"text": "Hello, Alice.", "usage": usage, "complete_only": True}]]})
@@ -566,31 +518,28 @@ async def test_a_message_that_arrives_whole_is_answered_with_its_text_and_its_to
     )
 
 
-@pytest.mark.asyncio
 async def test_text_that_arrives_with_the_start_of_its_block_is_kept(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [[{"text": "Hello, Alice.", "start_text": True}]]})
 
-    events = await _events(cli.provider(), ModelRequest(messages=[user("Hi")]))
+    events = await drain(cli.provider(), ModelRequest(messages=[user("Hi")]))
 
     assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Hello, Alice."
-    assert _turn(events).message.content == "Hello, Alice."
+    assert completed_turn(events).message.content == "Hello, Alice."
 
 
-@pytest.mark.asyncio
 async def test_the_texts_of_two_model_messages_in_one_answer_are_kept_apart(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [[{"text": "Let me check."}, {"text": "Done."}]]})
 
-    events = await _events(cli.provider(), ModelRequest(messages=[user("Hi")]))
+    events = await drain(cli.provider(), ModelRequest(messages=[user("Hi")]))
 
     assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Let me check.\n\nDone."
-    assert _turn(events).message.content == "Let me check.\n\nDone."
-    assert _turn(events).message.metrics.tokens.output_tokens == 10
+    assert completed_turn(events).message.content == "Let me check.\n\nDone."
+    assert completed_turn(events).message.metrics.tokens.output_tokens == 10
 
 
 # --- the next turn ----------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_an_idle_process_answers_the_next_user_message_of_its_conversation(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("It is LILAC-HERON."), text_turn("It is LEMON-IBIS.")]})
     provider = cli.provider(execution_identity=CONVERSATION)
@@ -605,7 +554,6 @@ async def test_an_idle_process_answers_the_next_user_message_of_its_conversation
     assert cli.events("user")[1]["content"] == [{"type": "text", "text": "And b?"}]
 
 
-@pytest.mark.asyncio
 async def test_a_changed_system_prompt_rebuilds_instead_of_continuing(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("One.")]}, {"turns": [text_turn("Two.")]})
     provider = cli.provider(execution_identity=CONVERSATION)
@@ -618,7 +566,6 @@ async def test_a_changed_system_prompt_rebuilds_instead_of_continuing(tmp_path: 
     assert [spawn["system_prompt"] for spawn in cli.events("spawn")] == ["You are the test agent.", "New rules."]
 
 
-@pytest.mark.asyncio
 async def test_an_answer_outside_a_conversation_leaves_no_process_behind(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("One.")]})
 
@@ -630,7 +577,6 @@ async def test_an_answer_outside_a_conversation_leaves_no_process_behind(tmp_pat
 
 
 @pytest.mark.parametrize("same_storage", [True, False], ids=["in the same storage", "in another storage"])
-@pytest.mark.asyncio
 async def test_a_conversation_is_not_continued_by_another_claude_executable(tmp_path: Path, same_storage: bool) -> None:
     one = fake_cli(tmp_path / "one", {"turns": [text_turn("OK.")]})
     two = fake_cli(tmp_path / "two", {"turns": [text_turn("From two.")]})
@@ -646,7 +592,6 @@ async def test_a_conversation_is_not_continued_by_another_claude_executable(tmp_
     assert len(one.events("user")) == 1
 
 
-@pytest.mark.asyncio
 async def test_an_idle_process_that_died_is_replaced_without_failing_the_next_request(tmp_path: Path) -> None:
     dies = [{"text": "One."}, {"die_after_result": True}]
     cli = fake_cli(tmp_path, {"turns": [dies]}, {"turns": [text_turn("Two.")]})
@@ -664,7 +609,6 @@ async def test_an_idle_process_that_died_is_replaced_without_failing_the_next_re
 # --- lifetime ---------------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_a_stream_that_is_abandoned_closes_its_process(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("Hello, Alice.")]})
 
@@ -679,7 +623,6 @@ async def test_a_stream_that_is_abandoned_closes_its_process(tmp_path: Path) -> 
     assert SESSIONS.resting == {}
 
 
-@pytest.mark.asyncio
 async def test_a_process_past_its_time_to_live_is_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cli = fake_cli(tmp_path, {"turns": [_TWO_CALLS]}, {"turns": [text_turn("Idle.")]})
     provider = cli.provider(execution_identity=CONVERSATION)
@@ -697,7 +640,6 @@ async def test_a_process_past_its_time_to_live_is_closed(tmp_path: Path, monkeyp
     assert len(cli.events("exit")) == 2
 
 
-@pytest.mark.asyncio
 async def test_a_new_process_past_the_limit_evicts_an_idle_one_before_a_parked_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -717,7 +659,6 @@ async def test_a_new_process_past_the_limit_evicts_an_idle_one_before_a_parked_o
     assert (len(SESSIONS.live), SESSIONS.starting) == (2, 0)
 
 
-@pytest.mark.asyncio
 async def test_a_request_past_the_process_limit_fails_as_retryable_instead_of_starting_one_more(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -740,7 +681,6 @@ async def test_a_request_past_the_process_limit_fails_as_retryable_instead_of_st
     assert (SESSIONS.live, SESSIONS.starting) == (set(), 0)
 
 
-@pytest.mark.asyncio
 async def test_a_system_prompt_is_private_to_the_user_and_gone_once_claude_code_started(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
     home_path = cli.storage_root / "claude_code"
@@ -766,7 +706,6 @@ async def test_a_system_prompt_is_private_to_the_user_and_gone_once_claude_code_
     assert left_behind(cli) == []
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("part", ["claude_code", "cwd"])
 async def test_claude_code_refuses_linked_runtime_directories(tmp_path: Path, part: str) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("never")]})
@@ -800,7 +739,6 @@ def held_start(monkeypatch: pytest.MonkeyPatch) -> tuple[asyncio.Event, asyncio.
     return reached, released
 
 
-@pytest.mark.asyncio
 async def test_a_request_cancelled_while_claude_code_starts_keeps_its_slot_until_the_start_ended(
     tmp_path: Path,
     held_start: tuple[asyncio.Event, asyncio.Event],
@@ -824,7 +762,6 @@ async def test_a_request_cancelled_while_claude_code_starts_keeps_its_slot_until
     assert left_behind(cli) == []
 
 
-@pytest.mark.asyncio
 async def test_a_slot_is_not_free_before_the_process_that_held_it_is_gone(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -882,7 +819,6 @@ async def _failure(
     return raised.value
 
 
-@pytest.mark.asyncio
 async def test_a_signed_out_claude_code_says_how_to_sign_in_and_sends_nothing(tmp_path: Path) -> None:
     error = await _failure(tmp_path, {"account": {"tokenSource": "none", "apiProvider": "firstParty"}}, asked=False)
 
@@ -890,7 +826,6 @@ async def test_a_signed_out_claude_code_says_how_to_sign_in_and_sends_nothing(tm
     assert str(error) == ("Claude Code is not signed in. Run `claude auth login` as the user that runs MindRoom.")
 
 
-@pytest.mark.asyncio
 async def test_an_api_key_from_the_environment_is_refused_by_name(tmp_path: Path) -> None:
     account = {"tokenSource": "claude.ai", "apiKeySource": "ANTHROPIC_API_KEY", "apiProvider": "firstParty"}
 
@@ -922,7 +857,6 @@ async def test_an_api_key_from_the_environment_is_refused_by_name(tmp_path: Path
         "a known plan with something after its name",
     ],
 )
-@pytest.mark.asyncio
 async def test_an_account_that_is_not_a_plain_subscription_sign_in_is_refused(
     tmp_path: Path,
     account: dict[str, str],
@@ -933,7 +867,6 @@ async def test_an_account_that_is_not_a_plain_subscription_sign_in_is_refused(
 
 
 @pytest.mark.parametrize("plan", ["Claude Pro", "Claude Max", "Claude Max 20x", "Claude Team", "Claude Enterprise"])
-@pytest.mark.asyncio
 async def test_each_claude_subscription_plan_is_answered(tmp_path: Path, plan: str) -> None:
     account = {"subscriptionType": plan, "apiProvider": "firstParty"}
     cli = fake_cli(tmp_path, {"account": account, "turns": [text_turn("Hello.")]})
@@ -962,7 +895,6 @@ async def test_each_claude_subscription_plan_is_answered(tmp_path: Path, plan: s
         "ANTHROPIC_A_VARIABLE_OF_A_LATER_CLAUDE_CODE",
     ],
 )
-@pytest.mark.asyncio
 async def test_an_inherited_variable_that_replaces_the_sign_in_or_where_it_is_sent_is_refused_by_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -982,7 +914,6 @@ async def test_an_inherited_variable_that_replaces_the_sign_in_or_where_it_is_se
     assert cli.events("spawn") == []
 
 
-@pytest.mark.asyncio
 async def test_a_variable_that_is_set_for_claude_code_anyway_is_not_refused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -995,7 +926,6 @@ async def test_a_variable_that_is_set_for_claude_code_anyway_is_not_refused(
     assert (await complete(cli.provider(), ModelRequest(messages=[user("Hi")]))).content == "Hello."
 
 
-@pytest.mark.asyncio
 async def test_a_claude_code_older_than_the_one_this_route_was_run_against_gets_no_prompt(tmp_path: Path) -> None:
     # 2.1.294 still let the model reach tools beyond the ones it was started with.
     error = await _failure(tmp_path, {"version": "2.1.294", "turns": [text_turn("never")]}, asked=False)
@@ -1005,7 +935,6 @@ async def test_a_claude_code_older_than_the_one_this_route_was_run_against_gets_
     assert "claude update" in str(error)
 
 
-@pytest.mark.asyncio
 async def test_a_missing_claude_binary_says_how_to_install_it(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {})
 
@@ -1022,7 +951,6 @@ async def test_a_missing_claude_binary_says_how_to_install_it(tmp_path: Path) ->
     ],
     ids=["its tool server did not connect", "another tool server is connected", "it does not say which are connected"],
 )
-@pytest.mark.asyncio
 async def test_a_process_whose_tool_servers_are_not_exactly_mindrooms_gets_no_request(
     tmp_path: Path,
     process: dict[str, Any],
@@ -1053,7 +981,6 @@ async def test_a_process_whose_tool_servers_are_not_exactly_mindrooms_gets_no_re
         "another tool server without any tool offered",
     ],
 )
-@pytest.mark.asyncio
 async def test_a_turn_that_does_not_start_with_exactly_mindrooms_tools_is_stopped(
     tmp_path: Path,
     init: dict[str, Any] | None,
@@ -1066,7 +993,6 @@ async def test_a_turn_that_does_not_start_with_exactly_mindrooms_tools_is_stoppe
     assert "stopped" in str(error)
 
 
-@pytest.mark.asyncio
 async def test_a_plan_limit_is_a_final_quota_error_with_its_reset_time(tmp_path: Path) -> None:
     rejected = {"status": "rejected", "resetsAt": 1900000000, "rateLimitType": "five_hour"}
     turn = [
@@ -1083,50 +1009,57 @@ async def test_a_plan_limit_is_a_final_quota_error_with_its_reset_time(tmp_path:
     assert str(error) == "Claude subscription limit reached (five hour). Resets at 2030-03-17T17:46:40+00:00."
 
 
-@pytest.mark.asyncio
-async def test_a_prompt_that_is_too_long_asks_mindroom_to_compact(tmp_path: Path) -> None:
-    turn = [
-        {"text": "Prompt is too long", "error": "invalid_request"},
-        {"result": {"is_error": True, "api_error_status": 400}},
-    ]
+@pytest.mark.parametrize(
+    ("steps", "error_type", "retryable", "status"),
+    [
+        pytest.param(
+            [
+                {"text": "Prompt is too long", "error": "invalid_request"},
+                {"result": {"is_error": True, "api_error_status": 400}},
+            ],
+            ContextWindowExceeded,
+            False,
+            400,
+            id="prompt too long",
+        ),
+        pytest.param(
+            [
+                {"text": "Invalid API key · Please run /login", "error": "authentication_failed"},
+                {"result": {"is_error": True}},
+            ],
+            AuthenticationFailed,
+            False,
+            401,
+            id="expired sign-in",
+        ),
+        pytest.param(
+            [
+                {"text": "API Error: 529 Overloaded", "error": "server_error"},
+                {"result": {"is_error": True, "api_error_status": 529}},
+            ],
+            ProviderError,
+            False,
+            529,
+            id="server error already retried by Claude Code",
+        ),
+        pytest.param([{"exit": 1}], ProviderUnavailable, True, None, id="process died"),
+    ],
+)
+async def test_claude_code_turn_failures_keep_their_error_shape(
+    tmp_path: Path,
+    steps: list[dict[str, Any]],
+    error_type: type[ProviderError],
+    retryable: bool,
+    status: int | None,
+) -> None:
+    error = await _failure(tmp_path, {"turns": [steps]})
 
-    assert isinstance(await _failure(tmp_path, {"turns": [turn]}), ContextWindowExceeded)
+    assert type(error) is error_type
+    assert (error.retryable, error.status_code) == (retryable, status)
+    if error_type is AuthenticationFailed:
+        assert "claude auth login" in str(error)
 
 
-@pytest.mark.asyncio
-async def test_a_sign_in_that_expired_mid_conversation_says_how_to_sign_in(tmp_path: Path) -> None:
-    turn = [
-        {"text": "Invalid API key · Please run /login", "error": "authentication_failed"},
-        {"result": {"is_error": True}},
-    ]
-
-    error = await _failure(tmp_path, {"turns": [turn]})
-
-    assert isinstance(error, AuthenticationFailed)
-    assert "claude auth login" in str(error)
-
-
-@pytest.mark.asyncio
-async def test_a_server_error_claude_code_already_retried_is_final(tmp_path: Path) -> None:
-    turn = [
-        {"text": "API Error: 529 Overloaded", "error": "server_error"},
-        {"result": {"is_error": True, "api_error_status": 529}},
-    ]
-
-    error = await _failure(tmp_path, {"turns": [turn]})
-
-    assert not error.retryable
-    assert error.status_code == 529
-
-
-@pytest.mark.asyncio
-async def test_a_process_that_dies_mid_turn_is_a_retryable_failure(tmp_path: Path) -> None:
-    error = await _failure(tmp_path, {"turns": [[{"exit": 1}]]})
-
-    assert isinstance(error, ProviderUnavailable)
-
-
-@pytest.mark.asyncio
 async def test_a_process_that_cannot_take_the_request_is_a_retryable_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1143,31 +1076,11 @@ async def test_a_process_that_cannot_take_the_request_is_a_retryable_failure(
     assert "not ready for writing" in str(error)
 
 
-@pytest.mark.asyncio
-async def test_tool_calls_in_a_message_that_did_not_stream_are_not_handed_over_in_part(tmp_path: Path) -> None:
-    # Each call arrives in a message of its own under one id, and nothing says which is the last.
-    whole = {"tools": [call("toolu_a", "a"), call("toolu_b", "b")], "complete_only": True}
-    cli = fake_cli(tmp_path, {"turns": [[whole]]})
-    events: list[StreamEvent] = []
-
-    async def read() -> None:
-        async for event in cli.provider().stream(ModelRequest(messages=[user("Look up a and b.")], tools=[LOOKUP])):
-            events.append(event)  # noqa: PERF401
-
-    with pytest.raises(ProviderUnavailable, match="did not stream"):
-        await asyncio.wait_for(read(), 10)
-    await _closed()
-
-    assert not any(isinstance(event, ToolCallReady | TurnCompleted) for event in events)
-    assert len(cli.events("exit")) == 1
-
-
 @pytest.mark.parametrize(
     ("status", "seconds"),
     [({"status_error": "No such request"}, 30.0), ({"status_stall": True}, 0.3), ({"mcp_status": "pending"}, 0.3)],
     ids=["it rejects the question", "it never answers the question", "its tool server never connects"],
 )
-@pytest.mark.asyncio
 async def test_a_claude_code_that_does_not_say_which_tools_it_connected_is_a_retryable_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1182,26 +1095,6 @@ async def test_a_claude_code_that_does_not_say_which_tools_it_connected_is_a_ret
     assert "did not start" in str(error)
 
 
-@pytest.mark.asyncio
-async def test_a_model_message_claude_code_gave_up_hands_over_none_of_its_calls(tmp_path: Path) -> None:
-    # The message ends without the reason a message that calls tools ends with, as one Claude Code retracts does.
-    retracted = {"tools": [call("toolu_a", "a")], "stop_reason": None}
-    cli = fake_cli(tmp_path, {"turns": [[retracted, {"text": "never"}]]})
-    events: list[StreamEvent] = []
-
-    async def read() -> None:
-        async for event in cli.provider().stream(ModelRequest(messages=[user("Look up a.")], tools=[LOOKUP])):
-            events.append(event)  # noqa: PERF401
-
-    with pytest.raises(ProviderUnavailable, match="gave up the model message"):
-        await read()
-    await _closed()
-
-    assert not any(isinstance(event, ToolCallReady | TurnCompleted) for event in events)
-    assert len(cli.events("exit")) == 1
-
-
-@pytest.mark.asyncio
 async def test_a_process_that_starts_over_holds_the_slot_of_the_one_it_replaces_all_along(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1237,7 +1130,6 @@ async def test_a_process_that_starts_over_holds_the_slot_of_the_one_it_replaces_
     assert [event for event in started if event in {"spawn", "exit"}] == ["spawn", "exit", "spawn"]
 
 
-@pytest.mark.asyncio
 async def test_a_process_that_is_gone_gives_its_slot_to_no_other(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1252,7 +1144,7 @@ async def test_a_process_that_is_gone_gives_its_slot_to_no_other(
     await complete(provider, ModelRequest(messages=[user("Hi again")]))
 
     # The one slot is held by another process now, which the new one must take as any start would.
-    new = await session_module.start(
+    new = await SESSIONS.start(
         provider="invented",
         storage_root=cli.storage_root,
         replaces=gone,
@@ -1265,7 +1157,6 @@ async def test_a_process_that_is_gone_gives_its_slot_to_no_other(
     assert SESSIONS.resting == {}
 
 
-@pytest.mark.asyncio
 async def test_a_call_that_got_its_result_leaves_only_its_id_which_no_later_call_may_use(tmp_path: Path) -> None:
     turn = [_TWO_CALLS[0], {"tools": [call("toolu_a", "again")]}, {"text": "never"}]
     cli = fake_cli(tmp_path, {"turns": [turn]})
@@ -1292,7 +1183,6 @@ async def test_a_call_that_got_its_result_leaves_only_its_id_which_no_later_call
     ["abandon", "denied", "unused"],
     ids=["it gave the call up", "it never made the call", "it dropped the result it was handed"],
 )
-@pytest.mark.asyncio
 async def test_an_answer_that_did_not_take_mindrooms_results_is_discarded_and_the_turn_rebuilt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1320,10 +1210,10 @@ async def test_an_answer_that_did_not_take_mindrooms_results_is_discarded_and_th
             await asyncio.sleep(0.01)
 
     messages += [asked.message, result("toolu_a", "LILAC-HERON")]
-    events = await _events(provider, ModelRequest(messages=messages, tools=[LOOKUP], on_send=on_send))
+    events = await drain(provider, ModelRequest(messages=messages, tools=[LOOKUP], on_send=on_send))
     await _closed()
 
-    assert _turn(events).message.content == "Rebuilt."
+    assert completed_turn(events).message.content == "Rebuilt."
     assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Rebuilt."
     assert modes == ["continue", "rebuild"]
     # A process that had gone on before the results were ready never got them.
@@ -1333,7 +1223,6 @@ async def test_an_answer_that_did_not_take_mindrooms_results_is_discarded_and_th
     assert len(cli.events("spawn")) == 2
 
 
-@pytest.mark.asyncio
 async def test_a_later_turn_of_a_process_must_start_with_exactly_mindrooms_tools_again(tmp_path: Path) -> None:
     process = {"turns": [text_turn("One."), text_turn("never")], "later_init": None}
     cli = fake_cli(tmp_path, process)
@@ -1349,32 +1238,52 @@ async def test_a_later_turn_of_a_process_must_start_with_exactly_mindrooms_tools
 
 
 @pytest.mark.parametrize(
-    ("tools", "said", "retryable"),
+    ("steps", "error_type", "said"),
     [
-        ([{"id": "toolu_x", "raw_name": "Bash", "input": {"command": "id"}, "denied": True}], "Bash", True),
-        ([call("toolu_a", "a"), call("toolu_a", "b")], "toolu_a twice", False),
+        pytest.param(
+            [{"tools": [call("toolu_a", "a"), call("toolu_b", "b")], "complete_only": True}],
+            ProviderUnavailable,
+            "did not stream",
+            id="calls arrive without a final streamed boundary",
+        ),
+        pytest.param(
+            [{"tools": [call("toolu_a", "a")], "stop_reason": None}, {"text": "never"}],
+            ProviderUnavailable,
+            "gave up the model message",
+            id="a retracted message",
+        ),
+        pytest.param(
+            [
+                {"tools": [{"id": "toolu_x", "raw_name": "Bash", "input": {"command": "id"}, "denied": True}]},
+                {"text": "never"},
+            ],
+            ProviderUnavailable,
+            "Bash",
+            id="an unoffered tool",
+        ),
+        pytest.param(
+            [{"tools": [call("toolu_a", "a"), call("toolu_a", "b")]}, {"text": "never"}],
+            ProviderError,
+            "toolu_a twice",
+            id="a reused call id",
+        ),
     ],
-    ids=["a tool MindRoom did not offer, which a new process may not name again", "a call id the model used before"],
 )
-@pytest.mark.asyncio
-async def test_a_call_mindroom_cannot_run_fails_before_any_call_is_handed_over(
+async def test_an_unusable_call_fails_before_any_call_is_handed_over(
     tmp_path: Path,
-    tools: list[dict[str, Any]],
+    steps: list[dict[str, Any]],
+    error_type: type[ProviderError],
     said: str,
-    retryable: bool,
 ) -> None:
-    cli = fake_cli(tmp_path, {"turns": [[{"tools": tools}, {"text": "never"}]]})
+    cli = fake_cli(tmp_path, {"turns": [steps]})
     events: list[StreamEvent] = []
+    request = ModelRequest(messages=[user("Look up the markers.")], tools=[LOOKUP])
 
-    async def read() -> None:
-        async for event in cli.provider().stream(ModelRequest(messages=[user("Hi")], tools=[LOOKUP])):
-            events.append(event)  # noqa: PERF401
-
-    with pytest.raises(ProviderError, match=said) as raised:
-        await read()
+    with pytest.raises(error_type, match=said) as raised:
+        await asyncio.wait_for(drain_into(events, cli.provider(), request), 10)
     await _closed()
 
-    assert raised.value.retryable == retryable
+    assert raised.value.retryable == (error_type is ProviderUnavailable)
     assert not any(isinstance(event, ToolCallReady | TurnCompleted) for event in events)
     assert len(cli.events("exit")) == 1
 
@@ -1386,7 +1295,6 @@ def _notice(text: str) -> Message:
     return Message(role="user", content=text, provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True})
 
 
-@pytest.mark.asyncio
 async def test_a_process_that_read_a_queued_message_notice_is_not_continued_once_the_notice_is_gone(
     tmp_path: Path,
 ) -> None:
@@ -1403,14 +1311,13 @@ async def test_a_process_that_read_a_queued_message_notice_is_not_continued_once
     assert len(cli.events("exit")) == 1
 
 
-@pytest.mark.asyncio
 async def test_the_images_a_tool_made_reach_the_parked_process_with_its_result(tmp_path: Path) -> None:
     turn = [{"tools": [call("toolu_a", "a")]}, {"text": "I see it."}]
     cli = fake_cli(tmp_path, {"turns": [turn]})
     provider = cli.provider()
     messages = [user("Take a screenshot.")]
     asked = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
-    made = replace(result("toolu_a", "Captured."), images=[Image(content=_PNG, format="png")])
+    made = replace(result("toolu_a", "Captured."), images=[Image(content=PNG, format="png")])
     # The agent loop moves a tool's media off its result, onto a user message of its own after the results.
     follow_up = media_follow_up([made])
     assert follow_up is not None
@@ -1422,10 +1329,9 @@ async def test_the_images_a_tool_made_reach_the_parked_process_with_its_result(t
     assert len(cli.events("spawn")) == 1
     [delivered] = cli.events("tool_result")
     assert [block["type"] for block in delivered["result"]["content"]] == ["text", "image"]
-    assert delivered["result"]["content"][1]["data"] == base64.b64encode(_PNG).decode()
+    assert delivered["result"]["content"][1]["data"] == base64.b64encode(PNG).decode()
 
 
-@pytest.mark.asyncio
 async def test_the_pooled_media_of_a_batch_of_several_calls_reach_a_new_process_as_their_own_turn(
     tmp_path: Path,
 ) -> None:
@@ -1433,7 +1339,7 @@ async def test_the_pooled_media_of_a_batch_of_several_calls_reach_a_new_process_
     provider = cli.provider()
     messages = [user("Take a screenshot and look up b.")]
     asked = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
-    shot = replace(result("toolu_a", "Captured."), images=[Image(content=_PNG, format="png")])
+    shot = replace(result("toolu_a", "Captured."), images=[Image(content=PNG, format="png")])
     failed = replace(result("toolu_b", "No such key."), tool_call_error=True)
     # Nothing says which call of the batch made the image, so no call's result may carry it.
     follow_up = media_follow_up([shot, failed])
@@ -1449,7 +1355,6 @@ async def test_the_pooled_media_of_a_batch_of_several_calls_reach_a_new_process_
     assert image["type"] == "image"
 
 
-@pytest.mark.asyncio
 async def test_a_user_message_after_the_results_of_a_parked_turn_rebuilds_as_a_user_message(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [[{"tools": [call("toolu_a", "a")]}]]}, {"turns": [text_turn("Rebuilt.")]})
     provider = cli.provider()
@@ -1465,7 +1370,6 @@ async def test_a_user_message_after_the_results_of_a_parked_turn_rebuilds_as_a_u
     assert cli.events("user")[1]["content"][-1]["text"].endswith("</conversation-checkpoint>\nStop, look up c instead.")
 
 
-@pytest.mark.asyncio
 async def test_a_conversation_that_starts_over_gives_the_slot_of_its_idle_process_to_the_new_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1482,7 +1386,6 @@ async def test_a_conversation_that_starts_over_gives_the_slot_of_its_idle_proces
     assert len(cli.events("exit")) == 1
 
 
-@pytest.mark.asyncio
 async def test_a_request_that_may_call_no_tool_leaves_the_idle_process_of_its_conversation_alone(
     tmp_path: Path,
 ) -> None:
@@ -1501,7 +1404,6 @@ async def test_a_request_that_may_call_no_tool_leaves_the_idle_process_of_its_co
     assert cli.events("user")[2]["content"] == [{"type": "text", "text": "More?"}]
 
 
-@pytest.mark.asyncio
 async def test_history_copied_to_another_conversation_does_not_close_the_process_parked_on_its_calls(
     tmp_path: Path,
 ) -> None:
@@ -1520,7 +1422,6 @@ async def test_history_copied_to_another_conversation_does_not_close_the_process
     assert (await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))).content == "LILAC-HERON"
 
 
-@pytest.mark.asyncio
 async def test_a_parked_turn_is_not_continued_or_closed_from_another_storage(tmp_path: Path) -> None:
     turn = [{"tools": [call("toolu_a", "a")]}, {"text": "{toolu_a}"}]
     cli = fake_cli(tmp_path, {"turns": [turn]}, {"turns": [text_turn("Elsewhere.")]})
@@ -1537,7 +1438,6 @@ async def test_a_parked_turn_is_not_continued_or_closed_from_another_storage(tmp
     assert [key[2] for key in SESSIONS.resting] == [("toolu_a",)]
 
 
-@pytest.mark.asyncio
 async def test_a_preflight_closes_only_the_process_it_started(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("One.")]})
     provider = cli.provider(execution_identity=CONVERSATION)
@@ -1558,7 +1458,6 @@ def _ledger(**counters: int) -> dict[str, int]:
     return {"inputTokens": 0, "cacheCreationInputTokens": 0, "cacheReadInputTokens": 0, "outputTokens": 0, **counters}
 
 
-@pytest.mark.asyncio
 async def test_what_a_turn_used_beyond_its_model_messages_is_added_once(tmp_path: Path) -> None:
     message = {"input_tokens": 3, "cache_creation_input_tokens": 40, "cache_read_input_tokens": 200, "output_tokens": 9}
     # Claude Code also asked another model something for itself, which no model message of the turn shows.
@@ -1586,7 +1485,6 @@ async def test_what_a_turn_used_beyond_its_model_messages_is_added_once(tmp_path
     assert answer.usage.context.input_tokens == 3
 
 
-@pytest.mark.asyncio
 async def test_what_a_later_turn_used_is_what_the_ledger_of_its_process_grew_by(tmp_path: Path) -> None:
     # The ledger counts both turns: 3 input tokens each for the model messages, and 7 more in the second turn.
     ledger = {"claude-invented-1": _ledger(inputTokens=6, outputTokens=10), "small": _ledger(inputTokens=7)}
@@ -1603,7 +1501,6 @@ async def test_what_a_later_turn_used_is_what_the_ledger_of_its_process_grew_by(
     assert len(cli.events("spawn")) == 1
 
 
-@pytest.mark.asyncio
 async def test_a_plan_limit_reported_while_the_process_rested_still_gives_its_reset_time(tmp_path: Path) -> None:
     refused = [{"text": "You've hit your limit", "error": "rate_limit"}, {"result": {"is_error": True}}]
     cli = fake_cli(tmp_path, {"turns": [[{"tools": [call("toolu_a", "a")]}, *refused]]})
@@ -1619,7 +1516,6 @@ async def test_a_plan_limit_reported_while_the_process_rested_still_gives_its_re
         await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
 
 
-@pytest.mark.asyncio
 async def test_two_requests_with_the_same_history_never_share_a_parked_process(tmp_path: Path) -> None:
     turn = [*_TWO_CALLS, {"text": "{toolu_a}+{toolu_b}"}]
     cli = fake_cli(tmp_path, {"turns": [turn]}, {"turns": [text_turn("Rebuilt.")]})

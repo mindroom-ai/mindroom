@@ -1,8 +1,4 @@
-"""Read one model step from a live Claude Code process and turn it into the events of one request.
-
-A step ends where MindRoom's loop takes over: at the end of a model message that calls MindRoom's tools, with the
-process parked on those calls, or at the result that ends Claude Code's turn.
-"""
+"""Read one model step, through its final answer or the tool calls Claude Code has parked on."""
 
 from __future__ import annotations
 
@@ -31,7 +27,8 @@ from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, Usag
 from mindroom.llm.usage import add_usage
 from mindroom.providers.anthropic.wire import parse_claude_usage, stop_reason_of
 from mindroom.providers.assistant_turn import finished_turn
-from mindroom.providers.claude_code.prompt import TOOL_PREFIX, answer_of
+from mindroom.providers.claude_code.bridge import TOOL_PREFIX
+from mindroom.providers.claude_code.prompt import answer_of
 from mindroom.providers.claude_code.session import NOT_SIGNED_IN
 from mindroom.providers.errors import classify_provider_error
 

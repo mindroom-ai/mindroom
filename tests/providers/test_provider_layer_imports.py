@@ -33,6 +33,7 @@ OWNED_PROVIDER_MODULES = (
     "mindroom.providers.gemini.wire",
     "mindroom.providers.gemini.files",
     "mindroom.providers.ollama.adapter",
+    "mindroom.providers.claude_code.adapter",
     "mindroom.providers.synthetic_adapter",
     "mindroom.providers.registry",
 )

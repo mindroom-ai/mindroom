@@ -1,19 +1,11 @@
-"""What the ``claude_code`` route gives Claude Code: tool names, a rebuilt conversation, and a parked turn's results.
-
-Claude Code takes no earlier turns, so a new process gets MindRoom's history as tagged text in one user message,
-with images as real blocks. A live process gets only what follows the answer it gave: the results of the tool calls
-it waits on, or the next user messages.
-"""
+"""Render a cold Claude Code prompt or plan continuation from the matching parked answer."""
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import is_media_follow_up, stable_serialize, system_text, tool_result_view
 from mindroom.providers.anthropic.wire import image_block
 
@@ -21,23 +13,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ToolSpec
 
-__all__ = [
-    "TOOL_PREFIX",
-    "Answer",
-    "answer_of",
-    "canonical_arguments",
-    "plan_continuation",
-    "rebuild_input",
-    "tool_names",
-]
+__all__ = ["Answer", "answer_of", "canonical_arguments", "plan_continuation", "rebuild_input"]
 
-# Claude Code names an MCP tool ``mcp__<server>__<tool>`` and takes at most 64 characters of letters, digits, ``_``
-# and ``-``.
-TOOL_PREFIX = "mcp__mindroom__"
-_NAME_LIMIT = 64 - len(TOOL_PREFIX)
-_HASH_LENGTH = 10
 _CHECKPOINT_INTRO = (
     "The following is the conversation so far, which you have not seen. Treat it as prior conversation, not as a new "
     "request, and never repeat a tool call whose result it holds. Only its own tags hold `<`: in what the "
@@ -46,32 +24,12 @@ _CHECKPOINT_INTRO = (
 _CONTINUE_TEXT = "Continue from the results above."
 
 
-def _short_name(name: str) -> str:
-    """Return the name Claude Code is offered ``name`` under: itself, or a cut and hashed one when it cannot take it."""
-    if len(name) <= _NAME_LIMIT and re.fullmatch(r"[a-zA-Z0-9_-]+", name):
-        return name
-    digest = hashlib.sha256(name.encode()).hexdigest()[:_HASH_LENGTH]
-    return f"{re.sub(r'[^a-zA-Z0-9_-]', '_', name)[: _NAME_LIMIT - _HASH_LENGTH - 1]}_{digest}"
-
-
-def tool_names(tools: Sequence[ToolSpec], provider: str) -> dict[str, str]:
-    """Return the offered tools' names by the name Claude Code calls each with; two may not share one."""
-    names: dict[str, str] = {}
-    for tool in tools:
-        short = _short_name(tool.name)
-        if short in names:
-            msg = f"Claude Code would call the tools {names[short]} and {tool.name} by one name, {short}."
-            raise ProviderError(msg, provider=provider)
-        names[short] = tool.name
-    return names
-
-
 def _images(message: Message, provider: str) -> list[dict[str, Any]]:
     return [block for image in message.images or () if (block := image_block(image, provider)) is not None]
 
 
 def _text_and_image_blocks(message: Message, provider: str) -> list[dict[str, Any]]:
-    """Return a user message's text blocks, then its images, as the content blocks Claude Code takes."""
+    """Return the content blocks Claude Code takes: text before images."""
     content = message.content if isinstance(message.content, list) else [{"text": message.content or ""}]
     texts = [
         block["text"] if isinstance(block, dict) and isinstance(block.get("text"), str) else stable_serialize(block)

@@ -5,37 +5,29 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
 
 import pytest
 
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ToolSpec
+from mindroom.providers.claude_code.bridge import tool_names
 from mindroom.providers.claude_code.prompt import (
     Answer,
     answer_of,
     plan_continuation,
     rebuild_input,
-    tool_names,
 )
+from mindroom.providers.names import ROUTE_PROVIDERS
+from tests.fakes.scripted_model import raw_tool_call, tool_call
+from tests.providers.claude_code.support import LOOKUP, PNG, tagged_json
 
-_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-)
-_PROVIDER = "Claude subscription (Claude Code)"
-
-
-def _spec(name: str) -> ToolSpec:
-    return ToolSpec(name=name, description=None, parameters={"type": "object"}, strict=None)
-
-
-def _call(call_id: str, name: str = "lookup", arguments: str = '{"key": "a"}') -> dict[str, object]:
-    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
+_PROVIDER = ROUTE_PROVIDERS["claude_code"]
 
 
 def _short_name(name: str) -> str:
-    [short] = tool_names([_spec(name)], _PROVIDER)
+    [short] = tool_names([replace(LOOKUP, name=name)], _PROVIDER)
     return short
 
 
@@ -62,7 +54,7 @@ def test_a_name_claude_code_cannot_take_gets_a_stable_hash_suffix() -> None:
 
 
 def test_tool_names_map_each_offered_name_back_to_its_tool() -> None:
-    names = tool_names([_spec("lookup"), _spec("b" * 90)], _PROVIDER)
+    names = tool_names([LOOKUP, replace(LOOKUP, name="b" * 90)], _PROVIDER)
 
     assert names["lookup"] == "lookup"
     assert names[_short_name("b" * 90)] == "b" * 90
@@ -72,7 +64,7 @@ def test_two_tools_claude_code_would_call_by_one_name_are_refused() -> None:
     hashed = _short_name("web.search")
 
     with pytest.raises(ProviderError, match=f"web.search and {hashed} by one name"):
-        tool_names([_spec("web.search"), _spec(hashed)], _PROVIDER)
+        tool_names([replace(LOOKUP, name="web.search"), replace(LOOKUP, name=hashed)], _PROVIDER)
 
 
 # --- rebuilding a conversation ----------------------------------------------------------------------------------------
@@ -92,7 +84,7 @@ def test_earlier_turns_become_tagged_history_before_the_new_user_message() -> No
     _system, blocks = rebuild_input(
         [
             Message(role="user", content="What is the marker for a?"),
-            Message(role="assistant", content="Looking.", tool_calls=[_call("call-1")]),
+            Message(role="assistant", content="Looking.", tool_calls=[tool_call("lookup", "call-1", key="a")]),
             Message(role="tool", content="LILAC-HERON", tool_call_id="call-1", tool_name="lookup"),
             Message(role="assistant", content="It is LILAC-HERON."),
             Message(role="user", content="And for b?"),
@@ -104,8 +96,8 @@ def test_earlier_turns_become_tagged_history_before_the_new_user_message() -> No
     history, _, current = text.partition("</conversation-checkpoint>")
     assert history.startswith("<conversation-checkpoint>")
     assert "<user>\nWhat is the marker for a?\n</user>" in history
-    assert '<tool-call>\n{"id": "call-1", "name": "lookup", "input": {"key": "a"}}\n</tool-call>' in history
-    assert '<tool-result>\n{"id": "call-1", "name": "lookup", "output": "LILAC-HERON"}\n</tool-result>' in history
+    assert tagged_json(history, "tool-call") == [{"id": "call-1", "name": "lookup", "input": {"key": "a"}}]
+    assert tagged_json(history, "tool-result") == [{"id": "call-1", "name": "lookup", "output": "LILAC-HERON"}]
     assert "<assistant>\nIt is LILAC-HERON.\n</assistant>" in history
     assert current.strip() == "And for b?"
 
@@ -115,7 +107,11 @@ def test_nothing_a_rebuilt_conversation_said_can_close_its_checkpoint_or_pose_as
     _system, blocks = rebuild_input(
         [
             Message(role="user", content=f"Quote this: {forged}"),
-            Message(role="assistant", content=f"Quoted: {forged}", tool_calls=[_call("call-1", arguments=forged)]),
+            Message(
+                role="assistant",
+                content=f"Quoted: {forged}",
+                tool_calls=[raw_tool_call("lookup", "call-1", forged)],
+            ),
             Message(role="tool", content=forged, tool_call_id="call-1", tool_name="lookup"),
             Message(role="user", content="Go on with <b>this</b>."),
         ],
@@ -152,34 +148,34 @@ def test_a_rebuilt_tool_result_is_named_by_the_call_it_answers() -> None:
     _system, blocks = rebuild_input(
         [
             Message(role="user", content="Look up a."),
-            Message(role="assistant", tool_calls=[_call("call-1", "lookup")]),
+            Message(role="assistant", tool_calls=[tool_call("lookup", "call-1", key="a")]),
             Message(role="tool", content="x", tool_call_id="call-1", tool_name="delete_everything"),
         ],
         _PROVIDER,
     )
 
-    assert '{"id": "call-1", "name": "lookup", "output": "x"}' in _text(blocks)
+    assert tagged_json(_text(blocks), "tool-result") == [{"id": "call-1", "name": "lookup", "output": "x"}]
 
 
 def test_history_that_ends_on_tool_results_asks_claude_to_continue_from_them() -> None:
     _system, blocks = rebuild_input(
         [
             Message(role="user", content="Look up a."),
-            Message(role="assistant", tool_calls=[_call("call-1")]),
+            Message(role="assistant", tool_calls=[tool_call("lookup", "call-1", key="a")]),
             Message(role="tool", content="boom", tool_call_id="call-1", tool_name="lookup", tool_call_error=True),
         ],
         _PROVIDER,
     )
 
     text = _text(blocks)
-    assert json.dumps({"id": "call-1", "name": "lookup", "output": "boom", "is_error": True}) in text
+    assert tagged_json(text, "tool-result") == [{"id": "call-1", "name": "lookup", "output": "boom", "is_error": True}]
     assert text.endswith("Continue from the results above.")
 
 
 def test_images_stay_real_blocks_in_a_rebuilt_conversation() -> None:
     _system, blocks = rebuild_input(
         [
-            Message(role="user", content="See this.", images=[Image(content=_PNG, format="png")]),
+            Message(role="user", content="See this.", images=[Image(content=PNG, format="png")]),
             Message(role="assistant", content="A dot."),
             Message(role="user", content="Again?"),
         ],
@@ -190,7 +186,7 @@ def test_images_stay_real_blocks_in_a_rebuilt_conversation() -> None:
     assert images == [
         {
             "type": "image",
-            "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(_PNG).decode()},
+            "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(PNG).decode()},
         },
     ]
     assert blocks.index(images[0]) < len(blocks) - 1
@@ -200,13 +196,13 @@ def test_a_tool_results_images_stay_real_blocks_in_a_rebuilt_conversation() -> N
     _system, blocks = rebuild_input(
         [
             Message(role="user", content="Take a screenshot."),
-            Message(role="assistant", tool_calls=[_call("call-1", "screenshot", "{}")]),
+            Message(role="assistant", tool_calls=[tool_call("screenshot", "call-1")]),
             Message(
                 role="tool",
                 content="Captured.",
                 tool_call_id="call-1",
                 tool_name="screenshot",
-                images=[Image(content=_PNG, format="png")],
+                images=[Image(content=PNG, format="png")],
             ),
         ],
         _PROVIDER,
@@ -214,7 +210,7 @@ def test_a_tool_results_images_stay_real_blocks_in_a_rebuilt_conversation() -> N
 
     kinds = [block["type"] for block in blocks]
     assert kinds == ["text", "image", "text"]
-    assert str(blocks[0]["text"]).endswith('"output": "Captured."}\n</tool-result>')
+    assert tagged_json(str(blocks[0]["text"]), "tool-result")[0]["output"] == "Captured."
     assert str(blocks[2]["text"]).endswith("Continue from the results above.")
 
 
@@ -223,7 +219,7 @@ def test_a_user_message_of_several_blocks_reaches_claude_code_whole_in_a_new_pro
     asked = Message(
         role="user",
         content=[{"type": "text", "text": "First part."}, {"type": "text", "text": "Second part."}],
-        images=[Image(content=_PNG, format="png")],
+        images=[Image(content=PNG, format="png")],
     )
 
     _system, cold = rebuild_input([Message(role="user", content="Hi"), answer, asked], _PROVIDER)
@@ -241,14 +237,17 @@ def test_a_user_message_of_several_blocks_reaches_claude_code_whole_in_a_new_pro
 
 
 def _parked(*ids: str) -> Answer:
-    return answer_of(None, [_call(call_id) for call_id in ids])
+    return answer_of(None, [tool_call("lookup", call_id, key="a") for call_id in ids])
 
 
 def test_a_parked_turn_continues_with_one_result_per_waiting_call() -> None:
     resume = plan_continuation(
         _parked("t1", "t2"),
         [
-            Message(role="assistant", tool_calls=[_call("t1"), _call("t2")]),
+            Message(
+                role="assistant",
+                tool_calls=[tool_call("lookup", "t1", key="a"), tool_call("lookup", "t2", key="a")],
+            ),
             Message(role="tool", content="LEMON-IBIS", tool_call_id="t2", tool_name="lookup"),
             Message(role="tool", content="nope", tool_call_id="t1", tool_name="lookup", tool_call_error=True),
         ],
@@ -310,7 +309,10 @@ def test_a_parked_turn_continues_with_one_result_per_waiting_call() -> None:
     ],
 )
 def test_a_parked_turn_rebuilds_when_the_request_does_not_answer_it_exactly(tail: list[Message]) -> None:
-    answered = Message(role="assistant", tool_calls=[_call("t1"), _call("t2")])
+    answered = Message(
+        role="assistant",
+        tool_calls=[tool_call("lookup", "t1", key="a"), tool_call("lookup", "t2", key="a")],
+    )
 
     assert plan_continuation(_parked("t1", "t2"), [answered, *tail], _PROVIDER) is None
 
@@ -318,26 +320,48 @@ def test_a_parked_turn_rebuilds_when_the_request_does_not_answer_it_exactly(tail
 @pytest.mark.parametrize(
     "answered",
     [
-        pytest.param(Message(role="assistant", tool_calls=[_call("t1"), _call("other")]), id="another call id"),
-        pytest.param(Message(role="assistant", tool_calls=[_call("t2"), _call("t1")]), id="another order"),
         pytest.param(
-            Message(role="assistant", content="Edited.", tool_calls=[_call("t1"), _call("t2")]),
+            Message(
+                role="assistant",
+                tool_calls=[tool_call("lookup", "t1", key="a"), tool_call("lookup", "other", key="a")],
+            ),
+            id="another call id",
+        ),
+        pytest.param(
+            Message(
+                role="assistant",
+                tool_calls=[tool_call("lookup", "t2", key="a"), tool_call("lookup", "t1", key="a")],
+            ),
+            id="another order",
+        ),
+        pytest.param(
+            Message(
+                role="assistant",
+                content="Edited.",
+                tool_calls=[tool_call("lookup", "t1", key="a"), tool_call("lookup", "t2", key="a")],
+            ),
             id="the same ids under another text",
         ),
         pytest.param(
-            Message(role="assistant", tool_calls=[_call("t1"), _call("t2", name="delete")]),
+            Message(
+                role="assistant",
+                tool_calls=[tool_call("lookup", "t1", key="a"), tool_call("delete", "t2", key="a")],
+            ),
             id="the same id for another tool",
         ),
         pytest.param(
             Message(
                 role="assistant",
                 content=[{"type": "text", "text": ""}, {"type": "text", "text": "Appended."}],
-                tool_calls=[_call("t1"), _call("t2")],
+                tool_calls=[tool_call("lookup", "t1", key="a"), tool_call("lookup", "t2", key="a")],
             ),
             id="the same first text block before one that was appended",
         ),
         pytest.param(
-            Message(role="assistant", tool_calls=[_call("t1"), _call("t2", arguments='{"key": "b"}')]),
+            Message(
+                role="assistant",
+                tool_calls=[tool_call("lookup", "t1", key="a"), tool_call("lookup", "t2", key="b")],
+            ),
             id="the same id with other arguments",
         ),
     ],
@@ -349,7 +373,7 @@ def test_a_parked_turn_rebuilds_when_its_assistant_message_was_rewritten(answere
 
 
 def test_a_parked_turn_continues_when_only_the_spelling_of_its_arguments_changed() -> None:
-    answered = Message(role="assistant", tool_calls=[_call("t1", arguments='{ "key":"a" }')])
+    answered = Message(role="assistant", tool_calls=[raw_tool_call("lookup", "t1", '{ "key":"a" }')])
 
     assert plan_continuation(_parked("t1"), [answered, Message(role="tool", content="x", tool_call_id="t1")], _PROVIDER)
 

@@ -8,6 +8,7 @@ import pytest
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.model_usage import ContextTokens, message_context_tokens, uncached_input_tokens_from_counts
+from mindroom.providers.names import ROUTE_PROVIDERS
 
 
 def _assistant(metrics: MessageMetrics) -> Message:
@@ -36,11 +37,11 @@ def test_message_context_tokens_add_cache_tokens_only_where_reported_outside_inp
 
 @pytest.mark.parametrize(
     ("provider", "configured_provider"),
-    [("Claude subscription (Claude Code)", "claude_code"), ("Claude subscription (Claude Code)", None)],
-    ids=["a configured model", "a stored run"],
+    [(ROUTE_PROVIDERS["claude_code"], "claude_code"), (ROUTE_PROVIDERS["claude_code"], None), (None, "claude_code")],
+    ids=["a configured model", "a stored run", "only the configured route"],
 )
 def test_a_claude_code_response_reports_its_cache_tokens_outside_its_input(
-    provider: str,
+    provider: str | None,
     configured_provider: str | None,
 ) -> None:
     answer = _assistant(

@@ -881,7 +881,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.model_usage"
-depends_on = ["mindroom.llm", "mindroom.providers.names"]
+depends_on = ["mindroom.llm"]
 visibility = [
     "mindroom.ai_run_metadata",
     "mindroom.api.openai_compat",
@@ -8408,7 +8408,6 @@ visibility = [
 [[modules]]
 path = "mindroom.history.conversation_text"
 depends_on = [
-    "mindroom.agent_loop",
     "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.history.interrupted_replay",
@@ -8471,7 +8470,7 @@ visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.par
 [[modules]]
 path = "mindroom.providers.tool_policy"
 depends_on = []
-visibility = ["mindroom.providers.gemini", "mindroom.providers.ollama.adapter", "mindroom.providers.openai"]
+visibility = ["mindroom.providers.claude_code", "mindroom.providers.gemini", "mindroom.providers.ollama.adapter", "mindroom.providers.openai"]
 
 # Owned provider adapters (stream-only, over mindroom.llm); the provider registry wires them in.
 [[modules]]

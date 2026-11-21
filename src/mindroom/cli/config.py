@@ -143,6 +143,15 @@ class _PresetInfo:
     setup: _SetupHints | None = None
 
 
+def _login_hints(command: str) -> _SetupHints:
+    """Describe the same login step for each setup path."""
+    return _SetupHints(
+        first_run=f"Run {command} in another terminal",
+        hosted=f"Run {command} before starting MindRoom (Matrix homeserver is prefilled)",
+        self_hosted=f"Set your Matrix homeserver and run {command} before starting MindRoom",
+    )
+
+
 # Every provider preset in menu order, default first.
 _PROVIDER_PRESETS: dict[_ProviderPreset, _PresetInfo] = {
     "openai": _PresetInfo("OpenAI", "API key"),
@@ -151,29 +160,17 @@ _PROVIDER_PRESETS: dict[_ProviderPreset, _PresetInfo] = {
     "codex": _PresetInfo(
         "Codex",
         "ChatGPT sign-in through `codex login`",
-        setup=_SetupHints(
-            first_run="Run `codex login` in another terminal",
-            hosted="Run `codex login` before starting MindRoom (Matrix homeserver is prefilled)",
-            self_hosted="Set your Matrix homeserver and run `codex login` before starting MindRoom",
-        ),
+        setup=_login_hints("`codex login`"),
     ),
     "claude_code": _PresetInfo(
         "Claude subscription",
         "Claude sign-in through `claude auth login`",
-        setup=_SetupHints(
-            first_run="Run `claude auth login` in another terminal",
-            hosted="Run `claude auth login` before starting MindRoom (Matrix homeserver is prefilled)",
-            self_hosted="Set your Matrix homeserver and run `claude auth login` before starting MindRoom",
-        ),
+        setup=_login_hints("`claude auth login`"),
     ),
     "kimi": _PresetInfo(
         "Kimi Code",
         "Kimi sign-in through `kimi`",
-        setup=_SetupHints(
-            first_run="Run `kimi` and `/login` in another terminal",
-            hosted="Run `kimi` and `/login` before starting MindRoom (Matrix homeserver is prefilled)",
-            self_hosted="Set your Matrix homeserver and run `kimi` and `/login` before starting MindRoom",
-        ),
+        setup=_login_hints("`kimi` and `/login`"),
     ),
     "ollama": _PresetInfo(
         "Ollama",

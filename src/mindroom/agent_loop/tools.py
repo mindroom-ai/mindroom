@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.llm.events import ToolProgress
-from mindroom.llm.messages import MEDIA_FOLLOW_UP_TEXT, Message, is_media_follow_up
+from mindroom.llm.messages import MEDIA_FOLLOW_UP_TEXT, Message
 from mindroom.llm.runs import FailingTool, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
@@ -459,7 +459,6 @@ def media_follow_up(results: Sequence[Message]) -> Message | None:
 
 __all__ = [
     "MAX_CONSECUTIVE_TOOL_FAILURES",
-    "MEDIA_FOLLOW_UP_TEXT",
     "NO_OUTPUT_TEXT",
     "PlannedCall",
     "PreparedTools",
@@ -472,7 +471,6 @@ __all__ = [
     "failed_answer",
     "failing_tool_stop_text",
     "ignored_refusal",
-    "is_media_follow_up",
     "media_follow_up",
     "offered_toolkits",
     "plan_tool_batch",

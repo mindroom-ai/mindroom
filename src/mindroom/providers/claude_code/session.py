@@ -1,10 +1,4 @@
-"""Live Claude Code processes of the ``claude_code`` route, and the MCP server that offers them MindRoom's tools.
-
-A process is read by the one request that started or claimed it, or it rests in ``SESSIONS`` under the identity of
-the request it answered: parked on tool calls whose results the next request brings, or idle after an answer. Its
-tool calls reach an in-process MCP server whose handler only waits for the result MindRoom's own loop produces.
-MindRoom's history stays the only record of a conversation: no process is resumed and none saves a transcript.
-"""
+"""Own Claude Code starts, parked processes, and the process-wide concurrency cap."""
 
 from __future__ import annotations
 
@@ -31,8 +25,7 @@ from mindroom.background_tasks import create_background_task, wait_for_backgroun
 from mindroom.claude_sdk_process import ClaudeProcess, user_message
 from mindroom.llm.errors import AuthenticationFailed, ProviderError, ProviderUnavailable
 from mindroom.logging_config import get_logger
-from mindroom.providers.claude_code.bridge import SERVER_NAME, ToolBridge
-from mindroom.providers.claude_code.prompt import TOOL_PREFIX, tool_names
+from mindroom.providers.claude_code.bridge import SERVER_NAME, TOOL_PREFIX, ToolBridge, tool_names
 from mindroom.runtime_shutdown import close_at_process_shutdown
 
 if TYPE_CHECKING:
@@ -43,7 +36,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ToolSpec
     from mindroom.providers.claude_code.prompt import Answer
 
-__all__ = ["NOT_SIGNED_IN", "SESSIONS", "LiveSession", "start"]
+__all__ = ["NOT_SIGNED_IN", "SESSIONS", "LiveSession"]
 
 logger = get_logger(__name__)
 
@@ -207,113 +200,7 @@ def _prepare(storage_root: Path, system: str) -> tuple[Path, Path | None]:
     return cwd, Path(path)
 
 
-async def start(
-    *,
-    provider: str,
-    storage_root: Path,
-    system: str = "",
-    tools: Sequence[ToolSpec] = (),
-    replaces: LiveSession | None = None,
-    **options: Any,  # noqa: ANN401 - fields of ``ClaudeAgentOptions``
-) -> LiveSession:
-    """Start a Claude Code process that has only ``tools``, and check that it is signed in to a subscription.
-
-    The process takes the slot of ``replaces``, which this closes, or one of its own. Its start runs on a task no
-    stopped request cuts short, since only the end of a start says whether a process holds the slot.
-    """
-    # MindRoom's environment is judged by the names of its variables alone, never by their values.
-    refused = sorted(
-        name
-        for name in os.environ
-        if (name.startswith(_REFUSED_PREFIXES) or name in _REFUSED_NAMES) and name not in _SET_FOR_THE_PROCESS
-    )
-    if refused:
-        msg = (
-            f"MindRoom's environment sets {', '.join(refused)}, which Claude Code could use in place of your Claude "
-            "sign-in or to send it somewhere else. Remove it from the environment MindRoom starts in (the `.env` "
-            "beside `config.yaml` is fine), or use `provider: anthropic`."
-        )
-        raise AuthenticationFailed(msg, provider=provider, status_code=401)
-    freed = SESSIONS.reserve(provider, replaces)
-    starting = create_background_task(
-        _launch(freed, provider, storage_root, system, tools, options),
-        name="claude_code_start",
-        owner=SESSIONS,
-        context=Context(),
-        # The request that waits for the start raises its failure.
-        log_exceptions=False,
-    )
-    try:
-        return await asyncio.shield(starting)
-    except asyncio.CancelledError:
-        # Nothing waits for the process any more, so it closes once its start ended.
-        starting.add_done_callback(lambda done: done.cancelled() or done.exception() or SESSIONS.retire(done.result()))
-        raise
-
-
-async def _launch(
-    freed: asyncio.Task[None] | None,
-    provider: str,
-    storage_root: Path,
-    system: str,
-    tools: Sequence[ToolSpec],
-    options: dict[str, Any],
-) -> LiveSession:
-    """Start one process in the slot ``start`` took, once ``freed`` ended, and give the slot up if that fails."""
-    session = prompt = None
-    try:
-        if freed is not None:
-            await freed
-        bridge = ToolBridge(names=tool_names(tools, provider))
-        cwd, prompt = await asyncio.to_thread(_prepare, storage_root, system)
-        sdk_options = ClaudeAgentOptions(
-            **options,
-            system_prompt={"type": "file", "path": str(prompt)} if prompt else "",
-            cwd=cwd,
-            tools=[],
-            skills=[],
-            setting_sources=[],
-            strict_mcp_config=True,
-            permission_mode="dontAsk",
-            settings='{"disableAllHooks":true}',
-            # Without it a user's ``@/path`` would make Claude Code read that file.
-            verbatim_prompts=True,
-            include_partial_messages=True,
-            env=_ISOLATION_ENV,
-            extra_args={"no-session-persistence": None},
-            max_buffer_size=_MAX_MESSAGE_BYTES,
-            client_app=f"mindroom/{__version__}",
-            stderr=lambda line: logger.debug("claude_code_stderr", line=line),
-        )
-        if tools:
-            server = bridge.server(tools)
-            sdk_options.mcp_servers = {SERVER_NAME: {"type": "sdk", "name": SERVER_NAME, "instance": server}}
-            sdk_options.allowed_tools = [f"{TOOL_PREFIX}*"]
-        process = await ClaudeProcess.open(sdk_options, messages=bridge.messages)
-        session = LiveSession(process, bridge, provider)
-        SESSIONS.finish_start(session)
-        async with asyncio.timeout(_READY_SECONDS):
-            await _refuse_unless_ready(process.client, bridge, provider)
-    except BaseException as error:
-        if session is None:
-            SESSIONS.finish_start(None)
-        else:
-            await SESSIONS.retire(session)
-        if isinstance(error, CLINotFoundError):
-            raise AuthenticationFailed(_NOT_FOUND, provider=provider) from error
-        # The SDK raises a plain exception for a request about its state that Claude Code rejects.
-        if isinstance(error, Exception) and not isinstance(error, ProviderError):
-            msg = f"Claude Code did not start: {error or type(error).__name__}"
-            raise ProviderUnavailable(msg, provider=provider) from error
-        raise
-    finally:
-        # Claude Code read the prompt when it started.
-        if prompt is not None:
-            await asyncio.to_thread(prompt.unlink, missing_ok=True)
-    return session
-
-
-type RestKey = tuple[str, str, tuple[str, ...]]
+type _RestKey = tuple[str, str, tuple[str, ...]]
 
 
 class _SessionRegistry:
@@ -325,11 +212,116 @@ class _SessionRegistry:
 
     def __init__(self) -> None:
         self.live: set[LiveSession] = set()
-        self.resting: dict[RestKey, LiveSession] = {}
+        self.resting: dict[_RestKey, LiveSession] = {}
         self.starting = 0
         self._sweep: asyncio.Task[None] | None = None
 
-    def reserve(self, provider: str, replaced: LiveSession | None) -> asyncio.Task[None] | None:
+    async def start(
+        self,
+        *,
+        provider: str,
+        storage_root: Path,
+        system: str = "",
+        tools: Sequence[ToolSpec] = (),
+        replaces: LiveSession | None = None,
+        **options: Any,  # noqa: ANN401 - fields of ``ClaudeAgentOptions``
+    ) -> LiveSession:
+        """Start and verify a process, reusing its predecessor's slot when replacing it.
+
+        Cancellation cannot cut short startup: only at its end do we know whether the process holds the slot.
+        """
+        # MindRoom's environment is judged by the names of its variables alone, never by their values.
+        refused = sorted(
+            name
+            for name in os.environ
+            if (name.startswith(_REFUSED_PREFIXES) or name in _REFUSED_NAMES) and name not in _SET_FOR_THE_PROCESS
+        )
+        if refused:
+            msg = (
+                f"MindRoom's environment sets {', '.join(refused)}, which Claude Code could use in place of your Claude "
+                "sign-in or to send it somewhere else. Remove it from the environment MindRoom starts in (the `.env` "
+                "beside `config.yaml` is fine), or use `provider: anthropic`."
+            )
+            raise AuthenticationFailed(msg, provider=provider, status_code=401)
+        freed = self._reserve(provider, replaces)
+        starting = create_background_task(
+            self._launch(freed, provider, storage_root, system, tools, options),
+            name="claude_code_start",
+            owner=self,
+            context=Context(),
+            log_exceptions=False,  # The waiting request raises its failure.
+        )
+        try:
+            return await asyncio.shield(starting)
+        except asyncio.CancelledError:
+            # Nothing waits for the process any more, so it closes once its start ended.
+            starting.add_done_callback(lambda done: done.cancelled() or done.exception() or self.retire(done.result()))
+            raise
+
+    async def _launch(
+        self,
+        freed: asyncio.Task[None] | None,
+        provider: str,
+        storage_root: Path,
+        system: str,
+        tools: Sequence[ToolSpec],
+        options: dict[str, Any],
+    ) -> LiveSession:
+        """Start one process in the slot ``start`` took, once ``freed`` ended, and give the slot up if that fails."""
+        session = prompt = None
+        try:
+            if freed is not None:
+                await freed
+            bridge = ToolBridge(names=tool_names(tools, provider))
+            cwd, prompt = await asyncio.to_thread(_prepare, storage_root, system)
+            sdk_options = ClaudeAgentOptions(
+                **options,
+                system_prompt={"type": "file", "path": str(prompt)} if prompt else "",
+                cwd=cwd,
+                tools=[],
+                skills=[],
+                setting_sources=[],
+                strict_mcp_config=True,
+                permission_mode="dontAsk",
+                settings='{"disableAllHooks":true}',
+                # Without it a user's ``@/path`` would make Claude Code read that file.
+                verbatim_prompts=True,
+                include_partial_messages=True,
+                env=_ISOLATION_ENV,
+                extra_args={"no-session-persistence": None},
+                max_buffer_size=_MAX_MESSAGE_BYTES,
+                client_app=f"mindroom/{__version__}",
+                stderr=lambda line: logger.debug("claude_code_stderr", line=line),
+            )
+            if tools:
+                server = bridge.server(tools)
+                sdk_options.mcp_servers = {SERVER_NAME: {"type": "sdk", "name": SERVER_NAME, "instance": server}}
+                sdk_options.allowed_tools = [f"{TOOL_PREFIX}*"]
+            process = await ClaudeProcess.open(sdk_options, messages=bridge.messages)
+            session = LiveSession(process, bridge, provider)
+            self.starting -= 1
+            self.live.add(session)
+            async with asyncio.timeout(_READY_SECONDS):
+                await _refuse_unless_ready(process.client, bridge, provider)
+        except BaseException as error:
+            if session is None:
+                self.starting -= 1
+            else:
+                await self.retire(session)
+            if isinstance(error, CLINotFoundError):
+                raise AuthenticationFailed(_NOT_FOUND, provider=provider) from error
+            # The SDK raises a plain exception for a request about its state that Claude Code rejects.
+            if isinstance(error, Exception) and not isinstance(error, ProviderError):
+                msg = f"Claude Code did not start: {error or type(error).__name__}"
+                raise ProviderUnavailable(msg, provider=provider) from error
+            raise
+        finally:
+            # Claude Code read the prompt when it started.
+            if prompt is not None:
+                await asyncio.to_thread(prompt.unlink, missing_ok=True)
+        return session
+
+    def _reserve(self, provider: str, replaced: LiveSession | None) -> asyncio.Task[None] | None:
         """Take the slot of a new process, and return the end of the process whose slot it is, which the start awaits.
 
         That is ``replaced``, or at the limit a resting one this closes, an idle one before a parked one and the
@@ -346,13 +338,7 @@ class _SessionRegistry:
         self.starting += 1
         return None if replaced is None else self.retire(replaced)
 
-    def finish_start(self, session: LiveSession | None) -> None:
-        """End a startup reservation, handing its slot to the process if it opened."""
-        self.starting -= 1
-        if session is not None:
-            self.live.add(session)
-
-    def claim(self, key: RestKey) -> LiveSession | None:
+    def claim(self, key: _RestKey) -> LiveSession | None:
         """Take a resting process out of circulation, so no other request can continue it."""
         return self.resting.pop(key, None)
 
@@ -367,7 +353,7 @@ class _SessionRegistry:
 
         return create_background_task(run(), name="claude_code_close", owner=self, context=Context())
 
-    def rest(self, key: RestKey, session: LiveSession) -> None:
+    def rest(self, key: _RestKey, session: LiveSession) -> None:
         """Keep ``session`` for the request that follows the answer it just gave."""
         if (replaced := self.resting.pop(key, None)) is not None:
             self.retire(replaced)
