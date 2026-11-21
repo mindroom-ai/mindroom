@@ -74,6 +74,7 @@ _READY_SECONDS = 30.0
 _MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 # Claude Code cuts a longer MCP tool description itself.
 _DESCRIPTION_LIMIT = 2048
+_CUT_DESCRIPTIONS: set[str] = set()
 # Claude Code features that would duplicate MindRoom's or hide its tools: memory files, compaction, and tool search.
 _ISOLATION_ENV = {
     "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
@@ -83,6 +84,7 @@ _ISOLATION_ENV = {
     "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
     # A call that waits long is not moved to the background, where the model would go on without its result.
     "CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND": "1",
+    "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS": "0",
     # MindRoom already bounds its tool results; Claude Code would replace a longer one with a file it cannot read.
     "MAX_MCP_OUTPUT_TOKENS": "200000",
     # A parked call waits for MindRoom's loop, such as for an approval: Claude Code must outwait the parked process.
@@ -90,7 +92,7 @@ _ISOLATION_ENV = {
 }
 # Claude Code reads its sign-in, where it sends requests, and what it adds to them from variables named like these.
 _REFUSED_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_")
-_REFUSED_NAMES = {"CLAUDE_BG_AUTH_SNAPSHOT_PATH"}
+_REFUSED_NAMES = {"CLAUDE_BG_AUTH_SNAPSHOT_PATH", "CLAUDE_AUTO_BACKGROUND_TASKS"}
 # The Claude Agent SDK and MindRoom set these for the process themselves, whatever MindRoom inherited.
 _SET_FOR_THE_PROCESS = {"CLAUDE_CODE_ENTRYPOINT", *_ISOLATION_ENV}
 # How Claude Code names the plans of a Claude subscription; an account without one is "Claude API".
@@ -105,24 +107,27 @@ _OTHER_TOOLS = "Claude Code did not connect exactly MindRoom's tools, so it got 
 
 @dataclass(eq=False)
 class _Call:
-    """One tool call of a process: what the model wrote, the result MindRoom gives, and how far Claude Code took it."""
+    """One tool call a process waits on: what the model wrote, the result MindRoom gives, and whether it was made."""
 
     made: asyncio.Future[tuple[str, str]]
     result: asyncio.Future[dict[str, Any]]
     entered: bool = False
-    delivered: bool = False
 
 
 @dataclass(eq=False)
 class _ToolBridge:
     """The tool calls of one Claude Code process, by call id: each waits for the result MindRoom's loop produces.
 
-    ``failure`` says why the process can no longer be trusted, such as a call the model did not write.
+    ``calls`` holds a call until its result was handed to Claude Code, ``unconfirmed`` its id until Claude Code said
+    that it took the result, and ``spent`` its id for good. ``failure`` says why the process can no longer be
+    trusted, such as a call the model did not write.
     """
 
     names: dict[str, str]
     messages: asyncio.Queue[ClaudeMessage | Exception] = field(default_factory=asyncio.Queue)
     calls: dict[str, _Call] = field(default_factory=dict)
+    unconfirmed: set[str] = field(default_factory=set)
+    spent: set[str] = field(default_factory=set)
     failure: str | None = None
 
     def _call(self, tool_use_id: str) -> _Call:
@@ -133,8 +138,7 @@ class _ToolBridge:
 
     def made(self, tool_use_id: str, name: str, arguments: object) -> bool:
         """Keep a tool call the model wrote, which Claude Code then brings to the tool server; False for a used id."""
-        call = self._call(tool_use_id)
-        if call.made.done():
+        if tool_use_id in self.spent or (call := self._call(tool_use_id)).made.done():
             return False
         call.made.set_result((name, canonical_arguments(arguments)))
         return True
@@ -148,8 +152,8 @@ class _ToolBridge:
 
     @property
     def undelivered(self) -> bool:
-        """Whether a result MindRoom gave has not reached Claude Code, whose model must not go on without it."""
-        return any(call.result.done() and not call.delivered for call in self.calls.values())
+        """Whether Claude Code has not taken a result MindRoom gave, without which its model must not go on."""
+        return bool(self.unconfirmed) or any(call.result.done() for call in self.calls.values())
 
     def fail(self, reason: str) -> None:
         """Mark the process as broken and wake the request that reads it."""
@@ -167,8 +171,7 @@ class _ToolBridge:
         tool_use_id = (params.meta or {}).get(_TOOL_USE_ID_META)
         if not isinstance(tool_use_id, str) or params.name not in self.names:
             return self._refuse(f"Claude Code called {params.name} without a usable call id")
-        call = self._call(tool_use_id)
-        if call.entered:
+        if tool_use_id in self.spent or (call := self._call(tool_use_id)).entered:
             return self._refuse(f"Claude Code made the tool call {tool_use_id} twice")
         call.entered = True
         try:
@@ -183,7 +186,10 @@ class _ToolBridge:
         except asyncio.CancelledError:
             self.fail(f"Claude Code gave up the tool call {tool_use_id}")
             raise
-        call.delivered = True
+        # Nothing of a call that is done is kept but its id, which no later call may use.
+        del self.calls[tool_use_id]
+        self.spent.add(tool_use_id)
+        self.unconfirmed.add(tool_use_id)
         return result
 
     def server(self, tools: Sequence[ToolSpec]) -> Server:
@@ -192,7 +198,7 @@ class _ToolBridge:
             tools=[
                 mcp.types.Tool(
                     name=short,
-                    description=(tool.description or "")[:_DESCRIPTION_LIMIT],
+                    description=_description(tool),
                     input_schema=dict(tool.parameters),
                     # Claude Code runs calls that are not read-only one after another.
                     annotations=mcp.types.ToolAnnotations(read_only_hint=False),
@@ -209,6 +215,15 @@ class _ToolBridge:
             return await self._answer(params)
 
         return Server(SERVER_NAME, version=__version__, on_list_tools=on_list_tools, on_call_tool=on_call_tool)
+
+
+def _description(tool: ToolSpec) -> str:
+    """Return the description Claude Code takes for ``tool``, saying once when it loses its end."""
+    description = tool.description or ""
+    if len(description) > _DESCRIPTION_LIMIT and tool.name not in _CUT_DESCRIPTIONS:
+        _CUT_DESCRIPTIONS.add(tool.name)
+        logger.warning("claude_code_tool_description_cut", tool=tool.name, length=len(description))
+    return description[:_DESCRIPTION_LIMIT]
 
 
 @dataclass(eq=False)

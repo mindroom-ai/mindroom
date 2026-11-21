@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from claude_agent_sdk import ClaudeSDKClient, CLIConnectionError, RateLimitEvent, RateLimitInfo
+from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.llm.errors import (
@@ -145,7 +146,7 @@ async def test_claude_code_starts_isolated_with_mindroom_system_prompt_and_the_u
     assert spawn["cwd"] == str(HOME / "cwd")
     assert int(spawn["tool_timeout"]) > 30 * 60 * 1000
     # A call that waits long stays a call, which the model does not go on without.
-    assert spawn["background"] == "1"
+    assert spawn["background"] == ["1", "0"]
     [sent] = cli.events("user")
     assert sent["content"] == [{"type": "text", "text": "Read @/etc/passwd"}]
     assert sent["client_composed"] is True
@@ -501,12 +502,18 @@ async def test_a_summary_request_starts_claude_code_without_a_thinking_setting(t
 
 
 @pytest.mark.asyncio
-async def test_a_tool_description_is_cut_to_what_claude_code_takes(tmp_path: Path) -> None:
+async def test_a_tool_description_claude_code_would_cut_is_cut_with_one_warning(tmp_path: Path) -> None:
     long = replace(LOOKUP, name="long_lookup", description="d" * 3000)
     cli = fake_cli(tmp_path, {"turns": [text_turn("One.")]})
+    provider = cli.provider()
 
-    await complete(cli.provider(), ModelRequest(messages=[user("One")], tools=[long]))
+    with capture_logs() as logs:
+        await complete(provider, ModelRequest(messages=[user("One")], tools=[long]))
+        await complete(provider, ModelRequest(messages=[user("Two")], tools=[long]))
 
+    cut = [entry for entry in logs if entry["event"] == "claude_code_tool_description_cut"]
+    assert [(entry["tool"], entry["length"], entry["log_level"]) for entry in cut] == [("long_lookup", 3000, "warning")]
+    assert "ddd" not in str(cut)
     assert len(cli.events("tools_list")[0]["tools"][0]["description"]) == 2048
 
 
@@ -890,6 +897,7 @@ async def test_each_claude_subscription_plan_is_answered(tmp_path: Path, plan: s
         "CLAUDE_CODE_USE_GATEWAY",
         "ANTHROPIC_PROFILE",
         "CLAUDE_BG_AUTH_SNAPSHOT_PATH",
+        "CLAUDE_AUTO_BACKGROUND_TASKS",
         "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
         "CLAUDE_CODE_EXTRA_BODY",
         "ANTHROPIC_A_VARIABLE_OF_A_LATER_CLAUDE_CODE",
@@ -1113,19 +1121,41 @@ async def test_a_claude_code_that_does_not_say_which_tools_it_connected_is_a_ret
     assert "did not start" in str(error)
 
 
+@pytest.mark.asyncio
+async def test_a_call_that_got_its_result_leaves_only_its_id_which_no_later_call_may_use(tmp_path: Path) -> None:
+    turn = [_TWO_CALLS[0], {"tools": [call("toolu_a", "again")]}, {"text": "never"}]
+    cli = fake_cli(tmp_path, {"turns": [turn]})
+    provider = cli.provider()
+    messages = [user("Look up a and b.")]
+    asked = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
+    [parked] = SESSIONS.resting.values()
+
+    messages += [asked.message, result("toolu_a", "LILAC-HERON" * 1000), result("toolu_b", "LEMON-IBIS")]
+    with pytest.raises(ProviderError, match="toolu_a"):
+        await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
+
+    # Neither the arguments nor the results of the calls that are done are kept.
+    assert (parked.bridge.calls, parked.bridge.unconfirmed) == ({}, set())
+    assert parked.bridge.spent == {"toolu_a", "toolu_b"}
+    assert len(cli.events("tool_result")) == 2
+
+
 # --- a process that goes on by itself --------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("denied", [False, True], ids=["while the request was prepared", "after it got the results"])
+@pytest.mark.parametrize(
+    "how",
+    ["abandon", "denied", "unused"],
+    ids=["it gave the call up", "it never made the call", "it dropped the result it was handed"],
+)
 @pytest.mark.asyncio
-async def test_an_answer_that_started_before_the_results_arrived_is_discarded_and_the_turn_rebuilt(
+async def test_an_answer_that_did_not_take_mindrooms_results_is_discarded_and_the_turn_rebuilt(
     tmp_path: Path,
-    denied: bool,
+    how: str,
 ) -> None:
     gate = tmp_path / "gate"
-    # Claude Code gives the call up, or never makes it, and its model answers without MindRoom's result.
     turn = [
-        {"tools": [{**call("toolu_a", "a"), "denied": denied}], "abandon": True},
+        {"tools": [{**call("toolu_a", "a"), how: True}], "abandon": how == "abandon"},
         {"text": "An answer without the result.", "after_file": str(gate)},
     ]
     cli = fake_cli(tmp_path, {"turns": [turn]}, {"turns": [text_turn("Rebuilt.")]})
@@ -1138,8 +1168,8 @@ async def test_an_answer_that_started_before_the_results_arrived_is_discarded_an
     async def on_send(body: Any) -> None:  # noqa: ANN401
         modes.append(body["mode"])
         gate.touch()
-        # The first case holds the request until the process went on; the second lets it go on only afterwards.
-        while not denied and len(modes) == 1 and parked.bridge.messages.empty():  # noqa: ASYNC110
+        # The first case holds the request until the process went on; the others let it go on only afterwards.
+        while how == "abandon" and len(modes) == 1 and parked.bridge.messages.empty():  # noqa: ASYNC110
             await asyncio.sleep(0.01)
 
     messages += [asked.message, result("toolu_a", "LILAC-HERON")]
@@ -1150,7 +1180,7 @@ async def test_an_answer_that_started_before_the_results_arrived_is_discarded_an
     assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Rebuilt."
     assert modes == ["continue", "rebuild"]
     # A process that had gone on before the results were ready never got them.
-    assert parked.bridge.calls["toolu_a"].result.cancelled() != denied
+    assert how != "abandon" or parked.bridge.calls["toolu_a"].result.cancelled()
     assert "LILAC-HERON" in json.dumps(cli.events("user")[1]["content"])
     assert cli.events("tool_result") == []
     assert len(cli.events("spawn")) == 2

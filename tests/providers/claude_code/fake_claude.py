@@ -28,7 +28,8 @@ starts its block, and ``complete_only`` sends the message whole, without streami
 tools. A tool with ``"mcp": {"name": ..., "input": ...}`` reaches the tool server as that other call, and one with
 ``"hidden": true`` reaches it without the model having made it. ``abandon`` starts each tool call and goes on
 without its result, ``cancel`` also cancels it, and ``repeat`` calls the tool of that id once more after the
-message's calls returned. A tool with ``"denied": true`` never reaches the tool server, and one with ``raw_name``
+message's calls returned. A tool with ``"denied": true`` never reaches the tool server, one with ``"unused": true``
+reaches it and its result is dropped, and one with ``raw_name``
 is written under that name as it is. A step with ``after_file`` starts once that file exists.
 """
 # ruff: noqa: D102
@@ -311,6 +312,9 @@ class FakeClaude:
         for call in calls[1 if step.get("call_before_stop") else 0 :]:
             if call.get("denied"):
                 self.results[call["id"]] = "(denied)"
+            elif call.get("unused"):
+                self.finish(self.start_call(call, with_id=with_id))
+                self.results[call["id"]] = "(unused)"
             elif step.get("abandon") or step.get("cancel"):
                 self.abandon_call(call, with_id=with_id, cancel=bool(step.get("cancel")))
             else:
@@ -375,7 +379,8 @@ class FakeClaude:
             system_prompt = self.args[self.args.index("--system-prompt") + 1]
         timeout = os.environ.get("MCP_TOOL_TIMEOUT")
         started = {"cwd": str(Path.cwd()), "system_prompt": system_prompt, "prompt_modes": modes}
-        started["background"] = os.environ.get("CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND")
+        background = ("CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND", "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS")
+        started["background"] = [os.environ.get(name) for name in background]
         self.log("spawn", args=self.args, tool_timeout=timeout, **started)
         while (message := self.queued.pop(0) if self.queued else self.read()) is not None:
             if message.get("type") == "control_request":

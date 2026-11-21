@@ -20,7 +20,9 @@ from claude_agent_sdk import (
     SystemMessage,
     TextBlock,
     ThinkingBlock,
+    ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
 )
 
 from mindroom.llm.errors import QUOTA_EXHAUSTED, AuthenticationFailed, ProviderError, ProviderUnavailable
@@ -107,6 +109,10 @@ class _Step:
                 session.inventoried = _only_mindrooms_tools(message.data, session)
         elif isinstance(message, RateLimitEvent):
             session.limited(message)
+        elif isinstance(message, UserMessage):
+            # Claude Code says which tool results it took before its model goes on with them.
+            blocks = message.content if isinstance(message.content, list) else []
+            session.bridge.unconfirmed -= {block.tool_use_id for block in blocks if isinstance(block, ToolResultBlock)}
         elif not session.inventoried:
             # Nothing a process says counts before it said that it runs with exactly MindRoom's tools.
             msg = "Claude Code did not start its turn with exactly MindRoom's tools, so the turn was stopped."
