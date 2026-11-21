@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from itertools import groupby
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.messages import is_media_follow_up, stable_serialize, system_text, tool_result_view
@@ -96,11 +97,11 @@ def canonical_arguments(arguments: object) -> str:
 def _merged(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return ``blocks`` with each run of text blocks joined into one, a line each."""
     merged: list[dict[str, Any]] = []
-    for block in blocks:
-        if block["type"] == "text" and merged and merged[-1]["type"] == "text":
-            merged[-1] = _text(f"{merged[-1]['text']}\n{block['text']}")
+    for is_text, run in groupby(blocks, key=lambda block: block["type"] == "text"):
+        if is_text:
+            merged.append(_text("\n".join(block["text"] for block in run)))
         else:
-            merged.append(block)
+            merged.extend(run)
     return merged
 
 
