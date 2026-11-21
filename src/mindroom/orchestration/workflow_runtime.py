@@ -48,7 +48,7 @@ class WorkflowRuntimeLifecycle:
         try:
             async with asyncio.timeout(self.script_runtime.pass_timeout_seconds / 2):
                 standing = partial(workflow_job_standing, self.script_runtime.runtime_paths)
-                await recover_runs(self.engine, self._access, standing)
+                await recover_runs(self.engine, standing)
                 cutoff = datetime.now(UTC) - timedelta(seconds=self.script_runtime.retention_seconds)
                 await asyncio.to_thread(self.engine.store.prune, utc_timestamp(cutoff))
         except Exception:
@@ -58,9 +58,10 @@ class WorkflowRuntimeLifecycle:
         """Return what the next attempt of a run starts with, from its saved owner's live runtime.
 
         The run saves its owner as its attempts do, so the script runtime's resolver answers for it, also before a
-        first attempt: access that cannot be checked yet, while the owner's bot is not running or room membership
-        is still loading, is pending, and access that is gone is revoked. An agent that the live configuration no
-        longer has, or no longer gives the `workflow` toolkit, is revoked whatever its bot does.
+        first attempt: access that cannot be checked yet, while the owner's bot is not running, has not finished its
+        first sync or room membership is still loading, is pending, and access that is gone is revoked. An agent
+        that the live configuration no longer has, or no longer gives the `workflow` toolkit, is revoked whatever
+        its bot does, and so is a run in a room its synced bot is no longer in.
         """
         resolver, owner = self.script_runtime.resolver, cast("ScriptRunRecord", run)
         config = self.script_runtime.config_provider()
@@ -69,11 +70,14 @@ class WorkflowRuntimeLifecycle:
             or "workflow" not in config.resolve_agent(run.agent_name).tools.tool_names
         ):
             return "revoked"
+        bot = resolver.bot_provider(run.agent_name)
+        if bot is None or not bot.first_sync_complete or bot.client is None:
+            return "pending"
         try:
             authorized = resolver.is_authorized(owner, require_resolved_membership=True)
             if authorized is None:
                 return "pending"
-            if authorized:
+            if authorized and run.room_id in bot.client.rooms:
                 context = resolver.resolve(owner, correlation_id=f"workflow:{run.run_id}")
                 return context, workflow_limits(context.config, run.agent_name)
         except ValueError:

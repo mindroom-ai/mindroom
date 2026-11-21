@@ -240,7 +240,7 @@ async def test_result_over_eight_mebibytes_returns_a_reference_and_the_results_r
         assert (await client.get(f"results/{receipt.id}")).json() == "x" * size
 
     stack = await stack.restart()
-    await stack.engine.reconcile()
+    await stack.settle()
     await stack.engine.resume(stack.context, stack.run_id)
     again = await stack.submit("@0", "tool", tool_args("counter", "text", size=size))
     assert (again.state, again.cached, again.result_ref) == ("completed", True, f"results/{receipt.id}")
@@ -651,11 +651,11 @@ async def test_accepted_cancel_wins_over_a_stored_report(stack: WorkflowStack, m
     if maintenance_first:
         await stack.scripts.revoke(stack.attempt.run_id, reason="Stopped by the user.")
         await stack.scripts.reconcile_durable(run_id=stack.attempt.run_id)
-        await stack.engine.reconcile()
+        await stack.settle()
 
     cancelled, _ = await asyncio.gather(
         stack.engine.cancel(stack.run_id, reason="Stopped by the user."),
-        stack.engine.reconcile(),
+        stack.settle(),
     )
 
     run = await stack.engine.wait(stack.run_id)

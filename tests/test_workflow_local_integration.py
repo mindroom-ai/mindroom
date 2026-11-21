@@ -71,6 +71,7 @@ class LocalWorkflowStack(WorkflowStack):
             cancellation_poll_interval_seconds=0.02,
         )
         self.engine = WorkflowEngine(self.store, self.scripts, self.broker)
+        self.engine.owner_access = self._owner_access
         self.context.orchestrator.workflow_engine = self.engine  # type: ignore[union-attr]
         if self.served is not None:
             bind_workflow_engine(self.served, self.engine)
@@ -280,7 +281,8 @@ async def test_attempt_that_hits_its_process_limit_is_resumed_while_working_time
 
     ended = await local_stack.scripts.reconcile_durable(run_id=first)
     assert (ended.state, ended.cancellation_reason) == (ScriptRunState.INTERRUPTED, MAX_RUNTIME_EXCEEDED)
-    assert await local_stack.maintain() == [local_stack.run_id]
+    # The pass records the attempt's end, and the run's job starts the next one.
+    assert await local_stack.maintain() == []
     job = await _ended_job(local_stack, handle["job_id"])
 
     run = local_stack.store.get_run(local_stack.run_id)

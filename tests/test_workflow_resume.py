@@ -439,7 +439,7 @@ async def test_look_at_the_old_attempt_after_a_resume_took_the_run_leaves_the_re
     await stack.end_attempt(ended, reason)
     await stack.engine.reopen(stack.run_id, stack.context)
 
-    assert not await stack.engine._reconcile_run(seen, stack.engine.owner_access)
+    assert await stack.engine.settle(seen, replay=True) == stack.store.get_run(stack.run_id)
 
     run = stack.store.get_run(stack.run_id)
     assert (run.state, run.error, len(stack.scripts.launched)) == (WorkflowRunState.STARTING, None, 1)
@@ -618,3 +618,26 @@ async def test_report_held_across_a_takeover_is_refused_and_the_next_attempts_re
 
     run = stack.store.get_run(stack.run_id)
     assert (run.state, run.attempt, run.result) == (WorkflowRunState.COMPLETED, 2, "the second report")
+
+
+@pytest.mark.asyncio
+async def test_call_and_stop_of_an_attempt_that_the_run_moved_on_from_reach_no_later_attempt(
+    stack: WorkflowStack,
+) -> None:
+    """What an attempt had under way when it was replaced acts with its own epoch: on the next attempt it does nothing.
+
+    A call that was accepted before the takeover and decided after it is refused, and the stop of an attempt that
+    ran out of time ends that attempt only.
+    """
+    old, asked = stack.attempt, stack.store.get_run(stack.run_id)
+    await _replayed(stack)
+    current = stack.store.get_run(stack.run_id)
+
+    with pytest.raises(SupersededAttemptError):
+        await stack.engine._admit(asked, old, NodeRequest("@0", "tool", _A, {}))
+    stopped = await stack.engine._stop(stack.run_id, WorkflowRunState.INTERRUPTED, "Out of time.", epoch=asked.epoch)
+
+    assert stopped == stack.store.get_run(stack.run_id) == current
+    assert (current.state, current.attempt) == (WorkflowRunState.RUNNING, 2)
+    assert (stack.store.nodes(stack.run_id), stack.counting_tool.calls) == ([], 0)
+    assert stack.attempt.state is ScriptRunState.RUNNING

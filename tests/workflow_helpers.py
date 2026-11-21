@@ -11,7 +11,7 @@ import asyncio
 import hashlib
 import json
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -376,6 +376,7 @@ class FakeScripts:
         """While set and not released, `run` has written its attempt's record and waits, as a starting process does."""
         self.refuse_launch: Exception | None = None
         self.refused = 0
+        self.ending: set[str] = set()
 
     # The real confined read of a script's source, which needs nothing of the manager itself.
     resolve_source = ScriptRunManager.resolve_source
@@ -428,7 +429,8 @@ class FakeScripts:
     async def reconcile_durable(self, *, run_id: str) -> ScriptRunRecord:
         """End a revoked attempt as the manager does once its process is confirmed dead: interrupted or cancelled."""
         attempt = self.store.get_run(run_id)
-        if attempt.state in TERMINAL_SCRIPT_RUN_STATES or attempt.cancel_requested_at is None:
+        # An attempt that `end` is ending in its two steps is not a revoked one: that end decides its state.
+        if attempt.state in TERMINAL_SCRIPT_RUN_STATES or attempt.cancel_requested_at is None or run_id in self.ending:
             return attempt
         interrupted = attempt.cancellation_reason in INTERRUPTION_REASONS
         return await self.end(run_id, ScriptRunState.INTERRUPTED if interrupted else ScriptRunState.CANCELLED)
@@ -443,15 +445,19 @@ class FakeScripts:
     ) -> ScriptRunRecord:
         """End the attempt's process as the manager records it: the exit, the broker's calls, the terminal state."""
         exit_code = 0 if state is ScriptRunState.EXITED else 1
-        self.store.record_process_exit(
-            run_id,
-            exit_code=exit_code,
-            error=None,
-            output=output,
-            cancellation_reason=reason,
-        )
-        await self.broker.cancel_run(run_id)
-        return self.store.finalize_cleaned_run(run_id, state=state)
+        self.ending.add(run_id)
+        try:
+            self.store.record_process_exit(
+                run_id,
+                exit_code=exit_code,
+                error=None,
+                output=output,
+                cancellation_reason=reason,
+            )
+            await self.broker.cancel_run(run_id)
+            return self.store.finalize_cleaned_run(run_id, state=state)
+        finally:
+            self.ending.discard(run_id)
 
 
 def owner_context(
@@ -670,7 +676,12 @@ class WorkflowStack:
     async def end_attempt(self, state: ScriptRunState, reason: str | None = None, *, output: str = "") -> None:
         """End the attempt's process in *state* and let the engine see it."""
         await self.scripts.end(self.attempt.run_id, state, reason=reason or PROCESS_EXIT_OBSERVED, output=output)
-        await self.engine.reconcile()
+        await self.settle()
+
+    async def settle(self) -> None:
+        """End each run whose attempt has ended as that attempt left it, with no next attempt."""
+        for run in self.store.list_runs(include_finished=False):
+            await self.engine.settle(run)
 
     async def open_jobs(self) -> ProcessRuntime:
         """Start the real job runtime on the stack's journal as the instance of the owner's storage root."""
@@ -750,7 +761,9 @@ class WorkflowStack:
             await self.engine.close()
             await self._retire_attempts(RUNTIME_SHUTDOWN)
         if self.has_jobs:
-            await self.jobs.quiesce()
+            # A killed primary saves nothing more: an outcome its journal refused stays unsaved.
+            with suppress(*([ExceptionGroup] if kill else [])):
+                await self.jobs.quiesce()
             await self.jobs.close_journal()
             release_background_tool_jobs(self.context.runtime_paths, self._instance)
         self._open()
@@ -791,12 +804,15 @@ class WorkflowStack:
     async def maintain(self) -> list[str]:
         """Run the workflow pass that follows each pass of the script runtime."""
         standing = partial(workflow_job_standing, self.context.runtime_paths)
-        return await recover_runs(self.engine, self._owner_access, standing)
+        return await recover_runs(self.engine, standing)
 
-    async def continue_jobs(self) -> None:
-        """Run the job coordinator's pass that continues the jobs a restart stopped, with the owner's access granted."""
+    async def continue_jobs(self, context: ToolRuntimeContext | None = None) -> None:
+        """Run the job coordinator's pass that continues the jobs a restart stopped, with the owner's access granted.
+
+        *context* is the conversation the jobs' bot rebuilds for them, the stack's own when not given.
+        """
         config = with_responder_access(self.context.config, self.context.agent_name, users=[self.context.requester_id])
-        await continue_stopped_jobs(self.jobs, config, self.context.runtime_paths, self.context)
+        await continue_stopped_jobs(self.jobs, config, self.context.runtime_paths, context or self.context)
 
     async def follow_ups(self) -> list[str]:
         """Run the job coordinator's follow-up pass and return the IDs of the follow-up turns it admits.
