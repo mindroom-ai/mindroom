@@ -1,12 +1,11 @@
 """Tailnet SSH against a real tailnet: Headscale, the gateway image, workers that run sshd, and Tailscale clients.
 
-A fake of the three routes the gateway asks the primary stands in for MindRoom, so no model or Matrix server takes
-part. The cases run only with ``MINDROOM_TAILNET_SSH_E2E=1`` and the two images, as the ``headscale-e2e`` CI job does.
+Use the primary's real link roster and key projection behind a small listener with a Docker wake fixture.
+Run with ``MINDROOM_TAILNET_SSH_E2E=1`` and the gateway and worker images, as in the ``headscale-e2e`` CI job.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import os
@@ -19,7 +18,6 @@ import subprocess
 import threading
 import time
 import traceback
-from collections import Counter
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any
@@ -28,11 +26,14 @@ import pytest
 import uvicorn
 from cryptography.hazmat.primitives import serialization
 from fastapi import Depends, FastAPI, Header, HTTPException
+from pydantic import SecretStr
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.tailnet_ssh import session
-from mindroom.tailnet_ssh.projection import authorized_key_lines, signin_keys
-from mindroom.tailnet_ssh.store import new_link
+from mindroom.tailnet_ssh.links import StatusReport, desired_links
+from mindroom.tailnet_ssh.store import read_links
 from mindroom.workers.backends.worker_security import docker_worker_security_options
 from mindroom.workers.models import WORKER_SSH_PORT
 
@@ -40,9 +41,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.tailnet_ssh.store import Link
 
-pytestmark = [pytest.mark.e2e, pytest.mark.timeout(1200)]
+pytestmark = [pytest.mark.e2e, pytest.mark.timeout(1200), pytest.mark.usefixtures("enforce_turn_authorization")]
 
 _GATEWAY_IMAGE = os.environ.get("MINDROOM_TAILNET_SSH_E2E_GATEWAY_IMAGE", "")
 _WORKER_IMAGE = os.environ.get("MINDROOM_TAILNET_SSH_E2E_WORKER_IMAGE", "")
@@ -87,7 +89,7 @@ from pathlib import Path
 from mindroom.tailnet_ssh.projection import write_projection
 from mindroom.tailnet_ssh.store import Link
 sent = json.load(sys.stdin)
-write_projection(Path(sys.argv[1]), Link.model_validate(sent["link"]), sent["key_lines"])
+write_projection(Path(sys.argv[1]), Link.model_validate(sent["link"]), sent["keys"])
 """
 # The worker's command, which does what the runner's /ssh/start does: keep the session's launch, written here by hand,
 # then run sshd on the files the primary wrote.
@@ -190,34 +192,22 @@ def _eventually[T](what: str, check: Callable[[], T | None], *, seconds: float =
         time.sleep(0.2)
 
 
-@dataclass(frozen=True)
-class _Connect:
-    """One connect call of the gateway."""
-
-    link_id: str
-    peer: dict[str, str]
-    at: float
-
-
 @dataclass
 class _Primary:
-    """The primary's internal listener as the gateway sees it: its three routes, over rows a test edits."""
+    """Serve the real roster; substitute the Docker wake and start behind connect."""
 
-    token: str = field(default_factory=lambda: secrets.token_urlsafe(24))
+    config: Config
+    paths: RuntimePaths
+    token: str = field(default_factory=lambda: secrets.token_urlsafe(24), repr=False)
     port: int = field(default_factory=_free_port)
-    # What GET /links answers.
-    rows: list[dict[str, Any]] = field(default_factory=list)
-    list_reads: Counter[tuple[str, str]] = field(default_factory=Counter)
-    # The host port each link's worker publishes its sshd on, and how long each link's connect takes.
-    workers: dict[str, int] = field(default_factory=dict)
-    delays: dict[str, float] = field(default_factory=dict)
-    # Every POST /status body and every connect call, in the order they came.
-    reports: list[dict[str, Any]] = field(default_factory=list)
-    connects: list[_Connect] = field(default_factory=list)
+    memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
+    connects: list[tuple[str, dict[str, str]]] = field(default_factory=list)
+    warm: Callable[[set[str]], int] | None = None
+    delay: float = 0
+    omissions: int = 0
 
-    def removed(self, link_id: str) -> bool:
-        """Whether the latest report acknowledges completed retirement."""
-        return bool(self.reports and link_id in self.reports[-1]["removed"])
+    def roster(self) -> list[dict[str, Any]]:
+        return desired_links(self.config, self.paths, self.memberships)
 
     def app(self) -> FastAPI:
         def authorized(authorization: Annotated[str | None, Header()] = None) -> None:
@@ -228,19 +218,24 @@ class _Primary:
 
         @app.get("/links")
         def links() -> list[dict[str, Any]]:
-            rows = [row.copy() for row in self.rows]
-            self.list_reads.update((row["id"], row["access_revision"]) for row in rows)
+            rows = self.roster()
+            self.omissions += not rows
             return rows
 
         @app.post("/status", status_code=204)
-        def status(report: dict[str, Any]) -> None:
-            self.reports.append(report)
+        def status(_report: StatusReport) -> None:
+            pass
 
         @app.post("/links/{link_id}/connect")
-        async def connect(link_id: str, peer: dict[str, str]) -> dict[str, Any]:
-            self.connects.append(_Connect(link_id, peer, time.monotonic()))
-            await asyncio.sleep(self.delays.get(link_id, 0))
-            return {"host": "127.0.0.1", "port": self.workers[link_id]}
+        def connect(link_id: str, peer: dict[str, str]) -> dict[str, Any]:
+            self.connects.append((link_id, peer))
+            if self.delay:
+                time.sleep(self.delay)
+            logins = next((set(row["allowed_logins"]) for row in self.roster() if row["id"] == link_id), set())
+            if peer["peer_login"] not in logins:
+                raise HTTPException(403, "Login is no longer allowed")
+            assert self.warm is not None
+            return {"host": "127.0.0.1", "port": self.warm(logins)}
 
         return app
 
@@ -275,29 +270,15 @@ class _Tailnet:
 
 
 @dataclass
-class _Node:
-    """A link under test: the stored link, its row for the gateway, and its worker's root on the test host."""
-
-    link: Link
-    owner: _Person
-    row: dict[str, Any]
-    root: Path | None = None
-
-
-@dataclass
 class _Stack:
-    """One gateway and the fake primary it asks, in the module's tailnet."""
+    """One gateway, one shared worker (initially asleep), and the primary listener."""
 
     tailnet: _Tailnet
-    prefix: str
     primary: _Primary
+    link: Link
     gateway: str
-    # The gateway's volume of node keys.
     state: str
-    config: Config
-    nodes: dict[str, _Node] = field(default_factory=dict)
-    # How many connections the tests opened that each link's connect call is for, by link id.
-    opened: dict[str, int] = field(default_factory=dict)
+    root: Path
 
 
 def _pre_auth_key(headscale: str, user: str) -> str:
@@ -310,13 +291,13 @@ def _pre_auth_key(headscale: str, user: str) -> str:
     return json.loads(key)["key"]
 
 
-def _signed_in(tailnet: _Tailnet) -> set[str]:
-    """Return the names of the machines signed in to the tailnet.
-
-    Headscale keeps a machine that signed out in its list, as one whose key has expired, which no peer sees.
-    """
-    listed = json.loads(_docker("exec", tailnet.headscale, "headscale", "nodes", "list", "--output", "json"))
-    return {node["given_name"] for node in listed if "expiry" not in node or node["expiry"]["seconds"] > time.time()}
+def _registered_node(stack: _Stack) -> tuple[int, list[str]] | None:
+    nodes = json.loads(_docker("exec", stack.tailnet.headscale, "headscale", "nodes", "list", "--output", "json"))
+    matches = [(node["id"], node["ip_addresses"]) for node in nodes if node["given_name"] == stack.link.hostname]
+    if matches:
+        [identity] = matches
+        return identity
+    return None
 
 
 def _joined(device: str) -> bool:
@@ -339,33 +320,12 @@ def _client(tailnet: _Tailnet, person: _Person, tool: str = "ssh", *, key: Path 
     return [tool, "-F", "none", *[arg for name, value in options.items() for arg in ("-o", f"{name}={value}")]]
 
 
-def _await_connect_slot(stack: _Stack, node: _Node) -> None:
-    """Wait until the link may have one more connect call: the gateway makes six a minute and closes what is over.
-
-    Every connection the link's own login opens waits here first, so each one is one connect call.
-    """
-    link_id = node.link.id
-
-    def asked() -> list[float]:
-        return [connect.at for connect in stack.primary.connects if connect.link_id == link_id]
-
-    opened = stack.opened.get(link_id, 0)
-    _eventually("the link's earlier connections to reach the primary", lambda: len(asked()) >= opened, seconds=30)
-    while len(recent := [at for at in asked() if time.monotonic() - at < 61]) >= 6:
-        time.sleep(max(0.1, 61 - (time.monotonic() - min(recent))))
-    stack.opened[link_id] = opened + 1
-
-
 def _run_ssh(
-    stack: _Stack,
-    node: _Node,
     argv: list[str],
     *,
     stdin: str | None = None,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a client command that opens one connection to the node as its link's login."""
-    _await_connect_slot(stack, node)
     return subprocess.run(
         argv,
         input=stdin,
@@ -373,19 +333,17 @@ def _run_ssh(
         capture_output=True,
         text=True,
         env=env,
-        timeout=120,
+        timeout=90,
         check=False,
     )
 
 
 @contextmanager
-def _ssh_session(stack: _Stack, node: _Node, argv: list[str]) -> Iterator[subprocess.Popen[str]]:
-    """Start a client command that opens one connection to the node as its link's login, and end it on the way out."""
-    _await_connect_slot(stack, node)
-    # In a process group of its own, so that the client ends together with its ProxyCommand.
+def _ssh_session(argv: list[str]) -> Iterator[subprocess.Popen[str]]:
+    """Open SSH and reap the client and its ProxyCommand on exit."""
     client = subprocess.Popen(
         argv,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -435,30 +393,14 @@ def _peers(person: _Person) -> set[str]:
     return {peer["HostName"] for peer in (status["Peer"] or {}).values()}
 
 
-def _assert_turned_away(stack: _Stack, person: _Person, node: _Node) -> None:
-    """Check that the gateway closes the person's connection to the node as not its login's, asking no primary."""
-    refusal = f"link {node.link.id}: closed a connection, its peer is not the link's login"
-    refused, asked = _logs(stack.gateway).count(refusal), len(stack.primary.connects)
-    done = subprocess.run(
-        [*_client(stack.tailnet, person, key=node.owner.key), node.link.hostname, "true"],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    assert done.returncode == 255
-    assert "Connection closed" in done.stderr
-    assert _logs(stack.gateway).count(refusal) == refused + 1
+def _assert_turned_away(stack: _Stack, person: _Person, key: Path) -> None:
+    """The peer can see the node, but the gateway refuses before any worker connect call."""
+    asked = len(stack.primary.connects)
+    assert stack.link.hostname in _peers(person)
+    refused = _run_ssh([*_client(stack.tailnet, person, key=key), stack.link.hostname, "true"])
+    assert refused.returncode == 255
+    assert "Connection closed" in refused.stderr
     assert len(stack.primary.connects) == asked
-
-
-def _in_state_volume(stack: _Stack, *command: str) -> subprocess.CompletedProcess[str]:
-    """Run a command of the worker image, as root, over the gateway's volume of node keys."""
-    return _docker_result(
-        *("run", "--rm", "--user", "0:0", "--entrypoint", command[0], "--volume", f"{stack.state}:/state:ro"),
-        *(_WORKER_IMAGE, *command[1:]),
-    )
 
 
 def _security_options(folder: Path) -> list[str]:
@@ -491,110 +433,80 @@ def _own(folder: Path, owner: str) -> None:
     )
 
 
-def _project(stack: _Stack, node: _Node) -> None:
-    """Write sshd's files for the link with its owner's keys into its worker's root, as the primary and its uid."""
-    key_lines = authorized_key_lines(signin_keys(stack.config, node.owner.requester_id))
-    _docker(
-        *("run", "--rm", "--interactive", "--user", "1000:1000", "--volume", f"{node.root}:{_WORKER_ROOT}"),
-        *(_WORKER_IMAGE, "python", "-c", _WRITE_PROJECTION, _PROJECTION),
-        stdin=json.dumps({"link": node.link.model_dump(mode="json"), "key_lines": key_lines}),
-    )
-
-
-def _start_worker(stack: _Stack, node: _Node) -> None:
-    """Run the link's worker as the Docker backend runs one, with sshd up, as after a connect the primary passed.
-
-    Its root is a folder of the test host, mounted as the backend mounts one: writable, with ``.runtime``, which the
-    primary writes, read-only over it. The primary and the worker are uid 1000, whoever runs the test.
-    """
-    name = f"{stack.prefix}-{node.link.hostname}"
-    node.root = stack.tailnet.folder / name
-    workspace = node.root / "workspace"
-    workspace.mkdir(parents=True)
-    (workspace / "owner").write_text(node.owner.login, encoding="utf-8")
-    for folder in (node.root, workspace):
-        folder.chmod(0o755)
-    _own(node.root, "1000:1000")
-    _project(stack, node)
+def _worker_wake(stack: _Stack, name: str) -> Callable[[set[str]], int]:
     port = _free_port()
-    _docker(
-        *("run", "--detach", "--name", name, "--user", "1000:1000", *_READ_ONLY_ROOT),
-        *("--cap-drop", "ALL", *_security_options(stack.tailnet.folder)),
-        *("--volume", f"{node.root}:{_WORKER_ROOT}", "--volume", f"{node.root}/.runtime:{_WORKER_ROOT}/.runtime:ro"),
-        *("--publish", f"127.0.0.1:{port}:{WORKER_SSH_PORT}"),
-        *(_WORKER_IMAGE, "python", "-c", _SERVE, _PROJECTION, str(session.LAUNCH_PATH), json.dumps(_LAUNCH)),
-    )
-    _eventually(f"the sshd of {name}", lambda: _answers_ssh(port), seconds=90)
-    stack.primary.workers[node.link.id] = port
+    lock = threading.Lock()
+    started = False
 
+    def wake(logins: set[str]) -> int:
+        nonlocal started
+        with lock:
+            if not started:
+                (stack.root / "workspace").mkdir(parents=True)
+                (stack.root / "workspace" / "shared").write_text("shared worker\n", encoding="utf-8")
+                _own(stack.root, "1000:1000")
+            # Reproject on every admitted connect, not when the test edits config.
+            keys = [
+                key
+                for person in stack.tailnet.people.values()
+                if person.login in logins
+                for key in stack.primary.config.tailnet_ssh.authorized_keys[person.requester_id]
+            ]
+            _docker(
+                "run",
+                "--rm",
+                "--interactive",
+                "--user",
+                "1000:1000",
+                "--volume",
+                f"{stack.root}:{_WORKER_ROOT}",
+                _WORKER_IMAGE,
+                "python",
+                "-c",
+                _WRITE_PROJECTION,
+                _PROJECTION,
+                stdin=json.dumps({"link": stack.link.model_dump(mode="json"), "keys": keys}),
+            )
+            if not started:
+                _docker(
+                    "run",
+                    "--detach",
+                    "--name",
+                    name,
+                    "--user",
+                    "1000:1000",
+                    *_READ_ONLY_ROOT,
+                    "--cap-drop",
+                    "ALL",
+                    *_security_options(stack.root.parent),
+                    "--volume",
+                    f"{stack.root}:{_WORKER_ROOT}",
+                    "--volume",
+                    f"{stack.root}/.runtime:{_WORKER_ROOT}/.runtime:ro",
+                    "--publish",
+                    f"127.0.0.1:{port}:{WORKER_SSH_PORT}",
+                    _WORKER_IMAGE,
+                    "python",
+                    "-c",
+                    _SERVE,
+                    _PROJECTION,
+                    str(session.LAUNCH_PATH),
+                    json.dumps(_LAUNCH),
+                )
+                _eventually("worker sshd banner", lambda: _answers_ssh(port), seconds=60)
+                started = True
+        return port
 
-def _add_link(
-    stack: _Stack,
-    owner: _Person,
-    hostname: str,
-    *,
-    worker: bool = True,
-) -> _Node:
-    """Publish one operator-tailnet node, optionally with a worker already listening."""
-    link = new_link(owner.requester_id, hostname.replace("-", "_"))
-    row = {
-        "id": link.id,
-        "hostname": link.hostname,
-        "desired": "on",
-        "allowed_login": stack.config.tailnet_ssh.logins[owner.requester_id],
-        "access_revision": _revision(stack, owner),
-    }
-    node = stack.nodes[hostname] = _Node(link, owner, row)
-    key = serialization.load_ssh_private_key(link.host_key.encode(), password=None).public_key()
-    with (stack.tailnet.folder / "known_hosts").open("a", encoding="utf-8") as known_hosts:
-        host_key = key.public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode()
-        known_hosts.write(f"{hostname} {host_key}\n")
-    if worker:
-        _start_worker(stack, node)
-    stack.primary.rows.append(row)
-    return node
-
-
-def _await_admitted(stack: _Stack, node: _Node) -> None:
-    """Connect to the node as its link's login, again and again, until the gateway takes a connection to the worker.
-
-    The gateway admits the login once a pass of it has read the row that names the login, and it reports no pass.
-    Until then it closes the login's connections and makes no connect call, so this costs the link one connect call.
-    """
-    link_id = node.link.id
-    argv = [*_client(stack.tailnet, node.owner), "-o", "ConnectTimeout=30", node.link.hostname, "true"]
-
-    def asked() -> int:
-        return sum(connect.link_id == link_id for connect in stack.primary.connects)
-
-    def admitted() -> bool:
-        done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=60, check=False)
-        return done.returncode == 0
-
-    before = asked()
-    _eventually(f"the gateway to admit the login of {node.link.hostname}", admitted, seconds=90)
-    assert asked() == before + 1
-    stack.opened[link_id] = stack.opened.get(link_id, 0) + 1
-
-
-def _revision(stack: _Stack, person: _Person) -> str:
-    login = stack.config.tailnet_ssh.logins[person.requester_id]
-    keys = signin_keys(stack.config, person.requester_id)
-    return hashlib.sha256(json.dumps([login, sorted(keys)]).encode()).hexdigest()
-
-
-def _set_key(stack: _Stack, node: _Node, key: str) -> None:
-    """Replace the owner's configured key, then refresh the projection and revision."""
-    stack.config.tailnet_ssh.authorized_keys[node.owner.requester_id] = [key]
-    _project(stack, node)
-    node.row["access_revision"] = _revision(stack, node.owner)
+    return wake
 
 
 @pytest.fixture(scope="module")
 def tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
-    """One Headscale with two distinct client logins and a reusable operator key for the gateway nodes."""
+    """One Headscale with two authorized logins and a third login unknown to MindRoom."""
     if os.environ.get("MINDROOM_TAILNET_SSH_E2E") != "1":
         pytest.skip("needs Docker, Headscale and the built images")
+    assert _GATEWAY_IMAGE, "Set MINDROOM_TAILNET_SSH_E2E_GATEWAY_IMAGE"
+    assert _WORKER_IMAGE, "Set MINDROOM_TAILNET_SSH_E2E_WORKER_IMAGE"
     prefix = f"mindroom-e2e-{secrets.token_hex(4)}"
     folder = tmp_path_factory.mktemp("tailnet")
     port = _free_port()
@@ -614,7 +526,7 @@ def tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
             lambda: _docker_result("exec", headscale, "headscale", "users", "list").returncode == 0,
         )
         people = {}
-        for login in ("alice", "bob"):
+        for login in ("alice", "bob", "mallory"):
             key = folder / login
             subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", login, "-f", key], check=True)
             person = people[login] = _Person(login, f"@{login}:example.org", f"{prefix}-{login}", key)
@@ -632,50 +544,96 @@ def tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
 
 
 @pytest.fixture(scope="module")
-def stack(tailnet: _Tailnet) -> Iterator[_Stack]:
-    """Start just one gateway against the fake primary; both nodes join using the operator's key."""
-    primary = _Primary()
-    listener = uvicorn.Config(primary.app(), host="127.0.0.1", port=primary.port, log_level="warning", ws="none")
-    served = uvicorn.Server(listener)
-    serving = threading.Thread(target=served.run, daemon=True)
-    config = Config(
-        tailnet_ssh={
-            "logins": {person.requester_id: person.login for person in tailnet.people.values()},
-            "authorized_keys": {person.requester_id: [person.public_key] for person in tailnet.people.values()},
+def operator_key(tailnet: _Tailnet) -> SecretStr:
+    """Reusable only in this throwaway tailnet."""
+    return SecretStr(_pre_auth_key(tailnet.headscale, "operator"))
+
+
+@pytest.fixture
+def stack(tailnet: _Tailnet, operator_key: SecretStr, tmp_path: Path) -> Iterator[_Stack]:
+    """Use a fresh shared worker key and gateway per test (their rate limits are independent)."""
+    suffix = secrets.token_hex(4)
+    prefix = f"{tailnet.prefix}-{suffix}"
+    config_path = tmp_path / "config.yaml"
+    config_path.touch()
+    paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+            "MINDROOM_WORKER_BACKEND": "docker",
         },
     )
-    prefix = f"{tailnet.prefix}-ssh"
-    stack = _Stack(tailnet, prefix, primary, f"{prefix}-gateway", f"{prefix}-state", config)
+    admitted = [tailnet.people[login] for login in ("alice", "bob")]
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+            "agents": {
+                f"shell_{suffix}": {
+                    "display_name": "Shared shell",
+                    "worker_scope": "shared",
+                    "tools": ["shell"],
+                    "tailnet_ssh": True,
+                    "access": {"users": [person.requester_id for person in admitted]},
+                },
+            },
+            "tailnet_ssh": {
+                "logins": {person.requester_id: person.login for person in admitted},
+                "authorized_keys": {person.requester_id: [person.public_key] for person in admitted},
+            },
+        },
+        paths,
+    )
+    primary = _Primary(config, paths)
+    [row] = primary.roster()
+    assert row["allowed_logins"] == ["alice", "bob"]
+    [link] = read_links(paths).links
+    stack = _Stack(tailnet, primary, link, f"{prefix}-gateway", f"{prefix}-state", tailnet.folder / prefix)
+    primary.warm = _worker_wake(stack, f"{prefix}-worker")
+    private = serialization.load_ssh_private_key(link.host_key.encode(), password=None)
+    key = private.public_key().public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode()
+    with (tailnet.folder / "known_hosts").open("a", encoding="utf-8") as known_hosts:
+        known_hosts.write(f"{link.hostname} {key}\n")
+    served = uvicorn.Server(
+        uvicorn.Config(primary.app(), host="127.0.0.1", port=primary.port, log_level="warning", ws="none"),
+    )
+    serving = threading.Thread(target=served.run, daemon=True)
     environment = {
         "TAILNET_SSH_PRIMARY_URL": f"http://127.0.0.1:{primary.port}",
         "TAILNET_SSH_GATEWAY_TOKEN": primary.token,
         "TAILNET_SSH_LOGIN_SERVER": tailnet.login_server,
-        "TAILNET_SSH_AUTH_KEY": _pre_auth_key(tailnet.headscale, "operator"),
+        "TAILNET_SSH_AUTH_KEY": operator_key.get_secret_value(),
     }
     serving.start()
     try:
-        _eventually("the fake primary to listen", lambda: served.started, seconds=10)
+        _eventually("the primary to listen", lambda: served.started, seconds=10)
         _docker(
-            *("run", "--detach", "--name", stack.gateway, "--network", "host", *_READ_ONLY_ROOT),
-            *("--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--volume", f"{stack.state}:/state"),
+            "run",
+            "--detach",
+            "--name",
+            stack.gateway,
+            "--network",
+            "host",
+            *_READ_ONLY_ROOT,
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--volume",
+            f"{stack.state}:/state",
             *[arg for name, value in environment.items() for arg in ("--env", f"{name}={value}")],
             _GATEWAY_IMAGE,
         )
         for person in tailnet.people.values():
-            node = _add_link(stack, person, f"mind-{person.login}")
-            _await_admitted(stack, node)
-            assert _in_state_volume(stack, "test", "-s", f"/state/{node.link.id}/tailscaled.state").returncode == 0
-        assert set(stack.nodes) <= _signed_in(tailnet)
+            _eventually(f"{person.login} to see {link.hostname}", lambda p=person: link.hostname in _peers(p))
         yield stack
     finally:
-        # On failure include gateway and sshd diagnostics, then remove this run's resources.
-        secret_values = {environment[name] for name in environment.keys() & _SECRET_ENV}
         for container in _docker("ps", "--all", "--filter", f"name=^{prefix}", "--format", "{{.Names}}").split():
-            print(f"--- {container}\n{_redact(_logs(container), secret_values)}")
+            print(f"--- {container}\n{_redact(_logs(container), {operator_key.get_secret_value(), primary.token})}")
         _remove(prefix)
-        for node in stack.nodes.values():
-            if node.root is not None:
-                _own(node.root, f"{os.getuid()}:{os.getgid()}")
+        if stack.root.exists():
+            _own(stack.root, f"{os.getuid()}:{os.getgid()}")
         served.should_exit = True
         serving.join(timeout=10)
 
@@ -684,26 +642,34 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_pre_auth_node_exec_uses_a_read_only_worker_projection(stack: _Stack) -> None:
-    """The operator-enrolled node admits the configured owner to its worker's restricted SSH server."""
-    alice = stack.tailnet.people["alice"]
-    node = stack.nodes["mind-alice"]
-    # The session is the worker's user in the launch's folder, and sshd's files are that user's, who cannot write them.
-    seen = f"stat --format %u:%a {_PROJECTION} {_PROJECTION}/ssh_host_ed25519_key; touch {_PROJECTION}/planted"
-    done = _run_ssh(stack, node, [*_client(stack.tailnet, alice), "mind-alice", f"id -u; pwd; {seen}"])
-    assert done.stdout.split() == ["1000", _WORKSPACE, "1000:755", "1000:600"], done.stderr
+def test_unknown_login_is_refused_before_wake(stack: _Stack) -> None:
+    """Even a key in the roster is not enough if WhoIs returns an unknown login."""
+    alice, mallory = (stack.tailnet.people[login] for login in ("alice", "mallory"))
+    _assert_turned_away(stack, mallory, alice.key)
+    assert not stack.root.exists(), "Unknown login woke the worker"
+    admitted = _run_ssh([*_client(stack.tailnet, alice), stack.link.hostname, "true"])
+    assert admitted.returncode == 0, admitted.stderr
+
+
+def test_two_authorized_logins_exec_on_one_shared_worker(stack: _Stack) -> None:
+    """Both login/key holders reach the same stable link and its read-only SSH projection."""
+    host = stack.link.hostname
+    for login in ("alice", "bob"):
+        person = stack.tailnet.people[login]
+        done = _run_ssh([*_client(stack.tailnet, person), host, "id -u; pwd; cat shared"])
+        assert (done.returncode, done.stdout.splitlines()) == (0, ["1000", _WORKSPACE, "shared worker"]), done.stderr
+        assert stack.primary.connects[-1] == (stack.link.id, {"peer_login": login, "peer_node": f"{login}-laptop"})
+    done = _run_ssh([*_client(stack.tailnet, stack.tailnet.people["alice"]), host, f"touch {_PROJECTION}/planted"])
     assert (done.returncode, "Read-only file system" in done.stderr) == (1, True), done.stderr
-    asked = stack.primary.connects[-1]
-    assert (asked.link_id, asked.peer) == (node.link.id, {"peer_login": "alice", "peer_node": "alice-laptop"})
 
 
 def test_pty_scp_sftp_rsync(stack: _Stack, tmp_path: Path) -> None:
     """A login gets a terminal, and a file comes back as it was sent by scp, sftp and rsync."""
     alice = stack.tailnet.people["alice"]
-    node = stack.nodes["mind-alice"]
+    host = stack.link.hostname
     ssh = _client(stack.tailnet, alice)
 
-    terminal = _run_ssh(stack, node, [*ssh, "-tt", "mind-alice", "tty"])
+    terminal = _run_ssh([*ssh, "-tt", host, "tty"])
     assert terminal.returncode == 0, terminal.stderr
     assert terminal.stdout.strip().startswith("/dev/pts/")
 
@@ -714,45 +680,44 @@ def test_pty_scp_sftp_rsync(stack: _Stack, tmp_path: Path) -> None:
     scp = _client(stack.tailnet, alice, "scp")
     rsync = ["rsync", "--archive", "--rsh", shlex.join(ssh)]
     transfers = [
-        ([*scp, str(sent), "mind-alice:scp.bin"], None),
-        ([*scp, "mind-alice:scp.bin", str(tmp_path / "scp.bin")], None),
+        ([*scp, str(sent), f"{host}:scp.bin"], None),
+        ([*scp, f"{host}:scp.bin", str(tmp_path / "scp.bin")], None),
         (
-            [*_client(stack.tailnet, alice, "sftp"), "-b", "-", "mind-alice"],
+            [*_client(stack.tailnet, alice, "sftp"), "-b", "-", host],
             f"put {sent} sftp.bin\nget sftp.bin {tmp_path / 'sftp.bin'}\n",
         ),
-        ([*rsync, f"{sent.parent}/", "mind-alice:rsync/"], None),
-        ([*rsync, "mind-alice:rsync/", f"{tmp_path / 'rsync'}/"], None),
+        ([*rsync, f"{sent.parent}/", f"{host}:rsync/"], None),
+        ([*rsync, f"{host}:rsync/", f"{tmp_path / 'rsync'}/"], None),
     ]
     for argv, stdin in transfers:
-        done = _run_ssh(stack, node, argv, stdin=stdin)
+        done = _run_ssh(argv, stdin=stdin)
         assert done.returncode == 0, done.stderr
     returned = [tmp_path / "scp.bin", tmp_path / "sftp.bin", tmp_path / "rsync" / "notes.bin"]
     assert [_sha256(path) for path in returned] == [_sha256(sent)] * 3
     # What was sent is in the workspace, which is the session's home.
-    assert node.root is not None
-    landed = [node.root / "workspace" / name for name in ("scp.bin", "sftp.bin", "rsync/notes.bin")]
+    landed = [stack.root / "workspace" / name for name in ("scp.bin", "sftp.bin", "rsync/notes.bin")]
     assert [_sha256(path) for path in landed] == [_sha256(sent)] * 3
 
 
 def test_forwarding_is_refused(stack: _Stack, tmp_path: Path) -> None:
     """A session forwards no port, no stdio and no agent."""
     alice = stack.tailnet.people["alice"]
-    node = stack.nodes["mind-alice"]
+    host = stack.link.hostname
     ssh = _client(stack.tailnet, alice)
     sshd = f"127.0.0.1:{WORKER_SSH_PORT}"
 
     # A local forward's listener is the client's own, so the worker refuses when something connects to it.
     port = _free_port()
-    with _ssh_session(stack, node, [*ssh, "-L", f"{port}:{sshd}", "mind-alice", "echo up; sleep 60"]) as local:
+    with _ssh_session([*ssh, "-L", f"{port}:{sshd}", host, "echo up; sleep 60"]) as local:
         _await_up(local)
         with socket.create_connection(("127.0.0.1", port), timeout=30) as through:
             assert through.recv(8) == b""
         assert "open failed" in _end(local)[1]
 
-    remote = _run_ssh(stack, node, [*ssh, "-o", "ExitOnForwardFailure=yes", "-R", f"0:{sshd}", "mind-alice", "true"])
+    remote = _run_ssh([*ssh, "-o", "ExitOnForwardFailure=yes", "-R", f"0:{sshd}", host, "true"])
     assert remote.returncode == 255
     assert "remote port forwarding failed" in remote.stderr
-    stdio = _run_ssh(stack, node, [*ssh, "-W", sshd, "mind-alice"])
+    stdio = _run_ssh([*ssh, "-W", sshd, host])
     assert stdio.returncode == 255
     assert "stdio forwarding failed" in stdio.stderr
 
@@ -763,9 +728,7 @@ def test_forwarding_is_refused(stack: _Stack, tmp_path: Path) -> None:
     try:
         _eventually("the SSH agent's socket", socket_path.exists, seconds=10)
         forwarded = _run_ssh(
-            stack,
-            node,
-            [*ssh, "-A", "mind-alice", f"find /tmp {_WORKER_ROOT} -type s && echo end"],
+            [*ssh, "-A", host, f"find /tmp {_WORKER_ROOT} -type s && echo end"],
             env={**os.environ, "SSH_AUTH_SOCK": str(socket_path)},
         )
     finally:
@@ -775,17 +738,15 @@ def test_forwarding_is_refused(stack: _Stack, tmp_path: Path) -> None:
 
 
 def test_wrong_key_and_password_are_refused(stack: _Stack, tmp_path: Path) -> None:
-    """Only a key of the link's owner signs in: the worker offers no other way."""
+    """The worker accepts only a configured SSH public key, not a password."""
     alice = stack.tailnet.people["alice"]
-    node = stack.nodes["mind-alice"]
+    host = stack.link.hostname
     other = tmp_path / "other"
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", other], check=True)
 
-    wrong_key = _run_ssh(stack, node, [*_client(stack.tailnet, alice, key=other), "mind-alice", "true"])
+    wrong_key = _run_ssh([*_client(stack.tailnet, alice, key=other), host, "true"])
     password = _run_ssh(
-        stack,
-        node,
-        [*_client(stack.tailnet, alice), "-o", "PubkeyAuthentication=no", "mind-alice", "true"],
+        [*_client(stack.tailnet, alice), "-o", "PubkeyAuthentication=no", host, "true"],
     )
     for refused in (wrong_key, password):
         assert refused.returncode == 255
@@ -793,85 +754,67 @@ def test_wrong_key_and_password_are_refused(stack: _Stack, tmp_path: Path) -> No
         assert "Permission denied (publickey)." in refused.stderr
 
 
-def test_two_links_in_one_tailnet_refuse_cross_login_even_with_the_right_key(stack: _Stack) -> None:
-    """TCP reaches both nodes, but WhoIs rejects each other login before the primary sees a connect."""
-    for login, other in (("alice", "bob"), ("bob", "alice")):
-        person = stack.tailnet.people[login]
-        own, theirs = stack.nodes[f"mind-{login}"], stack.nodes[f"mind-{other}"]
-        assert {own.link.hostname, theirs.link.hostname} <= _peers(person)
-        done = _run_ssh(stack, own, [*_client(stack.tailnet, person), own.link.hostname, "pwd; cat owner"])
-        assert (done.returncode, done.stdout.splitlines()) == (0, [_WORKSPACE, person.login]), done.stderr
-        asked = stack.primary.connects[-1]
-        assert (asked.link_id, asked.peer) == (own.link.id, {"peer_login": login, "peer_node": f"{login}-laptop"})
-        _assert_turned_away(stack, person, theirs)
+def _assert_session_still_works(held: subprocess.Popen[str]) -> None:
+    assert held.stdin is not None
+    assert held.stdout is not None
+    held.stdin.write("still here\n")
+    held.stdin.flush()
+    ready, _, _ = select.select([held.stdout], [], [], 30)
+    assert ready, "No reply from the already-open session"
+    assert held.stdout.readline() == "still here\n"
+    assert held.wait(timeout=15) == 0
 
 
-def test_key_removal_cuts_an_open_session(stack: _Stack, tmp_path: Path) -> None:
-    """Removing a person's key ends their open session within the gateway's next passes, and admits no new one."""
-    alice = stack.tailnet.people["alice"]
-    node = stack.nodes["mind-alice"]
-    ssh = _client(stack.tailnet, alice)
-    new_key = tmp_path / "replacement"
-    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", new_key], check=True)
-    replacement = new_key.with_suffix(".pub").read_text().strip()
-    with _ssh_session(stack, node, [*ssh, "mind-alice", "echo up; sleep 300"]) as held:
+_ROUND_TRIP = 'echo up; IFS= read -r line; printf "%s\\n" "$line"'
+
+
+def test_key_removal_refuses_new_connection_without_cutting_session(stack: _Stack) -> None:
+    """Alice still has a valid login, but a newly projected allowlist no longer accepts her old key."""
+    alice, bob = (stack.tailnet.people[login] for login in ("alice", "bob"))
+    ssh = [*_client(stack.tailnet, alice), stack.link.hostname]
+    with _ssh_session([*ssh, _ROUND_TRIP]) as held:
         _await_up(held)
-        try:
-            _set_key(stack, node, replacement)
-            assert held.wait(timeout=15) == 255
-            refused = _run_ssh(stack, node, [*ssh, "mind-alice", "true"])
-            assert refused.returncode == 255
-            assert "Permission denied (publickey)." in refused.stderr
-        finally:
-            _set_key(stack, node, alice.public_key)
-            key = (node.link.id, node.row["access_revision"])
-            target = stack.primary.list_reads[key] + 2
-            # Reconcile is serial. A second read proves the first pass applied the restore before the next test.
-            _eventually("the restored revision to settle", lambda: stack.primary.list_reads[key] >= target)
+        # Keep Alice's login present so the new connection must reach OpenSSH's key check.
+        stack.primary.config.tailnet_ssh.authorized_keys[alice.requester_id] = [bob.public_key]
+        done = _run_ssh([*ssh, "true"])
+        assert done.returncode == 255
+        assert "Permission denied (publickey)." in done.stderr
+        _assert_session_still_works(held)
+
+
+def test_omission_drains_and_gateway_restart_reuses_node_state(stack: _Stack) -> None:
+    """Omission refuses new connections, lets the live one drain, and preserves the tailnet identity."""
+    alice = stack.tailnet.people["alice"]
+    ssh = [*_client(stack.tailnet, alice), stack.link.hostname]
+    identity = _registered_node(stack)
+    assert identity is not None
+    logins = stack.primary.config.tailnet_ssh.logins.copy()
+    with _ssh_session([*ssh, _ROUND_TRIP]) as held:
+        _await_up(held)
+        stack.primary.config.tailnet_ssh.logins.clear()
+        # Reconcile is serial: by a second empty GET it processed the first omission.
+        _eventually("the gateway to reconcile omission", lambda: stack.primary.omissions >= 2)
+        _assert_turned_away(stack, alice, alice.key)
+        _assert_session_still_works(held)
+
+    _docker("stop", stack.gateway)
+    # A new process with the same volume has no in-memory tsnet state.
+    stack.primary.config.tailnet_ssh.logins.update(logins)
+    _docker("start", stack.gateway)
+    _eventually("SSH after gateway restart", lambda: _run_ssh([*ssh, "true"]).returncode == 0)
+    assert _registered_node(stack) == identity
 
 
 def test_connection_held_through_a_120s_start(stack: _Stack) -> None:
-    """A client with no setting of its own waits for a worker that takes two minutes to start, told to wait."""
+    """A client with no setting of its own waits out a long wake and sees the pre-banner."""
     alice = stack.tailnet.people["alice"]
-    node = stack.nodes["mind-alice"]
-    ssh = _client(stack.tailnet, alice)
-    stack.primary.delays[node.link.id] = 120
-    try:
-        with ExitStack() as held:
-            clients = [
-                held.enter_context(_ssh_session(stack, node, [*ssh, *verbose, "mind-alice", "true"]))
-                for verbose in ([], ["-v"])
-            ]
-            outputs = [client.communicate(timeout=300) for client in clients]
-    finally:
-        del stack.primary.delays[node.link.id]
+    endpoint = stack.link.hostname
+    stack.primary.delay = 120
+    with ExitStack() as held:
+        clients = [
+            held.enter_context(_ssh_session([*_client(stack.tailnet, alice), *verbose, endpoint, "true"]))
+            for verbose in ([], ["-v"])
+        ]
+        outputs = [client.communicate(timeout=300) for client in clients]
     assert [client.returncode for client in clients] == [0, 0], outputs
-    # Both were held: the first one's connect call came this long ago.
-    assert time.monotonic() - stack.primary.connects[-2].at >= 120
     assert "MindRoom: waking worker" in outputs[1][1]
-
-
-def test_removing_logs_out_and_gateway_restart_keeps_others(stack: _Stack) -> None:
-    """A removed link's node leaves the tailnet, also when the gateway was down, and a restart signs no node out."""
-    alice = stack.tailnet.people["alice"]
-    gone, late = (_add_link(stack, alice, hostname, worker=False) for hostname in ("mind-gone", "mind-late"))
-    _eventually("both nodes to join", lambda: {"mind-gone", "mind-late"} <= _signed_in(stack.tailnet))
-
-    gone.row.update(desired="removing", allowed_login=None, access_revision="")
-    _eventually("the removed link's node to be gone", lambda: stack.primary.removed(gone.link.id))
-    assert "mind-gone" not in _signed_in(stack.tailnet)
-    assert _in_state_volume(stack, "test", "-e", f"/state/{gone.link.id}").returncode == 1
-    stack.primary.rows.remove(gone.row)
-
-    # A restart, with a link removed while the gateway is down: its node is signed out from the keys in the volume.
-    _docker("stop", stack.gateway)
-    late.row.update(desired="removing", allowed_login=None, access_revision="")
-    _docker("start", stack.gateway)
-    _eventually("the link removed meanwhile to be gone", lambda: stack.primary.removed(late.link.id))
-    assert "mind-late" not in _signed_in(stack.tailnet)
-    assert _in_state_volume(stack, "test", "-e", f"/state/{late.link.id}").returncode == 1
-    stack.primary.rows.remove(late.row)
-
-    # StrictHostKeyChecking requires the same pinned host keys after restart.
-    for hostname in ("mind-alice", "mind-bob"):
-        _await_admitted(stack, stack.nodes[hostname])
