@@ -279,6 +279,11 @@ A `timeout` means the worker did not become ready within [`workers.kubernetes.re
 Previously named `subagent_worker_retire_failed`. This warning now covers failed cleanup of both dedicated subagent and named workers, and `worker` is the worker's log ID.
 If it repeats for the same worker, check the accompanying exception for a worker backend or storage error.
 
+### `worker_retirement_marker_allocation_failed`
+
+Logged when Kubernetes worker retirement cannot write a marker because the volume is full or a quota has been reached. `errno` distinguishes the two cases.
+Retirement still removes the worker's files, but if interrupted after removing the startup manifest, it may not be able to resume without a marker. If this warning repeats, check volume space, inodes, and quotas.
+
 ### `oauth_credentials_refresh_failed`
 
 Logged when MindRoom cannot refresh the access token of a stored [OAuth connection](https://docs.mindroom.chat/oauth-framework/), for a tool or an MCP server.

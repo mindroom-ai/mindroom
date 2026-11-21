@@ -6,10 +6,12 @@ import json
 import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, TextIO, cast
 
 import pytest
+from structlog.testing import capture_logs
 
+from mindroom.workers import named as named_module
 from mindroom.workers.backend import effective_idle_status, filter_and_sort_worker_handles
 from mindroom.workers.backends import local as local_module
 from mindroom.workers.backends._lifecycle import (
@@ -26,6 +28,8 @@ from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.workers.backend import WorkerBackend
 
 
 def _handle(worker_key: str, *, status: WorkerStatus, last_used_at: float) -> WorkerHandle:
@@ -191,6 +195,15 @@ def test_worker_backends_without_named_workers_use_safe_defaults(tmp_path: Path)
         assert not backend.has_named_worker(key)
         assert backend.named_worker_keys() == frozenset()
         assert not hasattr(backend, "retire_worker")
+
+
+def test_retiring_a_named_worker_without_a_capable_backend_logs_the_error() -> None:
+    """An incapable backend takes the same logged failure path as a retirement that fails."""
+    with capture_logs() as logs:
+        named_module._retire_named_worker(cast("WorkerBackend", object()), "v1:t:shared:a")
+    [warning] = logs
+    assert warning["event"] == "named_worker_retire_failed"
+    assert warning["log_level"] == "warning"
 
 
 def test_local_backend_touch_revives_idle_worker_and_clears_failure(tmp_path: Path) -> None:

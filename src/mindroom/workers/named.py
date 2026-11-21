@@ -326,8 +326,10 @@ def ensure_named_worker(
 
 
 def _retire_named_worker(backend: WorkerBackend, worker_key: str) -> None:
-    assert isinstance(backend, RetiringWorkerBackend)
     try:
+        if not isinstance(backend, RetiringWorkerBackend):
+            msg = "Named worker backend does not support exact worker retirement."
+            raise WorkerBackendError(msg)  # noqa: TRY301 - Use the same warning path as a failed retirement.
         backend.retire_worker(worker_key)
     except WorkerBackendError:
         logger.warning("named_worker_retire_failed", worker=worker_log_id(worker_key), exc_info=True)
