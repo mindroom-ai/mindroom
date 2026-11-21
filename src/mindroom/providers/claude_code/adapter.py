@@ -129,6 +129,7 @@ class ClaudeCodeProvider:
             thinking = {"type": "adaptive", "display": "summarized"}
             session = await runtime.start(
                 provider=provider,
+                storage_root=self.storage_root,
                 system=system,
                 tools=tools,
                 # The new process takes the slot of one it replaces.
@@ -193,7 +194,9 @@ class ClaudeCodeProvider:
 
     async def preflight(self) -> None:
         """Start Claude Code as a request would, send it nothing, and close it, raising what a request would."""
-        await runtime.SESSIONS.retire(await runtime.start(provider=self.identity.provider, **self._launch))
+        await runtime.SESSIONS.retire(
+            await runtime.start(provider=self.identity.provider, storage_root=self.storage_root, **self._launch)
+        )
 
 
 def build_adapter(

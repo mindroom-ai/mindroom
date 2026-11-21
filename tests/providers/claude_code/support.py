@@ -12,7 +12,6 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ToolSpec
-from mindroom.providers.claude_code import session
 from mindroom.providers.claude_code.builder import build_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -77,16 +76,9 @@ class FakeCli:
         return build_provider(model_config, self.runtime_paths, execution_identity=execution_identity)
 
 
-def left_behind() -> list[str]:
-    """Return what the route's processes left in its private directory besides their empty working directory."""
-    if not session._HOMES:
-        return []
-    return sorted(str(path.relative_to(home())) for path in home().rglob("*") if path.name != "cwd")
-
-
-def home() -> Path:
-    """Return the private directory of the route's processes."""
-    return session._HOMES[-1][0]
+def left_behind(cli: FakeCli) -> list[Path]:
+    """Return any files the route left in its private directory."""
+    return sorted(path for path in (cli.storage_root / "claude_code").rglob("*") if path.is_file())
 
 
 def fake_cli(tmp_path: Path, *processes: dict[str, Any]) -> FakeCli:

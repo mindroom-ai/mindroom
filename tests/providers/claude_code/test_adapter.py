@@ -5,10 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import concurrent.futures
 import json
 import os
-import shutil
+import stat
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -48,7 +47,6 @@ from tests.providers.claude_code.support import (
     LOOKUP,
     call,
     fake_cli,
-    home,
     left_behind,
     result,
     text_turn,
@@ -154,7 +152,7 @@ async def test_claude_code_starts_isolated_with_mindroom_system_prompt_and_the_u
     assert "--thinking-display" in args
     assert "--setting-sources=" in args
     assert not {"--add-dir", "--plugin-dir"} & set(args)
-    assert spawn["cwd"] == str(home() / "cwd")
+    assert spawn["cwd"] == str(cli.storage_root / "claude_code" / "cwd")
     assert int(spawn["tool_timeout"]) > 30 * 60 * 1000
     # A call that waits long stays a call, which the model does not go on without.
     assert spawn["background"] == ["1", "0"]
@@ -725,6 +723,11 @@ async def test_a_request_past_the_process_limit_fails_as_retryable_instead_of_st
 @pytest.mark.asyncio
 async def test_a_system_prompt_is_private_to_the_user_and_gone_once_claude_code_started(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
+    home_path = cli.storage_root / "claude_code"
+    cwd = home_path / "cwd"
+    cwd.mkdir(parents=True)
+    for path in (home_path, cwd):
+        path.chmod(0o755)
     umask = os.umask(0o022)
     try:
         await complete(cli.provider(execution_identity=CONVERSATION), ModelRequest(messages=[_SYSTEM, user("Hi")]))
@@ -734,50 +737,32 @@ async def test_a_system_prompt_is_private_to_the_user_and_gone_once_claude_code_
     [spawn] = cli.events("spawn")
     assert spawn["system_prompt"] == "You are the test agent."
     assert spawn["prompt_modes"] == [0o600, 0o700]
+    assert spawn["cwd"] == str(cwd)
+    assert stat.S_IMODE(cwd.stat().st_mode) == 0o700
+    assert list(home_path.iterdir()) == [cwd]
+    assert not list(cwd.iterdir())
     # The process still rests, and its prompt is no longer on disk.
     assert len(SESSIONS.resting) == 1
-    assert left_behind() == []
+    assert left_behind(cli) == []
 
 
 @pytest.mark.asyncio
-async def test_a_runtime_directory_that_was_cleaned_away_is_replaced_by_a_new_private_one(tmp_path: Path) -> None:
-    cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
-    provider = cli.provider()
-    await complete(provider, ModelRequest(messages=[_SYSTEM, user("Hi")]))
-    cleaned = home()
-    shutil.rmtree(cleaned)
-    # Someone else could make a directory of that name again.
-    cleaned.mkdir()
+@pytest.mark.parametrize("part", ["claude_code", "cwd"])
+async def test_claude_code_refuses_linked_runtime_directories(tmp_path: Path, part: str) -> None:
+    cli = fake_cli(tmp_path, {"turns": [text_turn("never")]})
+    home_path = cli.storage_root / "claude_code"
+    link = home_path if part == "claude_code" else home_path / "cwd"
+    target = tmp_path / "elsewhere"
+    target.mkdir(mode=0o755)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target, target_is_directory=True)
 
-    assert (await complete(provider, ModelRequest(messages=[_SYSTEM, user("Hi")]))).content == "Hello."
+    with pytest.raises(ProviderUnavailable, match="symlink"):
+        await complete(cli.provider(), ModelRequest(messages=[_SYSTEM, user("Hi")]))
 
-    assert home() != cleaned
-    assert list(cleaned.iterdir()) == []
-    assert cli.events("spawn")[1]["cwd"] == str(home() / "cwd")
-    assert cli.events("spawn")[1]["prompt_modes"] == [0o600, 0o700]
-
-
-@pytest.mark.asyncio
-async def test_a_directory_someone_else_made_under_the_old_name_is_neither_used_nor_removed(tmp_path: Path) -> None:
-    cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]}, {"turns": [text_turn("Hello.")]})
-    provider = cli.provider()
-    await complete(provider, ModelRequest(messages=[_SYSTEM, user("Hi")]))
-    cleaned = home()
-    shutil.rmtree(cleaned)
-    (cleaned / "cwd").mkdir(parents=True)
-
-    await complete(provider, ModelRequest(messages=[_SYSTEM, user("Hi again")]))
-    session_module._remove_homes()
-
-    assert cli.events("spawn")[1]["cwd"] != str(cleaned / "cwd")
-    assert (cleaned / "cwd").is_dir()
-
-
-def test_starts_preparing_at_once_share_one_private_directory() -> None:
-    with concurrent.futures.ThreadPoolExecutor(8) as pool:
-        homes = set(pool.map(lambda _: session_module._home(), range(32)))
-
-    assert len(homes) == 1
+    assert cli.events("spawn") == []
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+    assert not list(target.iterdir())
 
 
 @pytest.fixture
@@ -816,7 +801,7 @@ async def test_a_request_cancelled_while_claude_code_starts_keeps_its_slot_until
     assert (SESSIONS.live, SESSIONS.starting) == (set(), 0)
     assert len(cli.events("spawn")) == len(cli.events("exit")) == 1
     assert cli.events("user") == []
-    assert left_behind() == []
+    assert left_behind(cli) == []
 
 
 @pytest.mark.asyncio
@@ -873,7 +858,7 @@ async def _failure(
     assert SESSIONS.resting == {}
     assert len(cli.events("exit")) == len(cli.events("spawn"))
     assert bool(cli.events("user")) == asked
-    assert left_behind() == []
+    assert left_behind(cli) == []
     return raised.value
 
 
@@ -1247,7 +1232,13 @@ async def test_a_process_that_is_gone_gives_its_slot_to_no_other(
     await complete(provider, ModelRequest(messages=[user("Hi again")]))
 
     # The one slot is held by another process now, which the new one must take as any start would.
-    new = await session_module.start(provider="invented", replaces=gone, model="invented", cli_path=str(cli.path))
+    new = await session_module.start(
+        provider="invented",
+        storage_root=cli.storage_root,
+        replaces=gone,
+        model="invented",
+        cli_path=str(cli.path),
+    )
     await _closed()
 
     assert SESSIONS.live == {new}

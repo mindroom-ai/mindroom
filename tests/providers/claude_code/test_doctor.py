@@ -43,7 +43,7 @@ def test_doctor_passes_a_signed_in_claude_code_without_sending_it_a_prompt(
     # Both models run one executable, which is started once, asked nothing, and closed.
     assert len(cli.events("spawn")) == len(cli.events("exit")) == 1
     assert cli.events("user") == []
-    assert left_behind() == []
+    assert left_behind(cli) == []
 
 
 def test_doctor_fails_a_claude_code_that_is_not_signed_in(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

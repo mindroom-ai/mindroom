@@ -54,6 +54,7 @@ Every team's Mem0 records share one store, so the merge moves only records of th
 The one-time conversions of a database from an earlier release read its rows as untrusted input and write its `.pre-storage-v2` or `.pre-storage-v4` backup without following links, so worker code that tampers with a database can break only that agent's or team's history.
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
+The Claude Code model route keeps its empty working directory and temporary system-prompt files under primary-only `claude_code/` and refuses links in that directory or its working directory path.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
 Knowledge indexes, including private agents' indexes and their publication and refresh-status files, live in the primary-only `knowledge_db/` storage directory, like knowledge Git directories, so no worker can write the index files the primary opens.
 
