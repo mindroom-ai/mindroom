@@ -214,8 +214,8 @@ async def test_sweep_reconciles_each_held_room_once_through_its_steward(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_put_room_state_as_steward_returns_false_without_power(tmp_path: Path) -> None:
-    """The write goes through the steward's client and reports a refusal, or a room without a steward, as False."""
+async def test_put_room_state_as_steward_returns_none_when_refused(tmp_path: Path) -> None:
+    """The write goes through the steward's client and returns None when refused or when there is no steward."""
     room = _Room(tmp_path, ("agent1",))
     assert await put_room_state_as_steward(
         room.orchestrator.room_steward,
@@ -226,9 +226,9 @@ async def test_put_room_state_as_steward_returns_false_without_power(tmp_path: P
     )
     assert room.state["io.mindroom.test", "k"] == {"a": 1}
     room.refusal = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
-    assert not await put_room_state_as_steward(room.orchestrator.room_steward, ROOM_ID, "io.mindroom.test", {"a": 2})
+    assert await put_room_state_as_steward(room.orchestrator.room_steward, ROOM_ID, "io.mindroom.test", {"a": 2}) is None
     room.bots.clear()
-    assert not await put_room_state_as_steward(room.orchestrator.room_steward, ROOM_ID, "io.mindroom.test", {"a": 3})
+    assert await put_room_state_as_steward(room.orchestrator.room_steward, ROOM_ID, "io.mindroom.test", {"a": 3}) is None
 
 
 def test_steward_may_write_state_reads_the_stewards_own_power() -> None:
