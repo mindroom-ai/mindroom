@@ -97,6 +97,7 @@ _logged_unmanaged_authors: set[tuple[str, str]] = set()
 
 
 def _runtime_authored_task_content(
+    room_id: str,
     event: dict[str, typing.Any],
     runtime_account_ids: frozenset[str],
 ) -> dict[str, typing.Any] | None:
@@ -120,6 +121,13 @@ def _runtime_authored_task_content(
         # Coverage: tests/test_scheduled_task_runtime.py::test_task_saved_without_an_owner_keeps_its_writer_as_owner_through_a_rewrite.
         owner = content.get("owner")
         return {**content, "owner": owner if isinstance(owner, str) and owner else sender}
+    logger.debug(
+        "scheduled_task_event_ignored_unmanaged_author",
+        room_id=room_id,
+        task_id=event.get("state_key"),
+        event_id=event.get("event_id"),
+        sender=sender,
+    )
     return None
 
 
@@ -550,7 +558,7 @@ def task_records(
             continue
 
         state_key = event.get("state_key")
-        content = _runtime_authored_task_content(event, runtime_account_ids)
+        content = _runtime_authored_task_content(room_id, event, runtime_account_ids)
         sender = event.get("sender")
         if content is None and isinstance(sender, str) and isinstance(event.get("content"), dict):
             unmanaged[sender] += 1
@@ -687,7 +695,7 @@ async def _read_scheduled_task_state(
     if not await _homeserver_returns_full_state_events(client, room_id):
         msg = f"Scheduled task `{task_id}` in room `{room_id}` was read from a homeserver that ignores format=event"
         raise ScheduledTaskStateReadError(msg)
-    return _runtime_authored_task_content(event, persisted_bot_user_ids(runtime_paths))
+    return _runtime_authored_task_content(room_id, event, persisted_bot_user_ids(runtime_paths))
 
 
 async def get_scheduled_task(
@@ -1636,7 +1644,7 @@ async def cancel_all_scheduled_tasks(
     for event in response.events:
         if event["type"] != SCHEDULED_TASK_EVENT_TYPE:
             continue
-        content = _runtime_authored_task_content(event, runtime_account_ids)
+        content = _runtime_authored_task_content(room_id, event, runtime_account_ids)
         if content is None or _stored_task_status(content) != "pending":
             continue
         task_id = event["state_key"]

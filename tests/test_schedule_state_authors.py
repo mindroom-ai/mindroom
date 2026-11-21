@@ -155,7 +155,11 @@ async def test_creatorless_task_written_by_human_is_ignored_without_cancellation
     with capture_logs() as logs:
         assert await runtime.restore_room(bot, ROOM_ID) == 0
         restored = await runtime.restore_room(bot, ROOM_ID)
-    execute = await _run_once(client, workflow, runtime_paths)
+        execute = await _run_once(client, workflow, runtime_paths)
+        assert (
+            await scheduling.cancel_all_scheduled_tasks(client, ROOM_ID, runtime_paths)
+            == "No scheduled tasks to cancel."
+        )
 
     assert restored == 0
     assert not runtime._runners
@@ -170,6 +174,23 @@ async def test_creatorless_task_written_by_human_is_ignored_without_cancellation
             "sender": HUMAN_ID,
         },
     ]
+    rejected = [entry for entry in logs if entry["event"] == "scheduled_task_event_ignored_unmanaged_author"]
+    assert [entry["task_id"] for entry in rejected] == [
+        TASK_ID,
+        second_task_id,
+        TASK_ID,
+        second_task_id,
+        TASK_ID,
+        TASK_ID,
+        second_task_id,
+    ]
+    assert all(
+        entry["log_level"] == "debug"
+        and entry["event_id"] == f"$state_{entry['task_id']}"
+        and entry["room_id"] == ROOM_ID
+        and entry["sender"] == HUMAN_ID
+        for entry in rejected
+    )
 
 
 @pytest.mark.asyncio
