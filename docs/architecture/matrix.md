@@ -78,7 +78,7 @@ The private reply type is `io.mindroom.models.response`:
   "request_id": "random-uuid",
   "room_id": "!room:example.org",
   "thread_id": "$root",
-  "capabilities": ["model_selection"],
+  "capabilities": ["model_selection", "thread_model_on_root"],
   "agent_user_ids": ["@mindroom_helper:example.org"],
   "catalog_revision": "sha256-of-published-entries",
   "models": [{"key":"fast","display_name":"Quick helper","provider":"openai","id":"gpt-6-astra","icon_url":"mxc://example.org/image","reasoning_levels":["low","high"],"reasoning_default":"low"}],
@@ -109,6 +109,22 @@ Clients register their response listener before sending, correlate request, room
 Candidate runtime accounts are hints; clients require an owner-signed runtime device.
 Multiple runtime devices remain separate choices.
 Refresh on picker opening; expire requests after 12 seconds and discard late results.
+
+### Model Choice on a New Thread
+
+A catalog advertising `thread_model_on_root` supports an optional pick on the person's own opening `m.room.message`, including a media upload:
+
+```json
+{"io.mindroom.thread_model":{"version":1,"runtime_user_id":"@mindroom_helper:example.org","model":"fast@high"}}
+```
+
+Use the account that answered authenticated discovery for `runtime_user_id` and a catalog key or `key@level` for `model` (non-empty, unpadded strings of at most 1024 characters).
+Omit the key to inherit the defaults; it is not a room-wide setting or a separate event.
+For a coalesced opening turn, the latest source from the human requester carrying the key supplies the choice, and editing a message does not change or add a choice.
+The resolved thread root must be among that turn's source events, so an ordinary reply in an existing thread cannot set it.
+A valid pick applies before the first reply for the entities the sender may address under `!model` rules, takes precedence over fork inheritance, and is not reapplied after a later `!model` change or reset.
+Invalid or unauthorized picks are ignored without an acknowledgement, and the reply uses the inherited model.
+The key has the same visibility as the message it travels in.
 
 ### Thread Changes and Acknowledgements
 
