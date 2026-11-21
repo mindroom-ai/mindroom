@@ -6,6 +6,7 @@ import ast
 import asyncio
 import contextlib
 import json
+import os
 import signal
 import socket
 import stat
@@ -25,7 +26,6 @@ from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
-    from typing import BinaryIO
 
 _TOKEN = "runner-token"  # noqa: S105
 _SHELL_REQUEST = {"protocol": WORKER_PROTOCOL_VERSION, "tool_name": "shell", "function_name": "run_shell_command"}
@@ -50,21 +50,11 @@ server.listen()
 while True:
     server.accept()[0].close()
 """
-# Holds sshd's stderr and logs to it, as an SSH session's process does, until the stderr is closed, and then says so.
-_SESSION = """
-import os, pathlib, sys, time
-for _ in range(600):
-    try:
-        os.write(2, b"session\\n")
-    except BrokenPipeError:
-        pathlib.Path(sys.argv[1]).touch()
-        break
-    time.sleep(0.02)
-"""
-# Starts such a session, which says so in the file named as the listener's process ID in the given folder, then listens.
+# Starts a session that outlives the listener and inherits its stderr.
 _LISTENS_WITH_A_SESSION = f"""
-import os, subprocess, sys
-subprocess.Popen([sys.executable, "-c", {_SESSION!r}, os.path.join(sys.argv[2], str(os.getpid()))])
+import os, pathlib, subprocess, sys
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+pathlib.Path(sys.argv[2], str(os.getpid())).write_text(str(child.pid))
 {_LISTENS}
 """
 
@@ -161,7 +151,7 @@ class _FakeSshd:
         self._monkeypatch = monkeypatch
         self._sockets = sockets
 
-    async def spawn(self, argv: list[str], stderr: BinaryIO) -> asyncio.subprocess.Process:
+    async def spawn(self, argv: list[str]) -> asyncio.subprocess.Process:
         self.argvs.append(argv)
         reserved = self._sockets.enter_context(socket.socket())
         reserved.bind(("127.0.0.1", 0))
@@ -175,7 +165,6 @@ class _FakeSshd:
             str(descriptor),
             *self.program[1:],
             stdin=asyncio.subprocess.DEVNULL,
-            stderr=stderr,
             pass_fds=(descriptor,),
         )
         self.processes.append(process)
@@ -187,13 +176,6 @@ async def _exited(process: asyncio.subprocess.Process) -> None:
     async with asyncio.timeout(10):
         while process.returncode is None:  # noqa: ASYNC110
             await asyncio.sleep(0.01)
-
-
-async def _session_finds_stderr_closed(sshd: asyncio.subprocess.Process, sessions: Path) -> None:
-    """Wait until the session the stand-in ``sshd`` started, which runs on, has found sshd's stderr closed."""
-    async with asyncio.timeout(10):
-        while not (sessions / str(sshd.pid)).exists():  # noqa: ASYNC110
-            await asyncio.sleep(0.02)
 
 
 @pytest.fixture
@@ -215,8 +197,16 @@ def fake_sshd(install_fake_sshd: Callable[..., _FakeSshd]) -> _FakeSshd:
     return install_fake_sshd(_LISTENS)
 
 
+@pytest.fixture
+def keys(tmp_path: Path) -> Path:
+    path = tmp_path / "worker" / ".runtime" / "ssh" / "authorized_keys"
+    path.parent.mkdir(parents=True)
+    path.write_text("restrict,pty ssh-ed25519 AAAA alice@laptop\n", encoding="utf-8")
+    return path
+
+
 @pytest_asyncio.fixture
-async def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[httpx.AsyncClient]:
+async def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keys: Path) -> AsyncIterator[httpx.AsyncClient]:
     """Call the runner of the dedicated worker at ``tmp_path/worker``, whose shell launch is ``_LAUNCH``."""
     app = sandbox_runner_app.app
     paths = resolve_runtime_paths(
@@ -306,12 +296,12 @@ async def test_start_503_when_image_has_no_sshd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A worker image built without openssh-server says so."""
+    """A spawn failure returns a generic error, without exposing paths."""
     monkeypatch.setattr(worker_ssh, "_sshd_argv", lambda _projection: [str(tmp_path / "usr" / "sbin" / "sshd"), "-D"])
 
     response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
 
-    assert (response.status_code, response.json()) == (503, {"detail": "The worker image has no SSH server."})
+    assert (response.status_code, response.json()) == (503, {"detail": "The worker's SSH server did not start."})
 
 
 @pytest.mark.asyncio
@@ -368,8 +358,8 @@ async def test_shutdown_stops_the_sshd_of_a_start_cancelled_right_after_spawning
 ) -> None:
     """A start that is cancelled once sshd runs leaves no sshd the runner has lost track of."""
 
-    async def spawn_and_cancel(argv: list[str], stderr: BinaryIO) -> asyncio.subprocess.Process:
-        process = await fake_sshd.spawn(argv, stderr)
+    async def spawn_and_cancel(argv: list[str]) -> asyncio.subprocess.Process:
+        process = await fake_sshd.spawn(argv)
         task = asyncio.current_task()
         assert task is not None
         # Takes effect at the start's next await.
@@ -393,11 +383,11 @@ async def test_shutdown_stops_the_sshd_of_a_start_cancelled_right_after_spawning
 
 
 @pytest.mark.asyncio
-async def test_start_reports_sshd_stderr_when_it_exits_at_once(
+async def test_start_does_not_expose_sshd_stderr_when_it_exits_at_once(
     client: httpx.AsyncClient,
     install_fake_sshd: Callable[..., _FakeSshd],
 ) -> None:
-    """When sshd refuses its files, the start answers with the reason sshd gave last, without waiting for the port."""
+    """When sshd refuses its files, the start fails without exposing stderr or waiting for the port."""
     exits = (
         "import sys; print('reading the key', file=sys.stderr); print('bad ownership\\n', file=sys.stderr); sys.exit(1)"
     )
@@ -407,7 +397,7 @@ async def test_start_reports_sshd_stderr_when_it_exits_at_once(
         response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "The worker's SSH server did not start: bad ownership"}
+    assert response.json() == {"detail": "The worker's SSH server did not start."}
     # The next connect tries again.
     await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
     assert len(fake.argvs) == 2
@@ -467,12 +457,19 @@ async def test_start_refuses_a_shell_without_a_workspace(
 
 
 @pytest.mark.asyncio
-async def test_stop_route_kills_sshd_and_is_idempotent(client: httpx.AsyncClient, fake_sshd: _FakeSshd) -> None:
+async def test_stop_route_kills_sshd_and_is_idempotent(
+    client: httpx.AsyncClient,
+    fake_sshd: _FakeSshd,
+    keys: Path,
+) -> None:
     """A stop ends sshd, and answers the same when none runs; the next start runs a new one."""
     assert (await client.post("/api/sandbox-runner/ssh/stop")).status_code == 204
     await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
 
+    original = keys.read_text(encoding="utf-8")
+    keys.write_text("", encoding="utf-8")
     responses = [await client.post("/api/sandbox-runner/ssh/stop") for _ in range(2)]
+    keys.write_text(original, encoding="utf-8")
 
     assert [response.status_code for response in responses] == [204, 204]
     assert fake_sshd.processes[0].returncode == -signal.SIGKILL
@@ -485,17 +482,13 @@ async def test_stop_route_kills_sshd_and_is_idempotent(client: httpx.AsyncClient
 async def test_a_stop_sent_before_a_newer_connect_leaves_that_connects_sshd(
     client: httpx.AsyncClient,
     fake_sshd: _FakeSshd,
-    tmp_path: Path,
+    keys: Path,
 ) -> None:
     """The primary cleared the keys and sent a stop; a connect wrote keys and started sshd before the stop arrived.
 
     The stop then finds keys that admit someone, so the newer connect's sshd runs on. Once the keys are empty again,
     as the next removal leaves them, a stop ends it.
     """
-    projection = tmp_path / "worker" / ".runtime" / "ssh"
-    projection.mkdir(parents=True)
-    keys = projection / "authorized_keys"
-    keys.write_text("restrict,pty ssh-ed25519 AAAA alice@laptop\n", encoding="utf-8")
     await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
 
     response = await client.post("/api/sandbox-runner/ssh/stop")
@@ -519,68 +512,51 @@ async def test_stop_route_requires_runner_token(client: httpx.AsyncClient, fake_
 
 
 @pytest.mark.asyncio
-async def test_stop_route_does_not_wait_for_open_sessions(
+@pytest.mark.parametrize("present", [False, True])
+async def test_start_refuses_missing_or_empty_keys(
     client: httpx.AsyncClient,
-    tmp_path: Path,
-    install_fake_sshd: Callable[..., _FakeSshd],
+    fake_sshd: _FakeSshd,
+    keys: Path,
+    *,
+    present: bool,
 ) -> None:
-    """A stop ends the listener at once; the gateway has cut the removed link's sessions already."""
-    sessions = tmp_path / "sessions"
-    sessions.mkdir()
-    fake = install_fake_sshd(_LISTENS_WITH_A_SESSION, str(sessions))
-    await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
+    if present:
+        keys.write_text("", encoding="utf-8")
+    else:
+        keys.unlink()
+    response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
 
-    async with asyncio.timeout(10):
-        response = await client.post("/api/sandbox-runner/ssh/stop")
-
-    assert response.status_code == 204
-    assert fake.processes[0].returncode == -signal.SIGKILL
-    await _session_finds_stderr_closed(fake.processes[0], sessions)
+    assert response.status_code == 409
+    assert not fake_sshd.argvs
 
 
 @pytest.mark.asyncio
-async def test_runner_shutdown_stops_sshd_while_a_session_holds_its_stderr(
+@pytest.mark.parametrize("operation", ["stop", "shutdown", "restart"])
+async def test_listener_cleanup_does_not_wait_for_sessions(
     client: httpx.AsyncClient,
     tmp_path: Path,
     install_fake_sshd: Callable[..., _FakeSshd],
+    keys: Path,
+    operation: str,
 ) -> None:
-    """The runner's shutdown ends sshd and closes its stderr at once, though an open session's process holds it."""
-    sessions = tmp_path / "sessions"
-    sessions.mkdir()
-    fake = install_fake_sshd(_LISTENS_WITH_A_SESSION, str(sessions))
-
-    async with asyncio.timeout(10):
-        async with sandbox_runner_app.app.router.lifespan_context(sandbox_runner_app.app):
-            response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
-            assert response.status_code == 200
-
-    assert fake.processes[0].returncode == -signal.SIGKILL
-    # The session is not sshd's to end.
-    await _session_finds_stderr_closed(fake.processes[0], sessions)
-
-
-@pytest.mark.asyncio
-async def test_restart_closes_the_stderr_of_the_sshd_it_replaces_while_a_session_holds_it(
-    client: httpx.AsyncClient,
-    tmp_path: Path,
-    install_fake_sshd: Callable[..., _FakeSshd],
-) -> None:
-    """A start that replaces a dead sshd lets go of its stderr, and the shutdown of the new one's, session or not."""
-    sessions = tmp_path / "sessions"
-    sessions.mkdir()
-    fake = install_fake_sshd(_LISTENS_WITH_A_SESSION, str(sessions))
-
-    async with asyncio.timeout(20):
-        async with sandbox_runner_app.app.router.lifespan_context(sandbox_runner_app.app):
-            await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
-            fake.processes[0].kill()
-            await _exited(fake.processes[0])
-
-            response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
-
-            assert response.status_code == 200
-            assert len(fake.argvs) == 2
-            await _session_finds_stderr_closed(fake.processes[0], sessions)
-            # The running sshd's stderr stays open.
-            assert not (sessions / str(fake.processes[1].pid)).exists()
-        await _session_finds_stderr_closed(fake.processes[1], sessions)
+    fake = install_fake_sshd(_LISTENS_WITH_A_SESSION, str(tmp_path))
+    app = sandbox_runner_app.app
+    try:
+        async with asyncio.timeout(5), app.router.lifespan_context(app):
+            assert (await client.post("/api/sandbox-runner/ssh/start", json=_BODY)).status_code == 200
+            listener = fake.processes[0]
+            if operation == "stop":
+                keys.write_text("", encoding="utf-8")
+                assert (await client.post("/api/sandbox-runner/ssh/stop")).status_code == 204
+            elif operation == "restart":
+                listener.kill()
+                await _exited(listener)
+                assert (await client.post("/api/sandbox-runner/ssh/start", json=_BODY)).status_code == 200
+                assert fake.processes[1].returncode is None
+        assert listener.returncode == -signal.SIGKILL
+        os.kill(int((tmp_path / str(listener.pid)).read_text()), 0)
+    finally:
+        for process in fake.processes:
+            marker = tmp_path / str(process.pid)
+            if marker.exists():
+                os.kill(int(marker.read_text()), signal.SIGKILL)

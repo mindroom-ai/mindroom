@@ -469,5 +469,3 @@ _._validate_logins  # Pydantic field validator (src/mindroom/config/tailnet_ssh.
 _._validate_authorized_keys  # Pydantic field validator (src/mindroom/config/tailnet_ssh.py)
 post_status  # FastAPI route (src/mindroom/api/tailnet_ssh_gateway.py)
 connect_link  # FastAPI route (src/mindroom/api/tailnet_ssh_gateway.py)
-_.data_received  # asyncio.Protocol callback of the reader of sshd's stderr (src/mindroom/api/worker_ssh.py)
-_.connection_lost  # asyncio.Protocol callback of the reader of sshd's stderr (src/mindroom/api/worker_ssh.py)

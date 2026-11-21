@@ -17,7 +17,6 @@ import json
 import os
 import sys
 from contextlib import suppress
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
@@ -34,43 +33,14 @@ from mindroom.workers.protocol import ExecuteRequest  # noqa: TC001 - pydantic r
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from typing import BinaryIO
 
 router = APIRouter(prefix="/api/sandbox-runner/ssh", tags=["worker-ssh"])
-# How long a start waits for sshd to accept on its port, and for the last of what an sshd that failed to start wrote.
 _START_SECONDS = 15.0
-_STDERR_SECONDS = 1.0
-_STDERR_TAIL_BYTES = 4096
+_START_FAILED = "The worker's SSH server did not start."
 
 
 class _Start(BaseModel):
     request: ExecuteRequest
-
-
-class _StderrTail(asyncio.Protocol):
-    """The end of what sshd wrote to stderr, where ``-e`` sends its log, and whether this runner's end has closed."""
-
-    def __init__(self) -> None:
-        self.data = bytearray()
-        self.closed = asyncio.Event()
-
-    def data_received(self, data: bytes) -> None:
-        """Keep the last ``_STDERR_TAIL_BYTES``."""
-        self.data += data
-        del self.data[:-_STDERR_TAIL_BYTES]
-
-    def connection_lost(self, exc: Exception | None) -> None:  # noqa: ARG002
-        """Note the end: sshd and its sessions closed the pipe, or this runner did."""
-        self.closed.set()
-
-
-@dataclass(eq=False)
-class _Sshd:
-    """A started sshd, and this runner's end of the pipe its stderr is."""
-
-    process: asyncio.subprocess.Process
-    stderr: asyncio.ReadTransport
-    log: _StderrTail
 
 
 class _WorkerSsh:
@@ -78,7 +48,7 @@ class _WorkerSsh:
 
     def __init__(self) -> None:
         self.lock = asyncio.Lock()
-        self.sshd: _Sshd | None = None
+        self.sshd: asyncio.subprocess.Process | None = None
 
 
 def _worker_ssh(app: FastAPI) -> _WorkerSsh:
@@ -140,61 +110,20 @@ def _store_launch(app: FastAPI, payload: ExecuteRequest) -> None:
         os.close(directory_fd)
 
 
-async def _spawn(argv: list[str], stderr: BinaryIO) -> asyncio.subprocess.Process:
+async def _spawn(argv: list[str]) -> asyncio.subprocess.Process:
+    # Inherit stderr: sessions can outlive the listener and must not keep its reaper waiting on a pipe.
     return await asyncio.create_subprocess_exec(
         *argv,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.DEVNULL,
-        stderr=stderr,
     )
 
 
-async def _run(argv: list[str]) -> _Sshd:
-    """Run sshd with its stderr on a pipe that this runner reads, so that sshd never blocks writing its log.
-
-    The pipe is this module's, not the subprocess transport's: the sessions sshd starts hold it open after sshd, and
-    this runner must be able to close its end without waiting for them, as it could not close the transport's.
-
-    Nothing is awaited between sshd's start and this function's return, so a cancelled caller either has no sshd,
-    which a cancelled spawn kills itself, or gets the one it then keeps track of.
-    """
-    read_fd, write_fd = os.pipe()
-    with os.fdopen(write_fd, "wb", buffering=0) as theirs:
-        log = _StderrTail()
-        # Closes the read end itself when it fails.
-        transport, _ = await asyncio.get_running_loop().connect_read_pipe(
-            lambda: log,
-            os.fdopen(read_fd, "rb", buffering=0),
-        )
-        try:
-            process = await _spawn(argv, theirs)
-        except BaseException:
-            transport.close()
-            raise
-    return _Sshd(process, transport, log)
-
-
-async def _end(sshd: _Sshd, *, read_seconds: float = 0) -> None:
-    """Kill sshd if it runs and close its stderr, after ``read_seconds`` at most for the last of what it wrote.
-
-    The sessions it started run on, as they do when sshd ends by itself. They hold its stderr, so this does not
-    wait for it to close; sshd ignores a log line it cannot write. Ending an sshd again does nothing.
-    """
-    with suppress(ProcessLookupError):
-        sshd.process.kill()
-    await sshd.process.wait()
-    with suppress(TimeoutError):
-        async with asyncio.timeout(read_seconds):
-            await sshd.log.closed.wait()
-    sshd.stderr.close()
-    await sshd.log.closed.wait()
-
-
-async def _accepts(sshd: _Sshd) -> bool:
+async def _accepts(sshd: asyncio.subprocess.Process) -> bool:
     """Return whether sshd accepts on its port within ``_START_SECONDS``; False at once when it has exited."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _START_SECONDS
-    while sshd.process.returncode is None and loop.time() < deadline:
+    while sshd.returncode is None and loop.time() < deadline:
         try:
             _, writer = await asyncio.open_connection("127.0.0.1", WORKER_SSH_PORT)
         except OSError:
@@ -207,29 +136,25 @@ async def _accepts(sshd: _Sshd) -> bool:
 
 async def _ensure_sshd(app: FastAPI, state: _WorkerSsh) -> None:
     """Start sshd unless it runs, and return once its port accepts. The caller holds the lock."""
-    sshd = state.sshd
-    if sshd is None or sshd.process.returncode is not None:
-        if sshd is not None:
-            # An sshd that died: its sessions may run on, and nothing reads its stderr once it is replaced.
-            await _end(sshd)
+    projection_dir = _projection_dir(app)
+    if await asyncio.to_thread(_admits_nobody, projection_dir):
+        raise HTTPException(409, "No SSH public keys are authorized.")
+    if state.sshd is None or state.sshd.returncode is not None:
         try:
-            sshd = state.sshd = await _run(_sshd_argv(_projection_dir(app)))
-        except FileNotFoundError:
-            raise HTTPException(503, "The worker image has no SSH server.") from None
-    if await _accepts(sshd):
-        return
-    await _end(sshd, read_seconds=_STDERR_SECONDS)
-    state.sshd = None
-    lines = sshd.log.data.decode(errors="replace").split("\n")
-    reason = next((line.strip() for line in reversed(lines) if line.strip()), "")
-    detail = "The worker's SSH server did not start"
-    raise HTTPException(503, f"{detail}: {reason}" if reason else f"{detail}.")
+            state.sshd = await _spawn(_sshd_argv(projection_dir))
+        except OSError:
+            raise HTTPException(503, _START_FAILED) from None
+    if not await _accepts(state.sshd):
+        await _stop(state)
+        raise HTTPException(503, _START_FAILED)
 
 
 async def _stop(state: _WorkerSsh) -> None:
     """End sshd if it runs; its open sessions are not waited for. The caller holds the lock."""
     if state.sshd is not None:
-        await _end(state.sshd)
+        with suppress(ProcessLookupError):
+            state.sshd.kill()
+        await state.sshd.wait()
         state.sshd = None
 
 
