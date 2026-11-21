@@ -264,7 +264,7 @@ def apply_active(
     )
     if not decided.recorded:
         return False
-    approval_cards.reserve_receipt(
+    approval_cards.reserve(
         transaction,
         principal_id,
         kind="grant_receipt",
@@ -274,6 +274,7 @@ def apply_active(
         room_id=room_id,
         thread_id=thread_id,
         membership_epoch=membership_epoch,
+        approvable=False,
         sender_principal_id=card.sender_principal_id,
         payload=approval_cards.terminal_content(
             card.payload,

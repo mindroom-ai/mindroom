@@ -406,7 +406,7 @@ async def test_subsequent_granted_call_publishes_exact_terminal_receipt(
         first = await _card(journal, manager, "first")
         await _approve(manager, first)
         sent.clear()
-        await _card(journal, manager, "subsequent")
+        receipt_event_id = await _card(journal, manager, "subsequent")
         assert len(sent) == 1
         receipt = sent[0]
         assert receipt.stage is DeliveryStage.INITIAL
@@ -417,14 +417,10 @@ async def test_subsequent_granted_call_publishes_exact_terminal_receipt(
         assert receipt.payload["response_event_id"] == "$waiting-subsequent"
         assert "auto_approval" not in receipt.payload
         assert "auto_approve_options" not in receipt.payload
-        assert (
-            await pending_card(
-                journal.principal("router@shared").approvals,
-                room_id="!room:test",
-                card_event_id="$card-subsequent",
-            )
-            is None
-        )
+        approvals = journal.principal("router@shared").approvals
+        card = await approvals.approval_card(room_id="!room:test", card_event_id=receipt_event_id)
+        assert card is not None and card.approvable is False
+        assert await pending_card(approvals, room_id="!room:test", card_event_id=receipt_event_id) is None
         continuation = await journal.principal("agent@code").approvals.approval_continuation("subsequent")
         assert continuation is not None
         assert continuation.state == "ready"
