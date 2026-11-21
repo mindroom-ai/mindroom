@@ -183,7 +183,15 @@ async def _exited(process: asyncio.subprocess.Process) -> None:
 
 @pytest.fixture
 def install_fake_sshd(monkeypatch: pytest.MonkeyPatch) -> Callable[..., _FakeSshd]:
-    """Make the runner spawn a stand-in program instead of sshd, and probe the port reserved for each spawn."""
+    """Spawn a stand-in whose reserved port only it can open; ownership is incidental in these tests."""
+    if sys.platform != "linux":
+
+        def listens(port: int, _pid: int) -> bool:
+            with socket.socket() as probe:
+                probe.settimeout(0.25)
+                return probe.connect_ex(("127.0.0.1", port)) == 0
+
+        monkeypatch.setattr(worker_ssh, "group_listens", listens)
 
     def install(*program: str) -> _FakeSshd:
         fake = _FakeSshd(program, monkeypatch)
@@ -343,6 +351,7 @@ async def test_start_refuses_an_occupied_port(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Socket ownership is resolved through Linux /proc")
 async def test_start_requires_the_spawned_sshd_to_own_the_listener(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
