@@ -523,8 +523,9 @@ async def test_unauthorized_sender_is_ignored_even_when_mentioned(tmp_path: Path
     assert plan.kind == "ignore"
 
 
-def test_internal_agent_sender_bypasses_reply_allowlist(tmp_path: Path) -> None:
-    """Bot-to-bot senders are system participants and bypass per-agent reply allowlists."""
+@pytest.mark.usefixtures("enforce_turn_authorization")
+def test_another_mindroom_account_needs_a_grant_to_get_a_reply(tmp_path: Path) -> None:
+    """Another MindRoom account needs reply access like any other requester."""
     config = bind_runtime_paths(
         with_responder_access(
             Config(
@@ -540,7 +541,7 @@ def test_internal_agent_sender_bypasses_reply_allowlist(tmp_path: Path) -> None:
     )
     policy = _policy_for(config, "general")
 
-    assert policy.can_reply_to_sender_in_room(_entity_id(config, "research").full_id, "!room:localhost") is True
+    assert policy.can_reply_to_sender_in_room(_entity_id(config, "research").full_id, "!room:localhost") is False
 
 
 @pytest.mark.asyncio
@@ -733,6 +734,7 @@ async def test_a_mention_of_only_the_owner_account_gets_no_answer(config: Config
     assert plan.response_action is None
 
 
+@pytest.mark.usefixtures("enforce_turn_authorization")
 def test_owner_reply_access_reads_no_membership_without_router_access(config: Config) -> None:
     """Without `router.access` the owner works on anyone's message and waits for no room's membership row."""
     policy = _policy_for(config, ROUTER_AGENT_NAME)
