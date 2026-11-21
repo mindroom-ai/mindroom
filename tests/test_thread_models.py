@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 import mindroom.tools  # noqa: F401
+from mindroom import thread_models
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.coalescing.batch import requester_coalescing_key
 from mindroom.commands.model_commands import handle_model_command
@@ -113,6 +114,46 @@ def test_store_roundtrip(tmp_path: Path) -> None:
     assert clear_thread_model_override(runtime_paths, THREAD_ID, entity_names=("test_agent",), config=config) is True
     assert _stored_model(runtime_paths, THREAD_ID) is None
     assert clear_thread_model_override(runtime_paths, THREAD_ID, entity_names=("test_agent",), config=config) is False
+
+
+@pytest.mark.parametrize(
+    ("operations", "expected"),
+    [
+        (("apply", "apply-other"), {"test_agent": "large"}),
+        (("apply", "reset", "apply"), {}),
+        (("set", "apply"), {"test_agent": "default"}),
+        (("reset", "apply"), {}),
+        (("set", "reset", "apply"), {}),
+    ],
+)
+def test_root_thread_model_is_consumed_once(
+    tmp_path: Path,
+    operations: tuple[str, ...],
+    expected: dict[str, str],
+) -> None:
+    """A replay cannot replace the first pick or undo a later command, even if reset found no selection."""
+    config = _config_with_models(tmp_path)
+    paths = runtime_paths_for(config)
+    names = ("test_agent",)
+    for operation in operations:
+        if operation == "reset":
+            clear_thread_model_override(paths, THREAD_ID, entity_names=names, config=config)
+        elif operation == "set":
+            set_thread_model_override(
+                paths,
+                thread_id=THREAD_ID,
+                model_name="default",
+                entity_names=names,
+                config=config,
+            )
+        else:
+            thread_models.apply_root_thread_model(
+                paths,
+                thread_id=THREAD_ID,
+                model_name="large" if operation == "apply" else "default",
+                entity_names=names,
+            )
+    assert resolve_thread_model_override(paths, THREAD_ID, config=config).active == expected
 
 
 def test_copy_thread_model_override_copies_once_and_never_overwrites(tmp_path: Path) -> None:
