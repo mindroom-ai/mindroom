@@ -16,6 +16,7 @@ from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.logging_config import get_logger
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tailnet_ssh.projection import write_projection
 from mindroom.tailnet_ssh.store import read_links, update_links
@@ -77,7 +78,7 @@ def _roster(
         return {}
     agents = sorted(name for name, agent in config.agents.items() if agent.tailnet_ssh)
     requesters = sorted(
-        (requester, login)
+        (resolve_human_requester_alias(requester, config, paths), login)
         for requester, login in config.tailnet_ssh.logins.items()
         if config.tailnet_ssh.authorized_keys.get(requester)
     )

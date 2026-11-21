@@ -16,6 +16,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.room_agent_access import room_execution_identity
 from mindroom.tailnet_ssh import links
 from mindroom.tailnet_ssh.links import (
     ConnectRefused,
@@ -556,6 +557,51 @@ async def test_connect_resolves_the_exact_shell_worker(
     )
     assert ssh_call.request.execution_env == {}
     assert ssh_call.request.environment.set_names == []
+
+
+@pytest.mark.parametrize("scope", ["user", "user_agent"])
+@pytest.mark.asyncio
+async def test_alias_and_canonical_login_share_the_shell_worker(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: str,
+) -> None:
+    """An alias uses the turn's execution identity but keeps its configured login and public key."""
+    alias = "@bridge_alice:example.org"
+    config.authorization.aliases = {ALICE: [alias]}
+    config.agents["mind"].tailnet_ssh = False
+    config.agents["mine"].worker_scope = scope  # type: ignore[assignment]
+    config.tailnet_ssh.logins[alias] = "alice-bridge@github"
+    config.tailnet_ssh.authorized_keys[alias] = [SECOND_KEY]
+    identity = room_execution_identity("mine", alias, "!lobby:example.org", config, paths)
+    terminals = agent_terminals("mine", config, paths, identity, create=True)
+    assert terminals is not None
+    worker_key = _key(ALICE, "mine", scope)
+    manager = _manager(monkeypatch, _handle(worker_key, tmp_path / "ssh"))
+    monkeypatch.setattr(sandbox_proxy, "lease_worker_manager", lambda *_: manager)
+    starts: list[WorkerCall] = []
+
+    async def start_sshd(call: WorkerCall) -> None:
+        starts.append(call)
+
+    monkeypatch.setattr(links, "_start_sshd", start_sshd)
+    [row] = desired_links(config, paths, AgentReplyMembershipIndex())
+    [link] = read_links(paths).links
+    assert row["allowed_logins"] == ["alice-bridge@github", "alice@github"]
+    assert row["id"] == link.id
+    shell_call = sandbox_proxy.worker_call(terminals.stand_ins, "run_shell_command", start=False)
+    assert shell_call is not None
+    assert await _connect(config, paths, link.id, "alice-bridge@github") == ("10.0.0.5", 2222)
+    [ssh_call] = starts
+    assert (
+        manager.specs[0].worker_key == ssh_call.request.worker_key == shell_call.request.worker_key == link.worker_key
+    )
+    assert (tmp_path / "ssh" / "authorized_keys").read_text().splitlines() == [
+        f"restrict,pty {PUBLIC_KEY}",
+        f"restrict,pty {SECOND_KEY}",
+    ]
 
 
 @pytest.mark.asyncio
