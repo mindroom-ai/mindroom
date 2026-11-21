@@ -513,9 +513,11 @@ class RealtimeVoiceBridge:
             # LiveKit starts every new sender (a full reconnect republishes ours) on key index 0 and
             # enables it before this event reaches Python. Moving it here lets callers decode it;
             # set_frame_key keeps our slot 0 on the active key, so frames sent before the event
-            # cannot use a retired key that a departed device still holds.
+            # cannot use a retired key that a departed device still holds. A track first published
+            # during a full reconnect gets no publish event, so reconnecting re-applies the index too.
             room.on("local_track_published", self._apply_own_key_index)
             room.on("local_track_republished", self._apply_own_key_index)
+            room.on("reconnected", self._apply_own_key_index)
         connect_task = asyncio.create_task(
             room.connect(grant.url, grant.jwt, options),
             name="matrix_rtc_livekit_connect",

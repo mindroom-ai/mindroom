@@ -250,6 +250,18 @@ async def test_new_sender_never_encrypts_with_a_retired_own_key(
 
 
 @pytest.mark.asyncio
+async def test_reconnect_moves_a_sender_whose_publish_event_was_suppressed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A track first published during a full reconnect gets no publish event, only ``reconnected``."""
+    bridge, room = await _connected_e2ee_bridge(monkeypatch)
+    bridge.set_frame_key(_OWN, b"2" * 16, 2)
+    during_reconnect = room.new_cryptor(_OWN, "TR_DURING_RECONNECT")
+
+    room.emit("reconnected")
+
+    assert during_reconnect.key_indices == [2]
+
+
+@pytest.mark.asyncio
 async def test_track_published_before_own_key_keeps_livekit_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """With no own key installed yet there is no index to apply."""
     _bridge, room = await _connected_e2ee_bridge(monkeypatch)
