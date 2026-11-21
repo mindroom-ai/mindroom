@@ -70,6 +70,7 @@ from mindroom.event_journal import (
     EventKind,
     JournalEvent,
     PendingTurnView,
+    PrincipalStore,
 )
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
@@ -2177,6 +2178,59 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
         (research_requester, "@test_agent please check this for alice"),
         ("@alice:localhost", "alice last"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_edit_cannot_renew_notice_after_its_queued_message_flushes(tmp_path: Path) -> None:
+    """A slow journal write must not make an already claimed message look like a waiting follow-up."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    gate = bot._coalescing_gate
+    ingress = bot._turn_ingress
+    message = _text_event(event_id="$queued", body="before", thread_id="$thread")
+    edit = _text_event(event_id="$edit", body="* after", server_timestamp=1001)
+    edit.source["content"].update(
+        {
+            "m.relates_to": {"rel_type": "m.replace", "event_id": message.event_id},
+            "m.new_content": {"msgtype": "m.text", "body": "after"},
+        }
+    )
+    target = MessageTarget.resolve(room.room_id, "$thread", message.event_id)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    signal = runner.lifecycle_coordinator._get_or_create_queued_signal(target)
+    revision_started = asyncio.Event()
+    release_revision = asyncio.Event()
+    dispatched_bodies: list[str] = []
+
+    async def hold_revision(_event_id: str, _content: object) -> None:
+        revision_started.set()
+        await release_revision.wait()
+
+    async def dispatch(turn: PreparedTurn) -> bool:
+        dispatched_bodies.append(turn.event.body)
+        signal.begin_response_turn()
+        return True
+
+    signal.begin_response_turn()
+    try:
+        with (
+            patch.object(PrincipalStore, "revise_pending", new=AsyncMock(side_effect=hold_revision)),
+            patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock(side_effect=dispatch)),
+        ):
+            key = active_follow_up_coalescing_key(room.room_id, "$thread")
+            await _admit_ready(gate, key, make_pending_event(message, room, source_kind=MESSAGE_SOURCE_KIND))
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS), asyncio.TaskGroup() as tasks:
+                edited = tasks.create_task(ingress._edit_queued_message(room, edit, EventInfo.from_event(edit.source)))
+                await revision_started.wait()
+                signal.finish_response_turn()
+                await gate.drain_all()
+                release_revision.set()
+            assert edited.result()
+        assert dispatched_bodies == ["after"]
+        assert signal.has_active_response_turn()
+        assert signal.pending_human_messages == 0
+    finally:
+        signal.finish_response_turn()
 
 
 @pytest.mark.asyncio
