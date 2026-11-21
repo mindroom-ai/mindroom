@@ -1590,11 +1590,11 @@ def test_native_compaction_checkpoints_are_bound_to_the_endpoint(tmp_path: Path)
     ("request_params", "sent_id", "supported"),
     [
         ({"model": "claude-haiku-5-5"}, "claude-haiku-5-5", True),
-        ({"extra_body": {"model": "claude-haiku-5-5"}}, "claude-haiku-5-5", True),
         ({"model": "claude-haiku-4-5-20251001"}, "claude-haiku-4-5-20251001", False),
+        ({"extra_body": {"model": "claude-haiku-4-5-20251001"}}, "claude-haiku-4-5-20251001", False),
         (
-            {"model": "claude-haiku-5-5", "extra_body": {"model": "claude-opus-5-5"}},
-            "claude-opus-5-5",
+            {"model": "claude-haiku-4-5-20251001", "extra_body": {"model": "claude-haiku-5-5"}},
+            "claude-haiku-5-5",
             True,
         ),
     ],
