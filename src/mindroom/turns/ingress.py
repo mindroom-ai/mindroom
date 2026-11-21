@@ -232,12 +232,12 @@ class TurnIngress:
         event: PreparedIngress,
         *,
         facts: IngressFacts,
-        target: MessageTarget,
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
         ticket: IngressTicket,
     ) -> None:
         """Queue one prepared text or media event; the gate decides busy-conversation routing."""
+        target = envelope.target
         # A message for someone else, or one the room's reply mode leaves to nobody, must not cut this agent's running
         # response short or show that it waits for this agent.
         may_be_for_me = not self.deps.turn_policy.not_for_this_agent(room, event.source, target, envelope)
@@ -325,7 +325,6 @@ class TurnIngress:
             room,
             prepared_event,
             facts=facts,
-            target=target,
             envelope=envelope,
             coalescing_thread_id=coalescing_thread_id,
             ticket=ticket,
@@ -868,7 +867,6 @@ class TurnIngress:
                         room,
                         prepare_media_ingress(event),
                         facts=facts,
-                        target=target,
                         envelope=self.deps.resolver.build_envelope(event=event, facts=facts, target=target),
                         coalescing_thread_id=coalescing_thread_id,
                         ticket=ticket,
