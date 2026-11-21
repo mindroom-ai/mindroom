@@ -7597,7 +7597,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         ),
     ):
         ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
-        handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
+        handled = await bot._turn_ingress._normalize_and_dispatch_text(
             room,
             sidecar_event,
             make_ingress_facts(sidecar_event.sender, requester_user_id="@user:localhost"),
@@ -7761,7 +7761,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
         ),
     ):
         ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, sidecar.sender)
-        outcome = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
+        outcome = await bot._turn_ingress._normalize_and_dispatch_text(
             room,
             sidecar,
             make_ingress_facts(sidecar.sender, requester_user_id=sidecar.sender),

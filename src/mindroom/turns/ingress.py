@@ -62,7 +62,6 @@ from mindroom.thread_utils import (
     mentions_another_participant,
 )
 from mindroom.timing import (
-    DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
     create_dispatch_pipeline_timing,
     emit_elapsed_timing,
@@ -259,20 +258,6 @@ class TurnIngress:
         )
         if may_be_for_me:
             mark_waiting_for_approval(self.deps, target, envelope)
-
-    @staticmethod
-    async def _normalize_with_ingress_timing(
-        normalize: Awaitable[PreparedIngress],
-        dispatch_timing: DispatchPipelineTiming | None,
-    ) -> PreparedIngress:
-        """Await one text-like normalization while recording ingress timing boundaries."""
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_normalize_start")
-        prepared_event = await normalize
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_normalize_ready")
-        attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
-        return prepared_event
 
     async def _dispatch_prepared_text_like_ingress(
         self,
@@ -772,7 +757,6 @@ class TurnIngress:
                 room,
                 event,
                 facts,
-                dispatch_timing=dispatch_timing,
                 ticket=ticket,
             )
         finally:
@@ -784,7 +768,6 @@ class TurnIngress:
         event: nio.RoomMessageFormatted,
         facts: IngressFacts,
         *,
-        dispatch_timing: DispatchPipelineTiming | None,
         ticket: IngressTicket,
     ) -> TurnDispatchOutcome:
         """Resolve, normalize, and admit one live (non-edit) text event."""
@@ -804,14 +787,10 @@ class TurnIngress:
             sender=event.sender,
             thread_id=ingress_thread_id,
         )
-        prepared_event = await self._normalize_with_ingress_timing(
-            self.deps.normalizer.resolve_text_event(TextNormalizationRequest(event=event)),
-            dispatch_timing,
-        )
-        return await self._dispatch_prepared_text_like_ingress(
-            room=room,
-            prepared_event=prepared_event,
-            facts=facts,
+        return await self._normalize_and_dispatch_text(
+            room,
+            event,
+            facts,
             ticket=ticket,
             coalescing_thread_id=ingress_thread_id,
         )
@@ -871,7 +850,7 @@ class TurnIngress:
                     self._log_unplaceable_event(room, event)
                     return TurnDispatchOutcome.INTENTIONALLY_IGNORED
                 if is_file_message_event(event) and is_v2_sidecar_text_preview(event.source):
-                    dispatch_outcome = await self._dispatch_file_sidecar_text_preview(
+                    dispatch_outcome = await self._normalize_and_dispatch_text(
                         room,
                         event,
                         facts,
@@ -901,23 +880,26 @@ class TurnIngress:
             ticket.close()
         return dispatch_outcome
 
-    async def _dispatch_file_sidecar_text_preview(
+    async def _normalize_and_dispatch_text(
         self,
         room: nio.MatrixRoom,
-        event: FileMessageEvent,
+        event: nio.RoomMessageFormatted | FileMessageEvent,
         facts: IngressFacts,
         *,
         ticket: IngressTicket,
         coalescing_thread_id: str | None,
     ) -> TurnDispatchOutcome:
-        """Dispatch one sidecar-backed file preview through the normal text pipeline."""
-        prepared_text_event = await self._normalize_with_ingress_timing(
-            self.deps.normalizer.resolve_text_event(TextNormalizationRequest(event=event)),
-            get_dispatch_pipeline_timing(event.source),
-        )
+        """Normalize a text message or sidecar preview, then dispatch it."""
+        dispatch_timing = get_dispatch_pipeline_timing(event.source)
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_start")
+        prepared_event = await self.deps.normalizer.resolve_text_event(TextNormalizationRequest(event=event))
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_ready")
+        attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
         return await self._dispatch_prepared_text_like_ingress(
             room=room,
-            prepared_event=prepared_text_event,
+            prepared_event=prepared_event,
             facts=facts,
             ticket=ticket,
             coalescing_thread_id=coalescing_thread_id,
