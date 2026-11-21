@@ -12,7 +12,7 @@ import json
 import sqlite3
 import threading
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import pytest_asyncio
@@ -22,6 +22,7 @@ from mindroom.orchestration import tool_job_runtime as coordinator_module
 from mindroom.orchestration.script_runtime import _LiveScriptRuntimeResolver
 from mindroom.orchestration.workflow_runtime import WorkflowRuntimeLifecycle
 from mindroom.script_runs import manager as manager_module
+from mindroom.script_runs.broker import ScriptToolBroker
 from mindroom.script_runs.models import ScriptCallState, ScriptRunState
 from mindroom.script_runs.reasons import (
     MAX_RUNTIME_EXCEEDED,
@@ -43,7 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.script_runs.models import ScriptRunRecord
+    from mindroom.script_runs.models import ScriptCallRecord, ScriptRunRecord
     from mindroom.tool_jobs.runtime import BackgroundJob
 
 _A = tool_args("counter", "append", line="a")
@@ -765,6 +766,38 @@ async def test_call_after_a_rerun_runs_again_after_an_interruption_between_them(
     assert (await stack.submit("@0", "tool", _A)).cached
     assert await stack.result("@1", "tool", _B) == "appended"
     assert stack.counting_tool.lines == ["a", "b", "a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_call_after_a_changed_result_runs_again_when_the_attempt_died_before_it_compared(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The result a `cached=False` call had before is saved with its dispatch, so the receipt alone tells it changed."""
+    answer, every_time = tool_args("counter", "answer"), {"cached": False}
+    stack.counting_tool.answers = ["old", "new", "new"]
+    await _started(stack)
+    await stack.result("@0", "tool", answer, every_time)
+    await stack.result("@1", "tool", _A)
+    await _interrupted_and_resumed(stack)
+    execute, received = ScriptToolBroker.execute_for_workflow, asyncio.Event()
+
+    async def stopped_after_the_receipt(*args: Any, **options: Any) -> ScriptCallRecord:  # noqa: ANN401
+        await execute(*args, **options)
+        received.set()
+        return await asyncio.Event().wait()  # type: ignore[return-value]
+
+    monkeypatch.setattr(ScriptToolBroker, "execute_for_workflow", stopped_after_the_receipt)
+    await stack.submit("@0", "tool", answer, every_time)
+    await received.wait()
+    monkeypatch.setattr(ScriptToolBroker, "execute_for_workflow", execute)
+
+    await _interrupted_and_resumed(stack)
+
+    assert stack.store.get_node(stack.run_id, "@0").result == "new"  # type: ignore[union-attr]
+    assert await stack.result("@0", "tool", answer, every_time) == "new"
+    assert await stack.result("@1", "tool", _A) == "appended"
+    assert stack.counting_tool.lines == ["a", "a"]
 
 
 @pytest.mark.asyncio

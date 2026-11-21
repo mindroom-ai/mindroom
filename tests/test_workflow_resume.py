@@ -160,6 +160,23 @@ async def test_cached_false_with_another_result_reruns_what_follows(stack: Workf
 
 
 @pytest.mark.asyncio
+async def test_first_attempt_looks_for_no_saved_call_to_run_again(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No earlier attempt left a call to reuse, so a first attempt's calls read and write nothing to mark one."""
+
+    def unexpected(*_args: object) -> None:
+        raise AssertionError
+
+    monkeypatch.setattr(stack.store, "reusable_keys", unexpected)
+    monkeypatch.setattr(stack.store, "forget_digests", unexpected)
+
+    assert await stack.result("@0", "tool", _A) == "appended"
+    assert await stack.result("@1", "tool", _B, _EVERY_TIME) == "appended"
+
+
+@pytest.mark.asyncio
 async def test_cached_false_with_an_equal_result_over_the_inline_limit_keeps_the_lane_clean(
     stack: WorkflowStack,
 ) -> None:

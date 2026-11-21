@@ -48,11 +48,14 @@ class DispatchHandle:
 
     `ref` is the broker call (`"<script run id>:<call id>"`), the job ID, or a child run ID.
     `dispatched` turns true in the same transaction that hands the work over.
+    `same_as` is the digest of the result that a call which runs on every resume had before: what follows the call
+    is reused only when it answers that again, also when its answer is read after its attempt died.
     """
 
     kind: Literal["broker", "job", "run"]
     ref: str
     dispatched: bool
+    same_as: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

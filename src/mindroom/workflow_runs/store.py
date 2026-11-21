@@ -304,8 +304,9 @@ class WorkflowRunStore:
 
     def forget_digests(self, run_id: str, keys: Iterable[str]) -> None:
         """Make the nodes at *keys* match no request, so the next attempt that reaches one runs its call again."""
-        with self._write_transaction() as connection:
-            _forget(connection, run_id, keys)
+        if keys := list(keys):
+            with self._write_transaction() as connection:
+                _forget(connection, run_id, keys)
 
     def whole_result(self, node: WorkflowNode) -> object:
         """Return the node's whole result, read from its file when the row keeps only the start of it."""

@@ -80,8 +80,6 @@ _MAX_IDLE_RESUMES = 5
 _OUT_OF_TIME = "The run used its {hours:g} hours of working time. resume_workflow continues it."
 # How often a running run's working time is saved, so a primary that dies loses at most this much of the count.
 _CHARGE_SECONDS = 60.0
-# In place of a saved result: the call ran because a rule said so, and its lane is dirty whatever it answers.
-_RAN = object()
 _INTERRUPTED: dict[str, object] = {"kind": "interrupted", "message": "The call was interrupted before its tool ran."}
 # How long a waiter sleeps before it reads the store again, with or without a wake.
 _RECHECK_SECONDS = 1.0
@@ -533,7 +531,7 @@ class WorkflowEngine:
             started_at=utc_timestamp(),
         )
         if kind == "tool":
-            same_as: object = _RAN
+            same_as = None
             if previous is not None and not changed:
                 same_as = result_digest(await asyncio.to_thread(self.store.whole_result, previous))
             return await self._dispatch_tool(run, attempt, node, lanes, same_as)
@@ -548,14 +546,34 @@ class WorkflowEngine:
         return _receipt(node)
 
     async def _mark_dirty(self, lanes: DirtyLanes, run_id: str, attempt: int, key: str) -> None:
-        """Record that the call at *key* runs in *attempt*: what follows it in its lanes runs again, in any attempt.
-
-        A later attempt remembers nothing of this one, so each completed call that became dirty loses its digest
-        before the call that dirtied it changes. A call that may have run keeps its digest, and its own rule.
-        """
+        """Record that the call at *key* runs in *attempt*: what follows it in its lanes runs again, in any attempt."""
         lanes.mark(key)
-        saved = await asyncio.to_thread(self.store.reusable_keys, run_id, attempt)
-        await asyncio.to_thread(self.store.forget_digests, run_id, [key for key in saved if lanes.is_dirty(key)])
+        await asyncio.to_thread(self._forget_after, run_id, attempt, key)
+
+    def _forget_after(self, run_id: str, attempt: int, key: str) -> None:
+        """Make each completed call an earlier attempt left after *key*, in its lanes, run again when it is reached.
+
+        A later attempt remembers nothing of this one, so those calls lose their digests before the call that dirtied
+        them changes. A call that may have run keeps its digest, and its own rule. A first attempt reuses nothing.
+        """
+        if attempt > 1:
+            lanes = DirtyLanes()
+            lanes.mark(key)
+            saved = self.store.reusable_keys(run_id, attempt)
+            self.store.forget_digests(run_id, [key for key in saved if lanes.is_dirty(key)])
+
+    def _invalidate(self, node: WorkflowNode, outcome: _Outcome) -> bool:
+        """Return whether a call that runs on every resume answered something else than before, and if so mark what follows it.
+
+        Its handle holds the digest of the earlier result, compared whole and as JSON. The live call and the look at
+        the receipt of a call whose attempt died both come here, before the node shows its end.
+        """
+        same_as = node.handle.same_as if node.handle is not None else None
+        state, result, _ = outcome
+        if same_as is None or (state is WorkflowNodeState.COMPLETED and result_digest(result) == same_as):
+            return False
+        self._forget_after(node.run_id, node.attempt, node.key)
+        return True
 
     async def _dispatch_tool(
         self,
@@ -563,9 +581,13 @@ class WorkflowEngine:
         attempt: ScriptRunRecord,
         node: WorkflowNode,
         lanes: DirtyLanes,
-        same_as: object,
+        same_as: str | None,
     ) -> NodeReceipt:
-        """Save a tool node with the handle of its call, then run the call as the engine's own task."""
+        """Save a tool node with the handle of its call, then run the call as the engine's own task.
+
+        With *same_as*, the digest of its earlier result, the call's lane is dirty only if it answers something else;
+        without, it ran because a rule said so, and its lane is dirty whatever it answers.
+        """
         request = node.request
         arguments = request.get("arguments")
         if not isinstance(arguments, dict) or not all(
@@ -575,7 +597,7 @@ class WorkflowEngine:
             raise WorkflowRunStoreError(msg)
         grant = ScriptToolGrant(str(request["toolkit"]), str(request["function"]))
         call_id = uuid5(NAMESPACE_OID, f"{run.run_id}:{node.key}:{node.generation}").hex
-        if same_as is _RAN:
+        if same_as is None:
             await self._mark_dirty(lanes, run.run_id, run.attempt, node.key)
         node = await asyncio.to_thread(
             self.store.put_node,
@@ -583,12 +605,12 @@ class WorkflowEngine:
                 node,
                 state=WorkflowNodeState.RUNNING,
                 # Saved before the dispatch, so a crash after the tool ran reads the broker's receipt for this call.
-                handle=DispatchHandle("broker", f"{attempt.run_id}:{call_id}", dispatched=False),
+                handle=DispatchHandle("broker", f"{attempt.run_id}:{call_id}", dispatched=False, same_as=same_as),
             ),
         )
         kept = cast("list[str] | None", (run.persona or {}).get("tools"))
         call = partial(self.broker.execute_for_workflow, attempt, call_id=call_id, grant=grant, arguments=arguments)
-        self._spawn(run.run_id, self._run_tool_node(node, grant, call, kept, lanes, same_as))
+        self._spawn(run.run_id, self._run_tool_node(node, grant, call, kept, lanes))
         return _receipt(node)
 
     async def node_receipt(self, attempt: ScriptRunRecord, node_id: str, *, wait: float) -> NodeReceipt:
@@ -644,6 +666,7 @@ class WorkflowEngine:
                 outcome = (WorkflowNodeState.FAILED, None, _INTERRUPTED)
             except ScriptRunNotFoundError:
                 outcome = _indeterminate(node)
+        self._invalidate(node, outcome)
         state, result, error = outcome
         self.store.settle_node(node.run_id, node.key, node.generation, state=state, result=result, error=error)
         return state
@@ -694,24 +717,20 @@ class WorkflowEngine:
         call: Callable[[], Awaitable[ScriptCallRecord]],
         kept: list[str] | None,
         lanes: DirtyLanes,
-        same_as: object,
     ) -> None:
-        """Run one tool call and settle its node; *kept* is the tool list of the narrowed agent that started the run.
-
-        *same_as* is the digest of the saved result of a call that runs on every resume: its lane stays clean when
-        the call answers the same again, compared whole and as JSON.
-        """
+        """Run one tool call and settle its node; *kept* is the tool list of the narrowed agent that started the run."""
+        outcome: _Outcome
         try:
             _require_kept(kept, grant)
-            state, result, error = _call_outcome(node, await call())
+            outcome = _call_outcome(node, await call())
         except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
             # Refused before any claim: the rate limit, a revoked attempt, a broker that takes no calls now.
-            state, result, error = WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(exc)}
-        equal = state is WorkflowNodeState.COMPLETED and await asyncio.to_thread(result_digest, result) == same_as
-        if same_as is not _RAN and not equal:
+            outcome = WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(exc)}
+        if await asyncio.to_thread(self._invalidate, node, outcome):
             # Before the node shows its end, so the script's next call already finds the lane dirty.
-            await self._mark_dirty(lanes, node.run_id, node.attempt, node.key)
+            lanes.mark(node.key)
         await hold("before_settle")
+        state, result, error = outcome
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation)
         await asyncio.to_thread(settle, state=state, result=result, error=error)
         await self._notify(node.run_id)
