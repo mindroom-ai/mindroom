@@ -95,6 +95,7 @@ def text_event(
     body: str = "hello",
     *,
     thread_id: str | None = None,
+    sender: str = ALICE,
     ts: int = 1_000,
 ) -> nio.Event:
     """Return a parsed text message event."""
@@ -104,7 +105,7 @@ def text_event(
     event = nio.Event.parse_event(
         {
             "event_id": event_id,
-            "sender": ALICE,
+            "sender": sender,
             "origin_server_ts": ts,
             "type": "m.room.message",
             "content": content,
@@ -165,17 +166,7 @@ def route_event(
 
 def bot_event(event_id: str, body: str = "the answer", *, ts: int = 1_100) -> nio.Event:
     """Return this bot's own message as it comes back on the sync timeline."""
-    event = nio.Event.parse_event(
-        {
-            "event_id": event_id,
-            "sender": BOT,
-            "origin_server_ts": ts,
-            "type": "m.room.message",
-            "content": {"msgtype": "m.text", "body": body},
-        },
-    )
-    assert isinstance(event, nio.Event)
-    return event
+    return text_event(event_id, body, sender=BOT, ts=ts)
 
 
 def image_event(
@@ -5515,8 +5506,7 @@ class TestRouteDispatch:
         alice: PrincipalStore,
     ) -> None:
         """Only the dispatch of a route event marks a message as a route: a managed account's own mark is dropped."""
-        event = text_event("$message", "an ordinary message")
-        event.sender = event.source["sender"] = "@mindroom_other:example.org"
+        event = text_event("$message", "an ordinary message", sender="@mindroom_other:example.org")
         event.source[ROUTE_EVENT_TYPE] = ["$question"]
         event.source["content"][ROUTE_EVENT_TYPE] = {"entity": BOT, "event_ids": ["$question"]}
 
