@@ -42,9 +42,10 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   On `shared` and `user` scopes the limit would need the requester and agent carried beside the key, so those scopes are refused until someone needs them.
 - **A primary removes the named workers it did not start on its first maintenance pass.**
   No fleet survives a restart, so a named worker created before the process started can never be reached again, and waiting for its idle timeout only holds its requester's limit.
-- **A failure is recorded against the worker that failed.**
-  A handle carries the Deployment's UID as its incarnation, and a failure reported with another incarnation is ignored, so a late failure from a replaced worker cannot stop its replacement.
-  The `started` marker of a result reads the incarnation too, because a replacement starts counting its starts from one.
+- **A failure is recorded against the Deployment that failed.**
+  A handle carries the Deployment's UID, and a failure from a different UID or recorded startup count is ignored.
+  The `started` marker uses that same identity to report a new or replaced Deployment. It does not report Kubernetes replacing a pod or restarting a container within an unchanged Deployment.
+  A late failure from an earlier pod in the same Deployment can still stop its replacement.
 - **`workers run` is a client-side wrapper over `tools call`.**
   It adds no route and no server state.
   It exits with the command's exit code, so its own failures use 124 and 125 as `timeout` and `docker run` do, instead of the CLI's 1 to 4, which commands use too.

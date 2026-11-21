@@ -215,7 +215,8 @@ run_shell_command("bash e2e/shard.sh 1 2", worker="e2e-1", resource_profile="lar
   Another reply's calls with the same name get a worker of their own.
 - `resource_profile` is `small`, `standard`, or `large`, the [background script profiles](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings), and sizes the worker when its name is first used; omitting it gives the worker the normal worker resources.
   A later call that asks for another size fails.
-- The result starts with `[worker: <name>]`, or `[worker: <name>, started]` when the call ran in a newly started worker, where nothing from earlier commands is running.
+- The result starts with `[worker: <name>]`, or `[worker: <name>, started]` on the first call to a Deployment or a start MindRoom recorded.
+  Kubernetes may replace a pod or restart its container without changing the Deployment. The marker does not report those restarts.
 - A named worker has its own processes, network ports, and `/tmp`.
   It sees the same workspace, shared directories, and knowledge as the agent's normal worker, with the same leased tool settings and shared credentials, but not the packages installed into the normal worker's environment or its package caches.
 - Workers share the workspace, so give each one its own output directory, and its own git worktree when it changes a checkout, and build or install what all of them need once before starting them.
