@@ -178,6 +178,9 @@ async def _continuation_prompt(
     if child.delegation_id != delegation_child(job).delegation_id:
         return sent
     run = await read_child_run(child, config, runtime_paths)
+    if run is None and child.workflow_run_id is not None:
+        # The call of a workflow run goes on only on proof that its turn called no tool, which no run is not.
+        return None
     if run is None or not is_recovered_run(run):
         return None if run is not None and run.tools else sent
     # The prompt of a workflow run's call is sent whole: what it asks for may stand at its end.

@@ -13,6 +13,7 @@ import pytest
 import pytest_asyncio
 
 from mindroom.approval import manager as approval_manager
+from mindroom.delegation import continuation
 from mindroom.delegation.background import delegation_child
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
@@ -210,6 +211,26 @@ async def test_agent_that_cannot_be_continued_and_left_no_record_is_indeterminat
         return None
 
     monkeypatch.setattr(agent_nodes, "read_child_run", missing)
+
+    with pytest.raises(NodeFailed) as stopped:
+        await stack.result("@0", "agent", _PROMPT)
+    assert (stopped.value.kind, _node(stack).generation, stack.counting_tool.lines) == ("indeterminate", 1, ["a"])
+
+
+@pytest.mark.asyncio
+async def test_agent_whose_record_is_missing_at_the_restart_is_not_sent_its_prompt_again(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn whose run cannot be found is not proven to have called no tool: nothing continues it or runs it again."""
+    await _working(stack, after_append=True)
+
+    async def missing(*_args: object, **_options: object) -> None:
+        return None
+
+    monkeypatch.setattr(continuation, "read_child_run", missing)
+    monkeypatch.setattr(agent_nodes, "read_child_run", missing)
+    await _restarted(stack, calls(tool_call("append", "c2", line="a")), answer("done"))
 
     with pytest.raises(NodeFailed) as stopped:
         await stack.result("@0", "agent", _PROMPT)
