@@ -10628,7 +10628,6 @@ depends_on = [
 path = "mindroom.matrix.room_accounts"
 depends_on = [
     "mindroom.entity_resolution",
-    "mindroom.matrix.client_room_admin",
 ]
 
 [[modules]]

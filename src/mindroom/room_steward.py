@@ -38,13 +38,13 @@ def joined_bot(bots: Mapping[str, AgentBot], room_id: str, user_id: str) -> Agen
     return next((bot for bot_id, bot, _room in _joined(bots, room_id) if bot_id == user_id), None)
 
 
-def room_steward(bots: Mapping[str, AgentBot], room_id: str) -> AgentBot | None:
+def room_steward(bots: Mapping[str, AgentBot], room_id: str, *, accepting_only: bool = False) -> AgentBot | None:
     """Return the room's steward: the running, joined bot with the highest power there, None when there is none.
 
     Every entity counts, the owner account too, and each bot's power is the one its own cache of the room gives it,
     which is above every power level for a creator of a room whose version gives creators unlimited power.
     """
-    joined = list(_joined(bots, room_id))
+    joined = [entry for entry in _joined(bots, room_id) if not accepting_only or entry[1].accepting_work]
     steward_id = _pick_steward((user_id, room.power_levels.get_user_level(user_id)) for user_id, _bot, room in joined)
     return next((bot for user_id, bot, _room in joined if user_id == steward_id), None)
 

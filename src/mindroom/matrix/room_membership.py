@@ -145,8 +145,9 @@ async def ensure_room_membership_synced(
     *,
     sender_id: str,
     failure_level: Callable[[bool], int] = lambda _: logging.WARNING,
-) -> bool:
-    """Reuse or fetch application membership without certifying nio's crypto projection."""
+    quiet_forbidden: bool = False,
+) -> bool | None:
+    """Refresh application membership; return None for a refusal when quiet_forbidden is set."""
     if room_membership_is_complete(room):
         return True
     lookup = _lookups.setdefault(room, _MembershipLookup())
@@ -162,6 +163,12 @@ async def ensure_room_membership_synced(
             except Exception as exc:
                 response = exc
             if not isinstance(response, nio.JoinedMembersResponse):
+                if (
+                    quiet_forbidden
+                    and isinstance(response, nio.JoinedMembersError)
+                    and response.status_code == "M_FORBIDDEN"
+                ):
+                    return None
                 timed_out = isinstance(response, TimeoutError)
                 logger.log(
                     failure_level(timed_out),

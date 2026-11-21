@@ -29,6 +29,7 @@ from mindroom.orchestration import rooms as rooms_module
 from mindroom.orchestration.room_state import RoomStateWorker
 from mindroom.orchestration.rooms import RoomSetup
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.room_modes import change_room_thread_mode
 from mindroom.room_thread_modes import (
     clear_room_thread_mode_override,
@@ -157,8 +158,12 @@ def _accounts(state: RoomState) -> list[str] | None:
 def worker_runtime(room_state: RoomState) -> MagicMock:
     """Supply a live runtime with a replaceable room steward."""
     config, paths, _, _, client = room_state
-    runtime = MagicMock(config=config, runtime_paths=paths, running=True)
-    runtime.response_admission_gate.closed = False
+    runtime = MagicMock(
+        config=config,
+        runtime_paths=paths,
+        running=True,
+        response_admission_gate=ResponseAdmissionGate(),
+    )
     runtime.room_steward.return_value = MagicMock(client=client)
     return runtime
 
@@ -1386,17 +1391,16 @@ async def test_setup_defers_reconciliation_until_admission_reopens(
     assert snapshot is not None
     client.room_get_state.reset_mock()
     runtime = _router_duties(room_state).deps.runtime.orchestrator
-    runtime.response_admission_gate.closed = True
+    runtime.response_admission_gate.close()
     setup, worker = _room_setup(room_state, runtime)
     monkeypatch.setattr(setup, "ensure_rooms_exist", AsyncMock(return_value={"room": ROOM_ID}))
     monkeypatch.setattr(rooms_module, "reconcile_managed_rooms", AsyncMock(return_value={ROOM_ID: snapshot}))
     monkeypatch.setattr(setup, "_ensure_room_invitations", AsyncMock())
     await setup.setup([])
-    assert await wait_for_background_tasks(timeout=2, owner=worker)
+    await _yield_loop(30)
     client.room_get_state.assert_not_awaited()
     client.room_put_state.assert_not_awaited()
-    runtime.response_admission_gate.closed = False
-    await setup.publish_room_state()
+    runtime.response_admission_gate.reopen()
     assert await wait_for_background_tasks(timeout=2, owner=worker)
     client.room_get_state.assert_not_awaited()
     assert events[EVENT_TYPE, ""] == {"mode": "mixed"}
@@ -1558,8 +1562,12 @@ def _room_setup(state: RoomState, runtime: MagicMock | None = None) -> tuple[Roo
 def _router_duties(state: RoomState) -> StewardDuties:
     """Build the owner account's duties, the steward of every room."""
     config, paths, _, _, client = state
-    runtime = MagicMock(config=config, runtime_paths=paths, running=True)
-    runtime.response_admission_gate.closed = False
+    runtime = MagicMock(
+        config=config,
+        runtime_paths=paths,
+        running=True,
+        response_admission_gate=ResponseAdmissionGate(),
+    )
     deps = StewardDutiesDeps(
         runtime=MagicMock(config=config, runtime_paths=paths, client=client, orchestrator=runtime),
         logger=MagicMock(),
@@ -1695,7 +1703,7 @@ async def test_startup_admission_reopens_during_joins(
     snapshot = await read_room_state(client, ROOM_ID)
     duties = _router_duties(room_state)
     runtime = duties.deps.runtime.orchestrator
-    runtime.response_admission_gate.closed = True
+    runtime.response_admission_gate.close()
     setup, worker = _room_setup(room_state, runtime)
     monkeypatch.setattr(setup, "ensure_rooms_exist", AsyncMock(return_value={"room": ROOM_ID}))
     monkeypatch.setattr(rooms_module, "reconcile_managed_rooms", AsyncMock(return_value={ROOM_ID: snapshot}))
@@ -1711,7 +1719,7 @@ async def test_startup_admission_reopens_during_joins(
 
     async def joins() -> None:
         await join("agent1")
-        runtime.response_admission_gate.closed = False
+        runtime.response_admission_gate.reopen()
         await setup.publish_room_state()
         assert await wait_for_background_tasks(timeout=2, owner=worker)
         await join("agent2")

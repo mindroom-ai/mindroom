@@ -1957,6 +1957,7 @@ class AgentBot:
         self._runtime_view.begin_draining()
         self.invalidate_agent_reply_memberships(reason="observer_stopping")
         self._delivery_recovery_wake.set()
+        await self.orchestrator.room_state.release(self)
         if shutdown_intent.stop_reason == "shutdown":
             self.begin_process_shutdown()
             if self.client is not None:

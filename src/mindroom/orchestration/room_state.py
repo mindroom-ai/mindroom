@@ -17,6 +17,7 @@ from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.bot import AgentBot
     from mindroom.runtime_protocols import OrchestratorRuntime
 
 _MAX_RETRY_SECONDS = 60
@@ -29,13 +30,11 @@ class RoomStateWorker:
         self._runtime = runtime
         self._rooms: dict[str, tuple[asyncio.Task[None], asyncio.Event]] = {}
         self._slots = asyncio.Semaphore(4)
-
-    def _accepting(self) -> bool:
-        return self._runtime.running and not self._runtime.response_admission_gate.closed
+        self._borrowed: dict[str, AgentBot] = {}
 
     def mark(self, room_id: str) -> None:
         """Schedule a fresh comparison, without waiting for Matrix or a room lock."""
-        if not self._accepting():
+        if not self._runtime.running:
             return
         if (entry := self._rooms.get(room_id)) is not None and not entry[0].done():
             entry[1].set()
@@ -61,7 +60,20 @@ class RoomStateWorker:
     def stop(self) -> None:
         """Cancel in-flight and pending work once runtime admission has closed."""
         for task, _ in self._rooms.values():
-            task.cancel()
+            if not task.cancelling():
+                task.cancel()
+
+    async def release(self, bot: AgentBot) -> None:
+        """Cancel and drain attempts borrowing a draining bot before its client closes."""
+        tasks = {room_id: self._rooms[room_id][0] for room_id, borrower in self._borrowed.items() if borrower is bot}
+        for task in tasks.values():
+            if not task.cancelling():
+                task.cancel()
+        try:
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
+        finally:
+            for room_id in tasks:
+                self.mark(room_id)
 
     async def _attempt(
         self,
@@ -71,19 +83,21 @@ class RoomStateWorker:
         failure_level: Callable[[bool], int],
     ) -> tuple[str, set[int]] | None:
         """Return the writer and failed steps, or None when there is no eligible client."""
-        if not self._accepting():
-            return None
         runtime = self._runtime
-        steward = runtime.room_steward(room_id)
+        if not runtime.running:
+            return None
+        steward = runtime.room_steward(room_id, accepting_only=True)
         if steward is None or (client := steward.client) is None:
             return None
+        self._borrowed[room_id] = steward
         config = runtime.config
 
         def current() -> bool:
             return (
-                self._accepting()
+                runtime.running
+                and not runtime.response_admission_gate.closed
                 and runtime.config is config
-                and runtime.room_steward(room_id) is steward
+                and runtime.room_steward(room_id, accepting_only=True) is steward
                 and steward.client is client
             )
 
@@ -102,7 +116,7 @@ class RoomStateWorker:
             and current()
             and await step(may_write=current, failure_level=failure_level) is False
         }
-        if self._accepting() and not current():
+        if not current():
             # Keep the work in this room when its credential or config changes during a comparison.
             dirty.set()
         return client.user_id, failed
@@ -111,28 +125,33 @@ class RoomStateWorker:
         retry: tuple[str, set[int]] | None = None
         delay, warned = 0, False
 
-        def failure_level(_timed_out: bool) -> int:
+        def failure_level(timed_out: bool) -> int:
             nonlocal warned
             if warned:
                 return logging.DEBUG
-            if delay < _MAX_RETRY_SECONDS:
+            if timed_out and delay < _MAX_RETRY_SECONDS:
                 return logging.INFO
             warned = True
             return logging.WARNING
 
-        while self._accepting():
+        gate = self._runtime.response_admission_gate
+        while self._runtime.running:
+            await gate.wait_until_open()
             async with self._slots:
+                if gate.closed:
+                    continue
                 if dirty.is_set():
                     retry = None
                     dirty.clear()
-                retry = await self._attempt(room_id, retry, dirty, failure_level)
-            if retry is None:
+                try:
+                    retry = await self._attempt(room_id, retry, dirty, failure_level)
+                finally:
+                    self._borrowed.pop(room_id, None)
+            if retry is None or not (retry[1] or dirty.is_set()):
                 return
             if not retry[1]:
                 delay, warned = 0, False
-                if not dirty.is_set():
-                    return
-            elif not dirty.is_set() and self._accepting():
+            elif not dirty.is_set():
                 delay = min(max(1, delay * 2), _MAX_RETRY_SECONDS)
                 jitter = uniform(delay * 0.5, min(delay * 1.5, _MAX_RETRY_SECONDS))  # noqa: S311 - retry timing
                 with suppress(TimeoutError):

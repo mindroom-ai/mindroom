@@ -16,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.orchestration.room_state import RoomStateWorker
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.room_steward import room_steward
 from mindroom.steward_duties import (
     StewardDuties,
@@ -56,9 +57,9 @@ class _Room:
         self.joined = [PERSON, *(self.ids[name] for name in names)]
         self.bots: dict[str, Any] = {}
         self.runtime = MagicMock(agent_bots=self.bots, config=self.config, runtime_paths=self.paths, running=True)
-        self.runtime.response_admission_gate.closed = False
+        self.runtime.response_admission_gate = ResponseAdmissionGate()
         self.runtime.room_state = RoomStateWorker(self.runtime)
-        self.runtime.room_steward.side_effect = lambda room_id: room_steward(self.bots, room_id)
+        self.runtime.room_steward.side_effect = lambda room_id, **kwargs: room_steward(self.bots, room_id, **kwargs)
         for name in names:
             self._add_bot(name)
             self.apply_power(name, {self.ids[names[0]]: 100})
@@ -118,6 +119,7 @@ class _Room:
         self.bots[name] = SimpleNamespace(
             agent_name=name,
             running=True,
+            accepting_work=True,
             client=client,
             steward_duties=StewardDuties(deps),
         )

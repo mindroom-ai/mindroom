@@ -27,7 +27,7 @@ _THREAD_MODE_EVENT_TYPE = "io.mindroom.thread_mode"
 _LOCKS: WeakValueDictionary[tuple[Path, str], asyncio.Lock] = WeakValueDictionary()
 
 
-async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per comparison step
+async def reconcile_room_thread_mode(  # noqa: C901, PLR0911, PLR0912 - one outcome per comparison step
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -49,25 +49,31 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
         identities = prepared_entity_names_by_user_id(config, runtime_paths)
         # Bound lock waits too; the lock serializes the comparison and write.
         async with asyncio.timeout(10), _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
-            room = client.rooms[room_id]
+            if (room := client.rooms.get(room_id)) is None:
+                return False
             responders = configured_responder_entities_for_room(room, config, runtime_paths)
             if responders is None:
                 phase = "joined_members"
-                if not await ensure_room_membership_synced(
+                synced = await ensure_room_membership_synced(
                     client,
                     room,
                     sender_id=client.user_id,
                     failure_level=failure_level,
-                ):
+                    quiet_forbidden=may_write is not None,
+                )
+                if not synced:
                     logger.debug("room_thread_mode_membership_unavailable", room_id=room_id)
-                    return False
+                    return synced
                 responders = get_available_responders_in_room(room, config, runtime_paths)
             phase = "responder_membership"
-            modes = {
-                config.get_entity_thread_mode(identities[responder.full_id], runtime_paths, room_id=room_id)
-                for responder in responders
-                if await _joined(client, room_id, responder.full_id)
-            }
+            modes = set()
+            for responder in responders:
+                user_id = responder.full_id
+                joined = await _joined(client, room_id, user_id, quiet_forbidden=may_write is not None)
+                if joined is None:
+                    return None
+                if joined:
+                    modes.add(config.get_entity_thread_mode(identities[user_id], runtime_paths, room_id=room_id))
             if not modes:
                 return True
             mode = resolve_room_thread_mode_override(runtime_paths, room_id) or (
@@ -76,10 +82,15 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
             content = {"mode": mode}
             phase = "state_get"
             current = await client.room_get_state_event(room_id, _THREAD_MODE_EVENT_TYPE, state_key="")
-            if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
-                return True
-            if isinstance(current, nio.RoomGetStateEventError) and current.status_code != "M_NOT_FOUND":
-                forbidden = may_write is not None and current.status_code == "M_FORBIDDEN"
+            if isinstance(current, nio.RoomGetStateEventResponse):
+                if current.content == content:
+                    return True
+            elif not (isinstance(current, nio.RoomGetStateEventError) and current.status_code == "M_NOT_FOUND"):
+                forbidden = (
+                    may_write is not None
+                    and isinstance(current, nio.ErrorResponse)
+                    and current.status_code == "M_FORBIDDEN"
+                )
                 level = logging.DEBUG if forbidden else failure_level(False)
                 logger.log(level, "room_thread_mode_reconcile_failed", room_id=room_id, error=str(current))
                 return None if forbidden else False
@@ -103,8 +114,10 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
         return False
 
 
-async def _joined(client: nio.AsyncClient, room_id: str, user_id: str) -> bool:
+async def _joined(client: nio.AsyncClient, room_id: str, user_id: str, *, quiet_forbidden: bool) -> bool | None:
     membership = await client.room_get_state_event(room_id, "m.room.member", user_id)
     if isinstance(membership, nio.RoomGetStateEventError) and membership.status_code != "M_NOT_FOUND":
+        if quiet_forbidden and membership.status_code == "M_FORBIDDEN":
+            return None
         raise RuntimeError(str(membership))
     return isinstance(membership, nio.RoomGetStateEventResponse) and membership.content.get("membership") == "join"

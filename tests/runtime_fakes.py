@@ -52,11 +52,14 @@ class ReadyRuntime(_MultiAgentOrchestrator):
             return None
         return entity_name not in self.unavailable and entity_name not in self.not_ready
 
-    def room_steward(self, room_id: str) -> AgentBot | None:  # noqa: ARG002
+    def room_steward(self, room_id: str, *, accepting_only: bool = False) -> AgentBot | None:  # noqa: ARG002
         """Return the entity the test made every room's steward: its registered bot, else a stand-in with its name."""
         if self.steward is None:
             return None
-        return self.agent_bots.get(self.steward) or cast(
+        bot = self.agent_bots.get(self.steward)
+        if accepting_only:
+            return bot if bot is not None and bot.accepting_work else None
+        return bot or cast(
             "AgentBot",
             SimpleNamespace(agent_name=self.steward, client=None),
         )

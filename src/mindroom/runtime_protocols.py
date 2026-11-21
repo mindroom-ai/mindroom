@@ -117,7 +117,7 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
     @property
     def room_state(self) -> RoomStateWorker: ...  # noqa: D102
 
-    def room_steward(self, room_id: str) -> AgentBot | None:
+    def room_steward(self, room_id: str, *, accepting_only: bool = False) -> AgentBot | None:
         """Return the bot that does one room's shared invisible work now."""
         ...
 

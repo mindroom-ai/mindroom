@@ -1001,9 +1001,9 @@ class _MultiAgentOrchestrator:
         """Return the hook bindings of the runtime's own emissions, which each room's poster and steward back."""
         return service_hook_bindings(self, self._hook_lifetime)
 
-    def room_steward(self, room_id: str) -> AgentBot | None:
+    def room_steward(self, room_id: str, *, accepting_only: bool = False) -> AgentBot | None:
         """Return the bot that does one room's shared invisible work now."""
-        return room_steward(self.agent_bots, room_id)
+        return room_steward(self.agent_bots, room_id, accepting_only=accepting_only)
 
     def room_poster(self, room_id: str, sender: tuple[str | None, str] | None = None) -> AgentBot | None:
         """Return the bot that posts in one room where no agent answers, for a retry only its first sender."""
