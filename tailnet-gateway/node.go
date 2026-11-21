@@ -18,31 +18,37 @@ type tsnetNode struct {
 }
 
 func NewTsnetNode(loginServer, authKey string, tags []string) (NodeFactory, error) {
-	if strings.TrimSpace(authKey) == "" {
+	authKey = strings.TrimSpace(authKey)
+	if authKey == "" {
 		return nil, errors.New("TAILNET_SSH_AUTH_KEY is not set")
 	}
-	return func(dir, hostname string) (Node, error) {
-		server := tsnetServer(dir, hostname, loginServer, authKey, tags)
+	return func(dir, hostname string) (_ Node, err error) {
+		server := &tsnet.Server{
+			Dir:           dir,
+			Hostname:      hostname,
+			ControlURL:    loginServer,
+			AuthKey:       authKey,
+			AdvertiseTags: tags,
+			// tsnet can still emit interactive sign-in messages after a key fails.
+			UserLogf: func(string, ...any) {},
+		}
+		defer func() {
+			if err != nil {
+				server.Close()
+				err = errors.New(strings.ReplaceAll(err.Error(), authKey, "[redacted]"))
+			}
+		}()
 		// Listen starts the node without waiting for it to enroll.
 		listener, err := server.Listen("tcp", ":22")
 		if err != nil {
-			return nil, errors.New(strings.ReplaceAll(err.Error(), authKey, "[redacted]"))
+			return nil, err
 		}
-		client, _ := server.LocalClient() // Listen already started the server.
+		client, err := server.LocalClient()
+		if err != nil {
+			return nil, err
+		}
 		return &tsnetNode{server, client.WhoIs, listener}, nil
 	}, nil
-}
-
-func tsnetServer(dir, hostname, loginServer, authKey string, tags []string) *tsnet.Server {
-	return &tsnet.Server{
-		Dir:           dir,
-		Hostname:      hostname,
-		ControlURL:    loginServer,
-		AuthKey:       authKey,
-		AdvertiseTags: tags,
-		// tsnet can still emit interactive sign-in messages after a key fails.
-		UserLogf: func(string, ...any) {},
-	}
 }
 
 func (n *tsnetNode) Listener() net.Listener { return n.listener }

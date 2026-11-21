@@ -44,13 +44,24 @@ func TestTsnetNodeNeedsAnAuthKeyBeforeStarting(t *testing.T) {
 	}
 }
 
-func TestTsnetNodeLeavesDefaultControlURLToTsnet(t *testing.T) {
-	for _, loginServer := range []string{"", "https://headscale.example"} {
-		dir, tags := t.TempDir(), []string{"tag:mindroom"}
-		server := tsnetServer(dir, "mind-bas", loginServer, "operator-key", tags)
-		if server.ControlURL != loginServer || server.Dir != dir || server.Hostname != "mind-bas" ||
-			server.AuthKey != "operator-key" || server.Ephemeral || !reflect.DeepEqual(server.AdvertiseTags, tags) {
-			t.Error("tsnet node did not get the expected persistent enrollment config")
-		}
+func TestTsnetNodeStartsWithTrimmedEnrollmentKey(t *testing.T) {
+	t.Setenv("TS_NO_LOGS_NO_SUPPORT", "true")
+	t.Setenv("NO_PROXY", "*")
+	t.Setenv("TS_LOGS_DIR", t.TempDir())
+	const loginServer = "http://127.0.0.1:1"
+	dir, tags := t.TempDir(), []string{"tag:mindroom"}
+	factory, err := NewTsnetNode(loginServer, " \toperator-key\n", tags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := factory(dir, "mind-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { node.Close() })
+	server := node.(*tsnetNode).Server
+	if server.ControlURL != loginServer || server.Dir != dir || server.Hostname != "mind-test" ||
+		server.AuthKey != "operator-key" || server.Ephemeral || !reflect.DeepEqual(server.AdvertiseTags, tags) {
+		t.Error("tsnet node did not get the expected persistent enrollment config")
 	}
 }
