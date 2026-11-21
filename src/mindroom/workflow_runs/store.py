@@ -290,6 +290,23 @@ class WorkflowRunStore:
             _count_progress(connection, run_id, state)
         return True
 
+    def reusable_keys(self, run_id: str, before_attempt: int) -> list[str]:
+        """Return the keys of the completed nodes that an attempt before *before_attempt* left and a later one may reuse."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT key FROM workflow_nodes WHERE run_id = ? AND attempt < ? AND state = 'completed' AND digest != ''",
+                (run_id, before_attempt),
+            ).fetchall()
+        return [row["key"] for row in rows]
+
+    def forget_digests(self, run_id: str, keys: Iterable[str]) -> None:
+        """Make the nodes at *keys* match no request, so the next attempt that reaches one runs its call again."""
+        with self._write_transaction() as connection:
+            connection.executemany(
+                "UPDATE workflow_nodes SET digest = '' WHERE run_id = ? AND key = ?",
+                [(run_id, key) for key in keys],
+            )
+
     def whole_result(self, node: WorkflowNode) -> object:
         """Return the node's whole result, read from its file when the row keeps only the start of it."""
         if node.result_file is None:

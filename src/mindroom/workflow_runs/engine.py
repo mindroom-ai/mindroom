@@ -8,7 +8,7 @@ import secrets
 import time
 from collections import Counter
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -106,14 +106,6 @@ class WorkflowLimits:
 type ResumeAccess = tuple[ToolRuntimeContext, WorkflowLimits] | Literal["pending", "revoked"] | None
 
 
-@dataclass(slots=True)
-class _Replay:
-    """What one attempt keeps while its script replays: the calls a resume named, and the lanes in which a call ran."""
-
-    rerun: frozenset[str] = frozenset()
-    dirty: DirtyLanes = field(default_factory=DirtyLanes)
-
-
 class SupersededAttemptError(RuntimeError):
     """Raised for a request of an attempt its run no longer names, so a leftover process cannot act."""
 
@@ -135,7 +127,8 @@ class WorkflowEngine:
         self.started_at = utc_timestamp()
         # The attempts this engine started. No other is served: one an earlier primary left is a leftover process.
         self._launched: set[str] = set()
-        self._replays: dict[str, _Replay] = {}
+        # The lanes in which a call ran in each run's current attempt.
+        self._dirty: dict[str, DirtyLanes] = {}
         # When each running run's working time was last charged, by the engine's clock.
         self._charged: dict[str, float] = {}
         # One per run with a waiter or a launch in progress: polls and `wait` sleep on it, a launch holds its lock.
@@ -286,6 +279,8 @@ class WorkflowEngine:
             keys = self.resumable(run_id, rerun)
             run = self.store.get_run(run_id)
             text = run.source if source is None else source
+            # Saved with the calls themselves, so every later attempt runs them again until one of them did.
+            await asyncio.to_thread(self.store.forget_digests, run_id, keys)
             reopened = await asyncio.to_thread(
                 self.store.update_run,
                 run_id,
@@ -300,7 +295,6 @@ class WorkflowEngine:
                 error=None,
                 finished_at=None,
             )
-            self._replays[run_id] = _Replay(rerun=keys)
         return reopened, False
 
     async def resume(
@@ -439,11 +433,16 @@ class WorkflowEngine:
 
     async def _admit_gated(self, run: WorkflowRun, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:  # noqa: C901
         key, kind, meta = request.key, request.kind, request.meta
-        replay = self._replays.setdefault(run.run_id, _Replay())
+        lanes = self._dirty.setdefault(run.run_id, DirtyLanes())
         digest = node_digest(kind, request.args)
-        cached, dirty, rerun = meta.get("cached") is not False, replay.dirty.is_dirty(key), key in replay.rerun
         members = _members(meta) if kind == "group" else None
         saved = self.store.get_node(run.run_id, key)
+        # A saved call with no digest was named by a resume, or follows a call that ran in an attempt that died.
+        cached, dirty, rerun = (
+            meta.get("cached") is not False,
+            lanes.is_dirty(key),
+            saved is not None and not saved.digest,
+        )
         decision = partial(decide, digest=digest, attempt=run.attempt, dirty=dirty, rerun=rerun, cached=cached)
         action = decision(saved).action
         if saved is not None and action == "return":
@@ -462,7 +461,8 @@ class WorkflowEngine:
             stamp: dict[str, object] = {"attempt": run.attempt, "stale": False}
             if members != saved.members:
                 stamp["members"] = members
-                replay.dirty.mark_after(key)
+                # What follows the group is dirty and no member lane is, which is what marking the group does.
+                await self._mark_dirty(lanes, run.run_id, run.attempt, key)
             await asyncio.to_thread(partial(self.store.update_node, run.run_id, key, saved.generation, **stamp))
             if action == "raise_indeterminate":
                 # It may have run, so nothing is dispatched until a resume names it.
@@ -500,23 +500,33 @@ class WorkflowEngine:
             same_as: object = _RAN
             if previous is not None and not changed:
                 same_as = result_digest(await asyncio.to_thread(self.store.whole_result, previous))
-            return await self._dispatch_tool(run, attempt, node, replay, same_as)
+            return await self._dispatch_tool(run, attempt, node, lanes, same_as)
         if kind == "value":
             node = replace(node, result=_value(request.args))
         elif kind != "group":
             msg = f"This MindRoom cannot run a '{kind}' call in a workflow yet."
             raise WorkflowRunStoreError(msg)
         # A value and a group are complete when they are submitted, so no restart finds one half done.
+        await self._mark_dirty(lanes, run.run_id, run.attempt, key)
         node = await asyncio.to_thread(self.store.put_node, replace(node, ended_at=node.started_at))
-        replay.dirty.mark(key)
         return _receipt(node)
+
+    async def _mark_dirty(self, lanes: DirtyLanes, run_id: str, attempt: int, key: str) -> None:
+        """Record that the call at *key* runs in *attempt*: what follows it in its lanes runs again, in any attempt.
+
+        A later attempt remembers nothing of this one, so each completed call that became dirty loses its digest
+        before the call that dirtied it changes. A call that may have run keeps its digest, and its own rule.
+        """
+        lanes.mark(key)
+        saved = await asyncio.to_thread(self.store.reusable_keys, run_id, attempt)
+        await asyncio.to_thread(self.store.forget_digests, run_id, [key for key in saved if lanes.is_dirty(key)])
 
     async def _dispatch_tool(
         self,
         run: WorkflowRun,
         attempt: ScriptRunRecord,
         node: WorkflowNode,
-        replay: _Replay,
+        lanes: DirtyLanes,
         same_as: object,
     ) -> NodeReceipt:
         """Save a tool node with the handle of its call, then run the call as the engine's own task."""
@@ -529,6 +539,8 @@ class WorkflowEngine:
             raise WorkflowRunStoreError(msg)
         grant = ScriptToolGrant(str(request["toolkit"]), str(request["function"]))
         call_id = uuid5(NAMESPACE_OID, f"{run.run_id}:{node.key}:{node.generation}").hex
+        if same_as is _RAN:
+            await self._mark_dirty(lanes, run.run_id, run.attempt, node.key)
         node = await asyncio.to_thread(
             self.store.put_node,
             replace(
@@ -538,11 +550,9 @@ class WorkflowEngine:
                 handle=DispatchHandle("broker", f"{attempt.run_id}:{call_id}", dispatched=False),
             ),
         )
-        if same_as is _RAN:
-            replay.dirty.mark(node.key)
         kept = cast("list[str] | None", (run.persona or {}).get("tools"))
         call = partial(self.broker.execute_for_workflow, attempt, call_id=call_id, grant=grant, arguments=arguments)
-        self._spawn(run.run_id, self._run_tool_node(node, grant, call, kept, replay, same_as))
+        self._spawn(run.run_id, self._run_tool_node(node, grant, call, kept, lanes, same_as))
         return _receipt(node)
 
     async def node_receipt(self, attempt: ScriptRunRecord, node_id: str, *, wait: float) -> NodeReceipt:
@@ -647,7 +657,7 @@ class WorkflowEngine:
         grant: ScriptToolGrant,
         call: Callable[[], Awaitable[ScriptCallRecord]],
         kept: list[str] | None,
-        replay: _Replay,
+        lanes: DirtyLanes,
         same_as: object,
     ) -> None:
         """Run one tool call and settle its node; *kept* is the tool list of the narrowed agent that started the run.
@@ -664,7 +674,7 @@ class WorkflowEngine:
         equal = state is WorkflowNodeState.COMPLETED and await asyncio.to_thread(result_digest, result) == same_as
         if same_as is not _RAN and not equal:
             # Before the node shows its end, so the script's next call already finds the lane dirty.
-            replay.dirty.mark(node.key)
+            await self._mark_dirty(lanes, node.run_id, node.attempt, node.key)
         await hold("before_settle")
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation)
         await asyncio.to_thread(settle, state=state, result=result, error=error)
@@ -740,7 +750,7 @@ class WorkflowEngine:
             ended = await asyncio.to_thread(
                 partial(self.store.update_run, run.run_id, when=_LIVE_RUN_STATES, **changes),
             )
-            self._replays.pop(run.run_id, None)
+            self._dirty.pop(run.run_id, None)
             self._charged.pop(run.run_id, None)
             condition.notify_all()
         return ended

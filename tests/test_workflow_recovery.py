@@ -544,6 +544,111 @@ async def test_rerun_names_a_call_for_one_attempt_only(stack: WorkflowStack) -> 
     assert stack.counting_tool.lines == ["a", "a"]
 
 
+async def _resumed_by_a_person(stack: WorkflowStack, **arguments: object) -> None:
+    """End the attempt with a report and resume the run as its owner's call does, up to the new attempt."""
+    await stack.finish_attempt(result="the report")
+    attempt = stack.store.get_run(stack.run_id).attempt
+    await stack.call("resume_workflow", run_id=stack.run_id, **arguments)
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == attempt + 1)
+
+
+async def _interrupted_and_resumed(stack: WorkflowStack) -> None:
+    """Lose the attempt to a restart of its process and let the pass start the next one, which remembers nothing."""
+    await _interrupt(stack, PLUGIN_TOOLS_CHANGED)
+    assert await stack.maintain() == [stack.run_id]
+
+
+@pytest.mark.asyncio
+async def test_rerun_of_an_ambiguous_call_survives_an_interruption_before_the_call(
+    stack: WorkflowStack,
+    barrier: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resume that named the call was accepted, so a later attempt runs the call too, once."""
+    await _started(stack)
+    await _killed_at(stack, barrier, "before_receipt", monkeypatch)
+    await stack.recover()
+    await stack.continue_jobs()
+    with pytest.raises(NodeFailed):
+        await stack.result("@0", "tool", _A)
+    node = stack.store.get_node(stack.run_id, "@0")
+    assert node is not None
+    await _resumed_by_a_person(stack, rerun=[f"n{node.seq}"])
+
+    await _interrupted_and_resumed(stack)
+
+    assert await stack.result("@0", "tool", _A) == "appended"
+    await _interrupted_and_resumed(stack)
+    assert (await stack.submit("@0", "tool", _A)).cached
+    assert stack.counting_tool.lines == ["a", "a"]
+
+
+@pytest.mark.asyncio
+async def test_call_after_a_rerun_runs_again_after_an_interruption_between_them(stack: WorkflowStack) -> None:
+    """The call that follows a rerun may see something else, also when the attempt that reran died before it."""
+    await _started(stack)
+    await stack.result("@0", "tool", _A)
+    await stack.result("@1", "tool", _B)
+    node = stack.store.get_node(stack.run_id, "@0")
+    assert node is not None
+    await _resumed_by_a_person(stack, rerun=[f"n{node.seq}"])
+    await stack.result("@0", "tool", _A)
+
+    await _interrupted_and_resumed(stack)
+
+    assert (await stack.submit("@0", "tool", _A)).cached
+    assert await stack.result("@1", "tool", _B) == "appended"
+    assert stack.counting_tool.lines == ["a", "b", "a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_call_after_a_changed_fan_out_runs_again_after_an_interruption_between_them(
+    stack: WorkflowStack,
+) -> None:
+    """A fan-out whose items changed dirties what follows its join, and the next attempt still knows."""
+    fan_out: dict[str, object] = {"op": "foreach"}
+    await _started(stack)
+    await stack.submit("@0", "group", fan_out, {"members": ["/0:0"]})
+    await stack.result("@1", "tool", _A)
+    await _resumed_by_a_person(stack)
+    await stack.submit("@0", "group", fan_out, {"members": ["/0:0", "/0:1"]})
+
+    await _interrupted_and_resumed(stack)
+
+    assert (await stack.submit("@0", "group", fan_out, {"members": ["/0:0", "/0:1"]})).cached
+    assert await stack.result("@1", "tool", _A) == "appended"
+    assert stack.counting_tool.lines == ["a", "a"]
+
+
+@pytest.mark.asyncio
+async def test_call_that_may_have_run_is_not_run_because_a_call_before_it_ran_again(
+    stack: WorkflowStack,
+    barrier: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a resume that names it runs an ambiguous call again; a rerun before it does not, in any later attempt."""
+    monkeypatch.delenv("MINDROOM_WORKFLOW_FAULT_DIR")
+    await _started(stack)
+    await stack.result("@0", "tool", _B)
+    monkeypatch.setenv("MINDROOM_WORKFLOW_FAULT_DIR", str(barrier))
+    await stack.submit("@1", "tool", _A)
+    await stack.until((barrier / "before_receipt.reached").exists)
+    await stack.restart(kill=True)
+    monkeypatch.delenv("MINDROOM_WORKFLOW_FAULT_DIR")
+    await stack.recover()
+    await stack.continue_jobs()
+    first = stack.store.get_node(stack.run_id, "@0")
+    assert first is not None
+    await _resumed_by_a_person(stack, rerun=[f"n{first.seq}"])
+    await stack.result("@0", "tool", _B)
+
+    await _interrupted_and_resumed(stack)
+
+    with pytest.raises(NodeFailed) as error:
+        await stack.result("@1", "tool", _A)
+    assert (error.value.kind, stack.counting_tool.lines) == ("indeterminate", ["b", "a", "b"])
+
+
 @pytest.mark.asyncio
 async def test_run_whose_job_ended_is_not_resumed(stack: WorkflowStack) -> None:
     """A job the coordinator ended instead of continuing receives nothing, so its run gets no further attempt."""

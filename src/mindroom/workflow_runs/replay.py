@@ -99,9 +99,6 @@ class DirtyLanes:
             self._dirty_after[lane] = min(index, self._dirty_after.get(lane, index))
             group = parent_group(lane)
 
-    # A group whose ordered member list changed dirties what follows it and no member lane, which is what `mark` does.
-    mark_after = mark
-
     def is_dirty(self, key: str) -> bool:
         """Return whether the call at *key* follows, directly or through an enclosing group, a call that ran."""
         group: str | None = key
