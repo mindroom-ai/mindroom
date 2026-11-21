@@ -792,6 +792,39 @@ async def test_malformed_stored_shell_settings_only_refuse_their_own_route(
     assert [spec.worker_key for spec in manager.specs] == [healthy.worker_key]
 
 
+@pytest.mark.asyncio
+async def test_unknown_shell_exclusion_does_not_mask_another_route_to_same_worker(
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip the first agent's invalid filter and connect using the healthy agent sharing its worker."""
+    data = deepcopy(_DATA)
+    healthy = {**data["agents"]["mine"], "worker_scope": "user"}
+    data["agents"] = {
+        "broken": {**healthy, "tools": [{"shell": {"exclude_tools": ["stale_function"]}}]},
+        "mine": healthy,
+    }
+    config = bind_runtime_paths(Config.validate_with_runtime(data, paths), paths)
+    worker_key = _key(ALICE, "mine", "user")
+    manager = _manager(monkeypatch, _handle(worker_key, tmp_path / "ssh"))
+    monkeypatch.setattr(sandbox_proxy, "lease_worker_manager", lambda *_: manager)
+    starts: list[WorkerCall] = []
+
+    async def start_sshd(call: WorkerCall) -> None:
+        starts.append(call)
+
+    monkeypatch.setattr(links, "_start_sshd", start_sshd)
+    [row] = desired_links(config, paths, AgentReplyMembershipIndex())
+    [link] = read_links(paths).links
+    assert row == {"id": link.id, "hostname": link.hostname, "allowed_logins": ["alice@github"]}
+    assert link.worker_key == worker_key
+    assert await _connect(config, paths, link.id) == ("10.0.0.5", 2222)
+    [ssh_call] = starts
+    assert ssh_call.request.routing_agent_name == "mine"
+    assert ssh_call.request.worker_key == worker_key
+
+
 @pytest.mark.parametrize("backend", ["static_runner", "local", "docker_with_local_shell"])
 @pytest.mark.asyncio
 async def test_unsupported_shell_placement_never_wakes(

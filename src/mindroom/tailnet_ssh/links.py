@@ -21,7 +21,6 @@ from mindroom.tailnet_ssh.projection import write_projection
 from mindroom.tailnet_ssh.store import read_links, update_links
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.metadata import ToolConfigOverrideError, ToolInitOverrideError
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement, worker_call
 from mindroom.tool_system.worker_routing import build_requester_execution_identity, normal_worker_key, worker_log_id
@@ -115,8 +114,8 @@ def _roster(  # noqa: C901 - keep the ordered route checks together
             if (key := normal_worker_key(target)) is None:
                 continue
             try:
-                functions, _ = agent_tools.functions_for(entry, paths, target)
-            except (ToolConfigOverrideError, ToolInitOverrideError, TypeError):
+                functions, _ = agent_tools.functions_for(entry, paths, target, validate_filters=True)
+            except (ValueError, TypeError):
                 # Invalid stored function filters raise TypeError rather than an override error.
                 logger.warning("tailnet_ssh_shell_settings_invalid", agent=agent, worker=worker_log_id(key))
                 continue

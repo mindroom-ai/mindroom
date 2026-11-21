@@ -698,12 +698,15 @@ class _ToolSettings:
 def offered_functions(
     metadata: ToolMetadata,
     settings: Mapping[str, object],
+    *,
+    validate_filters: bool = False,
 ) -> tuple[frozenset[str] | None, bool]:
     """Return the toolkit's functions its settings leave on, and whether one it names as writing is among them.
 
     A function stays on by Agno's ``all`` or ``enable_<function>``, then the filters. The functions are None when the
     toolkit declares no function names, as a plugin or MCP server may, and no allowlist names them. A toolkit that
-    names no writing functions writes when it runs code.
+    names no writing functions writes when it runs code. Request filter validation only when the declared functions
+    and enable flags predict what the constructor registers, as they do for shell.
     """
     values = {config_field.name: config_field.default for config_field in metadata.config_fields or ()} | dict(settings)
     include, exclude = (
@@ -711,16 +714,20 @@ def offered_functions(
         for name in ("include_tools", "exclude_tools")
     )
 
-    def offered(names: Iterable[str]) -> frozenset[str]:
-        return frozenset(
-            function
-            for function in names
-            if (values.get("all") or values.get(f"enable_{function}", True))
-            and tool_name_allowed(function, include=include, exclude=exclude)
-        )
+    def offered(names: Iterable[str], *, validate: bool = False) -> frozenset[str]:
+        enabled = frozenset(name for name in names if values.get("all") or values.get(f"enable_{name}", True))
+        if validate:
+            filtered = _offered_function_names(
+                enabled,
+                include_tools=include,
+                exclude_tools=exclude,
+                declared_functions=frozenset(metadata.function_names or ()),
+            )
+            return enabled if filtered is None else filtered
+        return frozenset(name for name in enabled if tool_name_allowed(name, include=include, exclude=exclude))
 
     available = metadata.function_names or include
-    functions = None if available is None else offered(available)
+    functions = None if available is None else offered(available, validate=validate_filters)
     if not metadata.workspace_writers:
         return functions, metadata.executes_code
     return functions, bool(offered(metadata.workspace_writers))

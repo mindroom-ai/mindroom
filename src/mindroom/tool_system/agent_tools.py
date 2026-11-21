@@ -198,6 +198,8 @@ class AgentTools:
         entry: EffectiveToolConfig,
         paths: RuntimePaths,
         target: ResolvedWorkerTarget,
+        *,
+        validate_filters: bool = False,
     ) -> tuple[frozenset[str] | None, bool]:
         """Return a candidate's configured functions and write access without building the toolkit."""
         allowed = self.config.get_worker_grantable_credentials() if target.worker_scope is not None else None
@@ -209,7 +211,7 @@ class AgentTools:
             allowed_shared_services=allowed,
             tool_config_overrides=entry.tool_config_overrides,
         )
-        return offered_functions(self.tools.entries[entry.name], settings.values)
+        return offered_functions(self.tools.entries[entry.name], settings.values, validate_filters=validate_filters)
 
     def toolkit_names(self, candidates: Iterable[EffectiveToolConfig]) -> list[str]:
         """Return the toolkits ``candidates`` name for the agent CLI and subagent tool lists; a preset has no functions."""
