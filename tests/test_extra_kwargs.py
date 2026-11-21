@@ -23,8 +23,9 @@ from mindroom.providers.anthropic.prompt_cache import native_tool_search_support
 from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.settings import ClaudeSettings
 from mindroom.providers.cache_ladder import MAX_CACHE_MARKERS, has_cache_marker, prompt_cache_control
+from mindroom.providers.claude_code.settings import ClaudeCodeSettings
 from mindroom.providers.claude_wire_blocks import RebuiltBlock
-from mindroom.providers.extra_kwargs import settings_params
+from mindroom.providers.extra_kwargs import settings_keys, settings_params
 from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.ollama.settings import OllamaSettings
@@ -36,6 +37,7 @@ from mindroom.providers.synthetic_adapter import SyntheticSettings
 from mindroom.redaction import REDACTED
 from mindroom.startup_errors import PermanentStartupError
 from tests.providers.anthropic_family_support import claude_turn, route_provider, sse_reply
+from tests.providers.claude_code.support import fake_cli
 from tests.providers.golden_support import Wire, streamed_reply
 from tests.providers.openai_family_support import provider_runtime
 
@@ -1003,6 +1005,12 @@ def test_a_claude_code_model_takes_only_its_cli_path_and_effort(tmp_path: Path) 
     )
 
 
+def test_an_effort_claude_code_does_not_know_fails_the_model_build(tmp_path: Path) -> None:
+    """An unknown effort is rejected before launching Claude Code."""
+    with pytest.raises(ValueError, match="effort must be one of low, medium, high, xhigh, max"):
+        fake_cli(tmp_path, {}).provider(effort="ultra")
+
+
 _MODELS_DOC = Path(__file__).resolve().parents[1] / "docs" / "configuration" / "models.md"
 
 
@@ -1012,17 +1020,23 @@ _MODELS_DOC = Path(__file__).resolve().parents[1] / "docs" / "configuration" / "
         ("`openai` with Chat Completions, `zai`, `llama_cpp`", "llama_cpp"),
         ("`groq`", "groq"),
         ("`cerebras`", "cerebras"),
+        ("`claude_code`", "claude_code"),
     ],
-    ids=["chat", "groq", "cerebras"],
+    ids=["chat", "groq", "cerebras", "claude_code"],
 )
-def test_the_models_page_lists_the_keys_each_chat_route_accepts(tmp_path: Path, row: str, provider: str) -> None:
+def test_the_models_page_lists_the_keys_each_provider_accepts(tmp_path: Path, row: str, provider: str) -> None:
     """The accepted-keys table of the models page names exactly the ``extra_kwargs`` keys the route accepts."""
-    lines = _MODELS_DOC.read_text(encoding="utf-8").splitlines()
-    [cell] = [line.split("|")[2] for line in lines if line.startswith(f"| {row} |")]
+    extra_kwargs = _MODELS_DOC.read_text(encoding="utf-8").partition("## Extra Kwargs\n")[2].partition("\n## ")[0]
+    [cell] = [line.split("|")[2] for line in extra_kwargs.splitlines() if line.startswith(f"| {row} |")]
 
     documented = {key.strip().strip("`") for key in cell.split(",")}
 
-    assert documented == accepted_extra_kwargs(ModelConfig(provider=provider, id="m"), _runtime_paths(tmp_path))
+    accepted = (
+        settings_keys(ClaudeCodeSettings)
+        if provider == "claude_code"
+        else accepted_extra_kwargs(ModelConfig(provider=provider, id="m"), _runtime_paths(tmp_path))
+    )
+    assert documented == accepted
 
 
 _NOT_A_MAPPING = "extra_kwargs.client_params must be a mapping, not str"

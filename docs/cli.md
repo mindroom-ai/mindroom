@@ -323,7 +323,7 @@ It checks, in one pass:
   Doctor also warns about each environment variable a model needs but nothing sets, such as a missing key, Bedrock region, or Azure endpoint, as `config validate` does.
   Doctor checks the key the runtime uses, whether it comes from the environment or was saved in the dashboard, and names its source (see [Credentials from the Environment](oauth-framework.md#credentials-from-the-environment)).
   Doctor skips the key check and reports it as not checked for a model that uses a custom endpoint, meaning its config sets an endpoint or headers (such as `base_url` or `default_headers`) or its provider's endpoint variable (such as `OPENAI_BASE_URL`) is set.
-  For `claude_code` models, doctor starts Claude Code without sending it a prompt and fails when it or the Claude Agent SDK is missing, when it is too old, not signed in to a Claude subscription, or would use another credential or endpoint from the environment.
+  For `claude_code` models, doctor starts Claude Code without sending it a prompt; see [Claude Models with a Claude Subscription](configuration/models.md#claude-models-with-a-claude-subscription) for what the check reports.
 - **Memory config**: the memory LLM and embedder are reachable (Ollama, OpenAI embeddings, sentence-transformers).
 - **Matrix homeserver**: the homeserver answers `/_matrix/client/versions`.
 - **Pairing**: on hosted installs, whether this machine is paired with MindRoom Chat; before the first run it passes with `Not paired yet`, because `mindroom run` pairs automatically.

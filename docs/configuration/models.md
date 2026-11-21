@@ -155,7 +155,7 @@ models:
       base_url: http://localhost:8080/v1
 ```
 
-Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, as do downloads of media that tools return as URLs, OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
+MindRoom's own model clients, except `google`, `ollama`, and `synthetic`, verify an HTTPS endpoint's certificate against the operating system's trust store, as do downloads of media that tools return as URLs, OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
 Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces that store, so the file or directory must hold the public CAs too, for example the system CA bundle with the private CA appended.
 An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
 
@@ -433,16 +433,16 @@ defaults:
 The `id` is any model ID or alias Claude Code takes for `--model`, such as `claude-opus-5-5` or `opus`, within what the plan includes.
 `extra_kwargs` accepts `cli_path`, the `claude` executable to run, and `effort`, one of `low`, `medium`, `high`, `xhigh`, or `max`.
 Without `cli_path`, MindRoom runs the `claude` on its `PATH`, and when there is none, the copy the Claude Agent SDK ships, which uses the same sign-in.
-MindRoom never reads Claude Code's credentials and takes no API key, token, endpoint, or header for this provider.
+MindRoom never reads Claude Code's credentials, ignores an authored `api_key`, and does not accept a token, endpoint, or headers for this provider.
 The provider supports text and image input; the model is told when an audio, video, or file attachment was left out.
-A [`reasoning`](#reasoning-levels) block is not supported; set `effort`.
+Use [reasoning levels](#reasoning-levels) to select effort with a model reference like `opus@high`.
 These conversations do not appear in Claude Code's own session history.
 MindRoom runs at most 8 Claude Code processes at a time; while all 8 are answering, another reply is retried and fails if none finishes meanwhile.
 [`mindroom doctor`](../cli.md#doctor) starts Claude Code without sending it a prompt and reports the first three cases below.
 
 A reply fails with a message that names the fix in these cases:
 
-- Claude Code is not installed, or is older than 2.1.328: install it or run `claude update`.
+- Claude Code or the Claude Agent SDK is missing, or Claude Code is older than 2.1.328: install the required dependency or run `claude update`.
 - Claude Code is not signed in to a Pro, Max, Team, or Enterprise plan: run `claude auth login` as the user that runs MindRoom.
 - MindRoom's process environment sets a variable that Claude Code would use in place of the subscription sign-in, or to send it somewhere else: remove it from that environment.
   These are every variable whose name starts with `ANTHROPIC_` or `CLAUDE_CODE_`, whatever its value, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`, and `CLAUDE_AUTO_BACKGROUND_TASKS`.
@@ -572,6 +572,7 @@ A null, empty, or whitespace-only `base_url`, `project_id`, `region`, `location`
 | `openai` with Responses | `api_key`, `base_url`, `cache_system_prompt`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `include`, `max_output_tokens`, `max_tool_calls`, `metadata`, `organization`, `parallel_tool_calls`, `reasoning`, `reasoning_effort`, `reasoning_summary`, `request_params`, `service_tier`, `store`, `strict_output`, `temperature`, `timeout`, `top_p`, `truncation`, `user`, `verbosity` |
 | `codex` | The Responses keys without `max_output_tokens` and `temperature`, which the Codex endpoint rejects, plus `codex_home`, `default_instructions`, `prompt_cache_key`, and `session_id` |
 | `anthropic` | `api_key`, `auth_token`, `base_url`, `betas`, `cache_system_prompt`, `client_params`, `context_management`, `default_headers`, `extended_cache_time`, `max_tokens`, `output_config`, `request_params`, `stop_sequences`, `temperature`, `thinking`, `timeout`, `top_k`, `top_p` |
+| `claude_code` | `api_key`, `cli_path`, `effort` |
 | `vertexai_claude` | The `anthropic` keys without `auth_token`, plus `project_id` and `region` |
 | `bedrock_claude` | The `anthropic` keys without `auth_token` and `base_url`, plus `aws_access_key`, `aws_profile`, `aws_region`, `aws_secret_key`, and `aws_session_token` |
 | `google`, `gemini` | `api_key`, `cached_content`, `client_params`, `frequency_penalty`, `generation_config`, `generative_model_kwargs`, `include_thoughts`, `location`, `logprobs`, `max_output_tokens`, `presence_penalty`, `project_id`, `safety_settings`, `search`, `seed`, `stop_sequences`, `temperature`, `thinking_budget`, `thinking_level`, `timeout`, `top_k`, `top_p`, `vertexai` |
@@ -728,6 +729,7 @@ MindRoom sends the level in the setting the provider reads, and the block wins o
 | `zai` | `reasoning_effort: L` | no `off` level |
 | `deepseek` | `reasoning_effort: L`, `use_thinking: true` | `use_thinking: false` |
 | `anthropic`, `vertexai_claude`, `bedrock_claude` | `output_config.effort: L`, and an authored `thinking: {type: disabled}` is dropped | `thinking: {type: disabled}`, and an authored `output_config.effort` is dropped |
+| `claude_code` | `effort: L` (no `minimal` level) | no `off` level |
 | `google` | `thinking_level: L` | `thinking_budget: 0` |
 | `ollama` | `think: L` | `think: false` |
 
@@ -735,7 +737,7 @@ Write `off` in quotes, as in `levels: ["off", low, high]` or `default: "off"`, b
 `groq`, `cerebras`, and `synthetic` take no level, so a `reasoning` block on them fails config load.
 Z.ai has no setting MindRoom can switch thinking off with, so listing `off` for a `zai` model fails config load too; set `extra_kwargs.extra_body.thinking` yourself on a separate model entry.
 MindRoom does not know which levels each model accepts, so list only levels the model supports; a level it rejects fails the reply with the provider's error, like a wrong `extra_kwargs` value.
-For example, Claude 5 models reject disabled thinking, so do not list `off` for them.
+Claude 5 models reject disabled thinking, so do not list `off` for them.
 `request_params` and `extra_body` still win over the block.
 
 To replace per-level entries such as `opus` and `opus_high`, add a `reasoning` block to `opus`, point references at `opus@high`, and delete `opus_high`.
