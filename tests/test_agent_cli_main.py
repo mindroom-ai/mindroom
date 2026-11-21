@@ -584,6 +584,22 @@ def test_workers_run_rejects_nonpositive_tail_without_submitting(tail, capsys, m
     assert "--tail" in capsys.readouterr().err
 
 
+def test_workers_run_prints_the_error_when_output_auto_save_fails(capsys, monkeypatch, tmp_path) -> None:
+    """A refused output write returns a failure receipt, not a preview."""
+    from mindroom.agent_cli.projection import project_cli_result  # noqa: PLC0415
+    from mindroom.tool_system.output_files import ToolOutputFilePolicy  # noqa: PLC0415
+
+    result = format_shell_completion("finished", None, return_code=0)
+    policy = ToolOutputFilePolicy(tmp_path, max_bytes=1, auto_save_threshold_bytes=1)
+    outcome = project_cli_result(f"[worker: w]\n{result}", policy, "run_shell_command")
+    _worker_client(monkeypatch, _completed(outcome))
+
+    assert main(["workers", "run", "w", "--", "true"]) == 125
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "exceeds the 1 byte auto-save limit" in output.err
+
+
 def test_a_background_script_cannot_run_commands_in_named_workers(capsys, monkeypatch, tmp_path) -> None:
     """Named workers belong to a reply, and a background script outlives the reply that started it."""
     _in_background_script(monkeypatch, tmp_path)

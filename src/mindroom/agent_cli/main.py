@@ -278,12 +278,20 @@ def _run_in_worker(args: argparse.Namespace) -> int:
         running = f"; the command may still be running in worker {args.name}" if submitted else ""
         print(f"mindroom-agent: {exc}{running} (call {call_id})", file=sys.stderr)
         return _EXIT_NOT_RUN
+    return _print_worker_result(args, result)
+
+
+def _print_worker_result(args: argparse.Namespace, result: dict[str, object]) -> int:
+    """Print a command's output or a tool error, and return its CLI exit code."""
     outcome = result.get("outcome")
     saved_path = None
     saved = cast("dict[str, object]", outcome).get("mindroom_tool_output") if isinstance(outcome, dict) else None
     if isinstance(saved, dict):
-        # A long result arrives as its start and the workspace file that holds all of it.
         receipt = cast("dict[str, object]", saved)
+        if receipt.get("status") == "error":
+            print(f"mindroom-agent: {receipt.get('error', 'Could not save command output')}", file=sys.stderr)
+            return _EXIT_NOT_RUN
+        # A long result arrives as its start and the workspace file that holds all of it.
         outcome, saved_path = receipt.get("preview"), receipt.get("path")
     text = outcome if isinstance(outcome, str) else canonical_json(outcome)
     header, _, body = text.partition("\n")
