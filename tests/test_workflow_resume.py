@@ -615,6 +615,36 @@ async def _replayed(stack: WorkflowStack) -> None:
 
 
 @pytest.mark.asyncio
+async def test_attempt_end_whose_writer_is_cancelled_at_its_commit_makes_the_next_attempt_run_no_saved_call(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pass can time out while its write of an attempt's end commits: the next attempt still starts clean.
+
+    What the engine remembers of an attempt, the lanes its calls ran in among it, goes with the write of its end and
+    not with the task that waited for it, so the replay reuses both saved writes.
+    """
+    old = stack.attempt.run_id
+    assert await stack.result("@0", "tool", _A) == "appended"
+    assert await stack.result("@1", "tool", _B) == "appended"
+    await stack.scripts.end(old, ScriptRunState.INTERRUPTED, reason=PLUGIN_TOOLS_CHANGED)
+    ends = lambda *_args, **changes: changes.get("state") is WorkflowRunState.STARTING  # noqa: E731
+    held = HeldWrite(stack.store, "update_run", monkeypatch, when=ends)
+    timed_out = asyncio.create_task(stack.maintain())
+    await held.reached()
+    timed_out.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await timed_out
+    await held.release()
+    await stack.until(lambda: old not in stack.engine._launched)
+
+    assert await stack.maintain() == [stack.run_id]
+    assert [(await stack.submit(key, "tool", args)).cached for key, args in (("@0", _A), ("@1", _B))] == [True, True]
+    assert stack.counting_tool.lines == ["a", "b"]
+    assert list(stack.engine._launched) == [stack.attempt.run_id]
+
+
+@pytest.mark.asyncio
 async def test_settle_held_across_two_takeovers_marks_nothing_of_the_later_attempts(
     stack: WorkflowStack,
     monkeypatch: pytest.MonkeyPatch,

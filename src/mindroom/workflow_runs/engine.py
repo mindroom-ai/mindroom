@@ -125,7 +125,7 @@ class WorkflowEngine:
         self._launched: dict[str, int] = {}
         # The runs whose wait for an attempt was logged as refused, so the tries that follow say nothing.
         self._refused: set[str] = set()
-        # The lanes in which a call ran in each run's current attempt.
+        # The lanes in which a call ran in each attempt.
         self._dirty: dict[str, DirtyLanes] = {}
         # When each running run's working time was last charged, by the engine's clock.
         self._charged: dict[str, float] = {}
@@ -507,7 +507,7 @@ class WorkflowEngine:
     ) -> NodeReceipt:
         """Decide and save one call for the attempt that began with *epoch*, which every write here names."""
         key, kind, meta = request.key, request.kind, request.meta
-        lanes = self._dirty.setdefault(run.run_id, DirtyLanes())
+        lanes = self._dirty.setdefault(attempt.run_id, DirtyLanes())
         digest = node_digest(kind, request.args)
         members = _members(meta) if kind == "group" else None
         saved = self.store.get_node(run.run_id, key)
@@ -824,10 +824,19 @@ class WorkflowEngine:
                 # A call that took the run and waits for it itself has no job that keeps its report for it.
                 report = replace(current, state=state, error=error).outcome_text()
                 changes["claims"] = current.claims | {current.owner: report}
-            ended = await asyncio.to_thread(partial(self.store.update_run, run.run_id, run.epoch, **changes))
-            self._dirty.pop(run.run_id, None)
+            attempt = current.script_run_id or ""
+
+            def forget(written: asyncio.Future[WorkflowRun]) -> None:
+                if not written.cancelled() and written.exception() is None:
+                    self._dirty.pop(attempt, None)
+                    self._launched.pop(attempt, None)
+
+            write = partial(self.store.update_run, run.run_id, run.epoch, **changes)
+            end = asyncio.ensure_future(asyncio.to_thread(write))
+            # What is kept per attempt goes with the write: a task cancelled at the commit leaves none of it behind.
+            end.add_done_callback(forget)
+            ended = await asyncio.shield(end)
             self._charged.pop(run.run_id, None)
-            self._launched.pop(current.script_run_id or "", None)
             self._refused.discard(run.run_id)
             condition.notify_all()
         return ended
