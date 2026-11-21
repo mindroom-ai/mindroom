@@ -108,6 +108,12 @@ def test_full_mindroom_runtime_image_bundles_tailnet_ssh_packages() -> None:
     packages = _apt_install_packages(text.split(" AS final", maxsplit=1)[1])
 
     assert {"openssh-server", "rsync"} <= packages
+    install = next(
+        line
+        for line in text.replace("\\\n", " ").splitlines()
+        if line.startswith("RUN apt-get ") and "openssh-server" in line
+    )
+    assert re.search(r"openssh-server .*&& rm -f /etc/ssh/ssh_host_\*", install)
 
 
 def test_mindroom_runtime_images_keep_git_ssh_support_when_disabling_recommends() -> None:
