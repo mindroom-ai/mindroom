@@ -200,7 +200,9 @@ _NEEDS_ANSWER = {"workflow": "needs_you", "why": "question"}
     ("facts", "kwargs", "expected"),
     [
         ({"resolved_ts": 5000}, {"approval_ts": 4000}, {"workflow": "done"}),
+        ({"resolved_ts": 5000}, {"approval_ts": 6000}, _NEEDS_APPROVAL),
         ({"resolved_ts": 5000}, {"question_ts": 5000}, {"workflow": "done"}),
+        ({"resolved_ts": 5000}, {"question_ts": 6000}, {"workflow": "done"}),
         ({}, {"question_ts": 10_000 - _QUESTION_WAITS_MS}, {"workflow": "needs_you", "why": "your_turn"}),
         ({}, {"question_ts": 10_001 - _QUESTION_WAITS_MS}, _NEEDS_ANSWER),
         ({"scheduled_task_count": 2, "next_scheduled_ts": 20_000}, {}, {"workflow": "later", "back_at": 20_000}),
@@ -217,21 +219,6 @@ def test_thread_workflow_uses_status_and_request_timestamps(
 ) -> None:
     """Thread facts and the age of requests determine the workflow."""
     assert thread_workflow(facts, now=10_000, **{"replying": False, **kwargs}) == expected
-
-
-def test_thread_workflow_ignores_a_question_asked_after_the_resolve(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A question never waits in a resolved thread, but a new approval still does."""
-
-    def check_status(status: dict[str, Any], now: int) -> dict[str, object]:
-        assert status["pending_question"] is False
-        return classify_thread_workflow(status, now)
-
-    monkeypatch.setattr("mindroom.thread_workflow.classify_thread_workflow", check_status)
-    facts = {"resolved_ts": 5000}
-    asked_at = 5001
-    assert thread_workflow(facts, now=asked_at, replying=False, question_ts=asked_at) == {"workflow": "done"}
-    result = thread_workflow(facts, now=asked_at, replying=False, question_ts=asked_at, approval_ts=asked_at)
-    assert result == _NEEDS_APPROVAL
 
 
 _BOT = "@mindroom_general:localhost"

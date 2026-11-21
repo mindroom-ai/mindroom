@@ -17,7 +17,7 @@ MindRoom Chat groups threads in two places, and they do not agree on what "Needs
 
 - The room overview's tabs and the sidebar's sections use `classifyThreadWorkflow` alone (`src/app/event-store/threads/threadWorkflow.ts:42-52`): resolved is done, an active snooze is later, a background approval is needs you, a streaming reply or a background job is working, a pending scheduled task is later, and everything else is needs you.
   The sidebar shows that last bucket as "Idle" (`src/app/sidebar/threads/threadNavCategoryUtils.ts:60-76`).
-- The Threads page puts a thread in Needs you only when `isWaitingOnYou` holds (`src/app/threads/page/threadGroups.ts:38`, `threadWorkflow.ts:28-39`): a pending approval card, an unanswered agent question, or a background approval in an unresolved thread.
+- The Threads page puts a thread in Needs you only when `isWaitingOnYou` holds (`src/app/threads/page/threadGroups.ts:38`, `threadWorkflow.ts:28-39`): a pending approval card, or an unanswered agent question or background approval in an unresolved thread.
   It tests that before anything else, so such a thread is in Needs you even when it is snoozed or an agent is working in it.
   The other threads go to Unread, Working, Recent, Later or Automations (`threadGroups.ts:39-50`).
 - A later thread's return time is the end of its active snooze, else its next scheduled run (`threadReturnTs`, `threadWorkflow.ts:59-64`).
@@ -82,7 +82,7 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
    The client instead scans the newest 40 messages; the bundle agrees with it whenever the question is still the thread's newest event apart from title notices, which is the case until someone answers.
    Divergences, each of which turns a `question` row into the row its other facts give, most often `your_turn`:
    - a room that is encrypted, or a homeserver without the bundle, yields no question;
-   - any thread event after the question hides it, where the client hides it only for a message from the person or a newer agent reply;
+   - any thread event after the question hides it in the backend, while in the client a counted message from any sender clears it if sent after the question was asked;
    - a thread an agent started, in which the person later wrote, yields no question, where the client counts it;
    - for the seconds between a reaction that answers the question and the agent's next reply, the row still says `question`.
 9. **One case file, committed identically in both repositories.**

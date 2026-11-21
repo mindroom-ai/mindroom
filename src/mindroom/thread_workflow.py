@@ -160,7 +160,7 @@ def thread_workflow(
         "is_resolved": resolved_ts is not None,
         "is_streaming": replying,
         "pending_approval": approval_ts is not None and approval_ts > cutoff,
-        "pending_question": resolved_ts is None and question_ts is not None and question_ts > now - _QUESTION_WAITS_MS,
+        "pending_question": question_ts is not None and question_ts > now - _QUESTION_WAITS_MS,
     }
     return classify_thread_workflow(status, now)
 
