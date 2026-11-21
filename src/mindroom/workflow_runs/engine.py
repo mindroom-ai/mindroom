@@ -276,16 +276,24 @@ class WorkflowEngine:
         source: str | None = None,
         rerun: Sequence[str] = (),
         limits: WorkflowLimits | None = None,
+        job_id: str | None = None,
+        attempt: int | None = None,
     ) -> tuple[WorkflowRun, bool]:
         """Make an ended run ready for its next attempt, with the full working time; `launch` then starts it.
 
         The saved calls stay: the next attempt replays the script, with *source* when given, and reuses them, except
         the calls *rerun* names. The answer has the form of a reservation that found its run.
+
+        The run becomes *job_id*'s in the same write, or no job's. A resume that was accepted while the run had made
+        *attempt* attempts is refused once another resume has taken the run, and then changes nothing.
         """
         hours = (limits or WorkflowLimits()).max_runtime_hours
         async with self._condition(run_id):
-            keys = self.resumable(run_id, rerun)
             run = self.store.get_run(run_id)
+            if attempt is not None and (run.attempt != attempt or run.state not in TERMINAL_RUN_STATES):
+                msg = f"Run {run_id} was resumed by another call."
+                raise WorkflowRunStoreError(msg)
+            keys = self.resumable(run_id, rerun)
             text = run.source if source is None else source
             # Saved with the calls themselves, so every later attempt runs them again until one of them did.
             await asyncio.to_thread(self.store.forget_digests, run_id, keys)
@@ -299,6 +307,7 @@ class WorkflowEngine:
                 previous_source_digest=run.source_digest,
                 runtime_seconds_left=hours * 3600 if hours else None,
                 idle_resumes=0,
+                job_id=job_id,
                 result=None,
                 error=None,
                 finished_at=None,
@@ -310,12 +319,11 @@ class WorkflowEngine:
         context: ToolRuntimeContext,
         run_id: str,
         *,
-        source: str | None = None,
-        rerun: Sequence[str] = (),
         limits: WorkflowLimits | None = None,
+        **request: Any,  # noqa: ANN401
     ) -> WorkflowRun:
-        """Start the next attempt of an ended run for a person; see `reopen`."""
-        await self.reopen(run_id, source=source, rerun=rerun, limits=limits)
+        """Start the next attempt of an ended run for a person; see `reopen` for the *request*."""
+        await self.reopen(run_id, limits=limits, **request)
         return await self.launch(run_id, context, limits)
 
     async def wait(self, run_id: str) -> WorkflowRun:

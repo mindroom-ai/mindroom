@@ -618,11 +618,9 @@ async def test_rerun_names_a_call_for_one_attempt_only(stack: WorkflowStack) -> 
     """The call a person asked to run again ran in the resumed attempt; the automatic attempt after it reads it back."""
     await _started(stack)
     await stack.result("@0", "tool", _A)
-    await stack.finish_attempt(result="the report")
     node = stack.store.get_node(stack.run_id, "@0")
     assert node is not None
-    await stack.call("resume_workflow", run_id=stack.run_id, rerun=[f"n{node.seq}"])
-    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+    await _resumed_by_a_person(stack, rerun=[f"n{node.seq}"])
     await stack.result("@0", "tool", _A)
     await _interrupt(stack, PLUGIN_TOOLS_CHANGED)
 
@@ -633,8 +631,9 @@ async def test_rerun_names_a_call_for_one_attempt_only(stack: WorkflowStack) -> 
 
 
 async def _resumed_by_a_person(stack: WorkflowStack, **arguments: object) -> None:
-    """End the attempt with a report and resume the run as its owner's call does, up to the new attempt."""
+    """End the attempt with a report and, once its job delivered it, resume the run as its owner's call does."""
     await stack.finish_attempt(result="the report")
+    await _ended_job(stack, str(stack.store.get_run(stack.run_id).job_id))
     attempt = stack.store.get_run(stack.run_id).attempt
     await stack.call("resume_workflow", run_id=stack.run_id, **arguments)
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == attempt + 1)
@@ -918,3 +917,32 @@ async def test_lifecycle_waits_for_room_membership_before_it_judges_the_owners_a
         if answer == "ALLOWED"
         else (WorkflowRunState.INTERRUPTED, 1, "The requester no longer has access.")
     )
+
+
+@pytest.mark.asyncio
+async def test_resume_that_was_admitted_and_killed_before_it_took_the_run_takes_it_as_accepted(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The accepted request is saved with its job: the edited script and the named call survive the kill."""
+    edited = "def main(args):\n    return 'counted again'\n"
+    first = await _started(stack)
+    await stack.result("@0", "tool", _A)
+    await stack.finish_attempt(result="the first report")
+    await _ended_job(stack, first["job_id"])
+    monkeypatch.setattr(stack.engine, "reopen", lambda *_args, **_options: asyncio.Event().wait())
+    resumed = json.loads(await stack.call("resume_workflow", run_id=stack.run_id, source=edited, rerun=["n1"]))
+
+    await stack.restart(kill=True)
+    assert await stack.recover() == []
+    untouched = stack.store.get_run(stack.run_id)
+    await stack.continue_jobs()
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+
+    run = stack.store.get_run(stack.run_id)
+    assert (untouched.state, untouched.attempt, untouched.job_id) == (WorkflowRunState.COMPLETED, 1, first["job_id"])
+    assert (run.source, run.job_id) == (edited, resumed["job_id"])
+    assert await stack.result("@0", "tool", _A) == "appended"
+    await stack.finish_attempt(result="the second report")
+    job = await _ended_job(stack, resumed["job_id"])
+    assert (await stack.collect(job), stack.counting_tool.lines) == ("the second report", ["a", "a"])

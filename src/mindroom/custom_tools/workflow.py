@@ -216,9 +216,9 @@ class WorkflowTools(Toolkit):
         """
         engine, context = _waiting_runtime()
         arguments = {"run_id": run_id, "source": source, "path": path, "rerun": rerun}
-        run, options = await self._resumption(engine, context, arguments)
+        run, request = await self._resumption(engine, context, arguments)
         # One of the calls that wait for this run, as an inline start is: the last one to leave stops the run.
-        reopen = partial(engine.reopen, run.run_id, **options)
+        reopen = partial(engine.reopen, run.run_id, limits=self.limits, **request)
         return _outcome_text(await engine.attend(run.run_id, reopen, context, self.limits))
 
     async def managed_job(
@@ -235,7 +235,6 @@ class WorkflowTools(Toolkit):
         only once the runtime admitted the job, launches the attempt. The other functions run as any tool's call
         does (None).
         """
-        del runtime
         if function_name not in (_START, _RESUME):
             return None
         try:
@@ -252,33 +251,46 @@ class WorkflowTools(Toolkit):
             if (declined := await hooks(before=True, registered_toolkit="workflow")) is not None:
                 await hooks(before=False, result=declined, blocked=True)
                 return declined
-            refused = None
+            refused = request = None
             if function_name == _START:
                 run, _ = await self._reserve(engine, context, job_id, arguments, job_id=job_id)
                 begin: Callable[[], Awaitable[object]] = partial(engine.launch, run.run_id, context, self.limits)
                 refused = partial(asyncio.to_thread, engine.store.delete_intent, run.run_id)
             else:
-                run, options = await self._resumption(engine, context, arguments)
-                begin = partial(engine.resume, context, run.run_id, **options)
+                # A call delivered again names the job that already holds what was accepted, and is checked no more.
+                known = next((job.adapter for job in runtime.retained_jobs() if job.job_id == job_id), None)
+                run, request = await self._resumption(engine, context, arguments, known and known.get("resume"))
+                begin = partial(engine.resume, context, run.run_id, limits=self.limits, job_id=job_id, **request)
         except ValueError as exc:
             return str(exc)
-        return _run_job(engine, run, job_id, begin, after=partial(hooks, before=False), refused=refused)
+        after = partial(hooks, before=False)
+        return _run_job(engine, run, job_id, begin, after=after, refused=refused, resume=request)
 
     async def _resumption(
         self,
         engine: WorkflowEngine,
         context: ToolRuntimeContext,
         arguments: Mapping[str, Any],
+        accepted: dict[str, Any] | None = None,
     ) -> tuple[WorkflowRun, dict[str, Any]]:
-        """Check one resume and return its run and what its next attempt starts with; a refusal raises."""
+        """Check one resume and return its run and the request its job is admitted with; a refusal raises.
+
+        The request names the attempt the run had made, so it takes the run only if no other resume did since.
+        *accepted* is the request this same call was admitted with before, which is returned unchecked.
+        """
         source, path, rerun = arguments.get("source"), arguments.get("path"), arguments.get("rerun") or ()
         if source is not None and path is not None:
             raise WorkflowRunStoreError(_AT_MOST_ONE_SOURCE)
         run = _owned(engine, context, str(arguments.get("run_id")))
+        if accepted is not None:
+            return run, accepted
         engine.resumable(run.run_id, rerun)
+        if run.job_id in unfinished_workflow_jobs(context.runtime_paths)[0]:
+            msg = f"Run {run.run_id} is still delivering its report. Try again in a moment."
+            raise WorkflowRunStoreError(msg)
         edited = source is not None or path is not None
         text = (await engine.scripts.resolve_source(context, source=source, path=path)).decode() if edited else None
-        return run, {"source": text, "rerun": rerun, "limits": self.limits}
+        return run, {"source": text, "rerun": list(rerun), "attempt": run.attempt}
 
     async def _reserve(
         self,
@@ -345,16 +357,21 @@ def _run_job(
     *,
     after: Callable[..., Awaitable[object]] | None = None,
     refused: Callable[[], Awaitable[object]] | None = None,
+    resume: dict[str, Any] | None = None,
 ) -> JobSpec:
     """Return the job of *run*: it starts the run's next attempt with *begin*, waits, and ends as the run ends.
 
     *after* gets the report for the plugins' hooks, and *refused* undoes a start the runtime did not admit.
+    *resume* is the accepted request of a resume, saved with the job so that a restart goes on with exactly it.
     """
     store, run_id = engine.store, run.run_id
 
     async def operation() -> BackgroundOutcome:
-        await asyncio.to_thread(store.update_run, run_id, job_id=job_id)
-        await begin()
+        try:
+            await begin()
+        except WorkflowRunStoreError as exc:
+            # Another resume took the run first: this job owns nothing of it and says so.
+            return BackgroundOutcome("failed", str(exc), encode_result_payload(ToolResultPayload(value=str(exc))))
         outcome = _workflow_job_outcome(await engine.wait(run_id))
         if after is not None:
             await after(result=outcome.result)
@@ -365,6 +382,9 @@ def _run_job(
             # A stopping primary cancels nothing: the run is the restart's to continue or to end.
             return None
         try:
+            if store.get_run(run_id).job_id != job_id:
+                # The run is another job's: a resume that never took it, or a job whose run was resumed since.
+                return None
             return _workflow_job_outcome(await engine.cancel(run_id, reason="The run's job was cancelled."))
         except WorkflowRunNotFoundError:
             return None
@@ -377,7 +397,7 @@ def _run_job(
         kind="workflow",
         toolkit_name="workflow",
         # Never changed afterwards, so a redelivered call names the same job and reattaches to it.
-        adapter={"workflow_job": job_id, "workflow": run_id},
+        adapter={"workflow_job": job_id, "workflow": run_id} | ({"resume": resume} if resume is not None else {}),
         operation=operation,
         cancel=cancel,
         refused=refused,
@@ -395,8 +415,12 @@ async def continued_workflow_job(job: BackgroundJob) -> JobSpec:
     """
     engine, context = _runtime()
     run = engine.store.get_run(str(job.adapter.get("workflow")))
-    limits = workflow_limits(context.config, run.agent_name)
-    return _run_job(engine, run, job.job_id, partial(engine.go_on, run.run_id, context, limits))
+    limits, request = workflow_limits(context.config, run.agent_name), job.adapter.get("resume")
+    begin: Callable[[], Awaitable[object]] = partial(engine.go_on, run.run_id, context, limits)
+    if request is not None and run.job_id != job.job_id:
+        # A resume that was admitted and stopped before it took the run takes it now, as it was accepted.
+        begin = partial(engine.resume, context, run.run_id, limits=limits, job_id=job.job_id, **request)
+    return _run_job(engine, run, job.job_id, begin, resume=request)
 
 
 def unfinished_workflow_jobs(runtime_paths: RuntimePaths) -> tuple[frozenset[str], frozenset[str]]:

@@ -105,10 +105,17 @@ The next attempt runs the script from the top, and each call gets its saved resu
 - A call that completed with the same arguments returns its saved result at once.
 - A call that failed or was cancelled runs again.
 - In each sequence of calls, the first call that runs again makes every call after it run again too, because it may have changed what they see.
-- A `cached=False` call always runs again; the calls after it are reused when it returns the same result as before.
+- A `cached=False` call always runs again; the calls after it are reused when it returns the same result as before, compared whole and as JSON, so `1` and `1.0` differ.
 - A call that ended `indeterminate` raises `ToolError` with kind `indeterminate` on every attempt, whatever its arguments are now.
   Check its effect, then name it in `rerun`, for example `resume_workflow(run_id, rerun=["n4"])`, to run it again; `get_workflow(run_id, nodes="failed")` lists the IDs.
 - `source` or `path` replaces the script before the attempt starts; give at most one.
+- A call named in `rerun`, and the calls after one that ran again, stay marked until they have run, also when an interruption ends the attempt first.
+- Every attempt runs in the room and thread the run was started in, also when `resume_workflow` is called from another one by the same requester; the report goes to where it was called.
+
+One resume takes a run.
+Of two calls made at the same time, the second ends `failed` with `Run <id> was resumed by another call.` and changes nothing.
+While the job of the last attempt has not delivered its report yet, a resume is refused with `Run <id> is still delivering its report. Try again in a moment.`
+The accepted script and `rerun` list are saved with the job, so a restart of MindRoom before the attempt starts loses neither.
 
 Only the calls are saved.
 The Python between them, imports, and reads of files or the network run again on every attempt, and a write made with plain Python is repeated.
