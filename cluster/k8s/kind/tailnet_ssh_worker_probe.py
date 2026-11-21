@@ -1,14 +1,14 @@
 """A primary's steps for one tailnet SSH worker, run in a pod of the kind cluster by ``smoke_tailnet_ssh_worker``.
 
-That pod is set up as a primary's: the worker manager's Role, the storage claim workers mount, and the Kubernetes
-backend's environment. Only such a pod reaches a worker's Service and writes the files the worker's sshd reads.
+That pod is the one the runtime chart gives a primary, with this file as its command: its service account has the
+chart's worker manager Role, it mounts the storage claim workers mount, and its environment configures the Kubernetes
+backend. Only such a pod reaches a worker's runner and writes the files the worker's sshd reads.
 The worker is started through the primary's worker manager first without the tailnet SSH mark, then with it, then
 without it again, and the cluster's API server is asked what each start left.
 """
 
 from __future__ import annotations
 
-import socket
 import tempfile
 import time
 from pathlib import Path
@@ -123,19 +123,6 @@ class _Cluster:
         }
 
 
-def _ssh_banner(host: str, port: int) -> bytes:
-    """Return the first bytes the server at ``host`` and ``port`` sends, asked until a Service routes there."""
-    deadline = time.monotonic() + 30
-    while True:
-        try:
-            with socket.create_connection((host, port), timeout=5) as connection, connection.makefile("rb") as sent:
-                return sent.read(8)
-        except OSError:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(1)
-
-
 def _start_sshd(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -160,10 +147,10 @@ def _start_sshd(
         json={"request": call.request.model_dump(mode="json")},
         timeout=60,
     )
-    # sshd started on the host key the primary wrote 0600, as the pod's uid, under its fsGroup and seccomp profile.
+    # The runner answers once sshd accepts on its port: it started on the host key the primary wrote 0600, as the
+    # pod's uid, under its fsGroup and seccomp profile. The chart lets only the gateway dial that port, so nothing here does.
     answer = response.json() if response.status_code == 200 else response.text
     _expect("the runner's answer to /ssh/start", (response.status_code, answer), (200, {"port": 2222}))
-    _expect("what the Service's port 2222 sends", _ssh_banner(endpoint.host, endpoint.port), b"SSH-2.0-")
 
 
 def main() -> None:

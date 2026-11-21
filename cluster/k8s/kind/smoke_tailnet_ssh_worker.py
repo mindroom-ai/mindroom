@@ -1,8 +1,9 @@
-"""Smoke the Kubernetes worker backend's tailnet SSH worker against the kind API server.
+"""Smoke the Kubernetes worker backend's tailnet SSH worker against a kind cluster's API server.
 
 Run via ``python -m cluster.k8s.kind.smoke_tailnet_ssh_worker`` from the repo root, once the MindRoom image is loaded
-into the cluster ``kubectl`` talks to. It runs ``tailnet_ssh_worker_probe.py`` in a pod set up as a primary's, since
-only a pod reaches a worker's Service and the storage claim workers mount, and it fails when the probe does.
+into the kind cluster. It applies the runtime chart to a namespace it creates, and runs ``tailnet_ssh_worker_probe.py``
+in the pod the chart gives a primary, with the probe as its command: only that pod has the primary's access and
+environment, reaches a worker's Service, and mounts the storage claim workers mount. It fails when the probe does.
 """
 
 from __future__ import annotations
@@ -12,123 +13,122 @@ import os
 import secrets
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
-from scripts.smoke_helpers import error, getenv_int, log, run_command
+from scripts.smoke_helpers import ROOT_DIR, error, getenv_int, log, run_command
 
+_CHART = "cluster/k8s/runtime"
+# The chart's release, and so the primary's Deployment.
+_RELEASE = "tailnet-ssh-smoke"
 _PROBE = Path(__file__).with_name("tailnet_ssh_worker_probe.py")
-_NAME = "tailnet-ssh-smoke"
-# Where the runtime chart mounts the storage claim, in the primary and in its workers.
-_STORAGE_PATH = "/app/agent_data"
-# The verbs of the runtime chart's worker manager Role (cluster/k8s/runtime/templates/rbac.yaml).
-_ALL_VERBS = ["create", "delete", "get", "list", "patch", "update", "watch"]
-_ROLE_RULES = [
-    {"apiGroups": [""], "resources": ["services"], "verbs": _ALL_VERBS},
-    {"apiGroups": [""], "resources": ["secrets"], "verbs": ["create", "delete", "get", "patch"]},
-    {"apiGroups": [""], "resources": ["pods", "pods/log", "events"], "verbs": ["get", "list", "watch"]},
-    {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": _ALL_VERBS},
-    {"apiGroups": ["apps"], "resources": ["replicasets"], "verbs": ["list"]},
-]
+# The probe's pod, and the ConfigMap that holds its source.
+_PROBE_NAME = "tailnet-ssh-probe"
+# What only the pod the Deployment runs needs: the probe's pod serves nothing and ends by itself.
+_SERVING_KEYS = {"args", "ports", "startupProbe", "readinessProbe", "livenessProbe"}
 
 
-def _primary_env(namespace: str, image: str) -> list[dict[str, str]]:
-    """Return the environment the runtime chart gives a primary whose workers are Kubernetes Deployments."""
-    env = {
-        "MINDROOM_STORAGE_PATH": _STORAGE_PATH,
-        "MINDROOM_WORKER_BACKEND": "kubernetes",
-        "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
-        "MINDROOM_SANDBOX_PROXY_TOOLS": "shell,file,python,coding",
-        "MINDROOM_SANDBOX_PROXY_TOKEN": secrets.token_hex(16),
-        "MINDROOM_KUBERNETES_WORKER_NAMESPACE": namespace,
-        "MINDROOM_KUBERNETES_WORKER_IMAGE": image,
+def _chart_values(image: str) -> dict[str, object]:
+    """Return the runtime chart's values for a primary whose workers are Kubernetes Deployments of ``image``."""
+    repository, _, tag = image.rpartition(":")
+    if not repository or "/" in tag:
+        msg = f"MINDROOM_IMAGE must be repository:tag, got {image!r}"
+        raise ValueError(msg)
+    return {
+        "fullnameOverride": _RELEASE,
+        # The Deployment owns the workers and runs no pod: the probe's pod stands in for it.
+        "replicaCount": 0,
         # The image is loaded into kind, never pulled.
-        "MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_POLICY": "IfNotPresent",
-        "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": _NAME,
-        "MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH": _STORAGE_PATH,
-        "MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS": "300",
+        "image": {"repository": repository, "tag": tag, "pullPolicy": "IfNotPresent"},
+        # The probe syncs no Matrix events, so the chart need not run PostgreSQL.
+        "eventCache": {"backend": "sqlite"},
+        "workers": {
+            "backend": "kubernetes",
+            "sandbox": {"proxyToken": {"value": secrets.token_hex(16)}},
+            "kubernetes": {"readyTimeoutSeconds": 300},
+        },
     }
-    return [{"name": name, "value": value} for name, value in env.items()]
 
 
-def _manifests(namespace: str, image: str) -> dict[str, object]:
-    """Return the namespace and, in it, a primary's access, storage and pod, whose command is the probe."""
+def _require_kind(kubectl: list[str]) -> None:
+    """Raise unless every node of the context's cluster is a kind node, before anything is created or deleted."""
+    nodes = json.loads(run_command([*kubectl, "get", "nodes", "-o", "json"], capture_output=True).stdout)["items"]
+    if not nodes or not all(node["spec"].get("providerID", "").startswith("kind://") for node in nodes):
+        msg = "The context's cluster is not a kind cluster"
+        raise RuntimeError(msg)
 
-    def metadata() -> dict[str, str]:
-        return {"name": _NAME, "namespace": namespace}
 
-    pod_spec = {
-        "serviceAccountName": _NAME,
+def _apply(kubectl: list[str], namespace: str, manifests: str) -> None:
+    command = [*kubectl, "apply", "-n", namespace, "-f", "-"]
+    subprocess.run(command, input=manifests, text=True, check=True, cwd=ROOT_DIR)
+
+
+def _install_chart(kubectl: list[str], namespace: str, image: str) -> dict[str, Any]:
+    """Apply what the runtime chart renders, and return the primary's Deployment as the API server holds it."""
+    with tempfile.NamedTemporaryFile("w", suffix=".json") as values:
+        json.dump(_chart_values(image), values)
+        values.flush()
+        chart = run_command(
+            ["helm", "template", _RELEASE, _CHART, "--namespace", namespace, "--values", values.name],
+            capture_output=True,
+        ).stdout
+    _apply(kubectl, namespace, chart)
+    deployment = run_command(
+        [*kubectl, "get", "deployment", _RELEASE, "-n", namespace, "-o", "json"],
+        capture_output=True,
+    ).stdout
+    return json.loads(deployment)
+
+
+def _probe_manifests(deployment: dict[str, Any], namespace: str) -> dict[str, object]:
+    """Return the probe's source and its pod, which is the primary's pod of ``deployment`` with the probe as its command.
+
+    The service account, environment, mounts and security context are the chart's, so the probe has what the chart
+    gives a primary and nothing else. The pod's labels are the chart's too: by them the workers' NetworkPolicy admits it.
+    """
+    template = deployment["spec"]["template"]
+    [primary] = template["spec"]["containers"]
+    probe = {key: value for key, value in primary.items() if key not in _SERVING_KEYS} | {
+        "command": ["python", f"/smoke/{_PROBE.name}"],
+        "volumeMounts": [*primary["volumeMounts"], {"name": "smoke", "mountPath": "/smoke", "readOnly": True}],
+    }
+    spec = template["spec"] | {
         "restartPolicy": "Never",
-        "securityContext": {"fsGroup": 1000, "fsGroupChangePolicy": "OnRootMismatch"},
-        "containers": [
-            {
-                "name": "probe",
-                "image": image,
-                "imagePullPolicy": "IfNotPresent",
-                "command": ["python", f"/smoke/{_PROBE.name}"],
-                "env": _primary_env(namespace, image),
-                "securityContext": {
-                    "runAsNonRoot": True,
-                    "allowPrivilegeEscalation": False,
-                    "capabilities": {"drop": ["ALL"]},
-                },
-                "volumeMounts": [
-                    {"name": "storage", "mountPath": _STORAGE_PATH},
-                    {"name": "probe", "mountPath": "/smoke", "readOnly": True},
-                ],
-            },
-        ],
-        "volumes": [
-            {"name": "storage", "persistentVolumeClaim": {"claimName": _NAME}},
-            {"name": "probe", "configMap": {"name": _NAME}},
-        ],
+        "containers": [probe],
+        "volumes": [*template["spec"]["volumes"], {"name": "smoke", "configMap": {"name": _PROBE_NAME}}],
     }
+    metadata = {"name": _PROBE_NAME, "namespace": namespace}
     items = [
-        {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}},
-        {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": metadata()},
-        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": metadata(), "rules": _ROLE_RULES},
-        {
-            "apiVersion": "rbac.authorization.k8s.io/v1",
-            "kind": "RoleBinding",
-            "metadata": metadata(),
-            "subjects": [{"kind": "ServiceAccount", "name": _NAME, "namespace": namespace}],
-            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": _NAME},
-        },
-        {
-            "apiVersion": "v1",
-            "kind": "PersistentVolumeClaim",
-            "metadata": metadata(),
-            "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": "1Gi"}}},
-        },
         {
             "apiVersion": "v1",
             "kind": "ConfigMap",
-            "metadata": metadata(),
+            "metadata": metadata,
             "data": {_PROBE.name: _PROBE.read_text(encoding="utf-8")},
         },
-        {"apiVersion": "v1", "kind": "Pod", "metadata": metadata(), "spec": pod_spec},
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": metadata | {"labels": template["metadata"]["labels"]},
+            "spec": spec,
+        },
     ]
     return {"apiVersion": "v1", "kind": "List", "items": items}
 
 
-def _delete_namespace(namespace: str, *, check: bool) -> None:
-    """Delete the namespace with every worker in it, and wait until it is gone."""
-    run_command(["kubectl", "delete", "namespace", namespace, "--ignore-not-found", "--timeout=300s"], check=check)
-
-
-def _probe_phase(namespace: str) -> str:
+def _probe_phase(kubectl: list[str], namespace: str) -> str:
     result = run_command(
-        ["kubectl", "get", "pod", _NAME, "-n", namespace, "-o", "jsonpath={.status.phase}"],
+        [*kubectl, "get", "pod", _PROBE_NAME, "-n", namespace, "-o", "jsonpath={.status.phase}"],
         capture_output=True,
     )
     return result.stdout.strip()
 
 
-def _wait_for_probe(namespace: str, timeout_seconds: int) -> None:
+def _wait_for_probe(kubectl: list[str], namespace: str, timeout_seconds: int) -> None:
     """Wait until the probe's pod has ended, and raise unless it succeeded."""
     deadline = time.monotonic() + timeout_seconds
-    while (phase := _probe_phase(namespace)) not in {"Succeeded", "Failed"}:
+    while (phase := _probe_phase(kubectl, namespace)) not in {"Succeeded", "Failed"}:
         if time.monotonic() >= deadline:
             msg = f"The probe pod was still {phase or 'unscheduled'} after {timeout_seconds}s"
             raise RuntimeError(msg)
@@ -138,45 +138,55 @@ def _wait_for_probe(namespace: str, timeout_seconds: int) -> None:
         raise RuntimeError(msg)
 
 
-def _dump_diagnostics(namespace: str) -> None:
+def _report(exc: Exception) -> None:
+    error(f"[error] smoke_tailnet_ssh_worker.py failed: {exc}")
+    if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+        error(exc.stderr)
+
+
+def _dump_diagnostics(kubectl: list[str], namespace: str) -> None:
     """Best-effort Kubernetes diagnostics for a failed smoke."""
     error(f"[diagnostics] Dumping Kubernetes state for namespace {namespace}")
     commands = [
-        ["kubectl", "get", "pods,services,deployments,persistentvolumeclaims", "-n", namespace, "-o", "wide"],
-        ["kubectl", "describe", "pods", "-n", namespace],
-        ["kubectl", "logs", "-n", namespace, "-l", "mindroom.ai/component=worker", "--tail=200"],
-        ["kubectl", "get", "events", "-n", namespace, "--sort-by=.lastTimestamp"],
+        ["get", "pods,services,deployments,persistentvolumeclaims", "-n", namespace, "-o", "wide"],
+        ["describe", "pods", "-n", namespace],
+        ["logs", "-n", namespace, "-l", "mindroom.ai/component=worker", "--tail=200"],
+        ["get", "events", "-n", namespace, "--sort-by=.lastTimestamp"],
     ]
     for command in commands:
-        error(f"[diagnostics] $ {' '.join(command)}")
-        run_command(command, check=False)
+        error(f"[diagnostics] $ kubectl {' '.join(command)}")
+        run_command([*kubectl, *command], check=False)
 
 
 def main() -> int:
     """Run the smoke."""
-    namespace = os.getenv("TAILNET_SSH_SMOKE_NAMESPACE", "mindroom-tailnet-ssh-smoke")
+    # Named in every kubectl call, so the kubeconfig's current context is never the target.
+    context = os.getenv("TAILNET_SSH_SMOKE_CONTEXT", "kind-mindroom")
     image = os.getenv("MINDROOM_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
     timeout_seconds = getenv_int("TAILNET_SSH_SMOKE_TIMEOUT_SECONDS", 900)
+    kubectl = ["kubectl", "--context", context]
+    # This run's own: creating it fails if it exists, and it is deleted only once this run has created it.
+    namespace = f"{_RELEASE}-{secrets.token_hex(4)}"
     try:
-        # A pod an earlier run left would be read as this run's.
-        _delete_namespace(namespace, check=True)
-        log(f"[smoke] Running the tailnet SSH worker probe in namespace {namespace} with {image}")
-        subprocess.run(
-            ["kubectl", "apply", "-f", "-"],
-            input=json.dumps(_manifests(namespace, image)),
-            text=True,
-            check=True,
-        )
-        try:
-            _wait_for_probe(namespace, timeout_seconds)
-        finally:
-            run_command(["kubectl", "logs", _NAME, "-n", namespace], check=False)
+        _require_kind(kubectl)
+        run_command([*kubectl, "create", "namespace", namespace])
     except Exception as exc:
-        error(f"[error] smoke_tailnet_ssh_worker.py failed: {exc}")
-        _dump_diagnostics(namespace)
+        _report(exc)
+        return 1
+    try:
+        log(f"[smoke] Running the tailnet SSH worker probe in namespace {namespace} of {context} with {image}")
+        deployment = _install_chart(kubectl, namespace, image)
+        _apply(kubectl, namespace, json.dumps(_probe_manifests(deployment, namespace)))
+        try:
+            _wait_for_probe(kubectl, namespace, timeout_seconds)
+        finally:
+            run_command([*kubectl, "logs", _PROBE_NAME, "-n", namespace], check=False)
+    except Exception as exc:
+        _report(exc)
+        _dump_diagnostics(kubectl, namespace)
         return 1
     finally:
-        _delete_namespace(namespace, check=False)
+        run_command([*kubectl, "delete", "namespace", namespace, "--timeout=300s"], check=False)
     log("[smoke] tailnet SSH worker checks passed")
     return 0
 

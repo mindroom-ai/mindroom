@@ -129,6 +129,7 @@ jobs:
         run: python -m cluster.k8s.kind.smoke_tailnet_ssh_worker
         env:
           MINDROOM_IMAGE: ghcr.io/mindroom-ai/mindroom:latest
+          TAILNET_SSH_SMOKE_CONTEXT: kind-mindroom
 
       - name: Install platform chart
         run: bash cluster/k8s/kind/install_platform.sh
