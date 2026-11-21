@@ -373,6 +373,7 @@ class FakeScripts:
         self.hold_launch: asyncio.Event | None = None
         """While set and not released, `run` has written its attempt's record and waits, as a starting process does."""
         self.refuse_launch: Exception | None = None
+        self.refused = 0
 
     # The real confined read of a script's source, which needs nothing of the manager itself.
     resolve_source = ScriptRunManager.resolve_source
@@ -388,6 +389,7 @@ class FakeScripts:
     ) -> ScriptRunRecord:
         """Record one running attempt of *workflow_run_id* and keep its capability token."""
         if self.refuse_launch is not None:
+            self.refused += 1
             raise self.refuse_launch
         token, token_hash = mint_script_capability()
         attempt = self.store.create_run(

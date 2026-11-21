@@ -19,7 +19,7 @@ from mindroom.background_tasks import run_coroutine_until_complete, wait_for_fut
 from mindroom.delegation.personas import persona_allows
 from mindroom.logging_config import get_logger
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
-from mindroom.script_runs.manager import ScriptRunLimits
+from mindroom.script_runs.manager import ScriptRunLimits, ScriptRuntimeNotReadyError
 from mindroom.script_runs.models import (
     TERMINAL_SCRIPT_RUN_STATES,
     ScriptCallRecord,
@@ -151,7 +151,8 @@ class WorkflowEngine:
 
         The engine owns a launch once it began: a caller that goes away leaves no process its run does not name, and
         only the engine's stop ends a launch, which leaves the run starting for the next primary. An *automatic*
-        launch that is refused leaves the run as it is, for the next pass to try again.
+        launch of a run that waits for its next attempt leaves the run as it is when it is refused, for the next pass
+        to try again, and so does any launch of a job's run that a script runtime which is still starting refuses.
         """
         if self._closed:
             return self.store.get_run(run_id)
@@ -181,11 +182,11 @@ class WorkflowEngine:
                 # A reserved run gets one attempt from one launch; a run that was launched or has ended gets none,
                 # and a stopping engine starts none.
                 return run
-            # An attempt after the first that the engine starts on its own counts toward the idle limit, once the run
-            # names it.
-            automatic = automatic and run.attempt > 0
+            # An attempt the engine starts on its own, after one that an interruption ended, counts toward the idle
+            # limit once the run names it. A first attempt, or one a person's resume asked for, names none before.
+            automatic = automatic and run.script_run_id is not None
             idle = automatic and run.idle_resumes >= _MAX_IDLE_RESUMES
-            attempt, refusal = None, _IDLE.format(attempts=_MAX_IDLE_RESUMES)
+            attempt, refusal, kept = None, _IDLE.format(attempts=_MAX_IDLE_RESUMES), automatic
             if not idle:
                 try:
                     attempt = await self.scripts.run(
@@ -198,7 +199,10 @@ class WorkflowEngine:
                 except Exception as exc:
                     logger.warning("workflow_launch_refused", run_id=run_id, error=str(exc))
                     refusal = str(exc)
-                if attempt is None and automatic:
+                    # A script runtime that is still starting refuses nothing for good: the run of a job stays
+                    # starting, and the next pass launches it.
+                    kept = kept or (run.job_id is not None and isinstance(exc, ScriptRuntimeNotReadyError))
+                if attempt is None and kept:
                     return run
             if attempt is not None:
                 self._launched.add(attempt.run_id)

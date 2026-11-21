@@ -24,6 +24,7 @@ from mindroom.orchestration.script_runtime import _LiveScriptRuntimeResolver
 from mindroom.orchestration.workflow_runtime import WorkflowRuntimeLifecycle
 from mindroom.script_runs import manager as manager_module
 from mindroom.script_runs.broker import ScriptToolBroker
+from mindroom.script_runs.manager import ScriptRuntimeNotReadyError
 from mindroom.script_runs.models import ScriptCallState, ScriptRunState
 from mindroom.script_runs.reasons import (
     MAX_RUNTIME_EXCEEDED,
@@ -340,6 +341,33 @@ async def test_first_attempt_that_a_continued_job_cannot_start_fails_the_run_wit
     job = await _ended_job(stack, handle["job_id"])
     run = stack.store.get_run(stack.run_id)
     assert (run.state, run.error, job.status) == (WorkflowRunState.FAILED, "No worker is free.", "failed")
+
+
+@pytest.mark.asyncio
+async def test_first_attempt_of_a_continued_job_waits_for_a_script_runtime_that_is_still_starting(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The job coordinator may continue a job before the script runtime takes launches: the run waits, and a pass starts it."""
+    monkeypatch.setattr(stack.engine, "launch", lambda *_args, **_options: asyncio.Event().wait())
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    stack.run_id = handle["run_id"]
+    await stack.restart(kill=True)
+    stack.scripts.refuse_launch = ScriptRuntimeNotReadyError("Background script runtime reconciliation is in progress.")
+    assert await stack.recover() == []
+
+    await stack.continue_jobs()
+    await stack.until(lambda: stack.scripts.refused == 1 and not stack.engine._launching)
+    waiting = stack.store.get_run(stack.run_id)
+    assert await stack.maintain() == []
+    stack.scripts.refuse_launch = None
+    assert await stack.maintain() == [stack.run_id]
+
+    run = stack.store.get_run(stack.run_id)
+    assert (waiting.state, waiting.attempt, waiting.error) == (WorkflowRunState.STARTING, 0, None)
+    assert (run.state, run.attempt, run.idle_resumes, stack.scripts.refused) == (WorkflowRunState.RUNNING, 1, 0, 2)
+    await stack.finish_attempt(result="the report")
+    assert await stack.collect(await _ended_job(stack, handle["job_id"])) == "the report"
 
 
 @pytest.mark.asyncio

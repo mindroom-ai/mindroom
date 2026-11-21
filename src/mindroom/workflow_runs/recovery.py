@@ -60,13 +60,15 @@ async def recover_runs(
     """
 
     def access_of(run: WorkflowRun) -> ResumeAccess:
-        # A run that names no attempt is its own call's or job's to launch: a first attempt, or one a resume took.
+        # A run that names no attempt is its own call's or job's to launch first: a first attempt, or a resume's.
         own = run.state is WorkflowRunState.STARTING and run.script_run_id is None
         standing = "ended" if run.job_id is None else job_standing(run.job_id)
         if standing in ("unknown", "waiting", "stopping", "stopped"):
             return "pending"
-        launches_itself = standing == "live" or ((standing == "absent" or run.job_id is None) and _recent(engine, run))
-        return None if own and launches_itself else access(run)
+        # Its own call, or the admission of its job, is still at work on it in this primary. A run whose job runs
+        # is launched here too, once the job's own launch is over and left it starting.
+        admitting = (standing == "absent" or run.job_id is None) and _recent(engine, run)
+        return None if own and admitting else access(run)
 
     for listed in await asyncio.to_thread(engine.store.list_runs, include_finished=False):
         with suppress(WorkflowRunNotFoundError):
