@@ -5,10 +5,15 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shlex
+import shutil
+import stat
+import sys
 import tempfile
 from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any
@@ -22,11 +27,14 @@ from claude_agent_sdk import (
 )
 
 from mindroom import __version__
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.claude_sdk_process import ClaudeProcess, user_message
 from mindroom.llm.errors import AuthenticationFailed, ProviderError, ProviderUnavailable
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root
 from mindroom.providers.claude_code.bridge import SERVER_NAME, TOOL_PREFIX, ToolBridge, tool_names
+from mindroom.providers.claude_code.launcher import CLI_ENV, KEEP_ENV
 from mindroom.runtime_shutdown import close_at_process_shutdown
 
 if TYPE_CHECKING:
@@ -59,6 +67,10 @@ _ISOLATION_ENV = {
     "DISABLE_AUTO_COMPACT": "1",
     "ENABLE_TOOL_SEARCH": "false",
     "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
+    # The SDK only defaults this when it did not inherit a value, so set it explicitly.
+    "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
+    # Give the SDK and CLI the default explicitly so the SDK need not read the parent environment.
+    "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "600000",
     # A call that waits long is not moved to the background, where the model would go on without its result.
     "CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND": "1",
     "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS": "0",
@@ -67,11 +79,8 @@ _ISOLATION_ENV = {
     # A parked call waits for MindRoom's loop, such as for an approval: Claude Code must outwait the parked process.
     "MCP_TOOL_TIMEOUT": str(int((_PARKED_TTL_SECONDS + 10 * _SWEEP_INTERVAL_SECONDS) * 1000)),
 }
-# Claude Code reads its sign-in, where it sends requests, and what it adds to them from variables named like these.
-_REFUSED_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_")
-_REFUSED_NAMES = {"CLAUDE_BG_AUTH_SNAPSHOT_PATH", "CLAUDE_AUTO_BACKGROUND_TASKS"}
-# The Claude Agent SDK and MindRoom set these for the process themselves, whatever MindRoom inherited.
-_SET_FOR_THE_PROCESS = {"CLAUDE_CODE_ENTRYPOINT", *_ISOLATION_ENV}
+# The SDK reads these in the parent during connect, with no options override.
+_SDK_PARENT_ENV = {"CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"}
 # How Claude Code names the plans of a Claude subscription; an account without one is "Claude API".
 _PLAN = re.compile(r"Claude (Pro|Team|Enterprise|Max( \d+x)?)")
 _SIGN_IN_HINT = "Run `claude auth login` as the user that runs MindRoom."
@@ -143,8 +152,8 @@ def _startup_error(info: dict[str, Any] | None, provider: str) -> Authentication
         message = NOT_SIGNED_IN
     elif other not in (None, "claude.ai"):
         message = (
-            f"Claude Code would use a credential from {other} instead of your Claude sign-in. Remove it from "
-            "MindRoom's environment and run `claude auth login`, or use `provider: anthropic` to pay with a key."
+            f"Claude Code would use a credential from {other} instead of your Claude sign-in. Remove it and "
+            "run `claude auth login`, or use `provider: anthropic` to pay with a key."
         )
     elif account.get("apiProvider") != "firstParty" or not _PLAN.fullmatch(str(account.get("subscriptionType"))):
         message = f"Claude Code is not signed in to a Claude subscription. {_SIGN_IN_HINT}"
@@ -153,7 +162,7 @@ def _startup_error(info: dict[str, Any] | None, provider: str) -> Authentication
     return AuthenticationFailed(message, provider=provider, status_code=401)
 
 
-async def _refuse_unless_ready(client: ClaudeSDKClient, bridge: ToolBridge, provider: str) -> None:
+async def _refuse_unless_ready(client: ClaudeSDKClient, bridge: ToolBridge, provider: str, cli: Path) -> None:
     """Raise unless Claude Code may get a prompt: signed in to a subscription, with exactly the tools MindRoom offers.
 
     Its tool server connects a moment after it starts, so that is awaited.
@@ -161,7 +170,7 @@ async def _refuse_unless_ready(client: ClaudeSDKClient, bridge: ToolBridge, prov
     info = await client.get_server_info()
     # The rest of what Claude Code says at start-up names the account, which is never logged.
     version = (info or {}).get("claude_code_version")
-    logger.debug("claude_code_started", cli=client.options.cli_path or "bundled", version=version)
+    logger.debug("claude_code_started", cli=str(cli), version=version)
     if (refused := _startup_error(info, provider)) is not None:
         raise refused
     wanted = bridge.expected_inventory()
@@ -180,9 +189,12 @@ async def _refuse_unless_ready(client: ClaudeSDKClient, bridge: ToolBridge, prov
         await asyncio.sleep(0.05)
 
 
-def _prepare(storage_root: Path, system: str, provider: str) -> tuple[Path, Path | None]:
-    """Use a primary-only empty working directory and, while starting, a private system-prompt file beside it."""
-    home = storage_root / "claude_code"
+def _prepare(root: Path, system: str, provider: str, cli_path: str | None) -> tuple[Path, Path | None, Path, Path]:
+    """Resolve the CLI and prepare its private launcher, empty working directory, and optional prompt file."""
+    resolved = shutil.which(cli_path) if cli_path else None
+    if resolved is None or not (cli := Path(resolved).absolute()).is_file():
+        raise AuthenticationFailed(_NOT_FOUND, provider=provider)
+    home = root / "claude_code"
     cwd = home / "cwd"
     for directory in (home, cwd):
         if directory.is_symlink():
@@ -193,8 +205,9 @@ def _prepare(storage_root: Path, system: str, provider: str) -> tuple[Path, Path
     if any(cwd.iterdir()):
         msg = f"Claude Code working directory is not empty: {cwd}"
         raise ProviderError(msg, provider=provider)
+    launcher = _prepare_launcher(home, provider)
     if not system:
-        return cwd, None
+        return cwd, None, launcher, cli
     # A system prompt is too long for a command line.
     descriptor, path = tempfile.mkstemp(dir=home)
     prompt = Path(path)
@@ -205,7 +218,30 @@ def _prepare(storage_root: Path, system: str, provider: str) -> tuple[Path, Path
         with suppress(OSError):
             prompt.unlink(missing_ok=True)
         raise
-    return cwd, prompt
+    return cwd, prompt, launcher, cli
+
+
+@cache
+def _launcher_payload() -> bytes:
+    script = Path(__file__).with_name("launcher.py")
+    return f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -IS {shlex.quote(str(script))} "$@"\n'.encode()
+
+
+def _prepare_launcher(home: Path, provider: str) -> Path:
+    """Publish a stable executable without rewriting the file another start may be executing."""
+    launcher = (home / "exec-claude").absolute()
+    payload = _launcher_payload()
+    if (
+        not launcher.is_file(follow_symlinks=False)
+        or stat.S_IMODE(launcher.lstat().st_mode) != 0o700
+        or launcher.read_bytes() != payload
+    ):
+        with open_directory_within_root(home) as directory:
+            atomic_write_bytes_at(directory, launcher.name, payload, file_mode=0o700)
+    if not os.access(launcher, os.X_OK):
+        msg = f"Claude Code launcher is not executable: {launcher}. Check its permissions and the storage mount."
+        raise ProviderError(msg, provider=provider)
+    return launcher
 
 
 type _RestKey = tuple[str, str, tuple[str, ...]]
@@ -238,19 +274,9 @@ class _SessionRegistry:
 
         Cancellation cannot cut short startup: only at its end do we know whether the process holds the slot.
         """
-        # MindRoom's environment is judged by the names of its variables alone, never by their values.
-        refused = sorted(
-            name
-            for name in os.environ
-            if (name.startswith(_REFUSED_PREFIXES) or name in _REFUSED_NAMES) and name not in _SET_FOR_THE_PROCESS
-        )
-        if refused:
-            msg = (
-                f"MindRoom's environment sets {', '.join(refused)}, which Claude Code could use in place of your Claude "
-                "sign-in or to send it somewhere else. Remove it from the environment MindRoom starts in (the `.env` "
-                "beside `config.yaml` is fine), or use `provider: anthropic`."
-            )
-            raise AuthenticationFailed(msg, provider=provider, status_code=401)
+        if names := sorted(_SDK_PARENT_ENV.intersection(os.environ)):
+            msg = f"Unset {', '.join(names)} in MindRoom's environment. The Claude Agent SDK reads these directly."
+            raise AuthenticationFailed(msg, provider=provider)
         freed = self._reserve(provider, replaces)
         starting = create_background_task(
             self._launch(freed, provider, storage_root, system, tools, options),
@@ -281,7 +307,9 @@ class _SessionRegistry:
             if freed is not None:
                 await freed
             bridge = ToolBridge(names=tool_names(tools, provider))
-            cwd, prompt = await asyncio.to_thread(_prepare, storage_root, system, provider)
+            cli_path = options.get("cli_path")
+            cwd, prompt, launcher, cli = await asyncio.to_thread(_prepare, storage_root, system, provider, cli_path)
+            keep = {"CLAUDE_CODE_ENTRYPOINT", *_ISOLATION_ENV}  # Fail safe if the SDK adds other prefixed settings.
             sdk_options = ClaudeAgentOptions(
                 **options,
                 system_prompt={"type": "file", "path": str(prompt)} if prompt else "",
@@ -295,12 +323,13 @@ class _SessionRegistry:
                 # Without it a user's ``@/path`` would make Claude Code read that file.
                 verbatim_prompts=True,
                 include_partial_messages=True,
-                env=_ISOLATION_ENV,
+                env={**_ISOLATION_ENV, CLI_ENV: str(cli), KEEP_ENV: " ".join(sorted(keep))},
                 extra_args={"no-session-persistence": None},
                 max_buffer_size=_MAX_MESSAGE_BYTES,
                 client_app=f"mindroom/{__version__}",
                 stderr=lambda line: logger.debug("claude_code_stderr", line=line),
             )
+            sdk_options.cli_path = launcher
             if tools:
                 server = bridge.server(tools)
                 sdk_options.mcp_servers = {SERVER_NAME: {"type": "sdk", "name": SERVER_NAME, "instance": server}}
@@ -310,7 +339,7 @@ class _SessionRegistry:
             self.starting -= 1
             self.live.add(session)
             async with asyncio.timeout(_READY_SECONDS):
-                await _refuse_unless_ready(process.client, bridge, provider)
+                await _refuse_unless_ready(process.client, bridge, provider, cli)
         except BaseException as error:
             if session is None:
                 self.starting -= 1

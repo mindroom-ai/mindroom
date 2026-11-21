@@ -2529,22 +2529,21 @@ defaults:
 
 The `id` is any model ID or alias Claude Code takes for `--model`, such as `claude-opus-5-5` or `opus`, within what the plan includes.
 `extra_kwargs` accepts `cli_path`, the `claude` executable to run, and `effort`, one of `low`, `medium`, `high`, `xhigh`, or `max`.
-Without `cli_path`, MindRoom runs the `claude` on its `PATH`, and when there is none, the copy the Claude Agent SDK ships, which uses the same sign-in.
+Without `cli_path`, MindRoom runs the `claude` on its `PATH`; set `cli_path` when the service's `PATH` does not include it.
+MindRoom's storage directory must allow executing files for this provider.
 MindRoom never reads Claude Code's credentials, ignores an authored `api_key`, and does not accept a token, endpoint, or headers for this provider.
+MindRoom removes inherited `ANTHROPIC_*`, `CLAUDE_CODE_*`, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`, and `CLAUDE_AUTO_BACKGROUND_TASKS` variables from Claude Code's environment (except settings MindRoom explicitly allows), so Claude Code never uses an `ANTHROPIC_API_KEY` exported for other models.
 The provider supports text and image input; the model is told when an audio, video, or file attachment was left out.
 Use [reasoning levels](#reasoning-levels) to select effort with a model reference like `opus@high`.
 These conversations do not appear in Claude Code's own session history.
 MindRoom runs at most 8 Claude Code processes at a time; while all 8 are answering, another reply is retried and fails if none finishes meanwhile.
-[`mindroom doctor`](https://docs.mindroom.chat/cli/#doctor) starts Claude Code without sending it a prompt and reports the first three cases below.
+[`mindroom doctor`](https://docs.mindroom.chat/cli/#doctor) starts Claude Code without sending it a prompt to check the installation and sign-in.
 
 A reply fails with a message that names the fix in these cases:
 
 - Claude Code or the Claude Agent SDK is missing, or Claude Code is older than 2.1.328: install the required dependency or run `claude update`.
 - Claude Code is not signed in to a Pro, Max, Team, or Enterprise plan: run `claude auth login` as the user that runs MindRoom.
-- MindRoom's process environment sets a variable that Claude Code would use in place of the subscription sign-in, or to send it somewhere else: remove it from that environment.
-  These are every variable whose name starts with `ANTHROPIC_` or `CLAUDE_CODE_`, whatever its value, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`, and `CLAUDE_AUTO_BACKGROUND_TASKS`.
-  `CLAUDE_CODE_ENTRYPOINT` and the variables MindRoom sets for Claude Code itself are allowed.
-  The same variables in the `.env` beside `config.yaml` are fine, since only MindRoom's own `anthropic` models read them there.
+- `CLAUDE_CODE_STREAM_CLOSE_TIMEOUT` or `CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK` is set: unset it in MindRoom's environment because the SDK reads it directly.
 - The plan's usage limit is reached: the message gives the time the limit resets when Claude Code reports it.
 
 ## OpenRouter Provider Routing
@@ -18151,7 +18150,7 @@ Every team's Mem0 records share one store, so the merge moves only records of th
 The one-time conversions of a database from an earlier release read its rows as untrusted input and write its `.pre-storage-v2` or `.pre-storage-v4` backup without following links, so worker code that tampers with a database can break only that agent's or team's history.
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
-The Claude Code model route keeps its empty working directory and temporary system-prompt files under primary-only `claude_code/` and refuses to use either directory if it is a symlink.
+The Claude Code model route keeps its executable shell wrapper, empty working directory, and temporary system-prompt files under primary-only `claude_code/` and refuses to use either directory if it is a symlink.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
 Knowledge indexes, including private agents' indexes and their publication and refresh-status files, live in the primary-only `knowledge_db/` storage directory, like knowledge Git directories, so no worker can write the index files the primary opens.
 

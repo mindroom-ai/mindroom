@@ -1,8 +1,7 @@
-"""Keep the ``claude_code`` route's tests apart: no inherited Anthropic settings, and no process left running."""
+"""Keep Claude Code processes from leaking between tests."""
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -15,11 +14,11 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
-def _no_inherited_anthropic_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Clear what the shell exports for other Anthropic routes, which this route refuses to start beside."""
-    for name in list(os.environ):
-        if name.startswith(("ANTHROPIC_", "CLAUDE_CODE_")):
-            monkeypatch.delenv(name)
+def _clear_parent_sdk_settings(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    """Keep developer SDK settings out of fake-CLI tests, but leave live tests alone."""
+    if request.path.name != "test_live.py":
+        monkeypatch.delenv("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", raising=False)
+        monkeypatch.delenv("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", raising=False)
 
 
 @pytest_asyncio.fixture(autouse=True)
