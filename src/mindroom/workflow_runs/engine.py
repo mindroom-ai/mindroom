@@ -365,18 +365,6 @@ class WorkflowEngine:
             raise WorkflowRunStoreError(msg) from None
         return reopened, False
 
-    async def resume(
-        self,
-        context: ToolRuntimeContext,
-        run_id: str,
-        *,
-        limits: WorkflowLimits | None = None,
-        **request: Any,  # noqa: ANN401
-    ) -> WorkflowRun:
-        """Take an ended run for a person and start its next attempt; see `reopen` for the *request*."""
-        await self.reopen(run_id, context, limits=limits, **request)
-        return await self.launch(run_id, context, limits)
-
     async def wait(self, run_id: str, launch: Callable[[], Awaitable[WorkflowRun]] | None = None) -> WorkflowRun:
         """Return the run once it has ended.
 

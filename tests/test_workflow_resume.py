@@ -49,7 +49,7 @@ async def _resume(stack: WorkflowStack, state: ScriptRunState = ScriptRunState.F
     """End the attempt, if it still runs, and start the next one as a person's resume does."""
     if stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING:
         await stack.end_attempt(state)
-    await stack.engine.resume(stack.context, stack.run_id, **options)  # type: ignore[arg-type]
+    await stack.resume(stack.run_id, **options)  # type: ignore[arg-type]
 
 
 def _node(stack: WorkflowStack, key: str) -> WorkflowNode:
@@ -398,7 +398,7 @@ async def test_removed_item_is_marked_stale_when_the_attempt_completes(stack: Wo
 async def test_resume_of_a_run_that_still_runs_is_refused(stack: WorkflowStack) -> None:
     """A run has one live attempt at a time."""
     with pytest.raises(WorkflowRunStoreError) as refusal:
-        await stack.engine.resume(stack.context, stack.run_id)
+        await stack.resume(stack.run_id)
 
     assert str(refusal.value) == f"Run {stack.run_id} is still running. Cancel it first."
     assert len(stack.scripts.launched) == 1
@@ -413,7 +413,7 @@ async def test_resume_refuses_an_unknown_call_in_rerun_by_name(stack: WorkflowSt
     before = stack.engine.status(stack.run_id)
 
     with pytest.raises(WorkflowRunStoreError) as refusal:
-        await stack.engine.resume(stack.context, stack.run_id, rerun=["n1", unknown])
+        await stack.resume(stack.run_id, rerun=["n1", unknown])
 
     assert str(refusal.value) == f"Run {stack.run_id} has no call {unknown}."
     assert stack.engine.status(stack.run_id) == before
@@ -451,8 +451,8 @@ async def test_two_resumes_at_once_start_one_attempt(stack: WorkflowStack) -> No
     await stack.end_attempt(ScriptRunState.FAILED)
 
     outcomes = await asyncio.gather(
-        stack.engine.resume(stack.context, stack.run_id),
-        stack.engine.resume(stack.context, stack.run_id),
+        stack.resume(stack.run_id),
+        stack.resume(stack.run_id),
         return_exceptions=True,
     )
 
@@ -465,7 +465,7 @@ async def test_engine_that_stops_during_a_resume_leaves_the_run_starting(stack: 
     """A resume cut short by a stopping MindRoom stays accepted, as a start cut short does: the next primary starts it."""
     await stack.end_attempt(ScriptRunState.FAILED)
     stack.scripts.hold_launch = asyncio.Event()
-    resuming = asyncio.create_task(stack.engine.resume(stack.context, stack.run_id))
+    resuming = asyncio.create_task(stack.resume(stack.run_id))
     await stack.until(lambda: len(stack.scripts.launched) == 2)
 
     await stack.engine.close()
@@ -480,7 +480,7 @@ async def test_resume_whose_script_cannot_start_fails_the_run_with_the_reason(st
     await stack.end_attempt(ScriptRunState.FAILED)
     stack.scripts.refuse_launch = RuntimeError("No worker is available.")
 
-    run = await stack.engine.resume(stack.context, stack.run_id)
+    run = await stack.resume(stack.run_id)
 
     assert (run.state, run.error, run.attempt) == (WorkflowRunState.FAILED, "No worker is available.", 1)
 
@@ -514,7 +514,7 @@ async def test_working_time_limit_interrupts_and_resume_continues(timed: Workflo
     assert run.error == "The run used its 1 hours of working time. resume_workflow continues it."
     assert timed.attempt.state is ScriptRunState.CANCELLED
 
-    await timed.engine.resume(timed.context, timed.run_id, limits=WorkflowLimits(max_runtime_hours=2))
+    await timed.resume(timed.run_id, limits=WorkflowLimits(max_runtime_hours=2))
 
     assert (_left(timed), (await timed.submit("@0", "tool", _A)).cached) == (7200, True)
     assert timed.store.get_run(timed.run_id).state is WorkflowRunState.RUNNING
@@ -543,7 +543,7 @@ async def test_working_time_is_saved_when_the_attempt_ends(
     """What the run used is saved at its end too, not only once a minute."""
     monkeypatch.setattr(engine_module, "_CHARGE_SECONDS", 3600)
     await timed.end_attempt(ScriptRunState.FAILED)
-    await timed.engine.resume(timed.context, timed.run_id, limits=WorkflowLimits(max_runtime_hours=1))
+    await timed.resume(timed.run_id, limits=WorkflowLimits(max_runtime_hours=1))
     timed.now += 900
 
     await timed.end_attempt(ScriptRunState.FAILED)
@@ -555,7 +555,7 @@ async def test_working_time_is_saved_when_the_attempt_ends(
 async def test_run_without_a_limit_is_never_interrupted_for_its_time(timed: WorkflowStack) -> None:
     """`max_runtime_hours: 0` stores no limit."""
     await timed.end_attempt(ScriptRunState.FAILED)
-    await timed.engine.resume(timed.context, timed.run_id, limits=WorkflowLimits(max_runtime_hours=0))
+    await timed.resume(timed.run_id, limits=WorkflowLimits(max_runtime_hours=0))
     timed.now += 10_000 * 3600
     await asyncio.sleep(0.05)
 

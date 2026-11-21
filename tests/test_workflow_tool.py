@@ -1118,7 +1118,7 @@ async def test_resume_cancelled_at_its_write_marks_no_call_of_a_run_it_did_not_t
     first = await _failed(stack)
     writer = sqlite3.connect(stack.store.database_path, isolation_level=None)
     writer.execute("BEGIN IMMEDIATE")
-    resuming = asyncio.create_task(stack.engine.resume(stack.context, first["run_id"], rerun=["n1"]))
+    resuming = asyncio.create_task(stack.resume(first["run_id"], rerun=["n1"]))
     # The resume's write waits in its thread for the database, which is where the cancellation finds it.
     await asyncio.sleep(0.2)
     resuming.cancel()

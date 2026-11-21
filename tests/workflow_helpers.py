@@ -608,6 +608,11 @@ class WorkflowStack:
         """Reserve a run for the owner and launch its first attempt."""
         return await self.engine.launch(self.reserve(source, args, **options).run_id, self.context, self.limits)
 
+    async def resume(self, run_id: str, *, limits: WorkflowLimits | None = None, **request: Any) -> WorkflowRun:  # noqa: ANN401
+        """Take an ended run for the owner and start its next attempt, as a person's resume does."""
+        await self.engine.reopen(run_id, self.context, limits=limits, **request)
+        return await self.engine.launch(run_id, self.context, limits)
+
     def reserve(self, source: str = "", args: object = None, **options: object) -> WorkflowRun:
         """Write the intent of a run for the owner, which nothing has launched yet."""
         context = self.context

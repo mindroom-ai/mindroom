@@ -241,7 +241,7 @@ async def test_result_over_eight_mebibytes_returns_a_reference_and_the_results_r
 
     stack = await stack.restart()
     await stack.settle()
-    await stack.engine.resume(stack.context, stack.run_id)
+    await stack.resume(stack.run_id)
     again = await stack.submit("@0", "tool", tool_args("counter", "text", size=size))
     assert (again.state, again.cached, again.result_ref) == ("completed", True, f"results/{receipt.id}")
     async with stack.http() as client:
