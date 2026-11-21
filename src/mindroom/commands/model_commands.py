@@ -64,7 +64,13 @@ def _clear_thread_model(
     entity_names: tuple[str, ...],
 ) -> tuple[str, bool]:
     """Remove the override of the entities the requester may address; describe it, and say whether one was removed."""
-    if clear_thread_model_override(runtime_paths, thread_id, entity_names=entity_names, config=config):
+    if clear_thread_model_override(
+        runtime_paths,
+        thread_id,
+        entity_names=entity_names,
+        config=config,
+        consume_opening=True,
+    ):
         return (
             "✅ Thread model override removed for the agents and teams you may address; "
             "room-level model selection applies to them again."
@@ -87,6 +93,7 @@ def _set_thread_model(
         model_name=model_name,
         entity_names=entity_names,
         config=config,
+        consume_opening=True,
     )
     model = config.models[model_name]
     return (

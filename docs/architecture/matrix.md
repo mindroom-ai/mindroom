@@ -128,7 +128,10 @@ The resolved thread root must be among that turn's source events and no more tha
 A root timestamp more than five minutes in the future is ignored.
 An opening pick uses the same sender rule as `!model`, including reply-authorized bridge accounts.
 At opening, the pick applies only to responders the sender may address that do not already have an explicit choice, and it takes precedence over fork inheritance for those responders.
+The opening pick is stored before `message:received` hooks, so a hook can suppress the reply without discarding the pick.
+A handled `!model` set or reset consumes the opening pick for the entire thread, even if the reset found no override to remove.
 While the thread's bounded record is retained, later handling does not reapply the pick, even after a reset or expanded access.
+Known limit: more than 1,000 thread model records within the seven-day window can evict a consumed marker and let a still-eligible pick apply again on replay.
 Invalid or unauthorized picks are ignored without an acknowledgement, and the reply uses the inherited model.
 The key has the same visibility as the message it travels in.
 

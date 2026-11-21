@@ -139,7 +139,6 @@ def test_store_roundtrip(tmp_path: Path) -> None:
         (("apply", "apply-other"), {"test_agent": "large"}),
         (("apply", "reset", "apply"), {}),
         (("set", "apply"), {"test_agent": "default"}),
-        (("set", "reset", "apply"), {"test_agent": "large"}),
     ],
 )
 def test_root_thread_model_is_consumed_once(
@@ -341,6 +340,18 @@ def test_copy_thread_model_override_copies_once_and_never_overwrites(tmp_path: P
     copy_thread_model_override(runtime_paths, THREAD_ID, fork_id)
     assert entity_models(fork_id) == {}
 
+    # A marker-only reset before the fork opens must not count as an existing fork snapshot.
+    reset_first = "$reset-first:localhost"
+    assert not clear_thread_model_override(
+        runtime_paths,
+        reset_first,
+        entity_names=("test_agent",),
+        config=config,
+        consume_opening=True,
+    )
+    copy_thread_model_override(runtime_paths, THREAD_ID, reset_first)
+    assert entity_models(reset_first) == {"model:test_agent": "large", "model:router": "large"}
+
 
 @pytest.mark.parametrize("damage", ["unreadable", "corrupt"])
 def test_copy_thread_model_override_leaves_a_store_it_cannot_read_alone(tmp_path: Path, damage: str) -> None:
@@ -524,6 +535,61 @@ def _conversation_event(bot: AgentBot, event_id: str, body: str, **content: obje
             },
         },
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("commands", "expected"),
+    [(("manual",), "manual"), (("reset",), "default"), (("manual", "reset"), "default")],
+    ids=["set", "reset-before-any-choice", "set-then-reset"],
+)
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_typed_model_command_consumes_a_delayed_opening_pick(
+    tmp_path: Path,
+    commands: tuple[str, ...],
+    expected: str,
+) -> None:
+    """A handled set or reset prevents an older pick for the entire thread, not just the command's scope."""
+    bot = _fork_bot(tmp_path)
+    config = bot.config
+    config.models["manual"] = ModelConfig(provider="openai", id="manual-model")
+    opener, setter = "@user:localhost", "@setter:localhost"
+    config.agents["code"].access = ResponderAccessConfig(users=[opener, setter])
+    config.router.access = ResponderAccessConfig(users=[opener], current_room_members=False)
+    deps = bot._turn_dispatcher.deps
+    room = _matrix_room(ROOM_ID, bot.matrix_id.full_id, user_ids=(bot.matrix_id.full_id, opener, setter))
+    client = _join_model_test_bot(bot, room)
+    event = _conversation_event(
+        bot,
+        "$opening",
+        "First prompt",
+        **{
+            THREAD_MODEL_CONTENT_KEY: {
+                "version": 1,
+                "runtime_user_id": client.user_id,
+                "runtime_device_id": client.device_id,
+                "model": "large",
+            },
+        },
+    )
+    for index, command in enumerate(commands):
+        handle_model_command(
+            command,
+            client=client,
+            config=config,
+            runtime_paths=deps.runtime_paths,
+            membership_index=deps.runtime.agent_reply_memberships,
+            room_id=ROOM_ID,
+            thread_id=event.event_id,
+            requester_user_id=setter,
+            command_event_id=f"$command-{index}",
+        )
+
+    prepared = await bot._turn_dispatcher._prepare_dispatch(make_test_turn(room, event, opener))
+    assert prepared is not None
+    for entity, model in (("code", expected), (ROUTER_AGENT_NAME, "default")):
+        scope = ModelScope(entity=entity, room_id=ROOM_ID, thread_id=prepared.target.resolved_thread_id)
+        assert resolve_turn_model(config, deps.runtime_paths, scope, None).model_name == model
 
 
 @pytest.mark.asyncio
