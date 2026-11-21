@@ -26,6 +26,7 @@ from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import rooms as rooms_module
+from mindroom.orchestration.room_state import RoomStateWorker
 from mindroom.orchestration.rooms import RoomSetup
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.room_modes import change_room_thread_mode
@@ -152,6 +153,282 @@ def _accounts(state: RoomState) -> list[str] | None:
     _, _, ids, events, _ = state
     content = events.get((ACCOUNTS_EVENT_TYPE, ids[ROUTER_AGENT_NAME].full_id))
     return None if content is None else content["accounts"]
+
+
+@pytest.fixture
+def worker_runtime(room_state: RoomState) -> MagicMock:
+    config, paths, _, _, client = room_state
+    runtime = MagicMock(config=config, runtime_paths=paths, running=True)
+    runtime.response_admission_gate.closed = False
+    runtime.room_steward.return_value = MagicMock(client=client)
+    return runtime
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mark_during_io", [False, True])
+async def test_worker_coalesces_marks(
+    worker_runtime: MagicMock,
+    room_state: RoomState,
+    mark_during_io: bool,
+) -> None:
+    _, _, _, _, client = room_state
+    entered, release = asyncio.Event(), asyncio.Event()
+    read = client.room_get_state_event.side_effect
+
+    async def blocked(room_id: str, kind: str, state_key: str = "") -> object:
+        if kind == EVENT_TYPE:
+            entered.set()
+            await release.wait()
+        return await read(room_id, kind, state_key)
+
+    client.room_get_state_event.side_effect = blocked
+    worker = RoomStateWorker(worker_runtime)
+
+    async def mark() -> None:
+        worker.mark(ROOM_ID)
+
+    # gather queues all of the mark callers before the worker gets to take the dirty flag.
+    await asyncio.gather(*(mark() for _ in range(20)))
+    async with asyncio.timeout(2):
+        await entered.wait()
+        if mark_during_io:
+            await asyncio.gather(*(mark() for _ in range(20)))
+        reads = [c for c in client.room_get_state_event.await_args_list if c.args[1] == EVENT_TYPE]
+        assert len(reads) == 1
+        release.set()
+        assert await wait_for_background_tasks(owner=worker)
+    reads = [c for c in client.room_get_state_event.await_args_list if c.args[1] == EVENT_TYPE]
+    assert len(reads) == (2 if mark_during_io else 1)
+    assert len(_writes(client, EVENT_TYPE)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("when", ["before_attempt", "during_read"])
+async def test_worker_uses_current_steward(
+    worker_runtime: MagicMock,
+    room_state: RoomState,
+    when: str,
+) -> None:
+    _, _, ids, events, outgoing = room_state
+    incoming = AsyncMock(spec=nio.AsyncClient)
+    incoming.user_id = ids["agent1"].full_id
+    incoming.rooms = outgoing.rooms
+    incoming.room_get_state_event.side_effect = outgoing.room_get_state_event.side_effect
+    incoming.joined_members.side_effect = outgoing.joined_members.side_effect
+    incoming.room_put_state.side_effect = outgoing.room_put_state.side_effect
+    new_steward = MagicMock(client=incoming)
+    read = outgoing.room_get_state_event.side_effect
+
+    async def demote(room_id: str, kind: str, state_key: str = "") -> object:
+        if kind == EVENT_TYPE:
+            worker_runtime.room_steward.return_value = new_steward
+        return await read(room_id, kind, state_key)
+
+    worker = RoomStateWorker(worker_runtime)
+    worker.mark(ROOM_ID)
+    if when == "before_attempt":
+        worker_runtime.room_steward.return_value = new_steward
+    else:
+        outgoing.room_get_state_event.side_effect = demote
+    assert await wait_for_background_tasks(timeout=2, owner=worker)
+    outgoing.room_put_state.assert_not_awaited()
+    assert events[EVENT_TYPE, ""] == {"mode": "mixed"}
+    assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": incoming.user_id}
+    assert (ACCOUNTS_EVENT_TYPE, incoming.user_id) in events
+
+
+@pytest.mark.asyncio
+async def test_worker_uses_reloaded_config(worker_runtime: MagicMock, room_state: RoomState) -> None:
+    config, _, _, events, client = room_state
+    worker = RoomStateWorker(worker_runtime)
+    read = client.room_get_state_event.side_effect
+
+    async def reload_config(room_id: str, kind: str, state_key: str = "") -> object:
+        if kind == EVENT_TYPE and worker_runtime.config is config:
+            new_config = config.model_copy(deep=True)
+            new_config.agents["agent2"].thread_mode = "room"
+            worker_runtime.config = new_config
+            worker.mark(room_id)
+        return await read(room_id, kind, state_key)
+
+    client.room_get_state_event.side_effect = reload_config
+    worker.mark(ROOM_ID)
+    assert await wait_for_background_tasks(timeout=2, owner=worker)
+    assert events[EVENT_TYPE, ""] == {"mode": "room"}
+    assert [c.args[2] for c in _writes(client, EVENT_TYPE)] == [{"mode": "room"}]
+
+
+@pytest.mark.asyncio
+async def test_worker_drops_rooms_without_a_steward(worker_runtime: MagicMock, room_state: RoomState) -> None:
+    _, _, _, _, client = room_state
+    steward = worker_runtime.room_steward.return_value
+    worker_runtime.room_steward.return_value = None
+    worker = RoomStateWorker(worker_runtime)
+    worker.mark(ROOM_ID)
+    assert await wait_for_background_tasks(timeout=2, owner=worker)
+    client.room_get_state_event.assert_not_awaited()
+    worker_runtime.room_steward.return_value = steward
+    worker.mark(ROOM_ID)
+    assert await wait_for_background_tasks(timeout=2, owner=worker)
+    assert len(_writes(client, EVENT_TYPE)) == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_bounds_concurrency_and_does_not_serialize_rooms(worker_runtime: MagicMock) -> None:
+    entered: list[str] = []
+    three_waiting, release = asyncio.Event(), asyncio.Event()
+    healthy, fourth = asyncio.Event(), asyncio.Event()
+
+    async def accounts(*args: Any, **_kwargs: Any) -> bool:
+        room_id = args[-1]
+        if room_id == "!healthy:localhost":
+            healthy.set()
+        else:
+            entered.append(room_id)
+            if len(entered) == 3:
+                three_waiting.set()
+            if len(entered) == 4:
+                fourth.set()
+            await release.wait()
+        return True
+
+    worker = RoomStateWorker(worker_runtime)
+    with (
+        patch("mindroom.orchestration.room_state.reconcile_room_accounts", side_effect=accounts),
+        patch("mindroom.orchestration.room_state.reconcile_room_thread_mode", return_value=True),
+        patch("mindroom.orchestration.room_state.reconcile_room_router_binding", return_value=True),
+    ):
+        try:
+            for n in range(3):
+                worker.mark(f"!slow{n}:localhost")
+            async with asyncio.timeout(2):
+                await three_waiting.wait()
+                worker.mark("!healthy:localhost")
+                await healthy.wait()
+                for n in range(3, 8):
+                    worker.mark(f"!slow{n}:localhost")
+                await fourth.wait()
+                await asyncio.sleep(0)
+                assert len(entered) == 4
+        finally:
+            release.set()
+            assert await wait_for_background_tasks(timeout=2, owner=worker)
+    assert len(entered) == 8
+
+
+@pytest.mark.asyncio
+async def test_worker_stop_cancels_in_flight_and_queued_rooms(worker_runtime: MagicMock, room_state: RoomState) -> None:
+    _, _, _, _, client = room_state
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def blocked(*_args: object, **_kwargs: object) -> None:
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    client.room_get_state_event.side_effect = blocked
+    worker = RoomStateWorker(worker_runtime)
+    worker.mark(ROOM_ID)
+    async with asyncio.timeout(2):
+        await entered.wait()
+        worker.mark("!other:localhost")
+        worker_runtime.running = False
+        worker.stop()
+        await cancelled.wait()
+    assert await wait_for_background_tasks(timeout=2, owner=worker)
+    client.room_get_state_event.assert_awaited_once()
+    worker.mark(ROOM_ID)
+    await asyncio.sleep(0)
+    client.room_get_state_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_worker_caps_jitter_and_retries_only_transient_steps(
+    worker_runtime: MagicMock,
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, _, _, client = room_state
+    clock = 0.0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    draws: list[tuple[float, float]] = []
+    levels: list[str] = []
+    write = client.room_put_state.side_effect
+    attempts: list[str] = []
+
+    def latest(low: float, high: float) -> float:
+        assert 0 < low < high <= 60
+        draws.append((low, high))
+        return high
+
+    async def refuse(room_id: str, kind: str, content: dict, **kwargs: object) -> object:
+        attempts.append(kind)
+        if kind == EVENT_TYPE:
+            return nio.RoomPutStateError("Forbidden", "M_FORBIDDEN")
+        if kind == ACCOUNTS_EVENT_TYPE and attempts.count(kind) <= 9:
+            raise TimeoutError
+        return await write(room_id, kind, content, **kwargs)
+
+    async def settle() -> None:
+        for _ in range(40):
+            await asyncio.sleep(0)
+
+    monkeypatch.setattr("mindroom.orchestration.room_state.uniform", latest)
+    client.room_put_state.side_effect = refuse
+    worker = RoomStateWorker(worker_runtime)
+    try:
+        with capture_logs() as logs:
+            worker.mark(ROOM_ID)
+            await settle()
+            assert attempts == [EVENT_TYPE, ACCOUNTS_EVENT_TYPE, ROUTER_EVENT_TYPE]
+            for high in (1.5, 3, 6, 12, 24, 48, 60, 60, 60):
+                assert draws[-1][1] == high
+                clock += high - 0.25
+                count = len(attempts)
+                await settle()
+                assert len(attempts) == count
+                clock += 0.25
+                await settle()
+            levels = [log["log_level"] for log in logs if log["event"] == "room_accounts_publish_failed"]
+        assert levels == ["info"] * 7 + ["warning", "debug"]
+        assert attempts.count(EVENT_TYPE) == 1
+        assert attempts.count(ACCOUNTS_EVENT_TYPE) == 10
+        assert attempts.count(ROUTER_EVENT_TYPE) == 1
+        clock += 100
+        await settle()
+        assert attempts.count(EVENT_TYPE) == 1
+        worker.mark(ROOM_ID)
+        await settle()
+        assert attempts.count(EVENT_TYPE) == 2
+    finally:
+        worker.stop()
+        await settle()
+
+
+@pytest.mark.asyncio
+async def test_member_event_marks_without_blocking_its_room_lane(room_state: RoomState) -> None:
+    _, _, ids, _, client = room_state
+    duties = _owner_bot(room_state).steward_duties
+    worker = duties.deps.runtime.orchestrator.room_state
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    read = client.room_get_state_event.side_effect
+
+    async def blocked(*args: object, **kwargs: object) -> object:
+        entered.set()
+        await release.wait()
+        return await read(*args, **kwargs)
+
+    client.room_get_state_event.side_effect = blocked
+    try:
+        async with asyncio.timeout(2):
+            await duties.member_event(client.rooms[ROOM_ID], _membership_event(ids["agent2"].full_id, "join", "leave"))
+            await entered.wait()
+    finally:
+        release.set()
+        assert await wait_for_background_tasks(timeout=2, owner=worker)
 
 
 @pytest.mark.asyncio
