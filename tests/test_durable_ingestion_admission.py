@@ -718,6 +718,60 @@ async def test_duplicate_cannot_answer_a_question_published_after_source(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("positions", [False, True])
+async def test_a_persons_numeric_answer_selects_whatever_tool_trace_it_carries(
+    journal_database: Callable[[], EventJournalStore],
+    positions: bool,
+) -> None:
+    """Only an agent's reply had tool markers in its text, so nothing is put into a person's answer of ``1``."""
+    store = journal_database()
+    stream = uuid4()
+    principal = store.principal("agent@@bot:example.org")
+    consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
+    await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=stream)
+    thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"}}
+    question = message("$question")
+    question.source.update(
+        sender=ACCOUNT,
+        content={
+            "msgtype": "m.text",
+            "body": "Choose",
+            **thread,
+            "io.mindroom.interactive": {
+                "creator_agent": "agent",
+                "question_text": "Choose",
+                "options": {"1": "one"},
+                "option_labels": {"1": "One"},
+                "source_event_id": "$turn",
+            },
+        },
+    )
+    answer = message("$answer")
+    answer.source["content"] = {"msgtype": "m.text", "body": "1", **thread}
+    if positions:
+        call = {"type": "tool_call_completed", "tool_name": "shell", "body_line": 0, "at": 0}
+        answer.source["content"] |= {
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<p>1</p>\n",
+            "io.mindroom.tool_trace": {"version": 3, "events": [call]},
+        }
+    for sequence, record in enumerate((message("$turn"), question, answer), start=1):
+        batch = validate_ingestion_batch(
+            SyncBatch(stream, sequence, (record,)),
+            account_id=ACCOUNT,
+            sender_is_managed=lambda sender: sender == ACCOUNT,
+        )
+        await principal.admit_ingestion_batch(batch)
+        if record is question:
+            await principal.settle("$question")
+
+    selection = await principal.claim_interactive_text(source_event_id="$answer")
+
+    assert selection is not None
+    assert selection.selected_value == "one"
+
+
+@pytest.mark.asyncio
 async def test_batch_acceptance_survives_reopen_and_is_scoped_to_consumer(
     journal_database: Callable[[], EventJournalStore],
 ) -> None:

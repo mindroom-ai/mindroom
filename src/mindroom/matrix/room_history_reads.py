@@ -21,6 +21,7 @@ from nio.schemas import Schemas
 from mindroom.constants import ROUTE_EVENT_TYPE, SILENT_SCHEDULE_EVENT_TYPE
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
+from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
@@ -143,7 +144,10 @@ async def find_response_event_ids_via_room_messages(
                 exact_content_required=response_content is not None,
             )
             event_info = EventInfo.from_event(event_source)
-            exact_content = response_content is not None and event_source.get("content") == response_content
+            # This sender's reply reached Matrix without its tool markers, and its outbox row holds it with them.
+            own = response_content is not None and event_source.get("sender") == response_sender
+            content = event_source.get("content") if own else None
+            exact_content = isinstance(content, dict) and tool_markers_in_text(content) == response_content
             replies_to_source = (
                 not event_info.is_edit and not event_info.is_thread_fallback and event_info.reply_to_event_id in sources
             )
@@ -290,7 +294,7 @@ def _matched_delivery_copy_key(
     content = event_source.get("content")
     if not isinstance(content, dict):
         return None
-    key = _canonical_content_key(content)
+    key = _canonical_content_key(tool_markers_in_text(content))
     return key if key in expected else None
 
 

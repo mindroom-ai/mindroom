@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     """Create a mock Matrix client with one room."""
     client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@mindroom_test:localhost"
     room = MagicMock()
     room.encrypted = encrypted
     client.rooms = {"!room:localhost": room}
@@ -249,6 +250,7 @@ def test_edit_envelope_discards_thread_relation() -> None:
 def _cache_bypass_client(*, encrypted: bool | None) -> AsyncMock:
     """Create a mock client without a cached room; encryption state answers as given."""
     client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@mindroom_test:localhost"
     client.rooms = {}
     if encrypted is None:
         encryption_state = MagicMock(spec=nio.RoomGetStateEventError)
@@ -534,6 +536,7 @@ async def test_send_message_outcome_fits_for_encryption_enabled_during_sidecar_u
 async def test_uncached_room_encryption_enabled_during_upload_avoids_raw_send() -> None:
     """An uncached room enabling encryption during upload must not use the plaintext fallback."""
     client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@mindroom_test:localhost"
     client.rooms = {}
     client.olm = MagicMock()
     client.olm.device_id = "D"

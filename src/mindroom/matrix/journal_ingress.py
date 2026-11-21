@@ -28,6 +28,8 @@ from mindroom.matrix.media import (
     parse_matrix_media_event_source,
 )
 from mindroom.matrix.transport_progress import is_transport_progress_revision, is_unfinished_reply
+from mindroom.matrix_identifiers import has_agent_username
+from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -308,6 +310,8 @@ def ingestion_timeline_views(
 ) -> tuple[InboundEvent, ProjectedEvent | None] | None:
     """Classify one durable timeline input, or return its compatibility fate."""
     message = "Unsupported ingestion event"
+    if isinstance(content := source.get("content"), dict) and has_agent_username(source.get("sender")):
+        source = {**source, "content": tool_markers_in_text(cast("dict[str, object]", content))}
     parsed = parse_matrix_media_event_source(source) if is_encrypted_media_event_source(source) else None
     if not isinstance(parsed, MATRIX_MEDIA_EVENT_TYPES):
         parsed = nio.Event.parse_event(dict(source))

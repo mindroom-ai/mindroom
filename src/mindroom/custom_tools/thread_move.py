@@ -92,6 +92,10 @@ def _plan_thread_copy(
         if mentioned := mentioned_user_ids(message.content):
             # The copy keeps counting them as mentioned earlier in the thread, so a team the thread formed carries on.
             content[COPIED_MENTIONS_KEY] = mentioned
+        trace = content.get(TOOL_TRACE_CONTENT_KEY)
+        if isinstance(trace, dict) and trace.get("version") == 3:
+            # No read put this trace's calls back in the text, so nothing vouches for where it puts them.
+            del content[TOOL_TRACE_CONTENT_KEY]
         named = message.sender == mover_id
         speaks_for = message.content.get(ORIGINAL_SENDER_KEY)
         if entity_name_for_sender(message.sender) is not None and isinstance(speaks_for, str) and speaks_for:

@@ -29,14 +29,25 @@ from mindroom.constants import (
     WAKE_MENTIONED_KEY,
 )
 from mindroom.custom_tools.thread_move import ThreadMoveTools, _plan_thread_copy
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
+from mindroom.matrix.client_delivery import (
+    DeliveredMatrixEvent,
+    MatrixDeliveryFailure,
+    MatrixDeliveryFailureKind,
+    send_message_result,
+)
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagRecord, ThreadTagsError, ThreadTagsState
 from mindroom.thread_utils import get_all_mentioned_agents_in_thread
-from mindroom.tool_system.events import ToolTraceEntry, body_without_tool_markers, build_tool_trace_content
+from mindroom.tool_system.events import (
+    ToolTraceEntry,
+    body_without_tool_markers,
+    build_tool_trace_content,
+    tool_markers_in_text,
+    tool_markers_out_of_text,
+)
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -50,6 +61,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids
+from tests.tool_position_helpers import _marked
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -249,6 +261,17 @@ def test_plan_prefix_keeps_a_leading_tool_marker_on_its_own_line() -> None:
     assert copy["body"].splitlines()[0].endswith(":")
     assert body_without_tool_markers(copy["body"], copy).splitlines()[-1] == "found it"
     assert "🔧" not in body_without_tool_markers(copy["body"], copy)
+
+
+@pytest.mark.parametrize("events", [5, "events", [1, None, {"tool_name": 3, "at": "x"}]])
+def test_plan_relays_a_malformed_trace_without_failing(events: object) -> None:
+    """Any room member can write the trace, so a copy reads one of any shape as its text alone."""
+    content = {"msgtype": "m.text", "body": "Done.", "formatted_body": "<p>Done.</p>"}
+    content[TOOL_TRACE_CONTENT_KEY] = {"version": 3, "events": events}
+    [copy] = _plan(_message(ABSENT_ID, content), display_names={ABSENT_ID: "Research"})
+
+    assert copy["body"] == "Research: Done."
+    assert tool_markers_out_of_text(copy) is copy
 
 
 def test_plan_escapes_display_name_in_formatted_prefix() -> None:
@@ -681,6 +704,83 @@ async def test_move_thread_copies_tags_posts_notice_and_resolves_source(tmp_path
     assert notice["m.relates_to"]["m.in_reply_to"] == {"event_id": "$current:localhost"}
     assert payload["tags_copied"] == ["ideas", "priority"]
     assert payload["warnings"] == []
+
+
+_SHELL_CALL = {"type": "tool_call_completed", "tool_name": "shell"}
+
+
+def _real_sends(move: _Move) -> tuple[AsyncMock, AsyncMock]:
+    """Return what Matrix gets from the moving agent's client, and a send that goes through the real one to it."""
+    event_ids = iter(f"$copy{index}:localhost" for index in range(100))
+    room_send = AsyncMock(side_effect=lambda **_kwargs: nio.RoomSendResponse(next(event_ids), TARGET_ROOM_ID))
+    move.context.client.room_send = room_send
+    return room_send, AsyncMock(wraps=send_message_result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("events", [[_SHELL_CALL], [None, _SHELL_CALL], ["shell"], [{"tool_name": "shell"}]])
+async def test_move_thread_sends_each_copy_of_a_reply_with_tool_calls_whole(tmp_path: Path, events: list[Any]) -> None:
+    """A copy goes through the real send: its markers leave its text there, or stay when its trace names no call."""
+    move = _move(tmp_path)
+    reply = f"Checking.\n\n🔧 `shell` [{len(events)}]\n\nDone."
+    with_calls = _marked(reply, events)
+    history = _thread(move)
+    history[1] = _message(move.ids["general"], with_calls, "$general:localhost")
+    history[2] = _message(move.ids["research"], with_calls, "$research:localhost")
+    room_send, send = _real_sends(move)
+
+    with _matrix(move, history, send=send) as mocks:
+        payload = await _run()
+
+    assert payload["status"] == "ok"
+    assert payload["copied"] == 3
+    planned = [call.args[2] for call in mocks.send.await_args_list[1:3]]
+    assert [copy["body"] for copy in planned] == [reply, f"{move.ids['research']}: {reply}"]
+    sent = [call.kwargs["content"] for call in room_send.await_args_list[1:3]]
+    without_markers = ["Checking.\n\nDone.", f"{move.ids['research']}: Checking.\n\nDone."]
+    assert [copy["body"] for copy in sent] == (
+        without_markers if events == [_SHELL_CALL] else [reply, planned[1]["body"]]
+    )
+    assert [tool_markers_in_text(copy) for copy in sent] == planned
+    assert mocks.set_tag.await_args_list[-1].args[1:] == (SOURCE_ROOM_ID, ROOT_ID, RESOLVED_THREAD_TAG)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sender", "held_without_markers"),
+    [("@mindroom_gone:localhost", False), ("@helper:localhost", True), ("general", True)],
+)
+async def test_move_thread_copies_the_calls_of_a_reply_a_read_put_back_in_its_text_and_of_no_other(
+    tmp_path: Path,
+    sender: str,
+    held_without_markers: bool,
+) -> None:
+    """An agent taken out of the config had its markers put back by every read, by its username, so its calls move.
+
+    A row that still holds a version-3 trace is one no read restored: an account with another username wrote it, or
+    the row is the moving agent's own. Nothing vouches for where it puts its calls, so no copy carries it.
+    """
+    move = _move(tmp_path)
+    sender = move.ids.get(sender, sender)
+    said_by = "" if sender == move.ids["general"] else f"{sender}: "
+    reply = "Checking.\n\n🔧 `shell` [1]\n\nDone."
+    built = _marked(reply, [_SHELL_CALL])
+    held = tool_markers_out_of_text(built)
+    assert held["body"] == "Checking.\n\nDone."
+    history = _thread(move)
+    history[2] = _message(sender, held if held_without_markers else built, "$reply:localhost")
+    room_send, send = _real_sends(move)
+
+    with _matrix(move, history, send=send) as mocks:
+        payload = await _run()
+
+    assert payload["status"] == "ok"
+    planned = mocks.send.await_args_list[2].args[2]
+    sent = room_send.await_args_list[2].kwargs["content"]
+    assert planned["body"] == f"{said_by}{held['body'] if held_without_markers else reply}"
+    assert (TOOL_TRACE_CONTENT_KEY in planned) is not held_without_markers
+    assert sent["body"] == f"{said_by}Checking.\n\nDone."
+    assert tool_markers_in_text(sent) == planned
 
 
 @pytest.mark.asyncio

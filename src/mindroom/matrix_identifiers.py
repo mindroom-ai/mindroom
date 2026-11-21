@@ -53,6 +53,15 @@ def unnamespaced_agent_name_from_username_localpart(username_localpart: str) -> 
     return agent_name or None
 
 
+def has_agent_username(user_id: object) -> bool:
+    """Return whether a Matrix user ID has the username prefix MindRoom gives its agents, on any homeserver.
+
+    A send takes the tool markers out of such an account's text, and every read, here and in MindRoom Chat, puts them
+    back for it and for no other. Anyone can register the name elsewhere, so it trusts the account with nothing.
+    """
+    return isinstance(user_id, str) and user_id.lower().startswith(f"@{_AGENT_USERNAME_PREFIX}")
+
+
 def is_managed_room_key(room_key: str) -> bool:
     """Return whether a configured room reference names a managed room, not a Matrix room ID or alias."""
     return not room_key.startswith(("!", "#"))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from collections import defaultdict, deque
 from dataclasses import replace
@@ -44,6 +45,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.tool_position_helpers import reply_with_calls
 
 
 @pytest.fixture(autouse=True)
@@ -1196,6 +1198,51 @@ async def test_matrix_api_search_event_context_preserves_profile_info() -> None:
             },
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_search_finds_a_reply_by_its_prose_and_shows_it_with_its_tool_calls() -> None:
+    """The homeserver picks the hits from the body it holds, and a found reply is shown as its agent built it.
+
+    Matrix holds a reply without its tool marker lines, so a tool's name finds a reply from before they left the
+    text and none that named the tool in a marker line alone. A homeserver may answer with a sender that is no ID.
+    """
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    agent = entity_identity_registry(ctx.config, ctx.runtime_paths).current_ids["general"].full_id
+
+    async def found(
+        term: str,
+        content: dict[str, object],
+        neighbour: dict[str, object],
+        sender: object,
+    ) -> list[object]:
+        """Return the snippets, of each hit and of the message before it, that a search of one stored reply shows."""
+        context = {"events_before": [{**_raw_event(content=neighbour), "sender": sender}], "events_after": []}
+
+        async def search(_response: object, _method: str, _path: str, data: str) -> _MatrixSearchResponse:
+            asked = json.loads(data)["search_categories"]["room_events"]["search_term"]
+            # As a homeserver searches: for a word of the body it holds.
+            hit = asked in re.findall(r"\w+", str(content["body"]))
+            results = [_search_result(result={**_raw_event(content=content), "sender": sender}, context=context)]
+            return _MatrixSearchResponse(count=int(hit), next_batch=None, results=results if hit else [])
+
+        ctx.client._send.side_effect = search
+        with tool_runtime_context(ctx):
+            payload = json.loads(await tool.matrix_api(action="search", search_term=term, event_context={}))
+        return [[result["snippet"], result["context"]["events_before"][0]["snippet"]] for result in payload["results"]]
+
+    built, held = reply_with_calls("The needle.\n\n🔧 `shell` [1]", 1)
+    neighbour, held_neighbour = reply_with_calls("Before.\n\n🔧 `shell` [1]", 1)
+    assert (held["body"], held_neighbour["body"]) == ("The needle.", "Before.")
+    with_calls = [["The needle. 🔧 `shell` [1]", "Before. 🔧 `shell` [1]"]]
+
+    assert await found("needle", held, held_neighbour, agent) == with_calls
+    assert await found("needle", built, neighbour, agent) == with_calls
+    assert await found("shell", built, neighbour, agent) == with_calls
+    assert await found("shell", held, held_neighbour, agent) == []
+    for sender in ("@alice:localhost", [agent], {"id": agent}):
+        assert await found("needle", held, held_neighbour, sender) == [["The needle.", "Before."]]
 
 
 @pytest.mark.asyncio
