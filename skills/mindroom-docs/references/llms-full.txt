@@ -1474,7 +1474,7 @@ Edits to an agent's or team's own settings, such as `instructions`, `model`, `to
 Changing `display_name` or `accept_invites`, an agent's `private` settings, whether an agent has the `desktop` tool, or which MCP tools it has restarts that agent or team.
 Removing an agent or team makes it leave its rooms, except direct messages, when the reload applies.
 An edit saved while MindRoom is still starting applies once startup finishes.
-An edit that starts, stops, removes, or restarts no agent, team, or owner account and changes no access, room, or authorization setting, such as a model definition, knowledge base, or agent instruction change, applies within seconds even while agents are replying.
+An edit that starts, stops, or restarts no account and changes no access, room, contact, or authorization setting, such as a model definition, knowledge base, or agent instruction change, applies within seconds even while agents are replying.
 Other edits, including ones that restart an agent or team, an agent's or team's `access` or `rooms`, `administrators`, `authorization`, `room_defaults`, `rooms`, or `router.access`, first wait for active responses to finish, for at most 600 seconds.
 To confirm that a reload finished, use [`mindroom config check-applied`](https://docs.mindroom.chat/deployment/config-bundles/#config-fingerprint-and-config-check-applied).
 
@@ -1654,7 +1654,7 @@ Template prompts accept only their own `{field_name}` placeholders, and an unsup
 Placeholders are exact `{field_name}` replacements, not Jinja or Python `str.format`, so `{message.text}`, `{message!r}`, and `{message:.2f}` are rejected.
 Escape literal braces as `{{` and `}}` in overrides that use placeholders.
 Changed overrides apply through hot reload.
-Changing a prompt that agents build in when they start, such as `HIDDEN_TOOL_CALLS_PROMPT` or `AGENT_IDENTITY_CONTEXT_TEMPLATE`, restarts every agent, team, and the owner account; other prompt changes apply without restarts.
+Changing a prompt that agents build in when they start, such as `HIDDEN_TOOL_CALLS_PROMPT` or `AGENT_IDENTITY_CONTEXT_TEMPLATE`, restarts every agent, team, and the owner account; other prompt changes restart only an agent in an active voice call.
 
 ## Environment Variables
 
@@ -2993,7 +2993,7 @@ Then:
 2. If the thread requires explicit targeting, nothing is routed; eligible individual agents already in the thread may still use opt-in [adaptive participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation).
 3. If exactly one eligible responder remains, it answers directly without an AI routing call.
 4. If several remain, routing reads the message and up to three previous thread messages (each cut to 100 characters) and picks the best match from the candidates' roles, tools, and instructions.
-5. The chosen agent or team answers the message in the thread: the account doing the routing answers itself when it is chosen, and any other choice is told with a hidden event.
+5. The chosen agent or team answers the message: the account doing the routing answers itself when it is chosen, and tells any other choice with a hidden event.
    No routing message appears in the room.
 
 One MindRoom account per room does the routing: the one with the highest power level there, the lowest Matrix ID breaking a tie.
@@ -5757,8 +5757,7 @@ No transcript appears for a voice message nobody answers, or for one that could 
 If only one agent or team can respond, the transcript or caption mentions one, or thread context picks one, that responder answers the voice message directly.
 
 **Routing must choose.**
-If several agents or teams can respond and none is targeted, [routing](https://docs.mindroom.chat/configuration/router/#how-routing-works) picks one from the transcript, so no handoff message appears in the room.
-The account doing the routing answers itself when it is the one picked, and tells any other pick with a hidden event.
+If several agents or teams can respond and none is targeted, [routing](https://docs.mindroom.chat/configuration/router/#how-routing-works) chooses from the transcript as it does for text, and no handoff message appears in the room.
 The chosen responder answers the voice message and still receives the original audio attachment.
 
 **Sender is not routed.**
@@ -18051,8 +18050,8 @@ Tools such as `browser`, `attachments`, `matrix_message`, `gmail`, and `google_d
 Which Matrix user may drive an agent, act in a room, or approve a change is a separate question governed by access policy and requester authorization.
 An agent or team mentioned in another entity's reply acts for the human or configured bot account that requested that reply, so neither can reach an entity whose `access` excludes them by asking a different entity to mention it.
 Work no person started, such as a shared agent's automation run and the delegations, todos, mentions, and schedules that mention another agent it makes, acts as that agent's own account, which every other agent and team admits only through its own `access`.
-For an agent-created schedule that mentions no agent, routing considers only the responders the creating agent may address.
-When another responder receives the steward's route, it checks the steward's account for a visible trigger and the creating agent for a silent one.
+A schedule that mentions no agent is routed only to responders its recorded requester may address.
+When that requester is an agent and the trigger is visible, the responder the route names checks the steward's account instead.
 
 ## Protecting the primary from worker code
 
@@ -22092,7 +22091,6 @@ Requesting one of them returns HTTP 400 with code `unsupported_worker_scope`, an
 ## Auto-routing
 
 Select the `auto` model to pick an available agent for each request: a configured [router judgment](https://docs.mindroom.chat/configuration/router/#responder-selection-judgments) decides first, then the router model when the judgment does not decide.
-When that selection fails, the first available agent answers.
 `auto` considers agents only; select `team/<team_name>` to run a team.
 The response's `model` field names the chosen agent, and the session belongs to that agent.
 When a [router judgment](https://docs.mindroom.chat/configuration/router/#responder-selection-judgments) finds no suitable agent, the request fails with HTTP 400 and code `no_suitable_responder`; choose a model explicitly or rephrase.

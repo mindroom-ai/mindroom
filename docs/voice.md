@@ -84,8 +84,7 @@ No transcript appears for a voice message nobody answers, or for one that could 
 If only one agent or team can respond, the transcript or caption mentions one, or thread context picks one, that responder answers the voice message directly.
 
 **Routing must choose.**
-If several agents or teams can respond and none is targeted, [routing](configuration/router.md#how-routing-works) picks one from the transcript, so no handoff message appears in the room.
-The account doing the routing answers itself when it is the one picked, and tells any other pick with a hidden event.
+If several agents or teams can respond and none is targeted, [routing](configuration/router.md#how-routing-works) chooses from the transcript as it does for text, and no handoff message appears in the room.
 The chosen responder answers the voice message and still receives the original audio attachment.
 
 **Sender is not routed.**

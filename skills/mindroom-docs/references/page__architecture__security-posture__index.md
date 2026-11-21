@@ -20,8 +20,8 @@ Tools such as `browser`, `attachments`, `matrix_message`, `gmail`, and `google_d
 Which Matrix user may drive an agent, act in a room, or approve a change is a separate question governed by access policy and requester authorization.
 An agent or team mentioned in another entity's reply acts for the human or configured bot account that requested that reply, so neither can reach an entity whose `access` excludes them by asking a different entity to mention it.
 Work no person started, such as a shared agent's automation run and the delegations, todos, mentions, and schedules that mention another agent it makes, acts as that agent's own account, which every other agent and team admits only through its own `access`.
-For an agent-created schedule that mentions no agent, routing considers only the responders the creating agent may address.
-When another responder receives the steward's route, it checks the steward's account for a visible trigger and the creating agent for a silent one.
+A schedule that mentions no agent is routed only to responders its recorded requester may address.
+When that requester is an agent and the trigger is visible, the responder the route names checks the steward's account instead.
 
 ## Protecting the primary from worker code
 

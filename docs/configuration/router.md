@@ -51,7 +51,7 @@ Then:
 2. If the thread requires explicit targeting, nothing is routed; eligible individual agents already in the thread may still use opt-in [adaptive participation](threads.md#adaptive-participation).
 3. If exactly one eligible responder remains, it answers directly without an AI routing call.
 4. If several remain, routing reads the message and up to three previous thread messages (each cut to 100 characters) and picks the best match from the candidates' roles, tools, and instructions.
-5. The chosen agent or team answers the message in the thread: the account doing the routing answers itself when it is chosen, and any other choice is told with a hidden event.
+5. The chosen agent or team answers the message: the account doing the routing answers itself when it is chosen, and tells any other choice with a hidden event.
    No routing message appears in the room.
 
 One MindRoom account per room does the routing: the one with the highest power level there, the lowest Matrix ID breaking a tie.
