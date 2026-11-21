@@ -297,8 +297,6 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             fast_repeat_fallback = False
             queued_commentary_fallback = False
             if not ending and reason == "content":
-                # The close can follow an accepted start before its call_soon callback runs.
-                self._confirm_replacement_started()
                 now = time.monotonic()
                 previous = self._last_recovered_content_close
                 elapsed = now - previous if previous is not None else None

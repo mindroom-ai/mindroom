@@ -741,7 +741,7 @@ async def test_live_sdk_caps_repeated_content_closes(
             provider.connected_again.clear()
 
             now += elapsed
-            # When enabled, the fake socket has already queued session.started ahead of this close.
+            # When enabled, the replacement's session.started was accepted before this close.
             second.content_close()
             await asyncio.wait_for(second.closed_event.wait(), 2)
             if retryable is None:
