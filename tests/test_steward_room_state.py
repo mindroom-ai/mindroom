@@ -14,11 +14,13 @@ from structlog.testing import capture_logs
 
 from mindroom import room_modes
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.bot import AgentBot
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import AdmissionFacts, RoomMembershipPosition
+from mindroom.matrix import room_thread_mode
 from mindroom.matrix.room_accounts import reconcile_room_accounts, reconcile_room_router_binding
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
@@ -159,6 +161,410 @@ def worker_runtime(room_state: RoomState) -> MagicMock:
     runtime.response_admission_gate.closed = False
     runtime.room_steward.return_value = MagicMock(client=client)
     return runtime
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_due", [False, True])
+async def test_review_worker_survives_replacement_admission_closure(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+    retry_due: bool,
+) -> None:
+    """Marks and due retries survive a temporary replacement that has no after-reload sweep."""
+    config, paths, _, events, client = room_state
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=paths, config=config)
+    orchestrator.running = True
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: _owner_bot(room_state)})
+    lifecycle = make_config_reload_lifecycle(paths, response_admission_gate=orchestrator.response_admission_gate)
+    worker = orchestrator.room_state
+    clock = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    put = client.room_put_state.side_effect
+
+    async def timeout_roster(room_id: str, kind: str, content: dict, **kwargs: object) -> object:
+        if kind == ACCOUNTS_EVENT_TYPE:
+            raise TimeoutError
+        return await put(room_id, kind, content, **kwargs)
+
+    async def during_replacement() -> None:
+        nonlocal clock
+        assert lifecycle.response_admission_gate.closed
+        if retry_due:
+            clock = 1
+        else:
+            worker.mark(ROOM_ID)
+        client.room_put_state.reset_mock()
+        await _yield_loop(40)
+        client.room_put_state.assert_not_awaited()
+
+    try:
+        if retry_due:
+            client.room_put_state.side_effect = timeout_roster
+            worker.mark(ROOM_ID)
+            await _yield_loop(40)
+            assert len(_writes(client, ACCOUNTS_EVENT_TYPE)) == 1
+            client.room_put_state.side_effect = put
+        await lifecycle.apply_with_response_admission(
+            during_replacement,
+            operation_name="test MCP catalog replacement",
+            request_is_current=lambda: True,
+        )
+        lifecycle.after_reload.assert_not_awaited()
+        await _yield_loop(40)
+        assert events[EVENT_TYPE, ""] == {"mode": "mixed"}
+        assert _accounts(room_state) is not None
+    finally:
+        worker.stop()
+        await _yield_loop(10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["M_FORBIDDEN", "M_UNKNOWN"])
+async def test_review_accounts_does_not_put_when_comparison_fails(
+    room_state: RoomState,
+    status: str,
+) -> None:
+    """An unreadable roster is not absent, and only a transient comparison should retry."""
+    config, paths, _, _, client = room_state
+    read = client.room_get_state_event.side_effect
+
+    async def denied(room_id: str, kind: str, state_key: str = "") -> object:
+        if kind == ACCOUNTS_EVENT_TYPE:
+            return nio.RoomGetStateEventError("Failed comparison", status, room_id=room_id)
+        return await read(room_id, kind, state_key)
+
+    client.room_get_state_event.side_effect = denied
+    with capture_logs() as logs:
+        assert await reconcile_room_accounts(client, config, paths, ROOM_ID) is (status == "M_FORBIDDEN")
+    client.room_put_state.assert_not_awaited()
+    assert [log["log_level"] for log in logs] == ["debug" if status == "M_FORBIDDEN" else "warning"]
+
+
+def _room_state_fleet(room_state: RoomState) -> tuple[_MultiAgentOrchestrator, AgentBot, AgentBot]:
+    config, paths, ids, _, outgoing = room_state
+    incoming = _successor_client(room_state)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=paths, config=config)
+    orchestrator.running = True
+    bots = []
+    for name, client, power in ((ROUTER_AGENT_NAME, outgoing, 100), ("agent1", incoming, 50)):
+        bot = AgentBot(
+            AgentMatrixUser(name, ids[name].full_id, name, TEST_PASSWORD),
+            rooms=[],
+            orchestrator=orchestrator,
+        )
+        bot.running = True
+        room = nio.MatrixRoom(ROOM_ID, client.user_id)
+        room.power_levels.users[client.user_id] = power
+        client.rooms = {ROOM_ID: room}
+        bot.client = client
+        bots.append(install_runtime_journal_support(bot))
+    install_bots(orchestrator, {bot.agent_name: bot for bot in bots})
+    return orchestrator, bots[0], bots[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drains_during_read", [False, True])
+async def test_review_draining_steward_cannot_sign_through_its_client(
+    room_state: RoomState,
+    drains_during_read: bool,
+) -> None:
+    """A draining winner is ineligible for background PUTs even if it still holds the room."""
+    _, _, _, events, outgoing = room_state
+    orchestrator, owner, runner_up = _room_state_fleet(room_state)
+    read = outgoing.room_get_state_event.side_effect
+
+    async def drain(room_id: str, kind: str, state_key: str = "") -> object:
+        if kind == EVENT_TYPE:
+            owner._runtime_view.begin_draining()
+        return await read(room_id, kind, state_key)
+
+    if drains_during_read:
+        outgoing.room_get_state_event.side_effect = drain
+    else:
+        owner._runtime_view.begin_draining()
+    orchestrator.room_state.mark(ROOM_ID)
+    assert await wait_for_background_tasks(timeout=2, owner=orchestrator.room_state)
+    outgoing.room_put_state.assert_not_awaited()
+    assert orchestrator.room_steward(ROOM_ID) is owner  # Foreground election is unchanged.
+    assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": runner_up.agent_user.user_id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("denied_read", ["joined_members", "lazy_roster", "m.room.member", EVENT_TYPE])
+async def test_review_forbidden_reads_are_quiet_until_marked(
+    room_state: RoomState,
+    worker_runtime: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    denied_read: str,
+) -> None:
+    """A forbidden read does not write or retry that step, but the next mark checks again."""
+    config, paths, _, _, client = room_state
+    read = client.room_get_state_event.side_effect
+    reads = 0
+    clock = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+
+    async def deny_joined(_room_id: str) -> object:
+        nonlocal reads
+        reads += 1
+        return nio.JoinedMembersError("Denied", "M_FORBIDDEN")
+
+    async def deny_event(room_id: str, kind: str, state_key: str = "") -> object:
+        nonlocal reads
+        if kind == denied_read:
+            reads += 1
+            return nio.RoomGetStateEventError("Denied", "M_FORBIDDEN", room_id=room_id)
+        return await read(room_id, kind, state_key)
+
+    if denied_read == "lazy_roster":
+        for agent in config.agents.values():
+            agent.rooms = []
+    if denied_read in {"joined_members", "lazy_roster"}:
+        client.joined_members.side_effect = deny_joined
+    else:
+        client.room_get_state_event.side_effect = deny_event
+    worker = RoomStateWorker(worker_runtime)
+    try:
+        with capture_logs() as logs:
+            worker.mark(ROOM_ID)
+            await _yield_loop(40)
+            initial = reads
+            assert initial > 0
+            clock = 2
+            await _yield_loop(40)
+            assert reads == initial
+            if denied_read != "joined_members":
+                assert not _writes(client, EVENT_TYPE)
+            if denied_read in {"joined_members", "lazy_roster"}:
+                assert not _writes(client, ACCOUNTS_EVENT_TYPE)
+            worker.mark(ROOM_ID)
+            await _yield_loop(40)
+            assert reads > initial
+        assert {log["log_level"] for log in logs} <= {"debug"}
+        if denied_read != "joined_members":
+            assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is False
+    finally:
+        worker.stop()
+        await _yield_loop(10)
+
+
+@pytest.mark.asyncio
+async def test_review_leaving_while_waiting_on_mode_lock_does_not_log_traceback(room_state: RoomState) -> None:
+    """A vanished room after the compare lock wait is a normal departure, not an exception."""
+    config, paths, _, _, client = room_state
+    key = (paths.storage_root, ROOM_ID)
+    lock = asyncio.Lock()
+    room_thread_mode._LOCKS[key] = lock
+    async with lock:
+        task = asyncio.create_task(reconcile_room_thread_mode(client, config, paths, ROOM_ID))
+        await asyncio.sleep(0)
+        assert not task.done()
+        del client.rooms[ROOM_ID]
+    with capture_logs() as logs:
+        await task
+    assert not any(log.get("exc_info") for log in logs)
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_review_non_timeout_failure_warns_on_first_attempt(
+    room_state: RoomState,
+    worker_runtime: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected server response warns immediately, then logs at debug until recovery."""
+    _, _, _, _, client = room_state
+    clock = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    put = client.room_put_state.side_effect
+
+    async def unavailable(room_id: str, kind: str, content: dict, **kwargs: object) -> object:
+        if kind == ACCOUNTS_EVENT_TYPE:
+            return nio.RoomPutStateError("Unavailable", "M_UNKNOWN")
+        return await put(room_id, kind, content, **kwargs)
+
+    client.room_put_state.side_effect = unavailable
+    worker = RoomStateWorker(worker_runtime)
+    try:
+        with capture_logs() as logs:
+            worker.mark(ROOM_ID)
+            await _yield_loop(40)
+            clock = 1
+            await _yield_loop(40)
+        assert [log["log_level"] for log in logs if log["event"] == "room_accounts_publish_failed"] == [
+            "warning",
+            "debug",
+        ]
+    finally:
+        worker.stop()
+        await _yield_loop(10)
+
+
+@pytest.mark.asyncio
+async def test_review_mark_replaces_a_done_room_task_before_retirement(
+    room_state: RoomState,
+    worker_runtime: MagicMock,
+) -> None:
+    """A new mark is not lost when it lands just before the old task's done callback retires it."""
+    _, _, _, events, client = room_state
+    worker = RoomStateWorker(worker_runtime)
+    retire = worker._retire
+    count = 0
+
+    def mark_before_retire(room_id: str, task: asyncio.Task[None]) -> None:
+        nonlocal count
+        count += 1
+        if count == 1:
+            assert task.done()
+            del events[EVENT_TYPE, ""]
+            worker.mark(room_id)
+        retire(room_id, task)
+
+    with patch.object(worker, "_retire", side_effect=mark_before_retire):
+        worker.mark(ROOM_ID)
+        assert await wait_for_background_tasks(timeout=2, owner=worker)
+    assert len(_writes(client, EVENT_TYPE)) == 2
+    assert not worker._rooms
+
+
+@pytest.mark.asyncio
+async def test_review_backoff_releases_all_slots(worker_runtime: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Four retrying rooms do not keep a fifth room waiting for a backoff timer."""
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: 0)
+    visited = []
+    worker = RoomStateWorker(worker_runtime)
+    healthy = "!healthy:localhost"
+
+    async def accounts(_client: object, _config: object, _paths: object, room_id: str, **_kwargs: object) -> bool:
+        visited.append(room_id)
+        return room_id == healthy
+
+    with (
+        patch("mindroom.orchestration.room_state.reconcile_room_accounts", side_effect=accounts),
+        patch("mindroom.orchestration.room_state.reconcile_room_thread_mode", return_value=True),
+        patch("mindroom.orchestration.room_state.reconcile_room_router_binding", return_value=True),
+    ):
+        try:
+            for i in range(4):
+                worker.mark(f"!retry{i}:localhost")
+            await _yield_loop(40)
+            assert len(visited) == 4
+            worker.mark(healthy)
+            await _yield_loop(40)
+            assert visited[-1] == healthy
+        finally:
+            worker.stop()
+            await _yield_loop(20)
+
+
+@pytest.mark.asyncio
+async def test_review_backoff_and_warning_restart_after_success_in_same_task(
+    room_state: RoomState,
+    worker_runtime: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recovery followed by a dirty iteration resets the timer and warning before another failure."""
+    _, _, _, events, client = room_state
+    clock = attempts = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    put = client.room_put_state.side_effect
+    worker = RoomStateWorker(worker_runtime)
+
+    async def fail_then_recover(room_id: str, kind: str, content: dict, **kwargs: object) -> object:
+        nonlocal attempts
+        if kind != ACCOUNTS_EVENT_TYPE:
+            return await put(room_id, kind, content, **kwargs)
+        attempts += 1
+        if attempts <= 8 or attempts == 10:
+            raise TimeoutError
+        response = await put(room_id, kind, content, **kwargs)
+        if attempts == 9:
+            del events[kind, client.user_id]
+            worker.mark(room_id)
+        return response
+
+    client.room_put_state.side_effect = fail_then_recover
+    try:
+        with capture_logs() as logs:
+            worker.mark(ROOM_ID)
+            for tick in (0, 1, 3, 7, 15, 31, 63, 123, 183, 184):
+                clock = tick
+                await _yield_loop(40)
+        levels = [log["log_level"] for log in logs if log["event"] == "room_accounts_publish_failed"]
+        assert levels == ["info"] * 7 + ["warning", "info"]
+        assert attempts == 11
+        assert _accounts(room_state) is not None
+    finally:
+        worker.stop()
+        await _yield_loop(10)
+
+
+@pytest.mark.asyncio
+async def test_review_local_leave_marks_the_next_already_open_frame(room_state: RoomState) -> None:
+    """After an observer opened, a departed client triggers the remaining bot's roster on the next frame."""
+    _, _, ids, events, outgoing = room_state
+    orchestrator, owner, runner_up = _room_state_fleet(room_state)
+    worker = orchestrator.room_state
+    orchestrator.handle_bot_ready = AsyncMock()
+    owner.mark_sync_loop_started()
+    await owner._on_ingestion_frame_completion(True)
+    assert await wait_for_background_tasks(timeout=2, owner=worker)
+    assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": outgoing.user_id}
+
+    outgoing.rooms.clear()
+    events["m.room.member", outgoing.user_id] = {"membership": "leave"}
+    admission = _validated_reported_membership_admission(
+        owner,
+        ROOM_ID,
+        previous_membership="join",
+        membership="leave",
+        previous_epoch=0,
+    )
+    principal = MagicMock(ingestion_membership_position=AsyncMock(return_value=RoomMembershipPosition("leave", 1)))
+    with patch.object(owner, "journal_principal", return_value=principal):
+        await owner._after_ingestion_admission(admission, AdmissionFacts(True, False), None)
+    assert (ACCOUNTS_EVENT_TYPE, runner_up.agent_user.user_id) not in events
+    await owner._on_ingestion_frame_completion(True)
+    assert await wait_for_background_tasks(timeout=2, owner=worker)
+    assert events[ACCOUNTS_EVENT_TYPE, runner_up.agent_user.user_id] == {
+        "accounts": sorted([ids["agent1"].full_id, ids["agent2"].full_id]),
+    }
+
+
+@pytest.mark.asyncio
+async def test_review_stop_releases_worker_before_closing_its_matrix_client(room_state: RoomState) -> None:
+    """A bot's stop cancels and drains its borrowed comparison before closing the Matrix client."""
+    _, _, _, events, outgoing = room_state
+    orchestrator, owner, runner_up = _room_state_fleet(room_state)
+    entered, released = asyncio.Event(), asyncio.Event()
+    read = outgoing.room_get_state_event.side_effect
+    released_at_close: list[bool] = []
+
+    async def blocked(room_id: str, kind: str, state_key: str = "") -> object:
+        if kind == EVENT_TYPE:
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                released.set()
+        return await read(room_id, kind, state_key)
+
+    async def close() -> None:
+        released_at_close.append(released.is_set())
+
+    outgoing.room_get_state_event.side_effect = blocked
+    outgoing.close.side_effect = close
+    worker = orchestrator.room_state
+    try:
+        worker.mark(ROOM_ID)
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        await owner.stop()
+        assert released_at_close == [True]
+        assert await wait_for_background_tasks(timeout=2, owner=worker)
+        assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": runner_up.agent_user.user_id}
+    finally:
+        worker.stop()
+        await wait_for_background_tasks(timeout=2, owner=worker)
 
 
 @pytest.mark.asyncio
@@ -1475,6 +1881,8 @@ async def test_router_invite_join_after_agent_publishes_on_next_frame(room_state
     bot.client = client
     bot.orchestrator.handle_bot_ready = AsyncMock()
     bot.mark_sync_loop_started()
+    client.rooms.clear()
+    await bot._on_ingestion_frame_completion(True)
     # A local join leaves nio an empty room until the next sync frame.
     client.rooms[ROOM_ID] = nio.MatrixRoom(ROOM_ID, router_id)
     admission = _validated_reported_membership_admission(
