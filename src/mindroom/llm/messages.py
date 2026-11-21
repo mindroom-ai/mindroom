@@ -424,6 +424,11 @@ def tool_result_view(message: Message) -> ToolResultView:
     )
 
 
+def stored_tool_call(call_id: str, name: str | None, arguments: str) -> dict[str, Any]:
+    """Return a plain stored call, leaving its serialized arguments unchanged."""
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
+
+
 __all__ = [
     "AGGREGATE_USAGE_KEY",
     "CUT_OFF_TEXT_KEY",
@@ -443,6 +448,7 @@ __all__ = [
     "model_provenance",
     "read_model_provenance",
     "stable_serialize",
+    "stored_tool_call",
     "system_text",
     "system_texts",
     "tool_result_view",

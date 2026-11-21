@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from claude_agent_sdk import ClaudeSDKClient, RateLimitInfo
 
     from mindroom.llm.provider import ToolSpec
-    from mindroom.providers.claude_code.prompt import Emitted
+    from mindroom.providers.claude_code.prompt import Answer
 
 __all__ = ["NOT_SIGNED_IN", "SESSIONS", "LiveSession", "start"]
 
@@ -105,7 +105,7 @@ class LiveSession:
     counted: dict[str, int] = field(default_factory=dict)
     ledger: dict[str, int] = field(default_factory=dict)
     rejected: RateLimitInfo | None = None
-    emitted: Emitted | None = None
+    answer: Answer | None = None
     rested_at: float = 0.0
 
     def broken(self) -> str | None:

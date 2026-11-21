@@ -43,6 +43,8 @@ from mindroom.providers.claude_code import bridge as bridge_module
 from mindroom.providers.claude_code import session as session_module
 from mindroom.providers.claude_code.prompt import rebuild_input
 from mindroom.providers.claude_code.session import SESSIONS
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
 from tests.providers.claude_code.support import (
     CONVERSATION,
     LOOKUP,
@@ -88,6 +90,23 @@ async def _resting_process_breaks() -> None:
     async with asyncio.timeout(10):
         while session.broken() is None:  # noqa: ASYNC110 - the other side is another process
             await asyncio.sleep(0.01)
+
+
+def test_request_tokens_count_rendered_text_but_not_disabled_tools(tmp_path: Path) -> None:
+    provider = fake_cli(tmp_path).provider()
+    request = ModelRequest(
+        messages=[_SYSTEM, user("Hi"), Message(role="assistant", content="Hello"), user("More?")],
+        tools=[LOOKUP],
+        tool_choice="none",
+    )
+    system, blocks = rebuild_input(request.messages, provider.identity.provider)
+    rendered = system + "".join(block["text"] for block in blocks)
+
+    assert provider.request_tokens(request) == count(provider.token_counter, rendered)
+    assert provider.request_tokens(request, start=3) == count(provider.token_counter, "More?")
+    image = Message(role="user", images=[Image(content=_PNG)])
+    with_image = replace(request, messages=[*request.messages, image])
+    assert provider.request_tokens(with_image) == provider.request_tokens(request) + MEDIA_ALLOWANCE_TOKENS
 
 
 # --- one answer -------------------------------------------------------------------------------------------------------
@@ -258,7 +277,7 @@ async def test_a_request_that_no_longer_matches_the_parked_turn_rebuilds_in_a_ne
     assert cli.events("tool_result") == []
     # The process that waited on those calls can never be continued, so it is closed at once.
     assert len(cli.events("exit")) == 1
-    assert [session.emitted[0] for session in SESSIONS.resting.values() if session.emitted] == ["Rebuilt."]
+    assert [session.answer.text for session in SESSIONS.resting.values() if session.answer] == ["Rebuilt."]
     rebuilt = cli.events("user")[1]["content"][0]["text"]
     assert rebuilt.startswith("<conversation-checkpoint>")
     assert '"output": "LILAC-HERON"' in rebuilt
@@ -693,7 +712,7 @@ async def test_a_new_process_past_the_limit_evicts_an_idle_one_before_a_parked_o
     await complete(cli.provider(execution_identity=elsewhere), ModelRequest(messages=[user("Another conversation")]))
     await _closed()
 
-    resting = sorted(session.emitted[0] or "" for session in SESSIONS.resting.values())
+    resting = sorted(session.answer.text or "" for session in SESSIONS.resting.values() if session.answer)
     assert resting == ["Looking.", "New."]
     assert (len(SESSIONS.live), SESSIONS.starting) == (2, 0)
 
@@ -1459,7 +1478,7 @@ async def test_a_conversation_that_starts_over_gives_the_slot_of_its_idle_proces
     await complete(provider, ModelRequest(messages=[user("Something else, after a compaction")]))
     await _closed()
 
-    assert [session.emitted[0] for session in SESSIONS.resting.values()] == ["Two."]
+    assert [session.answer.text for session in SESSIONS.resting.values() if session.answer] == ["Two."]
     assert len(cli.events("exit")) == 1
 
 

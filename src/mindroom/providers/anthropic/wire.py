@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from anthropic.types.beta import BetaMessage, BetaUsage
 
 from mindroom.llm.media import canonical_mime_type, file_text, image_format, is_text_mime_type
-from mindroom.llm.messages import Message, ToolResultView, system_texts, tool_result_view
+from mindroom.llm.messages import Message, ToolResultView, stored_tool_call, system_texts, tool_result_view
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import (
@@ -529,11 +529,7 @@ def tool_call_from_block(block: ToolUseBlock | BetaToolUseBlock) -> dict[str, An
 
 def _tool_call(block: dict[str, Any]) -> dict[str, Any]:
     """Return a ``tool_use`` block as the stored tool-call dict; a cut-off block keeps the arguments that parsed."""
-    return {
-        "id": block["id"],
-        "type": "function",
-        "function": {"name": block["name"], "arguments": json.dumps(block["input"])},
-    }
+    return stored_tool_call(block["id"], block["name"], json.dumps(block["input"]))
 
 
 def assistant_message_from_response(

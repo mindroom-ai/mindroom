@@ -8561,6 +8561,7 @@ depends_on = [
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.identity",
+    "mindroom.providers.tool_policy",
     "mindroom.tool_system.dependencies",
 ]
 

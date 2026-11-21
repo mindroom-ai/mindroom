@@ -46,7 +46,6 @@ from mindroom.llm.messages import (
     PROMPT_UPDATE_KEY,
     REWRITTEN_ATTEMPT_KEY,
     Message,
-    is_queued_notice_message,
     stable_serialize,
 )
 from mindroom.llm.provider import TurnCompleted
@@ -141,10 +140,7 @@ def _anchors(messages: Sequence[Message], lengths: Sequence[int]) -> list[str | 
     done = 0
     for length in lengths:
         while done < min(length, len(messages)):
-            message = messages[done]
-            piece = message_digest(
-                replace(message, provider_data=None) if is_queued_notice_message(message) else message,
-            )
+            piece = message_digest(messages[done], count_queued_notices=True)
             if piece is None:
                 break
             digest.update(piece)

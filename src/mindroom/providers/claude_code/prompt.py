@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import ProviderError
@@ -24,10 +25,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "TOOL_PREFIX",
-    "Emitted",
+    "Answer",
+    "answer_of",
     "canonical_arguments",
-    "decide",
-    "emitted",
+    "plan_continuation",
     "rebuild_input",
     "tool_names",
 ]
@@ -69,7 +70,7 @@ def _images(message: Message, provider: str) -> list[dict[str, Any]]:
     return [block for image in message.images or () if (block := image_block(image, provider)) is not None]
 
 
-def _user_blocks(message: Message, provider: str) -> list[dict[str, Any]]:
+def _text_and_image_blocks(message: Message, provider: str) -> list[dict[str, Any]]:
     """Return a user message's text blocks, then its images, as the content blocks Claude Code takes."""
     content = message.content if isinstance(message.content, list) else [{"text": message.content or ""}]
     texts = [
@@ -93,7 +94,7 @@ def _history_blocks(message: Message, provider: str, names: dict[str, str]) -> l
             output["is_error"] = True
         return [_text(f"<tool-result>\n{_json(output)}\n</tool-result>"), *_images(message, provider)]
     if message.role == "user":
-        blocks = _user_blocks(message, provider)
+        blocks = _text_and_image_blocks(message, provider)
         said = [_text(block["text"].replace("<", "&lt;")) if block["type"] == "text" else block for block in blocks]
         return [_text("<user>"), *said, _text("</user>")]
     calls = [
@@ -106,7 +107,7 @@ def _history_blocks(message: Message, provider: str, names: dict[str, str]) -> l
         )
         for call in message.tool_calls or ()
     ]
-    texts = [block["text"] for block in _user_blocks(message, provider) if block["type"] == "text"]
+    texts = [block["text"] for block in _text_and_image_blocks(message, provider) if block["type"] == "text"]
     said = "\n".join(texts).replace("<", "&lt;")
     parts = [said, *(f"<tool-call>\n{call}\n</tool-call>" for call in calls)]
     return [_text("\n".join(["<assistant>", *filter(None, parts), "</assistant>"]))]
@@ -160,23 +161,31 @@ def rebuild_input(messages: Sequence[Message], provider: str) -> tuple[str, list
         for message in conversation[:end]:
             blocks += _history_blocks(message, provider, names)
         blocks.append(_text("</conversation-checkpoint>"))
-    current = [block for message in conversation[end:] for block in _user_blocks(message, provider)]
+    current = [block for message in conversation[end:] for block in _text_and_image_blocks(message, provider)]
     blocks += current or [_text(_CONTINUE_TEXT)]
     return system_text(messages), _merged(blocks)
 
 
-# The answer a live Claude Code process gave last: its text, and the tool calls it now waits on, in order. A call is
-# its id, its tool's name, and its arguments in one spelling.
-type Emitted = tuple[str | None, tuple[tuple[str, str, str], ...]]
+@dataclass(frozen=True, slots=True)
+class Answer:
+    """A process's answer: its text and the calls it awaits, by id, name, and canonical arguments."""
+
+    text: str | None
+    calls: tuple[tuple[str, str, str], ...]
+
+    @property
+    def call_ids(self) -> tuple[str, ...]:
+        """Return the waiting call ids in order."""
+        return tuple(call[0] for call in self.calls)
 
 
-def emitted(content: str | None, tool_calls: Sequence[dict[str, Any]]) -> Emitted:
+def answer_of(content: str | None, tool_calls: Sequence[dict[str, Any]]) -> Answer:
     """Return the answer that an assistant message with ``content`` and ``tool_calls`` holds."""
-    calls = (
+    calls = tuple(
         (call["id"], call["function"]["name"], canonical_arguments(call["function"].get("arguments")))
         for call in tool_calls
     )
-    return content or None, tuple(calls)
+    return Answer(content or None, calls)
 
 
 # What continues a live process: each waiting call's MCP result, or the user blocks of its next turn.
@@ -196,7 +205,7 @@ def _mcp_result(message: Message, provider: str) -> dict[str, Any]:
     return {"content": [_text(text), *_mcp_images(message, provider)], "isError": result.is_error}
 
 
-def decide(answer: Emitted, tail: Sequence[Message], provider: str) -> _Resume | None:
+def plan_continuation(answer: Answer, tail: Sequence[Message], provider: str) -> _Resume | None:
     """Return how ``tail`` continues the process that answered with ``answer``, or None when it must be rebuilt.
 
     ``tail`` starts at the request's last assistant message, which must be the answer the process gave. A process
@@ -206,12 +215,12 @@ def decide(answer: Emitted, tail: Sequence[Message], provider: str) -> _Resume |
     """
     answered, rest = tail[0], tail[1:]
     # The answer of a process is plain text, so a message that holds blocks is not one as the process gave it.
-    same = isinstance(answered.content, str | None) and emitted(answered.content, answered.tool_calls or ()) == answer
+    same = isinstance(answered.content, str | None) and answer_of(answered.content, answered.tool_calls or ()) == answer
     if not same or any(message.files or message.audio or message.videos for message in rest):
         return None
-    call_ids = [call[0] for call in answer[1]]
+    call_ids = answer.call_ids
     if not call_ids:
-        blocks = _merged([block for message in rest for block in _user_blocks(message, provider)])
+        blocks = _merged([block for message in rest for block in _text_and_image_blocks(message, provider)])
         return ({}, blocks) if blocks and all(message.role == "user" for message in rest) else None
     # The media of a batch are pooled, so only those of a batch of one call are known to be that call's.
     media = rest[-1] if len(call_ids) == 1 and rest and is_media_follow_up(rest[-1]) else None

@@ -13,9 +13,9 @@ from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ToolSpec
 from mindroom.providers.claude_code.prompt import (
-    Emitted,
-    decide,
-    emitted,
+    Answer,
+    answer_of,
+    plan_continuation,
     rebuild_input,
     tool_names,
 )
@@ -227,7 +227,7 @@ def test_a_user_message_of_several_blocks_reaches_claude_code_whole_in_a_new_pro
     )
 
     _system, cold = rebuild_input([Message(role="user", content="Hi"), answer, asked], _PROVIDER)
-    warm = decide(emitted("Ready.", []), [answer, asked], _PROVIDER)
+    warm = plan_continuation(answer_of("Ready.", []), [answer, asked], _PROVIDER)
 
     assert warm is not None
     _results, blocks = warm
@@ -240,12 +240,12 @@ def test_a_user_message_of_several_blocks_reaches_claude_code_whole_in_a_new_pro
 # --- continuing a live session ----------------------------------------------------------------------------------------
 
 
-def _parked(*ids: str) -> Emitted:
-    return emitted(None, [_call(call_id) for call_id in ids])
+def _parked(*ids: str) -> Answer:
+    return answer_of(None, [_call(call_id) for call_id in ids])
 
 
 def test_a_parked_turn_continues_with_one_result_per_waiting_call() -> None:
-    resume = decide(
+    resume = plan_continuation(
         _parked("t1", "t2"),
         [
             Message(role="assistant", tool_calls=[_call("t1"), _call("t2")]),
@@ -312,7 +312,7 @@ def test_a_parked_turn_continues_with_one_result_per_waiting_call() -> None:
 def test_a_parked_turn_rebuilds_when_the_request_does_not_answer_it_exactly(tail: list[Message]) -> None:
     answered = Message(role="assistant", tool_calls=[_call("t1"), _call("t2")])
 
-    assert decide(_parked("t1", "t2"), [answered, *tail], _PROVIDER) is None
+    assert plan_continuation(_parked("t1", "t2"), [answered, *tail], _PROVIDER) is None
 
 
 @pytest.mark.parametrize(
@@ -345,18 +345,18 @@ def test_a_parked_turn_rebuilds_when_the_request_does_not_answer_it_exactly(tail
 def test_a_parked_turn_rebuilds_when_its_assistant_message_was_rewritten(answered: Message) -> None:
     results = [Message(role="tool", content="x", tool_call_id=call["id"]) for call in answered.tool_calls or ()]
 
-    assert decide(_parked("t1", "t2"), [answered, *results], _PROVIDER) is None
+    assert plan_continuation(_parked("t1", "t2"), [answered, *results], _PROVIDER) is None
 
 
 def test_a_parked_turn_continues_when_only_the_spelling_of_its_arguments_changed() -> None:
     answered = Message(role="assistant", tool_calls=[_call("t1", arguments='{ "key":"a" }')])
 
-    assert decide(_parked("t1"), [answered, Message(role="tool", content="x", tool_call_id="t1")], _PROVIDER)
+    assert plan_continuation(_parked("t1"), [answered, Message(role="tool", content="x", tool_call_id="t1")], _PROVIDER)
 
 
 def test_an_idle_session_continues_with_the_new_user_messages() -> None:
-    resume = decide(
-        emitted("It is LILAC-HERON.", []),
+    resume = plan_continuation(
+        answer_of("It is LILAC-HERON.", []),
         [Message(role="assistant", content="It is LILAC-HERON."), Message(role="user", content="And for b?")],
         _PROVIDER,
     )
@@ -384,4 +384,4 @@ def test_an_idle_session_continues_with_the_new_user_messages() -> None:
     ],
 )
 def test_an_idle_session_rebuilds_when_the_request_does_not_follow_its_answer(tail: list[Message]) -> None:
-    assert decide(emitted("It is LILAC-HERON.", []), tail, _PROVIDER) is None
+    assert plan_continuation(answer_of("It is LILAC-HERON.", []), tail, _PROVIDER) is None

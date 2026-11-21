@@ -26,11 +26,12 @@ from claude_agent_sdk import (
 )
 
 from mindroom.llm.errors import QUOTA_EXHAUSTED, AuthenticationFailed, ProviderError, ProviderUnavailable
+from mindroom.llm.messages import stored_tool_call
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported
 from mindroom.llm.usage import add_usage
 from mindroom.providers.anthropic.wire import parse_claude_usage, stop_reason_of
 from mindroom.providers.assistant_turn import finished_turn
-from mindroom.providers.claude_code.prompt import TOOL_PREFIX, emitted
+from mindroom.providers.claude_code.prompt import TOOL_PREFIX, answer_of
 from mindroom.providers.claude_code.session import NOT_SIGNED_IN
 from mindroom.providers.errors import classify_provider_error
 
@@ -227,7 +228,7 @@ def _tool_call(block: ToolUseBlock, session: LiveSession) -> dict[str, Any]:
     if not session.bridge.made(block.id, short, block.input):
         msg = f"Claude wrote the tool call {block.id} twice."
         raise ProviderError(msg, provider=session.provider)
-    return {"id": block.id, "type": "function", "function": {"name": name, "arguments": json.dumps(block.input)}}
+    return stored_tool_call(block.id, name, json.dumps(block.input))
 
 
 def _turn_failure(
@@ -277,7 +278,7 @@ def _only_mindrooms_tools(init: dict[str, Any], session: LiveSession) -> bool:
 async def read_step(session: LiveSession, identity: ModelIdentity, timer: TurnTimer) -> AsyncIterator[ModelEvent]:
     """Yield the events of the next model step of ``session``; the finished turn is the last one.
 
-    ``session.emitted`` then holds the step's answer, whose tool calls the process is parked on.
+    ``session.answer`` then holds the step's answer, whose tool calls the process is parked on.
     """
     step = _Step()
     while step.stop_reason is None:
@@ -292,7 +293,7 @@ async def read_step(session: LiveSession, identity: ModelIdentity, timer: TurnTi
     for call in step.calls:
         yield timer.output(ToolCallReady(call))
     content = "".join(step.text) or None
-    session.emitted = emitted(content, step.calls)
+    session.answer = answer_of(content, step.calls)
     for event in finished_turn(
         identity,
         timer,
