@@ -522,6 +522,10 @@ class WorkflowEngine:
     ) -> NodeReceipt:
         """Decide and save one call for the attempt that began with *epoch*, which every write here names."""
         key, kind, meta = request.key, request.kind, request.meta
+        if run.epoch != epoch or run.state not in _SERVED_RUN_STATES:
+            # Before anything is kept for the attempt: one that the run left behind leaves nothing behind here.
+            msg = f"Run {run.run_id} takes no more calls from attempt {attempt.run_id}."
+            raise SupersededAttemptError(msg)
         lanes = self._dirty.setdefault(attempt.run_id, DirtyLanes())
         digest = node_digest(kind, request.args)
         members = _members(meta) if kind == "group" else None
@@ -534,9 +538,6 @@ class WorkflowEngine:
         )
         decision = partial(decide, digest=digest, attempt=run.attempt, dirty=dirty, rerun=rerun, cached=cached)
         action = decision(saved).action
-        if run.epoch != epoch or run.state not in _SERVED_RUN_STATES:
-            msg = f"Run {run.run_id} takes no more calls from attempt {attempt.run_id}."
-            raise SupersededAttemptError(msg)
         if saved is not None and action == "return":
             # A request the script sent twice never repeats work, not even failed work.
             return _receipt(saved)

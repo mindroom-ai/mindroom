@@ -361,6 +361,8 @@ async def test_request_that_was_let_in_before_its_attempt_was_replaced_gets_no_r
 
     with pytest.raises(SupersededAttemptError):
         await stack.engine._admit(let_in, old, NodeRequest("@0", "tool", _APPEND, {}))
+    # And the engine keeps nothing for the attempt that the run left behind.
+    assert list(stack.engine._dirty) == [stack.attempt.run_id]
 
 
 @pytest.mark.asyncio
