@@ -26,7 +26,6 @@ from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.declarations import ToolFileAccess
-from mindroom.tool_system.metadata import offered_functions, resolve_tool_settings
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
@@ -270,18 +269,8 @@ def _workspace(
         # Code a toolkit runs works in the workspace whatever paths the toolkit takes.
         if metadata is None or (metadata.file_access is ToolFileAccess.NONE and not metadata.executes_code):
             continue
-        settings = resolve_tool_settings(
-            entry.name,
-            runtime_paths,
-            tools=tools,
-            worker_target=storage.execution.worker_target,
-            allowed_shared_services=(
-                config.get_worker_grantable_credentials() if storage.execution.execution_scope is not None else None
-            ),
-            tool_config_overrides=entry.tool_config_overrides,
-        )
         # A toolkit whose functions only its build could tell offers what it builds.
-        functions, writes = offered_functions(metadata, settings.values)
+        functions, writes = agent_tools.functions_for(entry, runtime_paths, storage.execution.worker_target)
         if functions is not None and not functions:
             continue
         # On a runner that sees only its own storage, a toolkit writes there, not in the workspace.
