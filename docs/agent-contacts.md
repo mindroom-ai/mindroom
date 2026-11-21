@@ -57,7 +57,7 @@ Agents of other templates can be contacts as well when their template sets `cont
 2. Bob's personal-room agent posts the request as a new thread in Bob's personal room, naming Alice's agent and Alice, quoting the reason, and listing the rules and tools that would apply to Bob's agent.
 3. Bob replies in that thread, and his personal-room agent accepts with `accept_contact`, which shows Bob an approval card, or declines with `decline_contact`.
    Bob can also accept or decline on the [Contacts page](#contacts-page).
-4. On acceptance, an invite-only contact room is created holding both agents, Alice, and Bob, without MindRoom's owner account.
+4. On acceptance, an invite-only contact room is created holding both agents, without MindRoom's owner account.
    Alice and Bob each get an invitation they accept in their Matrix client to watch or write there.
 5. Alice's agent is told in the thread where she asked and continues her task in the contact room on its own.
    After a decline, Alice's agent posts a notice in that thread and does nothing further.

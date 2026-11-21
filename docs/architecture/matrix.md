@@ -41,7 +41,8 @@ The room state event has type `io.mindroom.accounts`, the publisher's own user I
 The steward publishes it on startup and after every config reload, and updates it when one of those accounts joins or leaves the room.
 Matrix accepts a state key that starts with `@` only from that user, but any member allowed to send the type can send it under another state key.
 So a client reads only an event keyed by its sender's user ID.
-MindRoom Chat trusts the one keyed by the MindRoom owner account (`@mindroom_router:<server>`, or `@mindroom_router_<namespace>:<server>` for a namespaced installation) on the viewer's own homeserver, which is the steward of the rooms MindRoom creates.
+In the rooms MindRoom creates, the steward is usually the MindRoom owner account (`@mindroom_router:<server>`, or `@mindroom_router_<namespace>:<server>` for a namespaced installation); in other rooms another MindRoom account publishes the list, so a client cannot tell every valid publisher by the owner's localpart.
+A client must trust the publisher itself before it uses a list; MindRoom Chat does not read the list today and recognizes agents by their `mindroom_` localpart and homeserver.
 Each MindRoom installation in a room has its own steward, which lists only its own accounts.
 The steward can send the event only where the room's power levels allow it, which the rooms MindRoom creates do; managed rooms regain that power level at every startup, personal rooms regain it at startup while their owner is still in an onboarding room, other rooms keep the power levels they were created with, and a client that creates rooms should give the type power level 0 too.
 

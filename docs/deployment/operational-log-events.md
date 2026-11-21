@@ -38,7 +38,8 @@ The `/api/ready` phases are:
 
 While `mindroom run` waits for hosted pairing approval, or converts conversation storage on the first start after an upgrade, only these two endpoints answer: `/api/health` returns `200` and `/api/ready` returns `503` with phase `starting` and detail `Waiting for local pairing approval` or `Converting conversation storage`.
 
-When an agent, team, or the owner account receives no Matrix sync for 120 seconds, MindRoom restarts that entity's sync loop on its own.
+When an agent, team, or the owner account receives no Matrix sync for 120 seconds after its sync loop's first response, MindRoom restarts that entity's sync loop on its own.
+Until a sync loop's first response, including after such a restart, the limit is [`MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS`](../configuration/index.md#matrix) (default `600`) instead.
 After 180 seconds without a sync, `/api/health` returns `503` and lists the entity in `stale_sync_entities`.
 While an entity is still making progress on a large backlog of received events, both wait up to [`MINDROOM_MATRIX_INGESTION_GRACE_SECONDS`](../configuration/index.md#matrix).
 Set the liveness probe's `failureThreshold` high enough that the sync-loop restart can recover before the container is restarted.

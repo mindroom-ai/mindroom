@@ -610,7 +610,7 @@ TurnOrigin(
 
 ResponseDraft(
     response_text: str,
-    response_kind: str,  # "ai", "team", "router", "system"
+    response_kind: str,  # "ai" or "team"
     tool_trace: list[ToolTraceEntry] | None,
     extra_content: dict[str, Any] | None,
     envelope: MessageEnvelope,
@@ -619,7 +619,7 @@ ResponseDraft(
 
 FinalResponseDraft(
     response_text: str,
-    response_kind: str,  # "ai", "team", "router", "system"
+    response_kind: str,  # "ai" or "team"
     envelope: MessageEnvelope,
 )
 

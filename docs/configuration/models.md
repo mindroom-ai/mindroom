@@ -686,7 +686,7 @@ Thread and room overrides that named the deleted entry, or a level later removed
 
 ## Hot Reload
 
-After a successful config reload, changes to a model definition, including its provider options, model ID, and `context_window`, apply from the next agent, team, or router response without restarting the bot.
+After a successful config reload, changes to a model definition, including its provider options, model ID, and `context_window`, apply from the next agent or team reply and the next routing decision without restarting the bot.
 Agents with voice calls enabled can still restart, because their call runtime keeps its configuration between responses.
 
 ## Model Overrides in Chat
