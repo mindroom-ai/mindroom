@@ -55,7 +55,10 @@ _DEPLOYMENT = {
 _GATEWAY_CONTAINER = {
     "name": "tailnet-gateway",
     "image": "gateway:test",
-    "env": [{"name": "TAILNET_SSH_PRIMARY_URL", "value": "http://primary.smoke.svc.cluster.local:8769"}],
+    "env": [
+        {"name": "TAILNET_SSH_PRIMARY_URL", "value": "http://primary.smoke.svc.cluster.local:8769"},
+        {"name": "TAILNET_SSH_AUTH_KEY", "valueFrom": {"secretKeyRef": {"name": "render-only", "key": "auth-key"}}},
+    ],
     "securityContext": {"readOnlyRootFilesystem": True},
     "volumeMounts": [{"name": "state", "mountPath": "/state"}],
 }
@@ -174,16 +177,16 @@ def test_the_charts_gateway_is_read_and_never_applied(monkeypatch: pytest.Monkey
 
     assert _run_smoke(monkeypatch, tools) == 0
     chart, gateway, pods = [command[4:] for command in tools.commands if command[3] == "apply"]
-    namespace = chart[1]
-    assert chart == ["-n", namespace, "-l", "app.kubernetes.io/component!=tailnet-ssh", "-f", "-"]
+    [namespace] = tools.namespaces("create")
+    assert chart == ["-l", "app.kubernetes.io/component!=tailnet-ssh", "-n", namespace, "-f", "-"]
     assert gateway == [
         "--dry-run=client",
         "-o",
         "json",
-        "-n",
-        namespace,
         "-l",
         "app.kubernetes.io/component=tailnet-ssh",
+        "-n",
+        namespace,
         "-f",
         "-",
     ]
@@ -235,7 +238,7 @@ def test_the_gateways_stand_in_is_the_charts_gateway_pod_running_the_primarys_im
                 "image": "mindroom:test",
                 "imagePullPolicy": "IfNotPresent",
                 "command": ["python", "/smoke/tailnet_ssh_gateway_stand_in.py"],
-                "env": _GATEWAY_CONTAINER["env"],
+                "env": [_GATEWAY_CONTAINER["env"][0]],
                 "securityContext": {"readOnlyRootFilesystem": True},
                 "volumeMounts": [{"name": "smoke", "mountPath": "/smoke", "readOnly": True}],
             },
@@ -287,15 +290,16 @@ def test_the_stand_in_sends_the_primary_what_the_worker_sent_first(monkeypatch: 
     assert told() == b"SSH-2.0-"
 
 
-def test_the_stand_in_tells_the_primary_why_it_could_not_reach_the_worker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A worker port that never answers is reported to the primary, which then fails with the reason."""
+def test_the_stand_in_raises_when_it_cannot_reach_the_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worker port that never answers fails the stand-in rather than returning a banner."""
     primary_port, told = _serve_once(f"127.0.0.1 {_unused_port()}\n".encode())
     monkeypatch.setenv("TAILNET_SSH_PRIMARY_URL", f"http://127.0.0.1:{primary_port}")
     monkeypatch.setattr(stand_in, "_WORKER_SECONDS", 0)
 
-    stand_in.main()
+    with pytest.raises(ConnectionRefusedError):
+        stand_in.main()
 
-    assert told().startswith(b"ConnectionRefusedError")
+    assert told() == b""
 
 
 def test_the_runtime_chart_renders_a_kubernetes_primary_from_the_smokes_values(tmp_path: Path) -> None:
