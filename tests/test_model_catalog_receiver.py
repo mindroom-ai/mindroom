@@ -118,7 +118,7 @@ async def test_authenticated_catalog_reply_and_live_config(tmp_path: Path, monke
     assert sent.call_args.args[1].device_id == "REQUESTER"
     content = reply["content"]
     assert content["agent_user_ids"] == [agent]
-    assert content["capabilities"] == ["model_selection"]
+    assert content["capabilities"] == ["model_selection", "thread_model_on_root"]
     assert content["selection"] == {
         "override": None,
         "inherited": [{"entity": "helper", "user_id": agent, "model": "default", "source": "agent"}],

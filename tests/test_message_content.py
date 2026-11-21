@@ -461,6 +461,43 @@ class TestResolvedMessageExtraction:
         assert event_info.original_event_id == "$original"
         assert event_info.thread_id is None
 
+    @pytest.mark.parametrize(
+        "preview",
+        [{}, {"io.mindroom.thread_model": None}, {"io.mindroom.thread_model": {"model": "fast"}}],
+    )
+    @pytest.mark.parametrize("has_sidecar_pick", [False, True])
+    @pytest.mark.asyncio
+    async def test_long_text_takes_its_model_pick_only_from_the_preview(
+        self,
+        preview: dict[str, object],
+        has_sidecar_pick: bool,
+    ) -> None:
+        """Hydration cannot add, replace, or remove an opening pick."""
+        key = "io.mindroom.thread_model"
+        downloaded = {"msgtype": "m.text", "body": "Full text"}
+        if has_sidecar_pick:
+            downloaded[key] = {"model": "other"}
+        client = _make_client()
+        client.download = AsyncMock(
+            return_value=MagicMock(spec=nio.DownloadResponse, body=json.dumps(downloaded).encode()),
+        )
+        source = await resolve_event_source_content(
+            {
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "Preview",
+                    "url": "mxc://server/long-text",
+                    "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+                    **preview,
+                },
+            },
+            client,
+        )
+        assert source["content"]["body"] == "Full text"
+        content = source["content"]
+        assert (key in content) == (key in preview)
+        assert content.get(key) == preview.get(key)
+
     @pytest.mark.asyncio
     async def test_hydration_cannot_give_a_relation_free_event_a_relation(self) -> None:
         """An event that relates to nothing still relates to nothing once its text arrives."""
