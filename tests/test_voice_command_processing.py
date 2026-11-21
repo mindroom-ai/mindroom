@@ -996,100 +996,48 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
 
 
 @pytest.mark.asyncio
-async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absent(tmp_path) -> None:  # noqa: ANN001
-    """A transcript mention should make the mentioned agent respond directly."""
-    config = _attach_runtime_paths(
-        with_current_room_member_access(
-            Config(
-                agents={
-                    "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
-                    "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
-                },
-                authorization={},
-                voice={"enabled": True, "visible_router_echo": False},
-            ),
-        ),
-        tmp_path,
-    )
-
-    room = _make_room("@mindroom_home:localhost", "@mindroom_research:localhost", "@alice:example.com")
-    event = _make_voice_event(sender="@alice:example.com")
-
-    bots: list[AgentBot] = []
-    generate_response_mocks: list[AsyncMock] = []
-    for agent_name in ("home", "research"):
-        agent_user = MagicMock()
-        agent_user.user_id = f"@mindroom_{agent_name}:localhost"
-        agent_user.agent_name = agent_name
-        agent_user.matrix_id = MatrixID.parse(f"@mindroom_{agent_name}:localhost")
-        bot = _agent_bot(
-            agent_user=agent_user,
-            config=config,
-            rooms=["!test:example.com"],
-        )
-        turn_store = unwrap_extracted_collaborator(bot._turn_store)
-        turn_store.is_handled = AsyncMock(return_value=False)
-        bot.logger = MagicMock()
-        replace_turn_deps(bot, logger=bot.logger)
-        bot.client = AsyncMock()
-        bot.client.rooms = {}
-        bot.client.user_id = f"@mindroom_{agent_name}:localhost"
-        generate_response = AsyncMock(return_value=f"${agent_name}_response")
-        install_generate_response_mock(bot, generate_response)
-        _install_voice_thread_dispatch_mocks(bot)
-        bots.append(bot)
-        generate_response_mocks.append(generate_response)
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        mock_voice.return_value = f"{VOICE_PREFIX}@research summarize this audio"
-        for bot in bots:
-            await bot._on_media_message(room, event)
-        await drain_coalescing(*bots)
-
-    assert mock_download_audio.await_count == 1
-    assert mock_voice.await_count == 1
-    assert generate_response_mocks[0].await_count == 0
-    assert generate_response_mocks[1].await_count == 1
-    call_kwargs = generate_response_mocks[1].call_args.kwargs
-    assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
-    assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}@research summarize this audio")
-    assert call_kwargs["attachment_ids"] == [_attachment_id_for_event("$voice_event")]
-
-
-@pytest.mark.asyncio
-async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tmp_path) -> None:  # noqa: ANN001
-    """Inherited audio-caption mentions should still target the agent when STT omits them."""
-    config = _attach_runtime_paths(
-        with_current_room_member_access(
-            Config(
-                agents={
-                    "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
-                    "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
-                },
-                authorization={},
-                voice={"enabled": True, "visible_router_echo": False},
-            ),
-        ),
-        tmp_path,
-    )
-
-    room = _make_room("@mindroom_home:localhost", "@mindroom_research:localhost", "@alice:example.com")
-    event = _make_voice_event(
-        sender="@alice:example.com",
-        body="For @research voice note",
-        source={
-            "content": {
+@pytest.mark.parametrize(
+    ("event_kwargs", "transcript"),
+    [
+        pytest.param({}, "@research summarize this audio", id="transcript-mention"),
+        pytest.param(
+            {
                 "body": "For @research voice note",
-                "filename": "voice.ogg",
-                "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
+                "source": {
+                    "content": {
+                        "body": "For @research voice note",
+                        "filename": "voice.ogg",
+                        "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
+                    },
+                },
             },
-        },
+            "summarize this audio",
+            id="caption-mention",
+        ),
+    ],
+)
+async def test_voice_mentions_target_the_mentioned_agent_when_router_absent(
+    tmp_path: Path,
+    event_kwargs: dict,
+    transcript: str,
+) -> None:
+    """A mention in the transcript or caption directly targets the named agent."""
+    config = _attach_runtime_paths(
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
+                    "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
+                },
+                authorization={},
+                voice={"enabled": True, "visible_router_echo": False},
+            ),
+        ),
+        tmp_path,
     )
+
+    room = _make_room("@mindroom_home:localhost", "@mindroom_research:localhost", "@alice:example.com")
+    event = _make_voice_event(sender="@alice:example.com", **event_kwargs)
 
     bots: list[AgentBot] = []
     generate_response_mocks: list[AsyncMock] = []
@@ -1122,7 +1070,7 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
+        mock_voice.return_value = f"{VOICE_PREFIX}{transcript}"
         for bot in bots:
             await bot._on_media_message(room, event)
         await drain_coalescing(*bots)
@@ -1133,5 +1081,5 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
     assert generate_response_mocks[1].await_count == 1
     call_kwargs = generate_response_mocks[1].call_args.kwargs
     assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
-    assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}summarize this audio")
+    assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}{transcript}")
     assert call_kwargs["attachment_ids"] == [_attachment_id_for_event("$voice_event")]
