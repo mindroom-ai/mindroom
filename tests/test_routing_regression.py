@@ -193,6 +193,16 @@ def setup_test_bot(
     return install_runtime_journal_support(bot)
 
 
+def _owner_user(user_id: str = "@mindroom_router:localhost") -> AgentMatrixUser:
+    """Create the owner account used in routing regressions."""
+    return AgentMatrixUser(
+        agent_name="router",
+        password=TEST_PASSWORD,
+        display_name="MindRoom",
+        user_id=user_id,
+    )
+
+
 def _alpha_beta_owner_bot(tmp_path: Path, room_id: str) -> tuple[AgentBot, dict[str, MatrixID]]:
     """Build the owner bot in a room configured with Alpha and Beta."""
     test_config = _runtime_bound_config(
@@ -213,12 +223,7 @@ def _alpha_beta_owner_bot(tmp_path: Path, room_id: str) -> tuple[AgentBot, dict[
     runtime_paths = runtime_paths_for(test_config)
     ids = entity_ids(test_config, runtime_paths)
     router_bot = setup_test_bot(
-        AgentMatrixUser(
-            agent_name="router",
-            password=TEST_PASSWORD,
-            display_name="MindRoom",
-            user_id=ids["router"].full_id,
-        ),
+        _owner_user(ids["router"].full_id),
         tmp_path,
         room_id,
         config=test_config,
@@ -1136,12 +1141,7 @@ class TestRoutingRegression:
         )
 
         # Create router agent
-        router_agent = AgentMatrixUser(
-            agent_name="router",
-            password=TEST_PASSWORD,
-            display_name="MindRoom",
-            user_id="@mindroom_router:localhost",
-        )
+        router_agent = _owner_user()
 
         # Set up router bot with test config
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
@@ -1260,12 +1260,7 @@ class TestRoutingRegression:
         state.add_account("agent_news", "mindroom_news_oldns", "pw", domain=test_config.get_domain(runtime_paths))
         save_matrix_state(state, runtime_paths)
 
-        router_agent = AgentMatrixUser(
-            agent_name="router",
-            password=TEST_PASSWORD,
-            display_name="MindRoom",
-            user_id="@mindroom_router:localhost",
-        )
+        router_agent = _owner_user()
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
         mock_suggest_responder.side_effect = AssertionError("AI router should not run for one candidate")
@@ -1489,12 +1484,7 @@ class TestRoutingRegression:
         )
         runtime_paths = runtime_paths_for(test_config)
         ids = entity_ids(test_config, runtime_paths)
-        router_agent = AgentMatrixUser(
-            agent_name="router",
-            password=TEST_PASSWORD,
-            display_name="MindRoom",
-            user_id=ids["router"].full_id,
-        )
+        router_agent = _owner_user(ids["router"].full_id)
         runtime = ready_runtime(test_config, runtime_paths)
         runtime.unavailable = {"beta"}
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config, orchestrator=runtime)
@@ -1729,12 +1719,7 @@ class TestRoutingRegression:
             tmp_path,
         )
 
-        router_agent = AgentMatrixUser(
-            agent_name="router",
-            password=TEST_PASSWORD,
-            display_name="MindRoom",
-            user_id="@mindroom_router:localhost",
-        )
+        router_agent = _owner_user()
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
         mock_suggest_responder.return_value = ResponderSelection("news")
@@ -1885,12 +1870,7 @@ class TestRoutingRegression:
             tmp_path,
         )
 
-        router_agent = AgentMatrixUser(
-            agent_name="router",
-            password=TEST_PASSWORD,
-            display_name="MindRoom",
-            user_id="@mindroom_router:localhost",
-        )
+        router_agent = _owner_user()
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
         mock_suggest_responder.return_value = ResponderSelection("research")
@@ -1955,12 +1935,7 @@ class TestRoutingRegression:
             tmp_path,
         )
 
-        router_agent = AgentMatrixUser(
-            agent_name="router",
-            password=TEST_PASSWORD,
-            display_name="MindRoom",
-            user_id="@mindroom_router:localhost",
-        )
+        router_agent = _owner_user()
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
         mock_suggest_responder.return_value = ResponderSelection("research")
@@ -2131,12 +2106,7 @@ class TestRoutingRegression:
         mock_is_user_online.return_value = True
 
         # Create router agent
-        router_agent = AgentMatrixUser(
-            agent_name="router",
-            password=TEST_PASSWORD,
-            display_name="MindRoom",
-            user_id="@mindroom_router:localhost",
-        )
+        router_agent = _owner_user()
 
         # Set up router bot
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id)
