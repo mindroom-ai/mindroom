@@ -328,25 +328,31 @@ CORS limits which pages may read a response, not which requests reach MindRoom: 
 
 ## Tailnet SSH
 
-Tailnet SSH is on only while the primary has `MINDROOM_TAILNET_SSH_GATEWAY_TOKEN`.
-The primary then serves the gateway's three routes on a listener of their own, `MINDROOM_TAILNET_SSH_PORT` (default 8769), which must differ from the API's port and the script gateway's; that app holds no other route, and a request without `Authorization: Bearer <token>` gets the same 401 on every path, before a route is matched or a body read.
-The token is a control-plane variable, so it is in no worker's or tool request's environment and never passed through to a shell.
-Only a dedicated worker per person and agent gets the tailnet SSH mark and its port 2222, and only for an agent that opts in, whose workspace is that person's alone, and that mounts no shared directory another agent owns; a Docker worker's port is published only on `publish_host`, and never when that is a wildcard address.
-A worker's sshd never starts at boot: the primary asks the runner to start it only for a connect it has passed, for a link that is on, a peer whose Tailscale login the link admits, a link eligible now, and the worker the person's turns of that agent run in.
-Before it starts sshd, the primary writes `sshd_config`, `authorized_keys` with every line `restrict,pty`, and the link's own Ed25519 host private key into `<worker root>/.runtime/ssh/`, which the worker mounts read-only, so worker code can read the host key, as sshd's own uid, but cannot change what sshd admits.
-The links, each person's SSH public keys, and every link's host private key live in `tracking/tailnet_ssh.json`, which only the primary reads and no worker mounts.
-A removed key, portal or operator, and a disconnected or removed link move the link's `closed_before`, which tells the gateway to close the sessions opened before it.
-A disconnected or removed link's worker, while it runs, gets an empty `authorized_keys`, written under the same lock as every key change and connect and retried at every reconcile until it is written, and then the primary asks its runner, apart from any response, to stop sshd, which the runner does only while that file admits nobody, and a connect whose keys admit nobody is refused before sshd starts, so a stop that arrives after a newer connect leaves that connect's sshd; a worker that does not run is left alone, as only a connect of a link that is on starts its sshd again, and that connect writes the keys first.
+[Operator setup](https://docs.mindroom.chat/tailnet-ssh/) describes the shared tailnet and deployment requirements.
+All nodes enroll in one operator-managed tailnet with one reusable auth key, held by the gateway only.
+The gateway persists each node's tailnet identity in its own volume, which workers never mount; deleting a link attempts control-plane logout and removes local node state.
 
-The gateway is the `mindroom-tailnet-gateway` image, a process of its own that holds one machine in a person's tailnet per link and listens on that machine's port 22 only: it dials no tailnet address, runs no command, and talks to neither Docker nor Kubernetes.
-Of MindRoom's secrets it holds the token alone, which the chart keeps in a Secret only the primary and the gateway read; it asks the primary through the three routes only, and connects to a worker only at the host and port the primary answers for a connection.
-The chart's policies let it reach the listener's port, port 2222 of marked workers, DNS, and public TCP 443 or the operator's proxy, and let nothing reach it.
-A connection is admitted three times, by three owners: the person's tailnet policy decides which devices reach the machine, the gateway closes a connection unless its peer's Tailscale login is the link's one login, and the worker's sshd takes only public keys, those of the link's person.
-A tailnet's default policy lets every member reach every machine, so the gateway checks every connection, before it asks the primary and so before a worker wakes, and the primary checks the login again; a tagged device has no login and is refused.
-The sshd the primary configures forwards nothing, by `sshd_config` and by `restrict` on every key line: no TCP, socket, agent, X11, or tunnel forwarding.
-That is the worker's word, and the person's client must not rely on it: sshd runs as the agent's uid, so worker code can replace it and plant shell startup files, and a person must not offer the worker agent or X11 forwarding (`ssh -A`, `ForwardX11`), nor use a client that trusts the remote, such as VS Code Remote-SSH.
-Each machine's node keys, which are that machine to its tailnet, live in the gateway's state volume under the link's id; no worker mounts it, and removing a link signs the machine out and deletes them.
-A node's login URL signs the machine in to the tailnet of whoever opens it, so only `GET /api/connections/tailnet-ssh` returns it, to the link's owner, and the gateway writes it to neither its log nor that volume.
+Under a permissive tailnet policy every member can reach every link node's TCP port 22; enrollment is not an authorization boundary between users.
+The gateway requires an exact `WhoIs` login match before contacting the primary, and refuses unknown or tagged clients.
+The primary rechecks the login, agent access, and workspace eligibility before and after waking the requester's exact marked worker.
+Only then does the gateway pipe the connection to the returned endpoint, not to a peer-supplied address or another tailnet node.
+OpenSSH authenticates separately using only that requester's public keys from `config.yaml`.
+
+The primary's three gateway routes run on a separate listener and reject requests without its bearer token before matching a route or reading a body.
+Only the primary and gateway hold the listener token, not the worker or its shell; the gateway has no Docker or Kubernetes control-plane access.
+On Kubernetes, the gateway policy denies pod-network ingress and limits egress to the internal listener, marked workers' SSH ports, DNS, and control and relay traffic as configured.
+The primary and worker ingress policies are also needed to prevent unrelated pods from reaching the internal listener or worker sshd directly.
+Docker publishes worker sshd only on the configured non-wildcard publish host.
+
+The primary-only link ledger stores the link's Ed25519 host private key; sshd reads a read-only projection of that key, `sshd_config`, and `authorized_keys` with `restrict,pty` on every line.
+The worker's uid can read its host key but cannot write the projected keys or configuration.
+The session has the reach of the agent's worker shell; sshd disables forwarding, but worker code runs as the same uid and can control what the client talks to or what its shell starts.
+Clients must not forward credentials or trust code from the worker.
+
+If the login or set of key identities changes, or the link is omitted or retired, the next successful gateway reconcile closes the link's open transports, including connections still waiting for a worker.
+The primary refreshes admitted keys, or clears the running worker's key projection before requesting a best-effort sshd stop when there is no remaining access.
+The runner stops sshd only while the allowlist is empty, so a late stop does not undo a newer admission; stopping the listener alone is not session revocation.
+Existing sessions can survive a primary outage or a revoke and restore not observed by the gateway.
 
 ## Known gaps
 
