@@ -24,7 +24,7 @@ Changing `display_name` or `accept_invites`, an agent's `private` settings, whet
 Removing an agent or team makes it leave its rooms, except direct messages, when the reload applies.
 An edit saved while MindRoom is still starting applies once startup finishes.
 Most edits that start, stop, or restart no account, such as a model definition, knowledge base, or agent instruction change, apply within seconds even while agents are replying.
-Other edits, including ones that restart an agent or team, an agent's or team's `access`, `rooms` or `contacts`, `administrators`, `authorization`, `mindroom_user`, `room_defaults`, `rooms`, or `router.access`, first wait for active responses to finish, for at most 600 seconds.
+Other edits, including ones that restart an agent or team, an agent's or team's `access` or `rooms`, adding or removing an agent's `contacts`, `administrators`, `authorization`, `mindroom_user`, `room_defaults`, `rooms`, or `router.access`, first wait for active responses to finish, for at most 600 seconds.
 To confirm that a reload finished, use [`mindroom config check-applied`](https://docs.mindroom.chat/deployment/config-bundles/#config-fingerprint-and-config-check-applied).
 
 ## Minimal Configuration
