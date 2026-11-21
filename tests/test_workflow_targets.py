@@ -162,7 +162,7 @@ def test_caller_grant_answers_only_whether_the_caller_has_the_toolkit() -> None:
     assert not caller_grants_child("gone", "dev", _config(), "workflow")
 
 
-def _child(tmp_path: Path, target: str) -> DelegationChild:
+def _child(tmp_path: Path, target: str, previous: DelegationChild | None = None) -> DelegationChild:
     return prepare_child_turn(
         "dev",
         target,
@@ -174,7 +174,7 @@ def _child(tmp_path: Path, target: str) -> DelegationChild:
         budget_monitor=None,
         model=None,
         agent_mode="standard",
-        previous=None,
+        previous=previous,
         persona=None,
     )
 
@@ -247,6 +247,22 @@ def test_job_runtime_grants_a_team_members_own_copy_to_a_requester_of_the_team(
     job = BackgroundJob("job", of_team, target, 0, kind="delegation", adapter={"child": asdict(of_run)})
 
     assert coordinator._grant(job) == granted
+
+
+def test_follow_up_turn_of_a_runs_agent_is_an_ordinary_subagent_turn(tmp_path: Path) -> None:
+    """`continue_subagent` on the agent of a run's call starts a turn of its own: not the run's, and not under its grant."""
+    of_run = replace(
+        _child(tmp_path, "helper"),
+        workflow_run_id="wf-" + "a" * 32,
+        workflow_node_key="@0",
+        workflow_generation=1,
+    )
+
+    follow_up = _child(tmp_path, "helper", previous=of_run)
+
+    assert (follow_up.subagent_id, follow_up.previous_delegation_id) == (of_run.subagent_id, of_run.delegation_id)
+    assert (follow_up.workflow_run_id, follow_up.workflow_node_key, follow_up.workflow_generation) == (None, None, None)
+    assert (delegation_grant(of_run), delegation_grant(follow_up)) == ("workflow", "delegate")
 
 
 def test_old_child_snapshot_reads_without_the_new_fields(tmp_path: Path) -> None:

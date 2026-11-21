@@ -98,6 +98,12 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         persona=child.persona,
         parent_tool_call_id=child.parent_tool_call_id,
     )
+    # The continuation is a turn of the same call of a workflow run, which no other follow-up of its agent is.
+    follow_up.workflow_run_id, follow_up.workflow_node_key, follow_up.workflow_generation = (
+        child.workflow_run_id,
+        child.workflow_node_key,
+        child.workflow_generation,
+    )
     arguments = {"subagent_id": child.subagent_id, "message": child.task}
     if OUTPUT_PATH_ARGUMENT in job.adapter:
         arguments[OUTPUT_PATH_ARGUMENT] = job.adapter[OUTPUT_PATH_ARGUMENT]

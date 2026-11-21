@@ -789,10 +789,6 @@ def prepare_child_turn(
         persona=persona,
         dedicated_worker=dedicated_worker,
         worker_resource_profile=worker_resource_profile,
-        # A follow-up turn of a workflow run's agent is a turn of the same call of that run.
-        workflow_run_id=previous.workflow_run_id if previous is not None else None,
-        workflow_node_key=previous.workflow_node_key if previous is not None else None,
-        workflow_generation=previous.workflow_generation if previous is not None else None,
     )
 
 
