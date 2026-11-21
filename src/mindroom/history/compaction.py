@@ -409,13 +409,10 @@ async def compact_scope_history(
 
     outcome = None
 
-    async def report(result: _CompactionRewriteResult | None) -> None:
+    async def report(result: _CompactionRewriteResult) -> None:
         nonlocal outcome
         await clear_manual_compaction_request(storage=storage, session=session, state=state)
-        if result is None:
-            return
         summary_model, compacted_run_count = result.served_by, result.compacted_run_count
-        compacted_at = _iso_utc_now()
         logger.info(
             "Compaction summary generated",
             session_id=session.session_id,
@@ -443,7 +440,7 @@ async def compact_scope_history(
                 runs_before=len(visible_runs),
                 runs_after=len(scope_visible_runs(session)),
                 compacted_run_count=compacted_run_count,
-                compacted_at=compacted_at,
+                compacted_at=_iso_utc_now(),
                 history_budget_tokens=available_history_budget,
             ),
             scope=scope,
@@ -452,7 +449,7 @@ async def compact_scope_history(
         )
 
     try:
-        await _rewrite_working_session_for_compaction(
+        result = await _rewrite_working_session_for_compaction(
             storage=storage,
             persisted_session=session,
             working_session=working_session,
@@ -468,6 +465,8 @@ async def compact_scope_history(
         # The reply replays what the conversation holds now; a manual request stays for the next reply.
         await run_session_storage_operation(lambda: storage, lambda opened: opened.reload_log(session))
         raise
+    if result is None:
+        await clear_manual_compaction_request(storage=storage, session=session, state=state)
     return outcome
 
 
@@ -483,7 +482,7 @@ async def _rewrite_working_session_for_compaction(
     model: ModelProvider,
     before_persist: Callable[[Sequence[AnyRunRecord]], Awaitable[None]],
     after_persist: Callable[[_SummaryChunk, int, int], Awaitable[None]],
-    report: Callable[[_CompactionRewriteResult | None], Coroutine[object, object, None]],
+    report: Callable[[_CompactionRewriteResult], Coroutine[object, object, None]],
 ) -> _CompactionRewriteResult | None:
     """Fold ``runs``, oldest first, into one appended summary row per chunk.
 
@@ -552,10 +551,9 @@ async def _rewrite_working_session_for_compaction(
             _stop_compaction(ConversationChangedError(), persisted_session.session_id, scope, compacted_run_count)
             break
         result = _CompactionRewriteResult(chunk.summary, len(runs) - runs_remaining, chunk.summarizer.model)
-        if not runs_remaining:
-            return result
-        summarizer, remaining = chunk.summarizer, remaining[-runs_remaining:]
-    await run_coroutine_until_complete(report(result))
+        summarizer, remaining = chunk.summarizer, remaining[len(chunk.included_runs) :]
+    if remaining and result is not None:
+        await run_coroutine_until_complete(report(result))
     return result
 
 
