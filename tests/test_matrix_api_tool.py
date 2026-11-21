@@ -1233,16 +1233,16 @@ async def test_matrix_api_search_finds_a_reply_by_its_prose_and_shows_it_with_it
         return [[result["snippet"], result["context"]["events_before"][0]["snippet"]] for result in payload["results"]]
 
     built, held = reply_with_calls("The needle.\n\n🔧 `shell` [1]", 1)
-    neighbour, held_neighbour = reply_with_calls("🔧 `shell` [1]", 1)
-    assert (held["body"], held_neighbour["body"]) == ("The needle.", "")
-    with_calls = [["The needle. 🔧 `shell` [1]", "🔧 `shell` [1]"]]
+    neighbour, held_neighbour = reply_with_calls("Before.\n\n🔧 `shell` [1]", 1)
+    assert (held["body"], held_neighbour["body"]) == ("The needle.", "Before.")
+    with_calls = [["The needle. 🔧 `shell` [1]", "Before. 🔧 `shell` [1]"]]
 
     assert await found("needle", held, held_neighbour, agent) == with_calls
     assert await found("needle", built, neighbour, agent) == with_calls
     assert await found("shell", built, neighbour, agent) == with_calls
     assert await found("shell", held, held_neighbour, agent) == []
     for sender in ("@alice:localhost", [agent], {"id": agent}):
-        assert await found("needle", held, held_neighbour, sender) == [["The needle.", ""]]
+        assert await found("needle", held, held_neighbour, sender) == [["The needle.", "Before."]]
 
 
 @pytest.mark.asyncio

@@ -143,7 +143,11 @@ async def test_a_send_puts_the_fixture_wire_content_on_matrix(case: dict[str, An
     delivered = await send_message_result(client, _ROOM, sent)
 
     wire = _on_the_wire(client)
-    assert (wire is sent and wire["body"] == case["sent"]["body"]) if case["wire"] is None else wire == _wire(case)
+    if case["wire"] is None or not case.get("written", True):
+        assert wire is sent
+        assert wire["body"] == case["sent"]["body"]
+    else:
+        assert wire == _wire(case)
     assert isinstance(delivered, DeliveredMatrixEvent)
     assert delivered.content_sent is sent
     assert calculate_event_size(wire) <= calculate_event_size(sent)
@@ -243,6 +247,44 @@ async def test_an_edit_bound_to_its_target_when_its_row_is_claimed_sends_no_mark
         assert layer[_TRACE_KEY]["version"] == 3
     assert (wire["body"], wire["m.new_content"]["body"]) == ("* Reading done.", "Reading done.")
     assert tool_markers_in_text(wire) == row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", [False, True])
+@pytest.mark.parametrize("body", ["🔧 `shell` [1]\n\n🔧 `shell` [2]", "🔧 `shell` [1]\n\n \n\n🔧 `shell` [2]\n\n"])
+async def test_a_reply_of_calls_alone_is_sent_with_its_markers_in_its_text(body: str, edit: bool) -> None:
+    """A reader that puts no markers back takes a reply without text for no message at all.
+
+    An earlier release and another server's are such readers: their judge cannot read that reply and then drops all
+    the conversation before it. So a reply, or an edit, whose text would be blank goes out as it was built.
+    """
+    built = _content(body, "<p>🔧 <code>shell</code> [1]</p>\n<p>🔧 <code>shell</code> [2]</p>\n", 2, [_SHELL, _SHELL])
+    content = build_edit_event_content(event_id="$reply", new_content=built, new_text=body) if edit else built
+    client = _client()
+
+    await send_message_result(client, _ROOM, content)
+
+    wire = _on_the_wire(client)
+    assert wire is content
+    # As that reader's judge takes what Matrix holds, with nothing put back.
+    assert message_judgment_text(_message(wire.get("m.new_content", wire))) is not None
+
+
+@pytest.mark.asyncio
+async def test_an_edit_with_prose_after_an_edit_of_calls_alone_is_read_as_it_was_built() -> None:
+    """Each edit says its own version: calls alone go out as built, and the prose after them goes out without markers."""
+    calls, prose = _marked("🔧 `shell` [1]", [_SHELL]), _marked("🔧 `shell` [1]\n\nFound it.", [_SHELL])
+    edits = [
+        build_edit_event_content(event_id="$reply", new_content=built, new_text=built["body"])
+        for built in (calls, prose)
+    ]
+
+    held = [tool_markers_out_of_text(edit) for edit in edits]
+
+    assert held[0] is edits[0]
+    assert (held[1]["body"], held[1]["m.new_content"][_TRACE_KEY]["version"]) == ("* Found it.", 3)
+    for built, wire in zip((calls, prose), held, strict=True):
+        assert await extract_edit_body(_event(wire, "$edit")) == (built["body"], built)
 
 
 @pytest.mark.asyncio
@@ -387,8 +429,10 @@ async def test_every_way_into_the_backend_reads_an_agents_reply_as_it_was_built(
     """A synced event, a fetched one and one a person's account reads all carry the reply with its markers."""
     sent, wire = _sent(case), _wire(case)
     edit = build_edit_event_content(event_id="$reply", new_content=sent, new_text=sent["body"])
-    wire_edit = tool_markers_out_of_text(edit)
-    assert wire_edit is not edit
+    # The edit as Matrix holds it: the fallback repeats the replacement, which a reply of calls alone no longer sends.
+    its_layer = {key: wire[key] for key in ("formatted_body", _TRACE_KEY)}
+    wire_edit = {**edit, "m.new_content": wire, "body": f"* {wire['body']}", **its_layer}
+    assert tool_markers_out_of_text(edit) == (wire_edit if case.get("written", True) else edit)
 
     views = ingestion_timeline_views(
         room_id=_ROOM,
@@ -532,8 +576,8 @@ async def test_a_reply_of_calls_alone_by_an_agent_this_runtime_does_not_run_leav
     config, paths = runtime.config, runtime.runtime_paths
     registry = entity_identity_registry(config, paths)
     agent = registry.current_ids["general"].full_id
-    built = _sent(_case("a reply of calls alone"))
-    held = tool_markers_out_of_text(built)
+    case = _case("a reply of calls alone")
+    built, held = _sent(case), _wire(case)
     assert held["body"] == ""
 
     def synced(event_id: str, ts: int, sender: str, content: dict[str, Any]) -> VisibleMessage:
@@ -591,7 +635,7 @@ async def test_a_reply_stored_as_matrix_holds_it_is_read_with_its_markers_in_its
     no judge can read, and one such row drops all the conversation before the turn.
     """
     config, paths = runtime.config, runtime.runtime_paths
-    held = tool_markers_out_of_text(_sent(_case("a reply of calls alone")))
+    held = _wire(_case("a reply of calls alone"))
     assert held["body"] == ""
 
     def synced(event_id: str, ts: int, sender: str, content: dict[str, Any]) -> ProjectedEvent:
@@ -655,17 +699,18 @@ async def test_only_an_account_mindroom_chat_takes_for_an_agent_sends_its_reply_
 ) -> None:
     """MindRoom Chat puts markers back for a ``mindroom_`` username alone, so any other account's reply keeps them.
 
-    An agent may have any username, and its reply of calls alone would be empty to everyone who reads it there.
+    An agent may have any username, and its calls would be gone for everyone who reads its reply there.
     A client that names no account is in doubt, and in doubt the reply goes out as it was built.
     """
-    sent = _sent(_case("a reply of calls alone"))
+    case = _case(_BETWEEN)
+    sent = _sent(case)
     client = _client()
     client.user_id = user_id
 
     await send_message_result(client, _ROOM, sent)
 
     wire = _on_the_wire(client)
-    assert (wire["body"] == "") is markers_leave
+    assert (wire == _wire(case)) is markers_leave
     assert wire is sent or markers_leave
 
 

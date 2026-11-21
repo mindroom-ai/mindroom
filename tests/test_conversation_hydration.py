@@ -3404,7 +3404,7 @@ class TestRepliesWithToolCalls:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A page ends at a size, so the same replies must have the same size whichever way they arrived."""
-        built, held = reply_with_calls("\n\n".join(f"🔧 `shell` [{index}]" for index in range(1, 9)), 8)
+        built, held = reply_with_calls("\n\n".join(["Looked.", *(f"🔧 `shell` [{index}]" for index in range(1, 9))]), 8)
         sizes = [len(json.dumps(content, separators=(",", ":"))) for content in (built, held)]
         monkeypatch.setattr(reads, "PAGE_CONTENT_BUDGET_BYTES", sum(sizes))
 

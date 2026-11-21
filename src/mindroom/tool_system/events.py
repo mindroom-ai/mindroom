@@ -758,6 +758,9 @@ def _layer_without_markers(layer: Mapping[str, Any], fallback: str | None) -> tu
     index_of_line = {marker_line: index for index, (marker_line, _block) in zip(calls, markers, strict=True)}
     marker_blocks = {marker_block for _line, marker_block in markers}
     kept, body_lines = _body_without_markers(body, index_of_line)
+    if not any(line.strip() for line in kept):
+        # A reply of calls alone keeps its lines: a reader that cannot put them back would see no message.
+        return None
     other = [] if fallback is None else _body_without_markers(fallback, index_of_line)[0]
     pieces: list[str] = []
     blocks: list[int] = []
