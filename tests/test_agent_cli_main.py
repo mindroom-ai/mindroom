@@ -444,7 +444,7 @@ def _unreachable_worker_client(monkeypatch, *, failed_reads: int | None, fail_su
             return {"status": "running"}
 
         def receipt(self, call_id) -> dict[str, object]:
-            del call_id
+            assert call_id == submissions[0]["call_id"]
             reads.append(clock.now)
             if failed_reads is None or len(reads) <= failed_reads:
                 msg = "Agent CLI transport outcome is unknown"
@@ -504,13 +504,21 @@ def test_workers_run_counts_a_minute_of_failed_reads_from_the_last_one_that_work
     assert clock.now > 60
 
 
-def test_workers_run_exits_125_at_once_when_the_command_cannot_be_submitted(capsys, monkeypatch) -> None:
-    """A submission is sent once, since a second one could run the command twice."""
-    clock, reads, submissions = _unreachable_worker_client(monkeypatch, failed_reads=None, fail_submission=True)
+@pytest.mark.parametrize("failed_reads, expected_code", [(None, 125), (2, 0)])
+def test_workers_run_recovers_after_a_lost_submission_response(capsys, monkeypatch, failed_reads, expected_code) -> None:
+    """Only read the receipt: another submission could run the command twice."""
+    clock, reads, submissions = _unreachable_worker_client(monkeypatch, failed_reads=failed_reads, fail_submission=True)
 
-    assert main(["workers", "run", "w", "--", "true"]) == 125
-    assert (len(submissions), reads, clock.now) == (1, [], 0.0)
-    assert "may still be running" not in capsys.readouterr().err
+    assert main(["workers", "run", "w", "--", "true"]) == expected_code
+    [submission] = submissions
+    output = capsys.readouterr()
+    if failed_reads is None:
+        assert len(reads) > 1
+        assert 60 <= clock.now < 65
+        assert f"may still be running in worker w (call {submission['call_id']})" in output.err
+    else:
+        assert len(reads) == failed_reads + 1
+        assert (output.out, output.err) == ("shard ok\n", "")
 
 
 def test_workers_run_prints_the_start_of_a_long_result_and_where_the_rest_is(capsys, monkeypatch) -> None:

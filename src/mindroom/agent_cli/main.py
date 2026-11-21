@@ -208,15 +208,15 @@ def _wait(client: AgentCliClient, call_id: str, result: dict[str, object], timeo
     return result
 
 
-def _settled(client: AgentCliClient, call_id: str, result: dict[str, object]) -> dict[str, object]:
+def _settled(client: AgentCliClient, call_id: str, result: dict[str, object] | None) -> dict[str, object]:
     """Read a submitted call's receipt until it settles, however long its command runs.
 
     The command runs on in its worker, so a read that fails is tried again, until reads have failed for
     ``_RESULT_UNREACHABLE_SECONDS``.
     """
     delay = 0.2
-    unreachable_since: float | None = None
-    while _exit_code(result) == 3:
+    unreachable_since = time.monotonic() if result is None else None
+    while result is None or _exit_code(result) == 3:
         time.sleep(delay)
         # A long command is polled less often, so many of them at once stay cheap for MindRoom.
         delay = min(delay * 1.5, 2.0)
@@ -252,15 +252,19 @@ def _run_in_worker(args: argparse.Namespace) -> int:
     try:
         client = AgentCliClient()
         # Sent once: a second submission after an unknown outcome could run the command twice.
-        result = client.operation(
-            {
-                "operation": "tools.call",
-                "toolkit": "shell",
-                "function": "run_shell_command",
-                "call_id": call_id,
-                "arguments": arguments,
-            },
-        )
+        try:
+            result = client.operation(
+                {
+                    "operation": "tools.call",
+                    "toolkit": "shell",
+                    "function": "run_shell_command",
+                    "call_id": call_id,
+                    "arguments": arguments,
+                },
+            )
+        except AgentCliUnavailableError:
+            # The server may have accepted the command even though it could not return the receipt.
+            result = None
         submitted = True
         result = _settled(client, call_id, result)
     except (AgentCliUnavailableError, ValueError) as exc:
