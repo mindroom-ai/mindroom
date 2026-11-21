@@ -140,11 +140,14 @@ Add the `compact_context` tool to an agent's `tools` to let it request compactio
 The request runs before the next reply in the same conversation and always uses text compaction.
 It requires a summary model with a `context_window` and the same 2,000-token summary input budget; otherwise the tool returns `Error: Compaction is unavailable for this scope because ...` with the reason.
 
-You can request the same compaction from chat with `/compact` (or `!compact`).
+From chat, use `/compact` (or `!compact`) to compact now without another message.
 `/compact <agent_or_team>` requests it for one agent or configured team; `/compact` alone requests it for all of them.
 Both forms only reach agents and configured teams you may address that already have a conversation here.
 The conversation is the thread, or the whole room for an agent or team in room mode; for a thread-mode agent, send it inside the thread.
-The reply has one line per agent or team, with the reason when compaction is unavailable for it.
+The command acknowledges each target, then that target reports the estimated history tokens before and after compaction.
+If a reply is in progress or waiting for approval, compaction waits behind it. Replies queued behind compaction wait for it to finish.
+In a target's contact room, compaction still runs before its next reply instead of sending a separate notice.
+If the target's recent room history has not synced or needs repair, the immediate fold is skipped and the request stays pending for its next reply.
 
 ## Team History and Compaction
 
