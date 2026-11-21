@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -43,6 +44,24 @@ def _mock_client(*, encrypted: bool = False) -> AsyncMock:
         client.olm.device_id = "DEVICE"
     client.room_send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id="!room:localhost")
     return client
+
+
+@pytest.mark.asyncio
+async def test_delivery_exception_logs_only_the_safe_innermost_site() -> None:
+    """A send that raises in nio identifies the failing check without rendering the exception."""
+    room_id = "!room:localhost"
+    client = nio.AsyncClient("https://matrix.example.org", "@bot:localhost")
+    client.rooms[room_id] = nio.MatrixRoom(room_id, client.user_id)
+    try:
+        with capture_logs() as logs:
+            outcome = await send_message_outcome(client, room_id, {"body": "hello", "msgtype": "m.text"})
+    finally:
+        await client.close()
+
+    assert outcome == MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "local delivery exception")
+    (failure,) = [entry for entry in logs if entry["event"] == "matrix_message_delivery_exception"]
+    assert re.fullmatch(r"nio/client/base_client\.py:\d+ _assert_logged_in", failure["exception_site"])
+    assert "Not logged in." not in str(failure)
 
 
 @pytest.mark.asyncio
