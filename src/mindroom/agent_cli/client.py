@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from http.client import HTTPException
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -29,7 +30,7 @@ def _rejection(error: HTTPError) -> ValueError:
     msg = "Agent CLI request was rejected"
     try:
         body = read_json(error.read(MAX_ENVELOPE_BYTES + 1))
-    except (OSError, ValueError):
+    except (OSError, HTTPException, ValueError):
         body = None
     match body:
         case {"detail": str(detail)} if detail:
@@ -103,7 +104,7 @@ class AgentCliClient:
                 raise _rejection(exc) from None
             msg = "Agent CLI authority or transport is unavailable"
             raise AgentCliUnavailableError(msg) from None
-        except (OSError, URLError, ValueError) as exc:
+        except (OSError, HTTPException, URLError, ValueError) as exc:
             # Name the address so a blocked route back to MindRoom is diagnosable from the shell.
             msg = f"Agent CLI transport outcome is unknown; check that this shell can reach {self._url}"
             raise AgentCliUnavailableError(msg) from exc
