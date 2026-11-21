@@ -287,7 +287,7 @@ class ClaudeProvider:
         assert self.identity.endpoint is not None
         route = native_compaction_route(
             provider=self.identity.provider,
-            model_id=self.identity.id,
+            model_id=_sent_model_id(self.identity.id, self.settings),
             endpoint=self.identity.endpoint,
             history_generation=history_generation,
         )
@@ -482,8 +482,15 @@ class ClaudeProvider:
         and the deferred tools their own searches load first: everything else the body sends, such as the system prompt
         and tools, authored ones included, went with the request before the answer too.
         """
-        loaded = claude_loaded_tool_names(request.messages[start:]) - claude_loaded_tool_names(request.messages[:start])
         body = self._request_body(replace(request, messages=request.messages[start:]) if start else request)
+        loaded = claude_loaded_tool_names(body.messages)
+        # A checkpoint inside the tail discards the whole prefix; otherwise only searches that survive there count.
+        if start and loaded and not body.checkpoint_prefix:
+            prefix = request.messages[:start]
+            if replay := request.native_compaction:
+                # Only tool-search results matter here, so the thinking mode does not affect the count.
+                prefix, _ = native_replay_messages_for_route(prefix, route=replay.route, manual_thinking=False)
+            loaded -= claude_loaded_tool_names(prefix)
         claude_body_parts(
             sdk_request_body(body.kwargs, _SDK_OPTION_KEYS),
             body.messages,
@@ -527,6 +534,7 @@ class ClaudeProvider:
             body,
             system=conversation.system,
             route=self.route,
+            endpoint=self.identity.endpoint,
             deferred_tool_names=request.deferred_tools.names,
             tool_choice=request.tool_choice,
             extended_cache_time=settings.extended_cache_time,
@@ -812,7 +820,7 @@ def predates_bedrock_api_2026(model_id: str) -> bool:
 def _sent_model_id(model_id: str, settings: ClaudeSettings) -> str:
     """Return the model the body names: the raw ``model`` override, ``extra_body`` first as the SDK merges, else the id."""
     request_params = settings.request_params or {}
-    return str((request_params.get("extra_body") or {}).get("model") or request_params.get("model") or model_id)
+    return str((request_params.get("extra_body") or {}).get("model", request_params.get("model", model_id)))
 
 
 def _keeps_legacy_api_version(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> bool:
@@ -898,7 +906,7 @@ def _claude_capabilities(
         native_tool_search=native_tool_search_supported(route, model_id),
         native_compaction=native_compaction_supported(
             route=route,
-            model_id=model_id,
+            model_id=_sent_model_id(model_id, settings),
             settings=settings,
             endpoint=endpoint,
         ),

@@ -547,7 +547,10 @@ Changing `seed` changes the response length, split point, and tool-call choice, 
 
 ## Claude Through OpenRouter
 
-Use `provider: anthropic` with OpenRouter's Messages endpoint to use Claude [native compaction](history.md#native-compaction) through OpenRouter.
+Use `provider: anthropic` with OpenRouter's Messages endpoint and set `context_window` to enable planning for Claude [native compaction](history.md#native-compaction).
+Use Anthropic's ID (`claude-opus-5-5`), not OpenRouter's slug (`anthropic/claude-opus-5.5`), so MindRoom selects the correct Claude capabilities.
+Set `base_url` to `https://openrouter.ai/api` without `/v1` because the Anthropic SDK appends it.
+Always set `api_key` for this model, or MindRoom may send your shared Anthropic key to OpenRouter.
 The `provider: openrouter` route uses Chat Completions and keeps text compaction.
 
 ```yaml
@@ -555,6 +558,7 @@ models:
   openrouter_claude:
     provider: anthropic
     id: claude-opus-5-5
+    context_window: 1000000
     extra_kwargs:
       base_url: https://openrouter.ai/api
       api_key: ${OPENROUTER_API_KEY}
