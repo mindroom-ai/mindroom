@@ -25,6 +25,7 @@ from mindroom.hooks import (
     RoomMemberLeftContext,
     emit,
 )
+from mindroom.matrix.event_types import MINDROOM_ACCOUNTS_EVENT_TYPE
 from mindroom.matrix.room_accounts import reconcile_room_accounts, reconcile_room_router_binding
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.room_member_joins import (
@@ -304,10 +305,19 @@ class StewardDuties:
             client = runtime.client
             if not self._may_publish_room_state(room_id) or client is None or room_id not in client.rooms:
                 return {}
+            alternate_clients = {
+                other.user_id: other
+                for bot in runtime.orchestrator.agent_bots.values()
+                if bot.running
+                and (other := bot.client) is not None
+                and other.user_id != client.user_id
+                and (room := other.rooms.get(room_id)) is not None
+                and room.power_levels.can_user_send_state(other.user_id, MINDROOM_ACCOUNTS_EVENT_TYPE)
+            }
             args = (client, runtime.config, runtime.runtime_paths, room_id)
             may_claim = partial(self._may_publish_room_state, room_id)
             return {
-                "accounts": partial(reconcile_room_accounts, *args),
+                "accounts": partial(reconcile_room_accounts, *args, alternate_clients=alternate_clients),
                 "mode": partial(reconcile_room_thread_mode, *args),
                 "binding": partial(reconcile_room_router_binding, client, room_id, may_claim=may_claim),
             }

@@ -15,7 +15,7 @@ from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.event_types import MINDROOM_ACCOUNTS_EVENT_TYPE, ROUTER_BINDING_EVENT_TYPE
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -31,18 +31,32 @@ async def reconcile_room_accounts(
     runtime_paths: RuntimePaths,
     room_id: str,
     *,
+    alternate_clients: Mapping[str, nio.AsyncClient] | None = None,
     failure_level: Callable[[bool], int] = lambda _: logging.WARNING,
 ) -> bool:
     """Write the client's list of the room's joined MindRoom accounts when it changed and return whether it is current.
 
     A write refused for lack of power does not need a retry until the room changes.
 
-    The state key is the writing account's user ID, the room's steward, which Matrix lets only that account write.
+    Prefer the bound account over the steward when it can write. The state key must be the writer's user ID.
     """
     phase = "room_lock"
     try:
         # Bound lock waits too; the lock prevents an older comparison from overwriting a newer roster.
         async with asyncio.timeout(10), _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
+            if alternate_clients:
+                phase = "binding_get"
+                reply = await client.room_get_state_event(room_id, ROUTER_BINDING_EVENT_TYPE, state_key="")
+                if isinstance(reply, nio.RoomGetStateEventResponse):
+                    bound = reply.content.get("user_id") if isinstance(reply.content, dict) else None
+                    if isinstance(bound, str):
+                        client = alternate_clients.get(bound, client)
+                elif not (
+                    isinstance(reply, nio.RoomGetStateEventError)
+                    and reply.status_code in {"M_NOT_FOUND", "M_FORBIDDEN"}
+                ):
+                    logger.log(failure_level(False), "room_accounts_publish_failed", room_id=room_id, error=str(reply))
+                    return False
             phase = "joined_members"
             members = await get_room_members(client, room_id, failure_level=failure_level)
             if members is None:
