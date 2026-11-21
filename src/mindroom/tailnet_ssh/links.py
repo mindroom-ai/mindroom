@@ -16,7 +16,7 @@ from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import resolve_human_requester_alias
-from mindroom.runtime_resolution import resolve_agent_execution, resolve_agent_runtime
+from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tailnet_ssh.projection import write_projection
 from mindroom.tailnet_ssh.store import read_links, update_links
 from mindroom.terminal.resolution import agent_terminals
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.sandbox_proxy import WorkerCall
+    from mindroom.tool_system.sandbox_proxy import WorkerCall, WorkerStandIns
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
     from mindroom.workers.models import WorkerSshEndpoint
 
@@ -145,15 +145,9 @@ def record_status(paths: RuntimePaths, status: GatewayStatus, payload: StatusRep
     )
 
 
-def _shell_call(config: Config, paths: RuntimePaths, worker_key: str, target: ResolvedWorkerTarget) -> WorkerCall:
-    identity = target.execution_identity
-    assert identity is not None
-    assert identity.agent_name is not None
-    terminals = agent_terminals(identity.agent_name, config, paths, identity, create=False)
-    if terminals is None:
-        raise ConnectRefused(409, _NO_SHELL)
+def _shell_call(stand_ins: WorkerStandIns, worker_key: str) -> WorkerCall:
     try:
-        call = worker_call(terminals.stand_ins, SHELL_FUNCTION, start=False, include_execution_env=False)
+        call = worker_call(stand_ins, SHELL_FUNCTION, start=False, include_execution_env=False)
     except (RuntimeError, OSError):
         raise ConnectRefused(503, "The agent's worker is unavailable.") from None
     if call is None:
@@ -184,9 +178,13 @@ def _admit(  # noqa: C901 - keep the before/after wake and projection checks tog
         with lease as manager:
             # Use a stable workspace for this worker, independent of the connecting peer.
             launch_target = next(iter(routes.values()))
-            launch_agent = launch_target.routing_agent_name
-            assert launch_agent is not None
-            resolve_agent_runtime(launch_agent, config, paths, launch_target.execution_identity, create=True)
+            identity = launch_target.execution_identity
+            assert identity is not None
+            assert identity.agent_name is not None
+            # The toolkit prepares the workspace before ensure_worker plans its mounts.
+            terminals = agent_terminals(identity.agent_name, config, paths, identity, create=True)
+            if terminals is None:
+                raise ConnectRefused(409, _NO_SHELL)
             ready = manager.ensure_worker(WorkerSpec(key, private_agent_names=target.private_agent_names))
     except (WorkerBackendError, OSError):
         raise ConnectRefused(503, "The worker did not start.") from None
@@ -198,7 +196,7 @@ def _admit(  # noqa: C901 - keep the before/after wake and projection checks tog
 
     # Don't build against an already stale snapshot or hold the ledger lock across a worker touch.
     snapshot, snapshot_paths = read_config()
-    call = _shell_call(config, paths, key, launch_target) if snapshot is config and snapshot_paths == paths else None
+    call = _shell_call(terminals.stand_ins, key) if snapshot is config and snapshot_paths == paths else None
 
     # Serialize the recheck and projection with other connects.
     with update_links(paths) as book:

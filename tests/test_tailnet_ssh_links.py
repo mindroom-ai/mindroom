@@ -273,6 +273,7 @@ async def test_first_private_connect_creates_workspace_before_worker_mounts(
     workspace = resolve_agent_runtime("mind", config, paths, identity, create=False).workspace.root
     assert not workspace.exists()
     manager = _wire_connect(monkeypatch, tmp_path, link)
+    monkeypatch.setattr(links, "agent_terminals", agent_terminals)
     ensure_worker = manager.ensure_worker
 
     def ensure_with_workspace(spec: WorkerSpec) -> WorkerHandle:
@@ -432,6 +433,8 @@ async def test_connect_refuses_without_the_agents_own_shell(
     assert refused.value.status_code == 409
     assert (refused.value.detail == "This agent has no shell tool.") == (shell != "other_worker")
     assert "ssh_start" not in manager.calls
+    if shell == "no_terminals":
+        assert "ensure_worker" not in manager.calls
 
 
 @pytest.mark.asyncio
