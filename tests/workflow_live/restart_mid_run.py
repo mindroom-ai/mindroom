@@ -22,9 +22,16 @@ import argparse
 import secrets
 import sys
 import time
-from pathlib import Path
 
-from tests.workflow_live.kill_after_write import Deployment, LiveError, counter_lines, say, start_run, until
+from tests.workflow_live.kill_after_write import (
+    Deployment,
+    LiveError,
+    add_send_options,
+    counter_lines,
+    say,
+    start_run,
+    until,
+)
 
 _WRITE_MANY = """\
 import time
@@ -36,7 +43,7 @@ def main(args):
     for index in range({writes}):
         shell(f"echo {{index}} >> {counter}")
         time.sleep(4)
-    return {{"report": "{token}"}}
+    return {{"report": "{report}"}}
 """
 
 
@@ -46,19 +53,22 @@ def main() -> int:
     parser.add_argument("--writes", type=int, default=6, help="how many lines the run appends")
     parser.add_argument("--after", type=int, default=3, help="restart once this many calls have completed")
     parser.add_argument("--slot", type=int, help="the live deployment's slot (default: the only ready one)")
-    parser.add_argument("--dev", type=Path, default=Path("~/repos/dev").expanduser(), help="where `just live` runs")
+    add_send_options(parser)
     parser.add_argument("--settle", type=float, default=90, help="seconds to wait for reports after the run ended")
     args = parser.parse_args()
+    dev = args.dev if args.send == "ask" else None
     deployment = Deployment.find(args.slot)
     token = f"tide{secrets.token_hex(6)}"
     counter = f"counter_{token}.txt"
+    # Only the run's result holds this word: the file's name and the call do not, so no other reply repeats it.
+    report = f"harbor{secrets.token_hex(6)}"
 
     backend = deployment.backend()
     deployment.give_workflow_toolkit()
     if "MINDROOM_WORKFLOW_FAULT_DIR" in backend.environment:
         backend.stop()
         backend.start()
-    root = start_run(deployment, _WRITE_MANY.format(writes=args.writes, counter=counter, token=token), token, args.dev)
+    root = start_run(deployment, _WRITE_MANY.format(writes=args.writes, counter=counter, report=report), token, dev)
 
     def enough_done() -> bool:
         found = deployment.run(token)
@@ -74,7 +84,7 @@ def main() -> int:
     completed = sum(node["state"] == "completed" for node in nodes)
     line = (
         f"lines={counter_lines(deployment, counter)} nodes={completed}/{len(nodes)} "
-        f"attempts={run['attempt']} reports={deployment.replies_with(root, token)}"
+        f"attempts={run['attempt']} reports={deployment.replies_with(root, report)}"
     )
     print(line, flush=True)
     say(f"run {run['run_id']} ended {run['state']}")

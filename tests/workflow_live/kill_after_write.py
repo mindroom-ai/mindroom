@@ -50,7 +50,7 @@ from mindroom.workflow import shell
 
 def main(args):
     shell("echo a >> {counter}")
-    return {{"report": "{token}"}}
+    return {{"report": "{report}"}}
 """
 
 
@@ -94,10 +94,21 @@ class Deployment:
             msg = f"found {len(ready)} ready live deployments ({sorted(ready)}); pass --slot N"
             raise LiveError(msg)
         slot = next(iter(ready)) if slot is None else slot
+        directory = _STACKS / f"slot-{slot}"
         if slot not in ready:
-            msg = f"no ready live deployment on slot {slot}; run `just live up --backend <checkout>` first"
-            raise LiveError(msg)
-        return cls(slot, ready[slot], _STACKS / f"slot-{slot}")
+            # A stack started with `stack.py N up` alone, as the Docker-worker one is: its own state names the same.
+            try:
+                stack = json.loads((directory / "state.json").read_text())
+                tester = stack["tester"]
+                ready[slot] = {
+                    "homeserver": stack["homeserver"],
+                    "lobby": {"roomId": stack["rooms"]["lobby"]},
+                    **tester,
+                }
+            except (OSError, KeyError, ValueError) as exc:
+                msg = f"no ready live deployment on slot {slot}; run `just live up --backend <checkout>` first"
+                raise LiveError(msg) from exc
+        return cls(slot, ready[slot], directory)
 
     @property
     def state(self) -> dict[str, Any]:
@@ -137,22 +148,31 @@ class Deployment:
             text = text.replace("defaults:\n", "defaults:\n  allow_shell_without_worker: true\n", 1)
         path.write_text(text)
 
-    def matrix(self, path: str) -> dict[str, Any]:
-        """GET *path* from the homeserver's client API as the test account."""
+    def matrix(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        """GET *path* from the homeserver's client API as the test account, or PUT *body* there."""
         request = urllib.request.Request(  # noqa: S310  # the deployment's own homeserver on 127.0.0.1
             f"{self.live['homeserver']}/_matrix/client{path}",
-            headers={"Authorization": f"Bearer {self.live['accessToken']}"},
+            data=None if body is None else json.dumps(body).encode(),
+            method="GET" if body is None else "PUT",
+            headers={"Authorization": f"Bearer {self.live['accessToken']}", "Content-Type": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
             return json.load(response)
 
-    def ask(self, text: str, dev: Path) -> str:
-        """Send *text* to the lobby through `just live ask`, wait for the Helper's reply, and return the thread's root."""
+    def ask(self, text: str, dev: Path | None) -> str:
+        """Send *text* to the lobby as the test account and return the message's event, the root of its thread.
+
+        With *dev* it goes through `just live ask` there, which types it in Chat and waits for the Helper's reply;
+        without, it is sent through the homeserver's client API, for a machine with no browser.
+        """
+        room = urllib.parse.quote(self.live["lobby"]["roomId"], safe="")
+        if dev is None:
+            message = {"msgtype": "m.text", "body": text}
+            return self.matrix(f"/v3/rooms/{room}/send/m.room.message/{secrets.token_hex(8)}", message)["event_id"]
         command = ["just", "live", "ask", text, "--slot", str(self.slot)]
         if subprocess.run(command, cwd=dev, stdout=sys.stderr, check=False).returncode:
-            msg = "`just live ask` failed"
+            msg = "`just live ask` failed; `--send api` sends the message without Chat"
             raise LiveError(msg)
-        room = urllib.parse.quote(self.live["lobby"]["roomId"], safe="")
         for event in self.matrix(f"/v3/rooms/{room}/messages?dir=b&limit=50")["chunk"]:
             if event["sender"] == self.live["userId"] and event.get("content", {}).get("body") == text:
                 return event["event_id"]
@@ -267,7 +287,13 @@ class Backend:
         return False
 
 
-def start_run(deployment: Deployment, source: str, token: str, dev: Path) -> str:
+def add_send_options(parser: argparse.ArgumentParser) -> None:
+    """Add the options that say how the script's one message reaches the lobby."""
+    parser.add_argument("--send", choices=["ask", "api"], default="ask", help="`just live ask`, or the Matrix API")
+    parser.add_argument("--dev", type=Path, default=Path("~/repos/dev").expanduser(), help="where `just live` runs")
+
+
+def start_run(deployment: Deployment, source: str, token: str, dev: Path | None) -> str:
     """Save *source* in the Helper's workspace, ask the Helper to start it, and return the thread's root event."""
     name = f"workflow_{token}.py"
     deployment.workspace.mkdir(parents=True, exist_ok=True)
@@ -297,12 +323,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 1)[0])
     parser.add_argument("--barrier", choices=sorted(_EXPECTED), required=True)
     parser.add_argument("--slot", type=int, help="the live deployment's slot (default: the only ready one)")
-    parser.add_argument("--dev", type=Path, default=Path("~/repos/dev").expanduser(), help="where `just live` runs")
+    add_send_options(parser)
     parser.add_argument("--settle", type=float, default=90, help="seconds to wait for reports after the run ended")
     args = parser.parse_args()
+    dev = args.dev if args.send == "ask" else None
     deployment = Deployment.find(args.slot)
     token = f"tide{secrets.token_hex(6)}"
     counter = f"counter_{token}.txt"
+    # Only the run's result holds this word: the file's name and the call do not, so no other reply repeats it.
+    report = f"harbor{secrets.token_hex(6)}"
     faults = deployment.directory / f"faults_{token}"
     faults.mkdir()
     barrier = _BARRIERS[args.barrier]
@@ -314,7 +343,7 @@ def main() -> int:
     deployment.give_workflow_toolkit()
     backend.stop()
     backend.start(MINDROOM_WORKFLOW_FAULT_DIR=str(faults))
-    root = start_run(deployment, _WRITE_ONCE.format(counter=counter, token=token), token, args.dev)
+    root = start_run(deployment, _WRITE_ONCE.format(counter=counter, report=report), token, dev)
     until(f"the {barrier} barrier", (faults / f"{barrier}.reached").exists, 300)
     say(f"the write stands at {barrier}; killing the backend (process {backend.pid})")
     killed = backend.pid
@@ -324,7 +353,7 @@ def main() -> int:
     run, nodes = deployment.ended_run(token, 600)
     time.sleep(args.settle)
     say(f"processes of the killed backend still running: {backend.survivors(killed) or 'none'}")
-    reports = deployment.replies_with(root, token)
+    reports = deployment.replies_with(root, report)
     line = f"lines={counter_lines(deployment, counter)} node={node_state(run, nodes[0])} reports={reports}"
     print(line, flush=True)
     say(f"run {run['run_id']} ended {run['state']} on attempt {run['attempt']}; expected `{_EXPECTED[args.barrier]}`")

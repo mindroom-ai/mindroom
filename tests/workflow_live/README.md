@@ -43,40 +43,37 @@ just live down --slot N
 ```
 
 `just live up` runs the working tree of `--backend`, so commit or keep the change you want to test in that checkout.
+Each script sends its one message with `just live ask`, which types it in Chat with Chromium.
+Pass `--send api` to send it through the homeserver's client API instead, on a machine with no browser or when Chat does not load.
 The scripts edit the slot's `config.yaml` once: the Helper gets the `workflow` toolkit, and `defaults.allow_shell_without_worker: true` lets its shell and its scripts run on this machine.
-Each script then asks the Helper, through `just live ask`, to start a run from a file it saved in the Helper's workspace.
+Each script then asks the Helper to start a run from a file it saved in the Helper's workspace.
 
 ## Stack with a Docker worker
 
 The run's shell call and its script process run in Docker workers of the backend.
-Build the worker image from the commit under test, then point the slot at it before running the scripts.
+These steps were written from `stack.py`'s options and have not been run yet; the local stack's steps have.
+`just live up` has no option for workers, so start the slot's homeserver and the agent stack by hand, from a MindRoom Chat checkout that has `scripts/agent-stack/stack.py`.
+`--computers --computer-tools shell` builds the worker image from the commit, installs MindRoom's `docker` extra, and routes `shell` to the workers.
 
 ```bash
-cd ~/repos/dev
-just live up --backend ~/repos/worktrees/mindroom-agent-graphs    # prints the slot N
-SLOT=/tmp/mindroom-client-agents/slot-N
-SHA=$(python3 -c "import json; print(json.load(open('$SLOT/state.json'))['sha'][:12])")
-git -C ~/repos/worktrees/mindroom-agent-graphs archive "$SHA" \
-  | docker build --quiet --tag "mindroom-workflow-live-worker:$SHA" --file local/instances/deploy/Dockerfile.mindroom -
-cat >> "$SLOT/.env" <<ENV
-MINDROOM_WORKER_BACKEND=docker
-MINDROOM_DOCKER_WORKER_IMAGE=mindroom-workflow-live-worker:$SHA
-MINDROOM_DOCKER_WORKER_NAME_PREFIX=mindroom-workflow-live-slot-N
-MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS=300
-MINDROOM_SANDBOX_PROXY_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(16))")
-ENV
-sed -i 's/^defaults:$/defaults:\n  worker_tools: [shell]/' "$SLOT/config.yaml"
+cd ~/repos/dev/mindroom-chat
+bash scripts/e2e-slot.sh N up                                       # a free slot N of 1-49
+export OPENAI_API_KEY=...                                           # the Helper's model
+python3 scripts/agent-stack/stack.py N up --model live --client-sessions \
+  --computers --computer-tools shell \
+  --checkout ~/repos/worktrees/mindroom-agent-graphs --ref HEAD
 cd ~/repos/worktrees/mindroom-agent-graphs
-python3 -m tests.workflow_live.kill_after_write --barrier before-receipt --slot N
-python3 -m tests.workflow_live.kill_after_write --barrier after-receipt --slot N
-python3 -m tests.workflow_live.restart_mid_run --slot N
-docker ps --all --quiet --filter "name=mindroom-workflow-live-slot-N" | xargs --no-run-if-empty docker rm --force
-cd ~/repos/dev
-just live down --slot N
+python3 -m tests.workflow_live.kill_after_write --barrier before-receipt --slot N --send api
+python3 -m tests.workflow_live.kill_after_write --barrier after-receipt --slot N --send api
+python3 -m tests.workflow_live.restart_mid_run --slot N --send api
+cd ~/repos/dev/mindroom-chat
+python3 scripts/agent-stack/stack.py N down
+bash scripts/e2e-slot.sh N down
 ```
 
-The scripts restart the backend themselves, so the new `.env` lines take effect on their first restart.
+The scripts restart the backend themselves and find the slot through the stack's own `state.json`.
 With `worker_tools` set, the scripts leave `allow_shell_without_worker` out, and a worker that is down refuses the run instead of falling back to this machine.
+A stack started this way has no Chat of its own, so the message goes through the Matrix API (`--send api`).
 
 ## What to check besides the result line
 
