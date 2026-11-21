@@ -72,18 +72,18 @@ def test_doctor_fails_a_claude_code_that_is_not_signed_in(tmp_path: Path, capsys
     assert "claude auth login" in capsys.readouterr().out.replace("\n", " ")
 
 
-def test_doctor_fails_an_environment_that_replaces_the_claude_sign_in(
+def test_doctor_can_check_a_subscription_with_an_inherited_anthropic_endpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.invented.example")
     cli = fake_cli(tmp_path, {})
 
-    assert _check(cli) == (0, 1, 0)
+    assert _check(cli) == (1, 0, 0)
 
-    assert "ANTHROPIC_BASE_URL" in capsys.readouterr().out
-    assert cli.events("spawn") == []
+    [spawn] = cli.events("spawn")
+    assert "ANTHROPIC_BASE_URL" not in spawn["env_names"]
+    assert not cli.events("user")
 
 
 def test_doctor_only_warns_when_claude_code_could_not_be_started(

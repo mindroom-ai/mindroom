@@ -699,7 +699,7 @@ async def test_a_system_prompt_is_private_to_the_user_and_gone_once_claude_code_
     assert spawn["prompt_modes"] == [0o600, 0o700]
     assert spawn["cwd"] == str(cwd)
     assert stat.S_IMODE(cwd.stat().st_mode) == 0o700
-    assert list(home_path.iterdir()) == [cwd]
+    assert set(home_path.iterdir()) == {cwd, home_path / "exec-claude"}
     assert not list(cwd.iterdir())
     # The process still rests, and its prompt is no longer on disk.
     assert len(SESSIONS.resting) == 1
@@ -855,7 +855,7 @@ async def test_a_signed_out_claude_code_says_how_to_sign_in_and_sends_nothing(tm
     assert str(error) == ("Claude Code is not signed in. Run `claude auth login` as the user that runs MindRoom.")
 
 
-async def test_an_api_key_from_the_environment_is_refused_by_name(tmp_path: Path) -> None:
+async def test_an_api_key_reported_by_claude_code_is_refused_by_name(tmp_path: Path) -> None:
     account = {"tokenSource": "claude.ai", "apiKeySource": "ANTHROPIC_API_KEY", "apiProvider": "firstParty"}
 
     error = await _failure(tmp_path, {"account": account, "turns": [text_turn("billed to the key")]}, asked=False)
@@ -903,56 +903,57 @@ async def test_each_claude_subscription_plan_is_answered(tmp_path: Path, plan: s
     assert (await complete(cli.provider(), ModelRequest(messages=[user("Hi")]))).content == "Hello."
 
 
-@pytest.mark.parametrize(
-    "variable",
-    [
+async def test_inherited_claude_settings_are_removed_only_from_the_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inherited = {
         "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_CUSTOM_HEADERS",
-        "ANTHROPIC_UNIX_SOCKET",
-        "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-        "CLAUDE_CODE_USE_FOUNDRY",
-        "CLAUDE_CODE_USE_GATEWAY",
-        "ANTHROPIC_PROFILE",
         "CLAUDE_BG_AUTH_SNAPSHOT_PATH",
         "CLAUDE_AUTO_BACKGROUND_TASKS",
-        "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
-        "CLAUDE_CODE_EXTRA_BODY",
-        "ANTHROPIC_A_VARIABLE_OF_A_LATER_CLAUDE_CODE",
-    ],
-)
-async def test_an_inherited_variable_that_replaces_the_sign_in_or_where_it_is_sent_is_refused_by_name(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    variable: str,
-) -> None:
-    monkeypatch.setenv(variable, "https://gateway.invented.example/invented-value")
-    # The account Claude Code reports still looks like a plain subscription sign-in.
-    cli = fake_cli(tmp_path, {"turns": [text_turn("sent elsewhere")]})
-
-    with pytest.raises(AuthenticationFailed) as raised:
-        await complete(cli.provider(), ModelRequest(messages=[user("Hi")]))
-
-    assert variable in str(raised.value)
-    assert "invented-value" not in str(raised.value)
-    assert not raised.value.retryable
-    # Claude Code never started, so it was sent nothing.
-    assert cli.events("spawn") == []
-
-
-async def test_a_variable_that_is_set_for_claude_code_anyway_is_not_refused(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The SDK sets the first for the process and MindRoom the others, whatever the environment held.
-    for variable in ("CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_DISABLE_AUTO_MEMORY", "MCP_TOOL_TIMEOUT"):
-        monkeypatch.setenv(variable, "0")
+    }
+    kept = {"CLAUDE_CODE_ENTRYPOINT", *session_module._ISOLATION_ENV}
+    for name in inherited | kept | {"CLAUDE_CONFIG_DIR"}:
+        monkeypatch.setenv(name, "inherited")
     cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
 
     assert (await complete(cli.provider(), ModelRequest(messages=[user("Hi")]))).content == "Hello."
+
+    [spawn] = cli.events("spawn")
+    child_names = set(spawn["env_names"])
+    assert child_names.isdisjoint(inherited)
+    assert child_names.issuperset(kept | {"CLAUDE_CONFIG_DIR"})
+    assert not any(name.startswith("MINDROOM_CLAUDE_CODE_") for name in child_names)
+    assert all(os.environ[name] == "inherited" for name in inherited | kept)
+
+
+async def test_two_starts_reuse_the_same_private_launcher(tmp_path: Path) -> None:
+    cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
+    launcher = cli.storage_root / "claude_code" / "exec-claude"
+    request = ModelRequest(messages=[user("Hi")])
+
+    await complete(cli.provider(), request)
+    first = launcher.stat()
+    await complete(cli.provider(), request)
+    second = launcher.stat()
+
+    assert len(cli.events("spawn")) == 2
+    assert stat.S_IMODE(second.st_mode) == 0o700
+    assert (first.st_ino, first.st_mtime_ns) == (second.st_ino, second.st_mtime_ns)
+
+
+async def test_a_non_executable_launcher_explains_why_claude_code_cannot_start(tmp_path: Path) -> None:
+    cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
+    request = ModelRequest(messages=[user("Hi")])
+    await complete(cli.provider(), request)
+    (cli.storage_root / "claude_code" / "exec-claude").chmod(0o600)
+
+    with pytest.raises(ProviderUnavailable, match="launcher is not executable"):
+        await complete(cli.provider(), request)
+
+    assert len(cli.events("spawn")) == 1
 
 
 async def test_a_claude_code_older_than_the_one_this_route_was_run_against_gets_no_prompt(tmp_path: Path) -> None:
@@ -964,11 +965,18 @@ async def test_a_claude_code_older_than_the_one_this_route_was_run_against_gets_
     assert "claude update" in str(error)
 
 
-async def test_a_missing_claude_binary_says_how_to_install_it(tmp_path: Path) -> None:
+@pytest.mark.parametrize("exists", [False, True], ids=["missing", "not executable"])
+async def test_an_unavailable_configured_binary_says_how_to_install_claude(tmp_path: Path, exists: bool) -> None:
     cli = fake_cli(tmp_path, {})
+    path = tmp_path / "unavailable"
+    if exists:
+        path.touch(mode=0o600)
 
-    with pytest.raises(AuthenticationFailed, match="Claude Code was not found"):
-        await complete(cli.provider(cli_path=str(tmp_path / "nowhere")), ModelRequest(messages=[user("Hi")]))
+    with pytest.raises(AuthenticationFailed, match="Claude Code was not found") as raised:
+        await complete(cli.provider(cli_path=str(path)), ModelRequest(messages=[user("Hi")]))
+
+    assert str(raised.value) == session_module._NOT_FOUND
+    assert cli.events("spawn") == []
 
 
 @pytest.mark.parametrize(
