@@ -13,11 +13,12 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ToolSpec
 from mindroom.providers.claude_code import session
-from mindroom.providers.claude_code.adapter import ClaudeCodeProvider, build_provider
+from mindroom.providers.claude_code.builder import build_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.providers.claude_code.adapter import ClaudeCodeProvider
 
 _FAKE = Path(__file__).with_name("fake_claude.py")
 LOOKUP = ToolSpec(

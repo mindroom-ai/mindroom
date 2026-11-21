@@ -11,20 +11,23 @@ from __future__ import annotations
 import asyncio
 import shutil
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, get_args
+
+from claude_agent_sdk.types import EffortLevel
 
 from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, stable_serialize
 from mindroom.llm.provider import Capabilities, ModelIdentity, TurnCompleted
 from mindroom.llm.request_identity import request_prefixes
 from mindroom.providers.assistant_turn import TurnTimer
+from mindroom.providers.claude_code import session as runtime
 from mindroom.providers.claude_code.prompt import decide, rebuild_input
 from mindroom.providers.claude_code.settings import ClaudeCodeSettings
+from mindroom.providers.claude_code.turn import Outrun, read_step
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.identity import model_identity
 from mindroom.providers.prompt_cache_key import derive_session_routing_key
 from mindroom.token_counting.families import counter_for_model
 from mindroom.token_counting.requests import plain_request_parts, route_context_key, route_request_tokens
-from mindroom.tool_system.dependencies import ensure_optional_deps
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -38,7 +41,7 @@ if TYPE_CHECKING:
     from mindroom.token_counting.requests import RequestParts
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-__all__ = ["ClaudeCodeProvider", "build_provider"]
+__all__ = ["ClaudeCodeProvider", "build_adapter"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -96,9 +99,6 @@ class ClaudeCodeProvider:
 
         ``tail`` starts at the request's last assistant message, which ``session`` gave, or is empty to start over.
         """
-        # The SDK loads only once a request is sent.
-        from mindroom.providers.claude_code.session import SESSIONS, start  # noqa: PLC0415
-
         provider = self.identity.provider
         messages = request.messages
         try:
@@ -123,11 +123,11 @@ class ClaudeCodeProvider:
                 # No request continues what this one leaves resting in its conversation. One that may call no tool,
                 # such as a decision about the conversation, is not the conversation going on.
                 held = {call["id"] for message in messages for call in message.tool_calls or ()}
-                stale += SESSIONS.superseded(self._conversation, held)
+                stale += runtime.SESSIONS.superseded(self._conversation, held)
             for other in stale[1:]:
-                SESSIONS.retire(other)
+                runtime.SESSIONS.retire(other)
             thinking = {"type": "adaptive", "display": "summarized"}
-            session = await start(
+            session = await runtime.start(
                 provider=provider,
                 system=system,
                 tools=tools,
@@ -141,15 +141,12 @@ class ClaudeCodeProvider:
             await session.send(blocks)
         except BaseException:
             if session is not None:
-                SESSIONS.retire(session)
+                runtime.SESSIONS.retire(session)
             raise
         return session
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Answer ``request`` with the process that waits for it, or with a new one given the whole conversation."""
-        from mindroom.providers.claude_code.session import SESSIONS  # noqa: PLC0415 - loads the SDK
-        from mindroom.providers.claude_code.turn import Outrun, read_step  # noqa: PLC0415 - loads the SDK
-
         timer = TurnTimer()
         # A process that was sent a queued-message notice has read it, so here a notice counts as any other message.
         unmarked = [
@@ -165,7 +162,7 @@ class ClaudeCodeProvider:
         if answered is not None and (prefix := prefixes[answered]) is not None:
             # Taken out of the resting ones, no other request continues it.
             key = (self._conversation, prefix, tuple(call["id"] for call in tail[0].tool_calls or ()))
-            session = SESSIONS.resting.pop(key, None)
+            session = runtime.SESSIONS.resting.pop(key, None)
         # A process that went on without the results it waited for is replaced by one given the whole conversation.
         for continued in (tail, []):
             session = await self._session(request, continued, session)
@@ -179,7 +176,7 @@ class ClaudeCodeProvider:
                     if isinstance(event, TurnCompleted) and answer is not None and waits and prefixes[-1] is not None:
                         # It rests before the turn is handed over, since the caller may stop reading there.
                         key = (self._conversation, prefixes[-1], tuple(call[0] for call in answer[1]))
-                        SESSIONS.rest(key, session)
+                        runtime.SESSIONS.rest(key, session)
                         rests = True
                     yield event
             except Outrun:
@@ -192,28 +189,29 @@ class ClaudeCodeProvider:
             finally:
                 if not rests:
                     # A request that failed or was abandoned leaves a process nothing can continue.
-                    SESSIONS.retire(session)
+                    runtime.SESSIONS.retire(session)
 
     async def preflight(self) -> None:
         """Start Claude Code as a request would, send it nothing, and close it, raising what a request would."""
-        from mindroom.providers.claude_code.session import SESSIONS, start  # noqa: PLC0415 - loads the SDK
-
-        await SESSIONS.retire(await start(provider=self.identity.provider, **self._launch))
+        await runtime.SESSIONS.retire(await runtime.start(provider=self.identity.provider, **self._launch))
 
 
-def build_provider(
+def build_adapter(
     model_config: ModelConfig,
     runtime_paths: RuntimePaths,
     *,
     execution_identity: ToolExecutionIdentity | None,
 ) -> ClaudeCodeProvider:
     """Build the adapter for a ``claude_code`` model config; a configured API key is ignored."""
-    ensure_optional_deps(["claude-agent-sdk"], "claude_agent", runtime_paths)
     storage_root = runtime_paths.storage_root
     scope = None
     if execution_identity is not None:
         scope = derive_session_routing_key(execution_identity, storage_root=storage_root)
     settings = settings_from_extra_kwargs(ClaudeCodeSettings, model_config.extra_kwargs, provider=model_config.provider)
+    efforts = get_args(EffortLevel)
+    if settings.effort is not None and settings.effort not in efforts:
+        msg = f"effort must be one of {', '.join(efforts)}"
+        raise ValueError(msg)
     return ClaudeCodeProvider(
         identity=model_identity(model_config),
         capabilities=Capabilities(

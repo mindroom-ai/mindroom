@@ -369,8 +369,9 @@ def ensure_optional_deps(
     runtime_paths: RuntimePaths,
     *,
     missing_message: str | None = None,
+    auto_install: bool = True,
 ) -> bool:
-    """Ensure dependencies are installed, auto-installing via optional extra if needed.
+    """Check dependency versions and install the extra if needed, unless ``auto_install`` is false.
 
     Import the package inside ``optional_dependency_environment()`` afterwards,
     so the import cannot overlap another thread's install.
@@ -381,7 +382,7 @@ def ensure_optional_deps(
         unsupported = _unsupported_extra_requirements(extra_name) if installed else []
     if installed and not unsupported:
         return False
-    if not auto_install_optional_extra_for_import_retry(extra_name, runtime_paths):
+    if not auto_install or not auto_install_optional_extra_for_import_retry(extra_name, runtime_paths):
         install_hint = f"Install with: pip install 'mindroom[{extra_name}]'"
         if unsupported:
             missing_message = f"Unsupported dependency versions: {', '.join(unsupported)}. {install_hint}"

@@ -47,11 +47,15 @@ def _level_settings(route: str, level: str, extra_kwargs: dict[str, Any]) -> dic
     off = level == "off"
     if route in _EFFORT_ROUTES:
         return {**extra_kwargs, "reasoning_effort": "none" if off else level}
-    if route == "zai":
-        if off:
+    if route in {"zai", "claude_code"}:
+        if route == "zai" and off:
             msg = "provider zai has no off level; set extra_kwargs.extra_body.thinking yourself"
             raise ValueError(msg)
-        return {**extra_kwargs, "reasoning_effort": level}
+        if route == "claude_code" and level in {"off", "minimal"}:
+            msg = f"provider claude_code has no {level} level"
+            raise ValueError(msg)
+        key = "effort" if route == "claude_code" else "reasoning_effort"
+        return {**extra_kwargs, key: level}
     if route == "deepseek":
         settings = _without(extra_kwargs, "reasoning_effort")
         return (

@@ -8551,7 +8551,7 @@ visibility = ["mindroom.embeddings.ollama_embedder", "mindroom.memory.config", "
 path = "mindroom.providers.ollama.settings"
 depends_on = ["mindroom.providers.extra_kwargs"]
 
-# Claude on the user's own subscription, through the Claude Code CLI; the SDK loads only once a request is sent.
+# Claude on the user's own subscription, through the Claude Code CLI; the SDK loads when its model is built.
 [[modules]]
 path = "mindroom.providers.claude_code"
 depends_on = [

@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
+
+import pytest
 
 from mindroom.cli.doctor import _check_single_provider
 from mindroom.config.main import Config
@@ -14,8 +14,6 @@ from tests.providers.claude_code.support import fake_cli, left_behind, text_turn
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
     from tests.providers.claude_code.support import FakeCli
 
@@ -121,28 +119,20 @@ def test_doctor_reports_a_missing_claude_agent_sdk_and_installs_nothing(
     assert "mindroom[claude_agent]" in capsys.readouterr().out.replace("\n", " ")
 
 
-class _NamesOnly(Mapping[str, str]):
-    """A process environment whose credential value must never be read."""
+def test_optional_dependency_check_only_never_enters_the_installer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dependencies, "check_deps_installed", lambda _dependencies: False)
 
-    def __init__(self, values: dict[str, str]) -> None:
-        self._values = values
+    def install(*_args: object) -> bool:
+        raise AssertionError
 
-    def __getitem__(self, name: str) -> str:
-        assert name != "CLAUDE_CODE_OAUTH_TOKEN", "doctor read a credential value"
-        return self._values[name]
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._values)
-
-    def __len__(self) -> int:
-        return len(self._values)
-
-
-def test_doctor_reads_no_credential_value_to_switch_off_installing(tmp_path: Path) -> None:
-    cli = fake_cli(tmp_path, {"turns": [text_turn("never")]})
-    paths = cli.runtime_paths
-    env = _NamesOnly({**paths.process_env, "CLAUDE_CODE_OAUTH_TOKEN": "invented"})
-    model = {"provider": "claude_code", "id": "claude-invented-1", "extra_kwargs": {"cli_path": str(cli.path)}}
-    config = Config.model_validate({"models": {"default": model}})
-
-    _check_single_provider("claude_code", config, replace(paths, process_env=env))
+    monkeypatch.setattr(dependencies, "auto_install_optional_extra_for_import_retry", install)
+    with pytest.raises(ImportError, match=r"mindroom\[claude_agent\]"):
+        dependencies.ensure_optional_deps(
+            ["claude-agent-sdk"],
+            "claude_agent",
+            fake_cli(tmp_path, {}).runtime_paths,
+            auto_install=False,
+        )

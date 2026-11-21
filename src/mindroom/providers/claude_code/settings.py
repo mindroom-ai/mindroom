@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, get_args
+from typing import TYPE_CHECKING
 
 from mindroom.providers.extra_kwargs import SECRET
 
 __all__ = ["ClaudeCodeSettings"]
 
-type _Effort = Literal["low", "medium", "high", "xhigh", "max"]
+if TYPE_CHECKING:
+    from claude_agent_sdk.types import EffortLevel
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -20,14 +21,7 @@ class ClaudeCodeSettings:
     ships. ``effort`` is Claude Code's effort level.
     """
 
-    # The shared credential flow can give any model a key; this route signs in through Claude Code and ignores it.
+    # Ignored; see _KEYLESS_ROUTES.
     api_key: str | None = field(default=None, metadata=SECRET)
     cli_path: str | None = None
-    effort: _Effort | None = None
-
-    def __post_init__(self) -> None:
-        """Reject an effort Claude Code does not know."""
-        efforts = get_args(_Effort.__value__)
-        if self.effort is not None and self.effort not in efforts:
-            msg = f"effort must be one of {', '.join(efforts)}"
-            raise ValueError(msg)
+    effort: EffortLevel | None = None

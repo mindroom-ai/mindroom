@@ -6,9 +6,8 @@ import asyncio
 import ipaddress
 import os
 import tempfile
-from collections import ChainMap, Counter
+from collections import Counter
 from collections.abc import Mapping
-from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -614,18 +613,15 @@ def _check_claude_code(config: Config, runtime_paths: RuntimePaths) -> tuple[int
     Claude Code is started as a request would start it and closed without a prompt, so the check spends nothing of
     the subscription and reads no credential.
     """
-    from mindroom.providers.claude_code.adapter import build_provider  # noqa: PLC0415 - loads the provider families
+    from mindroom.providers.claude_code.builder import build_provider  # noqa: PLC0415 - loads the provider families
 
     passed = failed = warnings = 0
     checked: set[str | None] = set()
-    # Doctor reports a missing Claude Agent SDK; it installs nothing. The overlay reads no other value.
-    no_install = ChainMap({"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"}, runtime_paths.process_env)  # ty: ignore[invalid-argument-type]
-    checked_paths = replace(runtime_paths, process_env=no_install)
     for model_config in config.models.values():
         if provider_route(model_config.provider) != "claude_code":
             continue
         try:
-            provider = build_provider(model_config, checked_paths, execution_identity=None)
+            provider = build_provider(model_config, runtime_paths, execution_identity=None, auto_install=False)
             if provider.cli_path in checked:
                 continue
             checked.add(provider.cli_path)

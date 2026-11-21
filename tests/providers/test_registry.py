@@ -874,6 +874,26 @@ async def test_routes_without_api_keys_never_send_a_configured_one(
 _LEVELS = {"levels": ["low", "high"], "default": "low"}
 
 
+@pytest.mark.parametrize(("reference", "level"), [("target", "low"), ("target@high", "high")])
+def test_claude_code_reasoning_level_overrides_authored_effort(
+    runtime_paths: RuntimePaths, reference: str, level: str
+) -> None:
+    """Claude Code uses the selected reasoning level, not an authored effort for the same model."""
+    model = ModelConfig(provider="claude_code", id="m", reasoning=_LEVELS, extra_kwargs={"effort": "max"})
+    provider = build_model_provider(Config(models={"target": model}), runtime_paths, reference)
+
+    assert provider.model_params["effort"] == level
+
+
+@pytest.mark.parametrize("level", ["off", "minimal"])
+def test_claude_code_rejects_unavailable_reasoning_levels(runtime_paths: RuntimePaths, level: str) -> None:
+    """A configured level Claude Code cannot represent fails instead of silently choosing another effort."""
+    model = ModelConfig(provider="claude_code", id="m", reasoning={"levels": [level], "default": level})
+
+    with pytest.raises(ValueError, match=rf"provider claude_code has no {level} level"):
+        build_model_provider(Config(models={"target": model}), runtime_paths, "target")
+
+
 def _sends(body: Any, expected: Any) -> bool:  # noqa: ANN401 - JSON values
     """Return whether ``body`` carries every value of ``expected``, recursing into objects."""
     if isinstance(expected, dict):

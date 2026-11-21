@@ -119,7 +119,7 @@ def _build_adapter(
 
         return build_ollama_provider(model_config, runtime_paths)
     if provider == "claude_code":
-        from mindroom.providers.claude_code.adapter import (  # noqa: PLC0415 - loads only for a model that uses it
+        from mindroom.providers.claude_code.builder import (  # noqa: PLC0415 - loads only for a model that uses it
             build_provider as build_claude_code_provider,
         )
 
