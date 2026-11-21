@@ -26,6 +26,7 @@ from mindroom.matrix.media import decrypt_media_bytes, download_mxc_bytes
 from mindroom.matrix.sidecar_content import sidecar_content_to_resolve, sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
 from mindroom.matrix_identifiers import has_agent_username
+from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
 from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
@@ -108,6 +109,10 @@ def _with_event_relation(
         resolved_content.pop(key, None)
         if event_content.get(key) is not None:
             resolved_content[key] = event_content[key]
+    # An opening pick, including its absence, belongs to the preview too.
+    resolved_content.pop(THREAD_MODEL_CONTENT_KEY, None)
+    if THREAD_MODEL_CONTENT_KEY in event_content:
+        resolved_content[THREAD_MODEL_CONTENT_KEY] = event_content[THREAD_MODEL_CONTENT_KEY]
     return resolved_content
 
 

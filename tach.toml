@@ -4737,6 +4737,7 @@ visibility = [
 path = "mindroom.matrix.message_content"
 depends_on = [
     "mindroom.constants",
+    "mindroom.model_selection",
     "mindroom.matrix.sidecar_content",
     "mindroom.matrix.visible_body",
     "mindroom.tool_system.events",

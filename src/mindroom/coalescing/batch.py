@@ -22,6 +22,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.segmented_messages import SEGMENT_COUNT_KEY
 from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY, parse_thread_model_choice
@@ -445,9 +446,12 @@ def _batch_thread_model_choice(events: list[PendingEvent]) -> ThreadModelChoice 
         content = pending.event.source.get("content")
         if not isinstance(content, Mapping) or THREAD_MODEL_CONTENT_KEY not in content:
             continue
+        if EventInfo.from_event(pending.event.source).is_edit:
+            continue
         if pending.facts.sender_is_managed or pending.facts.acts_for_requester:
             logger.info("Ignoring root thread model choice", event_id=pending.event.event_id, reason="not_direct_human")
             continue
+        # A newer malformed choice must not silently fall back to an older pick.
         choice = parse_thread_model_choice(content)
         if choice is None:
             logger.info("Ignoring root thread model choice", event_id=pending.event.event_id, reason="malformed")

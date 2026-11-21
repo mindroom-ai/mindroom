@@ -180,6 +180,28 @@ def test_coalesced_turn_reads_the_latest_source_with_a_model_pick(picks: str, ex
     assert (turn.thread_model_choice.model if turn.thread_model_choice else None) == expected
 
 
+@pytest.mark.parametrize("source_type", ["media-edit", "acting-for-requester"])
+def test_only_original_direct_sources_can_choose_a_thread_model(source_type: str) -> None:
+    """A media replacement and a proxy prompt can carry text but cannot select an opening model."""
+    event = _image_event("$image", 1000)
+    event.source["content"][THREAD_MODEL_CONTENT_KEY] = {
+        "version": 1,
+        "runtime_user_id": "@mindroom:localhost",
+        "model": "large",
+    }
+    if source_type == "media-edit":
+        event.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$original"}
+    pending = _pending(event)
+    if source_type == "acting-for-requester":
+        pending.facts = replace(pending.facts, acting_requester_id="@requester:localhost")
+    turn = build_prepared_turn(
+        requester_coalescing_key(pending.room.room_id, None, pending.facts.run_requester_id),
+        [pending],
+        queues_other_run=nothing_else_queued,
+    )
+    assert turn.thread_model_choice is None
+
+
 def test_single_message_batch_is_not_structured() -> None:
     """A lone coalesced message stays unstructured and keeps its plain body as the prompt."""
     batch = build_prepared_turn(
