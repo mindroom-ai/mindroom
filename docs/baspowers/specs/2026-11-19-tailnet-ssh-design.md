@@ -4,7 +4,7 @@ Date: 2026-11-19. Status: decided by Bas ("let's build it"), ready to plan.
 Code facts are from `mindroom` `origin/main` (branch `feat/tailnet-ssh`), `mindroom-chat` c65efdffe, and `mindroom-infra` `origin/main`.
 Tailscale and sshd behaviour is from the feasibility spike (`tailscale-brainstorm/spike-report.md` in the DevAgent workspace, prototype in `spike-gateway/`), cited as "spike Q1" to "spike Q6": tsnet 1.104.7, Headscale 0.29.7, OpenSSH 10.0, the hosted worker seccomp profile under Docker.
 
-> The multi-tailnet and portal parts are Later; [Single-tailnet v1 (2026-11-21)](#single-tailnet-v1-2026-11-21) supersedes them for v1.
+> [Shell-reach v1 (2026-11-21)](#shell-reach-v1-2026-11-21) is the current design. Earlier sections are historical; multi-tailnet and portal support are deferred.
 
 ## Intent
 
