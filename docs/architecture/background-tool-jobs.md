@@ -81,7 +81,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - Each outcome has one active result claim, and only the parent run's saved tool call acknowledges it, so a result is read once and a reply that fails before saving leaves it to be reported again.
 - Cancellation is saved before cleanup and stays pending until owned work settles, so a crash during cleanup still reports the job cancelled.
   Only work that a shutdown, restart, or event-loop teardown cut short is interrupted, and a child settlement saved before a crash stands.
-- A job's cancel request denies its open approval cards in the commit that saves the request, and its end denies any card a request still in flight posted after that, so no card of a stopping or ended job stays answerable, even while the router cannot post the denial yet.
+- A job's cancel request denies its open approval cards in the commit that saves the request, and its end denies any card a request still in flight posted after that, so no card of a stopping or ended job stays answerable, even while the card's sender cannot post the denial yet.
 - A job-gated call never runs inline: one that cannot become a job fails, and the agent CLI never offers it, because such a function asks for no confirmation of its own and its job's approval phase is its only approval gate.
 - A gated job durably leaves `awaiting_approval` before its call runs, so a stop says a call did not run only when it never started.
 - A reply's Stop is checked where a job asks for or takes an approval, not where the job stands when the Stop arrives, so no order of the Stop and the job's own awaits lets an approval through.

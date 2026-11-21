@@ -284,10 +284,11 @@ async def test_approver_demoted_revokes(harness: Harness) -> None:
 
 
 @pytest.mark.asyncio
-async def test_refused_room_revokes(harness: Harness) -> None:
-    """A room that became a personal room revokes the invite."""
+@pytest.mark.parametrize("kind", ["personal", "space"])
+async def test_refused_room_revokes(harness: Harness, kind: str) -> None:
+    """A room that became a personal room or a space revokes the invite."""
     invite, code = harness.sent_invite()
-    harness.refused = "personal"
+    harness.refused = kind
     assert (await harness.claim(ALICE, code) or {})["status"] == "rejected"
     assert harness.row(invite.id).revoked is True
 
@@ -580,15 +581,6 @@ async def test_result_is_answered_before_the_notice(harness: Harness) -> None:
     _invite, code = harness.sent_invite()
     await harness.claim(ALICE, code)
     assert harness.events == ["result", "notice"]
-
-
-@pytest.mark.asyncio
-async def test_room_that_became_a_space_revokes(harness: Harness) -> None:
-    """A space refuses the claim and revokes the invite."""
-    invite, code = harness.sent_invite()
-    harness.refused = "space"
-    assert (await harness.claim(ALICE, code) or {})["status"] == "rejected"
-    assert harness.row(invite.id).revoked is True
 
 
 def _event(sender: str, code: str, request_id: str) -> nio.UnknownToDeviceEvent:

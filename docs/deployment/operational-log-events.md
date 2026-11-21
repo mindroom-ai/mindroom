@@ -13,7 +13,7 @@ See also [Routing & Responder Selection](../configuration/router.md), [Threads, 
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Liveness. Returns `200` with `{"status": "healthy", ...}`, or `503` with `"status": "unhealthy"` once startup is ready and an agent, team, or router has stopped syncing with Matrix |
+| GET | `/api/health` | Liveness. Returns `200` with `{"status": "healthy", ...}`, or `503` with `"status": "unhealthy"` once startup is ready and an agent, team, or the owner account has stopped syncing with Matrix |
 | GET | `/api/ready` | Readiness. Returns `{"status": "ready"}` when startup has finished, otherwise `503` with `{"status": "<phase>", "detail": "..."}` |
 
 Use `/api/health` for startup and liveness probes and `/api/ready` for readiness probes in container orchestrators.
@@ -38,7 +38,8 @@ The `/api/ready` phases are:
 
 While `mindroom run` waits for hosted pairing approval, or converts conversation storage on the first start after an upgrade, only these two endpoints answer: `/api/health` returns `200` and `/api/ready` returns `503` with phase `starting` and detail `Waiting for local pairing approval` or `Converting conversation storage`.
 
-When an agent, team, or router receives no Matrix sync for 120 seconds, MindRoom restarts that entity's sync loop on its own.
+When an agent, team, or the owner account receives no Matrix sync for 120 seconds after its sync loop's first response, MindRoom restarts that entity's sync loop on its own.
+Until a sync loop's first response, including after such a restart, the limit is [`MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS`](../configuration/index.md#matrix) (default `600`) instead.
 After 180 seconds without a sync, `/api/health` returns `503` and lists the entity in `stale_sync_entities`.
 While an entity is still making progress on a large backlog of received events, both wait up to [`MINDROOM_MATRIX_INGESTION_GRACE_SECONDS`](../configuration/index.md#matrix).
 Set the liveness probe's `failureThreshold` high enough that the sync-loop restart can recover before the container is restarted.
@@ -64,7 +65,7 @@ The thresholds are starting points to tune against your own baseline, and the qu
 
 ### `event_loop_scheduler_lag_summary`
 
-All agents, teams, and the router share one event loop.
+All agents, teams, and the owner account share one event loop.
 Every 60 seconds MindRoom logs how late a heartbeat scheduled every 50 ms actually ran.
 
 | Field | Meaning |
@@ -101,7 +102,7 @@ Memory held by objects that become garbage while frozen, such as agents a config
 
 ### `event_loop_stall_detected`
 
-Logged when the shared event loop has run no heartbeat for `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` (default `5`), so every agent, team, and router is frozen until it ends.
+Logged when the shared event loop has run no heartbeat for `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` (default `5`), so every agent, team, and the owner account is frozen until it ends.
 While the stall lasts, an `event_loop_stall_ongoing` record with the same fields follows every 30 seconds.
 
 | Field | Meaning |
@@ -129,7 +130,7 @@ Sum `stall_duration_seconds` over a window to see how long agents were frozen in
 
 ### `matrix_sync_stall_diagnostics`
 
-Logged when one agent, team, or router goes 90 seconds without Matrix sync progress, and repeated at most every 90 seconds while the stall lasts.
+Logged when one agent, team, or the owner account goes 90 seconds without Matrix sync progress, and repeated at most every 90 seconds while the stall lasts.
 It shows where that entity's sync and event-processing tasks are waiting, without message content, and does not affect health or readiness.
 
 | Field | Meaning |

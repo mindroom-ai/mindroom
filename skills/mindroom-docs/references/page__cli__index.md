@@ -1077,7 +1077,7 @@ Use `--force` to overwrite existing files after changing avatar prompts or style
 
 ### avatars sync
 
-Apply configured room and root-Space avatars to Matrix using the router account.
+Apply configured room and root-Space avatars to Matrix using the owner account.
 Existing Matrix avatars are kept unless you pass `--force`.
 
 <!-- CODE:START -->

@@ -350,7 +350,7 @@ def claim(
         "UPDATE scheduled_call_approvals SET consumed_at_ns = ? WHERE principal_id = ? AND task_id = ?",
         (now_ns, principal_id, call.task_id),
     )
-    approval_cards.reserve_receipt(
+    approval_cards.reserve(
         transaction,
         principal_id,
         kind="scheduled_receipt",

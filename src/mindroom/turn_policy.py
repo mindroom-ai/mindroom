@@ -199,6 +199,16 @@ class TurnPolicy:
             self.deps.runtime_paths,
         )
 
+    def _classify_candidates(self, room: nio.MatrixRoom, requester_id: str) -> ResponderCandidatePermissions:
+        """Classify the room's responder candidates for one requester from its cached membership."""
+        return classify_responder_candidates_from_cached_room(
+            room,
+            requester_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            self.deps.agent_reply_memberships,
+        )
+
     def adaptive_participation(
         self,
         *,
@@ -210,13 +220,7 @@ class TurnPolicy:
         participation = self._adaptive_thread_participation(context, requester_user_id)
         if participation is None or not self._is_participating_thread_agent(context):
             return None
-        candidates = classify_responder_candidates_from_cached_room(
-            room,
-            requester_user_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            self.deps.agent_reply_memberships,
-        )
+        candidates = self._classify_candidates(room, requester_user_id)
         available = self._filter_materializable_responders(candidates.allowed, self._responder_availability())
         return participation if self.deps.matrix_id in available else None
 
@@ -258,13 +262,7 @@ class TurnPolicy:
     ) -> list[MatrixID]:
         """Return candidates from the boundary-prepared room membership snapshot."""
         availability = self._responder_availability()
-        candidates = classify_responder_candidates_from_cached_room(
-            room,
-            requester_user_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            self.deps.agent_reply_memberships,
-        )
+        candidates = self._classify_candidates(room, requester_user_id)
         if self._filter_materializable_responders(candidates.pending, availability):
             raise ReplyMembershipPendingError
         return self._filter_materializable_responders(candidates.allowed, availability)
@@ -298,9 +296,7 @@ class TurnPolicy:
     @staticmethod
     def _select_response_owner(response_owners: list[MatrixID]) -> MatrixID | None:
         """Return the stable visible owner from one candidate set."""
-        if not response_owners:
-            return None
-        return min(response_owners, key=lambda value: value.full_id)
+        return min(response_owners, key=lambda value: value.full_id, default=None)
 
     @staticmethod
     def _eligible_responder_owners(
@@ -503,23 +499,6 @@ class TurnPolicy:
             materializable_agent_names=availability.materializable_agent_names,
         )
 
-    def _thread_defers_to_named_responders(
-        self,
-        thread_history: Sequence[ResolvedVisibleMessage],
-        *,
-        sender_id: str,
-        available_responders: list[MatrixID],
-    ) -> bool:
-        """Return whether a thread's history leaves this sender's next message to the responders it names."""
-        return thread_requires_explicit_agent_targeting(
-            thread_history,
-            sender_id=sender_id,
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-            membership_index=self.deps.agent_reply_memberships,
-            available_responders_in_room=available_responders,
-        )
-
     async def aims_command_at_me(
         self,
         room: nio.MatrixRoom,
@@ -620,10 +599,13 @@ class TurnPolicy:
         if not self._routing_admits(requester_user_id, room.room_id):
             return ignore
         available_responders = await self.responder_candidates_for_room(room, requester_user_id)
-        if context.is_thread and self._thread_defers_to_named_responders(
+        if context.is_thread and thread_requires_explicit_agent_targeting(
             context.planning_thread_history,
             sender_id=requester_user_id,
-            available_responders=available_responders,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+            membership_index=self.deps.agent_reply_memberships,
+            available_responders_in_room=available_responders,
         ):
             self.deps.logger.info("Skipping routing: thread already requires explicit responder targeting")
             return ignore
@@ -744,13 +726,7 @@ class TurnPolicy:
     ) -> bool:
         """Return whether this agent surfaces the team these mentioned agents ask for, picked as a turn picks it."""
         availability = self._responder_availability()
-        candidates = classify_responder_candidates_from_cached_room(
-            room,
-            envelope.requester_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            self.deps.agent_reply_memberships,
-        )
+        candidates = self._classify_candidates(room, envelope.requester_id)
         sender_visible_responders = [*candidates.allowed, *candidates.pending]
         # Two or more tagged agents ask for the same team in any thread or room.
         form_team = decide_team_formation(
@@ -841,16 +817,7 @@ class TurnPolicy:
         requester_user_id = dispatch.requester_user_id
         planning_thread_history = context.planning_thread_history
         availability = self._responder_availability()
-        candidates = self._only_the_contact_answerer(
-            dispatch,
-            classify_responder_candidates_from_cached_room(
-                room,
-                requester_user_id,
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-                self.deps.agent_reply_memberships,
-            ),
-        )
+        candidates = self._only_the_contact_answerer(dispatch, self._classify_candidates(room, requester_user_id))
         available_responders_in_room = self._filter_materializable_responders(candidates.allowed, availability)
         pending_responders_in_room = self._filter_materializable_responders(candidates.pending, availability)
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)

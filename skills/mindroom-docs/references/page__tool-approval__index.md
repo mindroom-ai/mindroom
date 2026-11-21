@@ -97,6 +97,7 @@ Add an `auto_approve` rule for such a function to keep it available.
 
 The agent or team whose turn asks for approval posts the card and edits it when the call is decided.
 A card is denied when the agent or team that posted it leaves the room.
-Whether the router account is in the room, or leaves it, changes nothing for a card.
+Whether the owner account is in the room, or leaves it, changes nothing for a card an agent or team posted.
+A card still pending from an earlier release, which the router posted, expires at the upgrade and keeps its pending look when the owner account cannot edit it.
 An approval for a scheduled tool call ends when the agent that asked leaves the room, even if it rejoins.
 When an agent or team is removed from the configuration, its pending cards may stay unedited, and a notice in the conversation says the request ended.

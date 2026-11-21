@@ -73,14 +73,14 @@ What appears in the room depends on whether the responder is already clear.
 Voice messages follow the same mention, thread, and access rules as text from the original sender.
 
 **Transcript.**
-With `voice.visible_router_echo: true`, the agent or team that answers a voice message posts its transcript just before its reply.
+With `voice.visible_router_echo: true`, one agent or team that answers a voice message posts its transcript just before its reply, except in a contact room, where no transcript is posted.
 No transcript appears for a voice message nobody answers, or for one that could not be transcribed.
 
 **Responder already clear.**
 If only one agent or team can respond, the transcript or caption mentions one, or thread context picks one, that responder answers the voice message directly.
 
 **Routing must choose.**
-If several agents or teams can respond and none is targeted, [routing](https://docs.mindroom.chat/configuration/router/#how-routing-works) picks one from the transcript and tells it with a hidden event, so no handoff message appears in the room.
+If several agents or teams can respond and none is targeted, [routing](https://docs.mindroom.chat/configuration/router/#how-routing-works) chooses from the transcript as it does for text, and no handoff message appears in the room.
 The chosen responder answers the voice message and still receives the original audio attachment.
 
 **Sender is not routed.**

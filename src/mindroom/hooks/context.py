@@ -199,15 +199,17 @@ class HookContextSupport:
 
     def room_state_querier(self) -> HookRoomStateQuerier:
         """Return the room-state querier bound into hook contexts: this bot's own client, else the room's steward."""
+        client = self.runtime.client
         return chain_hook_room_state_queriers(
-            _client_room_state_querier(self.runtime.client),
+            None if client is None else build_hook_room_state_querier(client),
             _steward_state_querier(self.runtime.orchestrator),
         )
 
     def room_state_putter(self) -> HookRoomStatePutter:
         """Return the room-state putter bound into hook contexts: this bot's own client, else the room's steward."""
+        client = self.runtime.client
         return chain_hook_room_state_putters(
-            _client_room_state_putter(self.runtime.client),
+            None if client is None else build_hook_room_state_putter(client),
             _steward_state_putter(self.runtime.orchestrator),
         )
 
@@ -303,14 +305,6 @@ def service_hook_bindings(orchestrator: OrchestratorRuntime, registry_state: Hoo
         room_state_putter=_steward_state_putter(orchestrator),
         runtime_started_at=min(started, default=time.time()),
     )
-
-
-def _client_room_state_querier(client: nio.AsyncClient | None) -> HookRoomStateQuerier | None:
-    return None if client is None else build_hook_room_state_querier(client)
-
-
-def _client_room_state_putter(client: nio.AsyncClient | None) -> HookRoomStatePutter | None:
-    return None if client is None else build_hook_room_state_putter(client)
 
 
 @dataclass(frozen=True, slots=True)

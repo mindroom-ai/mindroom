@@ -178,7 +178,7 @@ def terminal_content(
     return resolution
 
 
-def _reserve(
+def reserve(
     transaction: Transaction,
     principal_id: str,
     *,
@@ -190,8 +190,8 @@ def _reserve(
     room_id: str,
     thread_id: str | None,
     membership_epoch: int,
-    approvable: bool,
     sender_principal_id: str | None,
+    approvable: bool = False,
 ) -> None:
     """Reserve one card's frozen INITIAL delivery in the shared Matrix delivery lifecycle, with its card row."""
     outbox.enqueue(
@@ -228,37 +228,6 @@ def _reserve(
     )
 
 
-def reserve_receipt(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    kind: Literal["grant_receipt", "scheduled_receipt"],
-    call: CallKey,
-    delivery_id: str,
-    event_type: str,
-    room_id: str,
-    thread_id: str | None,
-    membership_epoch: int,
-    payload: Mapping[str, object],
-    sender_principal_id: str | None,
-) -> None:
-    """Reserve the receipt that shows a call an automatic approval decided."""
-    _reserve(
-        transaction,
-        principal_id,
-        kind=kind,
-        call=call,
-        delivery_id=delivery_id,
-        event_type=event_type,
-        payload=payload,
-        room_id=room_id,
-        thread_id=thread_id,
-        membership_epoch=membership_epoch,
-        approvable=False,
-        sender_principal_id=sender_principal_id,
-    )
-
-
 def _reserve_card(
     transaction: Transaction,
     principal_id: str,
@@ -285,7 +254,7 @@ def _reserve_card(
     ):
         return
     reserved = card if offer is None else offer.card
-    _reserve(
+    reserve(
         transaction,
         principal_id,
         kind="request",

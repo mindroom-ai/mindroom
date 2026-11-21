@@ -67,7 +67,8 @@ A link stops working once used, when it expires, or when it is revoked. A link c
 The approver's right is checked again when the link is used; if they lost it, the invite is revoked.
 A person removed from the room cannot use the same link to come back.
 When the Matrix invite does not clearly succeed (a refusal, a timeout or an unexpected error), or the agent stopped while sending it, the link stops working and the thread is told once that the invite may or may not have gone out; the approver can send a new link, which is not blocked by the old one.
-When the agent that stopped while sending was since removed from the configuration, an agent or the owner account that is in the room and may post there does this for it at its next start.
+When the account that stopped while sending is no longer configured, a joined MindRoom account that can post in the room revokes the link and posts the notice at startup.
+The link is revoked before its notice is sent, and a notice that fails to send is logged and not retried, so the thread can miss it.
 
 In an encrypted room, the newcomer does not see messages sent before they joined; the mail says so.
 Whether agents answer the newcomer follows the normal [access rules](authorization.md): in a room that is not one of an agent's managed rooms, the agent may stay silent for them.

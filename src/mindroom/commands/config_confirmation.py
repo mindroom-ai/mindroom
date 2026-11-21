@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from contextlib import asynccontextmanager, suppress
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
+from weakref import WeakValueDictionary
 
 import nio
 
@@ -22,7 +23,7 @@ from mindroom.requester_identity import is_platform_administrator, resolve_human
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -134,32 +135,12 @@ class _PendingConfigChange:
 _pending_changes: dict[str, _PendingConfigChange] = {}
 
 
-@dataclass
-class _PendingChangeLock:
-    """One borrowed per-preview serialization lock."""
-
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    borrowers: int = 0
+_pending_change_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 
 
-_pending_change_locks: dict[str, _PendingChangeLock] = {}
-
-
-@asynccontextmanager
-async def _pending_change_lock(event_id: str) -> AsyncIterator[None]:
-    """Serialize one preview while retaining locks only for active borrowers."""
-    entry = _pending_change_locks.get(event_id)
-    if entry is None:
-        entry = _PendingChangeLock()
-        _pending_change_locks[event_id] = entry
-    entry.borrowers += 1
-    try:
-        async with entry.lock:
-            yield
-    finally:
-        entry.borrowers -= 1
-        if entry.borrowers == 0 and _pending_change_locks.get(event_id) is entry:
-            _pending_change_locks.pop(event_id)
+def _pending_change_lock(event_id: str) -> asyncio.Lock:
+    """Return the preview's lock, which lives only while someone holds or waits for it."""
+    return _pending_change_locks.setdefault(event_id, asyncio.Lock())
 
 
 def _store_path(runtime_paths: RuntimePaths) -> Path:
@@ -180,14 +161,17 @@ def _save_pending_change(
     """Save one checkpoint, or forget its preview given None, and drop the previews nobody decided in time."""
     path = _store_path(runtime_paths)
     records: dict[str, Any] = load_cached_override_records(path, _is_stored_change)
-    for stale in [key for key, record in records.items() if _PendingConfigChange.from_dict(record).is_expired()]:
-        del records[stale]
+    expired_ids = [key for key, record in records.items() if _PendingConfigChange.from_dict(record).is_expired()]
+    for event_id in expired_ids:
+        del records[event_id]
     if checkpoint is None:
         records.pop(preview_event_id, None)
     else:
         records[preview_event_id] = checkpoint.to_dict()
     write_override_records(path, records)
     # Memory follows the store: a write that fails leaves the change, and a value only memory holds, in place.
+    for event_id in expired_ids:
+        _pending_changes.pop(event_id, None)
     if checkpoint is None:
         _pending_changes.pop(preview_event_id, None)
     else:
@@ -291,22 +275,6 @@ async def _confirmation_response_ids(
         msg = "Config confirmation recovery found multiple visible responses"
         raise RuntimeError(msg)
     return tuple(response_ids)
-
-
-async def _has_visible_confirmation_response(
-    client: nio.AsyncClient,
-    room_id: str,
-    event: nio.ReactionEvent,
-) -> bool:
-    """Return whether durable Matrix output proves this decision was consumed."""
-    return bool(
-        await _confirmation_response_ids(
-            client,
-            room_id,
-            event.reacts_to,
-            decision_event_id=event.event_id,
-        ),
-    )
 
 
 async def _already_set_up(client: nio.AsyncClient, runtime_paths: RuntimePaths, room_id: str, event_id: str) -> bool:
@@ -471,7 +439,12 @@ async def handle_confirmation_reaction(
         if pending_change.decision_event_id is not None and pending_change.decision_event_id != event.event_id:
             return
 
-        if await _has_visible_confirmation_response(context.client, room.room_id, event):
+        if await _confirmation_response_ids(
+            context.client,
+            room.room_id,
+            preview_event_id,
+            decision_event_id=event.event_id,
+        ):
             _save_pending_change(context.runtime_paths, preview_event_id, None)
             return
 

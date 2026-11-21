@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+from weakref import WeakValueDictionary
 
 import nio
 import pytest
@@ -43,7 +44,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_system.plugin_imports import SkippedPlugin
 from mindroom.tool_system.plugins import PluginReloadResult
-from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
@@ -593,12 +593,7 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
         requester_user_id="@alice:example.org",
     )
 
-    context.record_handled_turn.assert_called_once_with(
-        TurnRecord.create(
-            ["$event"],
-            response_event_id="$reply",
-        ),
-    )
+    context.record_handled_turn.assert_called_once_with("$reply")
 
 
 @pytest.mark.asyncio
@@ -839,7 +834,7 @@ async def test_config_preview_is_kept_locally_and_writes_no_room_state(
         restored.room_id,
         restored.thread_id,
     ) == ("defaults.markdown", False, False, "@alice:example.org", "!room:example.org", None)
-    context.record_handled_turn.assert_awaited_once_with(TurnRecord.create(["$event"], response_event_id="$preview"))
+    context.record_handled_turn.assert_awaited_once_with("$preview")
     client.room_put_state.assert_not_awaited()
     client.room_get_state.assert_not_awaited()
     client.room_get_state_event.assert_not_awaited()
@@ -1088,7 +1083,7 @@ async def test_confirmation_reactions_serialize_one_decision(
     preview_event_id = "$preview"
     pending_change = _pending_config_change()
     monkeypatch.setattr(config_confirmation, "_pending_changes", {preview_event_id: pending_change})
-    monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
+    monkeypatch.setattr(config_confirmation, "_pending_change_locks", WeakValueDictionary())
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
         config=Config(
@@ -1166,7 +1161,7 @@ async def test_checkpointed_confirmation_ignores_changed_authorization(
         decision_key="✅",
     )
     monkeypatch.setattr(config_confirmation, "_pending_changes", {preview_event_id: pending_change})
-    monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
+    monkeypatch.setattr(config_confirmation, "_pending_change_locks", WeakValueDictionary())
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
         config=Config(
@@ -1228,7 +1223,7 @@ async def test_confirmation_send_failure_keeps_replay_state(
         sender="@router:example.org",
     )
     monkeypatch.setattr(config_confirmation, "_pending_changes", {event_id: pending_change})
-    monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
+    monkeypatch.setattr(config_confirmation, "_pending_change_locks", WeakValueDictionary())
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
         config=Config(
@@ -1283,7 +1278,7 @@ async def test_ambiguous_config_execution_reports_uncertainty_without_reapplying
         decision_execution_started=True,
     )
     monkeypatch.setattr(config_confirmation, "_pending_changes", {preview_event_id: pending_change})
-    monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
+    monkeypatch.setattr(config_confirmation, "_pending_change_locks", WeakValueDictionary())
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
         config=Config(**_handler_config_fields(config_command_enabled=True)),
@@ -1333,7 +1328,7 @@ async def test_config_preview_recovery_preserves_committed_decision(
         decision_execution_started=True,
     )
     monkeypatch.setattr(config_confirmation, "_pending_changes", {preview_event_id: pending_change})
-    monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
+    monkeypatch.setattr(config_confirmation, "_pending_change_locks", WeakValueDictionary())
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = "@router:example.org"
 
@@ -1372,7 +1367,7 @@ async def test_config_preview_with_a_visible_decision_is_not_set_up_again(
     """A preview whose decision was answered and forgotten counts as recovered and gets no new pending change."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     monkeypatch.setattr(config_confirmation, "_pending_changes", {})
-    monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
+    monkeypatch.setattr(config_confirmation, "_pending_change_locks", WeakValueDictionary())
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = "@mindroom_assistant:example.org"
 
@@ -1856,7 +1851,7 @@ async def test_config_set_secret_value_never_reaches_the_local_store(
     confirm = SimpleNamespace(event_id="$confirm", sender="@admin:example.org", key="✅", reacts_to="$preview")
     with (
         patch.object(config_confirmation, "_pending_changes", {}),
-        patch.object(config_confirmation, "_pending_change_locks", {}),
+        patch.object(config_confirmation, "_pending_change_locks", WeakValueDictionary()),
         patch.object(config_confirmation, "_confirmation_response_ids", AsyncMock(return_value=())),
         patch.object(config_confirmation, "_add_confirmation_reactions", new_callable=AsyncMock),
     ):
@@ -1912,22 +1907,28 @@ async def test_expired_config_change_is_discarded(tmp_path: Path) -> None:
 
 
 def test_saving_a_preview_prunes_what_nobody_decided_in_time(tmp_path: Path) -> None:
-    """Each write drops the previews nobody decided in time and the rows it cannot read, and keeps decided ones."""
+    """Each write prunes expired undecided previews from disk and memory, and keeps decided ones."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     old = datetime.now(UTC) - timedelta(hours=25)
-    rows = {
-        "$expired": replace(_pending_config_change(), created_at=old).to_dict(),
-        "$decided": replace(_pending_config_change(), created_at=old, decision_event_id="$reaction").to_dict(),
-        "$unreadable": {"sender": "@router:example.org", "created_at": "soon"},
+    expired = replace(_pending_config_change(), created_at=old)
+    decided = replace(expired, decision_event_id="$reaction")
+    pending = {
+        "$expired": expired,
+        "$withheld": replace(expired, new_value="sk-withheld", new_value_withheld=True),
+        "$decided": decided,
     }
+    rows = {event_id: preview.to_dict() for event_id, preview in pending.items()}
+    rows["$unreadable"] = {"sender": "@router:example.org", "created_at": "soon"}
     path = config_confirmation._store_path(runtime_paths)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rows), encoding="utf-8")
 
-    with patch.object(config_confirmation, "_pending_changes", {}):
-        config_confirmation._save_pending_change(runtime_paths, "$new", _pending_config_change())
+    fresh = _pending_config_change()
+    with patch.object(config_confirmation, "_pending_changes", pending):
+        config_confirmation._save_pending_change(runtime_paths, "$new", fresh)
 
     assert set(_stored_pending_changes(runtime_paths)) == {"$decided", "$new"}
+    assert pending == {"$decided": decided, "$new": fresh}
 
 
 def test_a_preview_whose_record_could_not_be_removed_keeps_its_withheld_value(tmp_path: Path) -> None:
@@ -2021,7 +2022,7 @@ async def test_withheld_config_change_restored_after_restart_asks_to_rerun(tmp_p
     confirm = SimpleNamespace(event_id="$confirm", sender="@admin:example.org", key="✅", reacts_to="$preview")
     with (
         patch.object(config_confirmation, "_pending_changes", {"$preview": restored}),
-        patch.object(config_confirmation, "_pending_change_locks", {}),
+        patch.object(config_confirmation, "_pending_change_locks", WeakValueDictionary()),
         patch.object(config_confirmation, "_confirmation_response_ids", AsyncMock(return_value=())),
         patch("mindroom.commands.config_commands.apply_config_change", new_callable=AsyncMock) as apply_change,
     ):

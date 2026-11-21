@@ -93,12 +93,6 @@ class CommandTurnExecutor:
 
         ``acts_for_requester`` says an entity wrote the command for ``requester_user_id``.
         """
-        if command.type is CommandType.MODEL and model_selection_targets_other_runtime(
-            event.source.get("content", {}),
-            self._client().user_id,
-            self._client().device_id,
-        ):
-            return
         lock: asyncio.Lock | nullcontext[None] = nullcontext()
         if command.type is CommandType.MODEL:
             # Keep a strong local reference while waiting. Text and structured
@@ -154,17 +148,13 @@ class CommandTurnExecutor:
             return
         active_command_turn = command_turn
 
-        async def send_response(
-            response_text: str,
-            *,
-            skip_mentions: bool = False,
-        ) -> str | None:
+        async def send_response(response_text: str) -> str | None:
             return await self.deps.visible_responses.deliver_recoverable_text(
                 active_command_turn,
                 target=target,
                 response_text=active_command_turn.command_result_text or response_text,
                 recovered_response_event_id=recovered_response_event_id,
-                skip_mentions=skip_mentions,
+                skip_mentions=True,
             )
 
         async def record_command_result(
@@ -179,9 +169,9 @@ class CommandTurnExecutor:
                 command_result_extra_content=extra_content,
             )
 
-        async def record_command_turn(outcome: TurnRecord) -> None:
+        async def record_command_turn(response_event_id: str) -> None:
             await self.deps.turn_store.record_responded_turn(
-                canonicalize_turn_record(active_command_turn, response_event_id=outcome.response_event_id),
+                canonicalize_turn_record(active_command_turn, response_event_id=response_event_id),
             )
 
         orchestrator = self.deps.runtime.orchestrator

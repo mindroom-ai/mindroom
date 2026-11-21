@@ -157,11 +157,16 @@ class ApprovalStore(PrincipalRows):
         any_arguments_allowed: bool,
     ) -> ScheduledApprovalArmState:
         """Arm one approved scheduled call for its unchanged task firing on time."""
-        return await self._write(
-            _arm_scheduled_call_approval,
-            task_id=task_id,
-            workflow_digest=workflow_digest,
-            any_arguments_allowed=any_arguments_allowed,
+        return await self._backend.write(
+            lambda transaction: scheduled_approvals.arm(
+                transaction,
+                self._principal_id,
+                task_id=task_id,
+                workflow_digest=workflow_digest,
+                any_arguments_allowed=any_arguments_allowed,
+                # Judged against the time its transaction runs.
+                now_ns=time.time_ns(),
+            ),
         )
 
     async def withdraw_scheduled_call_approval(self, *, task_id: str, reason: str) -> RecordedApprovalDecision:
@@ -180,7 +185,17 @@ class ApprovalStore(PrincipalRows):
         receipt: ApprovalCardReservation,
     ) -> ScheduledCallClaim | ScheduledCallRefusal:
         """Spend one armed scheduled approval and reserve its receipt in one commit."""
-        return await self._write(_claim_scheduled_call, call=call, arguments_json=arguments_json, receipt=receipt)
+        return await self._backend.write(
+            lambda transaction: scheduled_approvals.claim(
+                transaction,
+                self._principal_id,
+                call=call,
+                arguments_json=arguments_json,
+                receipt=receipt,
+                # Judged against the time its transaction runs.
+                now_ns=time.time_ns(),
+            ),
+        )
 
     async def record_scheduled_call_outcome(self, *, task_id: str, outcome: ScheduledCallOutcome) -> None:
         """Record how one claimed scheduled call ended."""
@@ -425,44 +440,6 @@ class ApprovalStore(PrincipalRows):
     def signals(self) -> ApprovalSignals:
         """Return what the store's committed approval writes tell this process."""
         return self._signals
-
-
-def _arm_scheduled_call_approval(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    task_id: str,
-    workflow_digest: str,
-    any_arguments_allowed: bool,
-) -> ScheduledApprovalArmState:
-    """Arm one approved scheduled call against the time its transaction runs."""
-    return scheduled_approvals.arm(
-        transaction,
-        principal_id,
-        task_id=task_id,
-        workflow_digest=workflow_digest,
-        any_arguments_allowed=any_arguments_allowed,
-        now_ns=time.time_ns(),
-    )
-
-
-def _claim_scheduled_call(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    call: ScheduledCall,
-    arguments_json: str,
-    receipt: ApprovalCardReservation,
-) -> ScheduledCallClaim | ScheduledCallRefusal:
-    """Spend one armed scheduled approval against the time its transaction runs."""
-    return scheduled_approvals.claim(
-        transaction,
-        principal_id,
-        call=call,
-        arguments_json=arguments_json,
-        receipt=receipt,
-        now_ns=time.time_ns(),
-    )
 
 
 def _maintain_automatic_approvals(

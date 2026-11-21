@@ -1474,8 +1474,8 @@ Edits to an agent's or team's own settings, such as `instructions`, `model`, `to
 Changing `display_name` or `accept_invites`, an agent's `private` settings, whether an agent has the `desktop` tool, or which MCP tools it has restarts that agent or team.
 Removing an agent or team makes it leave its rooms, except direct messages, when the reload applies.
 An edit saved while MindRoom is still starting applies once startup finishes.
-An edit that restarts no agent, team, or router and changes no access, room, or authorization setting, such as a model definition, knowledge base, or agent instruction change, applies within seconds even while agents are replying.
-Other edits, including ones that restart an agent or team, an agent's or team's `access` or `rooms`, `administrators`, `authorization`, `room_defaults`, `rooms`, or `router.access`, first wait for active responses to finish, for at most 600 seconds.
+Most edits that start, stop, or restart no account, such as a model definition, knowledge base, or agent instruction change, apply within seconds even while agents are replying.
+Other edits, including ones that restart an agent or team, an agent's or team's `access` or `rooms`, adding or removing an agent's `contacts`, `administrators`, `authorization`, `mindroom_user`, `room_defaults`, `rooms`, or `router.access`, first wait for active responses to finish, for at most 600 seconds.
 To confirm that a reload finished, use [`mindroom config check-applied`](https://docs.mindroom.chat/deployment/config-bundles/#config-fingerprint-and-config-check-applied).
 
 ## Minimal Configuration
@@ -1654,7 +1654,7 @@ Template prompts accept only their own `{field_name}` placeholders, and an unsup
 Placeholders are exact `{field_name}` replacements, not Jinja or Python `str.format`, so `{message.text}`, `{message!r}`, and `{message:.2f}` are rejected.
 Escape literal braces as `{{` and `}}` in overrides that use placeholders.
 Changed overrides apply through hot reload.
-Changing a prompt that agents build in when they start, such as `HIDDEN_TOOL_CALLS_PROMPT` or `AGENT_IDENTITY_CONTEXT_TEMPLATE`, restarts every agent, team, and the router; other prompt changes apply without restarts.
+Changing a prompt that agents build in when they start, such as `HIDDEN_TOOL_CALLS_PROMPT` or `AGENT_IDENTITY_CONTEXT_TEMPLATE`, restarts every agent, team, and the owner account; other prompt changes restart only an agent in an active voice call.
 
 ## Environment Variables
 
@@ -1898,7 +1898,7 @@ How a private agent behaves:
 - Private agents cannot be configured as team members, and a shared team member cannot reach one through `delegate_to`.
   Tagging a private agent together with other agents in a message still forms an ad hoc team for that requester.
 - A private agent runs only for a known requester; otherwise it fails with `Private agent '<name>' requires an active execution identity to resolve requester-local state`.
-- It never runs for MindRoom's own router, agent, and team accounts or the internal `mindroom_user` account, for example when a shared agent's automation mentions it or assigns it a todo; such a run fails with `Private agent '<name>' requires a human or bot-account requester to resolve requester-local state`.
+- It never runs for MindRoom's own owner, agent, and team accounts or the internal `mindroom_user` account, for example when a shared agent's automation mentions it or assigns it a todo; such a run fails with `Private agent '<name>' requires a human or bot-account requester to resolve requester-local state`.
   A delegation to it from such a turn is refused with `Cannot delegate to '<name>': a private agent runs only for a person or bot account.`
 
 ### Private Fields
@@ -2783,7 +2783,7 @@ Thread and room overrides that named the deleted entry, or a level later removed
 
 ## Hot Reload
 
-After a successful config reload, changes to a model definition, including its provider options, model ID, and `context_window`, apply from the next agent, team, or router response without restarting the bot.
+After a successful config reload, changes to a model definition, including its provider options, model ID, and `context_window`, apply from the next agent or team reply and the next routing decision without restarting the bot.
 Agents with voice calls enabled can still restart, because their call runtime keeps its configuration between responses.
 
 ## Model Overrides in Chat
@@ -2993,11 +2993,11 @@ Then:
 2. If the thread requires explicit targeting, nothing is routed; eligible individual agents already in the thread may still use opt-in [adaptive participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation).
 3. If exactly one eligible responder remains, it answers directly without an AI routing call.
 4. If several remain, routing reads the message and up to three previous thread messages (each cut to 100 characters) and picks the best match from the candidates' roles, tools, and instructions.
-5. The chosen agent or team is told with a hidden event and answers the message in the thread.
+5. The chosen agent or team answers the message: the account doing the routing answers itself when it is chosen, and tells any other choice with a hidden event.
    No routing message appears in the room.
 
 One MindRoom account per room does the routing: the one with the highest power level there, the lowest Matrix ID breaking a tie.
-In a room from `config.yaml` that is the MindRoom account; elsewhere it is an agent or team, which answers itself when it is the best match.
+In the rooms MindRoom creates from `config.yaml` that is usually the MindRoom owner account, and elsewhere usually an agent or team, but the same rule decides in every room; an agent or team that routes answers itself when it is the best match.
 If the routing call fails, for example because of a model error or an invalid choice, the candidate with the lowest Matrix ID answers.
 If no candidate fits the message, nobody answers; mention an agent or team to get an answer.
 Mentioning an agent or team with `@name` always bypasses routing, but the entity still answers only if it is in the room, listed for that room in its `rooms` when the room is configured, and allowed by its `access`.
@@ -5195,7 +5195,8 @@ Recurring schedules cannot pre-approve calls.
 ## Timezone
 
 The top-level `timezone` setting (default `UTC`) is the IANA timezone MindRoom uses for the current date in agent prompts, message timestamps, file-memory daily notes, automation `cron` times, and interpreting and displaying scheduled times.
-An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones; the router and chat commands such as `!schedule` use the top-level setting.
+An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones.
+A new schedule created with the `!schedule` command uses the top-level setting, even when the agent handling the command has its own `timezone`.
 A team reply uses the timezone of the account that posts it: a configured team uses the top-level setting, and an [ad hoc team](https://docs.mindroom.chat/configuration/teams/#ad-hoc-teams) uses the timezone of the agent whose account posts its reply.
 An unknown timezone name fails config validation.
 
@@ -5229,13 +5230,14 @@ A run waits rather than proceeding when membership cannot be confirmed.
 
 Schedules are stored in Matrix room state and survive restarts.
 In a room MindRoom did not create, a room admin may need to raise one MindRoom account's power level to the room's state-event level, usually 50, before schedules can be saved; the account with the most power in the room stores the schedules of every agent there, and an agent that cannot save one answers `I need moderator rights in this room to save schedules.`
-MindRoom only acts on schedule state written by its own router, agent, or team accounts; schedule state written by any other account, including a room admin, is ignored and logged.
+MindRoom only acts on schedule state written by its own owner, agent, or team accounts; schedule state written by any other account, including a room admin, is ignored and logged.
 The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16), as Synapse, Tuwunel, and Dendrite do; otherwise reading tasks fails.
 
 ### Scheduled Task Restoration
 
 The agent or team that saved a schedule runs it: it posts the trigger when the schedule is due.
-A schedule saved by an earlier release that the router ran moves to the first agent or team its message mentions that is in the room, else to the one with the lowest Matrix ID.
+A schedule saved by an earlier release that the router ran moves to the first agent or team its message mentions that is joined to the room and may post its trigger, else to the one with the lowest Matrix ID that may.
+It stays pending while no agent or team in the room may post its trigger.
 Every agent restores the schedules it runs in a room when it joins that room, at startup, when it accepts an invitation, or when it joins a [room listed under one of its rooms](https://docs.mindroom.chat/rooms/#rooms-under-a-room), and its own pending configuration previews when `/config` is enabled.
 Schedules keep running when their agent restarts, for example after a config edit: a one-time task that came due during the restart runs once the agent is back, and a recurring task runs the occurrence that came due if it is still within the catch-up window.
 A one-time task missed by less than 24 hours runs once its agent's Matrix sync is ready; an older one is marked failed instead.
@@ -5748,14 +5750,14 @@ What appears in the room depends on whether the responder is already clear.
 Voice messages follow the same mention, thread, and access rules as text from the original sender.
 
 **Transcript.**
-With `voice.visible_router_echo: true`, the agent or team that answers a voice message posts its transcript just before its reply.
+With `voice.visible_router_echo: true`, one agent or team that answers a voice message posts its transcript just before its reply, except in a contact room, where no transcript is posted.
 No transcript appears for a voice message nobody answers, or for one that could not be transcribed.
 
 **Responder already clear.**
 If only one agent or team can respond, the transcript or caption mentions one, or thread context picks one, that responder answers the voice message directly.
 
 **Routing must choose.**
-If several agents or teams can respond and none is targeted, [routing](https://docs.mindroom.chat/configuration/router/#how-routing-works) picks one from the transcript and tells it with a hidden event, so no handoff message appears in the room.
+If several agents or teams can respond and none is targeted, [routing](https://docs.mindroom.chat/configuration/router/#how-routing-works) chooses from the transcript as it does for text, and no handoff message appears in the room.
 The chosen responder answers the voice message and still receives the original audio attachment.
 
 **Sender is not routed.**
@@ -6284,7 +6286,7 @@ Send a file, image, or video in a Matrix room and mention the agent or team in t
 A media event's `body` counts as a caption only when the event also has a `filename` field with a different value, following [MSC2530](https://github.com/matrix-org/matrix-spec-proposals/pull/2530), so a body that only repeats the filename is not a caption.
 
 The responder answers only when it would answer a text message there (mention, thread participation, or DM).
-Without an `@mention`, the router uses the caption to choose among several eligible agents or teams.
+Without an `@mention`, routing uses the caption to choose among several eligible agents or teams.
 Both unencrypted and end-to-end encrypted media are supported.
 
 The responder's model receives the media directly, so it must support that input type (vision for images, file or video input for documents and videos).
@@ -7757,7 +7759,7 @@ mindroom_user:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `username` | string | `mindroom_user` | Matrix localpart, without `@` or a domain, using lowercase letters, digits, `.`, `_`, `=`, `-`, or `/`; it must not match an agent, team, or router account |
+| `username` | string | `mindroom_user` | Matrix localpart, without `@` or a domain, using lowercase letters, digits, `.`, `_`, `=`, `-`, or `/`; it must not match an agent, team, or owner account |
 | `display_name` | string | `MindRoomUser` | Display name, changeable at any time |
 
 Set `username` before first startup.
@@ -8490,7 +8492,7 @@ Agents of other templates can be contacts as well when their template sets `cont
 2. Bob's personal-room agent posts the request as a new thread in Bob's personal room, naming Alice's agent and Alice, quoting the reason, and listing the rules and tools that would apply to Bob's agent.
 3. Bob replies in that thread, and his personal-room agent accepts with `accept_contact`, which shows Bob an approval card, or declines with `decline_contact`.
    Bob can also accept or decline on the [Contacts page](#contacts-page).
-4. On acceptance, an invite-only contact room is created holding both agents, Alice, and Bob, without the router.
+4. On acceptance, an invite-only contact room is created holding both agents, without MindRoom's owner account.
    Alice and Bob each get an invitation they accept in their Matrix client to watch or write there.
 5. Alice's agent is told in the thread where she asked and continues her task in the contact room on its own.
    After a decline, Alice's agent posts a notice in that thread and does nothing further.
@@ -10264,7 +10266,7 @@ To drive the user's signed-in browser, also configure the [`browser`](https://do
 
 ## 2. Pair the Computer
 
-1. In a private Matrix room containing only you and one Desktop-enabled agent, plus the router account if it is in the room, send `!desktop setup`.
+1. In a private Matrix room containing only you and one Desktop-enabled agent, plus the owner account if it is in the room, send `!desktop setup`.
    The reply contains setup data for the macOS app, an equivalent `mindroom desktop setup` command, and a short-lived pairing code.
    The pairing code is a secret, so MindRoom refuses `!desktop` when any other member or pending invite is in the room or when it cannot confirm the room's membership.
 2. In the macOS app, paste the reply's JSON setup data into **Computer access** and follow the [Computer Access steps](https://docs.mindroom.chat/installation/macos-app/#computer-access).
@@ -10666,7 +10668,7 @@ Adding `run_shell` to the set adds a chat confirmation before the request is sen
 ### `!desktop`
 
 Manage your Desktop pairing for one Desktop-enabled agent.
-Run these commands in a private Matrix room containing only you and one Desktop-enabled agent, plus the router account if it is in the room:
+Run these commands in a private Matrix room containing only you and one Desktop-enabled agent, plus the owner account if it is in the room:
 
 ```text
 !desktop setup
@@ -13637,7 +13639,7 @@ agents:
       - shell
 ```
 
-The toolkit is opt-in and works only for a configured agent replying in a Matrix conversation; teams and the router cannot use it.
+The toolkit is opt-in and works only for a configured agent replying in a Matrix conversation; teams and the owner account cannot use it.
 A subagent running as a different agent cannot use it; the replying agent must make the request.
 Canvases need a separate opt-in; see [Turn canvases on](https://docs.mindroom.chat/canvases/#turn-canvases-on).
 The agent cannot choose the recipient, room, thread, or a URL: every request goes to the current conversation and is addressed to the user the agent is answering.
@@ -14163,8 +14165,8 @@ Changed work is poked again after a cooldown, and unchanged work gets at most th
 The poke mentions only the assigned agent and quotes todo titles as plain text.
 
 Work whose requester is a human is poked on that human's behalf, so the agent applies its normal reply access and tool authorization to that human.
-Work whose requester is an agent, team, or the router is poked as the assigned agent's own turn.
-Work is not poked when its requester is a human, agent, team, or router the assigned agent may not currently reply to, or a non-agent account such as a configured bot account.
+Work whose requester is an agent, team, or the owner account is poked as the assigned agent's own turn.
+Work is not poked when its requester is a human, agent, team, or the owner account the assigned agent may not currently reply to, or a non-agent account such as a configured bot account.
 Items whose requester was never recorded are skipped and logged once as `todo_poke_requester_unrecorded` until someone allowed to address the assigned agent updates them.
 
 | Environment variable | Default | Behavior |
@@ -17318,7 +17320,8 @@ Add an `auto_approve` rule for such a function to keep it available.
 
 The agent or team whose turn asks for approval posts the card and edits it when the call is decided.
 A card is denied when the agent or team that posted it leaves the room.
-Whether the router account is in the room, or leaves it, changes nothing for a card.
+Whether the owner account is in the room, or leaves it, changes nothing for a card an agent or team posted.
+A card still pending from an earlier release, which the router posted, expires at the upgrade and keeps its pending look when the owner account cannot edit it.
 An approval for a scheduled tool call ends when the agent that asked leaves the room, even if it rejoins.
 When an agent or team is removed from the configuration, its pending cards may stay unedited, and a notice in the conversation says the request ended.
 
@@ -17387,6 +17390,8 @@ A link stops working once used, when it expires, or when it is revoked. A link c
 The approver's right is checked again when the link is used; if they lost it, the invite is revoked.
 A person removed from the room cannot use the same link to come back.
 When the Matrix invite does not clearly succeed (a refusal, a timeout or an unexpected error), or the agent stopped while sending it, the link stops working and the thread is told once that the invite may or may not have gone out; the approver can send a new link, which is not blocked by the old one.
+When the account that stopped while sending is no longer configured, a joined MindRoom account that can post in the room revokes the link and posts the notice at startup.
+The link is revoked before its notice is sent, and a notice that fails to send is logged and not retried, so the thread can miss it.
 
 In an encrypted room, the newcomer does not see messages sent before they joined; the mail says so.
 Whether agents answer the newcomer follows the normal [access rules](https://docs.mindroom.chat/authorization/): in a room that is not one of an agent's managed rooms, the agent may stay silent for them.
@@ -18046,7 +18051,8 @@ Tools such as `browser`, `attachments`, `matrix_message`, `gmail`, and `google_d
 Which Matrix user may drive an agent, act in a room, or approve a change is a separate question governed by access policy and requester authorization.
 An agent or team mentioned in another entity's reply acts for the human or configured bot account that requested that reply, so neither can reach an entity whose `access` excludes them by asking a different entity to mention it.
 Work no person started, such as a shared agent's automation run and the delegations, todos, mentions, and schedules that mention another agent it makes, acts as that agent's own account, which every other agent and team admits only through its own `access`.
-When an agent-created schedule that mentions no agent reaches one of several responders through a router hand-off, the hand-off drops the managed requester, so the target checks the router's account, which the default `access` admits because the router joins every managed room.
+A schedule that mentions no agent is routed only to responders its recorded requester may address.
+When that requester is an agent and the trigger is visible, the responder the route names checks the steward's account instead.
 
 ## Protecting the primary from worker code
 
@@ -18301,11 +18307,15 @@ MindRoom does not filter what plugin routes return, so they must answer with JSO
 A plugin route that raises answers 500 without the error's detail, except that one using its plugin context while the current config does not load the plugin answers 503 naming only the plugin.
 Plugin routes under `/api/plugins/` call `require_client_user` from `mindroom.plugin_http`, which accepts `Authorization: Bearer <session_token>` and answers 401 for a missing, unknown, or expired token.
 `GET /api/plugins` checks the session the same way and answers any session, whatever its user's rooms, with this MindRoom's plugin API version and the manifest `name` and `mindroom_plugin_api` of each enabled plugin that loaded, never a plugin's path, settings, or load error.
-Routes that act on one room use `require_room_member` instead, which authenticates the caller the same way and checks the session's own user, never one a request parameter names, in the room the route's path names, never one from the query string; it reads live joined members through the client of the router bot if it is in the room, else of any running MindRoom bot in the room, answering 403 for a non-member and 503 when membership is unavailable (no running bot in the room, the Matrix call answered with an error, raised, or timed out, or the API runs without MindRoom's bots).
+Routes that act on one room use `require_room_member` instead, which authenticates the caller the same way and checks the session's own user, never one a request parameter names, in the room the route's path names, never one from the query string; it reads live joined members through the client of the room's steward, the running MindRoom bot in the room with the most power there, answering 403 for a non-member and 503 when membership is unavailable (no running bot in the room, the Matrix call answered with an error, raised, or timed out, or the API runs without MindRoom's bots).
 `require_room_reader` makes the same check before it reads anything else of the room, whatever the room's history visibility or join rule, and its `RoomReader` reads members' display names from that same lookup and power levels and direct-message status through a bot it picks the same way, each when the route asks, answering 503 rather than a refusal when a power-level read fails or times out; `is_direct()` is the agents' cached direct-message heuristic, which answers 503 when the bot's direct-message list or the room's state cannot be read and nothing else marks the room as direct, never an authorization.
 `RoomReader.set_modes()` changes the room's thread and reply mode overrides only for a caller a fresh power-level read shows with room admin power, the bar `!thread_mode` and `!reply_mode` set, answering 403 otherwise and 503 when that read fails, before it writes anything.
 `RoomReader.history()` reads the caller's membership again with the room's history visibility, answering 403 once they have left and 503 when the read fails or times out; the start of their view rests on `origin_server_ts`, which the sending homeserver sets, so it counts only events of the caller's own homeserver, the only one whose users get client sessions, and ends at an invite another homeserver sent.
-`RoomReader.agents()` and `agent()` admit an agent by the check the worker Computer uses, under the config the API serves rather than the one the runtime runs: the user ID names a current agent, it and the caller are both joined, by the lookup that admitted the caller here and by the router's for the Computer, and under current room grants the agent's access rules let the caller converse with it there; `agent()` answers 503 while identities or grants are unresolved, and `agents()` leaves such an agent out and answers 503 only while the router's rooms are unknown; grants are current as the router's sync keeps them, refreshed through the runtime's one refresh when they need it, and the room read again when its ready grants lack a caller its live roster shows joined, and plugin routes never refresh grants under a membership policy the running runtime has not applied.
+`RoomReader.agents()` and `agent()` admit an agent by the check the worker Computer uses: the user ID names a current agent, it and the caller are both joined, by the lookup that admitted the caller here and by the agent's own client for the Computer, and under current room grants the agent's access rules let the caller converse with it there.
+A plugin's workspace read checks those access rules under both the config the API serves and the config the agent's running bot runs.
+Each grant room's member observer keeps its grants current through its sync, the runtime's one refresh renews them when they need it, and the room is read again when its ready grants lack a caller its live roster shows joined.
+`agent()` answers 503 for an agent whose identity or grants are unresolved, and `agents()` leaves such an agent out once the bots' rooms are known.
+The whole request answers 503 while no runtime or running bot is available, while the runtime runs a membership policy other than the served config's, when the check outlasts its timeout, or while the bots' rooms are unknown and an agent's access waits on them, so plugin routes never refresh grants under a membership policy the running runtime has not applied.
 Each admitted agent's `root` is the workspace a turn of that agent for that caller in that room resolves, never a path from the request; `files` and `terminal` follow the agent's toolkits as their declarations and settings describe them, and give only `read` and `watch` to a caller whose power level keeps them from posting; a contact room opens none, because its turns run as the agent's owner.
 `terminal` is `none` unless the agent's `terminals` setting is `watch` or `type`, `none` by default, and its shell offers `run_shell_command` in a worker, and `type` only under `terminals: type` where that worker mounts the workspace, a dedicated worker or a `static_runner` the deployment says mounts the agents' storage, because only there does typing act on the files the caller sees as the agent's `root`.
 The terminal routes under `/api/rooms/` take the same sessions and admit through `RoomReader.agents()` or `agent()` on every request, stream only with `watch` or `type`, open, close, and take input only with `type`, and take no path or worker from the client; their streams recheck `agent()` every 15 seconds under the config served then, dropping input once the caller may only watch and closing once the agent is no longer open to them.
@@ -18317,9 +18327,9 @@ The agent profile route `GET /api/rooms/<room_id>/agents/<agent_user_id>/profile
 The [secret request route](https://docs.mindroom.chat/deployment/egress-broker/#asking-in-chat) `POST /api/rooms/<room_id>/secret-requests/<request_id>` takes the same sessions through `require_room_member` and answers only the person the agent asked, for a request registered in that room, once, while it is pending; under the config the API serves when the answer arrives, it checks again that the caller may manage the agent's Agent Keys, that the agent still keeps the caller's keys in the store the card was made for, and that the service still takes a user's key and has the hosts the card showed, and it writes the key only into that store, never into a scope the agent moved to.
 The key never appears in a response, a log line, or a Matrix event.
 The change stream rechecks `agent()` every 15 seconds under the config served then, closing once the workspace is no longer open to the caller or its `root` moved; it registers no watch by path, but scans the workspace by opening every folder from the root without following a link, as the file routes do, and reports only what those scans saw, so a link planted or swapped in the workspace never makes the primary look at or report anything outside it.
-`require_room_messenger` makes the same check, and its `RoomMessenger` posts only as the router, never from a person's account: `notice()` is an `m.notice` naming no requester, and `relay()` names the session's own user, never one a request names, as original sender, so each agent it wakes authorizes that user, after checking again just before sending that the session is live and the user is joined and may send `m.room.message`.
+`require_room_messenger` makes the same check, and its `RoomMessenger` posts only as a MindRoom account, never from a person's account: `notice()` is an `m.notice` naming no requester, and `relay()` names the session's own user, never one a request names, as original sender, so each agent it wakes authorizes that user, after checking again just before sending that the session is live and the user is joined and may send `m.room.message`.
 A relay mentions only agents and teams joined to the room, and both refuse content keys under `com.mindroom.`, `io.mindroom.`, MindRoom Chat's `chat.mindroom.`, or a namespace another loaded plugin reserves and the posting plugin does not, at any depth, and Matrix's own top-level keys, such as `body`, `m.relates_to`, and `m.new_content`, so neither a route nor its client can claim a requester, hide whom a relay is for, edit another message, or forge another plugin's card through content.
-`notice()` checks no power level, so a member the power levels keep from posting can still have a route post a router notice; the route chooses who may.
+`notice()` checks no power level, so a member the power levels keep from posting can still have a route post a MindRoom notice; the route chooses who may.
 Routes only administrators may use depend on `require_platform_administrator`, which authenticates the caller the same way and answers 403 unless the session's user, or the person it is a bridge alias of, is in `administrators` in the config the API serves when the request arrives.
 The session names a Matrix user and nothing more; a plugin route that serves room data must check that user's room membership itself.
 A browser cannot set a websocket's headers, so a plugin websocket route signs its caller in with `client_stream` from `mindroom.plugin_http`: the client offers the session token as the subprotocol `mindroom-session.<session_token>` beside `mindroom-session`, which the server accepts with, so the token is never echoed in the handshake answer.
@@ -18341,7 +18351,7 @@ A plugin's `origin_module` router answers every request on its hosts, `<label>.<
 Each host is an origin of its own, so its pages share no origin with the dashboard, the API's client routes, or another plugin's hosts; they do share a site with every other host of the domain, which is why the docs put the domain on a registrable domain of its own, and MindRoom's cookie-authenticated API changes require the API's own `Origin`.
 Every answer on the listener carries `Content-Security-Policy: frame-ancestors 'self'` with the origins `MINDROOM_COMPUTER_ALLOWED_ORIGINS` lists, as a separate policy a route can tighten but never loosen, so a page there loads only in MindRoom Chat's frames or the host's own; no other header is forced, because core never knows what a plugin serves.
 On any other host, `GET /ask?domain=<host>` tells an on-demand TLS proxy whether the host's plugin says it serves it now, so certificates are issued only for hosts a plugin vouches for; the listener writes no access log line for its HTTP requests, since a path or query may carry a one-use link, while Uvicorn still logs each websocket handshake with its path.
-The call transcript routes under `/api/call-transcripts/v1/` take the same sessions and check rooms themselves through the router: room membership to read a room's live call, permission to post messages to start or join a call, and for a call's own routes the room the call is in, never one the request names, answering 404 to anyone outside it.
+The call transcript routes under `/api/call-transcripts/v1/` take the same sessions and check rooms themselves through the room's steward: room membership to read a room's live call, permission to post messages to start or join a call, and for a call's own routes the room the call is in, never one the request names, answering 404 to anyone outside it.
 In a room an agent answers calls in, while no live call between people takes precedence, reading the room's live call checks room membership through that agent instead, also while call transcripts are off, and a call with the agent is read from the agent's transcript in memory, by its caller only, since other members could not tell they were heard.
 CORS for `/api/client-sessions`, `/api/plugins`, `/api/plugins/`, `/api/call-transcripts/`, `/api/rooms/`, and `/api/github/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin, call transcript, room, and GitHub routes too, and there is no separate list.
 Browsers let only those origins read these paths' responses, with credentials off, and every response carries `Cache-Control: no-store`; behind a proxy that serves MindRoom under a root path, the paths are matched below that root path.
@@ -18391,7 +18401,8 @@ Do not report or "fix" these; they are deliberate.
 - The `atlassian` tool's `write`, `jira_spaces`, and `confluence_spaces` limit only that tool's own functions, which act as a requester who may reach more: an issue in an allowed space still shows the keys and summaries of linked, parent, and sub-issues in other spaces, searches can select allowed issues by those relations, an issue's `fields` can set a parent elsewhere, `space_not_allowed` reveals that an item exists outside the allowed spaces, and the egress broker `atlassian` service, the API-token `jira` and `confluence` tools, and code execution in the primary are not limited; see [Limit What An Agent Can Do](https://docs.mindroom.chat/tools/atlassian/#limit-what-an-agent-can-do).
 - An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a Dynamic Workflow `subagent` participant, runs as its caller with the caller's tools, credentials, workspace, and approval rules, which for a workflow participant include the caller's `dynamic_workflow` `allowed_tools` pre-approval and reading the skills it names when the caller could without approval; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
 - Each agent publishes its running background jobs in each room as unencrypted room state keyed by its own user ID: job ID, thread, kind, tool name, status, requester ID, start time, and the subagent ID and run ID of a subagent job or the tool call ID of a tool job, never arguments or results, so the homeserver and every room member can read them even in an encrypted room.
-- Each agent, team, and the router also publishes its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, whether it has a worker computer, and for an agent or team its configured `role`, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one, and the role, also in an encrypted room and with the API off.
+- Each agent, team, and the owner account also publishes, while the API is on and the origin is usable, its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, and whether it has a worker computer, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one, also in an encrypted room.
+  An agent or team publishes its configured `role` in the same state whenever it is set, also with the API off.
   MindRoom Chat uses a published origin only from agents on the viewer's homeserver, and only while that homeserver binds tokens, so a hostile agent can collect at most tokens bound to its own origin.
   It shows a published role likewise only from agents on the viewer's homeserver, so a person writing the same state under their own user ID shows no role.
 - An administrator whom a personal agent's template `access` admits, whom an owner adds as a co-owner of an agent created with `create_agent`, or whom a team that includes such an agent admits, may use that agent, whose instructions its owner may have written, and its tools act for the administrator, so such an agent with an administrator-gated tool such as `config_manager` can make that tool act with an administrator's authority; [Letting an Agent Create Agents](https://docs.mindroom.chat/personal-agents/#letting-an-agent-create-agents) warns to allow creation only on agents whose whole configuration each person may have.
@@ -18401,9 +18412,9 @@ Do not report or "fix" these; they are deliberate.
 - An agent's 🛑 reaction, its Stop button included, stops nothing unless it comes from [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply), which counts as the Stop of the user the agent acts for and needs that user's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
 - `!auto_approve` lets a person approve every gated tool call they request in one thread, or in the whole room when it has no threads, for up to 24 hours, including tools that ask for their own confirmation but not tool calls scheduled to run later; only that person can send it, never an agent acting for them.
-- The router publishes each room's open `!auto_approve` windows as unencrypted room state keyed by its own user ID: thread, requester ID, and end time, so the homeserver and every room member can read them even in an encrypted room.
-- The router also publishes which joined members of each room are its installation's router, agent, and team accounts, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read them even in an encrypted room.
-  Other members can send the same event type only under other state keys, so a client trusts only the list a MindRoom router on the viewer's homeserver sent under its own user ID; see [Room Accounts List](https://docs.mindroom.chat/architecture/matrix/#room-accounts-list).
+- Each room's steward publishes the room's open `!auto_approve` windows as unencrypted room state keyed by its own user ID: thread, requester ID, and end time, so the homeserver and every room member can read them even in an encrypted room.
+- Each room's steward also publishes which joined members of the room are its installation's owner, agent, and team accounts, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read them even in an encrypted room.
+  Other members cannot write under the publisher's user ID but can publish lists under their own, so a client must trust the publisher itself before it uses a list; see [Room Accounts List](https://docs.mindroom.chat/architecture/matrix/#room-accounts-list).
 - Scheduled tasks, including their prompts, and thread tags, including the topic tags agents add automatically, are stored as unencrypted room state, so the homeserver and every room member can read them even in an encrypted room.
 - A `!config set` change awaiting confirmation is stored as unencrypted room state with its config path, requester, and new value, so the homeserver and every room member can read them even in an encrypted room; a new value that display redaction would mask, or that room state cannot hold, such as a decimal number, stays only in the running process.
 - `matrix_user_write` sends a message or a file, reacts, edits, redacts, changes memberships, and creates rooms as a personal agent's owner, in any turn that runs for them, as `matrix_user_read` does, but not through the MCP gateway, whose calls have no conversation; whether a call asks the owner first is decided by `tool_approval` rules, as for any tool.
@@ -19916,7 +19927,7 @@ Both return the message's event ID, and post in the thread `thread_id` names, el
 `content` adds namespaced keys of the plugin's own to the message, such as a card under one of its [reserved namespaces](#reserved-namespaces).
 It answers 400 and sends nothing when `content` sets a key of Matrix's own, one without a namespace such as `body` or `msgtype` or one under `m.` or `org.matrix.`, or, anywhere in it, a key under `com.mindroom.`, `io.mindroom.`, MindRoom Chat's `chat.mindroom.`, or a namespace another loaded plugin reserves and the posting plugin does not, so a route may pass a client's content through without letting it change the text, edit another message, forge another plugin's card, or claim to be someone else.
 Plugins that reserve the same namespace, such as a family of plugins sharing one, can each post keys in it, but a narrower namespace another plugin reserves inside it, such as `com.example.cards.` inside `com.example.`, stays refused.
-`relay()` answers 400 unless `mentions` names at least one agent or team and only agents and teams joined to the room, never a person or the router.
+`relay()` answers 400 unless `mentions` names at least one agent or team and only agents and teams joined to the room, never a person or the owner account.
 Just before it sends, `relay()` checks the caller again, with the answers of `require_room_member` and `power()`: 401 once their session has ended, 403 once they have left the room or may no longer send `m.room.message` there, and 503 when either cannot be read.
 Both answer 503 with `No MindRoom agent is running; try again.` while none runs, with `No MindRoom agent is in this room.` in a room none has joined, or for `relay()` while the first one it mentions is not running there, and with `The message could not be sent; try again.` when Matrix refuses the message or the posting bot stops before it is sent.
 A plugin that uses `require_room_messenger` states `"mindroom_plugin_api": "1.12"` in its manifest, and `"1.15"` when it posts keys in a namespace another plugin also reserves.
@@ -20748,11 +20759,11 @@ They read the Matrix accounts MindRoom keeps in the primary's storage, so a tool
 
 | Function | Returns |
 |----------|---------|
-| `entity_directory(config, runtime_paths)` | A mapping from the current Matrix user ID of the router and each configured agent and team to its `ManagedEntity` |
-| `is_human_user(user_id, config, runtime_paths)` | `False` for the router, an agent, a team, the [internal user](https://docs.mindroom.chat/matrix/#internal-user), and the [`bot_accounts`](https://docs.mindroom.chat/authorization/#bot-accounts), and `True` for anyone else |
+| `entity_directory(config, runtime_paths)` | A mapping from the current Matrix user ID of the owner account and each configured agent and team to its `ManagedEntity` |
+| `is_human_user(user_id, config, runtime_paths)` | `False` for the owner account, an agent, a team, the [internal user](https://docs.mindroom.chat/matrix/#internal-user), and the [`bot_accounts`](https://docs.mindroom.chat/authorization/#bot-accounts), and `True` for anyone else |
 | `is_platform_administrator(user_id, config, runtime_paths)` | Whether the user is in `administrators` or is a person's [bridge alias](https://docs.mindroom.chat/authorization/#bridge-aliases) for one |
 
-A `ManagedEntity` has the entity's config `name`, its `kind` (`"router"`, `"agent"`, or `"team"`), its `display_name`, and, for an agent, the `tool_names` its config gives it: the toolkits its `tools` and the defaults it takes name, a preset replaced by its toolkits, with the toolkits those imply, less those its settings turn off, such as `memory` when its memory backend is `none`, and with those its settings add, such as `delegate` for `delegate_to`.
+A `ManagedEntity` has the entity's config `name`, its `kind` (`"router"` for the owner account, `"agent"`, or `"team"`), its `display_name`, and, for an agent, the `tool_names` its config gives it: the toolkits its `tools` and the defaults it takes name, a preset replaced by its toolkits, with the toolkits those imply, less those its settings turn off, such as `memory` when its memory backend is `none`, and with those its settings add, such as `delegate` for `delegate_to`.
 The directory leaves out an entity whose Matrix account MindRoom has not created yet, such as one a config reload just added.
 A tool name grants nothing, so never decide what a caller may do from one.
 
@@ -21559,7 +21570,7 @@ TurnOrigin(
 
 ResponseDraft(
     response_text: str,
-    response_kind: str,  # "ai", "team", "router", "system"
+    response_kind: str,  # "ai" or "team"
     tool_trace: list[ToolTraceEntry] | None,
     extra_content: dict[str, Any] | None,
     envelope: MessageEnvelope,
@@ -21568,7 +21579,7 @@ ResponseDraft(
 
 FinalResponseDraft(
     response_text: str,
-    response_kind: str,  # "ai", "team", "router", "system"
+    response_kind: str,  # "ai" or "team"
     envelope: MessageEnvelope,
 )
 
@@ -22080,7 +22091,7 @@ Requesting one of them returns HTTP 400 with code `unsupported_worker_scope`, an
 
 ## Auto-routing
 
-Select the `auto` model to let the router pick the best available agent for each message.
+Select the `auto` model to pick an available agent for each request: a configured [router judgment](https://docs.mindroom.chat/configuration/router/#responder-selection-judgments) decides first, then the router model when the judgment does not decide.
 `auto` considers agents only; select `team/<team_name>` to run a team.
 The response's `model` field names the chosen agent, and the session belongs to that agent.
 When a [router judgment](https://docs.mindroom.chat/configuration/router/#responder-selection-judgments) finds no suitable agent, the request fails with HTTP 400 and code `no_suitable_responder`; choose a model explicitly or rephrase.
@@ -25219,7 +25230,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `egress_broker/` - Agent Keys CA, worker token signing key, and request log (see [Resetting broker state](https://docs.mindroom.chat/deployment/egress-broker/#resetting-broker-state))
 - `budgets/` - Per-user caps set on the [Budgets](https://docs.mindroom.chat/budgets/#per-user-caps) page or through the Budget API
 - `logs/` - Application logs
-- `matrix_state.yaml` - The Matrix accounts and access tokens of MindRoom's agents, teams, router, and its internal `mindroom_user` account when configured, the rooms MindRoom manages, the space room ID, and the server emoji room ID
+- `matrix_state.yaml` - The Matrix accounts and access tokens of MindRoom's agents, teams, owner account, and its internal `mindroom_user` account when configured, the rooms MindRoom manages, the space room ID, and the server emoji room ID
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 - `sync_continuity/` - Per-agent Matrix rooms still being joined and decrypted, kept across restarts
 
@@ -25507,7 +25518,7 @@ See also [Routing & Responder Selection](https://docs.mindroom.chat/configuratio
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Liveness. Returns `200` with `{"status": "healthy", ...}`, or `503` with `"status": "unhealthy"` once startup is ready and an agent, team, or router has stopped syncing with Matrix |
+| GET | `/api/health` | Liveness. Returns `200` with `{"status": "healthy", ...}`, or `503` with `"status": "unhealthy"` once startup is ready and an agent, team, or the owner account has stopped syncing with Matrix |
 | GET | `/api/ready` | Readiness. Returns `{"status": "ready"}` when startup has finished, otherwise `503` with `{"status": "<phase>", "detail": "..."}` |
 
 Use `/api/health` for startup and liveness probes and `/api/ready` for readiness probes in container orchestrators.
@@ -25532,7 +25543,8 @@ The `/api/ready` phases are:
 
 While `mindroom run` waits for hosted pairing approval, or converts conversation storage on the first start after an upgrade, only these two endpoints answer: `/api/health` returns `200` and `/api/ready` returns `503` with phase `starting` and detail `Waiting for local pairing approval` or `Converting conversation storage`.
 
-When an agent, team, or router receives no Matrix sync for 120 seconds, MindRoom restarts that entity's sync loop on its own.
+When an agent, team, or the owner account receives no Matrix sync for 120 seconds after its sync loop's first response, MindRoom restarts that entity's sync loop on its own.
+Until a sync loop's first response, including after such a restart, the limit is [`MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS`](https://docs.mindroom.chat/configuration/#matrix) (default `600`) instead.
 After 180 seconds without a sync, `/api/health` returns `503` and lists the entity in `stale_sync_entities`.
 While an entity is still making progress on a large backlog of received events, both wait up to [`MINDROOM_MATRIX_INGESTION_GRACE_SECONDS`](https://docs.mindroom.chat/configuration/#matrix).
 Set the liveness probe's `failureThreshold` high enough that the sync-loop restart can recover before the container is restarted.
@@ -25558,7 +25570,7 @@ The thresholds are starting points to tune against your own baseline, and the qu
 
 ### `event_loop_scheduler_lag_summary`
 
-All agents, teams, and the router share one event loop.
+All agents, teams, and the owner account share one event loop.
 Every 60 seconds MindRoom logs how late a heartbeat scheduled every 50 ms actually ran.
 
 | Field | Meaning |
@@ -25595,7 +25607,7 @@ Memory held by objects that become garbage while frozen, such as agents a config
 
 ### `event_loop_stall_detected`
 
-Logged when the shared event loop has run no heartbeat for `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` (default `5`), so every agent, team, and router is frozen until it ends.
+Logged when the shared event loop has run no heartbeat for `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` (default `5`), so every agent, team, and the owner account is frozen until it ends.
 While the stall lasts, an `event_loop_stall_ongoing` record with the same fields follows every 30 seconds.
 
 | Field | Meaning |
@@ -25623,7 +25635,7 @@ Sum `stall_duration_seconds` over a window to see how long agents were frozen in
 
 ### `matrix_sync_stall_diagnostics`
 
-Logged when one agent, team, or router goes 90 seconds without Matrix sync progress, and repeated at most every 90 seconds while the stall lasts.
+Logged when one agent, team, or the owner account goes 90 seconds without Matrix sync progress, and repeated at most every 90 seconds while the stall lasts.
 It shows where that entity's sync and event-processing tasks are waiting, without message content, and does not affect health or readiness.
 
 | Field | Meaning |
@@ -27306,7 +27318,7 @@ Use `--force` to overwrite existing files after changing avatar prompts or style
 
 ### avatars sync
 
-Apply configured room and root-Space avatars to Matrix using the router account.
+Apply configured room and root-Space avatars to Matrix using the owner account.
 Existing Matrix avatars are kept unless you pass `--force`.
 
 <!-- CODE:START -->

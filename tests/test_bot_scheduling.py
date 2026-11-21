@@ -28,7 +28,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_record import TurnRecord
-from tests.bot_helpers import make_test_agent_bot, owned_matrix_login
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -425,52 +425,6 @@ class TestBotScheduleCommands:
         assert delivered_target.resolved_thread_id is None
 
 
-class TestBotTaskRestoration:
-    """Test scheduled task restoration on bot startup."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("agent_name", ["router", "general"])
-    async def test_every_bot_hands_each_joined_room_to_the_scheduled_task_runtime(self, agent_name: str) -> None:
-        """Router and agents alike restore the schedules they own in each room they join."""
-        agent_user = AgentMatrixUser(
-            agent_name=agent_name,
-            user_id=f"@mindroom_{agent_name}:localhost",
-            display_name=agent_name,
-            password=TEST_PASSWORD,
-            access_token=TEST_ACCESS_TOKEN,
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config = _runtime_bound_config(Config(), Path(tmpdir))  # Empty config for testing
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
-            install_runtime_journal_support(bot)
-
-            with (
-                patch("mindroom.bot.login_agent_owned_session") as mock_login,
-                patch("mindroom.bot.AgentBot.refresh_presence", new_callable=AsyncMock),
-            ):
-                mock_client = make_matrix_client_mock(user_id=agent_user.user_id)
-                mock_client.access_token = TEST_ACCESS_TOKEN
-                mock_client.rooms = {}
-                mock_login.return_value = owned_matrix_login(mock_client)
-
-                # Mock the client.join method to return JoinResponse
-                mock_join_response = nio.JoinResponse.from_dict({"room_id": "!test:server"})
-                mock_client.join.return_value = mock_join_response
-
-                await bot.start()
-                restore_room = AsyncMock(return_value=2)
-                with patch.object(bot.orchestrator.scheduled_tasks, "restore_room", restore_room):
-                    await bot._room_lifecycle.join_configured_rooms()
-
-                restore_room.assert_awaited_once_with(bot, "!test:server")
-
-
 class TestCommandHandling:
     """Test command handling behavior across different agents."""
 
@@ -847,68 +801,6 @@ class TestCommandHandling:
         assert not should_respond, "Multiple agents wait for routing"
 
     @pytest.mark.asyncio
-    async def test_router_error_actual_behavior(self) -> None:
-        """Test the ACTUAL behavior when router sends an error - through full message flow."""
-        # Create finance agent
-        agent_user = AgentMatrixUser(
-            agent_name="finance",
-            user_id="@mindroom_finance:localhost",
-            display_name="Finance Agent",
-            password=TEST_PASSWORD,
-            access_token=TEST_ACCESS_TOKEN,
-        )
-
-        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
-
-        bot = make_test_agent_bot(
-            agent_user=agent_user,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=["!test:server"],
-        )
-        wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
-        bot.client.user_id = "@mindroom_finance:localhost"
-        bot.logger = MagicMock()
-        generate_response = AsyncMock()
-        _sync_turn_policy_runtime(bot)
-        install_generate_response_mock(bot, generate_response)
-
-        # Mock context extraction for router's error message
-        mock_context = _message_context(
-            am_i_mentioned=False,
-            is_thread=True,
-            thread_id="$thread123",
-        )
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=mock_context,
-        )
-
-        # Create router's error message event
-        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
-        event = nio.RoomMessageText.from_dict(
-            {
-                "event_id": "$router_error",
-                "sender": "@mindroom_router:localhost",
-                "origin_server_ts": 1234567890,
-                "content": {
-                    "msgtype": "m.text",
-                    "body": "❌ Unable to parse the schedule request",
-                },
-            },
-        )
-
-        await bot._on_message(room, event)
-        await drain_coalescing(bot)
-
-        # Verify finance agent did NOT process the message
-        generate_response.assert_not_called()
-
-        # Verify it was caught early by the agent message check
-        debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
-        assert "ignore_unmentioned_agent_event" in debug_calls
-
-    @pytest.mark.asyncio
     async def test_scheduled_agent_event_with_router_requester_reaches_dispatch_policy(self) -> None:
         """A deferred scheduled task authored by an agent may carry Router as requester."""
         agent_user = AgentMatrixUser(
@@ -1258,62 +1150,6 @@ class TestCommandHandling:
         generate_response.assert_not_called()
 
         # Verify it was logged as being ignored
-        debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
-        assert "ignore_unmentioned_agent_event" in debug_calls
-
-    @pytest.mark.asyncio
-    async def test_agents_ignore_any_agent_messages_without_mentions(self) -> None:
-        """Test that agents don't respond to ANY agent messages that don't mention anyone."""
-        # Create a general agent
-        agent_user = AgentMatrixUser(
-            agent_name="general",
-            user_id="@mindroom_general:localhost",
-            display_name="General Agent",
-            password=TEST_PASSWORD,
-            access_token=TEST_ACCESS_TOKEN,
-        )
-
-        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
-        bot = make_test_agent_bot(
-            agent_user=agent_user,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=["!test:server"],
-        )
-        bot.client = AsyncMock()
-        bot.client.user_id = "@mindroom_general:localhost"
-        bot.logger = MagicMock()
-        generate_response = AsyncMock()
-        _sync_turn_policy_runtime(bot)
-        install_generate_response_mock(bot, generate_response)
-
-        # Mock context extraction - no agents mentioned
-        mock_context = _message_context(
-            am_i_mentioned=False,
-            is_thread=True,
-            thread_id="$thread123",
-        )
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=mock_context,
-        )
-
-        # Create a room and event with message from router agent without mentions
-        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
-        event = nio.RoomMessageText.from_dict(
-            {
-                "event_id": "$event123",
-                "sender": "@mindroom_router:localhost",  # From router agent
-                "origin_server_ts": 1234567890,
-                "content": {"msgtype": "m.text", "body": "❌ Unable to parse the schedule request"},
-            },
-        )
-
-        await bot._on_message(room, event)
-        await drain_coalescing(bot)
-
-        # Verify the agent didn't try to process the message
-        generate_response.assert_not_called()
-        # Check debug calls for the new log message
         debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
         assert "ignore_unmentioned_agent_event" in debug_calls
 

@@ -5593,7 +5593,6 @@ depends_on = [
     "mindroom.commands.reply_mode_commands",
     "mindroom.commands.auto_approve_commands",
     "mindroom.entity_resolution",
-    "mindroom.turn_record",
     "mindroom.matrix.event_info",
     "mindroom.scheduling.tasks",
     "mindroom.tool_system.agent_tools",

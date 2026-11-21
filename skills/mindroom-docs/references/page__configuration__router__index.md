@@ -47,11 +47,11 @@ Then:
 2. If the thread requires explicit targeting, nothing is routed; eligible individual agents already in the thread may still use opt-in [adaptive participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation).
 3. If exactly one eligible responder remains, it answers directly without an AI routing call.
 4. If several remain, routing reads the message and up to three previous thread messages (each cut to 100 characters) and picks the best match from the candidates' roles, tools, and instructions.
-5. The chosen agent or team is told with a hidden event and answers the message in the thread.
+5. The chosen agent or team answers the message: the account doing the routing answers itself when it is chosen, and tells any other choice with a hidden event.
    No routing message appears in the room.
 
 One MindRoom account per room does the routing: the one with the highest power level there, the lowest Matrix ID breaking a tie.
-In a room from `config.yaml` that is the MindRoom account; elsewhere it is an agent or team, which answers itself when it is the best match.
+In the rooms MindRoom creates from `config.yaml` that is usually the MindRoom owner account, and elsewhere usually an agent or team, but the same rule decides in every room; an agent or team that routes answers itself when it is the best match.
 If the routing call fails, for example because of a model error or an invalid choice, the candidate with the lowest Matrix ID answers.
 If no candidate fits the message, nobody answers; mention an agent or team to get an answer.
 Mentioning an agent or team with `@name` always bypasses routing, but the entity still answers only if it is in the room, listed for that room in its `rooms` when the room is configured, and allowed by its `access`.

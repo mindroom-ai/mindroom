@@ -393,9 +393,7 @@ class CallTranscriptService:
         while the room cannot be read, the person drops out a minute after their app last checked in.
         """
         call = await self._fresh(call_id)
-        member = await self._room.is_member(call.room_id, user_id)
-        if member is None:
-            raise CallRefusedError(code="unavailable", message=_UNREADABLE)
+        member = await _is_room_member(self._room, call.room_id, user_id)
         await self._leave(call, user_id)
         if not member:
             raise CallRefusedError(code="not-found", message=_NO_SUCH_CALL)

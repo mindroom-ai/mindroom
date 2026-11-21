@@ -145,6 +145,7 @@ class TestResponseTrackingRegression:
         # Process same command again (simulating restart)
         handled_turn = await bot._turn_store.get_turn_record(command_event.event_id)
         assert handled_turn is not None
+        assert handled_turn.response_event_id == "$response_123"
         await bot._command_turn_executor.execute(
             mock_room,
             command_event,
@@ -228,6 +229,7 @@ class TestResponseTrackingRegression:
 
         send_response.assert_awaited_once()
         assert "❌ Unknown command" in send_response.await_args.kwargs["response_text"]
+        assert send_response.await_args.kwargs["skip_mentions"] is True
 
         # IMPORTANT: Check if event was marked as responded
         assert await bot._turn_store.is_handled(test_room_id, unknown_command_event.event_id), (
