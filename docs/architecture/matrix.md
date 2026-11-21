@@ -42,7 +42,9 @@ The steward publishes it on startup and after every config reload, and updates i
 Matrix accepts a state key that starts with `@` only from that user, but any member allowed to send the type can send it under another state key.
 So a client reads only an event keyed by its sender's user ID.
 The steward is often the MindRoom owner account (`@mindroom_router:<server>`, or `@mindroom_router_<namespace>:<server>` for a namespaced installation), but can be any MindRoom account, so the owner's localpart does not identify every valid publisher.
-A client must trust the publisher itself before it uses a list; MindRoom Chat does not read the list today and recognizes agents by their `mindroom_` localpart and homeserver.
+A client must trust the publisher itself before it uses a list.
+MindRoom Chat does not read the list today.
+It recognizes agent IDs by their `mindroom_` prefix; trust-sensitive checks also require the viewer's homeserver.
 Each MindRoom installation in a room has its own steward, which lists only its own accounts.
 The steward can send the event only where the room's power levels allow it, which the rooms MindRoom creates do; managed rooms regain that power level at every startup, personal rooms regain it at startup while their owner is still in an onboarding room, other rooms keep the power levels they were created with, and a client that creates rooms should give the type power level 0 too.
 
