@@ -133,7 +133,7 @@ A handled `!model` set or reset consumes the opening pick for the entire thread,
 While the thread's bounded record is retained, later handling does not reapply the pick, even after a reset or expanded access.
 Known limit: more than 1,000 thread model records within the seven-day window can evict a consumed marker and let a still-eligible pick apply again on replay.
 A `!model reset` handled before a fork's first turn does not stop that turn from inheriting the parent's models.
-If another sender's reply reaches the agent while a voice opener is still being transcribed, that reply uses the inherited model; the opener and later replies use the pick once it is applied.
+The pick applies when the opening turn is prepared, not when the opening event arrives: a reply in the new thread that an agent handles before that (for example while a voice opener is still being transcribed, or while all root-preparation slots are busy) uses the inherited model; the opener and later replies use the pick once it is applied.
 If the runtime cannot save an opening pick, it logs a warning and the reply uses the inherited model without a separate acknowledgement.
 Invalid or unauthorized picks are ignored without an acknowledgement, and the reply uses the inherited model.
 The key has the same visibility as the message it travels in.
