@@ -321,6 +321,15 @@ def test_openai_presets_use_current_models() -> None:
         "luna": model_defaults.ModelPreset("codex", "gpt-6-luna", 258_000, reasoning_effort="low", display_name="Luna"),
     }
     assert model_defaults.CONFIG_INIT_HELPER_MODELS["codex"] == "luna"
+    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["claude_code"] == model_defaults.ModelPreset(
+        "claude_code",
+        "claude-sonnet-5-5",
+        200_000,
+    )
+    assert dict(model_defaults.CONFIG_INIT_ADDITIONAL_MODELS["claude_code"]) == {
+        "haiku": model_defaults.ModelPreset("claude_code", "claude-haiku-5-5", 200_000),
+    }
+    assert model_defaults.CONFIG_INIT_HELPER_MODELS["claude_code"] == "haiku"
     assert dict(model_defaults.CONFIG_INIT_ADDITIONAL_MODELS["codex"])["luna"].to_config_dict() == {
         "provider": "codex",
         "id": "gpt-6-luna",

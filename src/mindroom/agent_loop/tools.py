@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.llm.events import ToolProgress
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import MEDIA_FOLLOW_UP_TEXT, Message
 from mindroom.llm.runs import FailingTool, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
@@ -40,7 +40,6 @@ _FAILING_TOOL_ERROR_TEXT = (
     "Tool {name} failed in {failures} requests of this turn with no success in between, so this call was not executed. "
     "Its last error: {error}\nDon't call {name} again in this turn. Tell the user what failed instead."
 )
-MEDIA_FOLLOW_UP_TEXT = "The tool call above generated the attached media."
 # A success without text is stored with this, since providers show an empty result in their own way: Anthropic adds a
 # note, OpenRouter's Claude route shows ``...``, and most others show nothing. Storing it, rather than adding it when a
 # request is built, leaves earlier results, and the thinking and caches built on them, as they were sent.
@@ -458,14 +457,8 @@ def media_follow_up(results: Sequence[Message]) -> Message | None:
     )
 
 
-def is_media_follow_up(message: Message) -> bool:
-    """Return whether a stored message is a media follow-up the loop wrote, which no person said."""
-    return message.role == "user" and message.content == MEDIA_FOLLOW_UP_TEXT
-
-
 __all__ = [
     "MAX_CONSECUTIVE_TOOL_FAILURES",
-    "MEDIA_FOLLOW_UP_TEXT",
     "NO_OUTPUT_TEXT",
     "PlannedCall",
     "PreparedTools",
@@ -478,7 +471,6 @@ __all__ = [
     "failed_answer",
     "failing_tool_stop_text",
     "ignored_refusal",
-    "is_media_follow_up",
     "media_follow_up",
     "offered_toolkits",
     "plan_tool_batch",

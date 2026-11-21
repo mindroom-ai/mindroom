@@ -97,7 +97,7 @@ uvx mindroom run
 ```
 
 The generated `.env` lists the credentials the chosen preset needs; set them before running.
-See [`config init`](cli.md#config-init) for every option and the extra steps for the `codex`, `kimi`, `ollama`, and `llama.cpp` presets, and [Model Environment Variables](configuration/models.md#environment-variables) for each provider's credentials.
+See [`config init`](cli.md#config-init) for every option and the extra steps for the `codex`, `kimi`, `claude_code`, `ollama`, and `llama.cpp` presets, and [Model Environment Variables](configuration/models.md#environment-variables) for each provider's credentials.
 
 <a id="alternative-full-stack-docker-compose"></a>
 

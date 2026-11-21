@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from anthropic.types.beta import BetaMessage, BetaUsage
 
 from mindroom.llm.media import canonical_mime_type, file_text, image_format, is_text_mime_type
-from mindroom.llm.messages import Message, ToolResultView, system_texts, tool_result_view
+from mindroom.llm.messages import Message, ToolResultView, stored_tool_call, system_texts, tool_result_view
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import (
@@ -235,7 +235,7 @@ def _answers_tool_calls(turn: dict[str, Any]) -> bool:
 def _user_blocks(message: Message, provider: str) -> list[Any]:
     content = message.content or ""
     blocks: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else _without_citations(content)
-    media = [_image_block(image, provider) for image in message.images or ()]
+    media = [image_block(image, provider) for image in message.images or ()]
     media += [_document_block(file, provider) for file in message.files or ()]
     # Audio and video are not Claude inputs; the media fallback replaces them with a note before the request.
     return blocks + [block for block in media if block is not None]
@@ -273,7 +273,8 @@ def _image_media_type(image: Image, data: bytes | None) -> str | None:
     return None if detected is None else _IMAGE_MEDIA_TYPES.get(detected)
 
 
-def _image_block(image: Image, provider: str) -> dict[str, Any] | None:
+def image_block(image: Image, provider: str) -> dict[str, Any] | None:
+    """Return the base64 ``image`` block of ``image``, or None for one that is empty or of an unknown type."""
     data = image.content
     if data is None and image.filepath is not None:
         data = read_media_bytes(image.filepath, media_id=image.id, kind="image", provider=provider)
@@ -528,11 +529,7 @@ def tool_call_from_block(block: ToolUseBlock | BetaToolUseBlock) -> dict[str, An
 
 def _tool_call(block: dict[str, Any]) -> dict[str, Any]:
     """Return a ``tool_use`` block as the stored tool-call dict; a cut-off block keeps the arguments that parsed."""
-    return {
-        "id": block["id"],
-        "type": "function",
-        "function": {"name": block["name"], "arguments": json.dumps(block["input"])},
-    }
+    return stored_tool_call(block["id"], block["name"], json.dumps(block["input"]))
 
 
 def assistant_message_from_response(
@@ -574,6 +571,7 @@ __all__ = [
     "claude_body_parts",
     "format_claude_messages",
     "format_claude_tools",
+    "image_block",
     "parse_claude_usage",
     "stop_reason_of",
     "supports_forced_tool_use",

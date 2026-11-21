@@ -29,6 +29,8 @@ from claude_agent_sdk import (
 )
 
 import mindroom.tools  # noqa: F401
+from mindroom import claude_sdk_process
+from mindroom import claude_sdk_process as process_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
@@ -499,7 +501,7 @@ def fake_manager(monkeypatch: pytest.MonkeyPatch) -> claude_agent_module._Claude
     _FakeClaudeSDKClient.instances = []
     manager = claude_agent_module._ClaudeSessionManager()
     monkeypatch.setattr(claude_agent_module.ClaudeAgentTools, "_session_manager", manager)
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _FakeClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _FakeClaudeSDKClient)
     return manager
 
 
@@ -709,7 +711,7 @@ async def test_claude_send_switches_models_after_claude_code_sends_many_messages
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Messages Claude Code sends while no call reads never stall the session, so a later call can switch models."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _BufferedFakeClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _BufferedFakeClaudeSDKClient)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
     with _as_agent("general", model_id="claude-opus-5-5"):
@@ -738,7 +740,7 @@ async def test_claude_send_replaces_a_session_whose_control_request_failed(
             message = "Control request timeout: set_model"
             raise Exception(message)  # noqa: TRY002 - the SDK raises a plain Exception
 
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _UnansweredControlClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _UnansweredControlClaudeSDKClient)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
     with _as_agent("general", model_id="claude-opus-5-5"):
@@ -808,7 +810,7 @@ def blocking_prompt_client(
     """Install the fake whose ``hold`` prompt blocks until released, with fresh events."""
     monkeypatch.setattr(_BlockingPromptFakeClaudeSDKClient, "blocked_query_started", asyncio.Event())
     monkeypatch.setattr(_BlockingPromptFakeClaudeSDKClient, "release_blocked_query", asyncio.Event())
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _BlockingPromptFakeClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _BlockingPromptFakeClaudeSDKClient)
 
 
 @pytest.mark.asyncio
@@ -890,7 +892,7 @@ async def test_claude_send_same_session_is_serialized_by_lock(
     _SlowFakeClaudeSDKClient.instances = []
     _SlowFakeClaudeSDKClient.active_queries = 0
     _SlowFakeClaudeSDKClient.max_concurrent_queries = 0
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _SlowFakeClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _SlowFakeClaudeSDKClient)
 
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
@@ -917,7 +919,7 @@ async def test_claude_interrupt_does_not_block_while_send_is_running(
     """Interrupt should be able to cancel an in-flight query for the same session."""
     _InterruptibleFakeClaudeSDKClient.instances = []
     _InterruptibleFakeClaudeSDKClient.created_event = asyncio.Event()
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _InterruptibleFakeClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _InterruptibleFakeClaudeSDKClient)
 
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
@@ -961,7 +963,7 @@ async def test_claude_send_refreshes_last_used_after_long_query(
     _TimeJumpFakeClaudeSDKClient.jump_seconds = 0.0
     _TimeJumpFakeClaudeSDKClient.clock = clock
     monkeypatch.setattr(claude_agent_module, "monotonic", _fake_monotonic)
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _TimeJumpFakeClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _TimeJumpFakeClaudeSDKClient)
     monkeypatch.setattr(claude_agent_module, "_SWEEP_INTERVAL_SECONDS", 0)
 
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", session_ttl_minutes=1)
@@ -1009,7 +1011,7 @@ async def test_session_opened_during_a_turn_does_not_inherit_the_turn_context(
 ) -> None:
     """A session outlives its turn, whose contextvars hold the turn's Agent and tools."""
     _ReaderTaskFakeClaudeSDKClient.instances = []
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ReaderTaskFakeClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ReaderTaskFakeClaudeSDKClient)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
@@ -1042,7 +1044,7 @@ async def test_cancelled_session_start_waits_for_the_sdk_cleanup(
     """A cancelled start-up returns only after the SDK disconnects, even when cancelled again meanwhile."""
     _SlowCleanupFakeClaudeSDKClient.instances = []
     _SlowCleanupFakeClaudeSDKClient.connect_started = asyncio.Event()
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _SlowCleanupFakeClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _SlowCleanupFakeClaudeSDKClient)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     start = asyncio.create_task(
         _in_call(ToolCallContext(run_id="run-1", session_id="session-1", user_id=None), tools.claude_start_session()),
@@ -1065,7 +1067,7 @@ def cancelled_start_client(monkeypatch: pytest.MonkeyPatch) -> type[_CancelledSt
     monkeypatch.setattr(_CancelledStartFakeClaudeSDKClient, "instances", [])
     monkeypatch.setattr(_CancelledStartFakeClaudeSDKClient, "on_connected", [])
     monkeypatch.setattr(_CancelledStartFakeClaudeSDKClient, "stuck_cleanup", None)
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _CancelledStartFakeClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _CancelledStartFakeClaudeSDKClient)
     return _CancelledStartFakeClaudeSDKClient
 
 
@@ -1092,7 +1094,7 @@ async def test_stuck_cleanup_of_a_cancelled_start_does_not_block_other_sessions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A disconnect that never finishes holds a cancelled start, and the manager lock, only until the deadline."""
-    monkeypatch.setattr(claude_agent_module, "_START_CLEANUP_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(claude_sdk_process, "_START_CLEANUP_TIMEOUT_SECONDS", 0.05)
     stuck_cleanup = asyncio.Event()
     cancelled_start_client.stuck_cleanup = stuck_cleanup
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
@@ -1132,7 +1134,7 @@ async def test_idle_session_closes_on_its_own_after_its_ttl(
         # The sweep ends once it closed the last session, and the next session starts another.
         assert fake_manager._sweep is not None
         await fake_manager._sweep
-        assert not cast("_FakeClaudeSDKClient", session.client).connected
+        assert not cast("_FakeClaudeSDKClient", session.process.client).connected
         assert fake_manager._sessions == {}
     assert len(_FakeClaudeSDKClient.instances) == 2
 
@@ -1166,7 +1168,7 @@ async def test_gateway_probe_posts_to_v1_messages_and_reuses_sdk_session(
 ) -> None:
     """Gateway-mode tool calls should hit /v1/messages with expected auth/version headers."""
     _GatewayProbeClaudeSDKClient.instances = []
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _GatewayProbeClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _GatewayProbeClaudeSDKClient)
 
     tools = claude_agent_module.ClaudeAgentTools(
         api_key="sk-test",
@@ -1201,7 +1203,7 @@ async def test_gateway_probe_can_include_anthropic_beta_header_when_not_disabled
 ) -> None:
     """When experimental betas are enabled, the Anthropic beta header should be present."""
     _GatewayProbeClaudeSDKClient.instances = []
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _GatewayProbeClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _GatewayProbeClaudeSDKClient)
 
     tools = claude_agent_module.ClaudeAgentTools(
         api_key="sk-test",
@@ -1226,7 +1228,7 @@ async def test_gateway_probe_error_is_propagated_and_session_is_closed(
 ) -> None:
     """Gateway failures should surface as Claude session errors and tear down the bad session."""
     _GatewayProbeClaudeSDKClient.instances = []
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _GatewayProbeClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _GatewayProbeClaudeSDKClient)
 
     tools = claude_agent_module.ClaudeAgentTools(
         api_key="sk-test",
@@ -1251,7 +1253,7 @@ async def test_claude_send_error_does_not_deadlock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Errors while querying should close the session without hanging on locks."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _FailingClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _FailingClaudeSDKClient)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
@@ -1291,7 +1293,7 @@ async def test_claude_cli_exit_while_reading_response_closes_session(
             if exit_error is not None:
                 raise exit_error
 
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ExitingClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ExitingClaudeSDKClient)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
@@ -1308,7 +1310,7 @@ async def test_claude_send_error_includes_runtime_session_hints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Error output should include runtime session hints for LLM self-correction."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _FailingClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _FailingClaudeSDKClient)
     tools = claude_agent_module.ClaudeAgentTools(
         api_key="sk-test",
         continue_conversation=True,
@@ -1350,7 +1352,7 @@ async def test_claude_start_session_error_includes_context(
             message = "connect failed"
             raise RuntimeError(message)
 
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _FailingConnectClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _FailingConnectClaudeSDKClient)
     tools = claude_agent_module.ClaudeAgentTools(
         api_key="sk-test",
         continue_conversation=True,
@@ -1386,7 +1388,7 @@ async def test_a_call_waiting_on_a_session_whose_message_stream_broke_still_retu
             line = "{not json"
             raise CLIJSONDecodeError(line, ValueError(line))
 
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _BrokenStreamClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _BrokenStreamClaudeSDKClient)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
@@ -1424,7 +1426,7 @@ async def test_a_failed_call_closes_only_the_session_it_used(
             line = "{not json"
             raise CLIJSONDecodeError(line, ValueError(line))
 
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _BrokenFirstStreamClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _BrokenFirstStreamClaudeSDKClient)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
@@ -1440,7 +1442,7 @@ async def test_a_failed_call_closes_only_the_session_it_used(
     _first, newer = instances
     assert all("Claude session error: Failed to decode JSON" in reply for reply in failed)
     assert "Echo: three" in three
-    assert fake_manager._sessions["mindroom:session-1"].client is newer
+    assert fake_manager._sessions["mindroom:session-1"].process.client is newer
     assert newer.connected
 
 
@@ -1455,10 +1457,10 @@ async def _until(condition: Callable[[], bool]) -> None:
 async def _stop_when_waiting(call: Coroutine[Any, Any, str]) -> None:
     """Run ``call`` until it sent its prompt and read all Claude Code sent, then stop it as a stopped reply does."""
     [session] = claude_agent_module.ClaudeAgentTools._session_manager._sessions.values()
-    client = cast("_FakeClaudeSDKClient", session.client)
+    client = cast("_FakeClaudeSDKClient", session.process.client)
     prompts = len(client.queries) + 1
     stopped = asyncio.create_task(call)
-    await _until(lambda: len(client.queries) == prompts and client.stream.empty() and session.messages.empty())
+    await _until(lambda: len(client.queries) == prompts and client.stream.empty() and session.process.messages.empty())
     stopped.cancel()
     with pytest.raises(asyncio.CancelledError):
         await stopped
@@ -1538,7 +1540,7 @@ async def test_claude_turn_usage_counts_toward_the_conversation_and_requester(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Each response of a turn's main conversation counts once, toward the requester who sent the prompt."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     turn = [
         _ECHO,
         _claude_response("claude-sonnet-5-5", "msg-1", 1000, cache_reads=5000, cache_writes=300),
@@ -1563,7 +1565,7 @@ async def test_each_claude_turn_counts_only_its_own_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Claude Code's running totals cover the whole session, so each turn records only its own usage."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     turns = [
         [_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000), _claude_result(200)],
         [_ECHO, _claude_response("claude-sonnet-5-5", "msg-2", 500), _claude_result(60)],
@@ -1607,7 +1609,7 @@ async def test_claude_send_answers_its_own_prompt_after_claude_code_starts_a_tur
     second_read: list[Message],
 ) -> None:
     """A turn Claude Code starts on its own stays in the next reply, which ends with the turn that used its prompt."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     first_read = [
         _ECHO,
         _claude_response("claude-sonnet-5-5", "msg-1", 1000, text="Started the tests."),
@@ -1643,7 +1645,7 @@ async def test_claude_send_returns_the_result_of_a_prompt_that_runs_no_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A prompt that runs no turn gets a result but no echo, and its result follows what Claude reported on its own."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [[_BACKGROUND_NOTE, _self_started_result(30), _NO_TURN]])
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
@@ -1677,7 +1679,7 @@ async def test_claude_send_returns_why_a_hook_blocked_its_prompt(
     blocked_reply: str,
 ) -> None:
     """A prompt a hook blocks gets no echo; the block reason answers it, and the next prompt gets its own reply."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     next_read = [_ECHO, _claude_response("claude-sonnet-5-5", "msg-3", 500, text="Next."), _claude_result(60)]
     monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [blocked_read, next_read])
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
@@ -1721,7 +1723,7 @@ async def test_claude_send_reads_claude_code_messages_that_leave_fields_out(
     reply: str,
 ) -> None:
     """A drop notice without a reason ends the read without text, and an origin without a kind counts as none."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [read])
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
@@ -1771,7 +1773,7 @@ async def test_claude_send_after_a_stopped_call_returns(
     second_reply: str,
 ) -> None:
     """A call stopped before Claude answered never leaves the next call waiting."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
@@ -1790,7 +1792,7 @@ async def test_claude_turns_read_by_a_stopped_call_still_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A call stopped while it waits for its own answer still counts the turns it already read."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     turns = [
         [_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000), _claude_result(200)],
         [_BACKGROUND_NOTE, _self_started_result(30)],
@@ -1839,16 +1841,16 @@ async def test_unread_turns_count_when_their_session_closes(
     stopped: bool,
 ) -> None:
     """Complete turns no call read, such as a stopped call's answer, count toward its requester at session close."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     monkeypatch.setattr(claude_agent_module, "_SWEEP_INTERVAL_SECONDS", 0)
     turns = [[_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000), _claude_result(200)], [_ECHO]]
     monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
 
     async def answer_then_close() -> None:
         [session] = fake_manager._sessions.values()
-        client = cast("_ScriptedClaudeSDKClient", session.client)
+        client = cast("_ScriptedClaudeSDKClient", session.process.client)
         closing = asyncio.create_task(close(fake_manager, session.key))
-        await _until(session.close_requested.is_set)
+        await _until(session.process.close_requested.is_set)
         # Still in the SDK's buffer as the session stops: the stopped call's answer, a turn Claude Code ran on its
         # own, and the start of another.
         for message in [
@@ -1945,7 +1947,7 @@ async def test_shutdown_waits_for_a_close_the_idle_sweep_started(
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
     await _in_call(run_context, tools.claude_send("hello"))
     [session] = fake_manager._sessions.values()
-    client = cast("_FakeClaudeSDKClient", session.client)
+    client = cast("_FakeClaudeSDKClient", session.process.client)
     release = asyncio.Event()
     disconnect = client.disconnect
 
@@ -1956,7 +1958,7 @@ async def test_shutdown_waits_for_a_close_the_idle_sweep_started(
     monkeypatch.setattr(client, "disconnect", disconnect_slowly)
     try:
         session.last_used_at -= session.ttl_seconds + 1
-        await _until(session.close_requested.is_set)
+        await _until(session.process.close_requested.is_set)
 
         shutdown = asyncio.create_task(run_process_shutdown_closers())
         done, _pending = await asyncio.wait({shutdown}, timeout=0.2)
@@ -1975,7 +1977,7 @@ async def test_claude_turn_that_switches_models_counts_each_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A turn can continue on another model; output, reported only per turn, goes to the model that finished it."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     turn = [
         _ECHO,
         _claude_response("claude-opus-5-5", "msg-1", 1000, cache_reads=4000),
@@ -1999,7 +2001,7 @@ async def test_claude_turn_counts_responses_that_sent_no_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An empty response that Claude Code retries sends no message, but the turn's result still counts it."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     turn = [
         _ECHO,
         _claude_response("claude-sonnet-5-5", "msg-1", 1000, cache_reads=4000),
@@ -2019,7 +2021,7 @@ async def test_claude_turn_without_messages_counts_toward_the_session_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A turn whose responses all sent no message is counted under the model the session was started with."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     monkeypatch.setattr(
         _ScriptedClaudeSDKClient,
         "turns",
@@ -2044,7 +2046,7 @@ async def test_claude_turn_that_reported_no_usage_records_none(
         recorded.append(args)
 
     monkeypatch.setattr(claude_agent_module, "record_helper_usage", record)
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [[_ECHO, _claude_result(0)]])
 
     await _send_metered_turns(tmp_path, ["@user:localhost"], model="claude-sonnet-5-5")
@@ -2059,7 +2061,7 @@ async def test_claude_turn_usage_counts_toward_api_requester(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An OpenAI-compatible request's Claude Code turn counts toward the API requester."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     turns = [[_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000), _claude_result(200)]]
     monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
 
@@ -2081,7 +2083,7 @@ async def test_claude_reply_survives_a_failed_usage_write(
         raise RuntimeError(msg)
 
     monkeypatch.setattr(claude_agent_module, "record_helper_usage", fail_to_record)
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     turns = [[_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000), _claude_result(200)]]
     monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
 
@@ -2098,7 +2100,7 @@ async def test_claude_turn_ending_in_an_api_error_keeps_its_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Claude Code's placeholder error message names no real model, so the turn keeps the model it ran on."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(process_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     turn = [
         _ECHO,
         _claude_response("claude-sonnet-5-5", "msg-1", 1000),

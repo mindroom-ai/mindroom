@@ -32,7 +32,8 @@ from mindroom.session_storage.schema import TableNames
 from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.agent_tool_helpers import tool_policy
 from tests.fakes.scripted_model import ScriptedModel, calls, tool_call
-from tests.providers.test_provider_pipeline import _drain, _ScriptedProvider, _transient, _turn
+from tests.providers.bare_adapter import drain
+from tests.providers.test_provider_pipeline import _ScriptedProvider, _transient, _turn
 from tests.session_storage.agno_layout import recorded_owner
 from tests.test_decrypt_failure import _megolm_event, _mock_client, _mock_room
 from tests.test_decrypt_failure import _runtime_paths as _decrypt_runtime_paths
@@ -257,7 +258,7 @@ async def test_provider_request_retried_keeps_its_name_and_fields_for_either_rea
     provider = WrappedProvider(inner, partial(retry.retrying_stream, idle_timeout_seconds=0.05))
 
     with capture_logs() as logs:
-        await _drain(provider, ModelRequest(messages=[]))
+        await drain(provider, ModelRequest(messages=[]))
 
     entry = _assert_logged(logs, "provider_request_retried")
     assert (entry["reason"], entry["status_code"]) == (reason, status_code)

@@ -13,6 +13,7 @@ import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from mindroom.llm.messages import stored_tool_call
 from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCallReady
 from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
@@ -93,7 +94,7 @@ def _plan_response(settings: SyntheticSettings, user_history: Sequence[str], *, 
 def _shell_call(tool_call_id: str) -> dict[str, Any]:
     """Return the stored-shape tool call that runs ``echo hi`` through the shell tool."""
     arguments = json.dumps({"args": ["echo", "hi"]}, separators=(",", ":"))
-    return {"id": tool_call_id, "type": "function", "function": {"name": SHELL_TOOL, "arguments": arguments}}
+    return stored_tool_call(tool_call_id, SHELL_TOOL, arguments)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -4482,7 +4482,7 @@ requires-dist = [
     { name = "cartesia", marker = "extra == 'cartesia'" },
     { name = "certifi", specifier = ">=2026.4.22" },
     { name = "chromadb", marker = "extra == 'chromadb'", specifier = ">=1.5.8" },
-    { name = "claude-agent-sdk", marker = "extra == 'claude-agent'", specifier = ">=0.2.140" },
+    { name = "claude-agent-sdk", marker = "extra == 'claude-agent'", specifier = ">=0.2.181" },
     { name = "click", specifier = "<8.5" },
     { name = "composio-agno", marker = "extra == 'composio'" },
     { name = "crawl4ai", marker = "extra == 'crawl4ai'", specifier = ">=0.7.3" },
