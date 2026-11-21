@@ -174,7 +174,7 @@ kind delete cluster --name mindroom
 - `build_load_images.sh` - Build and load platform + MindRoom Docker images
 - `install_platform.sh` - Deploy platform via Helm
 - `smoke_instance.py` - Deploy and verify a MindRoom instance
-- `smoke_tailnet_ssh_worker.py` - Start a Kubernetes worker with and without the tailnet SSH mark and verify its Service and sshd, by applying the runtime chart and running `tailnet_ssh_worker_probe.py` in the chart's primary pod
+- `smoke_tailnet_ssh_worker.py` - Start a Kubernetes worker with and without the tailnet SSH mark and verify its Service and sshd, by applying the runtime chart and running `tailnet_ssh_worker_probe.py` in the chart's primary pod and `tailnet_ssh_gateway_stand_in.py` in the chart's gateway pod
 - `start-fresh.sh` - Complete setup from scratch
 - `setup-local-access.sh` - Configure ingress for local domains
 - `test-access.sh` - Test all access methods

@@ -4,11 +4,14 @@ That pod is the one the runtime chart gives a primary, with this file as its com
 chart's worker manager Role, it mounts the storage claim workers mount, and its environment configures the Kubernetes
 backend. Only such a pod reaches a worker's runner and writes the files the worker's sshd reads.
 The worker is started through the primary's worker manager first without the tailnet SSH mark, then with it, then
-without it again, and the cluster's API server is asked what each start left.
+without it again, and the cluster's API server is asked what each start left. While the worker has the mark, the pod
+that stands in for the gateway (``tailnet_ssh_gateway_stand_in.py``) is told its sshd's address and reads there.
 """
 
 from __future__ import annotations
 
+import os
+import socket
 import tempfile
 import time
 from pathlib import Path
@@ -21,6 +24,7 @@ from kubernetes import client
 from kubernetes import config as kubernetes_config
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
+from mindroom.api.tailnet_ssh_gateway import PORT_ENV
 from mindroom.config.main import load_config
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.runtime_resolution import resolve_agent_execution
@@ -123,6 +127,31 @@ class _Cluster:
         }
 
 
+def _answers(host: str, port: int) -> bool:
+    """Return whether a connection from this pod to ``host`` and ``port`` is accepted."""
+    try:
+        socket.create_connection((host, port), timeout=5).close()
+    except OSError:
+        return False
+    return True
+
+
+def _read_at_the_gateway(endpoint: WorkerSshEndpoint) -> bytes:
+    """Tell the pod that stands in for the gateway where sshd is, and return what it read there first.
+
+    That pod dials this one as the gateway dials the primary: at the Service and the port the chart gives the
+    primary's listener for the gateway, which this pod serves for this one answer.
+    """
+    with socket.create_server(("", int(os.environ[PORT_ENV]))) as listener:
+        listener.settimeout(120)
+        asking, _ = listener.accept()
+        with asking, asking.makefile("rwb") as stream:
+            asking.settimeout(120)
+            stream.write(f"{endpoint.host} {endpoint.port}\n".encode())
+            stream.flush()
+            return stream.read()
+
+
 def _start_sshd(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -148,9 +177,14 @@ def _start_sshd(
         timeout=60,
     )
     # The runner answers once sshd accepts on its port: it started on the host key the primary wrote 0600, as the
-    # pod's uid, under its fsGroup and seccomp profile. The chart lets only the gateway dial that port, so nothing here does.
+    # pod's uid, under its fsGroup and seccomp profile.
     answer = response.json() if response.status_code == 200 else response.text
     _expect("the runner's answer to /ssh/start", (response.status_code, answer), (200, {"port": 2222}))
+    # The chart admits the gateway's pods alone to that port. Whether a cluster holds others off is its network
+    # plugin's doing, so this pod's own attempt is only told: where it is accepted, the gateway's proves no admission.
+    enforced = not _answers(endpoint.host, endpoint.port)
+    print(f"[probe] the cluster keeps the primary from the Service's port 2222: {enforced}", flush=True)
+    _expect("what the Service's port 2222 sends the gateway", _read_at_the_gateway(endpoint), b"SSH-2.0-")
 
 
 def main() -> None:
