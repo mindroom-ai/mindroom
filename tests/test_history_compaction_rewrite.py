@@ -119,7 +119,7 @@ async def _rewrite_single_run(
     fallback_summary_input_budget: int | None = None,
     served_models: list[str] | None = None,
     report: AsyncMock | None = None,
-) -> bool:
+) -> None:
     # Compaction folds runs of a stored conversation.
     seed_session(storage, working_session)
 
@@ -127,7 +127,7 @@ async def _rewrite_single_run(
         if served_models is not None:
             served_models.append(chunk.summarizer.model.name)
 
-    return await _rewrite_working_session_for_compaction(
+    await _rewrite_working_session_for_compaction(
         storage=storage,
         persisted_session=working_session,
         working_session=working_session,
@@ -192,14 +192,13 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
             wraps=build_summary_input,
         ) as build_summary_input_spy,
     ):
-        rewrite_result = await _rewrite_single_run(
+        await _rewrite_single_run(
             storage=storage,
             working_session=working_session,
             selected_run_ids=tuple(f"run-{index}" for index in range(1, 6)),
             summary_input_budget=110_000,
         )
 
-    assert rewrite_result
     assert len(summary_inputs) == 1
     assert build_summary_input_spy.call_count == 1
     assert build_summary_input_spy.call_args.kwargs["max_input_tokens"] == 110_000
@@ -307,9 +306,8 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_shrinkable_error
         "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(side_effect=fake_summary),
     ):
-        rewrite_result = await _rewrite_single_run(storage=storage, working_session=working_session)
+        await _rewrite_single_run(storage=storage, working_session=working_session)
 
-    assert rewrite_result
     assert len(summary_inputs) == 2
     assert quarter_tokens(summary_inputs[1]) < quarter_tokens(summary_inputs[0])
 
@@ -339,14 +337,13 @@ async def test_rewrite_starts_later_chunks_at_a_shrunk_budget(tmp_path: Path) ->
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.compaction.build_summary_input", wraps=build_summary_input) as build_spy,
     ):
-        rewrite_result = await _rewrite_single_run(
+        await _rewrite_single_run(
             storage=storage,
             working_session=working_session,
             selected_run_ids=run_ids,
             summary_input_budget=50_000,
         )
 
-    assert rewrite_result
     budgets = [call.kwargs["max_input_tokens"] for call in build_spy.call_args_list]
     assert budgets[0] == 50_000
     assert len(budgets) > 2
@@ -375,14 +372,13 @@ async def test_rewrite_keeps_a_later_run_whole_when_the_full_budget_holds_it(tmp
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.compaction.build_summary_input", wraps=build_summary_input) as build_spy,
     ):
-        rewrite_result = await _rewrite_single_run(
+        await _rewrite_single_run(
             storage=storage,
             working_session=working_session,
             selected_run_ids=("run-1", "run-2", "run-3"),
             summary_input_budget=50_000,
         )
 
-    assert rewrite_result
     summary_inputs = [call.kwargs["summary_input"] for call in summary_mock.await_args_list]
     assert len(summary_inputs) == 3
     assert "run-3 question" not in summary_inputs[1]
@@ -584,13 +580,12 @@ async def test_checkpoint_before_an_approval_pause_does_not_cover_the_turns_it_w
     summary_mock = AsyncMock(return_value="portable summary")
 
     with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
-        result = await _rewrite_single_run(
+        await _rewrite_single_run(
             storage=storage,
             working_session=loaded,
             selected_run_ids=("earlier", "intervening", "approval"),
         )
 
-    assert result is not None
     summary_input = summary_mock.await_args.kwargs["summary_input"]
     assert "INTERVENING FACT" in summary_input
     assert "CHECKPOINT" not in summary_input
@@ -619,14 +614,13 @@ async def test_summary_built_on_a_checkpoint_folds_its_run(tmp_path: Path) -> No
     summary_mock = AsyncMock(side_effect=["first", "second"])
 
     with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
-        rewrite_result = await _rewrite_single_run(
+        await _rewrite_single_run(
             storage=storage,
             working_session=working_session,
             selected_run_ids=("run-1", "run-2", "run-3", "run-4"),
             summary_input_budget=6_000,
         )
 
-    assert rewrite_result
     first_input = summary_mock.await_args_list[0].kwargs["summary_input"]
     assert "CHECKPOINT" in first_input
     assert "run-1 question" not in first_input
@@ -698,7 +692,7 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
             wraps=build_summary_input,
         ) as build_summary_input_spy,
     ):
-        rewrite_result = await _rewrite_single_run(
+        await _rewrite_single_run(
             storage=storage,
             working_session=working_session,
             selected_run_ids=("run-1", "run-2"),
@@ -710,7 +704,6 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
             report=report,
         )
 
-    assert rewrite_result
     summary_inputs = [call.kwargs["summary_input"] for call in summary_mock.await_args_list]
     summary_models = [call.kwargs["model"] for call in summary_mock.await_args_list]
     assert len(summary_inputs) == 3
@@ -819,9 +812,8 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
             wraps=append_compaction_chunk,
         ) as persist_spy,
     ):
-        rewrite_result = await _rewrite_single_run(storage=storage, working_session=working_session)
+        await _rewrite_single_run(storage=storage, working_session=working_session)
 
-    assert rewrite_result
     summary_inputs = [call.kwargs["summary_input"] for call in summary_mock.await_args_list]
     assert len(summary_inputs) == 2
     assert summary_inputs[1] == summary_inputs[0]
@@ -1851,7 +1843,7 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
         "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(return_value=summary_text),
     ):
-        rewrite_result = await _rewrite_working_session_for_compaction(
+        await _rewrite_working_session_for_compaction(
             storage=storage,
             persisted_session=working_session,
             working_session=working_session,
@@ -1863,7 +1855,7 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
             report=AsyncMock(),
             model=ScriptedModel([]),
         )
-    assert rewrite_result
+
     assert [run.run_id for run in working_session.runs] == ["run-2"]
 
     stored = storage.load_session("session-1")

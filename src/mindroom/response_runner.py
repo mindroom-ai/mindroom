@@ -851,8 +851,8 @@ class ResponseRunner:
                 fold,
                 runtime.wait_for_admission_or_shutdown,
             )
-        except ResponseAdmissionRefusedError:
-            raise  # Replacement must replay the pending source.
+        except (ReplyMembershipPendingError, ResponseAdmissionRefusedError):
+            raise  # The inbox returns this source to the journal worker for replay.
         except Exception:
             self.deps.logger.exception("manual_compaction_preparation_failed", source=event.event_id)
             notice = _COMPACTION_DEFERRED
@@ -874,7 +874,9 @@ class ResponseRunner:
             return None
         row_owner = await store.admitted_membership_owner(source)
         epoch = await store.membership_epoch(room)
-        return epoch if owner == row_owner == (room, epoch) else None
+        if row_owner == (room, epoch) and (owner == row_owner or (not wait and owner is None)):
+            return epoch
+        return None
 
     async def _fold_compaction(self, target: MessageTarget, requester: str, origin: str, source: str) -> str | None:  # noqa: PLR0911
         runtime = self.deps.runtime
@@ -887,16 +889,19 @@ class ResponseRunner:
             config,
             paths,
             runtime.agent_reply_memberships,
+            require_resolved_membership=True,
         ):
             return None
         scope = self.deps.state_writer.history_scope()
         identity = self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester)
-        if not await self._has_queued_forced_compaction(target.session_id, scope, identity):
+        read = self._read_queued_forced_compaction
+        probe = partial(read, session_id=target.session_id, scope=scope, execution_identity=identity)
+        if not await run_blocking_until_complete(probe):
             return None
         if await store.room_history_recovery(room) is not None:
             return _COMPACTION_DEFERRED
         if (epoch := await self._compaction_epoch(room, origin, source, wait=True)) is None:
-            return None
+            return _COMPACTION_DEFERRED
         if thread is not None and is_thread_history_degraded(
             await self.deps.resolver.fetch_thread_history(room, thread),
         ):
@@ -999,18 +1004,13 @@ class ResponseRunner:
         one session row, without its runs, on a thread.
         """
         read = self._read_queued_forced_compaction
-        return await asyncio.to_thread(read, session_id=session_id, scope=scope, execution_identity=execution_identity)
-
-    def _read_queued_forced_compaction(
-        self,
-        *,
-        session_id: str,
-        scope: HistoryScope,
-        execution_identity: ToolExecutionIdentity | None,
-    ) -> bool:
         try:
-            storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
-            return has_queued_force_compaction(storage, session_id)
+            return await asyncio.to_thread(
+                read,
+                session_id=session_id,
+                scope=scope,
+                execution_identity=execution_identity,
+            )
         except Exception as error:
             self.deps.logger.warning(
                 "forced_compaction_placeholder_check_failed",
@@ -1019,6 +1019,16 @@ class ResponseRunner:
                 exception_type=error.__class__.__name__,
             )
             return False
+
+    def _read_queued_forced_compaction(
+        self,
+        *,
+        session_id: str,
+        scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> bool:
+        storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
+        return has_queued_force_compaction(storage, session_id)
 
     async def _prepare_request_after_lock(
         self,

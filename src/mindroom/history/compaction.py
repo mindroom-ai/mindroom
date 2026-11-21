@@ -442,7 +442,7 @@ async def compact_scope_history(
         )
 
     try:
-        stored = await _rewrite_working_session_for_compaction(
+        await _rewrite_working_session_for_compaction(
             storage=storage,
             persisted_session=session,
             working_session=working_session,
@@ -458,7 +458,7 @@ async def compact_scope_history(
         # The reply replays what the conversation holds now; a manual request stays for the next reply.
         await run_session_storage_operation(lambda: storage, lambda opened: opened.reload_log(session))
         raise
-    if not stored:
+    if outcome is None:
         await clear_manual_compaction_request(storage=storage, session=session, state=state)
     return outcome
 
@@ -476,7 +476,7 @@ async def _rewrite_working_session_for_compaction(
     before_persist: Callable[[Sequence[AnyRunRecord]], Awaitable[None]],
     after_persist: Callable[[_SummaryChunk, int, int], Awaitable[None]],
     report: Callable[[_SummaryChunk, int], Coroutine[object, object, None]],
-) -> bool:
+) -> None:
     """Fold ``runs``, oldest first, into one appended summary row per chunk.
 
     Stops when the conversation changes or a chunk's summary, as ``model``'s route sizes it, exceeds ``max_summary_tokens``;
@@ -547,7 +547,6 @@ async def _rewrite_working_session_for_compaction(
         summarizer, remaining = chunk.summarizer, remaining[len(chunk.included_runs) :]
     if remaining and last_chunk is not None:
         await run_coroutine_until_complete(report(last_chunk, len(runs) - len(remaining)))
-    return last_chunk is not None
 
 
 def _summary_budget_error(summary_tokens: int, max_summary_tokens: int | None) -> RuntimeError | None:

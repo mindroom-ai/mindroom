@@ -37,8 +37,8 @@ async def _rewrite_with_summary_model(
     working_session: ConversationSession,
     summary_input_budget: int,
     summary_model: ModelProvider,
-) -> bool:
-    return await _rewrite_working_session_for_compaction(
+) -> None:
+    await _rewrite_working_session_for_compaction(
         storage=storage,
         persisted_session=working_session,
         working_session=working_session,
@@ -88,14 +88,14 @@ async def test_chunk_events_report_the_summary_input_as_the_summary_model_counts
         ),
         capture_logs() as logs,
     ):
-        rewrite_result = await _rewrite_with_summary_model(
+        await _rewrite_with_summary_model(
             storage=storage,
             working_session=working_session,
             summary_input_budget=8_000,
             summary_model=_summary_model(token_counter=fake_token_counter()),
         )
 
-    assert rewrite_result
+    assert working_session.summary is not None
     for event in ("Compaction summary chunk request", "Compaction summary chunk completed"):
         _assert_truthful_sizing_fields(
             _single_event(logs, event),
@@ -148,14 +148,14 @@ async def test_no_run_fit_warning_uses_token_budget_field(tmp_path: Path) -> Non
         patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock()),
         capture_logs() as logs,
     ):
-        rewrite_result = await _rewrite_with_summary_model(
+        await _rewrite_with_summary_model(
             storage=storage,
             working_session=working_session,
             summary_input_budget=1,
             summary_model=_summary_model(),
         )
 
-    assert not rewrite_result
+    assert working_session.summary is None
     event = _single_event(logs, "Compaction skipped because no run fit the single-pass summary budget")
     assert event["summary_input_budget_tokens"] == 1
     assert "summary_input_budget" not in event

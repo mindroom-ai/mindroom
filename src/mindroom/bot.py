@@ -1045,7 +1045,7 @@ class AgentBot:
             ),
         )
         if result is AdmissionResult.DUPLICATE:
-            return bool(await store.pending_among((source,)))
+            return await store.is_pending(source)
         self._journal_dispatcher.wake()
         return True
 

@@ -15,6 +15,7 @@ import nio
 import pytest
 
 from mindroom import response_runner as runner_module
+from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.commands.compact_commands import handle_compact_command
 from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import (
@@ -60,6 +61,7 @@ from mindroom.session_storage import summary_rows
 from mindroom.session_storage.usage_reader import stored_usage
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from tests import response_runner_helpers
+from tests.access_schema_support import refresh_memberships
 from tests.authorization_helpers import isolated_membership_index, make_test_command_handler_context
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -789,27 +791,86 @@ async def test_fold_queues_between_replies_without_claiming_unmentioned_messages
 
 
 @pytest.mark.asyncio
-async def test_compaction_waits_for_paused_approval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("pause_while_waiting", [False, True])
+async def test_compaction_waits_for_paused_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pause_while_waiting: bool,
+) -> None:
     config, paths = _config(tmp_path)
     _, target, room, command = _compact_pair(config, paths)
     coordinator = target._response_runner.lifecycle_coordinator
     await _hydrate(target)
-    coordinator._hold_for_approval(PausedReply(target.journal_principal().principal_id, "approval", ROOM, THREAD))
+    hold = PausedReply(target.journal_principal().principal_id, "approval", ROOM, THREAD)
+    lock = coordinator._response_lifecycle_lock(_target())
+    gate = target.orchestrator.response_admission_gate
+    if pause_while_waiting:
+        await lock.acquire()  # A reply has the lock, but has not paused yet.
+    else:
+        coordinator._hold_for_approval(hold)
     model = summary_model("finished fold", model_id="test-model", provider="openai")
     install_model_providers(monkeypatch, {"default": model})
     await _dispatch_message(target, room, command)
     fold = await _start_fold(target)
     try:
+        if pause_while_waiting:
+            await asyncio.sleep(0)
+            assert not gate.close_if_idle(), "the fold must have already entered admission"
+            coordinator._hold_for_approval(hold)
+            lock.release()
         done, _ = await asyncio.wait({fold}, timeout=0.25)
         assert not done
         assert not model.requests
-        gate = target.orchestrator.response_admission_gate
         assert gate.close_if_idle(), "a parked compaction must not defer a runtime replacement"
         gate.reopen()
     finally:
+        if lock.locked() and pause_while_waiting:
+            lock.release()
         coordinator._release_approval_hold("approval")
         await asyncio.wait_for(fold, 30)
     assert _summaries(config, paths, "code") == ["finished fold"]
+
+
+@pytest.mark.asyncio
+async def test_compaction_retries_when_a_pending_grant_becomes_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, paths = _config(tmp_path)
+    config.agents["code"].access = ResponderAccessConfig(current_room_members=True)
+    _, target, room, command = _compact_pair(config, paths)
+    await _hydrate(target)
+    index = target.orchestrator.agent_reply_memberships
+    target.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[ROOM])
+    target.client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(ALICE, None, None)],
+        room_id=ROOM,
+    )
+    await refresh_memberships(index, config, paths, target.client)
+    coordinator = target._response_runner.lifecycle_coordinator
+    coordinator._hold_for_approval(PausedReply(target.journal_principal().principal_id, "held", ROOM, THREAD))
+    model = summary_model("after refresh", model_id="test-model", provider="openai")
+    install_model_providers(monkeypatch, {"default": model})
+    await _dispatch_message(target, room, command)
+    fold = await _start_fold(target)
+    index.invalidate(config, reason="observer_refreshing")
+    coordinator._release_approval_hold("held")
+    with pytest.raises(ReplyMembershipPendingError):
+        await asyncio.wait_for(fold, 30)
+    store = target.journal_principal()
+    assert await store.is_pending(_ROW_ID)
+    assert not model.requests
+    gate = target.orchestrator.response_admission_gate
+    assert gate.close_if_idle()
+    gate.reopen()
+    dispatcher = target._journal_dispatcher
+    assert await dispatcher.drain_once() == 0  # The failed source is paced, not immediately re-admitted.
+    await refresh_memberships(index, config, paths, target.client)
+    await asyncio.wait_for(dispatcher._worker._room_retries[ROOM].task, 30)
+    await asyncio.wait_for(await _start_fold(target), 30)
+    assert _summaries(config, paths, "code") == ["after refresh"]
+    assert len(model.requests) == 1
+    assert not await store.is_pending(_ROW_ID)
 
 
 @pytest.mark.asyncio
@@ -1142,6 +1203,63 @@ async def test_compact_without_active_window_uses_explicit_summary_model(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_flag_probe_keeps_ownership_until_store_open_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, paths = _config(tmp_path)
+    _, target, room, command = _compact_pair(config, paths)
+    await _dispatch_message(target, room, command)
+    runner = target._response_runner
+    loop, opening, finish = asyncio.get_running_loop(), asyncio.Event(), threading.Event()
+    writer = runner.deps.state_writer
+    create_storage = writer.create_storage
+
+    def blocked_open(*args: Any, **kwargs: Any):  # noqa: ANN202, ANN401
+        loop.call_soon_threadsafe(opening.set)
+        assert finish.wait(30)
+        return create_storage(*args, **kwargs)
+
+    monkeypatch.setattr(writer, "create_storage", blocked_open)
+    fold = await _start_fold(target)
+    try:
+        await asyncio.wait_for(opening.wait(), 30)
+        fold.cancel()
+        done, _ = await asyncio.wait({fold}, timeout=0.05)
+        assert not done
+        assert runner.inbox.has_live_inbox_response(_ROW_ID)
+        assert runner.lifecycle_coordinator._response_lifecycle_lock(_target()).locked()
+        assert not target.orchestrator.response_admission_gate.close_if_idle()
+    finally:
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(fold, 30)
+    assert await target.journal_principal().is_pending(_ROW_ID)
+    assert _queued(config, paths, "code")
+
+
+@pytest.mark.asyncio
+async def test_flag_read_failure_defers_once_in_current_membership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, paths = _config(tmp_path)
+    _, target, room, command = _compact_pair(config, paths)
+    await _dispatch_message(target, room, command)
+    read = MagicMock(side_effect=[OSError("temporary metadata read failure"), True])
+    monkeypatch.setattr(runner_module, "has_queued_force_compaction", read)
+    build = MagicMock()
+    monkeypatch.setattr(runner_module.provider_registry, "build_model_provider", build)
+    await asyncio.wait_for(await _start_fold(target), 30)
+    assert await target._journal_dispatcher.drain_once() == 0
+    read.assert_called_once()
+    build.assert_not_called()
+    _assert_deferred(target)
+    assert _queued(config, paths, "code")
+    assert not await target.journal_principal().is_pending(_ROW_ID)
+
+
+@pytest.mark.asyncio
 async def test_pre_fold_provider_error_settles_without_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config, paths = _config(tmp_path)
     _, target, room, command = _compact_pair(config, paths)
@@ -1300,7 +1418,7 @@ async def test_compaction_defers_when_target_history_is_not_ready(  # noqa: C901
         record_gap.assert_awaited_once()
     assert _queued(config, paths, "code")
     assert _ROW_ID not in await store.unsettled_event_ids()
-    if boundary in {"origin_timeout", "rejoin_during_read"}:
+    if boundary == "rejoin_during_read":
         target.client.room_send.assert_not_awaited()
     else:
         _assert_deferred(target)
