@@ -2548,7 +2548,7 @@ depends_on = [
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.agent_nodes"]
-expose = ["AgentNodeError", "AgentRuntime", "await_child", "launch_child"]
+expose = ["AgentNodeError", "AgentNotReadyError", "AgentRuntime", "await_child", "launch_child"]
 
 [[modules]]
 path = "mindroom.workflow_runs.engine"
