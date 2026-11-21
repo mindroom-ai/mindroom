@@ -41,14 +41,7 @@ if TYPE_CHECKING:
 
     from mindroom.tailnet_ssh.store import Link
 
-pytestmark = [
-    pytest.mark.e2e,
-    pytest.mark.timeout(1200),
-    pytest.mark.skipif(
-        os.environ.get("MINDROOM_TAILNET_SSH_E2E") != "1",
-        reason="needs Docker, Headscale and the built images",
-    ),
-]
+pytestmark = [pytest.mark.e2e, pytest.mark.timeout(1200)]
 
 _GATEWAY_IMAGE = os.environ.get("MINDROOM_TAILNET_SSH_E2E_GATEWAY_IMAGE", "")
 _WORKER_IMAGE = os.environ.get("MINDROOM_TAILNET_SSH_E2E_WORKER_IMAGE", "")
@@ -115,11 +108,51 @@ def _docker_result(*args: str, stdin: str | None = None) -> subprocess.Completed
     return subprocess.run(["docker", *args], input=stdin, capture_output=True, text=True, timeout=300, check=False)
 
 
+_SECRET_ENV = {"TS_AUTHKEY", "TAILNET_SSH_AUTH_KEY", "TAILNET_SSH_GATEWAY_TOKEN"}
+
+
+def _redact(text: str, values: set[str]) -> str:
+    for value in sorted(values - {""}, key=len, reverse=True):
+        text = text.replace(value, "[redacted]")
+    return text
+
+
 def _docker(*args: str, stdin: str | None = None) -> str:
     """Run a Docker command that has to succeed, and return what it printed."""
-    done = _docker_result(*args, stdin=stdin)
-    assert done.returncode == 0, f"docker {shlex.join(args)} exited {done.returncode}: {done.stderr.strip()}"
+    secrets = {arg.partition("=")[2] for arg in args if arg.partition("=")[0] in _SECRET_ENV}
+    command = shlex.join([_redact(arg, secrets) for arg in args])
+    try:
+        done = _docker_result(*args, stdin=stdin)
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"docker {command} timed out", pytrace=False)
+    if done.returncode != 0:
+        pytest.fail(
+            f"docker {command} exited {done.returncode}: {_redact(done.stderr.strip(), secrets)}", pytrace=False
+        )
     return done.stdout.strip()
+
+
+@pytest.mark.parametrize("times_out", [False, True])
+def test_docker_failure_redacts_secret_env(monkeypatch: pytest.MonkeyPatch, *, times_out: bool) -> None:
+    env = {
+        "TS_AUTHKEY": "test-client-key",
+        "TAILNET_SSH_AUTH_KEY": "test-gateway-key",
+        "TAILNET_SSH_GATEWAY_TOKEN": "test-token",
+    }
+    argv = [value for name, secret in env.items() for value in ("--env", f"{name}={secret}")]
+    stderr = "docker could not start: " + " ".join(env.values())
+
+    def fail(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if times_out:
+            raise subprocess.TimeoutExpired(args, 300, stderr=stderr)
+        return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", fail)
+    with pytest.raises(pytest.fail.Exception) as failure:
+        _docker("run", *argv, "image")
+
+    assert all(secret not in str(failure.value) for secret in env.values())
+    assert ("timed out" if times_out else "docker could not start") in str(failure.value)
 
 
 def _logs(container: str) -> str:
@@ -554,6 +587,8 @@ def _set_key(stack: _Stack, node: _Node, key: str) -> None:
 @pytest.fixture(scope="module")
 def tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
     """One Headscale with two distinct client logins and a reusable operator key for the gateway nodes."""
+    if os.environ.get("MINDROOM_TAILNET_SSH_E2E") != "1":
+        pytest.skip("needs Docker, Headscale and the built images")
     prefix = f"mindroom-e2e-{secrets.token_hex(4)}"
     folder = tmp_path_factory.mktemp("tailnet")
     port = _free_port()
@@ -628,8 +663,9 @@ def stack(tailnet: _Tailnet) -> Iterator[_Stack]:
         yield stack
     finally:
         # On failure include gateway and sshd diagnostics, then remove this run's resources.
+        secret_values = {environment[name] for name in environment.keys() & _SECRET_ENV}
         for container in _docker("ps", "--all", "--filter", f"name=^{prefix}", "--format", "{{.Names}}").split():
-            print(f"--- {container}\n{_logs(container)}")
+            print(f"--- {container}\n{_redact(_logs(container), secret_values)}")
         _remove(prefix)
         for node in stack.nodes.values():
             if node.root is not None:
