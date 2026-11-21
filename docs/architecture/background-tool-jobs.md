@@ -22,6 +22,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
   Jobs are found by the reply record whose call started them, not by the reply event their cards name, because a reply may not show an event yet when its call starts a job; the link is saved with the job, because a subagent job outlives a restart and its reply's Stop must still reach it.
 - An ended job reaches the agent as a notice it acknowledges with `collect`, and gets a follow-up only when no reply collected it, so results arrive without a message per job.
   A running reply, or one that will replay its pending messages, keeps its ended jobs to itself: neither another turn nor a follow-up reports them.
+  A reply awaiting replay holds those jobs until it settles.
   If the reply ends without collecting those jobs, they can get a follow-up; a reply paused for approval does not hold them.
   Work that follow-ups start can chain at most 20 follow-ups without a human message, so follow-ups cannot keep each other going.
   A follow-up gives way to its requester's messages already waiting in its conversation, because the reply to one reports the jobs in its start note; answering first kept that message waiting and made the follow-up stop for a message older than itself.
