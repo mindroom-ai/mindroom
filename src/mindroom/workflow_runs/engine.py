@@ -813,6 +813,7 @@ class WorkflowEngine:
             ended = await asyncio.to_thread(partial(self.store.update_run, run.run_id, run.epoch, **changes))
             self._dirty.pop(run.run_id, None)
             self._charged.pop(run.run_id, None)
+            self._launched.pop(current.script_run_id or "", None)
             condition.notify_all()
         return ended
 

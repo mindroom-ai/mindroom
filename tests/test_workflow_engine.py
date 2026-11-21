@@ -337,6 +337,17 @@ async def test_attempt_the_run_no_longer_names_is_refused(stack: WorkflowStack) 
 
 
 @pytest.mark.asyncio
+async def test_engine_remembers_an_attempt_only_until_it_has_ended(stack: WorkflowStack) -> None:
+    """What the engine keeps for each attempt it serves does not grow with the attempts a primary has seen."""
+    first = stack.attempt.run_id
+    await stack.end_attempt(ScriptRunState.FAILED)
+    await stack.resume(stack.run_id)
+
+    assert first not in stack.engine._launched
+    assert list(stack.engine._launched) == [stack.attempt.run_id]
+
+
+@pytest.mark.asyncio
 async def test_request_that_was_let_in_before_its_attempt_was_replaced_gets_no_receipt(stack: WorkflowStack) -> None:
     """A request is let in when it arrives and decided under the run's lock, where the next attempt may be by then.
 
