@@ -355,6 +355,7 @@ class MatrixApiTools(Toolkit):
         content = raw_event_dict.get("content")
         normalized_content = cls._copy_string_keyed_dict(content) or {}
         if has_agent_username(sender):
+            # The homeserver chose this hit from the text it holds; the marker lines go back for what is shown.
             normalized_content = tool_markers_in_text(normalized_content)
         origin_server_ts = raw_event_dict.get("origin_server_ts")
         return {

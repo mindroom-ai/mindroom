@@ -1203,7 +1203,8 @@ async def test_matrix_api_search_event_context_preserves_profile_info() -> None:
 async def test_matrix_api_search_snippets_show_an_agents_tool_calls_and_put_none_in_a_persons_message() -> None:
     """A snippet is made from the reply as its agent built it, which Matrix holds without its tool marker lines.
 
-    A homeserver may answer with a sender that is no ID.
+    The homeserver picks the hits, from the text it holds, so the search goes out as it was asked: a tool's name
+    finds no reply that named the tool in a marker line alone. A homeserver may answer with a sender that is no ID.
     """
     tool = MatrixApiTools()
     ctx = _make_context()
@@ -1233,6 +1234,10 @@ async def test_matrix_api_search_snippets_show_an_agents_tool_calls_and_put_none
     assert (held_hit["body"], held_neighbour["body"]) == ("The needle.", "")
 
     assert await snippets(held_hit, held_neighbour, agent) == ["The needle. 🔧 `shell` [1]", "🔧 `shell` [1]"]
+    criteria = json.loads(ctx.client._send.await_args.args[3])["search_categories"]["room_events"]
+    assert criteria["search_term"] == "needle"
+    assert "shell" in hit["body"]
+    assert "shell" not in held_hit["body"]
     assert await snippets(hit, neighbour, agent) == ["The needle. 🔧 `shell` [1]", "🔧 `shell` [1]"]
     for sender in ("@alice:localhost", [agent], {"id": agent}):
         assert await snippets(held_hit, held_neighbour, sender) == ["The needle.", ""]
