@@ -357,6 +357,7 @@ def test_workers_run_defaults_to_an_hour_and_the_normal_worker_size(monkeypatch)
 @pytest.mark.parametrize(
     "stdout",
     [
+        "Exit code 0",
         "Exit code 3 was expected",
         "Exit code 3\nand more",
         "Stopped after 5s.",

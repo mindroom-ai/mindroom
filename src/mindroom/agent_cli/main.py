@@ -32,7 +32,7 @@ _RESULT_UNREACHABLE_SECONDS = 60
 # How a shell result leads when its command failed (`format_shell_completion`): its exit code, negative for the
 # signal that killed it, then the streams it kept under their labels. A command that succeeds while printing exactly
 # these lines first reads as failed, which the shell result cannot tell apart.
-_FAILED_COMMAND = re.compile(r"Exit code (-?\d+)(?:\n(?=(?:Output|Stderr):\n)|\Z)")
+_FAILED_COMMAND = re.compile(r"Exit code (-?[1-9][0-9]*)(?:\n(?=(?:Output|Stderr):\n)|\Z)")
 # Parsed options the CLI handles itself instead of sending in the operation payload.
 _LOCAL_ARGUMENTS = frozenset(
     {"group", "action", "json", "json_argument", "json_file", "json_stdin", "call_id", "timeout"},
