@@ -29,6 +29,7 @@ from claude_agent_sdk import (
 )
 
 import mindroom.tools  # noqa: F401
+from mindroom import claude_sdk_process
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
@@ -1092,7 +1093,7 @@ async def test_stuck_cleanup_of_a_cancelled_start_does_not_block_other_sessions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A disconnect that never finishes holds a cancelled start, and the manager lock, only until the deadline."""
-    monkeypatch.setattr(claude_agent_module, "_START_CLEANUP_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(claude_sdk_process, "_START_CLEANUP_TIMEOUT_SECONDS", 0.05)
     stuck_cleanup = asyncio.Event()
     cancelled_start_client.stuck_cleanup = stuck_cleanup
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")

@@ -1,0 +1,76 @@
+"""``mindroom doctor`` on the ``claude_code`` route, against a scripted Claude Code process."""
+# ruff: noqa: D103
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from mindroom.cli.doctor import _check_single_provider
+from mindroom.config.main import Config
+from tests.providers.claude_code.support import fake_cli, text_turn
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
+
+    from tests.providers.claude_code.support import FakeCli
+
+
+def _check(cli: FakeCli, *names: str) -> tuple[int, int, int]:
+    model: dict[str, Any] = {
+        "provider": "claude_code",
+        "id": "claude-invented-1",
+        "extra_kwargs": {"cli_path": str(cli.path)},
+    }
+    config = Config.model_validate({"models": dict.fromkeys(names or ("default",), model)})
+    return _check_single_provider("claude_code", config, cli.runtime_paths)
+
+
+def test_doctor_passes_a_signed_in_claude_code_without_sending_it_a_prompt(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli = fake_cli(tmp_path, {"turns": [text_turn("never")]})
+
+    assert _check(cli, "default", "fast") == (1, 0, 0)
+
+    assert "claude_code: Claude Code is signed in to a Claude subscription" in capsys.readouterr().out
+    # Both models run one executable, which is started once, asked nothing, and closed.
+    assert len(cli.events("spawn")) == len(cli.events("exit")) == 1
+    assert cli.events("user") == []
+    assert cli.directories() == []
+
+
+def test_doctor_fails_a_claude_code_that_is_not_signed_in(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cli = fake_cli(tmp_path, {"account": {"tokenSource": "none", "apiProvider": "firstParty"}})
+
+    assert _check(cli) == (0, 1, 0)
+
+    assert "claude auth login" in capsys.readouterr().out.replace("\n", " ")
+
+
+def test_doctor_fails_an_environment_that_replaces_the_claude_sign_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.invented.example")
+    cli = fake_cli(tmp_path, {})
+
+    assert _check(cli) == (0, 1, 0)
+
+    assert "ANTHROPIC_BASE_URL" in capsys.readouterr().out
+    assert cli.events("spawn") == []
+
+
+def test_doctor_only_warns_when_claude_code_could_not_be_started(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli = fake_cli(tmp_path, {})
+    cli.path.write_text("#!/bin/sh\nexit 3\n")
+
+    assert _check(cli) == (0, 0, 1)
+
+    assert "could not check Claude Code" in capsys.readouterr().out

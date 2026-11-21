@@ -35,6 +35,7 @@ from mindroom.llm.request_context import bind_request_headers
 from mindroom.providers import names
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
+from mindroom.providers.claude_code.adapter import ClaudeCodeProvider
 from mindroom.providers.gemini.adapter import GeminiProvider
 from mindroom.providers.identity import model_identity
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -183,6 +184,11 @@ _ROUTES: dict[str, tuple[dict[str, Any], type, str]] = {
     "deepseek": ({"provider": "deepseek", "id": "deepseek-flash"}, ChatAdapter, "DeepSeek"),
     "zai": ({"provider": "zai", "id": "glm-5.3"}, ChatAdapter, "ZAI"),
     "synthetic": ({"provider": "synthetic", "id": "lorem-ipsum"}, SyntheticProvider, "Synthetic"),
+    "claude_code": (
+        {"provider": "claude_code", "id": "claude-sonnet-5-5", "extra_kwargs": {"effort": "low"}},
+        ClaudeCodeProvider,
+        "Claude subscription (Claude Code)",
+    ),
 }
 
 
@@ -287,7 +293,7 @@ def test_config_load_rejects_an_unknown_provider_at_its_model() -> None:
     assert iter_config_validation_messages(info.value) == [
         (
             "models → default → provider",
-            "Unknown provider 'opneai': use one of anthropic, azure, bedrock_claude, cerebras, codex, "
+            "Unknown provider 'opneai': use one of anthropic, azure, bedrock_claude, cerebras, claude_code, codex, "
             "deepseek, google, groq, kimi, llama_cpp, ollama, openai, openrouter, synthetic, vertexai_claude, zai",
         ),
     ]
@@ -320,7 +326,7 @@ def test_every_model_name_config_load_accepts_builds(name: str, runtime_paths: R
 def test_config_accepts_exactly_the_providers_the_registry_builds() -> None:
     claude_routes = frozenset(get_args(ClaudeRouteKind.__value__))
 
-    assert OPENAI_FAMILY_PROVIDERS | claude_routes | {"google", "ollama", "synthetic"} == PROVIDER_ROUTES
+    assert OPENAI_FAMILY_PROVIDERS | claude_routes | {"claude_code", "google", "ollama", "synthetic"} == PROVIDER_ROUTES
 
 
 def test_the_dashboard_provider_fixture_lists_exactly_the_values_config_load_accepts() -> None:

@@ -95,6 +95,7 @@ _ProviderPreset = Literal[
     "anthropic",
     "bedrock_claude",
     "azure",
+    "claude_code",
     "codex",
     "kimi",
     "llama_cpp",
@@ -154,6 +155,15 @@ _PROVIDER_PRESETS: dict[_ProviderPreset, _PresetInfo] = {
             first_run="Run `codex login` in another terminal",
             hosted="Run `codex login` before starting MindRoom (Matrix homeserver is prefilled)",
             self_hosted="Set your Matrix homeserver and run `codex login` before starting MindRoom",
+        ),
+    ),
+    "claude_code": _PresetInfo(
+        "Claude subscription",
+        "Claude sign-in through `claude auth login`",
+        setup=_SetupHints(
+            first_run="Run `claude auth login` in another terminal",
+            hosted="Run `claude auth login` before starting MindRoom (Matrix homeserver is prefilled)",
+            self_hosted="Set your Matrix homeserver and run `claude auth login` before starting MindRoom",
         ),
     ),
     "kimi": _PresetInfo(
@@ -1509,7 +1519,7 @@ def _preset_api_key_env(provider_preset: _ProviderPreset) -> str | None:
     return constants.env_key_for_provider(CONFIG_INIT_MODEL_PRESETS[provider_preset].provider)
 
 
-def _provider_env_template(  # noqa: PLR0911
+def _provider_env_template(  # noqa: C901, PLR0911
     provider_preset: _ProviderPreset,
     provider_api_key: str | None,
 ) -> str:
@@ -1523,6 +1533,13 @@ def _provider_env_template(  # noqa: PLR0911
         # Run `codex login` before starting MindRoom.
         # MindRoom reads ChatGPT OAuth tokens from ~/.codex/auth.json by default.
         # CODEX_HOME=~/.codex
+        """).rstrip()
+
+    if provider_preset == "claude_code":
+        return textwrap.dedent("""\
+        # Claude subscription through Claude Code
+        # Run `claude auth login` as the user that runs MindRoom before starting it.
+        # Claude Code keeps the sign-in; MindRoom needs no key and reads no Claude credential.
         """).rstrip()
 
     if provider_preset == "kimi":

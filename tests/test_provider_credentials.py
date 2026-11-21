@@ -46,6 +46,7 @@ def test_missing_model_api_key_provider_honors_model_credentials(tmp_path: Path)
                 extra_kwargs={"client_params": {"api_key": "sk-client"}},
             ),
             "unkeyed": ModelConfig(provider="openai", id="gpt-6-astra"),
+            "subscription": ModelConfig(provider="claude_code", id="claude-sonnet-5-5"),
         },
     )
 

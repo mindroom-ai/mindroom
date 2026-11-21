@@ -16,6 +16,7 @@ The same model can have different IDs on different providers; check the [OpenAI]
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT login
 - `kimi` or `kimi_code` - Kimi models available through a local Kimi Code CLI login
+- `claude_code` - Claude models on your own Claude subscription, through a local Claude Code sign-in
 - `google` or `gemini` - Google Gemini models
 - `vertexai_claude` - Anthropic Claude models on Google Vertex AI
 - `ollama` - Local models via Ollama
@@ -185,7 +186,7 @@ Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a b
 A model key written as `${NAME}`, such as `api_key: ${OPENROUTER_TEAM_API_KEY}`, is read from that environment variable (or `NAME_FILE`), so two models of one provider can use different accounts while the keys stay out of `config.yaml`; the whole value must be the reference.
 When the variable is unset and that key is the one the model uses, `mindroom config validate` and `mindroom doctor` name it and replies fail with an error naming it; a key saved in the dashboard that overrides it prevents both.
 A model that authenticates another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or Vertex AI for `google` and `gemini`) never receives the shared key.
-`codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
+`codex`, `kimi`, `claude_code`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 
 Shared API keys are read from these variables:
 
@@ -392,6 +393,58 @@ If Kimi Code state lives outside `~/.kimi-code`, set `KIMI_CODE_HOME` in the `.e
 Kimi K3.1 Pro and K3 reason before replying by default, so responses include reasoning tokens even for short answers.
 Setting `extra_kwargs.reasoning_effort` to `none` makes K3.1 Pro requests fail with HTTP 400, while K3 then answers with K2.8 Preview without reasoning.
 The adapter depends on the Kimi Code CLI login format and backend, so a Kimi Code update can require a MindRoom update.
+
+## Claude Models with a Claude Subscription
+
+Use `provider: claude_code` to run Claude on your own Claude Pro, Max, or Team subscription instead of the billed Anthropic API.
+MindRoom runs the Claude Code CLI you signed in to, and that CLI talks to Anthropic.
+The agent keeps MindRoom's tools, memory, history, and approvals; Claude Code's own tools, skills, hooks, memory files, and settings are off.
+Use it for a personal deployment that runs as the subscriber: every reply the agent gives, to anyone who may talk to it, counts toward that one subscription's limits.
+
+Set it up as the user that runs MindRoom:
+
+1. Install [Claude Code](https://code.claude.com/docs/en/setup) 2.1.248 or later.
+2. Run `claude auth login` and sign in with the subscription.
+3. Install the Claude Agent SDK with `pip install 'mindroom[claude_agent]'`; MindRoom installs it on first use unless auto-install is off.
+
+`mindroom config init --provider claude_code` generates this config (see [CLI](../cli.md)):
+
+```yaml
+models:
+  default:
+    provider: claude_code
+    id: claude-sonnet-5-5
+    context_window: 200000
+  haiku:
+    provider: claude_code
+    id: claude-haiku-5-5
+    context_window: 200000
+
+router:
+  model: haiku
+
+defaults:
+  thread_summary_model: haiku
+```
+
+The `id` is any model ID or alias Claude Code takes for `--model`, such as `claude-opus-5-5` or `opus`, within what the plan includes.
+`extra_kwargs` accepts `cli_path`, the `claude` executable to run, and `effort`, one of `low`, `medium`, `high`, `xhigh`, or `max`.
+Without `cli_path`, MindRoom runs the `claude` on its `PATH`, and when there is none, the copy the Claude Agent SDK ships, which uses the same sign-in.
+MindRoom never reads Claude Code's credentials and takes no API key, token, endpoint, or header for this provider.
+The provider supports text and image input; the model is told when an audio, video, or file attachment was left out.
+A [`reasoning`](#reasoning-levels) block is not supported; set `effort`.
+These conversations do not appear in Claude Code's own session history.
+MindRoom runs at most 8 Claude Code processes at a time; while all 8 are answering, another reply is retried and fails if none finishes meanwhile.
+[`mindroom doctor`](../cli.md#doctor) starts Claude Code without sending it a prompt and reports the first three cases below.
+
+A reply fails with a message that names the fix in these cases:
+
+- Claude Code is not installed, or is older than 2.1.248: install it or run `claude update`.
+- Claude Code is not signed in to a Pro, Max, Team, or Enterprise plan: run `claude auth login` as the user that runs MindRoom.
+- MindRoom's process environment sets a variable that Claude Code would use in place of the subscription sign-in, or to send it somewhere else: remove it from that environment.
+  These are `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` (unless it is `https://api.anthropic.com`), `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_UNIX_SOCKET`, `CLAUDE_CODE_API_BASE_URL`, `CLAUDE_CODE_CUSTOM_OAUTH_URL`, the `CLAUDE_CODE_OAUTH_*` token variables, and the `CLAUDE_CODE_USE_*` variables that select Bedrock, Vertex AI, Foundry, or a gateway.
+  The same variables in the `.env` beside `config.yaml` are fine, since only MindRoom's own `anthropic` models read them there.
+- The plan's usage limit is reached: the message gives the time the limit resets.
 
 ## OpenRouter Provider Routing
 

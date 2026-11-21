@@ -744,6 +744,7 @@ update_agent({"role": "Answer in two sentences.", "instructions": None})
 
 `claude_agent` keeps Claude Agent SDK coding sessions alive across turns, so an agent can hand multi-step coding work to Claude Code and keep talking to the same session.
 It runs code in the primary runtime and cannot run in a worker, so enable it only for agents trusted with everything the primary runtime can reach; see [Security Posture](../architecture/security-posture.md#file-access).
+To make Claude on a Claude subscription the agent's own model, with MindRoom's tools instead of Claude Code's, use the [`claude_code` model provider](../configuration/models.md#claude-models-with-a-claude-subscription) instead.
 
 The tool exposes `claude_start_session()`, `claude_send()`, `claude_session_status()`, `claude_interrupt()`, and `claude_end_session()`.
 `claude_send()` creates the session if needed, so `claude_start_session()` is optional.

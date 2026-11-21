@@ -15,6 +15,7 @@ from mindroom.logging_config import get_logger
 from mindroom.providers.anthropic.settings import ACCEPTED_KEYS as CLAUDE_ACCEPTED_KEYS
 from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_ENDPOINT_VARIABLES
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
+from mindroom.providers.claude_code.settings import ClaudeCodeSettings
 from mindroom.providers.credentials import (
     api_key_env_reference,
     model_with_dashboard_key,
@@ -63,6 +64,7 @@ _LOCAL_STREAM_PROVIDERS = frozenset({"ollama", "llama_cpp"})
 _ENDPOINT_VARIABLES: dict[str, str] = {**OPENAI_ENDPOINT_VARIABLES, **CLAUDE_ENDPOINT_VARIABLES}
 # The ``extra_kwargs`` keys of each provider whose one settings type takes every key it declares.
 _SETTINGS_KEYS = {
+    "claude_code": settings_keys(ClaudeCodeSettings),
     "google": settings_keys(GeminiSettings),
     "ollama": settings_keys(OllamaSettings),
     "synthetic": settings_keys(SyntheticSettings),
@@ -116,6 +118,12 @@ def _build_adapter(
         )
 
         return build_ollama_provider(model_config, runtime_paths)
+    if provider == "claude_code":
+        from mindroom.providers.claude_code.adapter import (  # noqa: PLC0415 - loads only for a model that uses it
+            build_provider as build_claude_code_provider,
+        )
+
+        return build_claude_code_provider(model_config, runtime_paths, execution_identity=execution_identity)
     if provider == "synthetic":
         return build_synthetic_provider(model_config, runtime_paths)
     msg = f"Unsupported AI provider: {model_config.provider}"
@@ -137,7 +145,8 @@ def build_model_provider(
 ) -> ModelProvider:
     """Return the provider for the model configured as ``model_name``, with the full request pipeline.
 
-    ``execution_identity`` scopes the prompt-cache and session keys of the Codex and Kimi routes.
+    ``execution_identity`` scopes the prompt-cache and session keys of the Codex and Kimi routes, and the Claude Code
+    processes of the ``claude_code`` route.
     Raises ``ValueError`` for an unknown model name, an unsupported provider, or ``extra_kwargs`` its route
     does not accept.
     """
