@@ -796,18 +796,22 @@ def prepare_child_turn(
     )
 
 
-def original_prompt(child: DelegationChild) -> str:
-    """Return what the child's turn was first sent: its task, or for the agent of a workflow run its call's prompt.
+def workflow_call_prompt(child: DelegationChild) -> str | None:
+    """Return the prompt of the workflow run's call that *child* is the agent of, None once nothing waits for it.
 
     The task of such a child is only the label of its call. The run keeps the prompt, and the run's engine, which
     the orchestrator of the current tool context holds, is asked for it.
     """
     context = get_tool_runtime_context()
     if child.workflow_run_id is None or context is None or context.orchestrator is None:
-        return child.task
-    prompt = context.orchestrator.workflow_engine.node_prompt(
+        return None
+    return context.orchestrator.workflow_engine.node_prompt(
         child.workflow_run_id,
         child.workflow_node_key,
         child.workflow_generation,
     )
-    return prompt or child.task
+
+
+def original_prompt(child: DelegationChild) -> str:
+    """Return what the child's turn was first sent: its task, or for the agent of a workflow run its call's prompt."""
+    return workflow_call_prompt(child) or child.task

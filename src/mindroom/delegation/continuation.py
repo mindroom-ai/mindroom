@@ -13,6 +13,7 @@ from mindroom.delegation.lifecycle import (
     delegation_grant,
     original_prompt,
     prepare_child_turn,
+    workflow_call_prompt,
 )
 from mindroom.delegation.personas import follow_up_refusal
 from mindroom.delegation.recovery import read_child_run, settled_subagent
@@ -143,7 +144,11 @@ async def _stopped_turn(job: BackgroundJob, config: Config, runtime_paths: Runti
     continued = _CONTINUATIONS_KEY in job.adapter
     if child.delegation_id not in (saved.delegation_id, saved.previous_delegation_id if continued else None):
         return "its subagent is on another turn than the one the job ran"
-    return child if interrupted_by_restart(child) else f"its turn ended {child.status} before the restart settled it"
+    if not interrupted_by_restart(child):
+        return f"its turn ended {child.status} before the restart settled it"
+    if child.workflow_run_id is not None and workflow_call_prompt(child) is None:
+        return "the call of its workflow run has an outcome already, or its run is gone"
+    return child
 
 
 async def _continuation_prompt(

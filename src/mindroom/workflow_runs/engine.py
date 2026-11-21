@@ -813,9 +813,13 @@ class WorkflowEngine:
                     await asyncio.wait_for(condition.wait(), min(remaining, _RECHECK_SECONDS))
 
     def node_prompt(self, run_id: str, key: str | None, generation: int | None) -> str | None:
-        """Return the prompt of the agent call that is *generation* of the node at *key*, while the run still has it."""
+        """Return the prompt of the agent call that is *generation* of the node at *key*, while it waits for its agent.
+
+        None once the call has an outcome, was replaced, or went with its run: nothing waits for its job any more.
+        """
         node = self.store.get_node(run_id, key) if key else None
-        prompt = node.request.get("prompt") if node is not None and node.generation == generation else None
+        live = node is not None and node.generation == generation and node.state in _LIVE_NODE_STATES
+        prompt = node.request.get("prompt") if node is not None and live else None
         return prompt if isinstance(prompt, str) else None
 
     async def node(self, attempt: ScriptRunRecord, node_id: str) -> WorkflowNode:

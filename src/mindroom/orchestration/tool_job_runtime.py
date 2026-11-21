@@ -567,6 +567,10 @@ class ToolJobRuntimeCoordinator:
         finished: dict[tuple[str, str], bool] = {}
 
         async def source_finished(job: BackgroundJob) -> bool:
+            if is_workflow_node_job(job) and self.workflow_engine is not None:
+                # The call of a run owns its job, until it has an outcome or went with its run.
+                call = (job.adapter["workflow"], job.adapter.get("node"), job.adapter.get("generation"))
+                return self.workflow_engine().node_prompt(*call) is None
             entity, source = job.owner.recipient, job.source_event_id
             if source is None or (entity, job.owner.session_id) in protected_sessions:
                 return False

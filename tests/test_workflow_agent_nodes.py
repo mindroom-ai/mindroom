@@ -6,6 +6,7 @@ Level: engine harness (`WorkflowStack`) with the real job runtime and real deleg
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,7 @@ from mindroom.orchestration.tool_job_runtime import _follow_up_candidates
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.script_runs.reasons import PLUGIN_TOOLS_CHANGED
+from mindroom.tool_jobs import runtime as tool_job_runtime
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.publication import _jobs_state_content
 from mindroom.workflow_runs import agent_nodes
@@ -355,7 +357,7 @@ async def test_timeout_cancels_the_child_and_waits_for_it_to_end(stack: Workflow
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("work", "kind"), [(0.2, "completed"), (1.4, "timeout")])
+@pytest.mark.parametrize(("work", "kind"), [(0.2, "completed"), (2.6, "timeout")])
 async def test_timeout_counts_the_work_before_and_after_an_approval_and_not_the_wait(
     gated: WorkflowStack,
     work: float,
@@ -365,9 +367,10 @@ async def test_timeout_counts_the_work_before_and_after_an_approval_and_not_the_
     cards: JobApprovalCards = gated.cards  # type: ignore[attr-defined]
     busy = Await(partial(asyncio.sleep, work))
     gated.child_script([busy, *calls(tool_call("append", "c1", line="a"))], [busy, *answer("sent")])
-    receipt = await gated.submit("@0", "agent", _PROMPT, {"timeout": 2.0})
+    # Each stretch of work fits in the four seconds with room for the turn's own start; two long ones do not.
+    receipt = await gated.submit("@0", "agent", _PROMPT, {"timeout": 4.0})
     await asyncio.wait_for(cards.posted.wait(), 10)
-    await asyncio.sleep(2.5)
+    await asyncio.sleep(4.5)
     cards.decision.set_result(BackgroundApprovalDecision("approved", None))
 
     while receipt.state in ("running", "waiting"):
@@ -413,6 +416,32 @@ async def test_node_jobs_are_in_no_list_no_room_state_and_no_follow_up(stack: Wo
     assert _follow_up_candidates(ended) == {}
     assert await stack.jobs.ended_jobs(key) == ()
     assert await stack.jobs.list_jobs(owner=owner, depth=0) == []
+
+
+@pytest.mark.asyncio
+async def test_job_of_a_call_is_deleted_after_its_retention_once_the_call_has_its_outcome(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A node's job is kept while its call still waits for it, and goes the way of every old job after that."""
+    monkeypatch.setattr(tool_job_runtime, "_ENDED_JOB_RETENTION", timedelta(0))
+    gate = _hanging(stack, "kept until read")
+    await stack.submit("@0", "agent", _PROMPT)
+    job_id = stack.node_job("@0").job_id
+    # The attempt ends, and the job after it: no attempt has read its answer into the node yet.
+    await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=PLUGIN_TOOLS_CHANGED)
+    await stack.engine.settle(stack.store.get_run(stack.run_id), replay=True)
+    gate.set()
+    await wait_for_status(stack.jobs, job_id, "completed")
+
+    await stack.coordinator._expire_ended_jobs()
+    assert [job.job_id for job in _node_jobs(stack)] == [job_id]
+    assert await stack.maintain() == [stack.run_id]
+    assert (await stack.submit("@0", "agent", _PROMPT)).result == "kept until read"
+    await stack.until(lambda: stack.node_job("@0").consumed)
+    await stack.coordinator._expire_ended_jobs()
+
+    assert _node_jobs(stack) == []
 
 
 @pytest.mark.asyncio

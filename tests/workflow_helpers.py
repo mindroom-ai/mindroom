@@ -776,6 +776,8 @@ class WorkflowStack:
             journal_provider=lambda: self.jobs.journal,
             workflow_engine=lambda: self.engine,
         )
+        self.coordinator = coordinator
+        """The job coordinator of the stack, for its passes over ended jobs."""
         self.jobs = await tool_job_runtime(
             paths.storage_root,
             grant=lambda _job: self.admission,
@@ -785,6 +787,7 @@ class WorkflowStack:
         )
         self._instance = pin_background_tool_jobs(self.context.config, paths)
         register_background_runtime(paths, self.jobs)
+        coordinator._runtime, coordinator._journal = self.jobs, self.jobs.journal
         return self.jobs
 
     async def close(self) -> None:
