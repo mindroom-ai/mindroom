@@ -746,73 +746,26 @@ Connecting accounts also needs the providers' [OAuth clients](../../../docs/oaut
 
 ## Tailnet SSH
 
-With tailnet SSH a person runs `ssh <hostname>` from a device in their own tailnet (Tailscale or Headscale) and lands in their own Kubernetes worker, which wakes for the connection when it sleeps.
-A small gateway (`ghcr.io/mindroom-ai/mindroom-tailnet-gateway`) holds one tailnet node per link and forwards each accepted connection to the worker's sshd on port 2222; the primary decides each target on an internal listener only the gateway calls.
+Create a Secret in the release namespace with key `auth-key` holding a reusable, non-ephemeral Tailscale auth key for the operator's tailnet. Then set:
 
 ```yaml
 workers:
   backend: kubernetes
-
 tailnetSsh:
   enabled: true
-  port: 8769                   # the primary's internal listener
-  image: {repository: ghcr.io/mindroom-ai/mindroom-tailnet-gateway, tag: ""}
-  persistence: {size: 1Gi, storageClassName: ""}
-  authKeySecret: ""            # Secret with key `auth-key`; empty means login links
-  loginServer: ""              # Headscale
-  tags: []                     # with an operator key
-  httpsProxy: ""               # an HTTP CONNECT proxy for the gateway's only internet egress
-  resources: {}                # about 25 MB plus 7 MB per link
-  extraEgress: null            # raw NetworkPolicyEgressRule entries for the gateway
+  authKeySecret: mindroom-tailnet-key
 ```
 
-The chart then renders, all named `<fullname>-tailnet-ssh`:
+Optionally set `loginServer` for Headscale and `tags` for the enrolled nodes. Only the gateway reads the auth key; the internal listener token is shared only with the primary.
+Opt in eligible agents with `tailnet_ssh: true` and set each requester's login in `tailnet_ssh.logins` and public keys in `tailnet_ssh.authorized_keys`. There is no user enrollment or key management UI.
+Connect from the operator tailnet with `ssh mindroom@<hostname>` using the node's MagicDNS name and verify its SSH host key. The gateway checks the tailnet login before waking the worker; sshd separately checks the configured key.
 
-- A Secret with a generated `token`, kept across upgrades, which the primary reads as `MINDROOM_TAILNET_SSH_GATEWAY_TOKEN` and the gateway as `TAILNET_SSH_GATEWAY_TOKEN`; no worker gets it.
-- A ClusterIP Service for the primary's `tailnet-ssh` port, set by `MINDROOM_TAILNET_SSH_PORT`; it is separate from the main runtime Service so `service.type` never exposes it.
-- A ReadWriteOnce claim at `/state` holding the node keys, and a Deployment with one replica and `strategy: Recreate`, because two processes must never hold one node key.
-  The gateway runs non-root on a read-only root with all capabilities dropped, no service account token, and the control plane's `nodeSelector`, `affinity`, and `tolerations`.
-  It sets `TS_NO_LOGS_NO_SUPPORT=true`, so no node log goes to `log.tailscale.com`.
+For hosted use, enable `networkPolicy.create` and `workers.kubernetes.networkPolicy.create` or enforce equivalent isolation. Keep the internal listener and worker port `2222` off public ingress, and never use `2222` as the worker runner port.
+If using `tailnetSsh.httpsProxy`, admit it with `extraEgress`; do not use the workers' Squid. See [values.yaml](values.yaml) for the chart settings.
 
-Memory is about 25 MB plus 7 MB per link, so set `tailnetSsh.resources` from the number of links you expect; hundreds fit one replica.
-
-There are two enrolment modes:
-
-- **Login links** (`authKeySecret` empty): each link's node asks for a sign-in, and the person opens the login URL shown only on their own portal card, which enrols the node in their own tailnet.
-- **Operator key**: create a Secret with key `auth-key` holding a reusable tagged auth key and name it in `authKeySecret`; `tags` sets the tags the nodes advertise, which the key must allow, and `loginServer` points at a Headscale server.
-  Nodes then enrol without a sign-in, so use this only for a tailnet the operator controls.
-
-Three NetworkPolicies fence the gateway:
-
-- `<fullname>-tailnet-ssh-workers`, in the worker namespace, admits gateway pods to TCP 2222 on worker pods labelled `mindroom.ai/tailnet-ssh: "true"` only; other workers gain nothing, and no worker gains egress.
-  It renders with the chart's worker NetworkPolicy (`workers.kubernetes.networkPolicy.create`), to which it is additive.
-  With `workers.kubernetes.networkPolicy.create=false` the chart renders no gateway-to-worker grant, and an operator-managed policy must admit the gateway pods on TCP 2222 to pods labelled `mindroom.ai/tailnet-ssh: "true"`.
-- `<fullname>-tailnet-ssh-primary` admits gateway pods to `tailnetSsh.port` on the control-plane pod; it renders with `networkPolicy.create`, because alone it would isolate an otherwise open control-plane pod.
-- `<fullname>-tailnet-ssh` admits no ingress to the gateway and lets it reach only DNS (`egressProxy.networkPolicy.dns`), the primary's listener port, the labelled worker pods on TCP 2222, the `extraEgress` rules, and TCP 443 on public addresses (every private, carrier-grade NAT, and link-local range excluded).
-  No UDP besides DNS is allowed, so tailnet traffic is relayed over DERP, which needs `controlplane.tailscale.com` and the `derp*.tailscale.com` hosts, or the Headscale URL and its DERP servers.
-
-With `httpsProxy` set the gateway sends its control and DERP traffic through that HTTP CONNECT proxy, the public TCP 443 rule is not rendered, and `extraEgress` must admit the proxy, for example:
-
-```yaml
-tailnetSsh:
-  httpsProxy: http://proxy.infra.svc.cluster.local:3128
-  extraEgress:
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: infra
-          podSelector:
-            matchLabels:
-              app: proxy
-      ports:
-        - protocol: TCP
-          port: 3128
-```
-
-`extraEgress` rules are added exactly as written and are the operator's responsibility: the chart does not check them, so they should admit only the proxy, with no UDP, because a broader rule widens the gateway's egress and can defeat its DERP-only operation.
-The proxy must not be the workers' Squid (`approvedEgress` or `egressProxy`), because allowing the Tailscale hosts there would open them to workers too.
-
-The chart fails when `tailnetSsh.enabled` is set without `workers.backend: kubernetes`, when `tailnetSsh.port` equals `runtime.apiPort`, `scriptGateway.port`, or `egressBroker.port`, and when `httpsProxy` is set without `extraEgress`.
+Keep the gateway PVC across restarts. Replace an expired key in the Secret and restart the gateway for new enrollments; rotating the key does not move existing nodes to another tailnet.
+Reassigning a sole-user agent hands over its workspace. Disable SSH and let revocation finish before moving workers to another backend, tenant or namespace. A reused hostname gets a fresh host key.
+See the [single-tailnet design and operating limits](../../../docs/baspowers/specs/2026-11-19-tailnet-ssh-design.md#single-tailnet-v1-2026-11-21).
 
 ## Matrix Managed Account Authentication
 

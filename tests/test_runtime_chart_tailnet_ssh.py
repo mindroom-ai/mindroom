@@ -74,7 +74,8 @@ WORKER_VALUES = (
     f"workers.kubernetes.namespace={WORKER_NAMESPACE}",
     "workers.kubernetes.extraLabels.mindroom\\.ai/instance=demo",
 )
-ENABLED = (*WORKER_VALUES, "tailnetSsh.enabled=true")
+AUTH_KEY = "tailnetSsh.authKeySecret=tailnet-key"
+ENABLED = (*WORKER_VALUES, "tailnetSsh.enabled=true", AUTH_KEY)
 PROXY_EGRESS = (
     "tailnetSsh.httpsProxy=http://proxy.example:3128",
     "tailnetSsh.extraEgress[0].to[0].ipBlock.cidr=192.0.2.10/32",
@@ -178,6 +179,10 @@ def test_gateway_env_points_at_primary_and_never_logs_to_tailscale() -> None:
             "name": "TAILNET_SSH_GATEWAY_TOKEN",
             "valueFrom": {"secretKeyRef": {"name": NAME, "key": "token"}},
         },
+        "TAILNET_SSH_AUTH_KEY": {
+            "name": "TAILNET_SSH_AUTH_KEY",
+            "valueFrom": {"secretKeyRef": {"name": "tailnet-key", "key": "auth-key"}},
+        },
         "TAILNET_SSH_STATE_DIR": {"name": "TAILNET_SSH_STATE_DIR", "value": "/state"},
         "TS_NO_LOGS_NO_SUPPORT": {"name": "TS_NO_LOGS_NO_SUPPORT", "value": "true"},
     }
@@ -189,12 +194,11 @@ def test_gateway_env_points_at_primary_and_never_logs_to_tailscale() -> None:
     ]
 
 
-def test_auth_key_login_server_tags_and_proxy_are_optional_env() -> None:
-    """An operator key, Headscale, tags, and a proxy each add their variable only when set."""
+def test_login_server_tags_and_proxy_are_optional_env() -> None:
+    """Headscale, tags, and a proxy each add their variable only when set."""
     docs = _render(
         *ENABLED,
         *PROXY_EGRESS,
-        "tailnetSsh.authKeySecret=tailnet-key",
         "tailnetSsh.loginServer=https://headscale.example",
         "tailnetSsh.tags={tag:mindroom,tag:ssh}",
         "tailnetSsh.persistence.storageClassName=fast",
@@ -202,10 +206,6 @@ def test_auth_key_login_server_tags_and_proxy_are_optional_env() -> None:
     )
     env = _gateway_env(docs)
 
-    assert env["TAILNET_SSH_AUTH_KEY"] == {
-        "name": "TAILNET_SSH_AUTH_KEY",
-        "valueFrom": {"secretKeyRef": {"name": "tailnet-key", "key": "auth-key"}},
-    }
     assert env["TAILNET_SSH_LOGIN_SERVER"]["value"] == "https://headscale.example"
     assert env["TAILNET_SSH_TAGS"]["value"] == "tag:mindroom,tag:ssh"
     assert env["HTTPS_PROXY"]["value"] == "http://proxy.example:3128"
@@ -329,6 +329,15 @@ def test_validation_fails_with_a_sentence(value: str) -> None:
         )
 
 
+@pytest.mark.parametrize("secret", [(), ("tailnetSsh.authKeySecret=  ",)])
+def test_enabled_requires_a_nonblank_auth_key_secret(secret: tuple[str, ...]) -> None:
+    """An enabled gateway cannot render without an operator's auth-key Secret reference."""
+    values = (*BASE_VALUES, *WORKER_VALUES, "tailnetSsh.enabled=true", *secret)
+    completed = _run_helm_template(RUNTIME_CHART, *values, release_name=RELEASE)
+    assert completed.returncode != 0
+    assert "tailnetSsh.enabled requires tailnetSsh.authKeySecret" in completed.stderr
+
+
 def test_worker_egress_policy_and_squid_are_unchanged() -> None:
     """Workers gain one ingress rule and no egress: their policy and the approved-egress proxy render identically."""
     approved_egress = ("approvedEgress.enabled=true", "approvedEgress.image.tag=test")
@@ -344,4 +353,4 @@ def test_worker_egress_policy_and_squid_are_unchanged() -> None:
 
     off = worker_side()
     assert {doc["kind"] for doc in off} >= {"NetworkPolicy", "Deployment", "Service"}
-    assert worker_side("tailnetSsh.enabled=true") == off
+    assert worker_side("tailnetSsh.enabled=true", AUTH_KEY) == off

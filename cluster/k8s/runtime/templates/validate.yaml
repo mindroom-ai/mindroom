@@ -443,6 +443,9 @@
 {{- end -}}
 {{- end -}}
 {{- if .Values.tailnetSsh.enabled -}}
+{{- if or (not (kindIs "string" .Values.tailnetSsh.authKeySecret)) (not (trim .Values.tailnetSsh.authKeySecret)) -}}
+{{- fail "tailnetSsh.enabled requires tailnetSsh.authKeySecret" -}}
+{{- end -}}
 {{- if ne .Values.workers.backend "kubernetes" -}}
 {{- fail "tailnetSsh.enabled requires workers.backend=kubernetes" -}}
 {{- end -}}
