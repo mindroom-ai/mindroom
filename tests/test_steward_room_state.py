@@ -480,7 +480,22 @@ async def test_binding_claim_follows_a_handover_during_accounts_read(room_state:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("binding", ["writable", "absent", "stopped", "stops_during_get", "unjoined", "underpowered"])
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "writable",
+        "absent",
+        "stopped",
+        "stops_during_get",
+        "unjoined",
+        "underpowered",
+        "draining",
+        "drains_during_roster_get",
+        "members_forbidden",
+        "put_forbidden",
+        "fallback_transient",
+    ],
+)
 async def test_roster_follows_the_binding_after_steward_handover(room_state: RoomState, binding: str) -> None:
     """The steward refreshes the trusted roster through its author when that bot can still write it."""
     _, _, ids, events, bound_client = room_state
@@ -496,7 +511,51 @@ async def test_roster_follows_the_binding_after_steward_handover(room_state: Roo
     assert _accounts(room_state) == initial_roster
     assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": bound_id}
     bound_client.room_put_state.reset_mock()
+    bound_client.joined_members.reset_mock()
 
+    duties = _roster_successor(room_state, owner)
+    steward_client = duties.deps.runtime.client
+    assert steward_client is not None
+    _configure_roster_handover(room_state, owner, steward_client, binding)
+    events["m.room.member", joining_id] = {"membership": "join"}
+    try:
+        if binding == "stops_during_get":
+            await _reconcile_accounts_during_bound_bot_stop(duties, steward_client, owner)
+        else:
+            await duties.member_event(steward_client.rooms[ROOM_ID], _membership_event(joining_id, "join", "leave"))
+        if binding == "fallback_transient":
+            assert duties._room_state_reruns[ROOM_ID] == {"accounts"}
+            assert (ACCOUNTS_EVENT_TYPE, steward_id) not in events
+            await asyncio.wait_for(duties._room_state_retries[ROOM_ID], timeout=3)
+        assert not duties._room_state_reruns
+    finally:
+        duties.stopping()
+
+    expected_client = bound_client if binding == "writable" else steward_client
+    expected_id = expected_client.user_id
+    expected_roster = {"accounts": sorted([*initial_roster, joining_id])}
+    assert events[ACCOUNTS_EVENT_TYPE, expected_id] == expected_roster
+    write = call(ROOM_ID, ACCOUNTS_EVENT_TYPE, expected_roster, state_key=expected_id)
+    attempts = 2 if binding == "fallback_transient" else 1
+    assert _writes(expected_client, ACCOUNTS_EVENT_TYPE) == [write] * attempts
+    other_client = steward_client if binding == "writable" else bound_client
+    assert len(_writes(other_client, ACCOUNTS_EVENT_TYPE)) == (
+        attempts if binding in {"put_forbidden", "fallback_transient"} else 0
+    )
+    if binding == "members_forbidden":
+        bound_client.joined_members.assert_awaited_once_with(ROOM_ID)
+    if binding != "writable":
+        assert _accounts(room_state) == initial_roster
+    assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": steward_id if binding == "absent" else bound_id}
+    assert len(_writes(steward_client, ROUTER_EVENT_TYPE)) == (binding == "absent")
+    assert not _writes(bound_client, ROUTER_EVENT_TYPE)
+
+
+def _roster_successor(room_state: RoomState, owner: MagicMock) -> StewardDuties:
+    """Elect a new steward with its own client, sharing the fake homeserver with the bound bot."""
+    _, _, ids, _, bound_client = room_state
+    runtime = owner.steward_duties.deps.runtime.orchestrator
+    steward_id = ids["agent1"].full_id
     steward_room = nio.MatrixRoom(ROOM_ID, steward_id)
     steward_room.power_levels.users[steward_id] = 100
     steward_client = AsyncMock(spec=nio.AsyncClient, user_id=steward_id, rooms={ROOM_ID: steward_room})
@@ -510,32 +569,57 @@ async def test_roster_follows_the_binding_after_steward_handover(room_state: Roo
     steward = MagicMock(client=steward_client, agent_name="agent1", running=True, steward_duties=duties)
     runtime.agent_bots["agent1"] = steward
     runtime.room_steward.return_value = steward
+    return duties
+
+
+def _configure_roster_handover(
+    state: RoomState,
+    owner: MagicMock,
+    steward_client: AsyncMock,
+    binding: str,
+) -> None:
+    """Make the bound bot ineligible, refuse it on the server, or remove the binding for this case."""
+    _, _, _, events, bound_client = state
     owner.running = binding != "stopped"
+    owner.accepting_work = binding not in {"stopped", "draining"}
     if binding == "absent":
         del events[ROUTER_EVENT_TYPE, ""]
     elif binding == "unjoined":
         del bound_client.rooms[ROOM_ID]
     elif binding == "underpowered":
-        bound_room.power_levels.users[bound_id] = 0
+        bound_client.rooms[ROOM_ID].power_levels.users[bound_client.user_id] = 0
+    elif binding == "drains_during_roster_get":
+        read = bound_client.room_get_state_event.side_effect
 
-    events["m.room.member", joining_id] = {"membership": "join"}
-    if binding == "stops_during_get":
-        await _reconcile_accounts_during_bound_bot_stop(duties, steward_client, owner)
-    else:
-        await duties.member_event(steward_room, _membership_event(joining_id, "join", "leave"))
+        async def stop_accepting(room_id: str, event_type: str, state_key: str = "") -> object:
+            reply = await read(room_id, event_type, state_key)
+            if event_type == ACCOUNTS_EVENT_TYPE:
+                owner.accepting_work = False
+            return reply
 
-    expected_client = bound_client if binding == "writable" else steward_client
-    expected_id = expected_client.user_id
-    expected_roster = {"accounts": sorted([*initial_roster, joining_id])}
-    assert events[ACCOUNTS_EVENT_TYPE, expected_id] == expected_roster
-    assert _writes(expected_client, ACCOUNTS_EVENT_TYPE) == [
-        call(ROOM_ID, ACCOUNTS_EVENT_TYPE, expected_roster, state_key=expected_id),
-    ]
-    other_client = steward_client if binding == "writable" else bound_client
-    assert not _writes(other_client, ACCOUNTS_EVENT_TYPE)
-    assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": steward_id if binding == "absent" else bound_id}
-    assert len(_writes(steward_client, ROUTER_EVENT_TYPE)) == (binding == "absent")
-    assert not _writes(bound_client, ROUTER_EVENT_TYPE)
+        bound_client.room_get_state_event.side_effect = stop_accepting
+    elif binding == "members_forbidden":
+        bound_client.joined_members.side_effect = None
+        bound_client.joined_members.return_value = nio.JoinedMembersError("Forbidden", "M_FORBIDDEN", room_id=ROOM_ID)
+    elif binding in {"put_forbidden", "fallback_transient"}:
+        bound_client.room_put_state.side_effect = None
+        bound_client.room_put_state.return_value = nio.RoomPutStateError("Forbidden", "M_FORBIDDEN")
+        if binding == "fallback_transient":
+            _fail_first_steward_roster_put(steward_client)
+
+
+def _fail_first_steward_roster_put(client: AsyncMock) -> None:
+    write = client.room_put_state.side_effect
+    failed = False
+
+    async def fail_once(room_id: str, event_type: str, content: dict[str, Any], state_key: str = "") -> object:
+        nonlocal failed
+        if event_type == ACCOUNTS_EVENT_TYPE and not failed:
+            failed = True
+            return nio.RoomPutStateError("Unavailable", "M_UNKNOWN")
+        return await write(room_id, event_type, content, state_key=state_key)
+
+    client.room_put_state.side_effect = fail_once
 
 
 async def _reconcile_accounts_during_bound_bot_stop(
