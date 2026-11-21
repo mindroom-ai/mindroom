@@ -443,5 +443,5 @@ async def test_handler_runs_compact_only_for_the_human_in_person(tmp_path: Path,
         assert not _queued(config, paths, "code")
     else:
         assert reply == "✅ `code` compacts its context before its next reply in this thread."
-        record_command_result.assert_awaited_once_with(reply, extra_content=None)
+        record_command_result.assert_awaited_once_with(reply)
         assert _queued(config, paths, "code")

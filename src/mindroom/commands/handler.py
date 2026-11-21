@@ -61,6 +61,7 @@ from mindroom.tool_jobs.client_cancel import (
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.turn_record import TurnRecord
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -159,6 +160,18 @@ class _CommandEvent(Protocol):
     def source(self) -> dict[str, Any]: ...
 
 
+class _CommandResponseSender(Protocol):
+    """Send one command response to the stable command target."""
+
+    def __call__(
+        self,
+        response_text: str,
+        *,
+        skip_mentions: bool = False,
+    ) -> Awaitable[str | None]:
+        """Send a command response."""
+
+
 class _CommandResultRecorder(Protocol):
     """Checkpoint readable text and optional structured metadata together."""
 
@@ -176,9 +189,9 @@ class CommandHandlerContext:
     logger: structlog.stdlib.BoundLogger
     conversation_reader: ConversationReader
     stable_target: MessageTarget
-    record_handled_turn: Callable[[str], Awaitable[None]]
+    record_handled_turn: Callable[[TurnRecord], Awaitable[None]]
     record_command_result: _CommandResultRecorder
-    send_response: Callable[[str], Awaitable[str | None]]
+    send_response: _CommandResponseSender
     agent_reply_memberships: AgentReplyMembershipIndex
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]]
@@ -487,8 +500,15 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             # If we have change_info, this is a config set that needs confirmation
             if change_info:
                 # Send the preview message
-                raw_response_event_id = await context.send_response(response_text)
+                raw_response_event_id = await context.send_response(
+                    response_text,
+                    skip_mentions=True,
+                )
                 response_event_id = _require_response_event_id(raw_response_event_id)
+                handled_turn = TurnRecord.create(
+                    [event.event_id],
+                    response_event_id=response_event_id,
+                )
 
                 await config_confirmation.ensure_pending_change(
                     context.client,
@@ -502,7 +522,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     requester=resolved_requester_user_id,
                 )
 
-                await context.record_handled_turn(response_event_id)
+                await context.record_handled_turn(handled_turn)
                 return  # Exit early since we've handled the response
 
     elif command.type == CommandType.MODEL:
@@ -603,7 +623,18 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     if response_text:
         if command.type in COMMAND_TYPES_WITH_SIDE_EFFECTS:
-            await context.record_command_result(response_text, extra_content=result_extra_content)
-        raw_response_event_id = await context.send_response(response_text)
+            if result_extra_content is None:
+                await context.record_command_result(response_text)
+            else:
+                await context.record_command_result(response_text, extra_content=result_extra_content)
+        raw_response_event_id = await context.send_response(
+            response_text,
+            skip_mentions=True,
+        )
         response_event_id = _require_response_event_id(raw_response_event_id)
-        await context.record_handled_turn(response_event_id)
+        await context.record_handled_turn(
+            TurnRecord.create(
+                [event.event_id],
+                response_event_id=response_event_id,
+            ),
+        )

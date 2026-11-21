@@ -24,6 +24,7 @@ from mindroom.room_thread_modes import (
     resolve_room_thread_mode_override,
     set_room_thread_mode_override,
 )
+from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
@@ -375,7 +376,9 @@ async def test_thread_mode_command_admin_sets_runtime_override_without_config_wr
     assert "now uses `room`" in context.send_response.await_args.args[0]
     assert resolve_room_thread_mode_override(context.runtime_paths, ROOM_ID) == "room"
     assert context.runtime_paths.config_path.read_text(encoding="utf-8") == config_before
-    context.record_handled_turn.assert_called_once_with("$reply")
+    context.record_handled_turn.assert_called_once_with(
+        TurnRecord.create(["$event"], response_event_id="$reply"),
+    )
 
 
 @pytest.mark.asyncio
