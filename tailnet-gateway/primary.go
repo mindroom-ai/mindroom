@@ -18,27 +18,19 @@ const (
 	maxAnswer      = 4 << 20
 )
 
-type DesiredLink struct {
-	ID             string  `json:"id"`
-	Hostname       string  `json:"hostname"`
-	Desired        string  `json:"desired"`
-	AllowedLogin   *string `json:"allowed_login"` // nil enrolls the node but admits nobody
-	AccessRevision string  `json:"access_revision"`
+type Link struct {
+	ID            string   `json:"id"`
+	Hostname      string   `json:"hostname"`
+	AllowedLogins []string `json:"allowed_logins"`
 }
 
 type StatusReport struct {
 	OpenConnections map[string]int `json:"open_connections"`
-	Removed         []string       `json:"removed"`
 }
 
-type RefusedError struct {
-	StatusCode int    `json:"-"`
-	Detail     string `json:"detail"`
-}
+type RefusedError int
 
-func (e *RefusedError) Error() string {
-	return fmt.Sprintf("primary answered %d: %s", e.StatusCode, e.Detail)
-}
+func (e RefusedError) Error() string { return fmt.Sprintf("primary answered HTTP %d", int(e)) }
 
 type Primary struct {
 	baseURL, token string
@@ -47,25 +39,17 @@ type Primary struct {
 
 func NewPrimary(baseURL, token string) *Primary {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil // only the tailnet's control and relay traffic may use the proxy
+	transport.Proxy = nil // never send the gateway token through a proxy
 	return &Primary{strings.TrimRight(baseURL, "/"), token, &http.Client{
 		Transport:     transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
 }
 
-func (p *Primary) call(ctx context.Context, timeout time.Duration, method, path string, body, out any) error {
+func (p *Primary) call(ctx context.Context, timeout time.Duration, method, path string, body []byte, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	var sent io.Reader
-	if body != nil {
-		raw, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		sent = bytes.NewReader(raw)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, p.baseURL+path, sent)
+	req, err := http.NewRequestWithContext(ctx, method, p.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -78,30 +62,26 @@ func (p *Primary) call(ctx context.Context, timeout time.Duration, method, path 
 		return err
 	}
 	defer res.Body.Close()
-	if out == nil && res.StatusCode == http.StatusNoContent {
+	if out == nil && (res.StatusCode == http.StatusNoContent || res.StatusCode == http.StatusOK) {
 		return nil
+	}
+	if res.StatusCode != http.StatusOK {
+		return RefusedError(res.StatusCode)
 	}
 	answer, err := io.ReadAll(http.MaxBytesReader(nil, res.Body, maxAnswer))
 	if err != nil {
 		return err
 	}
-	if out != nil && res.StatusCode == http.StatusOK {
-		return json.Unmarshal(answer, out)
-	}
-	refused := &RefusedError{StatusCode: res.StatusCode}
-	if json.Unmarshal(answer, refused) != nil || refused.Detail == "" {
-		refused.Detail = fmt.Sprintf("%d %s", res.StatusCode, http.StatusText(res.StatusCode))
-	}
-	return refused
+	return json.Unmarshal(answer, out)
 }
 
-func (p *Primary) Links(ctx context.Context) ([]DesiredLink, error) {
-	var links []DesiredLink
+func (p *Primary) Links(ctx context.Context) ([]Link, error) {
+	var links []Link
 	if err := p.call(ctx, callTimeout, http.MethodGet, "/links", nil, &links); err != nil {
 		return nil, err
 	}
-	if links == nil { // JSON null is not permission to stop every node.
-		return nil, errors.New("GET /links: the primary answered null, not a list")
+	if links == nil {
+		return nil, errors.New("GET /links: expected a list, not null")
 	}
 	return links, nil
 }
@@ -110,23 +90,21 @@ func (p *Primary) PostStatus(ctx context.Context, report StatusReport) error {
 	if report.OpenConnections == nil {
 		report.OpenConnections = map[string]int{}
 	}
-	if report.Removed == nil {
-		report.Removed = []string{}
-	}
-	return p.call(ctx, callTimeout, http.MethodPost, "/status", report, nil)
+	body, _ := json.Marshal(report) // only string keys and integer counts
+	return p.call(ctx, callTimeout, http.MethodPost, "/status", body, nil)
 }
 
-func (p *Primary) Connect(ctx context.Context, id, peerLogin, peerNode string) (string, int, error) {
-	peer := map[string]string{"peer_login": peerLogin, "peer_node": peerNode}
-	var target struct {
+func (p *Primary) Connect(ctx context.Context, id, login, peer string) (string, int, error) {
+	body, _ := json.Marshal(map[string]string{"peer_login": login, "peer_node": peer})
+	var to struct {
 		Host string `json:"host"`
 		Port int    `json:"port"`
 	}
-	if err := p.call(ctx, connectTimeout, http.MethodPost, "/links/"+id+"/connect", peer, &target); err != nil {
+	if err := p.call(ctx, connectTimeout, http.MethodPost, "/links/"+id+"/connect", body, &to); err != nil {
 		return "", 0, err
 	}
-	if target.Host == "" || strings.TrimSpace(target.Host) != target.Host || target.Port < 1 || target.Port > 65535 {
+	if to.Host == "" || strings.TrimSpace(to.Host) != to.Host || to.Port < 1 || to.Port > 65535 {
 		return "", 0, errors.New("the primary's 200 names no valid host and port")
 	}
-	return target.Host, target.Port, nil
+	return to.Host, to.Port, nil
 }

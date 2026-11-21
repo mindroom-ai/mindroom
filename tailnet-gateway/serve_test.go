@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -98,7 +99,7 @@ func (f *fixtures) wake(t *testing.T) *fakeWorker {
 
 // serving lists the link, runs one pass, and returns the link's node, whose tailnet says every peer is the link's
 // login.
-func (f *fixtures) serving(t *testing.T, link DesiredLink) *fakeNode {
+func (f *fixtures) serving(t *testing.T, link Link) *fakeNode {
 	t.Helper()
 	f.primary.list(t, link)
 	f.reconcile(t)
@@ -211,7 +212,7 @@ func eventually(t *testing.T, what string, done func() bool) {
 func TestPeerLoginMismatchClosesBeforeAnyConnectCall(t *testing.T) {
 	f := newFixtures(t)
 	f.wake(t)
-	node := f.serving(t, on(idA))
+	node := f.serving(t, listed(idA))
 	node.peerIs("eve@github", "laptop")
 
 	peer := node.dial(t)
@@ -224,10 +225,66 @@ func TestPeerLoginMismatchClosesBeforeAnyConnectCall(t *testing.T) {
 	}
 }
 
+func TestSecondAuthorizedLoginConnectsToSameNode(t *testing.T) {
+	f := newFixtures(t)
+	f.wake(t)
+	link := listed(idA)
+	link.AllowedLogins = append(link.AllowedLogins, "alice@github")
+	node := f.serving(t, link)
+	for _, login := range link.AllowedLogins {
+		node.peerIs(login, "laptop")
+		if got := line(node.dial(t)); got != banner {
+			t.Fatalf("%s read %q, want %q", login, got, banner)
+		}
+	}
+	requests := f.primary.sent(connectRoute)
+	if len(requests) != 2 || f.nodes.count() != 1 {
+		t.Fatalf("got %d connects on %d nodes; want two connects on one node", len(requests), f.nodes.count())
+	}
+	for i, login := range link.AllowedLogins {
+		var peer map[string]string
+		if err := json.Unmarshal(requests[i].body, &peer); err != nil || peer["peer_login"] != login {
+			t.Errorf("connect body = %s, want login %s", requests[i].body, login)
+		}
+	}
+}
+
+func TestOmittedLinkRefusesNewConnectionsAndDrainsOpenPipe(t *testing.T) {
+	f := newFixtures(t)
+	worker := f.wake(t)
+	node := f.serving(t, listed(idA))
+	peer := node.dial(t)
+	upstream := worker.conn(t)
+	if got := line(peer); got != banner {
+		t.Fatalf("peer read %q, want %q", got, banner)
+	}
+	f.clock.advance(countedAfter)
+
+	f.primary.list(t)
+	f.reconcile(t)
+
+	if !closed(t, node.dial(t)) || f.connects() != 1 {
+		t.Fatal("an omitted link admitted a new connection")
+	}
+	if got := f.gateway.Status().OpenConnections[idA]; got != 1 {
+		t.Fatalf("omitted link reports %d pipes, want 1", got)
+	}
+	fmt.Fprint(upstream, "still open\r\n")
+	if got := line(peer); got != "still open\r\n" {
+		t.Fatalf("existing pipe read %q after omission", got)
+	}
+	peer.Close()
+	eventually(t, "drain the pipe", func() bool { return f.gateway.Status().OpenConnections[idA] == 0 })
+	f.reconcile(t)
+	if len(node.calls) != 1 || node.calls[0] != "Close" || !exists(t, node.dir) {
+		t.Fatalf("drained node got %v; want close with state preserved", node.calls)
+	}
+}
+
 func TestPeerTheTailnetDoesNotKnowIsRefused(t *testing.T) {
 	f := newFixtures(t)
 	f.wake(t)
-	f.primary.list(t, on(idA))
+	f.primary.list(t, listed(idA))
 	f.reconcile(t)
 
 	peer := f.nodes.node(t, 0).dial(t)
@@ -237,16 +294,16 @@ func TestPeerTheTailnetDoesNotKnowIsRefused(t *testing.T) {
 	}
 }
 
-func TestTaggedDeviceAndNilAllowedLoginAreRefused(t *testing.T) {
+func TestTaggedDeviceAndEmptyAllowedLoginsAreRefused(t *testing.T) {
 	f := newFixtures(t)
 	f.wake(t)
-	nobody := on(idA)
-	nobody.AllowedLogin = nil
+	nobody := listed(idA)
+	nobody.AllowedLogins = []string{}
 	for name, test := range map[string]struct {
-		link  DesiredLink
+		link  Link
 		login string
 	}{
-		"a tagged device":                          {on(idA), ""},
+		"a tagged device":                          {listed(idA), ""},
 		"a login on a link that admits nobody":     {nobody, "bas@github"},
 		"a tagged device where nobody is admitted": {nobody, ""},
 	} {
@@ -267,7 +324,7 @@ func TestTaggedDeviceAndNilAllowedLoginAreRefused(t *testing.T) {
 func TestPipeCarriesBytesBothWays(t *testing.T) {
 	f := newFixtures(t)
 	worker := f.wake(t)
-	node := f.serving(t, on(idA))
+	node := f.serving(t, listed(idA))
 
 	peer := node.dial(t)
 	greeting := line(peer)
@@ -290,7 +347,7 @@ func TestPipeCarriesBytesBothWays(t *testing.T) {
 func TestPreBannerLinesWhileConnectIsSlow(t *testing.T) {
 	f := newFixtures(t)
 	f.wake(t)
-	node := f.serving(t, on(idA))
+	node := f.serving(t, listed(idA))
 	connects := f.holdConnects(t)
 
 	// The connect takes 7 s, in which 3 s pass twice.
@@ -316,7 +373,7 @@ func TestPreBannerLinesUntilTheWorkerAnswers(t *testing.T) {
 	f := newFixtures(t)
 	worker := f.wake(t)
 	greet := worker.holdGreetings(t)
-	node := f.serving(t, on(idA))
+	node := f.serving(t, listed(idA))
 
 	// The primary answers at once, and the worker takes the connection and says nothing for 6 s.
 	peer := node.dial(t)
@@ -371,7 +428,7 @@ func TestWorkerThatSaysNothingHasA10SecondDeadline(t *testing.T) {
 	worker := f.wake(t)
 	worker.holdGreetings(t)
 	deadlines := f.workerDeadlines(25 * time.Millisecond)
-	node := f.serving(t, on(idA))
+	node := f.serving(t, listed(idA))
 	peer := node.dial(t)
 	worker.conn(t)
 	select {
@@ -391,7 +448,7 @@ func TestWorkerDeadlineIsClearedBeforePiping(t *testing.T) {
 	f := newFixtures(t)
 	worker := f.wake(t)
 	deadlines := f.workerDeadlines(time.Second)
-	node := f.serving(t, on(idA))
+	node := f.serving(t, listed(idA))
 	peer := node.dial(t)
 	if got := line(peer); got != banner {
 		t.Fatalf("the peer read %q, want the worker's banner", got)
@@ -409,7 +466,7 @@ func TestWorkerDeadlineIsClearedBeforePiping(t *testing.T) {
 func TestPeerThatTakesNoPreBannerIsDropped(t *testing.T) {
 	f := newFixtures(t)
 	f.wake(t)
-	node := f.serving(t, on(idA))
+	f.serving(t, listed(idA))
 	connects := f.holdConnects(t)
 	// A peer that reads nothing: a line written to it is not taken.
 	ours, theirs := net.Pipe()
@@ -417,7 +474,7 @@ func TestPeerThatTakesNoPreBannerIsDropped(t *testing.T) {
 		ours.Close()
 		theirs.Close()
 	})
-	go f.gateway.carry(context.Background(), idA, node, ours)
+	go f.gateway.carry(context.Background(), idA, f.gateway.nodes[idA], ours)
 	await(t, connects.entered, "the connect call")
 
 	// The first line is due, and the peer never consumes it.
@@ -433,7 +490,7 @@ func TestPeerThatTakesNoPreBannerIsDropped(t *testing.T) {
 func TestFastConnectSendsNoPreBanner(t *testing.T) {
 	f := newFixtures(t)
 	f.wake(t)
-	node := f.serving(t, on(idA))
+	node := f.serving(t, listed(idA))
 
 	if got := line(node.dial(t)); got != banner {
 		t.Errorf("the peer first read %q, want the worker's %q", got, banner)
@@ -443,7 +500,7 @@ func TestFastConnectSendsNoPreBanner(t *testing.T) {
 func TestSeventhConnectInAMinuteIsClosedWithoutCallingPrimary(t *testing.T) {
 	f := newFixtures(t)
 	f.wake(t)
-	node := f.serving(t, on(idA))
+	node := f.serving(t, listed(idA))
 	// Six connections, 10 s apart.
 	for i := range 6 {
 		if i > 0 {
@@ -473,7 +530,7 @@ func TestSeventhConnectInAMinuteIsClosedWithoutCallingPrimary(t *testing.T) {
 
 func TestRefusalCloses(t *testing.T) {
 	f := newFixtures(t)
-	node := f.serving(t, on(idA))
+	node := f.serving(t, listed(idA))
 	f.primary.answer(connectRoute, http.StatusForbidden, `{"detail": "scope"}`)
 
 	peer := node.dial(t)
@@ -485,7 +542,7 @@ func TestRefusalCloses(t *testing.T) {
 
 func TestRetryAfter503CanConnect(t *testing.T) {
 	f := newFixtures(t)
-	node := f.serving(t, on(idA))
+	node := f.serving(t, listed(idA))
 	f.primary.answer(connectRoute, http.StatusServiceUnavailable, `{"detail": "Agent membership is not yet known; retry shortly."}`)
 	if !closed(t, node.dial(t)) || f.connects() != 1 {
 		t.Fatal("503 did not close the connection without an automatic retry")
@@ -503,7 +560,7 @@ func TestWorkerDialFailureCloses(t *testing.T) {
 	f := newFixtures(t)
 	worker := f.wake(t)
 	worker.listener.Close()
-	node := f.serving(t, on(idA))
+	node := f.serving(t, listed(idA))
 
 	peer := node.dial(t)
 
@@ -512,144 +569,10 @@ func TestWorkerDialFailureCloses(t *testing.T) {
 	}
 }
 
-func TestAccessRevisionChangeClosesAllOpenConnections(t *testing.T) {
-	f := newFixtures(t)
-	worker := f.wake(t)
-	link := on(idA)
-	link.AccessRevision = "old"
-	node := f.serving(t, link)
-	peer := node.dial(t)
-	if got := line(peer); got != banner {
-		t.Fatalf("the peer read %q, want the worker's banner", got)
-	}
-	theirs := worker.conn(t)
-	theirs.SetReadDeadline(time.Now().Add(5 * time.Second))
-	other := node.dial(t)
-	if got := line(other); got != banner {
-		t.Fatalf("the second peer read %q, want the worker's banner", got)
-	}
-
-	// A pass with the value the connection was opened under closes nothing.
-	f.reconcile(t)
-	fmt.Fprint(peer, "still here\r\n")
-	if got := line(theirs); got != "still here\r\n" {
-		t.Fatalf("the worker read %q after a pass that changed nothing, want what the peer wrote", got)
-	}
-
-	// Revisions are opaque: any change revokes the existing pipe.
-	link.AccessRevision = "new"
-	f.primary.list(t, link)
-	f.reconcile(t)
-
-	if !closed(t, peer) || !closed(t, other) {
-		t.Error("a pipe stayed open after the link's access revision changed")
-	}
-}
-
-func TestOmittedLinkRefusesNewAndClosesOpen(t *testing.T) {
-	f := newFixtures(t)
-	f.wake(t)
-	node := f.serving(t, on(idA))
-	open := node.dial(t)
-	if got := line(open); got != banner {
-		t.Fatalf("the peer read %q, want the worker's banner", got)
-	}
-	f.primary.list(t)
-
-	f.reconcile(t)
-	if !closed(t, open) {
-		t.Error("the omitted link still has an open pipe")
-	}
-	if late, err := net.Dial("tcp", node.listener.Addr().String()); err == nil {
-		late.Close()
-		t.Error("the omitted node still listens for connections")
-	}
-	if got := f.connects(); got != 1 {
-		t.Errorf("the primary got %d connect calls, want the 1 from before the link was omitted", got)
-	}
-
-	// An accept from the old node may reach carry only after the same ID is listed again.
-	f.primary.list(t, on(idA))
-	f.reconcile(t)
-	ours, theirs := net.Pipe()
-	defer theirs.Close()
-	go f.gateway.carry(context.Background(), idA, node, ours)
-	if !closed(t, theirs) || f.connects() != 1 {
-		t.Fatal("an accept from the stopped node reached the primary after the ID returned")
-	}
-}
-
-func TestConnectionRevokedWhileItsWorkerWakesNeverReachesTheWorker(t *testing.T) {
-	f := newFixtures(t)
-	worker := f.wake(t)
-	node := f.serving(t, on(idA))
-	connects := f.holdConnects(t)
-	peer := node.dial(t)
-	await(t, connects.entered, "the connect call")
-	f.primary.list(t)
-
-	f.reconcile(t)
-
-	await(t, connects.abandoned, "give up the connect call of a connection a pass closed")
-	connects.answer()
-	if !closed(t, peer) {
-		t.Error("the connection of a link omitted while its worker woke is open")
-	}
-	select {
-	case <-worker.accepted:
-		t.Error("the gateway reached the worker for a connection of an omitted link")
-	case <-time.After(100 * time.Millisecond):
-	}
-}
-
-func TestConnectionRevokedWhileItsWorkerIsDialledGivesTheDialUp(t *testing.T) {
-	f := newFixtures(t)
-	f.wake(t)
-	dials := f.holdDials(t)
-	node := f.serving(t, on(idA))
-	peer := node.dial(t)
-	// The primary has named the worker, and the gateway is reaching it.
-	await(t, dials.entered, "the dial of the worker")
-	f.primary.list(t)
-
-	f.reconcile(t)
-
-	await(t, dials.cancelled, "give up the dial of a connection a pass closed")
-	if !closed(t, peer) {
-		t.Error("the connection of a link omitted while its worker was dialled is open")
-	}
-}
-
-func TestRemovingLinkTakesNoNewConnection(t *testing.T) {
-	f := newFixtures(t)
-	f.wake(t)
-	// The removal waits for the node's logout, so its listener is still open.
-	loggingOut, _ := f.nodes.holdLogouts(t)
-	f.primary.list(t, on(idA))
-	f.run(t)
-	node := f.nodes.node(t, 0)
-	node.peerIs("bas@github", "laptop")
-	f.primary.list(t, removing(idA))
-	f.clock.advance(5 * time.Second)
-	await(t, loggingOut, "the logout of the removed link's node")
-
-	peer := node.dial(t)
-
-	if !closed(t, peer) {
-		t.Error("a link that is being removed took a new connection")
-	}
-	f.gateway.mu.Lock()
-	open := len(f.gateway.conns[idA])
-	f.gateway.mu.Unlock()
-	if open != 0 || f.connects() != 0 {
-		t.Errorf("the link being removed has %d connections after %d connect calls, want none", open, f.connects())
-	}
-}
-
 func TestSlowWakeAndGraceCountNoOpenConnection(t *testing.T) {
 	f := newFixtures(t)
 	f.wake(t)
-	node := f.serving(t, on(idA))
+	node := f.serving(t, listed(idA))
 	connects := f.holdConnects(t)
 	peer := node.dial(t)
 	await(t, connects.entered, "the connect call")
@@ -679,7 +602,7 @@ func TestSlowWakeAndGraceCountNoOpenConnection(t *testing.T) {
 func TestOpenConnectionsCountsOnlyAfter75Seconds(t *testing.T) {
 	f := newFixtures(t)
 	f.wake(t)
-	node := f.serving(t, on(idA))
+	node := f.serving(t, listed(idA))
 	peer := node.dial(t)
 	if got := line(peer); got != banner {
 		t.Fatalf("the peer read %q, want the worker's banner", got)

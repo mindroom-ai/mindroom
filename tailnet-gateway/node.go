@@ -70,13 +70,4 @@ func peer(who *apitype.WhoIsResponse) (login, node string) {
 	return login, node
 }
 
-func (n *tsnetNode) Logout(ctx context.Context) error {
-	// A node reopened for retirement must finish its initial register before logging out.
-	// Otherwise that register can overwrite the logout at the control server.
-	if _, err := n.server.Up(ctx); err != nil {
-		return errors.New("node did not become ready for logout")
-	}
-	return n.client.Logout(ctx)
-}
-
 func (n *tsnetNode) Close() error { return n.server.Close() }

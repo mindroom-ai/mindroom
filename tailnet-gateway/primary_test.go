@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	idA = "0123456789abcdef"
+	idA = "245114feb27b4c95"
 	idB = "fedcba9876543210"
 	idC = "0011223344556677"
 )
@@ -87,9 +87,9 @@ func (p *fakePrimary) answer(route string, code int, body string) {
 }
 
 // list sets what GET /links answers.
-func (p *fakePrimary) list(t *testing.T, links ...DesiredLink) {
+func (p *fakePrimary) list(t *testing.T, links ...Link) {
 	t.Helper()
-	body, err := json.Marshal(append([]DesiredLink{}, links...))
+	body, err := json.Marshal(append([]Link{}, links...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,8 +135,6 @@ func jsonValue(t *testing.T, raw []byte) any {
 	return value
 }
 
-func ptr(s string) *string { return &s }
-
 func TestPrimarySendsBearerAndParsesLinks(t *testing.T) {
 	primary := newFakePrimary(t)
 	primary.answer("GET /links", http.StatusOK, string(fixture(t, "links.json")))
@@ -150,10 +148,7 @@ func TestPrimarySendsBearerAndParsesLinks(t *testing.T) {
 	if len(sent) != 1 || sent[0].authorization != "Bearer tok" {
 		t.Fatalf("requests = %+v, want one with Authorization: Bearer tok", sent)
 	}
-	want := []DesiredLink{
-		{ID: idA, Hostname: "mind-bas", Desired: "on", AllowedLogin: ptr("bas@github"), AccessRevision: "1a062839ccac17c6513015892a582b5f9a84714524f8272a1e0e8261dc5de728"},
-		{ID: idB, Hostname: "code", Desired: "removing"},
-	}
+	want := []Link{{ID: idA, Hostname: "v1-default-shared-mine", AllowedLogins: []string{"alice@github", "bas@github"}}}
 	if !reflect.DeepEqual(links, want) {
 		t.Fatalf("links = %+v, want %+v", links, want)
 	}
@@ -190,10 +185,11 @@ func TestLinksAnswerThatIsNotAListIsAnError(t *testing.T) {
 func TestStatusBodyIsTheContract(t *testing.T) {
 	primary := newFakePrimary(t)
 	client := NewPrimary(primary.URL, "tok")
-	report := StatusReport{OpenConnections: map[string]int{idA: 2}, Removed: []string{idB}}
+	report := StatusReport{OpenConnections: map[string]int{idA: 2}}
 	if err := client.PostStatus(context.Background(), report); err != nil {
 		t.Fatal(err)
 	}
+	primary.answer("POST /status", http.StatusOK, `{}`)
 	if err := client.PostStatus(context.Background(), StatusReport{}); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +197,7 @@ func TestStatusBodyIsTheContract(t *testing.T) {
 	if len(sent) != 2 || sent[0].authorization != "Bearer tok" || sent[1].authorization != "Bearer tok" {
 		t.Fatalf("requests = %+v, want two with Authorization: Bearer tok", sent)
 	}
-	for i, want := range [][]byte{fixture(t, "status.json"), []byte(`{"open_connections": {}, "removed": []}`)} {
+	for i, want := range [][]byte{fixture(t, "status.json"), []byte(`{"open_connections": {}}`)} {
 		if !reflect.DeepEqual(jsonValue(t, sent[i].body), jsonValue(t, want)) {
 			t.Errorf("status body = %s, want %s", sent[i].body, want)
 		}
@@ -240,27 +236,22 @@ func TestConnectAnswersTheTarget(t *testing.T) {
 	}
 }
 
-func TestConnectRefusalCarriesDetail(t *testing.T) {
-	for _, refusal := range []struct {
-		answer fakeAnswer
-		detail string
-	}{
-		{fakeAnswer{http.StatusConflict, `{"detail":"scope"}`}, "scope"},
-		{fakeAnswer{http.StatusForbidden, `{"detail":"wrong login"}`}, "wrong login"},
-		{fakeAnswer{http.StatusNotFound, `{"detail":"No such link."}`}, "No such link."},
-		{fakeAnswer{http.StatusServiceUnavailable, `{"detail":"Agent membership is not yet known; retry shortly."}`}, "Agent membership is not yet known; retry shortly."},
-		// An answer that is not the contract's still refuses, and says with what status.
-		{fakeAnswer{http.StatusBadGateway, "<html>"}, "502 Bad Gateway"},
-		{fakeAnswer{http.StatusUnprocessableEntity, `{"detail":[{"type":"missing"}]}`}, "422 Unprocessable Entity"},
+func TestConnectRefusalCarriesStatusButNotResponseText(t *testing.T) {
+	for _, answer := range []fakeAnswer{
+		{http.StatusConflict, `{"detail":"scope"}`},
+		{http.StatusForbidden, `{"detail":"wrong login"}`},
+		{http.StatusNotFound, `{"detail":"No such link."}`},
+		{http.StatusServiceUnavailable, `{"detail":"Bearer gateway-secret"}`},
+		{http.StatusBadGateway, "<html>"},
 	} {
 		primary := newFakePrimary(t)
-		primary.answer("POST /links/"+idA+"/connect", refusal.answer.code, refusal.answer.body)
+		primary.answer("POST /links/"+idA+"/connect", answer.code, answer.body)
 
-		_, _, err := NewPrimary(primary.URL, "tok").Connect(context.Background(), idA, "bas@github", "laptop")
+		_, _, err := NewPrimary(primary.URL, "gateway-secret").Connect(context.Background(), idA, "bas@github", "laptop")
 
-		var refused *RefusedError
-		if !errors.As(err, &refused) || refused.Detail != refusal.detail || refused.StatusCode != refusal.answer.code {
-			t.Errorf("answer %+v: err = %v, want a RefusedError with status %d and detail %q", refusal.answer, err, refusal.answer.code, refusal.detail)
+		var refused RefusedError
+		if !errors.As(err, &refused) || int(refused) != answer.code || strings.Contains(err.Error(), "gateway-secret") {
+			t.Errorf("HTTP %d: err = %v, want only the refusal status", answer.code, err)
 		}
 	}
 }
@@ -283,7 +274,7 @@ func TestConnectAnswerWithoutATargetIsAnError(t *testing.T) {
 		host, port, err := NewPrimary(primary.URL, "tok").Connect(context.Background(), idA, "bas@github", "laptop")
 
 		// A malformed success is not a refusal.
-		var refused *RefusedError
+		var refused RefusedError
 		if err == nil || errors.As(err, &refused) {
 			t.Errorf("answer %s: target = %q:%d, err = %v, want an error that is no RefusedError", body, host, port, err)
 		}
@@ -296,7 +287,7 @@ func TestPrimaryThatDoesNotAnswerIsNotARefusal(t *testing.T) {
 
 	_, _, err := NewPrimary(primary.URL, "tok").Connect(context.Background(), idA, "bas@github", "laptop")
 
-	var refused *RefusedError
+	var refused RefusedError
 	if err == nil || errors.As(err, &refused) {
 		t.Fatalf("err = %v, want an error that is no RefusedError", err)
 	}

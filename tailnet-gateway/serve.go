@@ -1,12 +1,11 @@
 package main
 
 import (
-	"bytes"
+	"bufio"
 	"context"
-	"errors"
 	"io"
-	"log"
 	"net"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -18,163 +17,109 @@ const (
 	workerTimeout   = 10 * time.Second // dial and first bytes together
 )
 
-func (g *Gateway) serve(ctx context.Context, id string, node Node) {
+func (g *Gateway) serve(ctx context.Context, id string, node *linkNode) {
 	for {
 		conn, err := node.Listener().Accept()
 		if err != nil {
-			if !errors.Is(err, net.ErrClosed) {
-				log.Printf("link %s: accepting connections: %v", id, err)
-			}
 			return
 		}
 		go g.carry(ctx, id, node, conn)
 	}
 }
 
-func (g *Gateway) carry(ctx context.Context, id string, node Node, conn net.Conn) {
-	defer conn.Close()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	if !g.open(id, node, conn, cancel) {
-		return
+func (g *Gateway) admit(node *linkNode, conn net.Conn, login string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if login == "" || !slices.Contains(node.logins, login) {
+		return false
 	}
-	defer g.forget(id, conn)
-	stopClosing := context.AfterFunc(ctx, func() { conn.Close() })
-	defer stopClosing()
+	now := g.now()
+	for len(node.recent) > 0 && now.Sub(node.recent[0]) >= time.Minute {
+		node.recent = node.recent[1:]
+	}
+	if len(node.recent) >= connectsAMinute {
+		return false
+	}
+	node.recent = append(node.recent, now)
+	node.open[conn] = time.Time{}
+	return true
+}
 
-	whoCtx, whoDone := context.WithTimeout(ctx, nodeCallTimeout)
+func (g *Gateway) carry(ctx context.Context, id string, node *linkNode, conn net.Conn) {
+	defer conn.Close()
+	whoCtx, whoDone := context.WithTimeout(ctx, callTimeout)
 	login, peer, err := node.WhoIs(whoCtx, conn.RemoteAddr().String())
 	whoDone()
-	if err != nil {
-		log.Printf("link %s: closed a connection, its peer is unknown: %v", id, err)
+	if err != nil || !g.admit(node, conn, login) {
 		return
 	}
-	if refusal := g.admit(id, conn, login); refusal != "" {
-		log.Printf("link %s: closed a connection, %s", id, refusal)
-		return
-	}
-
-	woken := make(chan worker, 1)
-	go func() { woken <- g.wake(ctx, id, conn, login, peer) }()
-	// Only this goroutine writes pre-banners; none can follow the worker's bytes.
-	for tick := g.after(preBannerEvery); ; {
+	defer func() {
+		g.mu.Lock()
+		delete(node.open, conn)
+		g.mu.Unlock()
+	}()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(ctx, func() { conn.Close() })()
+	ready := make(chan worker, 1)
+	go func() { ready <- g.wake(ctx, id, login, peer) }()
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		case to := <-woken:
-			if to.sshd != nil && conn.SetWriteDeadline(time.Time{}) == nil {
-				pipe(conn, to)
+		case to := <-ready:
+			if to.Conn == nil || conn.SetWriteDeadline(time.Time{}) != nil {
+				return
 			}
+			g.mu.Lock()
+			node.open[conn] = to.reached
+			g.mu.Unlock()
+			go func() {
+				io.Copy(to, conn)
+				conn.Close()
+				to.Close()
+			}()
+			io.Copy(conn, to.reader)
 			return
-		case <-tick:
-			if err := conn.SetWriteDeadline(time.Now().Add(preBannerEvery)); err != nil {
+		case <-g.after(preBannerEvery):
+			if conn.SetWriteDeadline(time.Now().Add(preBannerEvery)) != nil {
 				return
 			}
 			if _, err := io.WriteString(conn, preBanner); err != nil {
 				return
 			}
-			tick = g.after(preBannerEvery)
 		}
 	}
 }
 
 type worker struct {
-	sshd  net.Conn
-	first []byte
+	net.Conn
+	reader  *bufio.Reader
+	reached time.Time
 }
 
-func pipe(conn net.Conn, to worker) {
-	// Either copy finishing ends the pipe. carry then closes the peer and cancels the worker.
-	done := make(chan struct{}, 2)
-	copyTo := func(dst io.Writer, src io.Reader) {
-		io.Copy(dst, src)
-		done <- struct{}{}
-	}
-	go copyTo(conn, io.MultiReader(bytes.NewReader(to.first), to.sshd))
-	go copyTo(to.sshd, conn)
-	<-done
-}
-
-func (g *Gateway) wake(ctx context.Context, id string, conn net.Conn, login, peer string) worker {
+func (g *Gateway) wake(ctx context.Context, id, login, peer string) worker {
 	host, port, err := g.primary.Connect(ctx, id, login, peer)
 	if err != nil {
-		if ctx.Err() == nil {
-			log.Printf("link %s: connect: %v", id, err)
-		}
-		return worker{}
-	}
-	if ctx.Err() != nil {
 		return worker{}
 	}
 	inTime, cancel := context.WithTimeout(ctx, workerTimeout)
 	defer cancel()
 	sshd, err := g.dial(inTime, net.JoinHostPort(host, strconv.Itoa(port)))
-	if err == nil {
-		// The caller may already have left; close this dial on cancellation even then.
-		context.AfterFunc(ctx, func() { sshd.Close() })
-		g.mu.Lock()
-		if kept := g.conns[id][conn]; kept != nil {
-			kept.reached = g.now()
-		}
-		g.mu.Unlock()
-		deadline, _ := inTime.Deadline()
-		if err = sshd.SetReadDeadline(deadline); err == nil {
-			first := make([]byte, 4096)
-			var n int
-			if n, err = sshd.Read(first); n > 0 {
-				if err = sshd.SetReadDeadline(time.Time{}); err == nil {
-					return worker{sshd, first[:n]}
-				}
-			}
-		}
+	if err != nil {
+		return worker{}
 	}
-	if ctx.Err() == nil {
-		log.Printf("link %s: worker did not answer: %v", id, err)
+	context.AfterFunc(ctx, func() { sshd.Close() })
+	to := worker{sshd, bufio.NewReader(sshd), g.now()}
+	deadline, _ := inTime.Deadline()
+	if sshd.SetReadDeadline(deadline) == nil {
+		if _, err := to.reader.Peek(1); err == nil && sshd.SetReadDeadline(time.Time{}) == nil {
+			return to
+		}
 	}
 	return worker{}
 }
 
 func dialWorker(ctx context.Context, address string) (net.Conn, error) {
-	var dialer net.Dialer
-	return dialer.DialContext(ctx, "tcp", address)
-}
-
-func (g *Gateway) open(id string, node Node, conn net.Conn, cancel context.CancelFunc) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if !g.now().Before(g.leaseUntil) || g.links[id].Desired != "on" || g.nodes[id] != node {
-		return false
-	}
-	if g.conns[id] == nil {
-		g.conns[id] = map[net.Conn]*held{}
-	}
-	g.conns[id][conn] = &held{cancel: cancel}
-	return true
-}
-
-func (g *Gateway) forget(id string, conn net.Conn) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	delete(g.conns[id], conn)
-}
-
-func (g *Gateway) admit(id string, conn net.Conn, login string) string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.conns[id][conn] == nil {
-		return "the link's connections were revoked"
-	}
-	if allowed := g.links[id].AllowedLogin; login == "" || allowed == nil || *allowed != login {
-		return "its peer is not the link's login"
-	}
-	now := g.now()
-	recent := g.connects[id]
-	for len(recent) > 0 && now.Sub(recent[0]) >= time.Minute {
-		recent = recent[1:]
-	}
-	if len(recent) >= connectsAMinute {
-		return "the link had its six connections of this minute"
-	}
-	g.connects[id] = append(recent, now)
-	return ""
+	return (&net.Dialer{}).DialContext(ctx, "tcp", address)
 }
