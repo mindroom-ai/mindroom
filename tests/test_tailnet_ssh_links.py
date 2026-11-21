@@ -381,20 +381,23 @@ async def test_a_worker_discovered_without_credentials_reuses_its_link(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Credentials gate advertisement, not the durable identity; reuse that identity even without a live worker."""
+    """Credential mappings do not gate enrollment, and the ID stays even without a live worker."""
     manager = _manager(monkeypatch, _handle(_key(BOB, "mind"), tmp_path / "ssh"))
-    assert await _rows(config, paths) == []
+    [initial] = await _rows(config, paths)
+    assert (initial["desired"], initial["allowed_login"]) == ("on", None)
     [link] = read_links(paths).links
     assert link.requester_id == BOB
     manager.handles.clear()
     config.tailnet_ssh.logins[BOB] = "bob@github"
     config.tailnet_ssh.authorized_keys[BOB] = [PUBLIC_KEY]
-    assert [row["id"] for row in await _rows(config, paths)] == [link.id]
+    [configured] = await _rows(config, paths)
+    assert (initial["id"], configured["id"], configured["allowed_login"]) == (link.id, link.id, "bob@github")
+    assert initial["access_revision"] != configured["access_revision"]
     assert read_links(paths).by_id(link.id) == link
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["disabled", "scope", "denied", "login", "keys"])
+@pytest.mark.parametrize("reason", ["disabled", "scope", "denied"])
 async def test_ineligible_links_are_omitted_then_reused(config: Config, paths: RuntimePaths, reason: str) -> None:
     """A temporary eligibility loss does not retire or rename an asleep worker's link."""
     link = _link()
@@ -404,12 +407,8 @@ async def test_ineligible_links_are_omitted_then_reused(config: Config, paths: R
         changed.agents["mine"].tailnet_ssh = False
     elif reason == "scope":
         changed.agents["mine"].worker_scope = "user"
-    elif reason == "denied":
-        changed.agents["mine"].access.users = [BOB]
-    elif reason == "login":
-        changed.tailnet_ssh.logins.clear()
     else:
-        changed.tailnet_ssh.authorized_keys.clear()
+        changed.agents["mine"].access.users = [BOB]
     assert await _rows(changed, paths) == []
     assert read_links(paths).retiring_ids == set()
     assert [row["id"] for row in await _rows(config, paths)] == [link.id]
@@ -523,7 +522,7 @@ async def test_retirement_retries_before_ack_and_stops_only_its_own_worker(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("trigger", ["keys", "login", "scope", "disabled"])
-async def test_omission_clears_running_projection_and_stops_sshd(
+async def test_revocation_clears_running_projection_and_stops_sshd(
     config: Config,
     paths: RuntimePaths,
     tmp_path: Path,
@@ -536,6 +535,7 @@ async def test_omission_clears_running_projection_and_stops_sshd(
     _store(paths, link)
     _projected_keys(tmp_path / "ssh", link)
     _manager(monkeypatch, fake_runner.handle(_link_key(link), tmp_path / "ssh"))
+    [before] = await _rows(config, paths)
     if trigger == "keys":
         config.tailnet_ssh.authorized_keys.clear()
     elif trigger == "login":
@@ -544,7 +544,14 @@ async def test_omission_clears_running_projection_and_stops_sshd(
         config.agents["mine"].worker_scope = "user"
     else:
         config.agents["mine"].tailnet_ssh = False
-    assert await _rows(config, paths) == []
+    rows = await _rows(config, paths)
+    if trigger in ("keys", "login"):
+        [row] = rows
+        assert (row["desired"], row["id"]) == ("on", link.id)
+        assert row["access_revision"] != before["access_revision"]
+        assert row["allowed_login"] == (None if trigger == "login" else "alice@github")
+    else:
+        assert rows == []
     assert (tmp_path / "ssh" / "authorized_keys").read_text() == ""
     assert read_links(paths).by_id(link.id) == link
     await asyncio.gather(*links._STOPPING)
@@ -570,7 +577,8 @@ async def test_stops_run_together_and_apart_from_the_caller(
     _manager(monkeypatch, *handles)
     fake_runner.release.clear()
     fake_runner.status = 503
-    config.tailnet_ssh.logins.clear()
+    for link in (one, two):
+        config.agents[link.agent_name].tailnet_ssh = False
     with capture_logs() as logs:
         try:
             async with asyncio.timeout(5):
@@ -921,7 +929,8 @@ async def test_key_revocation_serializes_with_projection_write(
     finally:
         release.set()
         await connecting
-    assert await reconcile == []
+    [row] = await reconcile
+    assert row["desired"] == "on"
     assert (tmp_path / "ssh" / "authorized_keys").read_text() == ""
     await asyncio.gather(*links._STOPPING)
     assert fake_runner.posts == [_STOP]

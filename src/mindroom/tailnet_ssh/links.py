@@ -178,20 +178,24 @@ def _reconcile(
                 book.retiring_ids.add(link.id)
             retiring = link.id in book.retiring_ids
             login = config.tailnet_ssh.logins.get(requester, "")
-            keys = signin_keys(config, requester) if not retiring and login.strip() and denied is None else {}
+            eligible = not retiring and denied is None
+            allowed_login = login if eligible and login.strip() else None
+            keys = signin_keys(config, requester) if eligible else {}
             try:
-                _sync_keys(link, keys, handles.get(key), cleared)
+                _sync_keys(link, keys if allowed_login else {}, handles.get(key), cleared)
             except OSError as error:
                 logger.warning("tailnet_ssh_projection_failed", link_id=link.id, error=str(error))
                 continue
-            if keys or (retiring and listed is not None):
-                revision = hashlib.sha256(json.dumps([login, sorted(keys)]).encode()).hexdigest() if keys else ""
+            if eligible or (retiring and listed is not None):
+                revision = (
+                    hashlib.sha256(json.dumps([allowed_login, sorted(keys)]).encode()).hexdigest() if eligible else ""
+                )
                 rows.append(
                     {
                         "id": link.id,
                         "hostname": link.hostname,
-                        "desired": "on" if keys else "removing",
-                        "allowed_login": login if keys else None,
+                        "desired": "on" if eligible else "removing",
+                        "allowed_login": allowed_login,
                         "access_revision": revision,
                     },
                 )
