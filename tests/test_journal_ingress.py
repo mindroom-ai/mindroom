@@ -4635,15 +4635,24 @@ class TestStoreFailuresBelongToTheLane:
             _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
-    async def test_a_read_that_fails_before_the_handler_is_retried(
+    @pytest.mark.parametrize(
+        ("failure", "attempted"),
+        [({"fail_is_pending": {"$m"}}, ["$m"]), ({"fail_settle": {"$m"}}, ["$m", "$m"])],
+        ids=["read-before-the-handler", "settlement"],
+    )
+    async def test_a_store_call_that_fails_once_is_retried(
         self,
         alice: PrincipalStore,
+        failure: dict[str, set[str]],
+        attempted: list[str],
     ) -> None:
-        """Outside the lane's failure, this faults the task and nothing looks again.
+        """A lane must record failed store calls and schedule its own retries.
 
-        No room is recorded as failed, so no retry is scheduled, and nothing
-        else will wake the pump for a room that is quiet by definition -- the
-        event that would have woken it is the one still sitting there.
+        A failed read leaves the source pending without running its handler;
+        the quiet room has no other work to wake it. A settlement that never
+        committed still leaves the source owed. If the lane faults instead of
+        recording that failure, its exception goes unretrieved and unrelated
+        work can wake it to answer the same source again.
         """
         attempts: list[str] = []
 
@@ -4652,7 +4661,7 @@ class TestStoreFailuresBelongToTheLane:
             return True
 
         await self._admit(alice, text_event("$m"))
-        store = _FlakyReplayView(alice, fail_is_pending={"$m"})
+        store = _FlakyReplayView(alice, **failure)
         worker = PendingEventWorker(store=cast("Any", store), handle=handle)
         worker._retry_delay_seconds = 0.01
         worker.start()
@@ -4662,37 +4671,7 @@ class TestStoreFailuresBelongToTheLane:
         finally:
             await worker.stop()
 
-        assert attempts == ["$m"]
-
-    async def test_a_settlement_that_fails_is_retried_rather_than_abandoned(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """A settlement that never committed leaves the event owed, so say so.
-
-        Faulting the lane instead loses the failure twice over: the exception
-        is never retrieved and the room is never marked, so the next thing to
-        wake the pump is some unrelated event -- and by then the handler runs
-        again against a source it already answered.
-        """
-        attempts: list[str] = []
-
-        async def handle(event: JournalEvent) -> bool:
-            attempts.append(event.event_id)
-            return True
-
-        await self._admit(alice, text_event("$m"))
-        store = _FlakyReplayView(alice, fail_settle={"$m"})
-        worker = PendingEventWorker(store=cast("Any", store), handle=handle)
-        worker._retry_delay_seconds = 0.01
-        worker.start()
-
-        try:
-            await _eventually_async(lambda: alice.pending(), seconds=10)
-        finally:
-            await worker.stop()
-
-        assert attempts == ["$m", "$m"]
+        assert attempts == attempted
 
 
 class TestRecoveryDoesNotReenterALiveTurn:
