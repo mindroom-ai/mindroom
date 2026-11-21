@@ -36,16 +36,22 @@ AUTO_RESUME_REASONS = frozenset(
 )
 
 
+_JOB_ENDED = "The run's job ended before its next attempt started."
+
+
 async def recover_runs(
     engine: WorkflowEngine,
     access: Callable[[WorkflowRun], ResumeAccess],
     live_jobs: Collection[str],
+    waiting_jobs: Collection[str] = (),
 ) -> list[str]:
     """Settle the runs whose attempts ended and return the runs that got their next attempt.
 
     Called after the script runtime recorded which attempts ended, with the IDs of the jobs the job runtime holds
     unfinished. Every admitted run goes on under its saved owner, as *access* answers for it; its job only receives
     the report. A run whose job has ended was stopped with it, and an intent whose job was never admitted is deleted.
+    A job of *waiting_jobs* was stopped by a restart and is not continued yet: its run is left alone until the job
+    runtime granted the job in full and can cancel the run through it, and the continuation then goes on with it.
     """
 
     def access_of(run: WorkflowRun) -> ResumeAccess:
@@ -53,11 +59,17 @@ async def recover_runs(
         if run.job_id is None:
             # A call that waits for its run itself launches what it reserved in this process.
             return None if first and run.created_at >= engine.started_at else access(run)
+        if run.job_id in waiting_jobs:
+            return "pending"
         # A first attempt is its job's to launch.
         return None if first or run.job_id not in live_jobs else access(run)
 
     for run in await asyncio.to_thread(engine.store.list_runs, include_finished=False):
-        intent = run.state is WorkflowRunState.STARTING and run.attempt == 0 and run.created_at < engine.started_at
-        if intent and run.job_id is not None and run.job_id not in live_jobs:
+        if run.state is not WorkflowRunState.STARTING or run.job_id is None or run.job_id in live_jobs:
+            continue
+        if run.attempt:
+            # Nothing will start the attempt it waits for, and nothing else ends a run with no process.
+            await engine.cancel(run.run_id, reason=_JOB_ENDED)
+        elif run.created_at < engine.started_at:
             await asyncio.to_thread(engine.store.delete_intent, run.run_id)
     return await engine.reconcile(access_of)

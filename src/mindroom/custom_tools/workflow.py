@@ -388,21 +388,27 @@ def _run_job(
 async def continued_workflow_job(job: BackgroundJob) -> JobSpec:
     """Return what the job of a workflow run goes on as after a restart stopped it.
 
-    Called in the tool context of the job's conversation. The job waits for its run again: a run that never got an
-    attempt gets its first one here, one the restart interrupted gets its next one from the engine's pass, and one
-    that has ended ends the job with its report. A run that is gone raises, which ends the job.
+    Called in the tool context of the job's conversation, once the job runtime granted the job again. The job waits
+    for its run again and can cancel it, so the run's first or next attempt starts here, or in the engine's next pass
+    when the old attempt's end is not recorded yet. A run that has ended ends the job with its report, and one that
+    is gone raises, which ends the job.
     """
     engine, context = _runtime()
     run = engine.store.get_run(str(job.adapter.get("workflow")))
     limits = workflow_limits(context.config, run.agent_name)
-    return _run_job(engine, run, job.job_id, partial(engine.launch, run.run_id, context, limits))
+    return _run_job(engine, run, job.job_id, partial(engine.go_on, run.run_id, context, limits))
 
 
-def unfinished_workflow_jobs(runtime_paths: RuntimePaths) -> frozenset[str]:
-    """Return the IDs of the workflow jobs the job runtime holds unfinished: the runs that still have a receiver."""
+def unfinished_workflow_jobs(runtime_paths: RuntimePaths) -> tuple[frozenset[str], frozenset[str]]:
+    """Return the IDs of the workflow jobs the job runtime holds unfinished, and of those a restart stopped that wait.
+
+    A job that waits has not been granted again and cannot cancel its run yet; `continued_workflow_job` goes on with it.
+    """
     runtime = get_background_runtime(runtime_paths)
     jobs = runtime.retained_jobs() if runtime is not None else ()
-    return frozenset(job.job_id for job in jobs if job.kind == "workflow" and job.status not in TERMINAL_STATUSES)
+    waiting = runtime.awaiting_continuation() if runtime is not None else ()
+    unfinished = (job.job_id for job in jobs if job.kind == "workflow" and job.status not in TERMINAL_STATUSES)
+    return frozenset(unfinished), frozenset(job.job_id for job in waiting)
 
 
 def workflow_limits(config: Config, agent_name: str) -> WorkflowLimits:

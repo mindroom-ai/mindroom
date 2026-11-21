@@ -52,6 +52,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workflow_runs.engine import WorkflowEngine, WorkflowLimits
 from mindroom.workflow_runs.models import (
+    TERMINAL_RUN_STATES,
     NodeReceipt,
     NodeRequest,
     WorkflowNode,
@@ -316,7 +317,7 @@ class _StackResolver:
         self.hold_approvals: asyncio.Event | None = None
         self.decision = ToolApprovalDecision(approved=True)
 
-    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool | None:
+    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None, **_options: object) -> bool | None:
         del run, config
         return True
 
@@ -725,10 +726,26 @@ class WorkflowStack:
         await self._retire_attempts(RUNTIME_RESTARTED)
         return await self.maintain()
 
+    async def next_primary(self) -> None:
+        """Run a starting primary's passes for the run of a job: the workflow pass, then the job coordinator's.
+
+        The workflow pass leaves a run whose job waits to be continued; the continued job goes on with the run, and
+        this returns once the run names its next attempt or has ended.
+        """
+        assert await self.recover() == []
+        old = self.store.get_run(self.run_id).script_run_id
+        await self.continue_jobs()
+
+        def moved_on() -> bool:
+            run = self.store.get_run(self.run_id)
+            return run.script_run_id != old or run.state in TERMINAL_RUN_STATES
+
+        await self.until(moved_on)
+
     async def maintain(self) -> list[str]:
         """Run the workflow pass that follows each pass of the script runtime."""
         jobs = unfinished_workflow_jobs(self.context.runtime_paths)
-        return await recover_runs(self.engine, self._owner_access, jobs)
+        return await recover_runs(self.engine, self._owner_access, *jobs)
 
     async def continue_jobs(self) -> None:
         """Run the job coordinator's pass that continues the jobs a restart stopped, with the owner's access granted."""

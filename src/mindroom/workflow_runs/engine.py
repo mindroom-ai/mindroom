@@ -183,7 +183,9 @@ class WorkflowEngine:
                 # A reserved run gets one attempt from one launch; a run that was launched or has ended gets none,
                 # and a stopping engine starts none.
                 return run
-            # An attempt the engine starts on its own counts toward the idle limit once the run names it.
+            # An attempt after the first that the engine starts on its own counts toward the idle limit, once the run
+            # names it.
+            automatic = automatic and run.attempt > 0
             idle = automatic and run.idle_resumes >= _MAX_IDLE_RESUMES
             attempt, refusal = None, _IDLE.format(attempts=_MAX_IDLE_RESUMES)
             if not idle:
@@ -248,7 +250,8 @@ class WorkflowEngine:
         if run.state in TERMINAL_RUN_STATES:
             return run
         outcome: tuple[WorkflowRunState, str | None] = (state, reason)
-        if run.script_run_id is not None:
+        # A run that waits for its next attempt has no process: how its last one ended says nothing about this stop.
+        if run.script_run_id is not None and run.state is not WorkflowRunState.STARTING:
             await self.scripts.revoke(run.script_run_id, reason=reason)
             attempt = await self.scripts.reconcile_durable(run_id=run.script_run_id)
             if attempt.state in TERMINAL_SCRIPT_RUN_STATES:
@@ -373,8 +376,15 @@ class WorkflowEngine:
                 logger.exception("workflow_run_reconcile_failed", run_id=run.run_id)
         return resumed
 
+    async def go_on(self, run_id: str, context: ToolRuntimeContext, limits: WorkflowLimits) -> None:
+        """Start the attempt *run_id* waits for, for the job that was just continued and can cancel the run now."""
+        await self._reconcile_run(self.store.get_run(run_id), (context, limits))
+
     async def _reconcile_run(self, run: WorkflowRun, access: ResumeAccess) -> bool:
         """End *run* if its attempt has ended, or start its next attempt; return whether one started."""
+        if access == "pending":
+            # Nothing is decided before the owner's access is: the run stays as the interruption left it.
+            return False
         if run.state is WorkflowRunState.STARTING:
             if access is None or run.run_id in self._launching.values():
                 # Being launched, or its own call or job's to launch.
@@ -399,7 +409,7 @@ class WorkflowEngine:
 
     async def _relaunch(self, run: WorkflowRun, access: ResumeAccess) -> bool:
         """Start the next attempt of an interrupted run that waits for one, as *access* allows; return whether it started."""
-        if access is None or access == "pending" or run.state is not WorkflowRunState.STARTING:
+        if access is None or run.state is not WorkflowRunState.STARTING:
             return False
         if isinstance(access, str):
             await self._end_run(run, WorkflowRunState.INTERRUPTED, _NO_ACCESS)

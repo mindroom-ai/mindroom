@@ -190,8 +190,7 @@ async def test_real_run_killed_after_the_receipt_resumes_writes_once_and_reports
     """The acceptance test with a real script process, receipt saved: one write, the node reused, one report."""
     handle, first = await _kill_at(local_stack, tmp_path, "before_settle", monkeypatch)
 
-    assert await local_stack.recover() == [local_stack.run_id]
-    await local_stack.continue_jobs()
+    await local_stack.next_primary()
     job = await _ended_job(local_stack, handle["job_id"])
 
     run, [node] = local_stack.engine.status(local_stack.run_id)
@@ -216,8 +215,7 @@ async def test_real_run_killed_before_the_receipt_is_indeterminate_and_writes_on
     """
     handle, _ = await _kill_at(local_stack, tmp_path, "before_receipt", monkeypatch)
 
-    assert await local_stack.recover() == [local_stack.run_id]
-    await local_stack.continue_jobs()
+    await local_stack.next_primary()
     job = await _ended_job(local_stack, handle["job_id"])
 
     run, [node] = local_stack.engine.status(local_stack.run_id)

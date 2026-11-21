@@ -13,7 +13,7 @@ import threading
 from dataclasses import asdict, replace
 from functools import partial
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import pytest_asyncio
@@ -66,6 +66,7 @@ if TYPE_CHECKING:
 
     from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, ToolEnvironmentContext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.workflow_runs.models import WorkflowRun
 
 SCRIPT = "def main(args):\n    return 'counted'\n"
 _UNKNOWN = "No workflow run {} in your runs."
@@ -922,11 +923,24 @@ async def test_a_shutdown_while_the_first_attempt_starts_leaves_the_run_starting
 
 
 @pytest.mark.asyncio
-async def test_a_start_after_the_engine_stopped_launches_nothing_and_stays_admitted(stack: WorkflowStack) -> None:
+async def test_a_start_after_the_engine_stopped_launches_nothing_and_stays_admitted(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A start admitted between the engine's stop and the job runtime's launches nothing, and its run stays to start."""
     await stack.engine.close()
+    answered, launch = asyncio.Event(), stack.engine.launch
+
+    async def seen(*args: Any, **options: Any) -> WorkflowRun:  # noqa: ANN401
+        try:
+            return await launch(*args, **options)
+        finally:
+            answered.set()
+
+    monkeypatch.setattr(stack.engine, "launch", seen)
 
     handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    await answered.wait()
     await stack.jobs.quiesce()
     job = await _ended_job(stack, handle["job_id"])
 

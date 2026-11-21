@@ -126,8 +126,10 @@ The run's job stays `running`, and within about a minute of the interruption, or
 A write that finished before the interruption is not made again, and neither is a write whose end is unknown: that call is `indeterminate`, as described above.
 A run whose script had already returned its report ends with that report and gets no new attempt.
 
-- The next attempt starts once the requester's access to the agent is confirmed; while MindRoom cannot check it yet, the run waits.
+- The next attempt starts once the requester's access to the agent is confirmed; while MindRoom cannot check it yet, for example because room membership is still loading after a start, the run waits as the interruption left it.
   When the access is gone, the run ends `interrupted` with `The requester no longer has access.`
+- After a restart of MindRoom, the run's job is first checked again as every background job that a restart stopped is, and only then does the next attempt start.
+  A Stop or a cancel in between ends the run and starts nothing.
 - After 5 attempts in a row that finish no call, the run ends `interrupted` with `Stopped resuming after 5 attempts that finished nothing. Fix the script and call resume_workflow.`
 - A run with no job, which is one that `start_workflow` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.
   When the call that waited for it is gone, nothing delivers the report; `get_workflow(run_id)` returns it in `result`.

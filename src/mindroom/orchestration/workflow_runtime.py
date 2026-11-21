@@ -47,7 +47,7 @@ class WorkflowRuntimeLifecycle:
         try:
             async with asyncio.timeout(self.script_runtime.pass_timeout_seconds / 2):
                 jobs = unfinished_workflow_jobs(self.script_runtime.runtime_paths)
-                await recover_runs(self.engine, self._access, jobs)
+                await recover_runs(self.engine, self._access, *jobs)
                 cutoff = datetime.now(UTC) - timedelta(seconds=self.script_runtime.retention_seconds)
                 await asyncio.to_thread(self.engine.store.prune, utc_timestamp(cutoff))
         except Exception:
@@ -57,12 +57,12 @@ class WorkflowRuntimeLifecycle:
         """Return what the next attempt of a run starts with, from its saved owner's live runtime.
 
         The run saves its owner as its attempts do, so the script runtime's resolver answers for it, also before a
-        first attempt: access that cannot be checked while the owner's bot is not running is pending, and access
-        that is gone is revoked.
+        first attempt: access that cannot be checked yet, while the owner's bot is not running or room membership
+        is still loading, is pending, and access that is gone is revoked.
         """
         resolver, owner = self.script_runtime.resolver, cast("ScriptRunRecord", run)
         try:
-            authorized = resolver.is_authorized(owner)
+            authorized = resolver.is_authorized(owner, require_resolved_membership=True)
             if authorized is None:
                 return "pending"
             if authorized:
