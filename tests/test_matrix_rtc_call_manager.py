@@ -3865,7 +3865,13 @@ def _prepared(options: CallVoiceAgentOptions) -> Callable[[], Coroutine[None, No
     return prepare_agent
 
 
-def _session(client: AsyncMock, bridge: FakeBridge, transport: FakeKeyTransport, clock: list[int]) -> CallSession:
+def _session(
+    client: AsyncMock,
+    bridge: FakeBridge,
+    transport: FakeKeyTransport,
+    clock: list[int],
+    monotonic: list[int] | None = None,
+) -> CallSession:
     async def fetch_grant() -> SfuGrant:
         return GRANT
 
@@ -3882,6 +3888,7 @@ def _session(client: AsyncMock, bridge: FakeBridge, transport: FakeKeyTransport,
             livekit_service_url=SERVICE_URL,
             start_is_allowed=lambda: True,
             clock_ms=lambda: clock[0],
+            monotonic_ms=lambda: (clock if monotonic is None else monotonic)[0],
         ),
     )
 
@@ -6017,6 +6024,41 @@ async def test_rapid_roster_changes_preserve_key_activation_deadline(
         await real_sleep(0)
 
     assert [key_index for _, _, key_index in bridge.frame_keys] == [0, 2]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_wall_clock_jump_cannot_shorten_the_rotation_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The activation deadline runs on monotonic time, so a forward clock correction changes nothing."""
+    release_delays = asyncio.Event()
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def controlled_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await release_delays.wait()
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", controlled_sleep)
+    wall = [0]
+    monotonic = [0]
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, FakeKeyTransport(), wall, monotonic)
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+    charlie = _member("@charlie:example.org", "CHARLIEDEV")
+
+    session._members = [alice]
+    await session._distribute_keys()
+    wall[0] = monotonic[0] = 10_001
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    wall[0] += 2_000
+    session._members = [alice, bob, charlie]
+    await session._distribute_keys()
+    await real_sleep(0)
+
+    assert [key_index for _, _, key_index in bridge.frame_keys] == [0]
+    assert delays == [1.0, 1.0]
     await session.stop()
 
 

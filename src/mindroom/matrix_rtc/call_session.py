@@ -123,6 +123,8 @@ class CallSessionDeps:
     livekit_service_url: str
     start_is_allowed: Callable[[], bool]
     clock_ms: Callable[[], int] = lambda: int(time.time() * 1000)
+    #: Frame-key timing (grace and activation delay); a wall-clock jump cannot shorten it.
+    monotonic_ms: Callable[[], int] = lambda: int(time.monotonic() * 1000)
     #: Awaited once after the session fully stopped (transcript finalization).
     on_stopped: Callable[[], Coroutine[None, None, None]] | None = None
     #: Publish a safe, actionable failure notice into the Matrix room.
@@ -370,7 +372,7 @@ class CallSession:
             if self._stopped:
                 return
             members = list(self._members)
-            distribution = self._key_manager.update_memberships(members, self.deps.clock_ms())
+            distribution = self._key_manager.update_memberships(members, self.deps.monotonic_ms())
             if distribution is None:
                 return
             delivered: list[CallMember] = []
@@ -382,7 +384,7 @@ class CallSession:
                     key_index=distribution.key_index,
                     targets=list(distribution.targets),
                 )
-            self._key_manager.mark_distributed(distribution, tuple(delivered), now_ms=self.deps.clock_ms())
+            self._key_manager.mark_distributed(distribution, tuple(delivered), now_ms=self.deps.monotonic_ms())
             delivered_members = set(delivered)
             undelivered_device_ids = frozenset(
                 target.device_id for target in distribution.targets if target not in delivered_members
