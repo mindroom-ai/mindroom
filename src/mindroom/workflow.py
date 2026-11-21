@@ -34,6 +34,7 @@ __all__ = [
     "ShellResult",
     "ToolError",
     "WorkflowError",
+    "agent",
     "log",
     "now",
     "phase",
@@ -56,6 +57,7 @@ _RAW_THREAD_CALL = (
     "Raw threads are not tracked, so resume could not match their calls."
 )
 _NO_MAIN = "Define def main(args): and return the report. MindRoom calls it."
+_NO_SCHEMA = "schema is not available yet in this MindRoom version."
 
 
 class WorkflowError(RuntimeError):
@@ -195,10 +197,11 @@ def _call(
     label: str | None = None,
     name: str | None = None,
     cached: bool = True,
+    timeout: float | None = None,
 ) -> object:
     """Run one node: submit it under the lane's next key, wait until it settles, return its result or raise."""
     lane = _current_lane()
-    meta = {"cached": cached, "phase": lane.phase, "label": label, "name": name}
+    meta = {"cached": cached, "phase": lane.phase, "label": label, "name": name, "timeout": timeout}
     gateway = _gateway()
     receipt = gateway.submit(_next_key(), kind, args, {key: value for key, value in meta.items() if value is not None})
     node_id = str(receipt["id"])
@@ -224,6 +227,58 @@ def _check_options(function: str, given: Iterable[str], allowed: frozenset[str])
         hint = f" Did you mean {guesses[0]}?" if guesses else ""
         msg = f"{function}() has no option '{option}'.{hint}"
         raise WorkflowError(msg)
+
+
+def agent(
+    prompt: str,
+    *,
+    schema: object = None,
+    name: str | None = None,
+    agent: str | None = None,
+    model: str | None = None,
+    system: str | None = None,
+    tools: list[str] | None = None,
+    skills: list[str] | None = None,
+    knowledge: list[str] | None = None,
+    profile: str | None = None,
+    minimal: bool = False,
+    timeout: float | None = None,
+    output_path: str | None = None,
+    dedicated_worker: bool = False,
+    resource_profile: str | None = None,
+    **unknown: object,
+) -> str:
+    """Run one agent turn and return its answer.
+
+    Returns text, or parsed JSON matching `schema` (a JSON Schema dict).
+    The agent is a fresh copy of the workflow's owner with all its tools, unless `agent` names another configured agent.
+    `system`, `tools`, `skills`, `knowledge` or `profile` (a `subagents/<profile>.md` file) shape a copy of the owner.
+    `model` is any configured model name, such as "haiku" or "opus@high".
+    `name` labels the node and is the address other agents message; it does not select an agent.
+    `output_path` also writes the answer to that workspace file; `dedicated_worker` and `resource_profile` are those of run_subagent.
+    Raises AgentError when the turn fails, is cancelled, is denied, or times out after `timeout` seconds.
+    """
+    _current_lane()
+    options: dict[str, object] = {
+        "name": name,
+        "agent": agent,
+        "model": model,
+        "system": system,
+        "tools": tools,
+        "skills": skills,
+        "knowledge": knowledge,
+        "profile": profile,
+        "minimal": minimal,
+        "output_path": output_path,
+        "dedicated_worker": dedicated_worker,
+        "resource_profile": resource_profile,
+    }
+    _check_options("agent", unknown, frozenset(options) | {"schema", "timeout"})
+    if schema is not None:
+        raise WorkflowError(_NO_SCHEMA)
+    # What the turn is, which a resume compares; how long this attempt waits for it is no part of that.
+    call = {"prompt": str(prompt), **{option: value for option, value in options.items() if value}}
+    return str(_call("agent", call, name=name, timeout=timeout))
 
 
 def shell(command: str, *, timeout: int = 3600, tail: int = 2000, cached: bool = True) -> ShellResult:

@@ -16,6 +16,8 @@ from mindroom.custom_tools.workflow import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.script_runs.models import utc_timestamp
+from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.workflow_runs.agent_nodes import AgentRuntime
 from mindroom.workflow_runs.engine import WorkflowEngine
 from mindroom.workflow_runs.recovery import recover_runs
 from mindroom.workflow_runs.store import WorkflowRunStore
@@ -40,6 +42,7 @@ class WorkflowRuntimeLifecycle:
     async def start(self) -> None:
         """Follow each pass of the script runtime, which records the attempts that ended."""
         self.engine.owner_access = self._access
+        self.engine.agents = self._agents
         self.script_runtime.after_reconcile = self._maintain
 
     async def _maintain(self) -> None:
@@ -61,6 +64,12 @@ class WorkflowRuntimeLifecycle:
                 await asyncio.to_thread(self.engine.store.prune, utc_timestamp(cutoff), undelivered)
         except Exception:
             logger.exception("workflow_maintenance_pass_failed")
+
+    def _agents(self) -> AgentRuntime | None:
+        """Return the job runtime agent turns run on with the live configuration, or None while either is missing."""
+        paths, config = self.script_runtime.runtime_paths, self.script_runtime.config_provider()
+        jobs = get_background_runtime(paths)
+        return None if jobs is None or config is None else AgentRuntime(jobs, config, paths)
 
     def _access(self, run: WorkflowRun) -> ResumeAccess:
         """Return what the next attempt of a run starts with, from its saved owner's live runtime.

@@ -558,7 +558,7 @@ def reload_stopped_child_result(child: DelegationChild, response: RunRecord) -> 
     A run a refused call marked that ended another way, as one cancelled while its command still ran, was not stopped.
     """
     reason = (response.metadata or {}).get(CONFIG_RELOAD_CALL) if response.status == RunStatus.completed else None
-    if reason is None or delegation_grant(child) == "dynamic_workflow":
+    if reason is None or delegation_grant(child) != "delegate":
         # A workflow participant cannot be continued outside its workflow.
         return reason
     resume = f'continue_subagent(subagent_id="{child.subagent_id}", message="continue")'

@@ -33,7 +33,7 @@ def _limit(name: str, label: str, default: float | None, minimum: float = 1) -> 
 @register_tool_with_metadata(
     name="workflow",
     display_name="Workflows",
-    description="Run a Python script that calls your tools in the background, and read, cancel or resume the run",
+    description="Run a Python script that runs agents and your tools in the background, and read, cancel or resume the run",
     docs_url="https://docs.mindroom.chat/tools/workflows/",
     category=ToolCategory.DEVELOPMENT,
     file_access=ToolFileAccess.NONE,
@@ -51,7 +51,12 @@ def _limit(name: str, label: str, default: float | None, minimum: float = 1) -> 
         _limit("max_concurrent_agents", "Maximum Concurrent Agents Per Run", None),
         _limit("large_run_notice_usd", "Large Run Notice (USD)", 10, minimum=0),
     ],
-    managed_init_args=(ToolManagedInitArg.RUNTIME_CONFIG,),
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_CONFIG,
+        ToolManagedInitArg.AGENT_NAME,
+        ToolManagedInitArg.CURRENT_ROOM_ID,
+        ToolManagedInitArg.RUNTIME_PATHS,
+    ),
     requires_room_context=True,
     function_names=("start_workflow", "get_workflow", "cancel_workflow", "resume_workflow"),
     workspace_writers=("start_workflow", "resume_workflow"),

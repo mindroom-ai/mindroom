@@ -152,14 +152,14 @@ async def test_malformed_requests_are_422_and_save_nothing(stack: WorkflowStack,
         json.dumps({**_NODE, "key": "first"}),
         json.dumps({**_NODE, "priority": 1}),
         json.dumps({**_NODE, "args": tool_args("counter", "append", line="a")})[:-2] + ', "n": NaN}}',
-        json.dumps({**_NODE, "kind": "agent"}),
+        json.dumps({**_NODE, "kind": "later"}),
         json.dumps({**_NODE, "args": {"toolkit": "counter"}}),
     ]
 
     answers = [await client.post("nodes", content=body) for body in bodies]
 
     assert [answer.status_code for answer in answers] == [422] * 5
-    assert "agent" in answers[3].json()["detail"]
+    assert "later" in answers[3].json()["detail"]
     assert stack.engine.status(stack.run_id)[1] == []
 
 

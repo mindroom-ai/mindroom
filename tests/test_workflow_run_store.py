@@ -752,7 +752,7 @@ def test_store_of_the_first_schema_gets_an_epoch_and_an_owner_for_each_run(
         for run_id, (origin, job) in owners.items():
             run = _run(run_id, origin_job_id=origin, job_id=job)
             values = {**store_module._row_values(run, store_module._RUN_JSON_FIELDS), "reservation_digest": ""}
-            del values["epoch"], values["owner"], values["claims_json"]
+            del values["epoch"], values["owner"], values["claims_json"], values["depth"]
             store_module._insert(connection, "INSERT INTO workflow_runs", values)
 
     store = WorkflowRunStore(path)

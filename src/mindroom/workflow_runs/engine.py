@@ -29,6 +29,8 @@ from mindroom.script_runs.models import (
     utc_timestamp,
 )
 from mindroom.script_runs.store import ScriptCallNotFoundError, ScriptRunNotFoundError, ScriptRunStoreError
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
+from mindroom.workflow_runs.agent_nodes import AgentNodeError, AgentRuntime, await_child, launch_child
 from mindroom.workflow_runs.faults import hold
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
@@ -56,6 +58,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _UNSETTLED_NODE_STATES = frozenset({WorkflowNodeState.QUEUED, WorkflowNodeState.RUNNING})
+_LIVE_NODE_STATES = _UNSETTLED_NODE_STATES | {WorkflowNodeState.WAITING}
 # The states in which a run's attempt may submit calls: a run that is starting names no attempt that may.
 _SERVED_RUN_STATES = frozenset({WorkflowRunState.RUNNING, WorkflowRunState.WAITING})
 _SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
@@ -79,6 +82,9 @@ _OUT_OF_TIME = "The run used its {hours:g} hours of working time. resume_workflo
 # How often a running run's working time is saved, so a primary that dies loses at most this much of the count.
 _CHARGE_SECONDS = 60.0
 _INTERRUPTED: dict[str, object] = {"kind": "interrupted", "message": "The call was interrupted before its tool ran."}
+_NO_AGENTS = "A workflow runs agents as background tool jobs. Set background_tool_jobs.enabled: true."
+_NAME_LABELS = 'name="{name}" only labels the node. Use agent="{name}" to run that agent.'
+_RUN_ENDED = "The run ended before the agent did."
 # How long a waiter sleeps before it reads the store again, with or without a wake.
 _RECHECK_SECONDS = 1.0
 # How long after its report a script's exit is looked for, before the script runtime's own pass finds it.
@@ -120,6 +126,8 @@ class WorkflowEngine:
         self._clock = clock
         # What the saved owner of a run may start an attempt with now; set by the runtime that knows the live bots.
         self.owner_access: Callable[[WorkflowRun], ResumeAccess] = lambda _run: "pending"
+        # What agent turns run on, None while there is no job runtime; set by the runtime that knows it.
+        self.agents: Callable[[], AgentRuntime | None] = lambda: None
         # The attempts this engine started, each with the epoch its run got when it began: all it may ever write
         # with. No other attempt is served: one an earlier primary left is a leftover process.
         self._launched: dict[str, int] = {}
@@ -498,7 +506,7 @@ class WorkflowEngine:
         async with self._condition(asked.run_id):
             return await self._admit_gated(self.store.get_run(asked.run_id), asked.epoch, attempt, request)
 
-    async def _admit_gated(  # noqa: C901
+    async def _admit_gated(  # noqa: C901, PLR0912, PLR0915
         self,
         run: WorkflowRun,
         epoch: int,
@@ -525,11 +533,14 @@ class WorkflowEngine:
         if saved is not None and action == "return":
             # A request the script sent twice never repeats work, not even failed work.
             return _receipt(saved)
-        if saved is not None and action == "reconcile":
-            # Left unsettled by an attempt that ended: its handle says how it ended, before any rule may run it again.
-            await asyncio.to_thread(self.settle_from_handle, saved, epoch)
-            saved = self.store.get_node(run.run_id, key)
-            action = decision(saved).action
+        if saved is not None and action != "return" and saved.state in _LIVE_NODE_STATES:
+            # Left live by an attempt that ended: its handle says how it ended, or that its job still runs, before
+            # any rule may run it again. The call that replaces a node whose job still runs stops that job.
+            live = await self._reconcile(run, saved, epoch)
+            left, saved = saved, self.store.get_node(run.run_id, key)
+            action = decision(saved, live=live).action
+            if live and action == "run":
+                await self._reconcile(run, left, epoch, stop=True)
         if saved is not None and action != "run":
             # Reused: the node is this attempt's now, and a fan-out whose items changed dirties what follows it.
             stamp: dict[str, object] = {"attempt": run.attempt, "stale": False}
@@ -542,6 +553,9 @@ class WorkflowEngine:
             if action == "raise_indeterminate":
                 # It may have run, so nothing is dispatched until a resume names it.
                 return replace(_receipt(saved), state=WorkflowNodeState.FAILED)
+            if action == "attach":
+                # The job an earlier attempt started still runs: this attempt waits for it, and starts none.
+                self._spawn(run.run_id, self._run_agent_node(run, saved, epoch, _timeout(meta)))
             return replace(_receipt(saved), cached=action == "hit")
         # The completed node this call replaces although no rule before it said so: the call itself changed, or it
         # runs on every resume.
@@ -577,6 +591,9 @@ class WorkflowEngine:
                 # A check that runs on every resume, also one whose arguments were edited, in a lane that was clean.
                 same_as = result_digest(await asyncio.to_thread(self.store.whole_result, previous))
             return await self._dispatch_tool(run, attempt, node, lanes, same_as)
+        if kind == "agent":
+            lanes.mark(key)
+            return await self._dispatch_agent(run, node, _timeout(meta))
         if kind == "value":
             node = replace(node, result=_value(request.args))
         elif kind != "group":
@@ -622,6 +639,126 @@ class WorkflowEngine:
         self._spawn(run.run_id, self._run_tool_node(node, run.epoch, grant, call, kept, lanes))
         return _receipt(node)
 
+    async def _dispatch_agent(self, run: WorkflowRun, node: WorkflowNode, timeout: float | None) -> NodeReceipt:  # noqa: ASYNC109
+        """Start the job of an agent node and wait for it as the engine's own task; a refusal is the node's end.
+
+        The turn starts in the live context of the run's owner, as an attempt does. While that cannot be answered
+        the request fails as a transport error does, which the script's SDK repeats.
+        """
+        access = self.owner_access(run)
+        if access == "pending":
+            raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
+        try:
+            if not isinstance(access, tuple) or (runtime := self.agents()) is None:
+                raise AgentNodeError(NO_ACCESS if access == "revoked" else _NO_AGENTS)  # noqa: TRY301
+            if node.name in access[0].current_config.agents and not node.request.get("agent"):
+                notice = _NAME_LABELS.format(name=node.name)
+                await asyncio.to_thread(self.store.append_log, run.run_id, run.epoch, notice)
+            node = await launch_child(access[0], run, node, run.epoch, store=self.store, jobs=runtime.jobs)
+        except AgentNodeError as exc:
+            # Nothing ran. The node is saved already when the job runtime refused the job it names.
+            end = {"state": WorkflowNodeState.FAILED, "error": {"kind": "refused", "message": str(exc)}}
+            settle = partial(self.store.settle_node, run.run_id, node.key, node.generation, run.epoch, **end)
+            if not await asyncio.to_thread(settle):
+                refused = replace(node, **end, ended_at=utc_timestamp())
+                await asyncio.to_thread(partial(self.store.put_node, refused, run.epoch, dirty_after=True))
+            return _receipt(cast("WorkflowNode", self.store.get_node(run.run_id, node.key)))
+        self._restate(run.run_id)
+        self._spawn(run.run_id, self._run_agent_node(run, node, run.epoch, timeout))
+        return _receipt(node)
+
+    async def _run_agent_node(self, run: WorkflowRun, node: WorkflowNode, epoch: int, timeout: float | None) -> None:  # noqa: ASYNC109
+        """Wait for the job of an agent node and settle the node as its turn ended, then wake the run's waiters."""
+        await self._settle_agent(run, node, epoch, timeout)
+        await self._notify(node.run_id)
+
+    async def _settle_agent(
+        self,
+        run: WorkflowRun,
+        node: WorkflowNode,
+        epoch: int,
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> None:
+        """Settle an agent node from its job, once that has ended, for the attempt that began with *epoch*.
+
+        The turn's usage and its answer are saved before the job's outcome is acknowledged, so a primary that dies
+        in between reads the same job again. A run that moved on meanwhile reads the job itself.
+        """
+        assert node.handle is not None
+        runtime = cast("AgentRuntime", self.agents())
+        try:
+            waits = partial(self._node_waits, node, epoch)
+            (kind, text), usage, claim = await await_child(run, node, runtime, on_waiting=waits, timeout=timeout)
+        except Exception as exc:
+            logger.exception("workflow_agent_outcome_unreadable", run_id=node.run_id, key=node.key)
+            (kind, text), usage, claim = ("failed", str(exc)), None, None
+        outcome: _Outcome = WorkflowNodeState.FAILED, None, {"kind": kind, "message": text}
+        if kind == "completed":
+            outcome = WorkflowNodeState.COMPLETED, text, None
+        elif kind in ("cancelled", "indeterminate"):
+            outcome = _indeterminate(node) if kind == "indeterminate" else (WorkflowNodeState.CANCELLED, *outcome[1:])
+        if usage is not None:
+            add = partial(self.store.add_usage, node.run_id, node.key, node.generation, 1, run.attempt, usage)
+            await asyncio.to_thread(add)
+        state, result, error = outcome
+        settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
+        with suppress(SupersededAttemptError):
+            await asyncio.to_thread(partial(settle, state=state, result=result, error=error))
+            if claim is not None:
+                await runtime.jobs.acknowledge_wait(node.handle.ref, claim)
+
+    async def _node_waits(self, node: WorkflowNode, epoch: int, on: str | None) -> None:
+        """Show a node as waiting for a person, for what *on* says, or as running again with None; its run follows."""
+        state = WorkflowNodeState.WAITING if on else WorkflowNodeState.RUNNING
+        stamp = partial(self.store.update_node, node.run_id, node.key, node.generation, epoch)
+        with suppress(SupersededAttemptError):
+            await asyncio.to_thread(partial(stamp, state=state, waiting_on=on))
+        await self._notify(node.run_id)
+
+    async def _reconcile(self, run: WorkflowRun, node: WorkflowNode, epoch: int, *, stop: bool = False) -> bool:
+        """Settle a node that an ended attempt left live from what its handle names; return whether its job still runs.
+
+        A job that still runs is left as it is, for the attempt that reaches its node to wait for. With *stop* it is
+        cancelled and its node with it: the run has ended, or another call replaces the node. The caller holds the
+        run's lock.
+        """
+        assert node.handle is not None
+        if node.handle.kind != "job":
+            await asyncio.to_thread(self.settle_from_handle, node, epoch)
+            return False
+        runtime, job_id = self.agents(), node.handle.ref
+        if runtime is None and not stop:
+            # Nobody can say how the job stands: the script's SDK asks again.
+            raise ScriptRuntimeUnavailableError(_NO_AGENTS)
+        jobs = runtime.jobs.retained_jobs() if runtime is not None else ()
+        if runtime is None or any(job.job_id == job_id and job.status not in TERMINAL_STATUSES for job in jobs):
+            if not stop:
+                return True
+            if runtime is not None:
+                await runtime.jobs.request_cancel(job_id)
+            cancelled = {"state": WorkflowNodeState.CANCELLED, "error": {"kind": "cancelled", "message": _RUN_ENDED}}
+            settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch, **cancelled)
+            await asyncio.to_thread(settle)
+        else:
+            await self._settle_agent(run, node, epoch)
+        return False
+
+    def _restate(self, run_id: str) -> None:
+        """Show the run as waiting while a call of it waits for a person and none runs, and as running otherwise.
+
+        Time spent waiting is no working time, so the change charges what the run used up to it. The caller holds
+        the run's lock.
+        """
+        with suppress(SupersededAttemptError, WorkflowRunStoreError):
+            run = self.store.get_run(run_id)
+            if run.state in _SERVED_RUN_STATES:
+                states = self.store.node_states(run_id)
+                waits = WorkflowNodeState.WAITING in states and not states & _UNSETTLED_NODE_STATES
+                state = WorkflowRunState.WAITING if waits else WorkflowRunState.RUNNING
+                if state is not run.state:
+                    changes = {"state": state, **self._time_left(run)}
+                    partial(self.store.update_run, run_id, run.epoch, when=_SERVED_RUN_STATES)(**changes)
+
     async def node_receipt(self, attempt: ScriptRunRecord, node_id: str, *, wait: float) -> NodeReceipt:
         """Return a node's receipt, held up to *wait* seconds until the node has ended, while the attempt is served."""
         loop = asyncio.get_running_loop()
@@ -632,7 +769,7 @@ class WorkflowEngine:
             async with (condition := self._condition(run.run_id)):
                 node = self._node(run.run_id, node_id)
                 remaining = deadline - loop.time()
-                if node.state not in _UNSETTLED_NODE_STATES or remaining <= 0:
+                if node.state not in _LIVE_NODE_STATES or remaining <= 0:
                     return _receipt(node)
                 with suppress(TimeoutError):
                     await asyncio.wait_for(condition.wait(), min(remaining, _RECHECK_SECONDS))
@@ -683,10 +820,10 @@ class WorkflowEngine:
         return condition
 
     async def _notify(self, run_id: str) -> None:
-        condition = self._changed.get(run_id)
-        if condition is not None:
-            async with condition:
-                condition.notify_all()
+        """Wake the run's waiters after a call of it changed, and show whether the run waits for a person now."""
+        async with (condition := self._condition(run_id)):
+            self._restate(run_id)
+            condition.notify_all()
 
     def _spawn[T](self, owner: str, work: Coroutine[None, None, T]) -> asyncio.Task[T]:
         """Start *work* as the engine's own task, stopped when the run *owner* ends or the engine closes."""
@@ -811,9 +948,11 @@ class WorkflowEngine:
             await asyncio.gather(*tasks, return_exceptions=True)
             current = self.store.get_run(run.run_id)
             nodes = self.store.nodes(run.run_id, include_stale=True)
+            ended = state in TERMINAL_RUN_STATES
             for node in nodes:
-                if node.state in _UNSETTLED_NODE_STATES and node.handle is not None:
-                    await asyncio.to_thread(self.settle_from_handle, node, run.epoch)
+                # An agent's job outlives an attempt: the next one waits for it. It does not outlive its run.
+                if node.state in _LIVE_NODE_STATES and node.handle is not None and (ended or node.handle.kind != "job"):
+                    await self._reconcile(current, node, run.epoch, stop=ended)
             if state is WorkflowRunState.COMPLETED:
                 # What the completed script no longer reaches leaves the run's current view.
                 stale = stale_keys(nodes, current.attempt)
@@ -861,8 +1000,16 @@ def _require_kept(kept: list[str] | None, grant: ScriptToolGrant) -> None:
 
 
 def _default_label(kind: str, args: dict[str, object]) -> object:
-    """Return what a node is called when its script gave no label: the tool's function, or the operation."""
+    """Return what a node is called when its script gave no label: its function, name, prompt or operation."""
+    if kind == "agent":
+        return args.get("name") or args.get("prompt") or kind
     return f"{args.get('toolkit')}.{args.get('function')}" if kind == "tool" else args.get("op") or kind
+
+
+def _timeout(meta: dict[str, object]) -> float | None:
+    """Return the seconds of work an agent call gives its turn, which is no part of what the call is."""
+    seconds = meta.get("timeout")
+    return float(seconds) if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else None
 
 
 def _members(meta: dict[str, object]) -> tuple[str, ...]:

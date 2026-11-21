@@ -8892,7 +8892,7 @@ The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `rea
 
 - [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
 - [Background Python Scripts](https://docs.mindroom.chat/tools/background-scripts/) - Long-running Python scripts that call the agent's tools and wake it when something changes.
-- [Workflows](https://docs.mindroom.chat/tools/workflows/) - Python scripts that run in the background, call the agent's tools, and return one report.
+- [Workflows](https://docs.mindroom.chat/tools/workflows/) - Python scripts that run in the background, run agents, call the agent's tools, and return one report.
 - [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) - A visible browser in the agent's worker that the user can watch and control.
 - [Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) - Operate allowlisted apps, read selected folders, and run approved commands on a local computer.
 - [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/) - One Bash tool instead of full tool schemas, to cut tokens per request.
@@ -9866,13 +9866,12 @@ Set `MINDROOM_SCRIPT_RETENTION_SECONDS` to change the window; see the [environme
 
 # Workflows
 
-The `workflow` tool lets an agent run a Python script in the background that calls the agent's tools and returns one report.
+The `workflow` tool lets an agent run a Python script in the background that runs agents, calls the agent's tools, and returns one report.
 The script defines `def main(args):`, and MindRoom calls it.
-Every `tool()` and `shell()` call of the script is saved with its result as a node of the run.
+Every `agent()`, `tool()` and `shell()` call of the script is saved with its result as a node of the run.
 
 A run that stopped or failed can be resumed: its saved calls are reused, and only what changed or failed runs again.
 A run that a MindRoom restart interrupts is resumed the same way on its own.
-Running agents from the script is not available yet.
 
 Treat `workflow` as trusted arbitrary code with authority comparable to `python` or `shell`.
 The script is ordinary Python, so nothing restricts its imports, file access, subprocesses, or network clients.
@@ -9890,6 +9889,7 @@ agents:
     rooms: [engineering]
     tools:
       - workflow:
+Enabling `workflow` also lets the agent run the other agents of its room; see [Agents](#agents).
           max_concurrent_runs: 8
           max_tool_calls_per_minute: 600
       - shell
@@ -9940,14 +9940,14 @@ Cancelling that call cancels its run, unless another call still waits for the sa
 ## What The Script Can Call
 
 ```python
-from mindroom.workflow import shell, tool, phase, log, now, random
+from mindroom.workflow import agent, shell, tool, phase, log, now, random
 
 def main(args):
     phase("Test")
     tests = shell("pytest -q")
     log(f"tests exited with {tests.exit_code}")
     if not tests.ok:
-        return "Tests failed:\n" + tests.output
+        return agent("Explain these test failures in five lines:\n\n" + tests.output)
     return tool("file", "read_file", file_name="CHANGELOG.md")
 ```
 The same call delivered again finds its own run: it waits for it, or returns the report the run ended with, and runs nothing a second time.
@@ -9963,10 +9963,11 @@ A run that another call resumed since belongs to that call: the earlier one neit
 The script calls the tools the agent has at the time of each call, with the same hooks, approval rules, worker routing, and audit trail as a call from a reply.
 A run that a subagent with a narrowed tool list started has only the tools on that list, checked at every call, and never the rest of its agent's tools.
 `compact_context`, `dynamic_tools`, `slack`, and functions that stop the agent's current model step are never available to a script.
-Do writes (files, git, HTTP) through `shell()` or `tool()`, never with plain Python: those calls are saved with their results, and the Python between them is not.
+Do writes (files, git, HTTP) through `shell()`, `tool()` or an agent, never with plain Python: those calls are saved with their results, and the Python between them is not.
 A call whose tool was started and whose end is unknown, for example because MindRoom stopped in between, ends `indeterminate` and is never run again on its own.
 
 ## Resume A Run
+- `agent(prompt)` runs one agent turn and returns its answer as text; see [Agents](#agents).
 
 `resume_workflow(run_id)` works on a run that ended in any state: `failed`, `cancelled`, `interrupted`, or `completed`.
 A run that has not ended is refused with `Run <id> is still running. Cancel it first.`
@@ -9980,6 +9981,44 @@ The next attempt runs the script from the top, and each call gets its saved resu
 - A call that ended `indeterminate` raises `ToolError` with kind `indeterminate` on every attempt, whatever its arguments are now.
   Check its effect, then name it in `rerun`, for example `resume_workflow(run_id, rerun=["n4"])`, to run it again; `get_workflow(run_id, nodes="failed")` lists the IDs.
   Only an ID exactly as listed names a call; any other is refused with `Run <id> has no call x1.` and nothing changes.
+## Agents
+
+```python
+agent(prompt, *, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
+      profile=None, minimal=False, timeout=None, output_path=None, dedicated_worker=False, resource_profile=None)
+```
+
+`agent(prompt)` runs a fresh copy of the run's agent with all its tools and no memory of the conversation, so the prompt must hold everything the turn needs.
+The turn runs as a [subagent](https://docs.mindroom.chat/tools/agent-orchestration/) of the run's agent, with the same rules as `run_subagent`: its tools, hooks, approval rules, budgets, and the limit on nested subagents.
+The options are those of `run_subagent` under shorter names.
+
+| Option | Meaning |
+|--------|---------|
+| `agent` | Run that configured agent, with its own tools, instead of a copy of the run's agent |
+| `name` | A label for the call; it does not pick an agent |
+| `model` | Any configured model name, such as `haiku` or `opus@high` |
+| `system`, `tools`, `skills`, `knowledge`, `profile` | Shape a copy of the run's agent, as the same arguments of `run_subagent` do |
+| `minimal` | Run the turn in minimal mode |
+| `timeout` | Seconds of work, after which the turn is cancelled and the call raises with kind `timeout`; time spent waiting for an approval does not count |
+| `output_path` | Also write the answer to this workspace file |
+| `dedicated_worker`, `resource_profile` | Those of `run_subagent` |
+
+A run may name itself, every agent in its agent's `delegate_to`, and every other agent whose bot is in the run's room and that may reply to the requester there.
+So an agent with `workflow` can run the agents of its room without a `delegate_to` entry for them.
+The description of `start_workflow` lists the `delegate_to` agents and the agents configured for the room.
+
+A turn that fails raises `AgentError`, whose `kind` says how: `failed`, `cancelled`, `timeout`, `refused`, `interrupted`, or `indeterminate`.
+A turn that may not start, for example because the model name is unknown or the agent may not reply to the requester, is `refused` with the sentence `run_subagent` gives.
+Stopping one agent from the Sub-agents panel fails only that call with kind `cancelled`; the run goes on.
+
+While an agent's tool call waits for an approval, the call and the run show `waiting`, and that time is not charged to the run's [working time](#working-time).
+A denied card denies that one tool call, and the agent goes on with its turn.
+
+The agents of a run are not listed among the conversation's background jobs: the run reports them, and `get_workflow` shows each as a node with the IDs of its job and subagent.
+An agent keeps running when the attempt that asked for it ends, and the next attempt waits for the same turn instead of starting another.
+Cancelling the run stops its agents, and a call whose prompt or options changed stops the agent of the old call.
+`schema` is not available yet.
+
 - `source` or `path` replaces the script before the attempt starts; give at most one.
 - A call named in `rerun`, and the calls after one that ran again, stay marked until they have run, also when an interruption ends the attempt first.
 - Every attempt runs in the room and thread the run was started in, also when `resume_workflow` is called from another one by the same requester; the report goes to where it was called.
@@ -10021,8 +10060,9 @@ A run whose script had already returned its report ends with that report and get
 - A run whose job was stopped gets no further attempt, and `resume_workflow` continues it.
   After a Stop the run ends `cancelled`; when the job was stopped because the requester's access is gone, the run ends `interrupted` with `The requester no longer has access.`
   A job that ended in any other way only fails to deliver the report: the run goes on, and `get_workflow(run_id)` returns the report in `result`.
-- A reservation whose job was never admitted when MindRoom stopped is deleted at the next start.
   Every attempt is checked in this way when it starts, the first one of a run and one that `resume_workflow` asked for included.
+- A reservation whose job was never admitted when MindRoom stopped is deleted at the next start.
+- The report of a run stays saved until its job has delivered it, however long ago the run ended.
 - Removing the `workflow` tool or the agent, or revoking the requester's access, ends the run `interrupted`; it is not resumed on its own.
   That holds when MindRoom was stopped at the time: the next start finds the tool or the agent gone and ends the run with `The requester no longer has access.`
 - A script process that MindRoom did not start itself, such as one that survived a restart in a worker, is stopped, and each of its requests is refused with status 409, before and after its capability is revoked, so the process exits at once.
@@ -10037,7 +10077,6 @@ An attempt that MindRoom starts on its own after an interruption keeps the time 
 The time a run waits for its next attempt after an interruption is not counted.
 With `max_runtime_hours: 0` a run has no limit.
 One script process runs for at most 30 days; a run with working time left then continues in a new attempt.
-- The report of a run stays saved until its job has delivered it, however long ago the run ended.
 
 ## Where The Script Runs
 

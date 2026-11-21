@@ -11,7 +11,7 @@ import nio
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, is_workflow_node_job
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -85,6 +85,7 @@ def _jobs_state_content(
             job
             for job in jobs
             if job.status not in TERMINAL_STATUSES
+            and not is_workflow_node_job(job)
             and (
                 job.status != "running"
                 or job.job_id not in awaited

@@ -20,6 +20,7 @@ import pytest_asyncio
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import apply_tool_approval_capability
+from mindroom.config.agent import AgentConfig
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.custom_tools import workflow as workflow_tool_module
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
@@ -515,7 +516,7 @@ async def test_a_narrowed_childs_run_calls_the_tools_its_persona_keeps_and_no_ot
     with workflow_stack(tmp_path, extra_tools=("workflow",), require_approval=()) as stack:
         stack.context.config.background_tool_jobs = BackgroundToolJobsConfig(enabled=False)
         persona = SubagentPersona("inline", "counter", "Count.", tools=("workflow", "counter.text"))
-        child = SimpleNamespace(delegation_id="child-1")
+        child = SimpleNamespace(delegation_id="child-1", depth=1)
         token = lifecycle._CHILD_RUN.set(lifecycle.ChildRunObservation(child, None))  # type: ignore[arg-type]
         try:
             call = asyncio.create_task(
@@ -1479,45 +1480,75 @@ def test_a_workflow_job_is_granted_while_the_agent_has_the_toolkit_and_the_reque
 
 
 _OFFERED_DESCRIPTION = """\
-Run a workflow: a Python script that runs your tools and shell commands in the background.
+Run a workflow: a Python script that puts many agents to work in the background.
 
+Use it when a task needs many agents, an independent check, or a loop with a hard stop.
 Give exactly one of `source` (inline Python) or `path` (a file in your workspace).
 The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
 
-    from mindroom.workflow import shell, tool, phase, log, now, random
+    from mindroom.workflow import agent, shell, tool, phase, log, now, random
 
+    def main(args):
+        phase("Write")
+        draft = agent("Write a report on: " + args["topic"])
+        for _ in range(3):                       # a bounded loop with an independent check
+            problems = agent("List factual problems in this report, or reply NONE.\\n\\n" + draft)
+            if problems.strip() == "NONE":
+                break
+            draft = agent(f"Fix these problems: {problems}\\n\\n{draft}")
+        return draft
+
+- agent(prompt, *, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
+        profile=None, minimal=False, timeout=None, output_path=None, dedicated_worker=False, resource_profile=None)
+  runs one agent turn and returns its answer as text.
+  The agent is a fresh copy of you with all your tools and no memory of this conversation: put everything it needs in the prompt.
+  agent="other" runs that configured agent with its own tools. name is only a label; it does not pick an agent.
+  model: one of the models below. system: replaces the system prompt. tools, skills, knowledge: lists that narrow a copy of you.
+  profile: a subagents/<profile>.md file. minimal=True: a cheap copy with one shell tool. timeout: seconds, then the turn is cancelled.
+  output_path: also write the answer to this workspace file. dedicated_worker=True: its own container. resource_profile: a worker size.
+  A failed turn raises AgentError.
 - shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
   shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - phase(title) groups the calls that follow; log(text) shows a progress line.
 
-Every tool and shell call is saved with its result. The Python between the calls runs again on every resume,
-so do writes (files, git, HTTP) through shell() or tool(), never with plain Python.
+Every agent, tool and shell call is saved with its result. The Python between the calls runs again on every resume,
+so do writes (files, git, HTTP) through shell(), tool() or an agent, never with plain Python.
 resume_workflow reuses saved calls: in each sequence of calls, those before the first changed call are reused; that call and the
 calls after it run again.
 Use now() and random() from the SDK instead of time and random when the value goes into a prompt.
 shell(..., cached=False) and tool(..., cached=False) run again on every resume: use it for a check of something outside the run.
 The call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.
 Where the call cannot be a background job, it waits and returns the report itself.
+An agent that needs an approval waits for the user; it does not fail.
 
-Models: haiku, opus (add an effort as in opus@high)."""
+Models: haiku, opus (add an effort as in opus@high).
+Agents you can run with agent=: helper, roommate."""
 
 
 def test_description_teaches_what_this_release_runs_and_lists_the_configured_models(stack: WorkflowStack) -> None:
-    """The offered description names the four calls a script has now, how the report arrives, and the models.
+    """The offered description names the calls a script has now, how the report arrives, the models and the agents.
 
-    It promises nothing a later release adds: no agents, no fan-out, no graph.
+    It promises nothing a later release adds: no schema, no fan-out, no graph. The agents are those the owner may
+    delegate to and those configured for the room, without the owner itself.
     """
-    config = stack.context.config
+    config, room_id = stack.context.config, stack.context.room_id
+    config.agents["watcher"].delegate_to = ["helper"]
+    config.agents |= {
+        "helper": AgentConfig(display_name="Helper"),
+        "roommate": AgentConfig(display_name="Roommate", rooms=[room_id]),
+        "elsewhere": AgentConfig(display_name="Elsewhere", rooms=["!other:example.test"]),
+    }
     levels = {"levels": ["low", "high"], "default": "low"}
     config.models = {
         "opus": ModelConfig(provider="anthropic", id="test-opus", reasoning=levels),
         "haiku": ModelConfig(provider="anthropic", id="test-haiku"),
     }
-    toolkit = WorkflowTools(config)
+    toolkit = WorkflowTools(config, "watcher", room_id, stack.context.runtime_paths)
     functions = {function.name: function for function in adapt_toolkit(toolkit, key="workflow").functions}
     description = functions["start_workflow"].description or ""
 
     assert description == _OFFERED_DESCRIPTION
+    assert "Agents you can run" not in WorkflowTools(config)._start_description
     assert set(functions["start_workflow"].parameters["properties"]) == {
         "source",
         "path",

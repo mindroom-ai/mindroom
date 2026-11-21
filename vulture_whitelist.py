@@ -477,4 +477,3 @@ _.group_key  # WorkflowNode field the workflow engine reads from B5 on (src/mind
 _.result_ref  # NodeReceipt field the workflow SDK reads from the receipt's JSON (src/mindroom/workflow_runs/models.py)
 _.child_runs  # Workflow run API the workflow engine calls from B5 on (src/mindroom/workflow_runs/store.py)
 _.node_usage  # Workflow run API the workflow engine calls from B5 on (src/mindroom/workflow_runs/store.py)
-_check_options  # Workflow SDK check that agent() and spawn() call from B4 on (src/mindroom/workflow.py)

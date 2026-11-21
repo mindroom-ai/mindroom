@@ -2,7 +2,8 @@
 
 `FakeWorkflowGateway` answers the SDK over real HTTP (pure level).
 `WorkflowStack` is the engine harness: the real workflow store, script store, broker and engine, with a fake script
-manager, so a test plays the script by calling the engine's gateway methods.
+manager, so a test plays the script by calling the engine's gateway methods. With `script_agents`, the agents a run
+runs are real delegation jobs whose models answer what the test scripted.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from mindroom.api.workflow_gateway import router as workflow_router
 from mindroom.approval.tool_approval import ToolApprovalDecision
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths
 from mindroom.custom_tools.workflow import WorkflowTools, workflow_job_admission, workflow_job_standing
@@ -53,6 +55,7 @@ from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from mindroom.workflow_runs.agent_nodes import AgentRuntime
 from mindroom.workflow_runs.engine import WorkflowEngine, WorkflowLimits
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
@@ -75,6 +78,9 @@ from tests.conftest import (
     make_relation_lookup,
     runtime_paths_for,
 )
+from tests.delegation_helpers import ScriptedAgents
+from tests.fakes.scripted_model import ScriptedModel
+from tests.identity_helpers import entity_ids
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.tool_job_helpers import (
     call_job_tool,
@@ -469,11 +475,14 @@ def owner_context(
     process_env: Mapping[str, str] = MappingProxyType({}),
     require_approval: tuple[str, ...] = ("append",),
     thread_id: str = "$thread:example.test",
+    delegate_to: tuple[str, ...] = (),
+    other_agents: tuple[str, ...] = (),
 ) -> ToolRuntimeContext:
     """Return the tool context of the stack's owner: the agent `watcher` with `counter` and `shell`, for Alice.
 
     The operator allows shell on this machine and approves by default; only the functions in *require_approval* ask.
     *process_env* is the primary's environment, which says for example where its sandbox runner listens.
+    *other_agents* are configured beside the owner, with `counter` only; the owner may delegate to *delegate_to*.
     """
     defaults = DefaultsConfig(tools=[], allow_shell_without_worker=True)
     runtime_paths = RuntimePaths(
@@ -486,8 +495,17 @@ def owner_context(
     )
     config = bind_runtime_paths(
         Config(
-            agents={"watcher": AgentConfig(display_name="Watcher", tools=["counter", "shell", *extra_tools])},
+            agents={
+                "watcher": AgentConfig(
+                    display_name="Watcher",
+                    tools=["counter", "shell", *extra_tools],
+                    delegate_to=list(delegate_to),
+                ),
+                **{name: AgentConfig(display_name=name.title(), tools=["counter"]) for name in other_agents},
+            },
             defaults=defaults,
+            # No agent recalls memories, unless a test gives the owner the `memory` toolkit.
+            memory=MemoryConfig() if "memory" in extra_tools else MemoryConfig(backend="none"),
             models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval={
                 "default": "auto_approve",
@@ -573,6 +591,10 @@ class WorkflowStack:
         """Whether `open_jobs` started the job runtime, `jobs`."""
         self.continues: Callable[[BackgroundJob], bool] = lambda _job: False
         """Which jobs the job runtime keeps for a restart to continue; the coordinator's own rule in a recovery test."""
+        self.models: dict[str, ScriptedModel] = {}
+        """The scripted model of each agent, once `script_agents` serves them."""
+        self.bot_rooms: dict[str, tuple[str, ...]] = {}
+        """The rooms each agent's bot is in, as a run's check of the agents it may run reads them."""
         self._open()
 
     def _open(self) -> None:
@@ -587,8 +609,39 @@ class WorkflowStack:
         self.scripts.tokens = self.tokens
         self.engine = WorkflowEngine(self.store, self.scripts, self.broker, clock=lambda: self.now)  # type: ignore[arg-type]
         self.engine.owner_access = self._owner_access
-        # What a turn of the owner sees: the context with the orchestrator that holds the engine.
-        self.context = replace(self.context, orchestrator=SimpleNamespace(workflow_engine=self.engine, running=True))  # type: ignore[arg-type]
+        self.engine.agents = self._agents
+        # What a turn of the owner sees: the context with the orchestrator that holds the engine. Each agent's bot is
+        # in the rooms `bot_rooms` lists for it.
+        orchestrator = SimpleNamespace(
+            workflow_engine=self.engine,
+            running=True,
+            budgets=None,
+            knowledge_refresh_scheduler=None,
+            agent_bots={
+                name: SimpleNamespace(client=SimpleNamespace(rooms=rooms)) for name, rooms in self.bot_rooms.items()
+            },
+        )
+        self.context = replace(self.context, orchestrator=orchestrator)  # type: ignore[arg-type]
+
+    def _agents(self) -> AgentRuntime | None:
+        """Answer as the live runtime does: the job runtime once `open_jobs` started it, with the owner's config."""
+        return AgentRuntime(self.jobs, self.context.config, self.context.runtime_paths) if self.has_jobs else None
+
+    def script_agents(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Run the agents of a run as real delegation jobs whose models take the turns `child_script` gives them."""
+        ScriptedAgents(self.models).install(monkeypatch)
+        entity_ids(self.context.config, self.context.runtime_paths)
+
+    def child_script(self, *turns: Any, agent: str = "watcher") -> ScriptedModel:  # noqa: ANN401 - scripted steps.
+        """Give the model of *agent* its next turns, one per request, and return it with the requests it gets."""
+        self.models[agent] = ScriptedModel(list(turns))
+        return self.models[agent]
+
+    def node_job(self, key: str) -> BackgroundJob:
+        """Return the job of the agent node at *key*, as the job runtime holds it."""
+        node = self.store.get_node(self.run_id, key)
+        assert node is not None
+        return next(job for job in self.jobs.retained_jobs() if job.job_id == node.links["job_id"])
 
     def _owner_access(self, _run: WorkflowRun) -> ResumeAccess:
         """Answer for the run's saved owner as the live runtime does: the stack's own context, or what `access` says."""

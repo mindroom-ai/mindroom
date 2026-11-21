@@ -41,6 +41,7 @@ _RUN_UPDATE_FIELDS = frozenset(field.name for field in fields(WorkflowRun)) - {
     "run_id",
     "origin_job_id",
     "epoch",
+    "depth",
     *_OWNER_COLUMNS,
 }
 _ENDED_NODE_STATES = frozenset(WorkflowNodeState) - {
@@ -281,6 +282,15 @@ class WorkflowRunStore:
     def nodes(self, run_id: str, *, include_stale: bool = False) -> list[WorkflowNode]:
         """Return a run's nodes in the order they were first submitted."""
         return self._select_nodes("run_id = ?" if include_stale else "run_id = ? AND stale = 0", (run_id,))
+
+    def node_states(self, run_id: str) -> frozenset[WorkflowNodeState]:
+        """Return the states the run's current nodes are in."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT state FROM workflow_nodes WHERE run_id = ? AND stale = 0",
+                (run_id,),
+            ).fetchall()
+        return frozenset(WorkflowNodeState(row["state"]) for row in rows)
 
     def settle_node(
         self,
@@ -726,11 +736,16 @@ def _add_epoch_and_owner(connection: sqlite3.Connection) -> None:
     connection.execute("UPDATE workflow_runs SET owner = COALESCE(job_id, origin_job_id)")
 
 
-def _add_claims(connection: sqlite3.Connection) -> None:
-    """Give each run the list of the invocations that took it after it had ended."""
+def _add_claims_and_depth(connection: sqlite3.Connection) -> None:
+    """Give each run the list of the invocations that took it after it had ended, and the depth of its owner."""
     connection.execute("ALTER TABLE workflow_runs ADD COLUMN claims_json TEXT NOT NULL DEFAULT '{}'")
+    connection.execute("ALTER TABLE workflow_runs ADD COLUMN depth INTEGER NOT NULL DEFAULT 0")
 
 
 # Each entry upgrades the database by one schema version; the stored version is how many have run.
-_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_create_schema, _add_epoch_and_owner, _add_claims)
+_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
+    _create_schema,
+    _add_epoch_and_owner,
+    _add_claims_and_depth,
+)
 SCHEMA_VERSION = len(_MIGRATIONS)

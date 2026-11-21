@@ -107,6 +107,53 @@ def test_failed_tool_raises_tool_error_with_kind(gateway: FakeWorkflowGateway, s
 
 
 @pytest.mark.usefixtures("in_main")
+def test_agent_sends_its_turn_and_returns_the_answer(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """The call's arguments are the turn itself: the prompt and the options that were given, and no timeout."""
+    gateway.respond = lambda _request: completed("hi")
+
+    assert sdk.agent("Say hi", name="greeter", model="haiku", tools=["shell"], minimal=True, timeout=30) == "hi"
+    assert sdk.agent("Say hi") == "hi"
+
+    first, plain = gateway.nodes
+    assert (first["key"], first["kind"], plain["args"]) == ("@0", "agent", {"prompt": "Say hi"})
+    assert first["args"] == {
+        "prompt": "Say hi",
+        "name": "greeter",
+        "model": "haiku",
+        "tools": ["shell"],
+        "minimal": True,
+    }
+    assert (first["meta"], plain["meta"]) == ({"cached": True, "name": "greeter", "timeout": 30}, {"cached": True})
+
+
+@pytest.mark.usefixtures("in_main")
+def test_sdk_agent_raises_agent_error_with_kind(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """A turn that did not end with an answer raises with the stable kind the script can branch on."""
+    gateway.respond = lambda _request: failed("refused", "Cannot delegate: Unknown model 'opus5'.")
+
+    with pytest.raises(sdk.AgentError, match="Unknown model 'opus5'") as raised:
+        sdk.agent("Say hi", model="opus5")
+
+    assert (raised.value.kind, isinstance(raised.value, sdk.WorkflowError)) == ("refused", True)
+
+
+@pytest.mark.usefixtures("in_main")
+def test_agent_refuses_an_option_it_does_not_take_before_any_node(
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
+) -> None:
+    """A misnamed option, and one this release cannot honour, fail in the script, where the model can fix them."""
+    with pytest.raises(sdk.WorkflowError) as misnamed:
+        sdk.agent("Say hi", system_prompt="Be brief.")
+    with pytest.raises(sdk.WorkflowError) as schema:
+        sdk.agent("Say hi", schema={"type": "object"})
+
+    assert str(misnamed.value) == "agent() has no option 'system_prompt'. Did you mean system?"
+    assert str(schema.value) == "schema is not available yet in this MindRoom version."
+    assert gateway.nodes == []
+
+
+@pytest.mark.usefixtures("in_main")
 def test_log_shows_a_progress_line_and_sends_the_capability(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
     """A log line reaches the run, authenticated by the attempt's token."""
     sdk.log("Checked 3 of 9")

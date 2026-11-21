@@ -2528,9 +2528,34 @@ from = ["mindroom.workflow_runs.recovery"]
 expose = ["AUTO_RESUME_REASONS", "NO_ACCESS", "recover_runs"]
 
 [[modules]]
+path = "mindroom.workflow_runs.agent_nodes"
+depends_on = [
+    "mindroom.ai",
+    "mindroom.ai_run_metadata",
+    "mindroom.delegation.background",
+    "mindroom.delegation.execution",
+    "mindroom.delegation.lifecycle",
+    "mindroom.delegation.recovery",
+    "mindroom.delegation.state",
+    "mindroom.delegation.targets",
+    "mindroom.runtime_resolution",
+    "mindroom.tool_jobs.runtime",
+    "mindroom.tool_system.output_files",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.workflow_runs.models",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.agent_nodes"]
+expose = ["AgentNodeError", "AgentRuntime", "await_child", "launch_child"]
+
+[[modules]]
 path = "mindroom.workflow_runs.engine"
 depends_on = [
     "mindroom.delegation.personas",
+    "mindroom.tool_jobs.runtime",
+    "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.recovery",
@@ -2546,6 +2571,8 @@ expose = ["ResumeAccess", "SupersededAttemptError", "WorkflowEngine", "WorkflowL
 path = "mindroom.orchestration.workflow_runtime"
 depends_on = [
     "mindroom.custom_tools.workflow",
+    "mindroom.tool_jobs.runtime",
+    "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.engine",
     "mindroom.workflow_runs.recovery",
     "mindroom.workflow_runs.store",
@@ -2557,7 +2584,9 @@ path = "mindroom.custom_tools.workflow"
 depends_on = [
     "mindroom.config.main",
     "mindroom.config.resolution",
+    "mindroom.constants",
     "mindroom.delegation.lifecycle",
+    "mindroom.matrix.state",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.results",
     "mindroom.tool_jobs.runtime",
@@ -8290,7 +8319,11 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
 ]
-visibility = ["mindroom.custom_tools.delegate", "mindroom.delegation.execution"]
+visibility = [
+    "mindroom.custom_tools.delegate",
+    "mindroom.delegation.execution",
+    "mindroom.workflow_runs.agent_nodes",
+]
 
 [[modules]]
 path = "mindroom.delegation.personas"
@@ -8650,6 +8683,7 @@ visibility = [
     "mindroom.delegation.targets",
     "mindroom.delegation.continuation",
     "mindroom.loop_hooks",
+    "mindroom.workflow_runs.agent_nodes",
 ]
 
 [[modules]]
@@ -8678,6 +8712,7 @@ visibility = [
     "mindroom.delegation.execution",
     "mindroom.delegation.targets",
     "mindroom.delegation.continuation",
+    "mindroom.workflow_runs.agent_nodes",
 ]
 
 [[modules]]
@@ -9269,6 +9304,7 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_jobs.consumption",
     "mindroom.delegation.continuation",
+    "mindroom.workflow_runs.agent_nodes",
 ]
 
 [[modules]]
@@ -9306,6 +9342,9 @@ visibility = [
     "mindroom.tool_jobs.notices",
     # A secret request waits on its card as an approval does, so a Stop cancels its job.
     "mindroom.secret_request_cards",
+    "mindroom.orchestration.workflow_runtime",
+    "mindroom.workflow_runs.agent_nodes",
+    "mindroom.workflow_runs.engine",
 ]
 
 [[modules]]

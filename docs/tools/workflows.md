@@ -4,16 +4,16 @@ icon: lucide/network
 
 # Workflows
 
-The `workflow` tool lets an agent run a Python script in the background that calls the agent's tools and returns one report.
+The `workflow` tool lets an agent run a Python script in the background that runs agents, calls the agent's tools, and returns one report.
 The script defines `def main(args):`, and MindRoom calls it.
-Every `tool()` and `shell()` call of the script is saved with its result as a node of the run.
+Every `agent()`, `tool()` and `shell()` call of the script is saved with its result as a node of the run.
 
 A run that stopped or failed can be resumed: its saved calls are reused, and only what changed or failed runs again.
 A run that a MindRoom restart interrupts is resumed the same way on its own.
-Running agents from the script is not available yet.
 
 Treat `workflow` as trusted arbitrary code with authority comparable to `python` or `shell`.
 The script is ordinary Python, so nothing restricts its imports, file access, subprocesses, or network clients.
+Enabling `workflow` also lets the agent run the other agents of its room; see [Agents](#agents).
 
 ## Enable The Tool
 
@@ -80,17 +80,18 @@ A run that another call resumed since belongs to that call: the earlier one neit
 ## What The Script Can Call
 
 ```python
-from mindroom.workflow import shell, tool, phase, log, now, random
+from mindroom.workflow import agent, shell, tool, phase, log, now, random
 
 def main(args):
     phase("Test")
     tests = shell("pytest -q")
     log(f"tests exited with {tests.exit_code}")
     if not tests.ok:
-        return "Tests failed:\n" + tests.output
+        return agent("Explain these test failures in five lines:\n\n" + tests.output)
     return tool("file", "read_file", file_name="CHANGELOG.md")
 ```
 
+- `agent(prompt)` runs one agent turn and returns its answer as text; see [Agents](#agents).
 - `shell(command)` runs a command with the agent's `shell` tool and returns `.ok`, `.exit_code`, and `.output`.
   It returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - `tool(toolkit, function, **arguments)` calls any other tool of the agent and returns its result.
@@ -101,8 +102,46 @@ def main(args):
 The script calls the tools the agent has at the time of each call, with the same hooks, approval rules, worker routing, and audit trail as a call from a reply.
 A run that a subagent with a narrowed tool list started has only the tools on that list, checked at every call, and never the rest of its agent's tools.
 `compact_context`, `dynamic_tools`, `slack`, and functions that stop the agent's current model step are never available to a script.
-Do writes (files, git, HTTP) through `shell()` or `tool()`, never with plain Python: those calls are saved with their results, and the Python between them is not.
+Do writes (files, git, HTTP) through `shell()`, `tool()` or an agent, never with plain Python: those calls are saved with their results, and the Python between them is not.
 A call whose tool was started and whose end is unknown, for example because MindRoom stopped in between, ends `indeterminate` and is never run again on its own.
+
+## Agents
+
+```python
+agent(prompt, *, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
+      profile=None, minimal=False, timeout=None, output_path=None, dedicated_worker=False, resource_profile=None)
+```
+
+`agent(prompt)` runs a fresh copy of the run's agent with all its tools and no memory of the conversation, so the prompt must hold everything the turn needs.
+The turn runs as a [subagent](agent-orchestration.md) of the run's agent, with the same rules as `run_subagent`: its tools, hooks, approval rules, budgets, and the limit on nested subagents.
+The options are those of `run_subagent` under shorter names.
+
+| Option | Meaning |
+|--------|---------|
+| `agent` | Run that configured agent, with its own tools, instead of a copy of the run's agent |
+| `name` | A label for the call; it does not pick an agent |
+| `model` | Any configured model name, such as `haiku` or `opus@high` |
+| `system`, `tools`, `skills`, `knowledge`, `profile` | Shape a copy of the run's agent, as the same arguments of `run_subagent` do |
+| `minimal` | Run the turn in minimal mode |
+| `timeout` | Seconds of work, after which the turn is cancelled and the call raises with kind `timeout`; time spent waiting for an approval does not count |
+| `output_path` | Also write the answer to this workspace file |
+| `dedicated_worker`, `resource_profile` | Those of `run_subagent` |
+
+A run may name itself, every agent in its agent's `delegate_to`, and every other agent whose bot is in the run's room and that may reply to the requester there.
+So an agent with `workflow` can run the agents of its room without a `delegate_to` entry for them.
+The description of `start_workflow` lists the `delegate_to` agents and the agents configured for the room.
+
+A turn that fails raises `AgentError`, whose `kind` says how: `failed`, `cancelled`, `timeout`, `refused`, `interrupted`, or `indeterminate`.
+A turn that may not start, for example because the model name is unknown or the agent may not reply to the requester, is `refused` with the sentence `run_subagent` gives.
+Stopping one agent from the Sub-agents panel fails only that call with kind `cancelled`; the run goes on.
+
+While an agent's tool call waits for an approval, the call and the run show `waiting`, and that time is not charged to the run's [working time](#working-time).
+A denied card denies that one tool call, and the agent goes on with its turn.
+
+The agents of a run are not listed among the conversation's background jobs: the run reports them, and `get_workflow` shows each as a node with the IDs of its job and subagent.
+An agent keeps running when the attempt that asked for it ends, and the next attempt waits for the same turn instead of starting another.
+Cancelling the run stops its agents, and a call whose prompt or options changed stops the agent of the old call.
+`schema` is not available yet.
 
 ## Resume A Run
 

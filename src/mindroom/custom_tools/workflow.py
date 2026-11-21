@@ -14,7 +14,9 @@ from uuid import uuid4
 from mindroom.background_tasks import run_blocking_or_compensate
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.config.resolution import authored_tool_entries
-from mindroom.delegation.lifecycle import running_child_id
+from mindroom.constants import RuntimePaths  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.delegation.lifecycle import running_child_id, running_child_run
+from mindroom.matrix.state import resolve_room_aliases
 from mindroom.script_runs.manager import workflow_placement
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
@@ -39,7 +41,6 @@ from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunSt
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from mindroom.constants import RuntimePaths
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
@@ -51,25 +52,46 @@ _RESUME = "resume_workflow"
 # The spec's teaching text, cut to what this release runs: each later release adds the lines for what it adds. The
 # list of models follows it.
 _START_DESCRIPTION = """\
-Run a workflow: a Python script that runs your tools and shell commands in the background.
+Run a workflow: a Python script that puts many agents to work in the background.
 
+Use it when a task needs many agents, an independent check, or a loop with a hard stop.
 Give exactly one of `source` (inline Python) or `path` (a file in your workspace).
 The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
 
-    from mindroom.workflow import shell, tool, phase, log, now, random
+    from mindroom.workflow import agent, shell, tool, phase, log, now, random
 
+    def main(args):
+        phase("Write")
+        draft = agent("Write a report on: " + args["topic"])
+        for _ in range(3):                       # a bounded loop with an independent check
+            problems = agent("List factual problems in this report, or reply NONE.\\n\\n" + draft)
+            if problems.strip() == "NONE":
+                break
+            draft = agent(f"Fix these problems: {problems}\\n\\n{draft}")
+        return draft
+
+- agent(prompt, *, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
+        profile=None, minimal=False, timeout=None, output_path=None, dedicated_worker=False, resource_profile=None)
+  runs one agent turn and returns its answer as text.
+  The agent is a fresh copy of you with all your tools and no memory of this conversation: put everything it needs in the prompt.
+  agent="other" runs that configured agent with its own tools. name is only a label; it does not pick an agent.
+  model: one of the models below. system: replaces the system prompt. tools, skills, knowledge: lists that narrow a copy of you.
+  profile: a subagents/<profile>.md file. minimal=True: a cheap copy with one shell tool. timeout: seconds, then the turn is cancelled.
+  output_path: also write the answer to this workspace file. dedicated_worker=True: its own container. resource_profile: a worker size.
+  A failed turn raises AgentError.
 - shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
   shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - phase(title) groups the calls that follow; log(text) shows a progress line.
 
-Every tool and shell call is saved with its result. The Python between the calls runs again on every resume,
-so do writes (files, git, HTTP) through shell() or tool(), never with plain Python.
+Every agent, tool and shell call is saved with its result. The Python between the calls runs again on every resume,
+so do writes (files, git, HTTP) through shell(), tool() or an agent, never with plain Python.
 resume_workflow reuses saved calls: in each sequence of calls, those before the first changed call are reused; that call and the
 calls after it run again.
 Use now() and random() from the SDK instead of time and random when the value goes into a prompt.
 shell(..., cached=False) and tool(..., cached=False) run again on every resume: use it for a check of something outside the run.
 The call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.
 Where the call cannot be a background job, it waits and returns the report itself.
+An agent that needs an approval waits for the user; it does not fail.
 """
 _ONE_SOURCE = "Give exactly one of source or path."
 _AT_MOST_ONE_SOURCE = "Give at most one of source or path."
@@ -91,6 +113,9 @@ class WorkflowTools(Toolkit):
     def __init__(
         self,
         runtime_config: Config | None = None,
+        agent_name: str | None = None,
+        current_room_id: str | None = None,
+        runtime_paths: RuntimePaths | None = None,
         max_concurrent_runs: int = 8,
         max_runtime_hours: float = 72,
         max_tool_calls_per_minute: int = 600,
@@ -109,6 +134,14 @@ class WorkflowTools(Toolkit):
         levels = [f"{name}@{model.reasoning.levels[-1]}" for name, model in models if model.reasoning]
         effort = f" (add an effort as in {levels[0]})" if levels else ""
         self._start_description = f"{_START_DESCRIPTION}\nModels: {', '.join(name for name, _ in models)}{effort}."
+        # And the agents a run may name: those this agent may delegate to, and those configured for this room.
+        agents = runtime_config.agents if runtime_config is not None else {}
+        others = list(agents[agent_name].delegate_to) if agent_name in agents else []
+        if runtime_paths is not None:
+            rooms = {name: resolve_room_aliases(other.rooms, runtime_paths) for name, other in agents.items()}
+            others += [name for name in rooms if name not in (agent_name, *others) and current_room_id in rooms[name]]
+        if others:
+            self._start_description += f"\nAgents you can run with agent=: {', '.join(others)}."
         tools = [self.start_workflow, self.get_workflow, self.cancel_workflow, self.resume_workflow]
         super().__init__(name="workflow", tools=tools)
 
@@ -346,6 +379,8 @@ class WorkflowTools(Toolkit):
             origin_job_id=origin,
             owner=origin,
             job_id=job_id,
+            # The agents the run runs are subagents of the one that starts it, one level below it.
+            depth=child.child.depth if (child := running_child_run()) is not None else 0,
         )
         store = engine.store
 

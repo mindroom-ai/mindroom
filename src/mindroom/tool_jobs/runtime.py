@@ -174,6 +174,15 @@ class JobClaim:
     nonce: str
 
 
+def is_workflow_node_job(job: BackgroundJob) -> bool:
+    """Return whether the job is one call of a workflow run, which the run reports.
+
+    Such a job is no job of its own to anyone: it is in no list, no room state, no follow-up turn and no notice,
+    also when it ended while MindRoom was down.
+    """
+    return job.kind != "workflow" and "workflow" in job.adapter
+
+
 def _updated(job: BackgroundJob, **changes: object) -> BackgroundJob:
     """Return the next state of a job, stamped with its transition time."""
     return replace(job, **changes, updated_at=datetime.now(UTC).isoformat())
@@ -641,6 +650,7 @@ class ToolJobRuntime:
             for entry in entries.values()
             if entry.interruption is not None
             and entry.job.status in _RUNNING_STATUSES
+            and not is_workflow_node_job(entry.job)
             and self._grant(entry.job) == "allowed"
         )
 
@@ -882,7 +892,9 @@ class ToolJobRuntime:
             entries = [
                 entry
                 for entry in self._entries.values()
-                if not _returned_inline(entry) and self._visible(entry, owner, depth)
+                if not _returned_inline(entry)
+                and not is_workflow_node_job(entry.job)
+                and self._visible(entry, owner, depth)
             ]
             entries.sort(key=lambda entry: entry.job.updated_at, reverse=True)
             entries.sort(key=lambda entry: entry.job.status in TERMINAL_STATUSES)
@@ -1129,6 +1141,7 @@ class ToolJobRuntime:
                 and entry.job.depth == 0
                 and not entry.job.consumed
                 and entry.claim is None
+                and not is_workflow_node_job(entry.job)
                 and (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) == key.silent
                 and self._grant(entry.job) == "allowed"
             ]

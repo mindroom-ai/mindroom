@@ -45,6 +45,7 @@ from mindroom.tool_jobs.runtime import (
     JobGrant,
     JobSpec,
     ToolJobRuntime,
+    is_workflow_node_job,
     register_background_runtime,
 )
 from mindroom.tool_system.plugins import config_plugins
@@ -106,6 +107,7 @@ def _follow_up_candidates(jobs: Iterable[BackgroundJob]) -> dict[ConversationKey
             job.status in TERMINAL_STATUSES
             and job.depth == 0
             and not job.consumed
+            and not is_workflow_node_job(job)
             and job.owner.room_id is not None
             and job.owner.requester_id is not None
             and job.source_kind != SILENT_SCHEDULE_SOURCE_KIND

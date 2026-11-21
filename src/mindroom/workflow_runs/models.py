@@ -90,6 +90,8 @@ class WorkflowRun:
     job_id: str | None = None
     owner: str | None = None
     """The invocation the run is now: its job's ID, or the key of the call that waits for it itself."""
+    depth: int = 0
+    """How deep in a chain of subagents the agent that started the run is; the agents the run runs are one deeper."""
     claims: dict[str, str | None] = field(default_factory=dict)
     """Each invocation that took the run when it had ended, with the report of a call that waited for it itself."""
     card_event_id: str | None = None

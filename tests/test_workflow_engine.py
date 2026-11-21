@@ -379,8 +379,8 @@ async def test_read_that_waited_for_a_call_while_its_attempt_was_replaced_gets_n
 @pytest.mark.asyncio
 async def test_node_kind_this_release_cannot_run_is_refused_by_name(stack: WorkflowStack) -> None:
     """A script written for a later SDK gets a refusal it can read, and no node is saved."""
-    with pytest.raises(WorkflowRunStoreError, match="cannot run a 'agent' call"):
-        await stack.submit("@0", "agent", {"prompt": "Count the tides."})
+    with pytest.raises(WorkflowRunStoreError, match="cannot run a 'later' call"):
+        await stack.submit("@0", "later", {"prompt": "Count the tides."})
 
     assert stack.engine.status(stack.run_id)[1] == []
 
