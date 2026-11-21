@@ -86,3 +86,4 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
 - With a `ReadWriteOnce` storage claim every worker runs on the runtime's node, so named workers add isolation and their own resource limits there, not capacity.
 - Dedicated subagent workers are still not counted against any limit.
 - The Docker backend runs no named workers and does not retry a failed removal from the worker's files.
+- The warning `subagent_worker_retire_failed` is now `pinned_worker_retire_failed` and covers named workers too; a retirement that cannot allocate its marker on a full volume logs `worker_retirement_marker_allocation_failed` and removes the files without it. Neither is a stable event in `docs/deployment/operational-log-events.md`.
