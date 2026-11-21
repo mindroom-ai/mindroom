@@ -16,6 +16,7 @@ import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom.background_tasks import create_background_task
@@ -156,7 +157,8 @@ class _NamedWorkerFleet:
             if self.holders:
                 return
             del _fleets[self.turn_id]
-            worker_keys = tuple(self.workers)
+            # A blocking start can outlive its cancelled caller; its last starter retires it instead.
+            worker_keys = tuple(key for key in self.workers if key not in _starting)
         if worker_keys and self.runtime_paths is not None:
             # Removal waits for each pod to stop, which the reply that just ended does not wait for.
             create_background_task(
@@ -334,8 +336,19 @@ def ensure_named_worker(
     finally:
         with _lock:
             _starting[worker_key] -= 1
-            if not _starting[worker_key]:
+            last_start = _starting[worker_key] == 0
+            if last_start:
                 del _starting[worker_key]
+            retire = last_start and not call._fleet.holders
+        if retire:
+            _retire_named_worker(named_backend, worker_key)
+
+
+def _retire_named_worker(backend: _NamedWorkerBackend, worker_key: str) -> None:
+    try:
+        backend.retire_worker(worker_key)
+    except WorkerBackendError:
+        logger.warning("named_worker_retire_failed", worker=worker_log_id(worker_key), exc_info=True)
 
 
 def _retire_workers(runtime_paths: RuntimePaths, worker_keys: tuple[str, ...]) -> None:
@@ -348,11 +361,5 @@ def _retire_workers(runtime_paths: RuntimePaths, worker_keys: tuple[str, ...]) -
             return
         named_backend = _named_backend(backend)
 
-        def retire(worker_key: str) -> None:
-            try:
-                named_backend.retire_worker(worker_key)
-            except WorkerBackendError:
-                logger.warning("named_worker_retire_failed", worker=worker_log_id(worker_key), exc_info=True)
-
         with ThreadPoolExecutor(max_workers=len(worker_keys), thread_name_prefix="named-worker-retire") as pool:
-            list(pool.map(retire, worker_keys))
+            list(pool.map(partial(_retire_named_worker, named_backend), worker_keys))

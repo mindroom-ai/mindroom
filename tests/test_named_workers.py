@@ -523,6 +523,42 @@ async def test_a_worker_that_crashed_is_replaced_by_a_new_one(
 
 
 @pytest.mark.asyncio
+async def test_cancelling_a_reply_retires_a_named_worker_whose_start_finishes_later(
+    runtime_paths: RuntimePaths,
+    backend: _FakeBackend,
+) -> None:
+    """Retirement must wait for a blocking start, even after its awaiting reply was cancelled."""
+    config = Config(agents={"code": AgentConfig(display_name="Code", named_workers=1, worker_scope="user_agent")})
+    pending: list[asyncio.Task[WorkerHandle]] = []
+    release_start = threading.Event()
+    backend.hold_starts = release_start
+
+    async def reply() -> None:
+        async with execution_resources(response=True):
+            call = _call(runtime_paths, "build", config=config)
+            pending.append(asyncio.create_task(asyncio.to_thread(_run, backend, call)))
+            await asyncio.shield(pending[0])
+
+    cancelled = asyncio.create_task(reply())
+    try:
+        assert await asyncio.to_thread(backend.entered.acquire, timeout=SETTLE_TIMEOUT_SECONDS)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        # Drain any retirement the cancelled reply tried before its Deployment existed.
+        await _retired(backend)
+    finally:
+        release_start.set()
+    worker = await pending[0]
+
+    assert await _retired(backend) == [worker.worker_key]
+    assert backend.workers == {}
+    async with execution_resources(response=True):
+        _run(backend, _call(runtime_paths, "retry", config=config))
+    assert len(await _retired(backend)) == 2
+
+
+@pytest.mark.asyncio
 async def test_a_call_whose_reply_ended_starts_no_worker(runtime_paths: RuntimePaths, backend: _FakeBackend) -> None:
     """A call that outlives its reply and that reply's jobs cannot start a worker nothing would remove."""
     async with execution_resources(response=True):
