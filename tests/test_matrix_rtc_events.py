@@ -124,59 +124,38 @@ def test_parse_membership_rejects_unsupported_focus_mode(focus_active: object) -
     assert parse_membership_event(_membership_event({**content, "focus_active": focus_active})) is None
 
 
-def test_parse_oldest_membership_keeps_service_url_when_transport_also_has_url() -> None:
-    """Legacy focus selection still reads livekit_service_url from a dual-form transport."""
-    content = build_membership_content(
-        user_id=USER,
-        device_id=DEVICE,
-        livekit_service_url=SERVICE_URL,
-        expires_ms=123,
-    )
-    # matrix-js-sdk 45.1.0 src/matrixrtc/LivekitTransport.ts:69-82.
-    content["foci_preferred"][0]["url"] = "wss://sfu.example.org"
-
-    member = parse_membership_event(_membership_event(content))
-
-    assert member is not None
-    assert member.multi_sfu_service_url is None
-    assert member.livekit_service_url == SERVICE_URL
-
-
 @pytest.mark.parametrize(
-    ("transport", "focus", "publishes_on"),
+    ("transport", "focus"),
     [
-        (
-            {"type": "livekit", "livekit_service_url": SERVICE_URL, "livekit_alias": "!room:example.org"},
-            SERVICE_URL,
-            SERVICE_URL,
-        ),
+        ({"type": "livekit", "livekit_service_url": SERVICE_URL, "livekit_alias": "!room:example.org"}, SERVICE_URL),
         # matrix-js-sdk 45.1.0 src/matrixrtc/LivekitTransport.ts:69-95: a transport may name an SFU directly.
-        ({"type": "livekit", "livekit_service_url": SERVICE_URL, "url": "wss://sfu.example.org"}, SERVICE_URL, ""),
-        ({"type": "livekit", "url": "wss://sfu.example.org"}, None, ""),
+        ({"type": "livekit", "livekit_service_url": SERVICE_URL, "url": "wss://sfu.example.org"}, SERVICE_URL),
+        ({"type": "livekit", "url": "wss://sfu.example.org"}, None),
+        ({"type": "other", "livekit_service_url": SERVICE_URL}, None),
     ],
-    ids=["service", "service-and-direct-url", "direct-url"],
+    ids=["service", "service-and-direct-url", "direct-url", "not-livekit"],
 )
-def test_parse_multi_sfu_membership_keeps_the_focus_and_where_the_member_publishes(
+def test_parse_multi_sfu_membership_is_the_sdk_41_member_advertising_the_same_focus(
     transport: dict[str, str],
     focus: str | None,
-    publishes_on: str,
 ) -> None:
-    """A ``multi_sfu`` member carries the focus an SDK 41 member would, plus the service it publishes on itself."""
+    """Whatever its first transport holds, a ``multi_sfu`` membership parses to the SDK 41 member's exact value."""
     content = build_membership_content(
         user_id=USER,
         device_id=DEVICE,
         livekit_service_url=SERVICE_URL,
         expires_ms=123,
     )
+    content["foci_preferred"] = [transport, {"type": "livekit", "livekit_service_url": "https://later.example.org"}]
+    sdk_41_member = parse_membership_event(_membership_event(content))
     # matrix-js-sdk 45.1.0 src/matrixrtc/MembershipManager.ts:1038-1059.
     content["focus_active"] = {"type": "livekit", "focus_selection": "multi_sfu"}
-    content["foci_preferred"] = [transport]
 
     member = parse_membership_event(_membership_event(content))
 
-    assert member is not None
-    assert member.livekit_service_url == focus
-    assert member.multi_sfu_service_url == publishes_on
+    assert sdk_41_member is not None
+    assert sdk_41_member.livekit_service_url == focus
+    assert member == sdk_41_member
 
 
 def test_parse_membership_does_not_scan_past_primary_focus() -> None:
