@@ -1986,34 +1986,32 @@ class TestPendingEventWorker:
         handled = asyncio.Event()
 
         @dataclass
-        class BlockingFirstRead:
-            inner: PrincipalStore
-            pending_calls: int = 0
+        class BlockingFirstRead(_FlakyReplayView):
+            discovery_reads: int = 0
 
             async def pending(
                 self,
                 *,
                 limit: int = 256,
+                room_id: str | None = None,
                 after_receipt_order: int | None = None,
                 runtime_generation: str = "unmanaged",
             ) -> PendingPage:
-                self.pending_calls += 1
-                if self.pending_calls == 1:
-                    page = await self.inner.pending(
-                        limit=limit,
-                        after_receipt_order=after_receipt_order,
-                        runtime_generation=runtime_generation,
-                    )
+                if room_id is None:
+                    self.discovery_reads += 1
+                    if self.discovery_reads > 1:
+                        # The restarted worker finds nothing itself, so only the stale drain could dispatch the message.
+                        return PendingPage((), resume_after=None, reached_end=True, unreadable_rows=0)
+                page = await super().pending(
+                    limit=limit,
+                    room_id=room_id,
+                    after_receipt_order=after_receipt_order,
+                    runtime_generation=runtime_generation,
+                )
+                if room_id is None:
                     first_read_started.set()
                     await release_first_read.wait()
-                    return page
-                return PendingPage((), resume_after=None, reached_end=True, unreadable_rows=0)
-
-            async def is_pending(self, event_id: str) -> bool:
-                return await self.inner.is_pending(event_id)
-
-            async def settle(self, event_id: str) -> tuple[str, ...]:
-                return await self.inner.settle(event_id)
+                return page
 
         async def handle(event: JournalEvent) -> bool:
             del event
@@ -2021,7 +2019,7 @@ class TestPendingEventWorker:
             return True
 
         await self._admit(alice, text_event("$message"))
-        worker = PendingEventWorker(store=BlockingFirstRead(alice), handle=handle)
+        worker = PendingEventWorker(store=cast("Any", BlockingFirstRead(alice)), handle=handle)
         stale_drain = asyncio.create_task(worker.drain_once())
         await first_read_started.wait()
 
