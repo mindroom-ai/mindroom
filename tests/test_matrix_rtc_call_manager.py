@@ -777,6 +777,127 @@ async def test_manager_refuses_foreign_sdk_45_focus(tmp_path: Path, timing: str)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("started_on_legacy", "corrects_focus"),
+    [(False, False), (False, True), (True, False)],
+    ids=["initial-then-leave", "initial-then-correct", "active-then-leave"],
+)
+async def test_manager_recovers_from_refused_sdk_45_roster(
+    tmp_path: Path,
+    started_on_legacy: bool,
+    corrects_focus: bool,
+) -> None:
+    """Refuse repeated mixed rosters, then join as soon as the same caller's roster is trusted."""
+    client = _client()
+    bridges: list[FakeBridge] = []
+    manager = _manager(
+        client,
+        FakeBridge(),
+        tmp_path,
+        bridge_factory=_bridge_per_session(bridges),
+        clock_ms=lambda: 2_000,
+    )
+    legacy = _remote_member_event(created_ts=1_000)
+    foreign = _sdk_45_member_event("ALICESECOND", 1_001, "https://rtc.foreign.example")
+    room = _room()
+
+    try:
+        if started_on_legacy:
+            client.room_get_state.return_value = _state_response(legacy)
+            await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+            assert [bridge.connected_grant for bridge in bridges] == [GRANT]
+
+        client.room_get_state.return_value = _state_response(legacy, foreign)
+        for _ in range(2):
+            await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+            assert _call_state(manager).session is None
+            assert _call_state(manager).retry_task is None
+            assert len(bridges) == int(started_on_legacy)
+            assert all(bridge.closed for bridge in bridges)
+
+        if corrects_focus:
+            corrected = _sdk_45_member_event("ALICESECOND", 1_002)
+            # SDK 45 repeats created_ts and the state key when the same member refreshes its state.
+            corrected["content"]["created_ts"] = 1_001
+            corrected["event_id"] = "$corrected"
+            client.room_get_state.return_value = _state_response(legacy, corrected)
+            event = nio.UnknownEvent(corrected, CALL_MEMBER_EVENT_TYPE)
+        else:
+            client.room_get_state.return_value = _state_response(legacy)
+            event = _member_unknown_event()
+        await _deliver(manager, manager.on_room_event(room, event))
+
+        assert _call_state(manager).session is not None
+        assert len(bridges) == int(started_on_legacy) + 1
+        assert bridges[-1].connected_grant == GRANT
+        assert bridges[-1].agent_options is not None
+        assert not bridges[-1].closed
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("started_on_legacy", [False, True], ids=["initial", "active"])
+@pytest.mark.usefixtures("deliver_frame_keys")
+async def test_manager_drops_keys_from_refused_sdk_45_devices(tmp_path: Path, started_on_legacy: bool) -> None:
+    """A foreign device's authenticated key must not enqueue more work for a refused roster."""
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: 2_000)
+    legacy = _remote_member_event(created_ts=1_000)
+    foreign = _sdk_45_member_event("ALICESECOND", 1_001, "https://rtc.foreign.example")
+    room = _room(encrypted=True)
+
+    try:
+        if started_on_legacy:
+            client.room_get_state.return_value = _state_response(legacy)
+            await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+            assert bridge.connected_grant == GRANT
+        client.room_get_state.return_value = _state_response(legacy, foreign)
+        await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+        assert _call_state(manager).session is None
+        read_count = client.room_get_state.await_count
+
+        await _deliver(manager, manager.on_to_device_event(_frame_key_event(device_id="ALICESECOND")))
+
+        assert client.room_get_state.await_count == read_count
+        assert not _call_state(manager).pending_keys
+        assert not any(identity.endswith(":ALICESECOND") for identity, _, _ in bridge.frame_keys)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_manager_reuses_well_known_while_refusing_sdk_45_roster(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeat an authoritative read, not an uncached well-known lookup, on roster events."""
+    read_well_known = AsyncMock(return_value=SERVICE_URL)
+    monkeypatch.setattr("mindroom.matrix_rtc.focus._discovered_service_urls", {})
+    monkeypatch.setattr("mindroom.matrix_rtc.focus._read_livekit_service_url", read_well_known)
+    config = _config()
+    config.calls.livekit_service_url = None
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, config, clock_ms=lambda: 2_000)
+    room = _room()
+    foreign = _sdk_45_member_event("ALICEDEV", 1_000, "https://rtc.foreign.example")
+    client.room_get_state.return_value = _state_response(foreign)
+
+    try:
+        for _ in range(2):
+            await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+            assert _call_state(manager).session is None
+            assert _call_state(manager).retry_task is None
+        client.get_openid_token.assert_not_awaited()
+        assert client.room_get_state.await_count == 2
+        read_well_known.assert_awaited_once()
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "replacement_focus",
     [
         pytest.param("https://rtc.foreign.example/p", id="foreign"),
@@ -5754,6 +5875,45 @@ async def test_nonretryable_terminal_close_stays_quarantined_until_next_call(tmp
 
     assert _call_state(manager).session is not None
     await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_refused_sdk_45_roster_preserves_an_existing_terminal_close(tmp_path: Path) -> None:
+    """A refused roster cannot reopen or replace a previously terminated legacy call."""
+    client = _client()
+    bridges: list[FakeBridge] = []
+    manager = _manager(
+        client,
+        FakeBridge(),
+        tmp_path,
+        bridge_factory=_bridge_per_session(bridges),
+        clock_ms=lambda: 2_000,
+    )
+    legacy = _remote_member_event(created_ts=1_000)
+    client.room_get_state.return_value = _state_response(legacy)
+    room = _room()
+
+    try:
+        await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+        assert bridges[0].agent_options is not None
+        assert bridges[0].agent_options.on_session_terminated is not None
+        bridges[0].agent_options.on_session_terminated(False)
+        await asyncio.gather(*list(manager._background_tasks))
+        assert bridges[0].closed
+
+        foreign = _sdk_45_member_event("ALICESECOND", 1_001, "https://rtc.foreign.example")
+        for roster in ((legacy, foreign), (legacy,)):
+            client.room_get_state.return_value = _state_response(*roster)
+            await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+            assert _call_state(manager).session is None
+            assert len(bridges) == 1
+
+        client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=1_002))
+        await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+        assert len(bridges) == 2
+        assert bridges[-1].connected_grant == GRANT
+    finally:
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio

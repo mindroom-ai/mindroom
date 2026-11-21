@@ -120,20 +120,25 @@ def _resolve_speech_service(
     )
 
 
+@dataclass(frozen=True)
+class MultiSfuFocusRefusal:
+    """Devices whose publish transports disqualify the roster, not the logical call."""
+
+    devices: frozenset[tuple[str, str]]
+
+
 async def resolve_livekit_service(
     members: list[CallMember],
     *,
     user_id: str,
     configured_url: str | None,
     ssl_verify: bool,
-) -> str | None:
-    """Accept only the locally configured or discovered authorization service."""
+) -> str | MultiSfuFocusRefusal | None:
+    """Resolve the trusted service, or distinguish a refused multi-SFU roster from no service."""
     oldest_member = min(members, key=lambda member: member.created_ts)
     advertised_focus = _normalized_service_url(oldest_member.livekit_service_url)
     if advertised_focus is None or (configured_url is None and not advertised_focus.startswith("https://")):
-        if oldest_member.uses_multi_sfu:
-            _log_untrusted_focus(oldest_member)
-        return None
+        return multi_sfu_focus_refusal(members, None) if oldest_member.uses_multi_sfu else None
     local_server_name = MatrixID.parse(user_id).domain
     trusted_url = configured_url
     if trusted_url is None:
@@ -142,8 +147,12 @@ async def resolve_livekit_service(
             ssl_verify=ssl_verify,
             allow_private_networks=True,
         )
-        if trusted_url is not None and _normalized_service_url(trusted_url) != advertised_focus:
-            # A recently discovered URL may predate a well-known change that the caller's client already follows.
+        if (
+            trusted_url is not None
+            and _normalized_service_url(trusted_url) != advertised_focus
+            and not any(member.uses_multi_sfu for member in members)
+        ):
+            # Preserve the legacy refresh. Multi-SFU rosters can be rechecked repeatedly, so reuse the cache.
             trusted_url = await discover_livekit_service_url(
                 local_server_name,
                 ssl_verify=ssl_verify,
@@ -151,19 +160,24 @@ async def resolve_livekit_service(
                 max_age_s=0,
             )
     trusted_focus = _normalized_service_url(trusted_url)
+    if refusal := multi_sfu_focus_refusal(members, trusted_focus):
+        return refusal
     if advertised_focus != trusted_focus:
         _log_untrusted_focus(oldest_member)
         return None
-    return advertised_focus if multi_sfu_members_use_trusted_focus(members, advertised_focus) else None
+    return advertised_focus
 
 
-def multi_sfu_members_use_trusted_focus(members: list[CallMember], service_url: str) -> bool:
-    """Require every multi-SFU publisher to use the call's normalized trusted service URL."""
+def multi_sfu_focus_refusal(members: list[CallMember], service_url: str | None) -> MultiSfuFocusRefusal | None:
+    """Report publishers that do not use the normalized, trusted service URL."""
+    devices = set()
     for member in members:
-        if member.uses_multi_sfu and _normalized_service_url(member.livekit_service_url) != service_url:
+        if member.uses_multi_sfu and (
+            service_url is None or _normalized_service_url(member.livekit_service_url) != service_url
+        ):
             _log_untrusted_focus(member)
-            return False
-    return True
+            devices.add((member.user_id, member.device_id))
+    return MultiSfuFocusRefusal(frozenset(devices)) if devices else None
 
 
 def _log_untrusted_focus(member: CallMember) -> None:

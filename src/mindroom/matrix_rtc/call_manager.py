@@ -36,8 +36,9 @@ from mindroom.matrix.personal_room_store import personal_room_ids
 from mindroom.matrix.room_membership import cached_joined_member_ids
 from mindroom.matrix_rtc.audio_process import ProcessLiveVoiceBridge, prewarm_call_audio_process
 from mindroom.matrix_rtc.call_backends import (
+    MultiSfuFocusRefusal,
     fetch_sfu_grant,
-    multi_sfu_members_use_trusted_focus,
+    multi_sfu_focus_refusal,
     resolve_livekit_service,
     resolve_voice_backend,
 )
@@ -212,7 +213,7 @@ class _PendingFrameKey:
     event: AuthenticatedToDeviceEvent
 
 
-_JoinResult = Literal["joined", "retry", "skip"]
+_JoinResult = Literal["joined", "retry", "skip", "refused"]
 #: ``(user_id, device_id, created_ts)`` of each membership in one call roster.
 type _MembershipIdentities = frozenset[tuple[str, str, int]]
 
@@ -311,6 +312,8 @@ class _RoomCall:
     starting_call: _StartingCall | None = None
     joining_requester: str | None = None
     pending_keys: dict[tuple[str, str, int], _PendingFrameKey] = field(default_factory=dict)
+    #: Key intake only: refuse keys from these devices until an authoritative roster passes focus admission.
+    refused_key_devices: frozenset[tuple[str, str]] = frozenset()
     logical_call: _LogicalCallState | None = None
     retry_task: asyncio.Task[None] | None = None
     #: Set while the reconcile retry backoff is in force, including at zero attempts.
@@ -343,6 +346,12 @@ class _RoomCall:
         if task is not None and task is not asyncio.current_task():
             task.cancel()
 
+    def refuse_focus(self, refusal: MultiSfuFocusRefusal) -> None:
+        """Drop keys and stop retrying this roster without blocking its logical call."""
+        self.refused_key_devices = refusal.devices
+        self.pending_keys.clear()
+        self.clear_reconcile_retry()
+
     def cancel_expiry(self) -> None:
         if self.expiry_handle is not None:
             self.expiry_handle.cancel()
@@ -358,6 +367,7 @@ class _RoomCall:
         """Forget the room's call: cancel its retry and expiry timer, drop its queued keys, and stop its session."""
         self.clear_logical_call()
         self.pending_keys.clear()
+        self.refused_key_devices = frozenset()
         self.cancel_expiry()
         await self.stop_session(event=event)
 
@@ -650,6 +660,9 @@ class CallManager:
                 reason="unauthorized_call_member",
             )
             return
+        room_call = self._observe(room)
+        if (received.user_id, received.claimed_device_id) in room_call.refused_key_devices:
+            return
         logger.info(
             "call_frame_key_received",
             room_id=room_id,
@@ -657,12 +670,10 @@ class CallManager:
             device_id=received.claimed_device_id,
             key_index=received.key_index,
         )
-        room_call = self._observe(room)
         session = room_call.session
-        if session is not None and session.on_key_received(received):
-            return
-        _queue_pending_key(room_call.pending_keys, received, event)
-        self._request_reconcile(room)
+        if session is None or not session.on_key_received(received):
+            _queue_pending_key(room_call.pending_keys, received, event)
+            self._request_reconcile(room)
 
     async def reconcile_joined_rooms(self, room_ids: AbstractSet[str] | None = None) -> None:
         """Reconcile all configured calls, or only the requested joined rooms."""
@@ -845,22 +856,21 @@ class CallManager:
         joined_user_ids: AbstractSet[str],
     ) -> None:
         """Apply one authoritative room/call roster to the active session."""
-        if not members and self._hold_through_roster_gap(room, room_call, joined_user_ids):
-            return
+        if not members:
+            room_call.refused_key_devices = frozenset()
+            if self._hold_through_roster_gap(room, room_call, joined_user_ids):
+                return
         session = room_call.session
-        if (
-            not members
-            or (
-                session is not None
-                and not multi_sfu_members_use_trusted_focus(members, session.deps.livekit_service_url)
-            )
-            or not self._members_are_authorized(members, room.room_id)
-        ):
+        if session is not None and (refusal := multi_sfu_focus_refusal(members, session.deps.livekit_service_url)):
+            room_call.refuse_focus(refusal)
+            await room_call.stop_session()
+            return
+        if not members or not self._members_are_authorized(members, room.room_id):
             room_call.clear_logical_call()
             room_call.pending_keys.clear()
             await room_call.stop_session()
             return
-        logical_call = room_call.logical_call
+        previous_logical_call = logical_call = room_call.logical_call
         requester_id = members[0].user_id
         if (
             logical_call is None
@@ -876,7 +886,7 @@ class CallManager:
             await self._update_session_members(room, room_call, session, members)
             return
         await room_call.stop_session()
-        await self._join_populated(
+        result = await self._join_populated(
             room,
             room_call,
             logical_call,
@@ -884,6 +894,9 @@ class CallManager:
             retrying=retrying,
             agent_call_events=agent_call_events,
         )
+        if result == "refused":
+            # A refused roster cannot replace an existing terminal block or create a new one.
+            room_call.logical_call = previous_logical_call
 
     async def _join_populated(
         self,
@@ -894,14 +907,14 @@ class CallManager:
         *,
         retrying: bool = False,
         agent_call_events: tuple[dict[str, Any], ...],
-    ) -> None:
+    ) -> _JoinResult | None:
         """Join a populated call unless it is blocked or backing off."""
         if logical_call.join_blocked or (room_call.retry_attempts is not None and not retrying):
-            return
+            return None
         if self._response_admission_gate.closed:
             # A forced replacement may have planned this agent as idle; join once it publishes its config.
             self._schedule_reconcile_retry(room, room_call)
-            return
+            return None
         # Count the call as active before tool materialization captures the current config.
         room_call.joining_requester = members[0].user_id
         try:
@@ -912,10 +925,11 @@ class CallManager:
             room_call.clear_reconcile_retry()
         elif result == "retry":
             self._schedule_reconcile_retry(room, room_call)
-        else:
+        elif result == "skip":
             room_call.clear_reconcile_retry()
             room_call.pending_keys.clear()
             logical_call.join_blocked = True
+        return result
 
     async def _update_session_members(
         self,
@@ -1130,7 +1144,7 @@ class CallManager:
         )
         return _RoomCallState(members=members, agent_call_events=agent_call_events, joined_user_ids=joined_user_ids)
 
-    async def _join(  # noqa: C901, PLR0911
+    async def _join(  # noqa: C901, PLR0911, PLR0915
         self,
         room: nio.MatrixRoom,
         room_call: _RoomCall,
@@ -1163,9 +1177,13 @@ class CallManager:
         except ValueError as error:
             logger.warning("call_service_discovery_failed", room_id=room_id, agent=self._agent_name, error=str(error))
             return "skip"
+        if isinstance(service, MultiSfuFocusRefusal):
+            room_call.refuse_focus(service)
+            return "refused"
         if service is None:
             logger.warning("call_join_skipped_no_livekit_service", room_id=room_id, agent=self._agent_name)
             return "skip"
+        room_call.refused_key_devices = frozenset()
         service_resolved = time.monotonic()
         try:
             device_id = required_device_id(self._client)
