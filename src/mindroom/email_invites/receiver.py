@@ -1,4 +1,4 @@
-"""Router-only receiver of email-invite claims sent as plain to-device events."""
+"""Receiver of email-invite claims, sent as plain to-device events to the account whose link is used."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import nio
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.email_invites import store
 from mindroom.email_invites.policy import may_invite, refused_room_kind
-from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.joined_members import read_joined_members
@@ -51,8 +50,8 @@ def _claim(event: nio.UnknownToDeviceEvent) -> tuple[str, str] | None:
 
 
 class _Receiver:
-    def __init__(self, client: nio.AsyncClient, paths: RuntimePaths, config_getter: Callable[[], Config]) -> None:
-        self.client, self.paths, self.config_getter = client, paths, config_getter
+    def __init__(self, client: nio.AsyncClient, name: str, paths: RuntimePaths, config: Callable[[], Config]) -> None:
+        self.client, self.agent_name, self.paths, self.config_getter = client, name, paths, config
         self.limiter = OnboardingRateLimiter(60, 10)
 
     def admit(self, event: nio.UnknownToDeviceEvent) -> tuple[str, str] | None:
@@ -89,7 +88,8 @@ class _Receiver:
 
     async def _handle(self, invite: store.EmailInvite | None, sender: str) -> tuple[_Status, str | None]:  # noqa: PLR0911
         """Bind the code to the sender, recheck the rights, and send the Matrix invite; a notice comes with a won update."""
-        if invite is None or invite.claimed_by not in (None, sender):
+        # A link is answered only by the account it names, the one that sent it.
+        if invite is None or invite.agent_name != self.agent_name or invite.claimed_by not in (None, sender):
             return "rejected", None
         if invite.invited_at is not None:
             return "invited", None
@@ -106,8 +106,8 @@ class _Receiver:
         if kind not in (None, "unknown") or approver_right is False:
             store.revoke(self.paths, invite.id)
             return "rejected", None
-        router_id = entity_identity_registry(config, self.paths).current_id(ROUTER_AGENT_NAME).full_id
-        if kind == "unknown" or approver_right is None or await may_invite(self.client, room_id, router_id) is not True:
+        own_right = await may_invite(self.client, room_id, self.client.user_id)
+        if kind == "unknown" or approver_right is None or own_right is not True:
             return "retry", None
         if not store.start_sending(self.paths, invite.id, sender):  # The one winner; a revoke or expiry wins first.
             return "rejected", None
@@ -122,7 +122,7 @@ class _Receiver:
         if isinstance(response, nio.RoomInviteResponse):
             used = f"Invite for {invite.email} (approved by {invite.inviter_id}) was used by {sender}."
             return "invited", used if store.mark_invited(self.paths, invite.id) else None
-        await self.abandoned(store.abandon_sending(self.paths, invite.id))
+        await self.abandoned(store.abandon_sending(self.paths, invite_id=invite.id, agent_name=self.agent_name))
         return "rejected", None
 
     async def abandoned(self, invites: list[store.EmailInvite]) -> None:
@@ -158,11 +158,9 @@ async def register_email_invite_receiver(
     config_getter: Callable[[], Config],
     callback_wrapper: Callable[[Callable[..., Awaitable[None]]], Callable[..., Awaitable[None]]],
 ) -> None:
-    """Register the claim receiver on the router only, revoking links a crash left sending, before any claim."""
-    if agent_name != ROUTER_AGENT_NAME:
-        return
-    receiver = _Receiver(client, runtime_paths, config_getter)
-    if abandoned := store.abandon_sending(runtime_paths):
+    """Register this account's claim receiver, revoking its links a crash left sending, before any claim."""
+    receiver = _Receiver(client, agent_name, runtime_paths, config_getter)
+    if abandoned := store.abandon_sending(runtime_paths, agent_name=agent_name):
         await callback_wrapper(receiver.abandoned)(abandoned)
     wrapped = callback_wrapper(receiver.on_event)
 
@@ -171,3 +169,22 @@ async def register_email_invite_receiver(
             await wrapped(event, *claim)
 
     client.add_to_device_callback(on_event, nio.UnknownToDeviceEvent)
+
+
+async def revoke_orphaned_sends(client: nio.AsyncClient, runtime_paths: RuntimePaths, config: Config) -> None:
+    """Revoke, with its one notice, each link a crash left sending for an entity that is no longer configured.
+
+    No receiver starts for a removed or renamed entity, so an account revokes its links in the rooms its first sync
+    lists whose power levels let it post the notice. A configured entity's links are left to its own receiver.
+    """
+    configured = (ROUTER_AGENT_NAME, *config.agents, *config.teams)
+    rooms = [
+        room_id
+        for room_id, room in client.rooms.items()
+        if room.power_levels.can_user_send_message(
+            client.user_id,
+            "m.room.encrypted" if room.encrypted else "m.room.message",
+        )
+    ]
+    orphans = store.abandon_sending(runtime_paths, configured=configured, rooms=rooms)
+    await _Receiver(client, "", runtime_paths, lambda: config).abandoned(orphans)

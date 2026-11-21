@@ -68,6 +68,7 @@ from mindroom.reply_presentation import TEAM_PLACEHOLDER, Presentation, decode_p
 from mindroom.response_sources import Owned, SourceFate
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, _flush_phase_boundary_if_needed
 from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.events import tool_markers_in_text
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
@@ -213,8 +214,8 @@ class _Homeserver:
 
 
 def _body(content: Mapping[str, Any]) -> str:
-    """Return the body a reader would see, following an edit into its replacement."""
-    return str(visible_content_from_content(content).get("body", ""))
+    """Return the body MindRoom Chat reads, following an edit into its replacement, with its tool markers back."""
+    return str(tool_markers_in_text(visible_content_from_content(content)).get("body", ""))
 
 
 def _trace_events(content: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -561,7 +562,7 @@ def _require_echo_approval(turn: _Turn) -> None:
     )
     turn.bot.config.background_tool_jobs.enabled = False
 
-    async def prepare_event(_room: str, _thread: str | None, content: dict) -> dict:
+    async def prepare_event(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:
         return content
 
     async def send_card(_delivery: MatrixDelivery) -> str:
@@ -573,8 +574,8 @@ def _require_echo_approval(turn: _Turn) -> None:
         send_approval_delivery=send_card,
         resolve_approval_delivery=AsyncMock(return_value=None),
         cards=turn.bot._journal_store.principal("router@shared"),
-        transport_sender_id=lambda: "@router:localhost",
-        transport_device_id=lambda: "DEVICE",
+        sender_bot=lambda _entity_name, _room_id: object(),
+        sender_device_id=AsyncMock(return_value="DEVICE"),
     )
 
 

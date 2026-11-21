@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol
 
 import nio
 
 from mindroom.approval import manager as approval_manager
-from mindroom.approval.tool_approval import DEFAULT_ROUTER_MANAGED_ROOM_REASON, ToolApprovalTransportError
+from mindroom.approval.tool_approval import ToolApprovalTransportError
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import DeliveryStage
+from mindroom.event_journal.identity import agent_of_principal, matrix_user_of_principal
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
@@ -22,7 +24,7 @@ from mindroom.matrix.message_builder import build_matrix_edit_content, build_mes
 from mindroom.matrix.room_history_reads import find_outbox_delivery_event_id_via_room_messages
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from mindroom.event_journal import (
         ApprovalContinuation,
@@ -30,9 +32,11 @@ if TYPE_CHECKING:
         MatrixDelivery,
         PrincipalStore,
     )
+    from mindroom.event_journal.matrix_delivery import ResolveDelivered, SendDelivery
 logger = get_logger(__name__)
 
 _UNAVAILABLE_NOTICE_APPROVAL_ID_KEY = "io.mindroom.approval_unavailable_id"
+_UNREADABLE = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
 
 
 def _approval_delivery_content(claimed: MatrixDelivery) -> dict[str, object]:
@@ -46,12 +50,14 @@ def _approval_delivery_content(claimed: MatrixDelivery) -> dict[str, object]:
 class _ApprovalTransportBot(Protocol):
     """The live bot surface needed for card transport and source wakeups."""
 
-    agent_name: str
-    running: bool
-    client: nio.AsyncClient | None
+    @property
+    def agent_name(self) -> str: ...
 
     @property
-    def approval_room_ids(self) -> frozenset[str]: ...
+    def running(self) -> bool: ...
+
+    @property
+    def client(self) -> nio.AsyncClient | None: ...
 
     async def latest_thread_event_id_if_needed(
         self,
@@ -98,7 +104,11 @@ async def _offload_oversized_full_arguments(
 class ApprovalMatrixTransport:
     """Prepare, send, and adopt journal-owned approval deliveries."""
 
-    bot_provider: Callable[[str], _ApprovalTransportBot | None]
+    bots: Callable[[], Mapping[str, _ApprovalTransportBot]]
+    # The bot for a room's posts that have no answering agent.
+    room_poster: Callable[[str], _ApprovalTransportBot | None]
+    # The store whose card rows name each card's sender.
+    cards: Callable[[], ApprovalDeliveryView | None]
 
     async def wake_continuation_sources(
         self,
@@ -107,27 +117,34 @@ class ApprovalMatrixTransport:
         source_event_ids: tuple[str, ...],
     ) -> None:
         """Wake the exact owner after an atomic card decision makes work ready."""
-        bot = self.bot_provider(entity_name)
+        bot = self.bots().get(entity_name)
         if bot is not None and bot.running:
             bot.retry_approval_sources(room_id, source_event_ids)
 
     def responder_principal_id(self, entity_name: str) -> str | None:
         """Name the journal principal of one entity's Matrix account, as its paused replies record it."""
-        bot = self.bot_provider(entity_name)
+        bot = self.bots().get(entity_name)
         return None if bot is None else bot.journal_principal().principal_id
 
     async def deliver_unavailable_notice(
         self,
         continuation: ApprovalContinuation,
         reason: str,
-    ) -> ApprovalDeliveryView | None:
-        """Durably send or adopt one router-owned unavailable-owner notice."""
-        bot = self.transport_bot(continuation.room_id)
+    ) -> bool:
+        """Durably send or adopt one unavailable-owner notice through the room's poster, or the account that began it.
+
+        An acknowledged notice is delivered whether or not the account that posted it still runs.
+        """
+        cards = self.cards()
+        first = None if cards is None else await cards.approvals.unavailable_notice(continuation.approval_id)
+        if first is not None and first[2]:
+            return True
+        bot = self.room_poster(continuation.room_id) if first is None else self.bots().get(agent_of_principal(first[0]))
         if bot is None or bot.client is None:
-            return None
+            return False
         client = bot.client
         if not can_send_to_encrypted_room(client, continuation.room_id, operation="send_approval_notice"):
-            return None
+            return False
         store = bot.journal_principal()
         content = build_message_content(
             reason,
@@ -153,34 +170,29 @@ class ApprovalMatrixTransport:
                 raise ToolApprovalTransportError(msg)
             return str(response.event_id)
 
-        async def resolve_delivered(claimed: MatrixDelivery) -> str | None:
-            response_sender = client.user_id
-            if not response_sender:
-                return None
-            return await find_outbox_delivery_event_id_via_room_messages(
-                client,
-                claimed.room_id,
-                delivery_sender=response_sender,
-                source_event_ids=(continuation.response_event_id,),
-                delivery_content=claimed.payload,
-                delivery_event_type=claimed.event_type,
+        delivery_id = (
+            first[1]
+            if first is not None
+            else await store.approvals.enqueue_unavailable_approval_notice(
+                approval_id=continuation.approval_id,
+                room_id=continuation.room_id,
+                thread_id=continuation.thread_id,
+                payload=content,
             )
-
-        delivery_id = await store.approvals.enqueue_unavailable_approval_notice(
-            approval_id=continuation.approval_id,
-            room_id=continuation.room_id,
-            thread_id=continuation.thread_id,
-            payload=content,
         )
         if delivery_id is None:
-            return None
+            return False
         try:
             delivered = await MatrixDeliveryWorker(
                 store=store,
                 send=send,
                 event_type="m.room.message",
-                sending_device_id=self.transport_device_id(),
-                resolve_delivered=resolve_delivered,
+                sending_device_id=client.device_id or None,
+                resolve_delivered=partial(
+                    self._resolve_approval_delivery,
+                    client,
+                    source_event_ids=(continuation.response_event_id,),
+                ),
             ).flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
         except ToolApprovalTransportError:
             logger.warning(
@@ -189,8 +201,8 @@ class ApprovalMatrixTransport:
                 room_id=continuation.room_id,
                 exc_info=True,
             )
-            return None
-        return store if delivered is not None else None
+            return False
+        return delivered is not None
 
     async def _approval_thread_relation(
         self,
@@ -199,7 +211,7 @@ class ApprovalMatrixTransport:
         agent_name: str,
     ) -> dict[str, object]:
         """Return a threaded relation payload for approval events."""
-        bot = self.bot_provider(agent_name)
+        bot = self.bots().get(agent_name)
         latest_thread_event_id = thread_id
         if bot is not None:
             resolved = await bot.latest_thread_event_id_if_needed(room_id, thread_id)
@@ -215,14 +227,15 @@ class ApprovalMatrixTransport:
         room_id: str,
         thread_id: str | None,
         content: dict[str, Any],
+        sender_entity: str,
     ) -> dict[str, Any] | None:
-        """Freeze relation and sidecar content before durable reservation."""
-        bot = self.bot_provider(ROUTER_AGENT_NAME)
-        if bot is None or not bot.running or bot.client is None:
-            return None
-        if not self._bot_has_approval_room(bot, room_id):
-            raise ToolApprovalTransportError(DEFAULT_ROUTER_MANAGED_ROOM_REASON)
-        if not can_send_to_encrypted_room(bot.client, room_id, operation="send_approval_event"):
+        """Freeze relation and sidecar content for the entity that will send the card, before durable reservation."""
+        bot = self._joined_bot(sender_entity, room_id)
+        if (
+            bot is None
+            or bot.client is None
+            or not can_send_to_encrypted_room(bot.client, room_id, operation="send_approval_event")
+        ):
             return None
         send_content = dict(content)
         if thread_id is not None:
@@ -234,13 +247,34 @@ class ApprovalMatrixTransport:
             )
         return await _offload_oversized_full_arguments(bot.client, room_id, send_content)
 
-    async def send_approval_delivery(self, claimed: MatrixDelivery) -> str:
-        """Send one already-frozen approval event or deterministic edit."""
-        bot = self.transport_bot(claimed.room_id)
-        if bot is None or bot.client is None:
-            raise ToolApprovalTransportError(DEFAULT_ROUTER_MANAGED_ROOM_REASON)
+    async def pinned_delivery(self, delivery_id: str | None) -> tuple[SendDelivery, ResolveDelivered, str | None]:
+        """Pin the one client a card's deliveries go out through, with its device, before a delivery is claimed.
+
+        A sender that is not ready, or has no bot while it is replaced, raises: nothing is claimed and a later pass retries.
+        """
+        client = None
+        if delivery_id is not None:
+            cards = self.cards()
+            card = None if cards is None else await cards.approvals.approval_card_sender(delivery_id=delivery_id)
+            bot = None if card is None else self.sender_bot(*card)
+            if bot is None:
+                msg = f"The sender of approval delivery {delivery_id!r} is not ready"
+                raise ToolApprovalTransportError(msg)
+            client = bot.client
+        send = partial(self._send_approval_delivery, client)
+        return (
+            send,
+            partial(self._resolve_approval_delivery, client),
+            None if client is None else client.device_id or None,
+        )
+
+    async def _send_approval_delivery(self, client: nio.AsyncClient | None, claimed: MatrixDelivery) -> str:
+        """Send one already-frozen approval event or deterministic edit through the pinned client of its sender."""
+        if client is None:
+            msg = f"Approval delivery {claimed.delivery_id!r} has no pinned sender"
+            raise ToolApprovalTransportError(msg)
         response = await send_room_event_result(
-            bot.client,
+            client,
             claimed.room_id,
             claimed.event_type,
             _approval_delivery_content(claimed),
@@ -252,98 +286,74 @@ class ApprovalMatrixTransport:
             raise ToolApprovalTransportError(msg)
         return str(response.event_id)
 
-    async def resolve_approval_delivery(self, claimed: MatrixDelivery) -> str | None:
-        """Adopt the exact card or terminal edit found after a device change."""
-        bot = self.transport_bot(claimed.room_id)
-        if bot is None or bot.client is None:
-            return None
-        sender = bot.client.user_id
-        if not isinstance(sender, str) or not sender:
+    async def _resolve_approval_delivery(
+        self,
+        client: nio.AsyncClient | None,
+        claimed: MatrixDelivery,
+        *,
+        source_event_ids: tuple[str, ...] = (),
+    ) -> str | None:
+        """Adopt the exact card, terminal edit, or notice its sender left before a device change."""
+        if client is None or not client.user_id:
             return None
         return await find_outbox_delivery_event_id_via_room_messages(
-            bot.client,
+            client,
             claimed.room_id,
-            delivery_sender=sender,
-            source_event_ids=(),
+            delivery_sender=client.user_id,
+            source_event_ids=source_event_ids,
             delivery_content=_approval_delivery_content(claimed),
             delivery_event_type=claimed.event_type,
         )
 
     async def resolve_approval_action_delivery(self, room_id: str, card_event_id: str) -> str | None:
-        """Return the generic delivery ID carried by one exact visible card."""
-        bot = self.bot_provider(ROUTER_AGENT_NAME)
-        if bot is None:
-            msg = f"Router approval transport cannot read {room_id} to verify a card action"
+        """Return the generic delivery ID carried by one exact visible card that its recorded sender sent.
+
+        Every running bot in the room may read the event: the card's sender can read what another account cannot.
+        With no such bot nothing says the event is a card, so an ordinary reply goes on as text.
+        """
+        cards, refused, failed = self.cards(), None, None
+        # The fleet changes while a reader waits on Matrix, so the readers are named before the first read.
+        joined = [bot.client for bot in self.bots().values() if bot.running and bot.client is not None]
+        for client in [client for client in joined if room_id in client.rooms]:
+            response = await client.room_get_event(room_id, card_event_id)
+            event = response.event if isinstance(response, nio.RoomGetEventResponse) else None
+            source = None if event is None or isinstance(event, nio.MegolmEvent) else event.source
+            if not isinstance(source, dict):
+                final = isinstance(response, nio.RoomGetEventError) and response.status_code in _UNREADABLE
+                refused, failed = (response, failed) if final else (refused, response)
+                continue
+            content = source.get("content")
+            approval_id = content.get("approval_id") if isinstance(content, dict) else None
+            if cards is None or event is None or not isinstance(approval_id, str):
+                return None
+            card = await cards.approvals.approval_card_sender(delivery_id=approval_id)
+            if (
+                card is None
+                or event.event_id != card_event_id
+                or source.get("room_id") not in {None, room_id}
+                or source.get("type") != "io.mindroom.tool_approval"
+                or event.sender != matrix_user_of_principal(card[0] or cards.principal_id)
+            ):
+                return None
+            return approval_id
+        if failed is not None:
+            msg = f"Matrix could not verify approval card {card_event_id!r}: {failed}"
+            raise ToolApprovalTransportError(msg)
+        if refused is not None:
+            msg = f"Matrix cannot verify approval card {card_event_id!r}: {refused}"
             raise approval_manager.UnverifiableApprovalCardError(msg)
-        if not bot.running or bot.client is None:
-            msg = f"Router approval transport is not ready to verify a card action in {room_id}"
-            raise ToolApprovalTransportError(msg)
-        if not self._bot_has_approval_room(bot, room_id):
-            # Router-free agent rooms cannot contain cards from this transport.
-            # Abstain so ordinary replies continue through normal text ingress.
-            return None
-        response = await bot.client.room_get_event(room_id, card_event_id)
-        if isinstance(response, nio.RoomGetEventError) and response.status_code in {
-            "M_FORBIDDEN",
-            "M_NOT_FOUND",
-        }:
-            msg = f"Matrix cannot verify approval card {card_event_id!r}: {response}"
-            raise approval_manager.UnverifiableApprovalCardError(msg)
-        if not isinstance(response, nio.RoomGetEventResponse):
-            msg = f"Matrix could not verify approval card {card_event_id!r}: {response}"
-            raise ToolApprovalTransportError(msg)
-        event = response.event
-        if isinstance(event, nio.MegolmEvent):
-            msg = f"Matrix could not decrypt approval card {card_event_id!r}"
-            raise ToolApprovalTransportError(msg)
-        sender = self.transport_sender_id()
-        source = event.source if isinstance(event.source, dict) else None
-        if (
-            sender is None
-            or event.event_id != card_event_id
-            or event.sender != sender
-            or source is None
-            or source.get("room_id") not in {None, room_id}
-            or source.get("type") != "io.mindroom.tool_approval"
-        ):
-            return None
-        content = source.get("content")
-        if not isinstance(content, dict):
-            return None
-        approval_id = content.get("approval_id")
-        return approval_id if isinstance(approval_id, str) and approval_id else None
+        return None
 
-    def _bot_has_approval_room(self, bot: _ApprovalTransportBot, room_id: str) -> bool:
-        """Return whether one bot can safely post into an approval room."""
-        return bot.client is not None and room_id in bot.approval_room_ids
+    def sender_bot(self, sender_principal_id: str | None, room_id: str) -> _ApprovalTransportBot | None:
+        """Return the running bot of a card's sender while its own client is joined to the card's room."""
+        # LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
+        entity = agent_of_principal(sender_principal_id) if sender_principal_id else ROUTER_AGENT_NAME
+        return self._joined_bot(entity, room_id)
 
-    def router_missing(self, room_id: str) -> bool:
-        """Return whether the running router does not serve one room, so no approval card can reach it."""
-        bot = self.bot_provider(ROUTER_AGENT_NAME)
-        return bot is not None and bot.running and not self._bot_has_approval_room(bot, room_id)
-
-    def transport_bot(self, room_id: str) -> _ApprovalTransportBot | None:
-        """Return the live router bot serving one approval room."""
-        bot = self.bot_provider(ROUTER_AGENT_NAME)
-        if bot is None or not bot.running or bot.client is None:
-            return None
-        return bot if self._bot_has_approval_room(bot, room_id) else None
-
-    def transport_sender_id(self) -> str | None:
-        """Return the Matrix user id that owns approval cards."""
-        bot = self.bot_provider(ROUTER_AGENT_NAME)
-        if bot is None or bot.client is None:
-            return None
-        user_id = bot.client.user_id
-        return user_id if isinstance(user_id, str) and user_id else None
-
-    def transport_device_id(self) -> str | None:
-        """Return the Matrix device that sends approval cards."""
-        bot = self.bot_provider(ROUTER_AGENT_NAME)
-        if bot is None or bot.client is None:
-            return None
-        device_id = bot.client.device_id
-        return device_id if isinstance(device_id, str) and device_id else None
+    def _joined_bot(self, entity_name: str, room_id: str) -> _ApprovalTransportBot | None:
+        bot = self.bots().get(entity_name)
+        joined = bot is not None and bot.running and bot.client is not None and room_id in bot.client.rooms
+        return bot if joined else None
 
     async def send_notice(
         self,
@@ -353,8 +363,8 @@ class ApprovalMatrixTransport:
         thread_id: str | None,
         reason: str,
     ) -> bool:
-        """Send one approval notice through router transport."""
-        bot = self.transport_bot(room_id)
+        """Send one approval notice through the room's poster."""
+        bot = self.room_poster(room_id)
         if bot is None or bot.client is None:
             return False
         content = build_message_content(

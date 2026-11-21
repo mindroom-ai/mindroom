@@ -165,6 +165,7 @@ async def test_send_message_result_marks_prepare_and_send_phases() -> None:
     """Matrix sends should mark large-message prep and room-send boundaries."""
     timing_events: list[tuple[str, dict[str, object]]] = []
     client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@mindroom_test:localhost"
     room = Mock()
     room.encrypted = False
     client.rooms = {"!room:localhost": room}

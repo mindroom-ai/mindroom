@@ -57,7 +57,11 @@ from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turn_record import TurnRecord
 from mindroom.turns.dispatch import TurnDispatcher
-from tests.access_schema_support import with_current_room_member_access
+from tests.access_schema_support import (
+    refresh_memberships,
+    with_current_room_member_access,
+    with_responder_access,
+)
 from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -718,7 +722,7 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
     )
 
     bot._turn_policy.plan_turn.assert_awaited_once()
-    dispatch = bot._turn_policy.plan_turn.await_args.args[2]
+    dispatch = bot._turn_policy.plan_turn.await_args.args[1]
     assert dispatch.envelope.source_kind == "hook"
     assert dispatch.envelope.message_received_depth == 1
     assert dispatch.envelope.mentioned_agents == ("code",)
@@ -928,7 +932,7 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
 
     assert hook_calls == ["called"]
     bot._turn_policy.plan_turn.assert_awaited_once()
-    dispatch = bot._turn_policy.plan_turn.await_args.args[2]
+    dispatch = bot._turn_policy.plan_turn.await_args.args[1]
     assert dispatch.envelope.source_kind == "message"
 
 
@@ -1147,8 +1151,8 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
     await bot._coalescing_gate.drain_all()
 
     assert captured_bodies == ["@mindroom_code:localhost what is 99+1?"]
-    assert bot._turn_policy.plan_turn.await_args.args[1].body == "@mindroom_code:localhost what is 99+1?"
     execute_args = bot._turn_dispatcher._execute_response_action.await_args.args
+    assert execute_args[1].body == "@mindroom_code:localhost what is 99+1?"
     assert isinstance(execute_args[4], DispatchPayloadInputs)
     await prepare_payload_via_seam(bot, execute_args)
     payload_request = bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments.await_args.args[0]
@@ -1467,43 +1471,6 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
 
 
 @pytest.mark.asyncio
-async def test_router_reply_to_hook_dispatch_text_preserves_original_envelope_metadata(tmp_path: Path) -> None:
-    """The router's reply to hook-dispatch text, which is conversation even when it looks like a command, keeps its targeting."""
-    bot = _agent_bot(tmp_path, agent_name="router")
-    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
-    event = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$hook-dispatch-command",
-            "sender": "@mindroom_router:localhost",
-            "origin_server_ts": 1234567890,
-            "content": {
-                "msgtype": "m.text",
-                "body": "!help",
-                SOURCE_KIND_KEY: "hook_dispatch",
-                "com.mindroom.hook_source": "origin-plugin:message:received",
-                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
-            },
-        },
-    )
-    bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=_dispatch_context(bot),
-    )
-    bot._delivery_gateway.send_text = AsyncMock(return_value="$reply")
-    replace_turn_deps(bot, delivery_gateway=bot._delivery_gateway)
-
-    await dispatch_test_turn(
-        bot._turn_dispatcher,
-        room,
-        event,
-        facts=bot._ingress_validator.classify(event, room_id=room.room_id),
-    )
-
-    request = bot._delivery_gateway.send_text.await_args.args[0]
-    assert request.target.resolved_thread_id == "$hook-dispatch-command"
-    assert request.target.reply_to_event_id == "$hook-dispatch-command"
-
-
-@pytest.mark.asyncio
 async def test_deep_hook_dispatch_does_not_consume_interactive_answer_on_message_path(tmp_path: Path) -> None:
     """Deep synthetic relays should stop before interactive answers are consumed."""
     bot = _agent_bot(tmp_path)
@@ -1658,7 +1625,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
             },
         },
     )
-    bot._inbound_turn_normalizer.prepare_file_sidecar_text_event = AsyncMock(return_value=prepared_text_event)
+    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=prepared_text_event)
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=_dispatch_context(bot),
     )
@@ -1671,7 +1638,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
             room,
             "@mindroom_router:localhost",
         )
-        handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
+        handled = await bot._turn_ingress._normalize_and_dispatch_text(
             room,
             sidecar_event,
             bot._ingress_validator.classify(sidecar_event, room_id=room.room_id),
@@ -1727,7 +1694,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
             },
         },
     )
-    bot._inbound_turn_normalizer.prepare_file_sidecar_text_event = AsyncMock(return_value=prepared_text_event)
+    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=prepared_text_event)
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=_dispatch_context(bot),
     )
@@ -1740,7 +1707,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
             room,
             "@mindroom_router:localhost",
         )
-        handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
+        handled = await bot._turn_ingress._normalize_and_dispatch_text(
             room,
             sidecar_event,
             bot._ingress_validator.classify(sidecar_event, room_id=room.room_id),
@@ -1786,7 +1753,7 @@ async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_
     )
 
     bot._turn_policy.plan_turn.assert_awaited_once()
-    dispatch = bot._turn_policy.plan_turn.await_args.args[2]
+    dispatch = bot._turn_policy.plan_turn.await_args.args[1]
     assert dispatch.envelope.source_kind == "hook_dispatch"
     assert dispatch.envelope.message_received_depth == 1
 
@@ -1890,40 +1857,47 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(tmp_path: Path) -> None:
-    """hook_dispatch should enforce room authorization against the preserved requester."""
-    bot = _hook_bot(tmp_path)
+    """A responder enforces room authorization against a hook dispatch's preserved requester.
+
+    The room's steward takes such a message only to route it, and each candidate applies its own access.
+    The responder's access admits the account that sent the event, so only the preserved requester refuses it.
+    """
+    bot = _wired_bot(with_responder_access(_config(tmp_path), "code", users=["@mindroom_router:localhost"]), "code")
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock()
-    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
     room.canonical_alias = None
     bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
     bot.client.joined_members.return_value = nio.JoinedMembersResponse(
-        members=[nio.RoomMember("@mindroom_router:localhost", None, None)],
+        members=[nio.RoomMember("@mindroom_code:localhost", None, None)],
         room_id=room.room_id,
     )
-    await bot._runtime_view.agent_reply_memberships.refresh(bot.config, bot.runtime_paths, bot.client)
-    event = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$unauthorized-hook-dispatch",
-            "sender": "@mindroom_router:localhost",
-            "origin_server_ts": 1234567890,
-            "content": {
-                "msgtype": "m.text",
-                "body": "restart notification",
-                SOURCE_KIND_KEY: "hook_dispatch",
-                "com.mindroom.hook_source": "hook-plugin:agent:started",
-                ORIGINAL_SENDER_KEY: "@unauthorized:localhost",
-            },
-        },
-    )
+    await refresh_memberships(bot._runtime_view.agent_reply_memberships, bot.config, bot.runtime_paths, bot.client)
 
-    assert (
-        await bot._turn_ingress._precheck_dispatch_event(
-            room,
-            event,
-            bot._ingress_validator.classify(event, room_id=room.room_id),
+    def hook_dispatch(event_id: str, **preserved: str) -> nio.RoomMessageText:
+        return nio.RoomMessageText.from_dict(
+            {
+                "event_id": event_id,
+                "sender": "@mindroom_router:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "restart notification",
+                    SOURCE_KIND_KEY: "hook_dispatch",
+                    "com.mindroom.hook_source": "hook-plugin:agent:started",
+                    **preserved,
+                },
+            },
         )
-        is False
-    )
+
+    async def precheck(event: nio.RoomMessageText) -> bool:
+        facts = bot._ingress_validator.classify(event, room_id=room.room_id)
+        return await bot._turn_ingress._precheck_dispatch_event(room, event, facts)
+
+    # The same dispatch with no preserved requester passes, so the refusal below is the requester's.
+    assert await precheck(hook_dispatch("$own-hook-dispatch")) is True
+    turn_store.record_turn.assert_not_called()
+    event = hook_dispatch("$unauthorized-hook-dispatch", **{ORIGINAL_SENDER_KEY: "@unauthorized:localhost"})
+    assert await precheck(event) is False
     turn_store.record_turn.assert_called_once_with(TurnRecord.create([event.event_id]), room_id=room.room_id)

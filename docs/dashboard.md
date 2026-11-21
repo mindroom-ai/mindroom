@@ -63,7 +63,7 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 ### Schedules
 
 Lists scheduled tasks across rooms with room, status, schedule type, delivery mode, and next run time.
-A room whose schedules cannot be read, for example because the router is not in it, is named above the list with the reason, and the home tab counts it, instead of showing as empty.
+A room whose schedules cannot be read, for example because no running agent has joined it, is named above the list with the reason, and the home tab counts it, instead of showing as empty.
 You can edit a task's timing, description, and visible or silent delivery, or cancel it.
 See [Scheduling](scheduling.md).
 

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.constants import ACTING_REQUESTER_KEY
 from mindroom.matrix.client_visible_messages import bundled_replacement_candidates
 from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
-from mindroom.scheduling.tasks import task_records_with_writers
+from mindroom.scheduling.tasks import task_records
 from mindroom.thread_tags import (
     RESOLVED_THREAD_TAG,
     SNOOZED_THREAD_TAG,
@@ -129,7 +129,7 @@ def room_thread_facts(
         waits = job["status"] == "awaiting_approval"
         facts[job["thread_id"]]["has_background_approval" if waits else "has_background_job"] = True
     runs: defaultdict[str, list[int | None]] = defaultdict(list)
-    for task, _writer in task_records_with_writers(room_id, state, runtime_paths):
+    for task in task_records(room_id, state, runtime_paths):
         workflow = task.workflow
         execute_at = None if workflow.execute_at is None else int(workflow.execute_at.timestamp() * 1000)
         if workflow.thread_id and not workflow.new_thread and (execute_at is None or execute_at > now):

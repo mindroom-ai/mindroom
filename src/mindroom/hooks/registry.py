@@ -7,16 +7,19 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom.automations.registry import AutomationCatalog, compile_automations
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 
 from .decorators import get_hook_metadata
-from .types import HookCallback, RegisteredHook
+from .types import EVENT_BOT_READY, EVENT_CONFIG_RELOADED, HookCallback, RegisteredHook
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Awaitable, Callable, Iterable
 
     from mindroom.automations.registry import CheckFn
     from mindroom.config.plugin import PluginEntryConfig
+
+    from .types import HookScope
 
 logger = get_logger(__name__)
 
@@ -24,11 +27,30 @@ logger = get_logger(__name__)
 class HookRegistryPlugin(Protocol):
     """Structural plugin shape consumed by hook-registry compilation."""
 
-    name: str
-    entry_config: PluginEntryConfig
-    plugin_order: int
-    discovered_hooks: tuple[HookCallback, ...]
-    discovered_automations: tuple[CheckFn, ...]
+    @property
+    def name(self) -> str:
+        """The plugin name."""
+        ...
+
+    @property
+    def entry_config(self) -> PluginEntryConfig:
+        """The plugin's config entry."""
+        ...
+
+    @property
+    def plugin_order(self) -> int:
+        """The position of the plugin in the configured order."""
+        ...
+
+    @property
+    def discovered_hooks(self) -> tuple[HookCallback, ...]:
+        """The hook callbacks the plugin registers."""
+        ...
+
+    @property
+    def discovered_automations(self) -> tuple[CheckFn, ...]:
+        """The automation checks the plugin registers."""
+        ...
 
 
 def _callback_source_lineno(callback: HookCallback) -> int:
@@ -76,6 +98,26 @@ class HookRegistry:
                     continue
 
                 seen_hook_names.add(qualified_name)
+                scope: HookScope = metadata.scope
+                agents = metadata.agents
+                # LEGACY_COMPAT: the `agents=(ROUTER_AGENT_NAME,)` hook filter that meant once per room or process.
+                # Legacy format: a plugin hook whose `agents` filter is exactly the router's name.
+                # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when
+                # written, runs such hooks on the router bot; replacement: unreleased, no bot is in every room, and
+                # hooks say `scope="room"` or `scope="service"`.
+                # Handling: registered with one warning as service scope on bot:ready and as room scope elsewhere, with
+                # the filter cleared; on config:reloaded the filter stays and, as before, never matches.
+                # Coverage: tests/test_hook_registry.py::test_router_alias_registration and
+                # ::test_router_alias_warns_once_with_plugin_and_hook_name
+                if agents == (ROUTER_AGENT_NAME,) and metadata.event_name != EVENT_CONFIG_RELOADED:
+                    scope = "service" if metadata.event_name == EVENT_BOT_READY else "room"
+                    agents = None
+                    logger.warning(
+                        "Hook filter agents=(ROUTER_AGENT_NAME,) is deprecated; register the hook with this scope",
+                        plugin_name=plugin.name,
+                        hook_name=metadata.hook_name,
+                        scope=scope,
+                    )
                 hooks_by_event[metadata.event_name].append(
                     RegisteredHook(
                         plugin_name=plugin.name,
@@ -89,9 +131,10 @@ class HookRegistry:
                         settings=dict(plugin.entry_config.settings),
                         plugin_order=plugin.plugin_order,
                         source_lineno=_callback_source_lineno(callback),
-                        agents=metadata.agents,
+                        agents=agents,
                         rooms=metadata.rooms,
                         required=metadata.required,
+                        scope=scope,
                     ),
                 )
 
@@ -142,10 +185,12 @@ class HookRegistryState:
     """
 
     registry: HookRegistry
+    # Set by the runtime: whether a bot runs room-scoped hooks, given ``(agent_name, room_id, event_name, event_id)``.
+    room_hook_owner: Callable[[str, str, str, str | None], Awaitable[bool]] | None = None
 
-    def lifetime(self) -> HookRegistryLifetime:
-        """Return a view of this holder for one lifetime, such as a bot generation, that can end on its own."""
-        return HookRegistryLifetime(self)
+    def lifetime(self, emitter: str | None = None) -> HookRegistryLifetime:
+        """Return a view of this holder for one lifetime that can end on its own: a bot generation's names that bot."""
+        return HookRegistryLifetime(self, emitter)
 
 
 class HookRegistryLifetime:
@@ -155,15 +200,23 @@ class HookRegistryLifetime:
     view holds no hooks, so hooks it emitted report inactive and a stopped bot generation emits nothing more.
     """
 
-    __slots__ = ("_source",)
+    __slots__ = ("_emitter", "_source")
 
-    def __init__(self, runtime: HookRegistryState) -> None:
+    def __init__(self, runtime: HookRegistryState, emitter: str | None = None) -> None:
         self._source = runtime
+        self._emitter = emitter
 
     @property
     def registry(self) -> HookRegistry:
         """Return the runtime's current snapshot, or this lifetime's own empty registry once it ended."""
         return self._source.registry
+
+    async def runs_room_hooks(self, room_ids: Iterable[str], event_name: str, event_id: str | None) -> bool:
+        """Return whether this lifetime's bot runs an emission's room-scoped hooks; a lifetime of no bot always does."""
+        owner = self._source.room_hook_owner
+        if self._emitter is None or owner is None:
+            return True
+        return any([await owner(self._emitter, room_id, event_name, event_id) for room_id in room_ids])
 
     def end(self) -> None:
         """End this lifetime; its view holds no hooks from now on."""

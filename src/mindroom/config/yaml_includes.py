@@ -406,9 +406,9 @@ def attach_partial_source_files(
     Reload watchers use this set to keep covering include files that a broken
     edit referenced, so fixing them still triggers a retry reload.
     """
-    exc.partial_source_files = files  # ty: ignore[unresolved-attribute]
+    exc.partial_source_files = files  # ty: ignore[missing-attribute]
     if uses_includes is not None:
-        exc.config_uses_includes = uses_includes  # ty: ignore[unresolved-attribute]
+        exc.config_uses_includes = uses_includes  # ty: ignore[missing-attribute]
 
 
 def partial_source_files(exc: BaseException) -> frozenset[Path] | None:

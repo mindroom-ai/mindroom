@@ -53,7 +53,12 @@ from mindroom.config.legacy_access import (
     persist_access_migration,
     validate_access_migration_source,
 )
-from mindroom.config.legacy_fields import approval_rule_a_file_rename_escapes, rename_legacy_knowledge_reranker
+from mindroom.config.legacy_fields import (
+    RETIRED_PROMPT_NAMES,
+    approval_rule_a_file_rename_escapes,
+    drop_retired_fields,
+    rename_legacy_knowledge_reranker,
+)
 from mindroom.config.matrix import (
     EventJournalConfig,
     MatrixSpaceConfig,
@@ -601,6 +606,12 @@ class Config(BaseModel):
         if not isinstance(value, list):
             return value
         return [{"path": plugin_entry} if isinstance(plugin_entry, str) else plugin_entry for plugin_entry in value]
+
+    @field_validator("prompts", mode="before")
+    @classmethod
+    def drop_retired_prompt_overrides(cls, value: object) -> object:
+        """Drop overrides of retired prompts, before unknown names are rejected."""
+        return drop_retired_fields(value, RETIRED_PROMPT_NAMES)
 
     @field_validator("prompts")
     @classmethod
@@ -1263,7 +1274,7 @@ class Config(BaseModel):
 
     def runtime_model_dump(self) -> dict[str, Any]:
         """Serialize authored config plus the agents generated from personal_agents templates."""
-        payload = cast("dict[str, Any]", self.model_dump(exclude_unset=True))
+        payload = self.model_dump(exclude_unset=True)
         knowledge_bases = payload.get("knowledge_bases")
         if isinstance(knowledge_bases, dict):
             for base_id in self._runtime_knowledge_base_overlays:
@@ -1729,6 +1740,10 @@ class Config(BaseModel):
         for team_config in self.teams.values():
             all_room_aliases.update(team_config.rooms)
         return all_room_aliases
+
+    def needs_owner_account(self) -> bool:
+        """Return whether this config has a room (the root Space links only those) or the emoji room for the owner."""
+        return bool(self.get_all_configured_rooms()) or self.server_emoji.enabled
 
     def managed_room_keys(self) -> set[str]:
         """Return configured room keys, excluding Matrix room IDs (`!…`) and aliases (`#…`)."""

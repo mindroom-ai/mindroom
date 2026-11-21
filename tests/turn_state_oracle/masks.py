@@ -84,6 +84,10 @@ class Divergence:
 
 
 _RECORD_OBSERVABLES = ("turn_record", "record_for_response")
+_ECHO_POSTED_ONCE = (
+    "The answering agent posts a voice transcript once, so no placeholder echo is replaced by a transcript or a "
+    "fallback, and neither the store nor the conversion of an old record keeps how a replacement ended."
+)
 # The scenarios whose every redaction is an action; a legacy input also holds redactions no action made.
 _ACTION_SCENARIOS = frozenset(
     {*(f"named/{name}" for name in NAMED), *(f"generated/seed_{seed:02d}" for seed in range(SEEDS))},
@@ -254,13 +258,24 @@ def _a_source_without_context_owes_no_answer(key: str, value: object, context: C
         assert not value, f"{key} owes an answer without a turn that holds its context"
 
 
-def _finalized_published_echo(key: str, value: object, context: Context) -> object:
-    return None if key in (context.echoes or {}) else value
+def _no_finalized_echo(_key: str, _value: object, _context: Context) -> object:
+    return None
 
 
-def _a_finalization_names_the_published_echo(key: str, value: object, context: Context) -> None:
-    if isinstance(value, dict):
-        assert value["event_id"] == (context.echoes or {}).get(key), f"{key} finalized an echo it never published"
+def _nothing_finalizes_an_echo(key: str, value: object, _context: Context) -> None:
+    assert value is None, f"{key} records how its echo was replaced"
+
+
+def _without_echo_replacement(_key: str, value: object, _context: Context) -> object:
+    record = _record_fields(value)
+    if record is None:
+        return value
+    return {name: field for name, field in record.items() if name != "echo_fallback"}
+
+
+def _no_echo_replacement(_key: str, value: object, _context: Context) -> None:
+    record = _record_fields(value)
+    assert record is None or "echo_fallback" not in record, f"a record of how an echo was replaced: {record}"
 
 
 def _without_suppressed_revisions(_key: str, value: object, _context: Context) -> object:
@@ -640,11 +655,13 @@ MASKS: tuple[Mask, ...] = (
     ),
     Mask(
         "finalized_echo",
-        "An echo is a fact of the voice source it was published for, so its replacement is recorded even after the "
-        "source's batch re-formed; the old store had lost the echo with the batch and recorded nothing.",
-        _finalized_published_echo,
-        _a_finalization_names_the_published_echo,
-        _ACTION_SCENARIOS,
+        _ECHO_POSTED_ONCE,
+        _no_finalized_echo,
+        _nothing_finalizes_an_echo,
+    ),
+    *(
+        Mask(observable, _ECHO_POSTED_ONCE, _without_echo_replacement, _no_echo_replacement)
+        for observable in _RECORD_OBSERVABLES
     ),
     Mask(
         "outcome",

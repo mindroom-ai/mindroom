@@ -13,7 +13,6 @@ import pytest
 
 from mindroom import interactive
 from mindroom.approval import manager as approval_manager
-from mindroom.approval import transport as approval_transport
 from mindroom.approval.inbound import maybe_handle_tool_approval_reply
 from mindroom.approval.tool_approval import (
     ApprovalActionResult,
@@ -72,6 +71,7 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     activate_interactive_prompt,
+    approval_transport_for_test,
     handle_card_response_for_test,
     initialize_approval_store_for_test,
     install_relation_lookup,
@@ -637,7 +637,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
@@ -659,7 +659,7 @@ class TestAgentBot(AgentBotTestBase):
             await _dispatch_reaction(bot, room, event)
 
         assert seen == []
-        resolve_pending.assert_awaited_once_with(bot.client, room.room_id, event, enabled=True)
+        resolve_pending.assert_awaited_once_with(bot.client, bot.runtime_paths, event, room.room_id)
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")
@@ -676,7 +676,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
@@ -1493,6 +1493,7 @@ class TestAgentBot(AgentBotTestBase):
                 _room_id: str,
                 _thread_id: str | None,
                 content: dict[str, Any],
+                _sender_entity: str,
             ) -> dict[str, Any]:
                 return content
 
@@ -1505,8 +1506,8 @@ class TestAgentBot(AgentBotTestBase):
                 send_approval_delivery=send_delivery,
                 resolve_approval_delivery=AsyncMock(return_value=None),
                 cards=first._journal_store.principal(router_principal_id),
-                transport_sender_id=lambda: "@mindroom_router:localhost",
-                transport_device_id=lambda: "DEVICE",
+                sender_bot=lambda _entity_name, _room_id: object(),
+                sender_device_id=AsyncMock(return_value="DEVICE"),
             )
         source = InboundEvent(
             event_id="$source",
@@ -1581,8 +1582,8 @@ class TestAgentBot(AgentBotTestBase):
                 send_approval_delivery=send_delivery,
                 resolve_approval_delivery=AsyncMock(return_value=None),
                 cards=restarted._journal_store.principal(router_principal_id),
-                transport_sender_id=lambda: "@mindroom_router:localhost",
-                transport_device_id=lambda: "DEVICE",
+                sender_bot=lambda _entity_name, _room_id: object(),
+                sender_device_id=AsyncMock(return_value="DEVICE"),
                 wake_continuation_sources=AsyncMock(
                     side_effect=lambda _entity_name, room_id, source_ids: restarted.retry_approval_sources(
                         room_id,
@@ -2029,33 +2030,34 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._coalescing_gate.lanes.all_settled()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("router_is_ready_but_unserved", [False, True])
-    async def test_unverifiable_or_unserved_approval_action_does_not_block_later_room_events(
+    @pytest.mark.parametrize("room_has_reader", [False, True])
+    async def test_unverifiable_or_unreadable_approval_action_does_not_block_later_room_events(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
         *,
-        router_is_ready_but_unserved: bool,
+        room_has_reader: bool,
     ) -> None:
-        """An unbound approval action settles before the room lane advances."""
+        """An unbound approval action settles before the room lane advances, with a bot that reads the room or none."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         dispatched: list[str] = []
-        router = (
+        not_found = nio.RoomGetEventError("not found", status_code="M_NOT_FOUND")
+        reader = (
             MagicMock(
                 running=True,
-                client=MagicMock(room_get_event=AsyncMock()),
-                approval_room_ids=frozenset(),
+                client=MagicMock(room_get_event=AsyncMock(return_value=not_found)),
+                approval_room_ids=frozenset({"!test:localhost"}),
             )
-            if router_is_ready_but_unserved
+            if room_has_reader
             else None
         )
 
         try:
             cards = bot._journal_store.principal("router@shared")
-            transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: router)
+            transport = approval_transport_for_test(lambda _name: reader)
             initialize_approval_store_for_test(
                 runtime_paths,
                 cards=cards,
@@ -2097,12 +2099,11 @@ class TestAgentBot(AgentBotTestBase):
 
         assert dispatched == [ignored.event_id, later.event_id]
         assert await bot._journal_dispatcher.store.pending() == ()
-        if router is None:
-            warning.assert_called_once()
-            assert warning.call_args.args == ("unverifiable_legacy_approval_action_ignored",)
-        else:
+        if reader is None:
             warning.assert_not_called()
-            router.client.room_get_event.assert_not_awaited()
+        else:
+            warning.assert_called_once()
+            assert warning.call_args.args == ("unverifiable_approval_action_ignored",)
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")
@@ -2130,7 +2131,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
@@ -2214,7 +2215,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
@@ -2338,7 +2339,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()

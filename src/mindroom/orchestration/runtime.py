@@ -338,6 +338,8 @@ class _SyncIteration:
                     stale_for_seconds=sync_age_seconds,
                 )
 
+            # The stalled loop's account stops observing room members before its cancellation is awaited.
+            bot.invalidate_agent_reply_memberships(reason="watchdog_stall")
             watchdog_cancelled_sync.set()
             request_task_cancel(sync_task, cancel_source="sync_restart")
             with suppress(asyncio.CancelledError):

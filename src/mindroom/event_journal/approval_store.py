@@ -157,11 +157,16 @@ class ApprovalStore(PrincipalRows):
         any_arguments_allowed: bool,
     ) -> ScheduledApprovalArmState:
         """Arm one approved scheduled call for its unchanged task firing on time."""
-        return await self._write(
-            _arm_scheduled_call_approval,
-            task_id=task_id,
-            workflow_digest=workflow_digest,
-            any_arguments_allowed=any_arguments_allowed,
+        return await self._backend.write(
+            lambda transaction: scheduled_approvals.arm(
+                transaction,
+                self._principal_id,
+                task_id=task_id,
+                workflow_digest=workflow_digest,
+                any_arguments_allowed=any_arguments_allowed,
+                # Judged against the time its transaction runs.
+                now_ns=time.time_ns(),
+            ),
         )
 
     async def withdraw_scheduled_call_approval(self, *, task_id: str, reason: str) -> RecordedApprovalDecision:
@@ -180,7 +185,17 @@ class ApprovalStore(PrincipalRows):
         receipt: ApprovalCardReservation,
     ) -> ScheduledCallClaim | ScheduledCallRefusal:
         """Spend one armed scheduled approval and reserve its receipt in one commit."""
-        return await self._write(_claim_scheduled_call, call=call, arguments_json=arguments_json, receipt=receipt)
+        return await self._backend.write(
+            lambda transaction: scheduled_approvals.claim(
+                transaction,
+                self._principal_id,
+                call=call,
+                arguments_json=arguments_json,
+                receipt=receipt,
+                # Judged against the time its transaction runs.
+                now_ns=time.time_ns(),
+            ),
+        )
 
     async def record_scheduled_call_outcome(self, *, task_id: str, outcome: ScheduledCallOutcome) -> None:
         """Record how one claimed scheduled call ended."""
@@ -234,9 +249,13 @@ class ApprovalStore(PrincipalRows):
             grant_id=grant_id,
         )
 
-    async def retire_approval_card(self, *, delivery_id: str) -> bool:
+    async def retire_approval_card(self, *, delivery_id: str, without_edit: bool = False) -> bool:
         """Retire a decided request card once Matrix acknowledged or refused for good its terminal edit."""
-        return await self._write(approval_cards.retire, delivery_id=delivery_id)
+        return await self._write(approval_cards.retire, delivery_id=delivery_id, without_edit=without_edit)
+
+    async def approval_card_sender(self, *, delivery_id: str) -> tuple[str | None, str] | None:
+        """Return a card's sender principal, None for a card the router sent before upgrade, with its room."""
+        return await self._read(approval_cards.sender_of, delivery_id=delivery_id)
 
     async def remember_terminal_approval_alias(self, *, room_id: str, card_event_id: str, delivery_id: str) -> None:
         """Remember a transport-verified copy of an automatic receipt as another event of that receipt."""
@@ -387,7 +406,7 @@ class ApprovalStore(PrincipalRows):
 
         Returns the work its commit left for afterwards, or ``None`` when the run is not ready to finish.
         """
-        return await self._write(_finish_approval_continuation, approval_id)
+        return await self._write(_finish_approval_continuation, approval_id, owner_available=True)
 
     async def enqueue_unavailable_approval_notice(
         self,
@@ -406,64 +425,21 @@ class ApprovalStore(PrincipalRows):
             payload=payload,
         )
 
-    async def discard_unavailable_approval_continuation(
-        self,
-        approval_id: str,
-        *,
-        notice_principal_id: str,
-    ) -> tuple[PostCommitEffect, ...] | None:
+    async def unavailable_notice(self, approval_id: str) -> tuple[str, str, bool] | None:
+        """Return the principal and delivery of one approval's unavailable-owner notice and whether it is acknowledged."""
+        return await self._read(approval_continuations.unavailable_notice, approval_id)
+
+    async def discard_unavailable_approval_continuation(self, approval_id: str) -> tuple[PostCommitEffect, ...] | None:
         """Release sources after permanent owner loss and visible card cleanup, ending the reply the approval paused.
 
         Returns the work its commit left for afterwards, or ``None`` when the run may not be discarded.
         """
-        return await self._write(
-            _discard_unavailable_approval_continuation,
-            approval_id,
-            notice_principal_id=notice_principal_id,
-        )
+        return await self._write(_finish_approval_continuation, approval_id, owner_available=False)
 
     @property
     def signals(self) -> ApprovalSignals:
         """Return what the store's committed approval writes tell this process."""
         return self._signals
-
-
-def _arm_scheduled_call_approval(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    task_id: str,
-    workflow_digest: str,
-    any_arguments_allowed: bool,
-) -> ScheduledApprovalArmState:
-    """Arm one approved scheduled call against the time its transaction runs."""
-    return scheduled_approvals.arm(
-        transaction,
-        principal_id,
-        task_id=task_id,
-        workflow_digest=workflow_digest,
-        any_arguments_allowed=any_arguments_allowed,
-        now_ns=time.time_ns(),
-    )
-
-
-def _claim_scheduled_call(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    call: ScheduledCall,
-    arguments_json: str,
-    receipt: ApprovalCardReservation,
-) -> ScheduledCallClaim | ScheduledCallRefusal:
-    """Spend one armed scheduled approval against the time its transaction runs."""
-    return scheduled_approvals.claim(
-        transaction,
-        principal_id,
-        call=call,
-        arguments_json=arguments_json,
-        receipt=receipt,
-        now_ns=time.time_ns(),
-    )
 
 
 def _maintain_automatic_approvals(
@@ -565,50 +541,22 @@ def _finish_approval_continuation(
     transaction: Transaction,
     principal_id: str,
     approval_id: str,
-) -> tuple[PostCommitEffect, ...] | None:
-    """Settle a paused run whose FINAL delivery ended, and end its reply."""
-    return _end_approval(
-        transaction,
-        principal_id,
-        approval_id,
-        may_end=lambda: approval_continuations.may_finish(
-            transaction,
-            principal_id,
-            approval_id=approval_id,
-        ),
-        end=lambda finishing: replies.approval_finished(
-            transaction,
-            principal_id,
-            finishing,
-            owner_available=True,
-        ),
-    )
-
-
-def _discard_unavailable_approval_continuation(
-    transaction: Transaction,
-    principal_id: str,
-    approval_id: str,
     *,
-    notice_principal_id: str,
+    owner_available: bool,
 ) -> tuple[PostCommitEffect, ...] | None:
-    """Release a run whose owner is permanently gone, ending the reply it paused."""
-    # The owner that could settle the reply is gone; the notice is what the room sees.
+    """End a paused run and its reply: settled after its FINAL delivery, or discarded when its owner is permanently gone."""
+    # Without an owner to settle the reply, the notice is what the room sees.
+    may_end = approval_continuations.may_finish if owner_available else approval_continuations.may_discard_unavailable
     return _end_approval(
         transaction,
         principal_id,
         approval_id,
-        may_end=lambda: approval_continuations.may_discard_unavailable(
+        may_end=lambda: may_end(transaction, principal_id, approval_id=approval_id),
+        end=lambda ending: replies.approval_finished(
             transaction,
             principal_id,
-            approval_id=approval_id,
-            notice_principal_id=notice_principal_id,
-        ),
-        end=lambda discarded: replies.approval_finished(
-            transaction,
-            principal_id,
-            discarded,
-            owner_available=False,
+            ending,
+            owner_available=owner_available,
         ),
     )
 

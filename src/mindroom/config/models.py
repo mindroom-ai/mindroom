@@ -13,7 +13,11 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
-from mindroom.config.legacy_fields import reject_legacy_defaults_fields
+from mindroom.config.legacy_fields import (
+    RETIRED_DEFAULTS_FIELDS,
+    drop_retired_fields,
+    reject_legacy_defaults_fields,
+)
 from mindroom.config.room_activity import RoomActivityConfig
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.tool_aliases import ToolNames, canonical_tool_name
@@ -64,7 +68,6 @@ _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
         "delegate",
         "dynamic_tools",
         "external_trigger_manager",
-        "invite_router",
         "self_config",
         "skill_manage",
     },
@@ -180,7 +183,7 @@ def _normalize_tool_entry_overrides(
         return {}
     if not isinstance(overrides, dict):
         raise ValueError(error_message)  # noqa: TRY004 - keep Pydantic validation errors structured
-    return cast("dict[str, object]", dict(overrides))
+    return dict(overrides)
 
 
 def _coerce_named_tool_entry(data: dict[object, object]) -> dict[str, object]:
@@ -608,10 +611,15 @@ class DefaultsConfig(BaseModel):
         default=False,
         description="Default setting for allowing agents to modify their own configuration",
     )
-    max_preload_chars: int = Field(
-        default=50000,
+    max_preload_file_chars: int = Field(
+        default=30000,
         ge=1,
-        description="Hard cap for extra role preload context loaded from context_files",
+        # The limit's next character must fit the 1 MiB read of a file even at 4 bytes a character.
+        le=200_000,
+        description=(
+            "Characters of each file inlined into the system prompt, context files and MEMORY.md alike; "
+            "a longer file keeps its first whole lines within this limit"
+        ),
     )
     automations: AutomationList = Field(
         default_factory=list,
@@ -658,8 +666,8 @@ class DefaultsConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def reject_legacy_defaults_fields(cls, data: object) -> object:
-        """Reject removed legacy fields to prevent silent misconfiguration."""
-        return reject_legacy_defaults_fields(data)
+        """Drop retired fields that changed nothing, and reject removed legacy fields to prevent silent misconfiguration."""
+        return reject_legacy_defaults_fields(drop_retired_fields(data, RETIRED_DEFAULTS_FIELDS))
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
@@ -1046,7 +1054,7 @@ class ModelTable(dict[str, ModelConfig]):
         model = super().get(name)
         if level is None or model is None or model.reasoning is None or level not in model.reasoning.levels:
             return None
-        return model if level == model.reasoning.default else model.at_level(cast("_ReasoningLevel", level))
+        return model if level == model.reasoning.default else model.at_level(level)
 
     def __contains__(self, reference: object) -> bool:
         """Return whether ``reference`` names a configured model or one of its levels."""
@@ -1057,14 +1065,14 @@ class ModelTable(dict[str, ModelConfig]):
         model = self._at_level(reference)
         return super().__getitem__(reference) if model is None else model
 
-    def get(self, reference: str, default: ModelConfig | None = None) -> ModelConfig | None:  # ty: ignore[invalid-method-override]
+    def get(self, reference: str, default: ModelConfig | None = None) -> ModelConfig | None:  # ty: ignore[incompatible-method-override]
         """Return the model ``reference`` names, at its level for ``name@level``, or ``default``."""
         model = self._at_level(reference)
         return super().get(reference, default) if model is None else model
 
 
 class RouterConfig(BaseModel):
-    """Configuration for the router system."""
+    """Configuration for routing and for the MindRoom owner account."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1077,12 +1085,16 @@ class RouterConfig(BaseModel):
         default=None,
         description="Optional System One or OpenAI Decisions responder selection before the LLM router",
     )
-    accept_invites: InviteAcceptancePolicy = Field(
-        default=True,
-        description=(
-            "true accepts every room invite to the router, false accepts none, and a list accepts only "
-            "invites from matching inviter Matrix IDs or glob patterns"
-        ),
+    # LEGACY_COMPAT: `router.accept_invites` in a config file.
+    # Legacy format: `accept_invites: true|false|[patterns]` under `router:`, which chose the invites the router took.
+    # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
+    #   honors it; replacement: unreleased, the owner account accepts no invites, so nothing replaces the field.
+    # Handling: the field still validates so such configs load; a set value logs one deprecation warning at load
+    #   and on reload (`orchestration/config_warnings.py`) and changes nothing.
+    # Coverage: tests/test_access_schema.py::test_accept_invites_loads_with_deprecation_warning
+    accept_invites: InviteAcceptancePolicy | None = Field(
+        default=None,
+        description="Deprecated and ignored: the MindRoom owner account accepts no room invites",
     )
     access: ResponderAccessConfig | None = Field(
         default=None,

@@ -15,12 +15,8 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
 
 from mindroom.logging_config import get_logger
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable
 
 logger = get_logger(__name__)
 
@@ -100,7 +96,7 @@ async def _wait_until_ready(server: EmbeddedServer, db_dir: Path) -> None:
         if Path(server.socket_path).exists():
             client = Redis(unix_socket_path=server.socket_path, socket_timeout=_PING_TIMEOUT_SECONDS)
             try:
-                if await cast("Awaitable[bool]", client.ping()):
+                if await client.ping():
                     return
             except (BusyLoadingError, RedisTimeoutError):
                 # Loading a large database after a restart can take minutes; wait while the server runs.

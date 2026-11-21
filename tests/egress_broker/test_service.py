@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
 
 import httpx
+import httpx2
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -1571,7 +1572,7 @@ async def test_revoked_grant_returns_oauth_connection_required(
     config = _config(github=_GITHUB_OAUTH)
     connect_account(manager, account_store("@alice:example.org"), "stale-oauth", expires_at=1.0)
     allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
-    serve_token_endpoint(monkeypatch, [httpx.Response(400, json={"error": "invalid_grant"})])
+    serve_token_endpoint(monkeypatch, [httpx2.Response(400, json={"error": "invalid_grant"})])
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         env = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
         with capture_logs() as logs:
@@ -1646,7 +1647,7 @@ async def test_provider_outage_is_a_retryable_503_off_the_shared_executor(
     connect_account(manager, account_store("@alice:example.org"), "stale-oauth", expires_at=1.0)
     allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
     grant_started = threading.Event()
-    outage = httpx.Response(503, json={"error": "temporarily_unavailable"})
+    outage = httpx2.Response(503, json={"error": "temporarily_unavailable"})
     presented = serve_token_endpoint(
         monkeypatch,
         [DelayedTokenEndpointOutcome(2.0, outage)],

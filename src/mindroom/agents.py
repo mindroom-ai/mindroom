@@ -38,6 +38,7 @@ from mindroom.llm.provider import DeferredTools, ModelRequest
 from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.path_confinement import read_regular_file_within_root
+from mindroom.preload_cap import cap_preload_text
 from mindroom.prompt_templates import openai_compat_identity, render_prompt_template
 from mindroom.providers import registry as provider_registry
 from mindroom.runtime_resolution import (
@@ -52,12 +53,11 @@ from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agent_tools import AgentTools, offered_without_room, turn_room_flags
+from mindroom.tool_system.agent_tools import AgentTools, offered_without_room, turn_keeps_room_tools
 from mindroom.tool_system.agno_toolkits import (
     adapt_toolkit,
     configure_toolkit_functions,
     offered_refusal,
-    toolkit_function_names,
     with_offered_instructions,
 )
 from mindroom.tool_system.catalog import get_tool_by_name
@@ -67,11 +67,7 @@ from mindroom.tool_system.construction import (
     get_toolkit_construction,
     tool_config_signature,
 )
-from mindroom.tool_system.declarations import (
-    MATRIX_ROOM_RUNTIME_TOOL_NAMES,
-    ToolFileAccess,
-    is_matrix_room_runtime_function,
-)
+from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir
 from mindroom.tool_system.sandbox_proxy import ToolPlacement, tool_placement
@@ -119,16 +115,12 @@ _PROJECTED_WORKER_ASSET_PATH_PREFIXES = (
 _MAX_WORKSPACE_CONTEXT_FILE_BYTES = 1 << 20
 
 
-@dataclass
+@dataclass(frozen=True)
 class _PreloadChunk:
-    """One preloaded context file: its path as ``title``, its text, and what the preload cap removed from it.
-
-    The rendered section names each file the cap cut and by how much, so a dropped file never vanishes without a trace.
-    """
+    """One preloaded context file: its path as ``title`` and its text; the preload cuts only what it renders."""
 
     title: str
     body: str
-    omitted_chars: int = 0
 
 
 @dataclass(frozen=True)
@@ -338,168 +330,53 @@ def _read_context_file(resolved_path: Path, *, workspace_root: Path | None, agen
         return None
     if len(payload) >= _MAX_WORKSPACE_CONTEXT_FILE_BYTES:
         logger.warning("context_file_truncated", agent=agent_name, path=str(resolved_path))
-    return payload.decode("utf-8", errors="replace").strip()
-
-
-def _render_context_chunk(chunk: _PreloadChunk, *, chunk_marker_template: str) -> str:
-    """Render one chunk under its source path, marking what the cap removed."""
-    body = chunk.body.strip()
-    if not chunk.omitted_chars:
-        return f"### {chunk.title}\n{body}" if body else ""
-    marker = render_prompt_template(
-        chunk_marker_template,
-        title=chunk.title,
-        omitted_chars=chunk.omitted_chars,
-    )
-    return f"### {chunk.title}\n{body}\n{marker}" if body else f"### {chunk.title}\n{marker}"
+    # The preload counts the file as it is, so nothing is stripped before its cut.
+    return payload.decode("utf-8", errors="replace")
 
 
 def _render_context_chunks(
     chunks: list[_PreloadChunk],
     *,
+    agent_name: str,
     section_heading: str,
-    chunk_marker_template: str,
+    max_chars: int,
+    cut_marker_template: str,
 ) -> str:
-    """Render every chunk that still carries content or an omission marker."""
-    rendered = [
-        block
-        for chunk in chunks
-        if (block := _render_context_chunk(chunk, chunk_marker_template=chunk_marker_template))
-    ]
+    """Render each non-empty file under its path, cut on its own to ``max_chars`` and marked where it was cut."""
+    rendered: list[str] = []
+    for chunk in chunks:
+        kept, cut = cap_preload_text(chunk.body, max_chars)
+        parts = [kept.strip()]
+        if cut:
+            logger.warning(
+                "context_file_preload_cut",
+                agent=agent_name,
+                path=chunk.title,
+                max_preload_file_chars=max_chars,
+            )
+            parts.append(render_prompt_template(cut_marker_template, path=chunk.title, max_chars=max_chars))
+        if block := "\n".join(part for part in parts if part):
+            rendered.append(f"### {chunk.title}\n{block}")
     if not rendered:
         return ""
     return f"{section_heading}\n" + "\n\n".join(rendered) + "\n\n"
-
-
-def _drop_whole_chunks(
-    chunks: list[_PreloadChunk],
-    max_preload_chars: int,
-    *,
-    render: Callable[[list[_PreloadChunk]], str],
-) -> int:
-    """Drop entire chunk bodies (least critical first) until under the cap."""
-    omitted = 0
-    remaining_body_chunks = sum(bool(chunk.body) for chunk in chunks)
-    for chunk in chunks:
-        if len(render(chunks)) <= max_preload_chars:
-            return omitted
-        if not chunk.body:
-            continue
-        if remaining_body_chunks == 1:
-            return omitted
-        omitted += len(chunk.body)
-        chunk.omitted_chars += len(chunk.body)
-        chunk.body = ""
-        remaining_body_chunks -= 1
-    return omitted
-
-
-def _trim_chunk_tails(
-    chunks: list[_PreloadChunk],
-    max_preload_chars: int,
-    *,
-    render: Callable[[list[_PreloadChunk]], str],
-) -> int:
-    """Trim from the *end* of chunks to preserve headers/identity at the top."""
-    omitted = 0
-    for chunk in chunks:
-        while chunk.body:
-            overflow = len(render(chunks)) - max_preload_chars
-            if overflow <= 0:
-                return omitted
-            remove_count = min(overflow, len(chunk.body))
-            original_length = len(chunk.body)
-            chunk.body = chunk.body[: original_length - remove_count].rstrip()
-            actual_removed = original_length - len(chunk.body)
-            chunk.omitted_chars += actual_removed
-            omitted += actual_removed
-    return omitted
-
-
-def _apply_preload_cap(
-    personality_chunks: list[_PreloadChunk],
-    max_preload_chars: int,
-    *,
-    section_heading: str,
-    truncation_marker_template: str,
-    chunk_marker_template: str,
-) -> tuple[str, int]:
-    """Apply hard preload cap with deterministic truncation priority.
-
-    Truncation order is by file list order.
-    First drops whole chunks, then trims from the *end* of remaining chunks.
-    Every touched file keeps a marker naming it and the chars it lost, so a
-    dropped context file is visible to the model instead of silently missing.
-    """
-    render = partial(
-        _render_context_chunks,
-        section_heading=section_heading,
-        chunk_marker_template=chunk_marker_template,
-    )
-    rendered = render(personality_chunks)
-    if len(rendered) <= max_preload_chars:
-        return rendered, 0
-
-    # Trim against a budget that already reserves room for the summary marker,
-    # so file bodies cannot consume space required by omission metadata.
-    marker_upper_bound = render_prompt_template(
-        truncation_marker_template,
-        omitted_chars=sum(len(chunk.body) for chunk in personality_chunks),
-    )
-    marker_upper_bound_block = f"\n\n{marker_upper_bound}\n\n"
-    required_marker_chunks = [
-        replace(
-            chunk,
-            body="",
-            omitted_chars=chunk.omitted_chars + len(chunk.body),
-        )
-        for chunk in personality_chunks
-    ]
-    minimum_rendered = render(required_marker_chunks).rstrip("\n") + marker_upper_bound_block
-    if len(minimum_rendered) > max_preload_chars:
-        msg = (
-            f"max_preload_chars={max_preload_chars} cannot fit required context headings and omission markers; "
-            f"at least {len(minimum_rendered)} characters are required"
-        )
-        raise ValueError(msg)
-    trim_budget = max_preload_chars - len(marker_upper_bound_block)
-
-    omitted_chars = _drop_whole_chunks(
-        personality_chunks,
-        trim_budget,
-        render=render,
-    )
-    omitted_chars += _trim_chunk_tails(
-        personality_chunks,
-        trim_budget,
-        render=render,
-    )
-
-    rendered = render(personality_chunks)
-    if omitted_chars <= 0:
-        return rendered, 0
-
-    marker = render_prompt_template(truncation_marker_template, omitted_chars=omitted_chars)
-    marker_block = f"\n\n{marker}\n\n"
-    return rendered.rstrip("\n") + marker_block, omitted_chars
 
 
 @timed("system_prompt_assembly.agent_create.preloaded_files")
 def _render_preloaded_files(
     agent_name: str,
     agent_config: AgentConfig,
-    max_preload_chars: int,
+    max_preload_file_chars: int,
     *,
     personality_section_heading: str,
-    truncation_marker_template: str,
-    chunk_marker_template: str,
+    cut_marker_template: str,
     workspace_context_files: tuple[Path, ...],
     workspace_root: Path,
     context_documents: list[_PreloadChunk],
     storage_path: Path,
     runtime_paths: constants.RuntimePaths,
 ) -> str:
-    """Render the configured and workspace context files as the role's preload section, within ``max_preload_chars``.
+    """Render the configured and workspace context files as the role's preload section, each cut on its own.
 
     This is evaluated each time one agent instance is created.
     The normal Matrix and OpenAI-compatible request paths build fresh agent
@@ -517,23 +394,15 @@ def _render_preloaded_files(
             workspace_root=workspace_root,
         )
 
-    # Preload truncation mutates chunks; keep complete files for CLI reads.
-    context_documents.extend(replace(chunk) for chunk in personality_chunks)
-
-    rendered, omitted_chars = _apply_preload_cap(
+    # CLI reads get each whole file stripped, as before; the preload cuts the text as it is.
+    context_documents.extend(replace(chunk, body=chunk.body.strip()) for chunk in personality_chunks)
+    return _render_context_chunks(
         personality_chunks,
-        max_preload_chars,
+        agent_name=agent_name,
         section_heading=personality_section_heading,
-        truncation_marker_template=truncation_marker_template,
-        chunk_marker_template=chunk_marker_template,
+        max_chars=max_preload_file_chars,
+        cut_marker_template=cut_marker_template,
     )
-    if omitted_chars > 0:
-        logger.warning(
-            "Preload context exceeded max_preload_chars and was truncated",
-            omitted_chars=omitted_chars,
-            max_preload_chars=max_preload_chars,
-        )
-    return rendered
 
 
 def _file_mode_knowledge_instruction_block(
@@ -579,9 +448,9 @@ def _offered_entries(
 ) -> tuple[tuple[_ToolkitEntry, ...], dict[str, set[str]]]:
     """Return ``entries``, each holding only the functions a run offers of it, and by tool the functions left out.
 
-    A run offers one function per name. An MCP function leaves whenever another toolkit offers its name, or the name
-    is reserved for Matrix room recovery, because its server's catalog chooses that name and can change it without
-    anyone editing the config, so a new remote tool never shadows a local function or another server's; every other
+    A run offers one function per name. An MCP function leaves whenever another toolkit offers its name, because its
+    server's catalog chooses that name and can change it without anyone editing the config, so a new remote tool
+    never shadows a local function or another server's; every other
     name keeps its first function (``offered_toolkits``). A configured toolkit whose every function another took is
     reported. A ``filesystem`` read that cannot decode an image names ``view_file`` when the run offers it and it finds the file.
     """
@@ -610,21 +479,17 @@ def _offered_entries(
 
 def _without_colliding_mcp_functions(entries: Sequence[_ToolkitEntry], *, agent_name: str) -> list[AdaptedToolkit]:
     """Return the toolkits of ``entries``, each MCP one without the functions whose name another toolkit offers."""
-    # Each owner is an entry, named by its toolkit; a reserved room-recovery function is its registered tool's,
-    # offered or not.
-    owners: dict[str, list[tuple[_ToolkitEntry | None, str]]] = {
-        name: [(None, name)] for name in MATRIX_ROOM_RUNTIME_TOOL_NAMES
-    }
+    owners: dict[str, list[_ToolkitEntry]] = {}
     for entry in entries:
         for function in entry.adapted.functions:
-            owners.setdefault(function.name, []).append((entry, entry.adapted.name))
+            owners.setdefault(function.name, []).append(entry)
     toolkits: list[AdaptedToolkit] = []
     for entry in entries:
         toolkit = entry.adapted
         if isinstance(entry.toolkit, MindRoomMCPToolkit):
             kept: list[ToolFunction] = []
             for function in toolkit.functions:
-                others = [*dict.fromkeys(name for owner, name in owners[function.name] if owner is not entry)]
+                others = [*dict.fromkeys(owner.adapted.name for owner in owners[function.name] if owner is not entry)]
                 if not others:
                     kept.append(function)
                     continue
@@ -638,25 +503,6 @@ def _without_colliding_mcp_functions(entries: Sequence[_ToolkitEntry], *, agent_
             toolkit = replace(toolkit, functions=tuple(kept))
         toolkits.append(toolkit)
     return toolkits
-
-
-class _MatrixRoomRuntimeToolCollisionError(ValueError):
-    """Raised when another registered tool claims a reserved runtime function."""
-
-
-def _reject_matrix_room_runtime_tool_function_collisions(registered_tool_name: str, toolkit: AnyToolkit) -> None:
-    """Keep reserved room-runtime functions owned by their registered built-in tool, whatever else the toolkit holds.
-
-    An MCP server's catalog chooses its names, so its function of a reserved name leaves at offer time instead.
-    """
-    if isinstance(toolkit, MindRoomMCPToolkit):
-        return
-    reserved_names = set(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
-    function_names = set(toolkit_function_names(toolkit))
-    collisions = sorted(name for name in function_names & reserved_names if registered_tool_name != name)
-    if collisions:
-        msg = f"Tool function name(s) {', '.join(collisions)} are reserved for Matrix room recovery tools."
-        raise _MatrixRoomRuntimeToolCollisionError(msg)
 
 
 def _agent_tool_output_file_policy(
@@ -1012,14 +858,10 @@ def _approval_may_gate(config: Config, tools: ToolRegistry, function_name: str, 
     """Return whether a config approval rule may gate one function of the tool registered as this name in ``tools``."""
     # A scheduled call runs only with the approval its requester gave when it was scheduled.
     is_scheduled_call_runner = registered_tool_name == "scheduler" and function_name == "run_scheduled_call"
-    return (
-        not is_matrix_room_runtime_function(registered_tool_name, function_name)
-        and not is_scheduled_call_runner
-        and tool_may_require_approval(
-            config,
-            function_name,
-            toolkit_approval_alias(config, tools, registered_tool_name, function_name),
-        )
+    return not is_scheduled_call_runner and tool_may_require_approval(
+        config,
+        function_name,
+        toolkit_approval_alias(config, tools, registered_tool_name, function_name),
     )
 
 
@@ -1173,7 +1015,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     )
     persona_tools = persona.tools if persona is not None else None
     hook_middleware = build_tool_hook_middleware(HookBindings(registry=plugins.hooks), config, runtime_paths)
-    room_tools, matrix_room_tools = turn_room_flags(execution_identity)
+    room_tools = turn_keeps_room_tools(execution_identity)
     # Minimal mode calls deferred toolkits through mindroom-agent, so it attaches only initial ones and the toolkits a
     # saved approval needs; every other runtime attaches them all. Native tool search sends deferred ones marked as
     # deferred, portable tool search keeps them off the wire, and builds narrowed to an explicit tool list, plus voice
@@ -1181,7 +1023,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     selected = agent_tools.candidates(
         depth=delegation_depth,
         room_tools=room_tools,
-        matrix_room_tools=matrix_room_tools,
         deferred=required_tool_names if minimal_mode and not eager_deferred_tools else None,
         portable_search=portable_deferred_tools,
     )
@@ -1192,11 +1033,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     )
     deferred_configs = {}
     if minimal_mode:
-        complete = agent_tools.candidates(
-            depth=delegation_depth,
-            room_tools=room_tools,
-            matrix_room_tools=matrix_room_tools,
-        )
+        complete = agent_tools.candidates(depth=delegation_depth, room_tools=room_tools)
         deferred_configs = {
             entry.name: entry
             for entry in complete
@@ -1240,7 +1077,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             )
         if toolkit is None:
             return None
-        _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
         # Adapted once, right after it is built; every step below works on the functions it offers.
         adapted = adapt_toolkit(toolkit, key=authored_name, registered=tool_name)
         if not room_tools:
@@ -1346,8 +1182,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     for tool_name, tool_entry in tool_entries():
         try:
             entry = build_entry(tool_entry)
-        except _MatrixRoomRuntimeToolCollisionError:
-            raise
         except Exception as exc:
             # One toolkit's construction or adaptation failure must never stop the agent.
             if minimal_mode:
@@ -1487,10 +1321,9 @@ def _build_agent_role_context(
         preloaded_files = _render_preloaded_files(
             agent_name,
             agent_config,
-            config.defaults.max_preload_chars,
+            config.defaults.max_preload_file_chars,
             personality_section_heading=config.get_prompt("PERSONALITY_CONTEXT_SECTION_HEADING"),
-            truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
-            chunk_marker_template=config.get_prompt("CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE"),
+            cut_marker_template=config.get_prompt("PRELOAD_FILE_CUT_MARKER_TEMPLATE"),
             workspace_context_files=workspace.context_files,
             workspace_root=workspace.root,
             context_documents=context_documents,

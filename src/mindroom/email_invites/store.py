@@ -11,7 +11,7 @@ from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Collection, Iterator
 
     from mindroom.constants import RuntimePaths
 
@@ -45,7 +45,7 @@ class EmailInvite:
     thread_id: str | None
     email: str
     requested_by: str
-    agent_name: str
+    agent_name: str  # Once sent: the entity whose account the link names, the only one that answers its claim.
     created_at: int
     expires_at: int
     inviter_id: str | None
@@ -107,7 +107,7 @@ def _enforce(connection: sqlite3.Connection, limit: _LimitName, maximum: int, wh
 
 
 class Request(NamedTuple):
-    """Where a request is made and by whom: the room, its thread, the address, the person, and the agent."""
+    """Where a request is made and by whom: the room, its thread, the address, the person, and the answering entity."""
 
     room_id: str
     thread_id: str | None
@@ -159,12 +159,12 @@ def issue_code(
         invite = invite or _insert(connection, request, current, expiry_days)
         _enforce(connection, "address", 3, "email = ? AND sent_at > ?", (request.email, current - _DAY))
         _enforce(connection, "deployment", 50, "sent_at > ?", (current - _DAY,))
-        expires_at = current + expiry_days * _DAY
         connection.execute(
-            "UPDATE email_invites SET inviter_id = ?, code_hash = ?, sent_at = ?, expires_at = ? WHERE id = ?",
-            (request.person, _hash(code), current, expires_at, invite.id),
+            "UPDATE email_invites SET inviter_id = ?, agent_name = ?, code_hash = ?, sent_at = ?, expires_at = ?"
+            " WHERE id = ?",
+            (request.person, request.agent_name, _hash(code), current, current + expiry_days * _DAY, invite.id),
         )
-    return replace(invite, inviter_id=request.person, sent_at=current, expires_at=expires_at), code
+        return _select(connection, "id = ?", (invite.id,))[0], code
 
 
 def open_invites(paths: RuntimePaths, room_id: str, now: int | None = None) -> list[EmailInvite]:
@@ -217,20 +217,30 @@ def bind_claim(paths: RuntimePaths, invite_id: int, claimant: str, now: int | No
 def start_sending(paths: RuntimePaths, invite_id: int, claimant: str, now: int | None = None) -> bool:
     """Move an open request bound to `claimant` to sending; only the one call that wins may send its Matrix invite."""
     current = _now(now)
-    sql = (
-        "UPDATE email_invites SET sending_at = ? WHERE id = ? AND claimed_by = ? AND revoked = 0"
-        " AND expires_at > ? AND invited_at IS NULL AND sending_at IS NULL"
-    )
+    sql = f"UPDATE email_invites SET sending_at = ? WHERE id = ? AND claimed_by = ? AND {_OPEN}"  # noqa: S608
     return _update(paths, current, sql, (current, invite_id, claimant, current))
 
 
-def abandon_sending(paths: RuntimePaths, invite_id: int | None = None) -> list[EmailInvite]:
-    """Revoke one request, or at startup all, left sending with an unknown outcome; return those this call revoked."""
-    where = "sending_at IS NOT NULL AND invited_at IS NULL AND revoked = 0" + (
+def abandon_sending(
+    paths: RuntimePaths,
+    *,
+    invite_id: int | None = None,
+    agent_name: str | None = None,
+    configured: tuple[str, ...] = (),
+    rooms: Collection[str] = (),
+) -> list[EmailInvite]:
+    """Revoke one request of an entity, or at its start all, left sending with an unknown outcome; return those.
+
+    Without ``agent_name``, revoke those in ``rooms`` of every entity not in ``configured``.
+    """
+    issuers = (agent_name,) if agent_name else configured
+    issuer = f"agent_name {'' if agent_name else 'NOT '}IN ({','.join('?' * len(issuers))})"
+    where = f"sending_at IS NOT NULL AND invited_at IS NULL AND revoked = 0 AND {issuer}" + (
         "" if invite_id is None else " AND id = ?"
     )
+    params = (*issuers, *(() if invite_id is None else (invite_id,)))
     with _write(paths, _now(None)) as connection:
-        rows = _select(connection, where, () if invite_id is None else (invite_id,))
+        rows = [row for row in _select(connection, where, params) if agent_name or row.room_id in rooms]
         connection.executemany("UPDATE email_invites SET revoked = 1 WHERE id = ?", [(row.id,) for row in rows])
     return rows
 

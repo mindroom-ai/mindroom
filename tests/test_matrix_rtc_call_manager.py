@@ -106,6 +106,7 @@ from mindroom.token_counting.counts import count
 from mindroom.token_counting.families import openai_model_counter
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage
+from tests.access_schema_support import refresh_memberships
 from tests.conftest import test_runtime_paths
 from tests.fakes.token_counter import fake_token_counter
 from tests.matrix_state_helpers import save_matrix_state
@@ -362,7 +363,7 @@ async def _grant_room_memberships(
         room_id=GRANT_ROOM_ID,
     )
     memberships = AgentReplyMembershipIndex()
-    await memberships.refresh(config, runtime_paths, client)
+    await refresh_memberships(memberships, config, runtime_paths, client)
     return memberships
 
 
@@ -1652,7 +1653,7 @@ async def test_manager_accepts_call_member_authorized_by_grant_room(tmp_path: Pa
         room_id=ROOM_ID,
     )
     memberships = AgentReplyMembershipIndex()
-    await memberships.refresh(config, runtime_paths, client)
+    await refresh_memberships(memberships, config, runtime_paths, client)
     manager = _manager(
         client,
         bridge,
@@ -1726,7 +1727,7 @@ async def test_manager_starts_observed_call_after_grant_snapshot_becomes_ready(t
         members=[nio.RoomMember("@alice:example.org", None, None)],
         room_id=GRANT_ROOM_ID,
     )
-    await memberships.refresh(config, runtime_paths, client)
+    await refresh_memberships(memberships, config, runtime_paths, client)
     await manager.reconcile_reply_authorization()
 
     assert bridge.connected_grant is GRANT
@@ -1750,7 +1751,7 @@ async def test_manager_starts_observed_call_after_live_grant_join(tmp_path: Path
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[GRANT_ROOM_ID])
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=GRANT_ROOM_ID)
     memberships = AgentReplyMembershipIndex()
-    await memberships.refresh(config, runtime_paths, client)
+    await refresh_memberships(memberships, config, runtime_paths, client)
     manager = _manager(
         client,
         bridge,
@@ -2416,7 +2417,7 @@ async def test_a_call_a_ready_grant_room_allows_restarts_after_each_loss_of_auth
     membership_sync = AgentReplyMembershipSync(memberships, lambda: [bot])
 
     async def refresh() -> None:
-        await memberships.refresh(config, test_runtime_paths(tmp_path), client)
+        await refresh_memberships(memberships, config, test_runtime_paths(tmp_path), client)
         await membership_sync.apply_grant_change()
 
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
@@ -2460,7 +2461,7 @@ async def test_a_refresh_a_new_loss_of_authority_overtook_starts_no_call(tmp_pat
     membership_sync.invalidate(config, reason="sync_loop_started")
     await bot.settle()
 
-    await memberships.refresh(config, test_runtime_paths(tmp_path), client)
+    await refresh_memberships(memberships, config, test_runtime_paths(tmp_path), client)
     membership_sync.invalidate(config, reason="uncertain_sync_response")
     state_reads = client.room_get_state.await_count
     await membership_sync.apply_grant_change()
@@ -2486,6 +2487,9 @@ async def test_a_batch_of_loss_records_ends_a_denied_call_once(tmp_path: Path, *
     manager = _manager(client, bridge, tmp_path, config, agent_reply_memberships=memberships)
     bot = _ManagerBot(manager)
     membership_sync = AgentReplyMembershipSync(memberships, lambda: [bot])
+    # Only an account whose receive loop has caught up observes rooms, so only its lost history revokes.
+    membership_sync.observer_loop_started(config, BOT_USER)
+    membership_sync.observer_frame_settled(BOT_USER)
     call = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
     await asyncio.wait_for(bridge.connect_started.wait(), timeout=1)
     if not starting:
@@ -2499,6 +2503,7 @@ async def test_a_batch_of_loss_records_ends_a_denied_call_once(tmp_path: Path, *
             test_runtime_paths(tmp_path),
             IngestionRecordAdmission(disposition=IngestionRecordDisposition.HISTORY_LOSS, room_id=ROOM_ID),
             None,
+            observer_user_id=BOT_USER,
         )
     assert len(bot.tasks) == 3
     await bot.settle()

@@ -387,6 +387,7 @@ class ApprovalContinuationRunner:
                 message_received_depth=request.response_envelope.message_received_depth,
                 dispatch_policy_source_kind=request.response_envelope.dispatch_policy_source_kind,
                 correlation_id=correlation_id_for_request(request),
+                reply_to_event_id=target.reply_to_event_id,
                 turn_id=request.turn_id,
                 history_scope=history_scope,
                 origin=request.response_envelope.origin,
@@ -990,7 +991,7 @@ class ApprovalContinuationRunner:
         payload = dict(delivery.payload)
         nested = payload.get("m.new_content")
         visible = cast("dict[str, Any]", nested) if isinstance(nested, dict) else payload
-        semantic = cast("dict[str, object]", delivery.result) if isinstance(delivery.result, dict) else {}
+        semantic = delivery.result if isinstance(delivery.result, dict) else {}
         interactive_metadata = InteractiveMetadata.from_metadata(semantic.get("interactive"))
         reply = None if delivery.reply_id is None else await self.deps.replies.store.replies.load(delivery.reply_id)
         span = None if delivery.span_id is None else await self.deps.replies.store.replies.span(delivery.span_id)
@@ -1410,10 +1411,7 @@ class ApprovalContinuationRunner:
         continuation = await self.deps.approval_store.approval_continuation(approval_id)
         if continuation is None:
             return True
-        target = continuation_target(
-            continuation,
-            reply_to_event_id=continuation.source_event_ids[0],
-        )
+        target = continuation_target(continuation)
         request = self.approval_response_request(continuation, target=target)
 
         async def recover(_target: MessageTarget) -> bool:

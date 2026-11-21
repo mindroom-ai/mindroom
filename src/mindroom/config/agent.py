@@ -53,7 +53,7 @@ from mindroom.config.validation import (
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 _PrivateWorkerScope = Literal["user", "user_agent"]
-# `auto` lets the router and a room's only responder answer a message that mentions no one; `mentions` does not.
+# `auto` lets the best-fitting or a room's only responder answer a message that mentions no one; `mentions` does not.
 RoomReplyMode = Literal["auto", "mentions"]
 # Everything the primary writes beside a private workspace in its private state root;
 # tests/test_private_root_reservations.py enumerates the writers. Workers mount only
@@ -666,7 +666,7 @@ class RoomConfig(BaseModel):
     reply_mode: RoomReplyMode = Field(
         default="auto",
         description=(
-            "'auto' lets the router and the room's only agent or team answer a message that mentions no one; "
+            "'auto' lets the best-fitting or the room's only agent or team answer a message that mentions no one; "
             "'mentions' answers only messages that mention an agent or team, and follow-ups in threads an agent or "
             "team already replied in or is still answering"
         ),

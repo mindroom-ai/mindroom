@@ -419,9 +419,10 @@ def tool_result_message(execution: ToolExecution, media: ToolValue | None = None
     """
     images = audio = videos = files = None
     if media is not None and not execution.is_error:
-        images, audio, videos, files = (
-            list(items) or None for items in (media.images, media.audios, media.videos, media.files)
-        )
+        images = list(media.images) or None
+        audio = list(media.audios) or None
+        videos = list(media.videos) or None
+        files = list(media.files) or None
     return Message(
         role="tool",
         content=tool_result_content(execution.result, is_error=execution.is_error),

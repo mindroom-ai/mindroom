@@ -13,7 +13,6 @@ from mindroom.dispatch_source import (
 from mindroom.turn_origin import (
     TurnIntent,
     classify_turn_origin,
-    original_sender_for_router_handoff,
     original_sender_for_router_relay,
     requester_id_from_trusted_original_sender,
 )
@@ -205,15 +204,16 @@ def test_requester_id_from_trusted_original_sender_requires_original_sender() ->
 
 
 def test_router_handoff_is_trusted_user_relay() -> None:
-    """Router handoffs are trusted relays of the original human author."""
+    """A route from the room's steward, whichever managed account it is, relays the original human author."""
     origin = classify_turn_origin(
-        transport_sender_id="@mindroom_router:localhost",
+        transport_sender_id="@mindroom_helper:localhost",
         requester_id="@human:localhost",
-        sender_entity_name="router",
+        sender_entity_name="helper",
         requester_entity_name=None,
         source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         original_sender="@human:localhost",
         trusted_user_relay=True,
+        routed=True,
     )
 
     assert origin.intent == TurnIntent.ROUTER_HANDOFF
@@ -232,6 +232,7 @@ def test_router_notice_stays_internal_chatter() -> None:
         source_kind="message",
         original_sender=None,
         trusted_user_relay=False,
+        routed=True,
     )
 
     assert origin.intent == TurnIntent.ROUTER_NOTICE
@@ -276,6 +277,7 @@ def test_replay_guard_supersedable_policy_tracks_interactive_requester_turns() -
         source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         original_sender="@human:localhost",
         trusted_user_relay=True,
+        routed=True,
     )
     trusted_relay = classify_turn_origin(
         transport_sender_id="@mindroom_helper:localhost",
@@ -322,34 +324,6 @@ def test_replay_guard_supersedable_policy_tracks_interactive_requester_turns() -
     assert not managed_chatter.may_be_superseded_by_newer_requester_turn
 
 
-def test_router_handoff_original_sender_only_for_human_targeted_handoff() -> None:
-    """Router handoff metadata is stamped only on real targeted human requests."""
-    assert (
-        original_sender_for_router_handoff(
-            target_entity_name="general",
-            requester_id="@human:localhost",
-            requester_entity_name=None,
-        )
-        == "@human:localhost"
-    )
-    assert (
-        original_sender_for_router_handoff(
-            target_entity_name=None,
-            requester_id="@human:localhost",
-            requester_entity_name=None,
-        )
-        is None
-    )
-    assert (
-        original_sender_for_router_handoff(
-            target_entity_name="general",
-            requester_id="@mindroom_router:localhost",
-            requester_entity_name="router",
-        )
-        is None
-    )
-
-
 def test_router_relay_original_sender_preserves_human_requester_or_inherited_human() -> None:
     """Router relay metadata uses a human requester or a trusted inherited human author."""
     assert (
@@ -378,8 +352,7 @@ def test_router_relay_original_sender_preserves_human_requester_or_inherited_hum
         is None
     )
     assert (
-        original_sender_for_router_handoff(
-            target_entity_name="general",
+        original_sender_for_router_relay(
             requester_id="@human:localhost",
             requester_entity_name=None,
             inherited_original_sender="@stale:localhost",
@@ -388,8 +361,7 @@ def test_router_relay_original_sender_preserves_human_requester_or_inherited_hum
         == "@human:localhost"
     )
     assert (
-        original_sender_for_router_handoff(
-            target_entity_name="general",
+        original_sender_for_router_relay(
             requester_id="@mindroom_alpha:localhost",
             requester_entity_name="alpha",
             inherited_original_sender="@human:localhost",
@@ -398,8 +370,7 @@ def test_router_relay_original_sender_preserves_human_requester_or_inherited_hum
         == "@human:localhost"
     )
     assert (
-        original_sender_for_router_handoff(
-            target_entity_name="general",
+        original_sender_for_router_relay(
             requester_id="@mindroom_alpha:localhost",
             requester_entity_name="alpha",
             inherited_original_sender="@mindroom_alpha:localhost",

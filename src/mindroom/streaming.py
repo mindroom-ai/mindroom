@@ -619,6 +619,8 @@ class StreamingResponse:
         repr=False,
     )
     _last_delivered_text: str = field(default="", init=False, repr=False)
+    # The accumulated text the last live frame rendered and its Markdown, so a tick of an unchanged reply skips both.
+    _live_markdown: tuple[str, str] | None = field(default=None, init=False, repr=False)
     _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
     _last_delivered_presentation_state: dict[str, object] | None = field(default=None, init=False, repr=False)
     _last_placeholder_progress_sent: bool = field(default=False, init=False, repr=False)
@@ -721,12 +723,15 @@ class StreamingResponse:
         if not self.live_active:
             return None
         assert self.event_id is not None
-        display_text, _ = _visible_text(self.accumulated_text, in_progress=True)
-        md = (
-            ""
-            if display_text == _PROGRESS_PLACEHOLDER
-            else visible_markdown(self.config, self.runtime_paths, display_text)
-        )
+        if self._live_markdown is None or self._live_markdown[0] is not self.accumulated_text:
+            display_text, _ = _visible_text(self.accumulated_text, in_progress=True)
+            md = (
+                ""
+                if display_text == _PROGRESS_PLACEHOLDER
+                else visible_markdown(self.config, self.runtime_paths, display_text)
+            )
+            self._live_markdown = (self.accumulated_text, md)
+        md = self._live_markdown[1]
         warmup_lines = self._warmup_state.render_lines(show_tool_calls=self.show_tool_calls)
         tools = serialize_tool_trace(self.tool_trace) if self.show_tool_calls else ()
         if tools and self.tool_progress:

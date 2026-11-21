@@ -66,7 +66,7 @@ def setup_test_bot(
     install_direct_response_admission(bot)
     bot.client = make_matrix_client_mock(user_id="@mindroom_calculator:localhost")
     install_runtime_journal_support(bot)
-    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+    bot._turn_ingress.deps.resolver._dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
     bot._conversation_resolver.fetch_thread_history = AsyncMock(

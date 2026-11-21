@@ -169,7 +169,7 @@ Bridges bring the same agents to Slack, Telegram, WhatsApp, and Discord, and an 
 
 **Agents and teams**
 
-- **Multi-agent orchestration** — define specialist agents and teams in `config.yaml` or the dashboard; a built-in router picks the responder when you don't @-mention one, mentioning several agents makes them collaborate in a thread, and agents can hand tasks to each other or run reusable workflows ([Teams](https://docs.mindroom.chat/configuration/teams/), [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/)).
+- **Multi-agent orchestration** — define specialist agents and teams in `config.yaml` or the dashboard; built-in routing picks the responder when you don't @-mention one, mentioning several agents makes them collaborate in a thread, and agents can hand tasks to each other or run reusable workflows ([Teams](https://docs.mindroom.chat/configuration/teams/), [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/)).
 - **Adaptive participation** — in a thread with several people, agents you opt in that already replied there decide for themselves when an untagged message is theirs to answer, and a judge can decide whether a new message should interrupt the current task or wait ([Threads](https://docs.mindroom.chat/configuration/threads/#adaptive-participation)).
 - **Personal rooms and access control** — each person can get a private room with their own agent, and each agent answers only the people and rooms you allow ([Personal Rooms](https://docs.mindroom.chat/personal-rooms/), [Access Control](https://docs.mindroom.chat/authorization/)).
 
@@ -319,7 +319,7 @@ To work on MindRoom itself, run it from a checkout.
 <summary><b>Run from source</b></summary>
 
 Requires Python 3.13–3.14 and [uv](https://github.com/astral-sh/uv).
-For the dashboard in a fresh source checkout, install Node.js 24 and [Bun](https://bun.sh/) so the first run can build missing assets, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
+For the dashboard in a fresh source checkout, install Node.js 24 and [Bun](https://bun.sh/) 1.4 or newer so the first run can build missing assets, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
 The repository dev shell provides Node.js 24 and Bun.
 
 ```bash
@@ -368,7 +368,7 @@ Plain replies that never reach threaded context still stay plain replies.
 1. **Mentioned agents and teams respond** - Tag them to get their attention
 2. **Single responder continues** - In a thread with one person, the agent or team that answered keeps responding without a tag
 3. **Multiple agents collaborate** - Mention multiple agents when you want an ad-hoc collaboration
-4. **Smart routing** - The router picks the best agent or team for a new thread when you don't tag one, unless the room's [`reply_mode`](https://docs.mindroom.chat/configuration/threads/#reply-mode) is `mentions`
+4. **Smart routing** - MindRoom picks the best agent or team for a new thread when you don't tag one, unless the room's [`reply_mode`](https://docs.mindroom.chat/configuration/threads/#reply-mode) is `mentions`
 5. **Group threads stay human-first** - Once two or more people talk in a thread, agents answer only when tagged, so they don't interrupt
 6. **Adaptive participation** - An agent with [`participation`](https://docs.mindroom.chat/configuration/threads/#adaptive-participation) enabled that has already replied in a group thread decides for each untagged message whether it can help, so nobody has to tag it
 7. **DMs need no mentions** - Agents respond naturally in 1:1 rooms, unless the room's `reply_mode` is `mentions`, and you can add more agents to a DM for private collaboration
@@ -398,6 +398,7 @@ Every command also works with `!` instead of `/` (`!help`), including in clients
 - `/config <operation>` - Manage configuration
 - `/desktop [setup|status|confirm|rotate|disconnect]` - Manage your Desktop target
 - `/mode <agent> minimal|standard|show|reset` - Switch one agent between standard tools and a Bash-only interface
+- `/compact [agent_or_team]` - Compact the agents' context before their next reply in this conversation
 - `/model [name|name@level|list|reset]` - Show or switch the model used in the current thread
 - `/room_model [name|name@level|list|reset]` - Show the room model default or switch it (set/reset require a room admin)
 - `/thread_mode [room|thread|reset|show]` - Show or switch the thread mode used in the current room (room admin only)

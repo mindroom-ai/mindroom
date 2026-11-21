@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from mindroom.approval.tool_approval import resolve_tool_approval_approver
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.email_invites import store
 from mindroom.email_invites.mail import (
     SMTP_FROM_ENV,
@@ -18,8 +17,8 @@ from mindroom.email_invites.mail import (
     smtp_configured,
 )
 from mindroom.email_invites.policy import may_invite, refused_room_kind
-from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_room_admin import get_room_name, room_encryption_enabled
+from mindroom.steward_duties import moderator_rights_message
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -83,17 +82,17 @@ class EmailInviteTools(Toolkit):
         if isinstance(caller, str):
             return caller
         context, approver = caller
-        config, paths, room_id = context.current_config, context.runtime_paths, context.room_id
+        config, room_id = context.current_config, context.room_id
         address = normalize_email(email)
         if (refusal := await _refusal(context, address)) or address is None:
             return refusal or _BAD_ADDRESS
-        router_id = entity_identity_registry(config, paths).current_id(ROUTER_AGENT_NAME).full_id
-        if await may_invite(context.client, room_id, router_id) is not True:
-            return "Error: the router may not invite people to this room."
+        # The account that answers here is the one the link names: it sends the Matrix invite when the link is used.
+        if await may_invite(context.client, room_id, context.client.user_id) is not True:
+            return f"Error: {moderator_rights_message('invite people')}"
         rights = await may_invite(context.client, room_id, approver, config.email_invites.approvers)
         if rights is None:
             return _UNREADABLE
-        return await _request(context, approver, address, router_id, rights=rights)
+        return await _request(context, approver, address, rights=rights)
 
     async def list_email_invites(self) -> str:
         """List the open email invites of this room with their state, asker, approver and expiry."""
@@ -140,7 +139,7 @@ class EmailInviteTools(Toolkit):
         return f"No open invite for {address} in this room."
 
 
-async def _request(context: ToolRuntimeContext, approver: str, address: str, router_id: str, *, rights: bool) -> str:
+async def _request(context: ToolRuntimeContext, approver: str, address: str, *, rights: bool) -> str:
     """Store a waiting request, or send one when the person may invite."""
     paths, room_id, config = context.runtime_paths, context.room_id, context.current_config
     existing = store.open_invite(paths, room_id=room_id, email=address)
@@ -148,7 +147,7 @@ async def _request(context: ToolRuntimeContext, approver: str, address: str, rou
         if existing.inviter_id is None:
             return f"An invite for {address} is already waiting for someone who may invite."
         return f"An invite for {address} was already sent; it is valid until {_date(existing.expires_at)}."
-    request = store.Request(room_id, context.target.resolved_thread_id, address, approver, context.agent_name)
+    request = store.Request(room_id, context.target.resolved_thread_id, address, approver, context.recipient)
     try:
         if not rights:
             store.create_request(paths, request, expiry_days=config.email_invites.expiry_days)
@@ -156,14 +155,14 @@ async def _request(context: ToolRuntimeContext, approver: str, address: str, rou
                 f"Stored, nothing sent: {approver} may not invite people to this room. Someone who may invite "
                 f'can approve it by asking an agent here: "approve the invite for {address}".'
             )
-        return await _send(context, request, router_id)
+        return await _send(context, request)
     except store.EmailInviteLimitError as exc:
         return f"Error: limit reached: {_LIMITS[exc.limit]}."
     except ValueError:
         return _CHANGED
 
 
-async def _send(context: ToolRuntimeContext, request: store.Request, router_id: str) -> str:
+async def _send(context: ToolRuntimeContext, request: store.Request) -> str:
     """Issue the code and mail the link, or return it when no mail server is configured."""
     paths, settings = context.runtime_paths, context.current_config.email_invites
     if mailing := smtp_configured(paths):
@@ -172,7 +171,7 @@ async def _send(context: ToolRuntimeContext, request: store.Request, router_id: 
         encrypted = await room_encryption_enabled(context.client, context.room_id) is True
     invite, code = store.issue_code(paths, request, expiry_days=settings.expiry_days)
     address, approver = request.email, request.person
-    link, date = invite_link(settings.chat_url, router_id, code), _date(invite.expires_at)
+    link, date = invite_link(settings.chat_url, context.client.user_id, code), _date(invite.expires_at)
     if not mailing:
         return (
             f"No mail server is configured, so nothing was mailed. Give this link to {address} yourself. "

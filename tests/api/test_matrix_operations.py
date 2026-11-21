@@ -3,7 +3,7 @@
 import re
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import nio
 import pytest
@@ -17,7 +17,6 @@ from mindroom import constants
 from mindroom.api import config_lifecycle, main
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.state import MatrixState
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 from tests.matrix_state_helpers import save_matrix_state
@@ -70,6 +69,19 @@ def _save_matrix_identity(
         access_token=access_token,
     )
     save_matrix_state(state, runtime_paths)
+
+
+def _joined_agent_client(monkeypatch: pytest.MonkeyPatch, room_id: str) -> AsyncMock:
+    """Run one agent joined to ``room_id`` and return its live client."""
+    user_id = "@mindroom_test_agent:localhost"
+    client = AsyncMock(user_id=user_id, rooms={room_id: nio.MatrixRoom(room_id, user_id)})
+    bots = {"test_agent": Mock(running=True, client=client)}
+    monkeypatch.setattr(config_lifecycle.app_state(main.app), "room_bots", bots)
+    return client
+
+
+def _avatar_state(content: object) -> nio.RoomGetStateEventResponse:
+    return nio.RoomGetStateEventResponse(content, "m.room.avatar", "", "!test:example.org")
 
 
 def _save_matrix_room(runtime_paths: constants.RuntimePaths, room_key: str, room_id: str) -> None:
@@ -305,130 +317,69 @@ class TestMatrixOperations:
         [({"url": "mxc://example.org/room-avatar"}, 200), ({}, 404)],
         ids=["current-avatar", "no-avatar"],
     )
-    def test_room_avatar_reads_current_state_with_configured_occupant(
+    def test_room_avatar_reads_current_state_through_joined_agent(
         self,
         test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
         room_avatar_content: dict[str, str],
         expected: int,
     ) -> None:
-        """A configured room is read through a saved identity assigned to that room."""
+        """With one person, one agent and no owner account, the room is read through the agent's own client."""
         runtime_paths = main._app_runtime_paths(main.app)
         _save_matrix_room(runtime_paths, "test_room", "!test:example.org")
-        _save_matrix_identity(
-            runtime_paths,
-            "test_agent",
-            username="test_agent_bot",
-            access_token="room-token",  # noqa: S106
-        )
+        client = _joined_agent_client(monkeypatch, "!test:example.org")
+        client.room_get_state_event.return_value = _avatar_state(room_avatar_content)
+        client.thumbnail.return_value = nio.ThumbnailResponse(b"room-thumbnail", "image/webp", None)
 
-        with aioresponses() as matrix:
-            matrix.get(
-                re.compile(r"http://localhost:8008/_matrix/client/v3/rooms/.*/state/m\.room\.avatar"),
-                payload=room_avatar_content,
-            )
-            if expected == 200:
-                matrix.get(
-                    "http://localhost:8008/_matrix/client/v1/media/thumbnail/example.org/room-avatar"
-                    "?width=96&height=96&method=scale&allow_remote=true",
-                    body=b"room-thumbnail",
-                    content_type="image/webp",
-                )
+        response = test_client.get("/api/matrix/rooms/avatar", params={"room_id": "!test:example.org"})
 
-            response = test_client.get("/api/matrix/rooms/avatar", params={"room_id": "!test:example.org"})
-
-            assert matrix.requests
-            assert all(
-                call.kwargs["headers"]["Authorization"] == "Bearer room-token"
-                for calls in matrix.requests.values()
-                for call in calls
-            )
         assert response.status_code == expected, response.text
+        client.room_get_state_event.assert_awaited_once_with("!test:example.org", "m.room.avatar")
         if expected == 200:
             assert response.content == b"room-thumbnail"
             assert response.headers["content-type"] == "image/webp"
+            client.thumbnail.assert_awaited_once_with("example.org", "room-avatar", width=96, height=96)
 
-    def test_room_avatar_uses_router_for_room_only_metadata(self, test_client: TestClient) -> None:
-        """Room metadata without an assigned entity remains readable through the configured router."""
-        _add_room_metadata_to_runtime_config("announcements")
-        runtime_paths = main._app_runtime_paths(main.app)
-        _save_matrix_room(runtime_paths, "announcements", "!announcements:example.org")
-        _save_matrix_identity(
-            runtime_paths,
-            ROUTER_AGENT_NAME,
-            username="router_bot",
-            access_token="router-token",  # noqa: S106
-        )
-
-        with aioresponses() as matrix:
-            matrix.get(
-                re.compile(r"http://localhost:8008/_matrix/client/v3/rooms/.*/state/m\.room\.avatar"),
-                payload={"url": "mxc://example.org/announcements-avatar"},
-            )
-            matrix.get(
-                re.compile(r"http://localhost:8008/_matrix/client/v1/media/thumbnail/.*"),
-                body=b"room-thumbnail",
-                content_type="image/jpeg",
-            )
-
-            response = test_client.get("/api/matrix/rooms/avatar", params={"room_id": "announcements"})
-
-            assert response.status_code == 200, (response.text, list(matrix.requests))
-            assert all(
-                call.kwargs["headers"]["Authorization"] == "Bearer router-token"
-                for calls in matrix.requests.values()
-                for call in calls
-            )
-
-    def test_room_avatar_maps_malformed_upstream_and_closes_clients(self, test_client: TestClient) -> None:
-        """Malformed room state becomes a bounded upstream error and closes every attempted identity."""
+    def test_room_avatar_no_running_agent_joined_is_not_available(
+        self,
+        test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A room no running bot has joined stays unreadable."""
         runtime_paths = main._app_runtime_paths(main.app)
         _save_matrix_room(runtime_paths, "test_room", "!test:example.org")
-        malformed_content: Any = []
-        clients = [AsyncMock(), AsyncMock()]
-        for matrix_client in clients:
-            matrix_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-                malformed_content,
-                "m.room.avatar",
-                "",
-                "!test:example.org",
-            )
-            matrix_client.close = AsyncMock()
+        client = _joined_agent_client(monkeypatch, "!other:example.org")
 
-        with patch(
-            "mindroom.api.matrix_operations.create_agent_http_client",
-            side_effect=clients,
-        ):
-            response = test_client.get("/api/matrix/rooms/avatar", params={"room_id": "test_room"})
+        response = test_client.get("/api/matrix/rooms/avatar", params={"room_id": "test_room"})
 
-        assert response.status_code == 502
-        for matrix_client in clients:
-            matrix_client.close.assert_awaited_once_with()
+        assert response.status_code == 404
+        client.room_get_state_event.assert_not_awaited()
 
-    def test_room_avatar_maps_matrix_thumbnail_error_to_upstream_failure(self, test_client: TestClient) -> None:
-        """A Matrix error response from room thumbnail lookup is returned as an upstream failure."""
+    @pytest.mark.parametrize(
+        "failure",
+        ["malformed", "thumbnail-error", "disposed-client"],
+    )
+    def test_room_avatar_maps_upstream_failures(
+        self,
+        test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+    ) -> None:
+        """Malformed state, a Matrix thumbnail error and a client its stopped bot closed are temporary failures."""
         runtime_paths = main._app_runtime_paths(main.app)
         _save_matrix_room(runtime_paths, "test_room", "!test:example.org")
-        matrix_client = AsyncMock()
-        matrix_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-            {"url": "mxc://example.org/room-avatar"},
-            "m.room.avatar",
-            "",
-            "!test:example.org",
-        )
-        matrix_client.thumbnail.return_value = nio.ThumbnailError(
-            "server error",
-            status_code="M_UNKNOWN",
-        )
-        matrix_client.close = AsyncMock()
+        client = _joined_agent_client(monkeypatch, "!test:example.org")
+        content: Any = [] if failure == "malformed" else {"url": "mxc://example.org/room-avatar"}
+        client.room_get_state_event.return_value = _avatar_state(content)
+        client.thumbnail.return_value = nio.ThumbnailError("server error", status_code="M_UNKNOWN")
+        if failure == "disposed-client":
+            client.room_get_state_event.side_effect = nio.LocalProtocolError("Client is closed")
 
-        with patch(
-            "mindroom.api.matrix_operations.create_agent_http_client",
-            return_value=matrix_client,
-        ):
-            response = test_client.get("/api/matrix/rooms/avatar", params={"room_id": "test_room"})
+        response = test_client.get("/api/matrix/rooms/avatar", params={"room_id": "test_room"})
 
         assert response.status_code == 502
-        matrix_client.close.assert_awaited_once_with()
+        assert response.json()["detail"] == "Room avatar is temporarily unavailable"
+        client.close.assert_not_awaited()
 
     def test_room_avatar_rejects_unconfigured_room_without_matrix_access(self, test_client: TestClient) -> None:
         """An arbitrary Matrix room ID cannot turn the dashboard into a room-media oracle."""

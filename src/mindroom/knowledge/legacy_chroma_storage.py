@@ -125,7 +125,7 @@ def legacy_chroma_rows(
 
         yield pages()
     finally:
-        client.close()  # ty: ignore[unresolved-attribute] - `PersistentClient` returns a closable `Client` typed as `ClientAPI`
+        client.close()  # ty: ignore[missing-attribute] - `PersistentClient` returns a closable `Client` typed as `ClientAPI`
 
 
 def remove_legacy_chroma_storage(storage: Path, *, base_id: str) -> None:

@@ -537,3 +537,32 @@ async def test_send_scheduled_failure_notice_follows_workflow_target() -> None:
     assert content["m.relates_to"]["event_id"] == "$thread"
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
     assert content[SKIP_MENTIONS_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_an_edited_one_time_task_fires_under_a_new_transaction_id(tmp_path: Path) -> None:
+    """A retry of one workflow reuses its transaction ID; an edited workflow of the same task gets its own.
+
+    Matrix returns the first event for a repeated transaction ID, so an edit sent under the old ID would never post.
+    """
+    config = _agent_config(tmp_path)
+    original, edited = _workflow("first text"), _workflow("edited text")
+
+    async def transaction_id(workflow: ScheduledWorkflow) -> str:
+        with patch(
+            "mindroom.matrix.client_delivery.send_message_outcome",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
+        ) as mock_send:
+            await execute_scheduled_workflow(
+                AsyncMock(),
+                workflow,
+                config,
+                runtime_paths_for(config),
+                _conversation_reader(latest_thread_event_id="$latest"),
+                HookRegistryState(HookRegistry.empty()),
+                task_id="task-1",
+            )
+        return mock_send.await_args.kwargs["transaction_id"]
+
+    assert await transaction_id(original) == await transaction_id(original)
+    assert await transaction_id(original) != await transaction_id(edited)

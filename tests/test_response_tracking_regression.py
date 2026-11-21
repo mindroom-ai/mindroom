@@ -20,6 +20,7 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.router.relay import execute_router_relay
+from mindroom.routing_judgment import ResponderSelection
 from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -44,7 +45,7 @@ def mock_router_agent() -> AgentMatrixUser:
     return AgentMatrixUser(
         agent_name="router",
         password=TEST_PASSWORD,
-        display_name="RouterAgent",
+        display_name="MindRoom",
         user_id="@mindroom_router:localhost",
     )
 
@@ -144,6 +145,7 @@ class TestResponseTrackingRegression:
         # Process same command again (simulating restart)
         handled_turn = await bot._turn_store.get_turn_record(command_event.event_id)
         assert handled_turn is not None
+        assert handled_turn.response_event_id == "$response_123"
         await bot._command_turn_executor.execute(
             mock_room,
             command_event,
@@ -157,6 +159,7 @@ class TestResponseTrackingRegression:
         # Should NOT send another response if properly tracked
         # But here we're testing that the tracking was done
 
+    @pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
     @pytest.mark.asyncio
     async def test_unknown_command_response_tracking(
         self,
@@ -226,6 +229,7 @@ class TestResponseTrackingRegression:
 
         send_response.assert_awaited_once()
         assert "❌ Unknown command" in send_response.await_args.kwargs["response_text"]
+        assert send_response.await_args.kwargs["skip_mentions"] is True
 
         # IMPORTANT: Check if event was marked as responded
         assert await bot._turn_store.is_handled(test_room_id, unknown_command_event.event_id), (
@@ -266,7 +270,7 @@ class TestResponseTrackingRegression:
         bot.client.room_send.return_value = mock_send_response
 
         # Mock suggest_responder to return "research"
-        mock_suggest_responder.return_value = "research"
+        mock_suggest_responder.return_value = ResponderSelection("research")
 
         # Create a regular message (no mentions)
         message_event = MagicMock(spec=nio.RoomMessageText)

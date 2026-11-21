@@ -90,6 +90,7 @@ from mindroom.approval.manager import (
     ToolApprovalTransportError,
     initialize_approval_store,
 )
+from mindroom.approval.transport import ApprovalMatrixTransport
 from mindroom.authorization import _ReplyAuthorizationDecision
 from mindroom.bot import AgentBot
 from mindroom.coalescing.batch import PendingEvent
@@ -99,7 +100,7 @@ from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, load_config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.config.resolution import entity_model_name
-from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
+from mindroom.constants import ROUTE_EVENT_TYPE, ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_handoff import (
     MediaDispatchEvent,
@@ -197,6 +198,7 @@ from mindroom.session_storage.store import (
     persist_to,
     runs_without,
 )
+from mindroom.steward_duties import StewardDuties
 from mindroom.thread_summary import schedule as thread_summary_schedule
 from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 from mindroom.thread_utils import decide_agent_response
@@ -215,8 +217,8 @@ from mindroom.turns.ingress import TurnIngress
 from mindroom.turns.interactive_selection import InteractiveSelections
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
+from mindroom.voice import visible_voice_echo
 from mindroom.voice.ingress import VoiceIngress
-from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backends import static_runner as static_runner_module
 from mindroom.workers.compatibility import worker_health_payload
@@ -681,7 +683,16 @@ def live_turn_tools_for_test(
     return LiveTurnTools(owner, catalog=catalog, authorize=authorize, **(turn_options | options))
 
 
-async def _no_approval_event(_room_id: str, _thread_id: str | None, _content: dict[str, Any]) -> dict[str, Any] | None:
+async def _no_approval_event(
+    _room_id: str,
+    _thread_id: str | None,
+    _content: dict[str, Any],
+    _sender_entity: str,
+) -> dict[str, Any] | None:
+    return None
+
+
+async def _no_device(_delivery_id: str | None) -> str | None:
     return None
 
 
@@ -702,21 +713,54 @@ async def _no_sources_to_wake(_entity_name: str, _room_id: str, _source_event_id
 class FakeApprovalTransport:
     """The approval transport an approval manager uses, with the methods a test sets.
 
-    The others prepare and send nothing, find no earlier delivery, know no sender, device, or responder principal,
-    wake nothing, and find the router in every room.
+    The others prepare and send nothing, find no earlier delivery, find no card's sender in its room, know no device,
+    name each entity's principal on one shared account, and wake nothing.
     """
 
-    prepare_approval_event: Callable[[str, str | None, dict[str, Any]], Awaitable[dict[str, Any] | None]] = (
+    prepare_approval_event: Callable[[str, str | None, dict[str, Any], str], Awaitable[dict[str, Any] | None]] = (
         _no_approval_event
     )
     send_approval_delivery: Callable[[MatrixDelivery], Awaitable[str]] = _no_approval_delivery
     resolve_approval_delivery: Callable[[MatrixDelivery], Awaitable[str | None]] = _no_delivered_event
     resolve_approval_action_delivery: Callable[[str, str], Awaitable[str | None]] = _no_delivered_event
-    transport_sender_id: Callable[[], str | None] = lambda: None
-    transport_device_id: Callable[[], str | None] = lambda: None
+    sender_bot: Callable[[str | None, str], object | None] = lambda _sender, _room_id: None
+    sender_device_id: Callable[[str | None], Awaitable[str | None]] = _no_device
     wake_continuation_sources: Callable[[str, str, tuple[str, ...]], Awaitable[None]] = _no_sources_to_wake
-    responder_principal_id: Callable[[str], str | None] = lambda _entity_name: None
-    router_missing: Callable[[str], bool] = lambda _room_id: False
+    responder_principal_id: Callable[[str], str | None] = lambda entity_name: entity_name + "@shared"
+
+    async def pinned_delivery(self, delivery_id: str | None) -> tuple[Any, Any, str | None]:
+        """Return the send and adoption methods a test set, with the device it named."""
+        return self.send_approval_delivery, self.resolve_approval_delivery, await self.sender_device_id(delivery_id)
+
+
+def approval_transport_for_test(
+    bot_provider: "Callable[[str], Any]",
+    *,
+    cards: "ApprovalDeliveryView | None" = None,
+    entities: tuple[str, ...] = (ROUTER_AGENT_NAME, "code"),
+) -> ApprovalMatrixTransport:
+    """Build the approval transport over one bot lookup, with the router's bot as the poster of every room.
+
+    Its bots are the ones the lookup knows among ``entities``, each joined to the rooms its ``approval_room_ids`` name.
+    Without ``cards`` every event that names a delivery is a card the router sent.
+    """
+    if cards is None:
+        cards = MagicMock(principal_id="router@@mindroom_router:localhost")
+        cards.approvals.approval_card_sender = AsyncMock(return_value=(None, "!room:localhost"))
+        cards.approvals.unavailable_notice = AsyncMock(return_value=None)
+
+    def bots() -> dict[str, Any]:
+        found = {name: bot for name in entities if (bot := bot_provider(name)) is not None}
+        for bot in found.values():
+            if bot.client is not None:
+                bot.client.rooms = bot.approval_room_ids
+        return found
+
+    return ApprovalMatrixTransport(
+        bots=bots,
+        room_poster=lambda _room_id: bot_provider(ROUTER_AGENT_NAME),
+        cards=lambda: cards,
+    )
 
 
 def approval_manager_for_test(
@@ -1535,6 +1579,29 @@ def legacy_default_store_client(
     client = MindRoomAsyncClient(homeserver, user_id, store_path=str(store_dir), config=matrix_client_config())
     client.restore_login(user_id, device_id, access_token)
     return client
+
+
+def parsed_route(
+    content: dict[str, Any],
+    *,
+    sender: str,
+    event_id: str = "$route",
+    origin_server_ts: int = 1_001,
+    **source: object,
+) -> nio.UnknownEvent:
+    """Return a steward's hidden route event as nio parses it off the timeline."""
+    event = nio.Event.parse_event(
+        {
+            "type": ROUTE_EVENT_TYPE,
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": origin_server_ts,
+            "content": content,
+            **source,
+        },
+    )
+    assert isinstance(event, nio.UnknownEvent)
+    return event
 
 
 def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> AsyncMock:
@@ -3334,12 +3401,7 @@ def _changes_for(deps: "DataclassInstance", changes: Mapping[str, object]) -> di
     return {name: value for name, value in changes.items() if name in deps.__dataclass_fields__}
 
 
-_VOICE_READINESS_CHANGES = {
-    "normalizer": "normalizer",
-    "turn_store": "turn_store",
-    "visible_voice_echo": "visible_echo",
-    "logger": "logger",
-}
+_VOICE_READINESS_FIELDS = frozenset({"normalizer", "turn_store", "logger"})
 
 
 def _turn_owners(bot: RuntimeBot) -> tuple[TurnIngress, TurnDispatcher, InteractiveSelections, VoiceIngress]:
@@ -3365,13 +3427,13 @@ def update_turn_owner_deps(bot: RuntimeBot, **changes: object) -> None:
     In place, because the gate and the reaction dispatcher keep the owners they were built with.
     """
     owners = _turn_owners(bot)
-    known = set(_VOICE_READINESS_CHANGES) | _turn_owner_field_names(bot)
+    known = _VOICE_READINESS_FIELDS | _turn_owner_field_names(bot)
     unknown = set(changes) - known
     assert not unknown, f"not a turn owner collaborator: {sorted(unknown)}"
     for owner in owners:
         if owner_changes := _changes_for(owner.deps, changes):
             owner.deps = replace(owner.deps, **owner_changes)
-    readiness_changes = {field: changes[name] for name, field in _VOICE_READINESS_CHANGES.items() if name in changes}
+    readiness_changes = {name: changes[name] for name in _VOICE_READINESS_FIELDS if name in changes}
     if readiness_changes:
         voice = bot._voice_ingress
         voice.deps = replace(voice.deps, readiness=replace(voice.deps.readiness, **readiness_changes))
@@ -3422,16 +3484,12 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
         )
     bot._ingress_validator = rebuilt_changes["ingress"]
     visible_voice_echo = unwrap_extracted_collaborator(bot._visible_voice_echo)
-    bot._visible_voice_echo = VisibleVoiceEchoLifecycle(
-        replace(
-            visible_voice_echo.deps,
-            runtime=rebuilt_changes.get("runtime", _held_turn_collaborator(bot, "runtime")),
-            logger=rebuilt_changes.get("logger", _held_turn_collaborator(bot, "logger")),
-            agent_name=rebuilt_changes.get("agent_name", _held_turn_collaborator(bot, "agent_name")),
-            delivery_gateway=rebuilt_changes["delivery_gateway"],
-            turn_store=rebuilt_changes["turn_store"],
-            ingress=rebuilt_changes["ingress"],
-        ),
+    bot._visible_voice_echo = replace(
+        visible_voice_echo,
+        runtime=rebuilt_changes.get("runtime", _held_turn_collaborator(bot, "runtime")),
+        agent_name=rebuilt_changes.get("agent_name", _held_turn_collaborator(bot, "agent_name")),
+        delivery_gateway=rebuilt_changes["delivery_gateway"],
+        turn_store=rebuilt_changes["turn_store"],
     )
     wrap_extracted_collaborators(bot, "_visible_voice_echo")
     visible_responses = unwrap_extracted_collaborator(bot._visible_responses)
@@ -3463,7 +3521,6 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
             "runtime",
             "logger",
             "runtime_paths",
-            "agent_name",
             "normalizer",
             "turn_policy",
             "turn_store",
@@ -3476,7 +3533,6 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
             runtime=rebuilt_changes.get("runtime", _held_turn_collaborator(bot, "runtime")),
             logger=rebuilt_changes.get("logger", _held_turn_collaborator(bot, "logger")),
             runtime_paths=rebuilt_changes.get("runtime_paths", _held_turn_collaborator(bot, "runtime_paths")),
-            agent_name=rebuilt_changes.get("agent_name", _held_turn_collaborator(bot, "agent_name")),
             normalizer=rebuilt_changes["normalizer"],
             turn_policy=rebuilt_changes["turn_policy"],
             turn_store=rebuilt_changes["turn_store"],
@@ -3553,9 +3609,9 @@ def patch_response_runner_module(**changes: object) -> Generator[None]:
 
 
 def install_personal_room_shutdown_mock(bot: AgentBot) -> None:
-    """Install lifecycle cancellation for partial shutdown fixtures through one seam; they build no router duties."""
+    """Install lifecycle cancellation for partial shutdown fixtures through one seam, with idle steward duties."""
     bot._personal_room_lifecycle = MagicMock(spec=PersonalRoomLifecycle)
-    bot._router = None
+    bot.steward_duties = MagicMock(spec=StewardDuties)
 
 
 def install_shutdown_drain_mocks(
@@ -3588,6 +3644,8 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
         )
 
     bot._delivery_gateway.send_text = AsyncMock(side_effect=_send_text)
+    # A steward's hidden route is no response; tests read its content from this mock.
+    bot._delivery_gateway.send_route = AsyncMock(return_value="$route")
 
     async def _deliver_final(request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
         event_id = await send_response(
@@ -4366,11 +4424,11 @@ def _reset_approval_manager_runtime() -> Generator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_voice_echo_barriers() -> Generator[None]:
-    """Keep cross-bot voice echo ordering state, and its loop bindings, per test."""
-    _reset_visible_voice_echo_barriers()
+def _reset_voice_transcript_locks() -> Generator[None]:
+    """Keep the per-voice-message transcript locks, and their loop bindings, per test."""
+    visible_voice_echo._posting.clear()
     yield
-    _reset_visible_voice_echo_barriers()
+    visible_voice_echo._posting.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -4447,6 +4505,15 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None]:
 @pytest.fixture
 def enforce_turn_authorization() -> None:
     """Keep final TurnPolicy authorization active for tests that exercise it."""
+
+
+@pytest.fixture
+def commands_aimed_at_bot_under_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aim every command at the bot under test, whatever its entity.
+
+    Whom a command is aimed at is `TurnPolicy.aims_command_at_me`'s own test; these tests are about what running one does.
+    """
+    monkeypatch.setattr(TurnPolicy, "aims_command_at_me", AsyncMock(return_value=True))
 
 
 @pytest.fixture

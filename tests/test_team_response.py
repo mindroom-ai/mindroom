@@ -21,7 +21,7 @@ from mindroom.agents import create_agent
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
-from mindroom.constants import AI_RUN_METADATA_KEY, MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import AI_RUN_METADATA_KEY, MATRIX_SEEN_EVENT_IDS_METADATA_KEY
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.execution_preparation import render_prepared_messages_text
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
@@ -317,18 +317,6 @@ async def test_the_leader_is_told_which_member_knowledge_is_unavailable_before_a
     notice = format_knowledge_availability_notice(unavailable)
     assert notice is not None
     assert any(notice in str(message.content) for message in _leader(team).requests[0].messages)
-
-
-@pytest.mark.asyncio
-async def test_the_router_in_a_direct_member_list_is_skipped(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    team = _team(tmp_path, monkeypatch, leader=[answer("General response")])
-    text = await team.respond(agent_names=[ROUTER_AGENT_NAME, "general"])
-
-    assert text == f"{HEADER}\n**Team Consensus**:\n\nGeneral response"
-    assert '<member id="general" name="GeneralAgent">' in str(_leader(team).requests[0].messages[0].content)
 
 
 @pytest.mark.asyncio

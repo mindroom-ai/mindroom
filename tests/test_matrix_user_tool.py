@@ -15,8 +15,10 @@ from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.connection_agents import AgentToolContext, resolve_connection_agent, resolve_connection_user
 from mindroom.attachments.storage import load_attachment
 from mindroom.config.approval import ToolApprovalConfig
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.teams.members import resolve_exact_team_members
+from mindroom.tool_system.events import tool_markers_out_of_text
 from mindroom.tool_system.runtime_context import (
     current_execution_identity,
     get_tool_runtime_context,
@@ -46,6 +48,7 @@ from tests.matrix_user_helpers import (
     sync_answer,
 )
 from tests.tool_approval_helpers import gated_functions
+from tests.tool_position_helpers import _SHELL, _marked
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -61,6 +64,7 @@ TURN_NEEDED = "download needs a chat turn: the file is handed to the conversatio
 WRITE_TURN_NEEDED = (
     "matrix_user_write needs a conversation with the agent, so it does not work through the MCP gateway."
 )
+
 # An alias, and the room the homeserver's directory says it names.
 ALIAS = "#general:example.com"
 ALIASED_ROOM = "!general:example.com"
@@ -702,6 +706,67 @@ async def test_the_owners_mcp_gateway_call_reads_as_the_owner(
     [request] = homeserver.requests
     assert request.headers["Authorization"] == f"Bearer {TOKEN}"
     assert request.query["user_id"] == [OWNER]
+
+
+# An agent's reply as it built it; Matrix holds it without the marker line.
+_REPLY_WITH_A_CALL = _marked("Needle.\n\n🔧 `shell` [1]", [_SHELL])
+
+
+@pytest.mark.asyncio
+async def test_the_owners_mcp_gateway_call_reads_an_agents_reply_with_its_tool_calls(
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """Matrix holds an agent's reply without its tool marker lines, and every read of messages shows them.
+
+    The username says whose reply had them, on any homeserver. Alice's agent has a username of its own, so it sends
+    its replies as it built them, and positions in a trace of its message are its own writing.
+    """
+    config = owner_config(paths)
+    owner = resolve_connection_user(ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config), OWNER)
+    gateway_agent = resolve_connection_agent(owner, AGENT)
+    agent = entity_identity_registry(config, paths).current_ids[AGENT].full_id
+    built = _REPLY_WITH_A_CALL
+    held = tool_markers_out_of_text(built)
+    assert held["body"] == "Needle."
+    reads = [
+        {"action": "messages", "room_id": ROOM},
+        {"action": "messages", "room_id": ROOM, "thread_id": "$m"},
+        {"action": "messages", "room_id": ROOM, "event_id": "$m"},
+        {"action": "search", "query": "needle"},
+    ]
+
+    async def texts(content: dict[str, object], sender: str) -> list[str]:
+        """Return the text of the one message that each read shows."""
+        message = room_event("$m", "m.room.message", content, sender=sender)
+        room = f"/_matrix/client/v3/rooms/{ROOM}"
+        homeserver.answers = {
+            f"{room}/messages": {"chunk": [message]},
+            f"{room}/event/$m": message,
+            f"/_matrix/client/v1/rooms/{ROOM}/relations/$m/m.thread": {"chunk": []},
+            f"{room}/context/$m": {"event": message, "events_before": [], "events_after": []},
+            "/_matrix/client/v3/search": search_answer({**message, "room_id": ROOM}),
+        }
+        shown = []
+        with homeserver.serving_the_toolkit():
+            for arguments in reads:
+                result = await gateway.invoke_tool(
+                    gateway_agent,
+                    toolkit="matrix_user",
+                    function="matrix_user_read",
+                    arguments=arguments,
+                )
+                (line,) = json.loads(result["result"])["messages"]
+                shown.append(line.rsplit(" | ", 1)[1])
+        return shown
+
+    with_calls = ["Needle. 🔧 `shell` [1]"] * len(reads)
+    assert await texts(built, agent) == with_calls
+    for sender in ("@mindroom_code:example.com", "@mindroom_code:elsewhere.example"):
+        assert await texts(held, sender) == with_calls
+    assert agent.startswith("@mind_alice:")
+    for sender in (agent, STRANGER):
+        assert await texts(held, sender) == ["Needle."] * len(reads)
 
 
 @pytest.mark.asyncio

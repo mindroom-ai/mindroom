@@ -187,9 +187,7 @@ def forget_invited_room(path: Path, room_id: str) -> None:
 
 
 def _invite_acceptance_policy(config: Config, agent_name: str) -> InviteAcceptancePolicy | None:
-    if agent_name == ROUTER_AGENT_NAME:
-        return config.router.accept_invites
-
+    """Return an agent's or a team's invitation rule; the owner account has none and accepts no invite."""
     agent_config = config.agents.get(agent_name)
     if agent_config is not None:
         return agent_config.accept_invites
@@ -230,4 +228,10 @@ def invited_room_entity_names(config: Config) -> tuple[str, ...]:
 
 def should_persist_invited_rooms(config: Config, agent_name: str) -> bool:
     """Return whether one entity should keep accepted invited rooms across restarts."""
-    return should_accept_invites(config, agent_name)
+    # LEGACY_COMPAT: the owner account's saved invited rooms, written while the router accepted invites.
+    # Legacy format: a JSON list of room IDs in the `router` entity's `invited_rooms.json`.
+    # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written;
+    #   replacement: unreleased, the owner account accepts no invite, and only a hook's `matrix_admin` adds a room.
+    # Handling: the owner keeps reading the list as rooms it keeps track of; it never joins a room because of it.
+    # Coverage: tests/test_room_invites.py::test_owner_does_not_join_a_room_its_saved_invite_record_names
+    return agent_name == ROUTER_AGENT_NAME or should_accept_invites(config, agent_name)

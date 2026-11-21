@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="SiOpenai",
+    icon="TbBrandOpenai",
     icon_color="text-green-600",
     config_fields=[
         ConfigField(

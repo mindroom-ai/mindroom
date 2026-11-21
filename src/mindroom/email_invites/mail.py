@@ -40,9 +40,9 @@ def normalize_email(raw: str) -> str | None:
     return address.lower()
 
 
-def invite_link(chat_url: str, router_id: str, code: str) -> str:
-    """Return the Chat link that carries the router ID and the code in its fragment."""
-    return f"{chat_url}/invite/#r={quote(router_id, safe='')}&c={quote(code, safe='')}"
+def invite_link(chat_url: str, account_id: str, code: str) -> str:
+    """Return the Chat link that carries, in its fragment, the code and the ID of the account that takes its claim."""
+    return f"{chat_url}/invite/#r={quote(account_id, safe='')}&c={quote(code, safe='')}"
 
 
 def smtp_configured(paths: RuntimePaths) -> bool:

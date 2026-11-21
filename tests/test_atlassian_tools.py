@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import parse_qs
 
 import httpx
+import httpx2
 import pytest
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
@@ -206,11 +207,11 @@ async def test_expiring_token_is_refreshed_through_the_atlassian_token_endpoint(
     manager = save_client_config(paths)
     provider = atlassian_oauth_provider()
     publish_grant(provider, manager, "expired-token", expires_at=1.0)
-    token_requests: list[httpx.Request] = []
+    token_requests: list[httpx2.Request] = []
 
-    def token_endpoint(request: httpx.Request) -> httpx.Response:
+    def token_endpoint(request: httpx2.Request) -> httpx2.Response:
         token_requests.append(request)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "access_token": "rotated-token",
@@ -222,7 +223,7 @@ async def test_expiring_token_is_refreshed_through_the_atlassian_token_endpoint(
         )
 
     def oauth_client(**kwargs: object) -> AsyncOAuth2Client:
-        return AsyncOAuth2Client(transport=httpx.MockTransport(token_endpoint), **kwargs)
+        return AsyncOAuth2Client(transport=httpx2.MockTransport(token_endpoint), **kwargs)
 
     monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", oauth_client)
     gateway = FakeGateway(sites_by_token={"rotated-token": [site()]}).install(monkeypatch)
@@ -259,8 +260,8 @@ async def test_refresh_failures_ask_to_reconnect_or_to_retry(
     publish_grant(atlassian_oauth_provider(), manager, "expired-token", expires_at=1.0)
 
     def oauth_client(**kwargs: object) -> AsyncOAuth2Client:
-        response = httpx.Response(status_code, json={"error": error, "error_description": "secret-detail"})
-        return AsyncOAuth2Client(transport=httpx.MockTransport(lambda _request: response), **kwargs)
+        response = httpx2.Response(status_code, json={"error": error, "error_description": "secret-detail"})
+        return AsyncOAuth2Client(transport=httpx2.MockTransport(lambda _request: response), **kwargs)
 
     monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", oauth_client)
     gateway = FakeGateway().install(monkeypatch)

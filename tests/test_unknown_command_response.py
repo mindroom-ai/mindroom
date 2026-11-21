@@ -25,6 +25,7 @@ from tests.conftest import (
 )
 
 
+@pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
 @pytest.mark.asyncio
 async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     """Test that unknown commands get a helpful error response in main room."""
@@ -116,6 +117,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     assert msg["thread_id"] == "$test_event"
 
 
+@pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
 @pytest.mark.asyncio
 async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     """Test that unknown commands get a helpful error response when in a thread."""
@@ -154,6 +156,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     room.members_synced = True
     room.canonical_alias = None
     room.name = "Test Room"
+    room.invited_users = {}
     room.users = {
         "@mindroom_router:localhost": None,
         "@mindroom_general:localhost": None,
@@ -226,6 +229,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     assert msg["thread_id"] == "$thread_root"
 
 
+@pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
 @pytest.mark.asyncio
 async def test_unknown_command_with_reply_starts_prompt_thread(tmp_path: Path) -> None:
     """Plain-reply unknown commands should answer the command event, not the stale reply target."""

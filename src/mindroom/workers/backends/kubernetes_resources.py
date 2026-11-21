@@ -64,7 +64,7 @@ from mindroom.workers.backends.dedicated_launch import (
     dedicated_worker_startup_runtime_paths,
     write_dedicated_worker_startup_manifest,
 )
-from mindroom.workers.backends.kubernetes_config import resolve_kubeconfig_paths
+from mindroom.workers.backends.kubernetes_config import resolve_kubeconfig_paths, validated_kubernetes_object
 from mindroom.workers.backends.kubernetes_pod_names import (
     SANDBOX_RUNNER_CONTAINER_NAME,
     WORKER_STORAGE_VOLUME_NAME,
@@ -86,6 +86,7 @@ logger = get_logger(__name__)
 _READY_POLL_INTERVAL_SECONDS = 1.0
 _DELETE_POLL_INTERVAL_SECONDS = 0.2
 _HOSTNAME_ENV = "HOSTNAME"
+_MERGE_PATCH_CONTENT_TYPE = "application/merge-patch+json"
 
 _ANNOTATION_CREATED_AT = "mindroom.ai/created-at"
 _ANNOTATION_LAST_USED_AT = "mindroom.ai/last-used-at"
@@ -188,7 +189,7 @@ class KubernetesDeployment(Protocol):
     def spec(self) -> _KubernetesDeploymentSpec: ...  # noqa: D102
 
     @property
-    def status(self) -> _KubernetesDeploymentStatus: ...  # noqa: D102
+    def status(self) -> _KubernetesDeploymentStatus | None: ...  # noqa: D102
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +308,12 @@ class _CoreApiProtocol(Protocol):
     def list_namespaced_pod(self, namespace: str, **kwargs: object) -> _KubernetesRawResponse: ...
 
     def read_namespaced_pod(self, name: str, namespace: str) -> _KubernetesPod: ...
+
+
+def _validate_manifest(manifest: dict[str, object]) -> None:
+    """Fail before any request when the installed client's models reject one worker manifest."""
+    kind = cast("str", manifest["kind"])
+    validated_kubernetes_object(f"V1{kind}", manifest, what=f"The worker {kind} manifest")
 
 
 def service_dns_name(service_name: str, namespace: str) -> str:
@@ -723,7 +730,7 @@ class KubernetesResourceManager:
                 name,
                 namespace,
                 body,
-                _content_type="application/merge-patch+json",
+                _content_type=_MERGE_PATCH_CONTENT_TYPE,
             ),
             resource_name=worker_id,
             manifest=self._service_manifest(worker_id, ssh=ssh),
@@ -739,6 +746,7 @@ class KubernetesResourceManager:
             )
             return
         manifest = self._auth_secret_manifest(worker_key=worker_key, worker_id=worker_id)
+        _validate_manifest(manifest)
         try:
             self._core.read_namespaced_secret(worker_id, self.config.namespace)
         except self.api_exception as exc:
@@ -936,7 +944,7 @@ class KubernetesResourceManager:
             secret_name,
             self.config.namespace,
             body,
-            _content_type="application/merge-patch+json",
+            _content_type=_MERGE_PATCH_CONTENT_TYPE,
         )
 
     def _recreate_deployment(
@@ -947,6 +955,8 @@ class KubernetesResourceManager:
         timeout_seconds: float,
     ) -> None:
         """Delete one Deployment, wait until it and its pods are gone, and create it again from the manifest."""
+        # Checked first: a manifest the client rejects must not cost the worker its running Deployment.
+        _validate_manifest(manifest)
         self.delete_deployment(deployment_name, timeout_seconds=timeout_seconds)
         deadline = time.time() + timeout_seconds
         while True:
@@ -1030,6 +1040,7 @@ class KubernetesResourceManager:
         resource_name: str,
         manifest: dict[str, object],
     ) -> None:
+        _validate_manifest(manifest)
         try:
             read_fn(resource_name, self.config.namespace)
         except self.api_exception as exc:

@@ -58,6 +58,8 @@ class ApprovalCardReservation:
     # Whether an approval can be honored: the arguments were reviewable when the card was prepared.
     approvable: bool
     grant_operation: ApprovalOperation | None = None
+    # The journal principal of the account that sends and edits the card.
+    sender_principal_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +105,8 @@ class ApprovalCardView:
     responder_entity_name: str | None
     offers_timed_approval: bool
     any_arguments_offered: bool
+    # The principal of the account that sends and edits the card; None for a card the router sent before upgrade.
+    sender_principal_id: str | None = None
 
     @property
     def terminal(self) -> bool:
@@ -174,7 +178,7 @@ def terminal_content(
     return resolution
 
 
-def _reserve(
+def reserve(
     transaction: Transaction,
     principal_id: str,
     *,
@@ -186,7 +190,8 @@ def _reserve(
     room_id: str,
     thread_id: str | None,
     membership_epoch: int,
-    approvable: bool,
+    sender_principal_id: str | None,
+    approvable: bool = False,
 ) -> None:
     """Reserve one card's frozen INITIAL delivery in the shared Matrix delivery lifecycle, with its card row."""
     outbox.enqueue(
@@ -205,8 +210,8 @@ def _reserve(
         """
         INSERT INTO approval_cards (
             principal_id, delivery_id, kind, owner_id, generation, tool_call_id,
-            room_id, thread_id, approvable
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            room_id, thread_id, approvable, sender_principal_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             principal_id,
@@ -218,36 +223,8 @@ def _reserve(
             room_id,
             encode_thread_id(thread_id),
             int(approvable),
+            sender_principal_id,
         ),
-    )
-
-
-def reserve_receipt(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    kind: Literal["grant_receipt", "scheduled_receipt"],
-    call: CallKey,
-    delivery_id: str,
-    event_type: str,
-    room_id: str,
-    thread_id: str | None,
-    membership_epoch: int,
-    payload: Mapping[str, object],
-) -> None:
-    """Reserve the receipt that shows a call an automatic approval decided."""
-    _reserve(
-        transaction,
-        principal_id,
-        kind=kind,
-        call=call,
-        delivery_id=delivery_id,
-        event_type=event_type,
-        payload=payload,
-        room_id=room_id,
-        thread_id=thread_id,
-        membership_epoch=membership_epoch,
-        approvable=False,
     )
 
 
@@ -277,7 +254,7 @@ def _reserve_card(
     ):
         return
     reserved = card if offer is None else offer.card
-    _reserve(
+    reserve(
         transaction,
         principal_id,
         kind="request",
@@ -289,6 +266,7 @@ def _reserve_card(
         thread_id=thread_id,
         membership_epoch=membership_epoch,
         approvable=reserved.approvable,
+        sender_principal_id=card.sender_principal_id,
     )
     if offer is not None and offer.scope is not None:
         approval_grants.insert_scope(transaction, principal_id, delivery_id=card.delivery_id, scope=offer.scope)
@@ -333,7 +311,8 @@ def reserve_reply_cards(
         if _reply_identity(card.payload) != (continuation_id, expected_generation, card.tool_call_id):
             msg = f"Approval delivery {card.delivery_id!r} changed exact-call identity"
             raise ValueError(msg)
-    membership_epoch = _claim_membership(transaction, card_principal_id, continuation.room_id)
+    sender = cards[0].sender_principal_id
+    membership_epoch = _claim_membership(transaction, card_principal_id, continuation.room_id, sender)
     if membership_epoch is None:
         return False
     invoking_agents = {call.tool_call_id: call.invoking_agent for call in continuation.calls}
@@ -383,21 +362,12 @@ def _reply_identity(payload: Mapping[str, object]) -> tuple[str, int, str] | Non
     return continuation_id, generation, tool_call_id
 
 
-def _claim_membership(transaction: Transaction, principal_id: str, room_id: str) -> int | None:
-    """Hold the card principal's current membership of a room for a reservation, or None after a departure fence."""
-    epoch = transaction.fetchone(
-        "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
-        (principal_id, room_id),
-    )
-    membership_epoch = 0 if epoch is None else int(epoch["membership_epoch"])
-    if not membership_state.claim_membership_epoch(
-        transaction,
-        principal_id,
-        room_id=room_id,
-        expected_membership_epoch=membership_epoch,
-    ):
+def _claim_membership(transaction: Transaction, principal_id: str, room_id: str, sender: str | None) -> int | None:
+    """Hold the ledger's epoch of a room for a reservation, or None once the account that sends the card left it."""
+    claim_active = membership_state.claim_active_membership_epoch
+    if sender is not None and claim_active(transaction, sender, room_id=room_id) is None:
         return None
-    return membership_epoch
+    return claim_active(transaction, principal_id, room_id=room_id)
 
 
 def reserve_detached_card(
@@ -424,7 +394,7 @@ def reserve_detached_card(
         raise ValueError(msg)
     if grant_scope is not None:
         approval_grants.lock(transaction, principal_id)
-    membership_epoch = _claim_membership(transaction, principal_id, room_id)
+    membership_epoch = _claim_membership(transaction, principal_id, room_id, card.sender_principal_id)
     if membership_epoch is None:
         return False
     if not approval_calls.insert_detached(
@@ -591,8 +561,26 @@ def _retire(transaction: Transaction, principal_id: str, delivery_id: str) -> No
     )
 
 
-def retire(transaction: Transaction, principal_id: str, *, delivery_id: str) -> bool:
-    """Retire a decided request card Matrix is done with; return whether it is retired.
+def sender_of(transaction: Transaction, principal_id: str, *, delivery_id: str) -> tuple[str | None, str] | None:
+    """Return a card's sender principal, None for a card the router sent before upgrade, with its room.
+
+    A grant's revocation edit is a delivery of the card that gave the grant.
+    """
+    row = transaction.fetchone(
+        """
+        SELECT sender_principal_id AS sender, room_id FROM approval_cards
+        WHERE principal_id = ? AND delivery_id = COALESCE((
+            SELECT delivery_id FROM approval_grants
+            WHERE principal_id = ? AND 'approval-grant-revoked:' || grant_id = ?
+        ), ?)
+        """,
+        (principal_id, principal_id, delivery_id, delivery_id),
+    )
+    return None if row is None else (cast("str | None", row["sender"]), str(row["room_id"]))
+
+
+def retire(transaction: Transaction, principal_id: str, *, delivery_id: str, without_edit: bool = False) -> bool:
+    """Retire a decided request card Matrix is done with, or ``without_edit``; return whether it is retired.
 
     Matrix is done with it once its terminal edit is acknowledged or refused for good; a card Matrix refused to post
     refuses its terminal edit too. A card whose delivery Matrix refuses must not keep the paused reply it shows from
@@ -620,7 +608,7 @@ def retire(transaction: Transaction, principal_id: str, *, delivery_id: str) -> 
         return False
     if bool(row["retired"]):
         return True
-    if bool(row["undecided"]) or (row["final_event_id"] is None and row["final_refused"] is None):
+    if bool(row["undecided"]) or (not without_edit and row["final_event_id"] is None and row["final_refused"] is None):
         return False
     _retire(transaction, principal_id, delivery_id)
     return True
@@ -647,10 +635,8 @@ def retire_receipts(transaction: Transaction, principal_id: str) -> None:
         _retire(transaction, principal_id, str(row["delivery_id"]))
 
 
-# A card's outbox rows belong to the card principal's current, unfenced membership of the room.
-_CURRENT_MEMBERSHIP = """(
-    initial.membership_epoch = COALESCE(membership.membership_epoch, 0) AND COALESCE(membership.departure_fenced, 0) = 0
-)"""
+# A card is current while the account that sends it is in the room; the ledger that keeps its rows leaves no room.
+_CURRENT_MEMBERSHIP = "COALESCE(membership.departure_fenced, 0) = 0"
 
 
 def card_event_of(alias: str) -> str:
@@ -665,7 +651,7 @@ _VIEW_COLUMNS = f"""
     cards.delivery_id AS delivery_id, cards.kind AS kind,
     cards.owner_id AS owner_id, cards.generation AS generation, cards.tool_call_id AS tool_call_id,
     cards.room_id AS room_id, cards.thread_id AS thread_id,
-    cards.approvable AS approvable, cards.retired AS retired,
+    cards.approvable AS approvable, cards.retired AS retired, cards.sender_principal_id AS sender_principal_id,
     COALESCE(initial.created_at_ns, 0) AS created_at_ns,
     {_CURRENT_MEMBERSHIP} AS current_membership,
     calls.owner_kind AS owner_kind, calls.approver_user_id AS approver_user_id,
@@ -674,9 +660,10 @@ _VIEW_COLUMNS = f"""
     scope.delivery_id AS scope_delivery_id,
     scheduled.any_arguments_offered AS any_arguments_offered
 """
+# LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
 _VIEW_JOINS = """
     LEFT JOIN room_membership AS membership
-      ON membership.principal_id = cards.principal_id
+      ON membership.principal_id = COALESCE(cards.sender_principal_id, cards.principal_id)
      AND membership.room_id = cards.room_id
     LEFT JOIN approval_calls AS calls
       ON calls.owner_id = cards.owner_id
@@ -720,6 +707,7 @@ def _view(row: Row, card_event_id: str | None) -> ApprovalCardView:
         responder_entity_name=cast("str | None", row["responder_entity_name"]),
         offers_timed_approval=row["scope_delivery_id"] is not None,
         any_arguments_offered=bool(row["any_arguments_offered"]),
+        sender_principal_id=cast("str | None", row["sender_principal_id"]),
     )
 
 
@@ -757,6 +745,7 @@ _LIVE_REQUESTS = f"""
 
 def pending_room_ids(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
     """Return every current-membership room where this principal has a live request card."""
+    # LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
     rows = transaction.fetchall(
         f"""
         SELECT DISTINCT cards.room_id/*bytes*/ AS room_id
@@ -766,7 +755,7 @@ def pending_room_ids(transaction: Transaction, principal_id: str) -> tuple[str, 
          AND initial.delivery_id = cards.delivery_id
          AND initial.stage = 'initial'
         LEFT JOIN room_membership AS membership
-          ON membership.principal_id = cards.principal_id
+          ON membership.principal_id = COALESCE(cards.sender_principal_id, cards.principal_id)
          AND membership.room_id = cards.room_id
         WHERE {_LIVE_REQUESTS}
         ORDER BY cards.room_id/*bytes*/
@@ -822,6 +811,7 @@ def pending_cards(
 
 def retire_completed_for_departure(transaction: Transaction, principal_id: str, *, room_id: str) -> None:
     """Finish the retirement a crash left after a terminal edit's acknowledgement, before departure fences the room."""
+    # LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
     rows = transaction.fetchall(
         f"""
         SELECT cards.principal_id, cards.delivery_id
@@ -838,7 +828,7 @@ def retire_completed_for_departure(transaction: Transaction, principal_id: str, 
           ON calls.owner_kind = 'reply' AND continuations.approval_id = calls.owner_id
         WHERE cards.kind = 'request' AND cards.retired = 0 AND final.acknowledged_event_id IS NOT NULL
           AND (
-              (cards.principal_id = ? AND cards.room_id = ?)
+              (COALESCE(cards.sender_principal_id, cards.principal_id) = ? AND cards.room_id = ?)
               OR (
                   continuations.principal_id = ?
                   AND {approval_continuations.holds_source_in_room("continuations")}
@@ -853,16 +843,17 @@ def retire_completed_for_departure(transaction: Transaction, principal_id: str, 
 
 def deny_for_departed_card_owner(
     transaction: Transaction,
-    card_principal_id: str,
+    sender_principal_id: str,
     *,
     room_id: str,
     reason: str,
 ) -> None:
-    """Fail the paused replies a departed card principal's cards wait on, and deny every call those cards show.
+    """Fail the paused replies a departed sender's cards wait on, and deny every call those cards show.
 
     A card never attempted is deleted outright; an attempted one keeps its
-    terminal-edit debt under the membership that inherited the room.
+    terminal-edit debt, as the ledger that holds it never leaves a room.
     """
+    # LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
     failed = transaction.fetchall(
         """
         UPDATE approval_continuations
@@ -874,36 +865,35 @@ def deny_for_departed_card_owner(
                 ON calls.owner_id = cards.owner_id
                AND calls.generation = cards.generation
                AND calls.tool_call_id = cards.tool_call_id
-              WHERE cards.principal_id = ? AND cards.room_id = ?
+              WHERE COALESCE(cards.sender_principal_id, cards.principal_id) = ? AND cards.room_id = ?
                 AND cards.kind = 'request' AND cards.retired = 0
                 AND calls.owner_kind = 'reply' AND calls.owner_id = approval_continuations.approval_id
                 AND calls.decision IS NULL
           )
         RETURNING principal_id, approval_id
         """,
-        (reason, card_principal_id, room_id),
+        (reason, sender_principal_id, room_id),
     )
     # A failing reply's sources are runnable again, and its own principal is not the one writing this.
     for row in failed:
         approval_signals.freed(transaction, str(row["principal_id"]), str(row["approval_id"]))
+    # LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
     rows = transaction.fetchall(
         """
-        SELECT cards.delivery_id, cards.owner_id, cards.generation, cards.tool_call_id,
-               initial.attempted, membership.membership_epoch AS current_membership_epoch
+        SELECT cards.principal_id, cards.delivery_id, cards.owner_id, cards.generation, cards.tool_call_id,
+               initial.attempted
         FROM approval_cards AS cards
         JOIN matrix_delivery_outbox AS initial
           ON initial.principal_id = cards.principal_id
          AND initial.delivery_id = cards.delivery_id
          AND initial.stage = 'initial'
-        JOIN room_membership AS membership
-          ON membership.principal_id = cards.principal_id
-         AND membership.room_id = cards.room_id
-        WHERE cards.principal_id = ? AND cards.room_id = ? AND cards.kind = 'request' AND cards.retired = 0
+        WHERE COALESCE(cards.sender_principal_id, cards.principal_id) = ? AND cards.room_id = ?
+          AND cards.kind = 'request' AND cards.retired = 0
         """,
-        (card_principal_id, room_id),
+        (sender_principal_id, room_id),
     )
     for row in rows:
-        delivery_id = str(row["delivery_id"])
+        card_principal_id, delivery_id = str(row["principal_id"]), str(row["delivery_id"])
         approval_calls.resolve_call(
             transaction,
             approval_calls.CallKey.of_row(row),
@@ -913,11 +903,6 @@ def deny_for_departed_card_owner(
         )
         if not bool(row["attempted"]):
             _delete_unattempted(transaction, card_principal_id, delivery_id)
-            continue
-        transaction.execute(
-            "UPDATE matrix_delivery_outbox SET membership_epoch = ? WHERE principal_id = ? AND delivery_id = ?",
-            (int(row["current_membership_epoch"]), card_principal_id, delivery_id),
-        )
 
 
 def expire_for_departed_responder(

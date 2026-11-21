@@ -88,8 +88,13 @@ class IngressHookRunner:
         envelope: MessageEnvelope,
         correlation_id: str,
         policy: HookIngressPolicy,
+        routed: bool = False,
     ) -> bool:
-        """Emit message:received and return whether hooks suppressed processing."""
+        """Emit message:received and return whether hooks suppressed processing.
+
+        A ``routed`` envelope is a hidden route of a person's message: the room's hooks ran once when that message
+        arrived, so only the responder's own hooks run for its route.
+        """
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_RECEIVED):
             return False
         if not policy.rerun_message_received:
@@ -99,6 +104,7 @@ class IngressHookRunner:
             **self.hook_context.base_kwargs(EVENT_MESSAGE_RECEIVED, correlation_id),
             envelope=envelope,
             skip_plugin_names=policy.skip_message_received_plugin_names,
+            _routed=routed,
         )
         await emit(self.hook_context.registry, EVENT_MESSAGE_RECEIVED, context)
         return context.suppress

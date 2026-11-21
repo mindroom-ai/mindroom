@@ -175,7 +175,7 @@ Prerequisites:
     source .venv/bin/activate
     ```
 
-    Install Node.js 24 and [Bun](https://bun.sh/) to build missing dashboard assets on first run, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
+    Install Node.js 24 and [Bun](https://bun.sh/) 1.4 or newer to build missing dashboard assets on first run, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
     Without assets and Bun, the API is available but the dashboard is not.
 
 ### Configuration
@@ -241,7 +241,7 @@ See [Environment Variables](configuration/index.md#environment-variables) for ev
 
 ### Matrix account provisioning
 
-MindRoom creates a Matrix account for each agent, team, and the router.
+MindRoom creates a Matrix account for each agent and team, and one account of its own that administers the rooms in `config.yaml`.
 Configure one way for it to do so: hosted provisioning, `MATRIX_REGISTRATION_TOKEN`, `MATRIX_REGISTRATION_SHARED_SECRET`, an [application service](matrix.md#agent-users), or intentionally open registration.
 If registration fails, check the selected credentials and the homeserver's registration policy.
 

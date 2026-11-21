@@ -19,7 +19,6 @@ from mindroom.agent_reply_membership import agent_reply_membership_policy_change
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.contacts.store import contact_room_ids
 from mindroom.entity_resolution import MissingManagedEntityAccountError, current_entity_id
 from mindroom.logging_config import get_logger
@@ -110,25 +109,6 @@ def _agent_user_ids(room_id: str, config: Config, runtime_paths: RuntimePaths) -
     return user_ids
 
 
-async def _bring_memberships_current(
-    requester_id: str,
-    room_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    memberships: AgentReplyMembershipIndex,
-    refresh_memberships: Callable[[], Awaitable[None]],
-) -> None:
-    """Refresh ``memberships`` when they need it, and read the room again while they lack ``requester_id``.
-
-    The room's live roster just showed the requester joined.
-    """
-    await memberships.refresh_reading_room(
-        room_id,
-        refresh_memberships,
-        lambda: not memberships.misses_member(requester_id, room_id, config, runtime_paths),
-    )
-
-
 async def admit_room_agent(
     requester_id: str,
     room_id: str,
@@ -155,7 +135,7 @@ async def admit_room_agent(
     joined = await joined_members()
     if requester_id not in joined or agent_user_id not in joined:
         raise HTTPException(403, "Requester and agent must both be joined to this room.")
-    await _bring_memberships_current(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
+    await memberships.refresh_until_member(requester_id, room_id, config, runtime_paths, refresh_memberships)
     if not _may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
         raise HTTPException(403, "Requester cannot use this agent.")
     return name
@@ -174,7 +154,7 @@ async def _admitted_agents(
     """Return each agent joined to the room that ``requester_id`` may use there, by name and user ID, in config order.
 
     It leaves out an agent without its account or whose own grant rooms are unresolved, and answers 503 while the
-    router's rooms are unknown and an agent's access waits on them.
+    bots' rooms are unknown and an agent's access waits on them.
     """
     joined_agents = [
         (name, user_id)
@@ -183,8 +163,8 @@ async def _admitted_agents(
     ]
     if not joined_agents:
         return []
-    await _bring_memberships_current(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
-    # Without the router's rooms every room grant is unresolved, and an empty answer would read as no agents.
+    await memberships.refresh_until_member(requester_id, room_id, config, runtime_paths, refresh_memberships)
+    # Without the bots' rooms every room grant is unresolved, and an empty answer would read as no agents.
     rooms_known = memberships.knows_joined_rooms()
     admitted: list[tuple[str, str]] = []
     for name, user_id in joined_agents:
@@ -315,7 +295,7 @@ def _workspace(
     # Each toolkit's settings, as the agent's turn builds it, decide which of its functions it offers, and its
     # declarations whether one of them writes files or runs code.
     path_toolkits: dict[str, bool] = {}
-    for entry in agent_tools.candidates(matrix_room_tools=True):
+    for entry in agent_tools.candidates():
         # It acts only through the shell, whose own entry counts what that shell may change.
         if entry.name == "terminal":
             continue
@@ -376,16 +356,15 @@ async def room_agent_workspaces(
     """
     snapshot = bind_current_request_snapshot(connection)
     config = snapshot.runtime_config
-    runtime = ensure_app_state(connection.app).embedded
-    router = runtime.agent_bot(ROUTER_AGENT_NAME) if runtime is not None else None
+    state = ensure_app_state(connection.app)
+    runtime = state.embedded
+    bots = {name: bot for name, bot in (state.room_bots or {}).items() if bot.running and bot.client is not None}
     if (
         config is None
         or runtime is None
-        or router is None
-        or router.client is None
-        or not router.running
+        or not bots
         # The runtime's grants follow its own config; a refresh under another membership policy would replace them.
-        or agent_reply_membership_policy_changed(router.config, config)
+        or any(agent_reply_membership_policy_changed(bot.config, config) for bot in bots.values())
     ):
         raise HTTPException(503, _ACCESS_UNAVAILABLE)
     runtime_paths = snapshot.runtime_paths
@@ -420,20 +399,22 @@ async def room_agent_workspaces(
                 admitted = [(name, agent_user_id)]
     except TimeoutError:
         raise HTTPException(503, _ACCESS_UNAVAILABLE) from None
-    opened: list[tuple[str, str]] = []
+    # Read last, so the bots checked below are the ones bound when the workspaces return: no await follows.
+    may_send = (await power()).may_send(user_id, "m.room.message")
+    live = {name: bot for name, bot in (state.room_bots or {}).items() if bot.running and bot.client is not None}
+    workspaces: list[AgentWorkspace] = []
     for name, agent_id in admitted:
         with _leaving_out(name, room_id, leave_out=listing):
+            # The agent's own bot admits its turns by the config it runs, so nothing opens before or without that bot.
+            bot = live.get(name)
+            memberships = runtime.agent_reply_memberships
+            if bot is None or not _may_converse(user_id, name, room_id, bot.config, runtime_paths, memberships):
+                raise HTTPException(503, _ACCESS_UNAVAILABLE)
             # Every turn in a contact room runs as its agent's owner, whom the other side must never reach through it.
-            if room_id not in contact_room_ids(config, runtime_paths, name, any_status=True):
-                opened.append((name, agent_id))
-    if not opened:
-        if not listing:
-            raise HTTPException(403, "No workspace opens through a contact room.")
-        return []
-    may_send = (await power()).may_send(user_id, "m.room.message")
-    workspaces: list[AgentWorkspace] = []
-    for name, agent_id in opened:
-        with _leaving_out(name, room_id, leave_out=listing):
+            if room_id in contact_room_ids(config, runtime_paths, name, any_status=True):
+                if not listing:
+                    raise HTTPException(403, "No workspace opens through a contact room.")
+                continue
             workspaces.append(
                 _workspace(
                     name,

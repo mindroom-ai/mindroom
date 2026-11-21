@@ -76,6 +76,7 @@ async def test_runtime_services_share_the_sync_and_stop_lifecycle(tmp_path: Path
                 runtime_paths=runtime_paths,
                 config_provider=lambda: config,
                 bot_provider=lambda _name: None,
+                steward_provider=lambda _room_id: None,
                 response_admission_gate=ResponseAdmissionGate(),
                 agent_reply_memberships=memberships,
             ),

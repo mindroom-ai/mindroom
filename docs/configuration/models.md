@@ -524,6 +524,7 @@ A null, empty, or whitespace-only `base_url`, `project_id`, `region`, `location`
 On `deepseek`, `use_thinking`, a boolean that defaults to `true`, runs requests in DeepSeek's thinking mode, where the model reasons before it answers; set it to `false` to answer without thinking.
 An `ollama` model's `think` turns a thinking model's reasoning on (`true`) or off (`false`), or sets its effort (`low`, `medium`, or `high`) on models that take a level; unset leaves the choice to Ollama.
 A `google` or `gemini` model's `search: true` grounds its answers with Google Search, and search with tools needs a Gemini 3 or later model name on the Gemini API, such as `gemini-4-hydrogen`: there the agent keeps its tools beside search, while other models, aliases such as `gemini-flash-latest`, and every Vertex AI model use search alone, in place of the agent's tools.
+On the Gemini API, `google` and `gemini` models and the `gemini` tool send to API version `v1beta`, which serves the `-latest` aliases and preview models; set `extra_kwargs.client_params.http_options.api_version` to choose another version for a model.
 
 When a response reaches the model's output limit (`max_tokens` or the route's equivalent), its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 A Claude model whose `extra_kwargs` sets no `max_tokens` can write up to its maximum output on `anthropic`, 128,000 tokens for Claude 5 models, except Claude Sonnet 4.5 and models older than Claude 4.5, which write up to 8,192 tokens, as every model does on `bedrock_claude` and `vertexai_claude`, whose quotas count the requested output when a request starts; set `max_tokens` to choose another limit.
@@ -685,12 +686,12 @@ Thread and room overrides that named the deleted entry, or a level later removed
 
 ## Hot Reload
 
-After a successful config reload, changes to a model definition, including its provider options, model ID, and `context_window`, apply from the next agent, team, or router response without restarting the bot.
+After a successful config reload, changes to a model definition, including its provider options, model ID, and `context_window`, apply from the next agent or team reply and the next routing decision without restarting the bot.
 Agents with voice calls enabled can still restart, because their call runtime keeps its configuration between responses.
 
 ## Model Overrides in Chat
 
-Each agent, team, and the router normally answers with its own configured `model` (`router.model` for the router).
+Each agent and team normally answers with its own configured `model`, and [routing](router.md) picks a responder with `router.model`.
 Users can change that per thread or per room, and the most specific choice wins:
 
 1. An explicit model for one run, such as a delegated child run.
@@ -701,14 +702,14 @@ Users can change that per thread or per room, and the most specific choice wins:
 
 Thread and room overrides name models from the `models:` section and survive restarts.
 A Matrix client's model picker lists the configured models and changes the thread override like `!model`.
-The picker works in encrypted and unencrypted rooms when the router and at least one agent you may address are joined; teams alone do not qualify.
+The picker works in encrypted and unencrypted rooms when at least one agent you may address is joined; teams alone do not qualify.
 It shows each model's key, display name, provider, model ID, icon, and [reasoning levels](#reasoning-levels), never API keys, hosts, local paths, or `extra_kwargs`.
 Catalogs with more than 256 models or over 64 KiB are not offered to the picker; `!model` still works.
 The client protocol is described in [Model Selection Protocol](../architecture/matrix.md#model-selection-protocol).
 
 ### `!model`
 
-Show or switch the model that the agents, teams, and router you may address use in the current thread.
+Show or switch the model that the agents and teams you may address, and routing, use in the current thread.
 
 ```
 !model
@@ -726,7 +727,7 @@ Other threads and rooms are unaffected.
 
 ### `!room_model`
 
-Show or switch the default model for every agent, team, and the router in the current room.
+Show or switch the default model for every agent and team, and for routing, in the current room.
 
 ```
 !room_model

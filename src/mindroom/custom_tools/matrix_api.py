@@ -22,12 +22,14 @@ from mindroom.matrix.thread_mutation_impact import (
     event_thread_membership_known,
     redaction_thread_membership_known,
 )
+from mindroom.matrix_identifiers import has_agent_username
 from mindroom.requester_identity import (
     equivalent_requester_ids,
     is_access_checked_requester_id,
     is_human_requester_id,
 )
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -352,6 +354,9 @@ class MatrixApiTools(Toolkit):
         event_type = raw_event_dict.get("type")
         content = raw_event_dict.get("content")
         normalized_content = cls._copy_string_keyed_dict(content) or {}
+        if has_agent_username(sender):
+            # The homeserver chose this hit from the text it holds; the marker lines go back for what is shown.
+            normalized_content = tool_markers_in_text(normalized_content)
         origin_server_ts = raw_event_dict.get("origin_server_ts")
         return {
             "event_id": event_id if isinstance(event_id, str) else "",
@@ -1301,6 +1306,7 @@ class MatrixApiTools(Toolkit):
         - search: Full-text search one room's events with `search_term`, optional `keys`, pagination, and context.
 
         `room_id` defaults to the current Matrix tool runtime context room.
+        `get_event` returns the raw event: a version 3 reply has its calls in `io.mindroom.tool_trace.events` alone.
         `search` enforces a single-room scope via `room_id`; if `filter.rooms` is supplied it must match that room.
         `search` always uses the top-level `limit`; `filter.limit` is rejected to avoid conflicting inputs.
         `com.mindroom.*`, `io.mindroom.*`, and the chat client's `chat.mindroom.*` are reserved for runtime metadata:

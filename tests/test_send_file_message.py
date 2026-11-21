@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     """Create a mock nio.AsyncClient with room state."""
     client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@mindroom_test:localhost"
     room = MagicMock()
     room.encrypted = encrypted
     client.rooms = {"!room:localhost": room}
@@ -459,6 +460,7 @@ class TestSendAudioMessage:
     async def test_uncached_unencrypted_room_uses_raw_send_fallback(self) -> None:
         """Voice audio sends should match text delivery's uncached-room fallback."""
         client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@mindroom_test:localhost"
         client.rooms = {}
         client.olm = None
         client.access_token = "token"  # noqa: S105
@@ -530,6 +532,7 @@ class TestSendMessageResult:
     async def test_falls_back_to_raw_send_when_room_missing_from_cache_but_room_is_unencrypted(self) -> None:
         """Unencrypted sends should not depend on nio's room cache."""
         client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@mindroom_test:localhost"
         client.rooms = {}
         client.olm = None
         client.access_token = "token"  # noqa: S105
@@ -567,6 +570,7 @@ class TestSendMessageResult:
     async def test_returns_none_for_uncached_encrypted_room_without_olm(self) -> None:
         """Encrypted sends should fail closed until nio has synced the room cache."""
         client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@mindroom_test:localhost"
         client.rooms = {}
         client.olm = None
         client.access_token = "token"  # noqa: S105
@@ -1117,6 +1121,7 @@ class TestEncryptionEnabledDuringMediaUpload:
     async def test_uncached_room_audio_send_refuses_plaintext_upload(self) -> None:
         """The post-upload state read decides, so an uncached room is protected too."""
         client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@mindroom_test:localhost"
         client.rooms = {}
         client.olm = MagicMock()
         client.olm.device_id = "DEVICE"
@@ -1138,6 +1143,7 @@ class TestEncryptionEnabledDuringMediaUpload:
     async def test_unreadable_state_after_upload_refuses_plaintext_upload(self) -> None:
         """A post-upload state read that fails cannot prove the room stayed plaintext."""
         client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@mindroom_test:localhost"
         client.rooms = {}
         client.olm = None
         client.access_token = "token"  # noqa: S105
@@ -1157,6 +1163,7 @@ class TestEncryptionEnabledDuringMediaUpload:
     async def test_uncached_encrypted_room_never_takes_the_plaintext_raw_send(self) -> None:
         """An encrypted upload to an uncached room goes through nio's encrypting send path."""
         client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@mindroom_test:localhost"
         client.rooms = {}
         client.olm = MagicMock()
         client.olm.device_id = "DEVICE"

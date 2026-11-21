@@ -78,13 +78,11 @@ def build_hook_room_state_putter(
 
 def chain_hook_room_state_queriers(
     primary: HookRoomStateQuerier | None,
-    fallback: HookRoomStateQuerier | None,
-) -> HookRoomStateQuerier | None:
+    fallback: HookRoomStateQuerier,
+) -> HookRoomStateQuerier:
     """Return a room-state querier that falls back on Matrix error responses."""
     if primary is None:
         return fallback
-    if fallback is None:
-        return primary
 
     async def _query(room_id: str, event_type: str, state_key: str | None) -> dict[str, Any] | None:
         result = await primary(room_id, event_type, state_key)
@@ -97,13 +95,11 @@ def chain_hook_room_state_queriers(
 
 def chain_hook_room_state_putters(
     primary: HookRoomStatePutter | None,
-    fallback: HookRoomStatePutter | None,
-) -> HookRoomStatePutter | None:
+    fallback: HookRoomStatePutter,
+) -> HookRoomStatePutter:
     """Return a room-state putter that falls back on Matrix error responses."""
     if primary is None:
         return fallback
-    if fallback is None:
-        return primary
 
     async def _put(room_id: str, event_type: str, state_key: str, content: dict[str, Any]) -> bool:
         if await primary(room_id, event_type, state_key, content):

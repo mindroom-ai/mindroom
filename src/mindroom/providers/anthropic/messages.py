@@ -413,7 +413,7 @@ class ClaudeProvider:
         ):
             return params
         owner = _thinking_owner(params)
-        thinking = dict(owner.get("thinking") or {"type": "adaptive"})
+        thinking: dict[str, object] = dict(owner.get("thinking") or {"type": "adaptive"})
         if thinking.get("type") == "adaptive" and thinking.get("block_binding") is None:
             thinking["block_binding"] = {"prefix_mismatch_behavior": "drop_block"}
             owner["thinking"] = thinking

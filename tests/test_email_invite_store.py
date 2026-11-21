@@ -178,11 +178,28 @@ def test_one_send_per_link_and_sending_is_terminal(tmp_path: Path) -> None:
     assert store.start_sending(paths, invite.id, "@alice:example.org", now=NOW + 1) is False
     assert store.revoke(paths, invite.id, now=NOW + 2) is False
     assert store.open_invites(paths, ROOM, now=NOW + 2) == []
-    assert [row.id for row in store.abandon_sending(paths)] == [invite.id]
-    assert store.abandon_sending(paths) == []
+    assert store.abandon_sending(paths, agent_name="other") == []
+    assert [row.id for row in store.abandon_sending(paths, agent_name="general")] == [invite.id]
+    assert store.abandon_sending(paths, agent_name="general") == []
     assert store.find_by_code(paths, code, now=NOW + 2) is None
     fresh, _fresh_code = _issue(paths, now=NOW + 3)
     assert fresh.id != invite.id
+
+
+def test_a_sent_request_names_the_entity_that_sent_it(tmp_path: Path) -> None:
+    """A waiting request asked through one entity and sent through another belongs to the sender's account."""
+    paths = test_runtime_paths(tmp_path)
+    waiting = _request(paths)
+    request = store.Request(ROOM, "$thread", "alice@example.com", "@bas:example.org", "code")
+    invite, code = store.issue_code(paths, request, expiry_days=7, now=NOW)
+    found = store.find_by_code(paths, code, now=NOW)
+    assert found is not None
+    assert (waiting.agent_name, invite.id, invite.agent_name, found.agent_name) == (
+        "general",
+        waiting.id,
+        "code",
+        "code",
+    )
 
 
 def test_two_claimants_one_winner(tmp_path: Path) -> None:

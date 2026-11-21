@@ -22,7 +22,6 @@ from mindroom.turn_record import (
     PreparedVoiceSource,
     RevisionSnapshotChangedError,
     SourceEventRevision,
-    SourceVisibleEcho,
     TurnRecord,
     canonicalize_turn_record,
 )
@@ -129,7 +128,7 @@ class _ClaimRegistry:
     ) -> TurnClaim | None:
         """Return a live claim sharing a source with these sources or an alias with these aliases.
 
-        Roles are compared separately: a human message and the router's relay of
+        Roles are compared separately: a human message and the route of
         it, which indexes that message as its alias, are different turns.
         """
         return next(
@@ -286,14 +285,9 @@ class TurnStore:
         """Return an exact physical source's voice checkpoint."""
         return await self.deps.turn_records.read(turn_rows.prepared_voice, source_event_id)
 
-    async def visible_echo(self, source_event_id: str) -> SourceVisibleEcho | None:
-        """Return the visible echo tracked for one source event, and how its replacement ended."""
+    async def visible_echo(self, source_event_id: str) -> str | None:
+        """Return the event ID of the visible echo tracked for one source event."""
         return await self.deps.turn_records.read(turn_rows.visible_echo, source_event_id)
-
-    async def finalized_visible_echoes(self, source_event_ids: Sequence[str]) -> tuple[str, ...]:
-        """Return every visible echo of these sources whose replacement succeeded, in source order."""
-        echoes = [await self.visible_echo(source_event_id) for source_event_id in source_event_ids]
-        return tuple(echo.event_id for echo in echoes if echo is not None and echo.is_fallback is not None)
 
     async def turn_record_for_response_event_id(self, response_event_id: str) -> TurnRecord | None:
         """Return the durable turn that owns one visible response event."""
@@ -447,21 +441,6 @@ class TurnStore:
             room_id=room_id,
             source_event_id=source_event_id,
             echo_event_id=echo_event_id,
-        )
-
-    async def record_finalized_visible_echo(
-        self,
-        source_event_id: str,
-        echo_event_id: str,
-        *,
-        is_fallback: bool,
-    ) -> None:
-        """Mark a tracked visible echo as successfully replaced; the turn's answer stays as it was."""
-        await self.deps.turn_records.write(
-            turn_rows.record_finalized_visible_echo,
-            source_event_id=source_event_id,
-            echo_event_id=echo_event_id,
-            is_fallback=is_fallback,
         )
 
     async def claim(self, turn_record: TurnRecord) -> TurnClaim | ClaimRefused | ClaimContended:

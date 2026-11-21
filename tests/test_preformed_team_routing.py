@@ -25,6 +25,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
+from mindroom.routing_judgment import ResponderSelection
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_origin import TurnIntent
 from tests.access_schema_support import with_current_room_member_access
@@ -147,7 +148,10 @@ async def test_router_does_not_route_when_preformed_team_is_mentioned(config_wit
     event = _mock_event_with_team_mention(team_user_id)
 
     # Also patch suggest_responder_for_message to detect accidental routing
-    with patch("mindroom.router.relay.suggest_responder_for_message", new=AsyncMock(return_value="a1")):
+    with patch(
+        "mindroom.router.relay.suggest_responder_for_message",
+        new=AsyncMock(return_value=ResponderSelection("a1")),
+    ):
         await router._on_message(room, event)
 
     # Router must not send any message (i.e., must not route)

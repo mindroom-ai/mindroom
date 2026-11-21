@@ -52,6 +52,7 @@ from tests.conftest import (
     bind_runtime_paths,
     install_model_providers,
     make_turn_context,
+    make_visible_message,
     message_origin,
     patch_response_runner_module,
     request_envelope,
@@ -459,6 +460,52 @@ async def test_a_prepared_team_turn_sends_the_prompt_without_unseen_context(
 
     assert prepared.turn.context == ()
     assert [message.content for message in prepared.run_input(MediaInputs())] == ["Coordinate"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_as_shown", ["The release date is Thursday.", "recording.ogg"], ids=["text", "voice"])
+async def test_a_routed_team_reads_each_message_of_its_batch_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_as_shown: str,
+) -> None:
+    """A team a route names gets the route's prompt, and the thread's copies of the messages it holds are left out."""
+    config = _config(tmp_path)
+    built = _built_team(config, _team_members(config, monkeypatch))
+    turn = make_turn_context(
+        room_id="!room:localhost",
+        thread_id="$root",
+        requester_id="@user:localhost",
+        reply_to_event_id="$question",
+    )
+
+    prepared = await prepare_materialized_team_execution(
+        # What the runner's shared turn context holds for a routed request: the messages its route names.
+        replace(turn, prompt_source_event_ids=("$first", "$question")),
+        scope_context=unstored_team_scope_context(
+            config,
+            [member.id for member in built.spec.members],
+            team_name=None,
+        ),
+        built=built,
+        message="The release date is Thursday.\n\nWhat day did I say?",
+        thread_history=[
+            make_visible_message(sender="@user:localhost", body="Planning the release", event_id="$root"),
+            make_visible_message(sender="@user:localhost", body=first_as_shown, event_id="$first"),
+            make_visible_message(sender="@user:localhost", body="What day did I say?", event_id="$question"),
+        ],
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        runtime_model=resolve_turn_model(config, runtime_paths_for(config), ModelScope(entity=None), None),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@user:localhost",
+    )
+
+    rendered = "\n".join(str(message.content) for message in prepared.run_input(MediaInputs()))
+    assert "Planning the release" in rendered
+    assert rendered.count("The release date is Thursday.") == 1
+    assert rendered.count("What day did I say?") == 1
+    assert "recording.ogg" not in rendered
 
 
 @pytest.mark.asyncio

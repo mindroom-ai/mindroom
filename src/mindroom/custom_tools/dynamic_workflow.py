@@ -96,7 +96,6 @@ _WORKFLOW_RESTRICTED_TOOLS = frozenset(
         "delegate",
         "dynamic_tools",
         "dynamic_workflow",
-        "invite_router",
         "memory",
         "self_config",
         "skill_manage",
@@ -905,7 +904,9 @@ def _authored(spec: dict[str, Any]) -> dict[str, Any]:
     """
 
     def renamed(owner: object) -> object:
-        tools = owner.get("tools") if isinstance(owner, dict) else None
+        if not isinstance(owner, dict):
+            return owner
+        tools = owner.get("tools")
         if not isinstance(tools, list) or not all(isinstance(name, str) for name in tools):
             return owner
         return {**owner, "tools": canonical_tool_names([name.strip() for name in tools])}

@@ -289,7 +289,7 @@ def test_context_files_remain_complete_and_notes_untouched(
             ),
         },
     )
-    config.defaults.max_preload_chars = 1000
+    config.defaults.max_preload_file_chars = 1000
     runtime = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     persist_entity_accounts(config, runtime)
     minimal = agents.create_agent(

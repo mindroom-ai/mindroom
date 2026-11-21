@@ -1,0 +1,333 @@
+{
+  "description": "MindRoom tool positions (io.mindroom.tool_trace version 3). 'sent' is a reply as the backend builds it, its markers in the text (version 2); 'wire' is what Matrix gets: the text without the markers of its calls, and on each such call 'body_line', the number of lines of the wire body before its marker, and 'at', the number of top-level blocks of the wire formatted_body before it (null: the call has neither key, and no marker). A top-level block is a top-level element with its content, a top-level void element, or a run of top-level text with a non-whitespace character; a tag name ends at the first character that is no ASCII letter, digit or hyphen. A reader puts each marker back as 'sent' has it: a body line before line 'body_line' with a blank line after it, or at the end after a blank line; a <p> and a newline before block 'at' or at the end. For a position that is no integer, is past the end or lies before an earlier call's, MindRoom Chat puts the marker at the end and the backend reads the content as it is. 'wire' null: the backend sends 'sent' as it is, version 2, because no marker would go, a marker line is not also a top-level <p> of the same call in the same order, a line that looks like a marker would stay, or the text would not read back exactly. 'written' false: the backend sends 'sent' as it is too, because no text would be left for a reader that puts no markers back, and a reader still takes this 'wire', which an earlier build sent. 'rendered' false: the formatted_body is not the backend's rendering of the body. Shared by mindroom (tests/fixtures) and mindroom-chat (src/app/matrix/protocol/__fixtures__); change both copies together.",
+  "cases": [
+    {
+      "name": "calls between two paragraphs share one position",
+      "sent": {
+        "body": "Let me check.\n\n🔧 `shell` [1]\n\n🔧 `shell` [2] ⏳\n\nFound it.",
+        "formatted_body": "<p>Let me check.</p>\n<p>🔧 <code>shell</code> [1]</p>\n<p>🔧 <code>shell</code> [2] ⏳</p>\n<p>Found it.</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          },
+          {
+            "type": "tool_call_started",
+            "tool_name": "shell",
+            "args_preview": "cmd=pwd"
+          }
+        ]
+      },
+      "wire": {
+        "body": "Let me check.\n\nFound it.",
+        "formatted_body": "<p>Let me check.</p>\n<p>Found it.</p>\n",
+        "body_line": [2, 2],
+        "at": [1, 1]
+      }
+    },
+    {
+      "name": "calls that open and end the reply",
+      "sent": {
+        "body": "🔧 `read_file` [1]\n\nReading done.\n\n🔧 `shell` [2]",
+        "formatted_body": "<p>🔧 <code>read_file</code> [1]</p>\n<p>Reading done.</p>\n<p>🔧 <code>shell</code> [2]</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "read_file",
+            "args_preview": "path=notes.txt",
+            "result_preview": "placeholder"
+          },
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": {
+        "body": "Reading done.",
+        "formatted_body": "<p>Reading done.</p>\n",
+        "body_line": [0, 1],
+        "at": [0, 1]
+      }
+    },
+    {
+      "name": "a list and a code block with a blank line count as one block each",
+      "sent": {
+        "body": "Steps:\n\n- one\n- two\n\n🔧 `shell` [1]\n\n```\nx\n\ny\n```\n\n🔧 `shell` [2]\n\nDone.",
+        "formatted_body": "<p>Steps:</p>\n<ul>\n<li>one</li>\n<li>two</li>\n</ul>\n<p>🔧 <code>shell</code> [1]</p>\n<pre><code>x\n\ny\n</code></pre>\n<p>🔧 <code>shell</code> [2]</p>\n<p>Done.</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          },
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": {
+        "body": "Steps:\n\n- one\n- two\n\n```\nx\n\ny\n```\n\nDone.",
+        "formatted_body": "<p>Steps:</p>\n<ul>\n<li>one</li>\n<li>two</li>\n</ul>\n<pre><code>x\n\ny\n</code></pre>\n<p>Done.</p>\n",
+        "body_line": [5, 11],
+        "at": [2, 3]
+      }
+    },
+    {
+      "name": "an escaped tool name",
+      "sent": {
+        "body": "Check.\n\n🔧 `a&b<c>` [1]",
+        "formatted_body": "<p>Check.</p>\n<p>🔧 <code>a&amp;b&lt;c&gt;</code> [1]</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "a&b<c>"
+          }
+        ]
+      },
+      "wire": {
+        "body": "Check.",
+        "formatted_body": "<p>Check.</p>\n",
+        "body_line": [1],
+        "at": [1]
+      }
+    },
+    {
+      "name": "a heading with no blank line after it",
+      "sent": {
+        "body": "# Plan\nStep one.\n\n🔧 `shell` [1]\n\nAnswer 😀.",
+        "formatted_body": "<h1>Plan</h1>\n<p>Step one.</p>\n<p>🔧 <code>shell</code> [1]</p>\n<p>Answer 😀.</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": {
+        "body": "# Plan\nStep one.\n\nAnswer 😀.",
+        "formatted_body": "<h1>Plan</h1>\n<p>Step one.</p>\n<p>Answer 😀.</p>\n",
+        "body_line": [3],
+        "at": [2]
+      }
+    },
+    {
+      "name": "a reply of calls alone",
+      "sent": {
+        "body": "🔧 `shell` [1]\n\n🔧 `shell` [2] ⏳",
+        "formatted_body": "<p>🔧 <code>shell</code> [1]</p>\n<p>🔧 <code>shell</code> [2] ⏳</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          },
+          {
+            "type": "tool_call_started",
+            "tool_name": "shell",
+            "args_preview": "cmd=pwd"
+          }
+        ]
+      },
+      "wire": {
+        "body": "",
+        "formatted_body": "",
+        "body_line": [0, 0],
+        "at": [0, 0]
+      },
+      "written": false
+    },
+    {
+      "name": "a separator after a call and extra blank lines stay",
+      "sent": {
+        "body": "🔧 `shell` [1]\n\n---\n\n\nAfter.",
+        "formatted_body": "<p>🔧 <code>shell</code> [1]</p>\n<hr>\n<p>After.</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": {
+        "body": "---\n\n\nAfter.",
+        "formatted_body": "<hr>\n<p>After.</p>\n",
+        "body_line": [0],
+        "at": [0]
+      }
+    },
+    {
+      "name": "a call without a marker gets no position",
+      "sent": {
+        "body": "🔧 `shell` [1]\n\nDone.",
+        "formatted_body": "<p>🔧 <code>shell</code> [1]</p>\n<p>Done.</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          },
+          {
+            "type": "tool_call_completed",
+            "tool_name": "read_file",
+            "args_preview": "path=notes.txt"
+          }
+        ]
+      },
+      "wire": {
+        "body": "Done.",
+        "formatted_body": "<p>Done.</p>\n",
+        "body_line": [0, null],
+        "at": [0, null]
+      }
+    },
+    {
+      "name": "a call between lines of one paragraph stays version 2",
+      "sent": {
+        "body": "Before\n🔧 `shell` [1]\nAfter",
+        "formatted_body": "<p>Before<br>\n🔧 <code>shell</code> [1]<br>\nAfter</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": null
+    },
+    {
+      "name": "a fenced example of a marker stays version 2",
+      "sent": {
+        "body": "Example:\n\n```\n🔧 `shell` [1]\n```\n\n🔧 `shell` [1]\n\nDone.",
+        "formatted_body": "<p>Example:</p>\n<pre><code>🔧 `shell` [1]\n</code></pre>\n<p>🔧 <code>shell</code> [1]</p>\n<p>Done.</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": null
+    },
+    {
+      "name": "a call inside a list item stays version 2",
+      "sent": {
+        "body": "- item a\n\n  🔧 `shell` [1]\n\n- item b",
+        "formatted_body": "<ul>\n<li>\n<p>item a</p>\n<p>🔧 <code>shell</code> [1]</p>\n</li>\n<li>\n<p>item b</p>\n</li>\n</ul>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": null
+    },
+    {
+      "name": "raw HTML around a call stays version 2",
+      "sent": {
+        "body": "<p>Before\n\n🔧 `shell` [1]\n\nAfter</p>",
+        "formatted_body": "<p>Before\n<p>🔧 <code>shell</code> [1]</p>\n<p>After</p></p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": null
+    },
+    {
+      "name": "a link reference that links the index stays version 2",
+      "sent": {
+        "body": "See [1].\n\n🔧 `shell` [1]\n\n[1]: https://example.org",
+        "formatted_body": "<p>See <a href=\"https://example.org\">1</a>.</p>\n<p>🔧 <code>shell</code> <a href=\"https://example.org\">1</a></p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": null
+    },
+    {
+      "name": "a fenced example of the marker of a call that shows none stays version 2",
+      "sent": {
+        "body": "Example:\n\n```\n🔧 `shell` [1]\n\ncode\n```\n\nDone.",
+        "formatted_body": "<p>Example:</p>\n<pre><code>🔧 `shell` [1]\n\ncode\n</code></pre>\n<p>Done.</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": null
+    },
+    {
+      "name": "a call without a marker alone stays version 2",
+      "sent": {
+        "body": "Done.",
+        "formatted_body": "<p>Done.</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": null
+    },
+    {
+      "name": "a raw tag with a letter outside ASCII is a block of its own",
+      "rendered": false,
+      "sent": {
+        "body": "prefix <xé>stuff</xé>\n\n🔧 `shell` [1]\n\nNext",
+        "formatted_body": "prefix <xé>stuff</xé>\n<p>🔧 <code>shell</code> [1]</p>\n<p>Next</p>\n",
+        "events": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "shell",
+            "args_preview": "cmd=ls",
+            "result_preview": "notes.txt"
+          }
+        ]
+      },
+      "wire": {
+        "body": "prefix <xé>stuff</xé>\n\nNext",
+        "formatted_body": "prefix <xé>stuff</xé>\n<p>Next</p>\n",
+        "body_line": [2],
+        "at": [2]
+      }
+    }
+  ]
+}

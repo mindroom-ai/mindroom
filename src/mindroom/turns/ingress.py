@@ -18,10 +18,8 @@ from mindroom.coalescing.batch import (
 )
 from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
 from mindroom.coalescing.ingress_ticket import IngressTicket
-from mindroom.constants import (
-    ROUTER_AGENT_NAME,
-    RuntimePaths,
-)
+from mindroom.commands.parsing import CommandType
+from mindroom.constants import ROUTE_REVISION_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import (
     DispatchEvent,
@@ -58,12 +56,12 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.matrix.transport_progress import is_unfinished_reply
 from mindroom.mid_turn import mid_turn_mode
+from mindroom.model_selection import model_selection_names_runtime, model_selection_targets_other_runtime
 from mindroom.thread_utils import (
     check_agent_mentioned,
     mentions_another_participant,
 )
 from mindroom.timing import (
-    DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
     create_dispatch_pipeline_timing,
     emit_elapsed_timing,
@@ -71,7 +69,7 @@ from mindroom.timing import (
     get_dispatch_pipeline_timing,
 )
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
-from mindroom.turns.facts import command_for, is_router_voice_echo
+from mindroom.turns.facts import command_for, is_voice_echo
 from mindroom.turns.queued_notice import mark_waiting_for_approval, queued_notice_reservation_if_busy
 
 if TYPE_CHECKING:
@@ -82,13 +80,15 @@ if TYPE_CHECKING:
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.coalescing.gate import CoalescingGate
+    from mindroom.constants import (
+        RuntimePaths,
+    )
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import PrincipalStore
     from mindroom.hooks import MessageEnvelope
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.identity import MatrixID
-    from mindroom.message_target import MessageTarget
     from mindroom.response_runner import ResponseRunner
     from mindroom.turn_policy import TurnPolicy
     from mindroom.turn_store import TurnStore
@@ -231,12 +231,12 @@ class TurnIngress:
         event: PreparedIngress,
         *,
         facts: IngressFacts,
-        target: MessageTarget,
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
         ticket: IngressTicket,
     ) -> None:
         """Queue one prepared text or media event; the gate decides busy-conversation routing."""
+        target = envelope.target
         # A message for someone else, or one the room's reply mode leaves to nobody, must not cut this agent's running
         # response short or show that it waits for this agent.
         may_be_for_me = not self.deps.turn_policy.not_for_this_agent(room, event.source, target, envelope)
@@ -258,68 +258,6 @@ class TurnIngress:
         if may_be_for_me:
             mark_waiting_for_approval(self.deps, target, envelope)
 
-    async def _should_skip_router_before_shared_ingress_work(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.RoomMessageFormatted,
-        *,
-        facts: IngressFacts,
-        thread_id: str | None,
-    ) -> bool:
-        """Return whether the router can safely skip shared ingress work for one text event."""
-        requester_user_id = facts.lane_requester_id
-        if (
-            self.deps.agent_name != ROUTER_AGENT_NAME
-            or command_for(facts, dispatch_prompt_for_event(event)) is not None
-            # A long text's preview is not its text yet, so it may hide a command.
-            or is_v2_sidecar_text_preview(event.source)
-            # A caption for an upload still waiting in this sender's burst must join that upload's
-            # turn, or the router routes the upload alone while the named agent answers the caption.
-            or any(
-                self.deps.coalescing_gate.has_pending_work(
-                    requester_coalescing_key(room.room_id, scope_thread_id, requester_user_id),
-                )
-                for scope_thread_id in {None, thread_id}
-            )
-        ):
-            return False
-
-        mention_skips = self.deps.turn_policy.router_mention_skips(room, event.source)
-        if mention_skips is not None:
-            return mention_skips
-        if thread_id is None:
-            return False
-
-        try:
-            thread_history = await self.deps.resolver.dispatch_thread_snapshot(
-                room.room_id,
-                thread_id,
-            )
-        except Exception as exc:
-            self.deps.logger.warning(
-                "Router pre-ingress skip ignored thread snapshot failure",
-                room_id=room.room_id,
-                thread_id=thread_id,
-                error=str(exc),
-            )
-            return False
-        return await self.deps.turn_policy.router_thread_skips(room, requester_user_id, thread_history)
-
-    @staticmethod
-    async def _normalize_with_ingress_timing(
-        normalize: Awaitable[PreparedIngress | None],
-        dispatch_timing: DispatchPipelineTiming | None,
-    ) -> PreparedIngress:
-        """Await one text-like normalization while recording ingress timing boundaries."""
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_normalize_start")
-        prepared_event = await normalize
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_normalize_ready")
-        assert prepared_event is not None
-        attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
-        return prepared_event
-
     async def _dispatch_prepared_text_like_ingress(
         self,
         *,
@@ -337,7 +275,7 @@ class TurnIngress:
             event_source=prepared_event.source,
         )
         content = prepared_event.source.get("content") if isinstance(prepared_event.source, dict) else None
-        if facts.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND and is_router_voice_echo(facts, content):
+        if facts.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND and is_voice_echo(facts, content):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         envelope = self.deps.resolver.build_envelope(event=prepared_event, facts=facts, target=target)
         if not hook_ingress_policy(envelope).allow_full_dispatch:
@@ -352,7 +290,12 @@ class TurnIngress:
             )
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         message_text = prepared_event.body.strip()
-        if envelope.origin.may_answer_interactive_prompt and message_text.isdigit() and len(message_text) == 1:
+        if (
+            envelope.origin.may_answer_interactive_prompt
+            and not facts.aimed_at_owner
+            and message_text.isdigit()
+            and len(message_text) == 1
+        ):
             selection = await self.deps.interactive_questions.claim_interactive_text(
                 source_event_id=prepared_event.event_id,
             )
@@ -381,7 +324,6 @@ class TurnIngress:
             room,
             prepared_event,
             facts=facts,
-            target=target,
             envelope=envelope,
             coalescing_thread_id=coalescing_thread_id,
             ticket=ticket,
@@ -419,14 +361,21 @@ class TurnIngress:
         if facts.sender_is_managed:
             return None
         event_info = EventInfo.from_event(event.source)
+        # A steward that only routes this sender still routes their queued message as edited.
+        async with self.deps.ingress.admitted_reply_decision(
+            facts.lane_requester_id,
+            room.room_id,
+            unanswered=(event.event_id,),
+            or_routed=True,
+        ) as allowed:
+            if not allowed or await self._edit_queued_message(room, event, event_info):
+                return None
         async with self.deps.ingress.admitted_reply_decision(
             facts.lane_requester_id,
             room.room_id,
             unanswered=(event.event_id,),
         ) as allowed:
             if not allowed:
-                return None
-            if await self._edit_queued_message(room, event, event_info):
                 return None
             return await self.deps.edit_regenerator.handle_message_edit(room, event, event_info, facts)
 
@@ -453,12 +402,22 @@ class TurnIngress:
             source_event_id=original_event_id,
             sender=event.sender,
             body=body,
-            new_content=content,
+            new_content={**content, ROUTE_REVISION_KEY: [event.server_timestamp, event.event_id]},
             for_another_participant=self._mentions_another_participant(room, {"content": content}),
         )
         if edited is None:
             return False
-        self._renew_queued_notice(room, *edited)
+        key, pending_event = edited
+        edited_facts = self.deps.ingress.classify(pending_event.event, room_id=room.room_id)
+        # Keep admission-time provenance; only the command's mention facts follow the edited content.
+        pending_event.facts = replace(
+            pending_event.facts,
+            mention_names=edited_facts.mention_names,
+            aimed_at_owner=edited_facts.aimed_at_owner,
+        )
+        self._renew_queued_notice(room, key, pending_event)
+        # The edit settles here, so after a crash only the message replays: the journal keeps it as edited.
+        await self.deps.interactive_questions.revise_pending(original_event_id, pending_event.event.source["content"])
         return True
 
     def _renew_queued_notice(self, room: nio.MatrixRoom, key: CoalescingKey, pending_event: PendingEvent) -> None:
@@ -518,8 +477,12 @@ class TurnIngress:
         *,
         facts: IngressFacts,
     ) -> bool:
-        """Fail one command visibly when its conversation cannot be resolved yet."""
-        if command_for(facts, dispatch_prompt_for_event(event)) is None:
+        """Fail one command visibly when its conversation cannot be resolved yet.
+
+        The bot the command is aimed at says so; its thread is unread, so the thread's agent is not known.
+        """
+        command = command_for(facts, dispatch_prompt_for_event(event))
+        if command is None:
             return False
         requester_user_id = facts.lane_requester_id
         self.deps.logger.warning(
@@ -528,7 +491,25 @@ class TurnIngress:
             room_id=room.room_id,
             sender=event.sender,
         )
-        if self.deps.agent_name == ROUTER_AGENT_NAME:
+        mentioned_agents, _am_i_mentioned, _has_non_agent_mentions = check_agent_mentioned(
+            event.source,
+            self.deps.matrix_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            room=room,
+        )
+        # A model selection names one device: no other bot answers for it, and that bot shares the command's claim.
+        content = event.source.get("content", {}) if command.type is CommandType.MODEL else {}
+        client = self._client()
+        addressed_elsewhere = model_selection_targets_other_runtime(content, client.user_id, client.device_id)
+        if not addressed_elsewhere and await self.deps.turn_policy.aims_command_at_me(
+            room,
+            requester_user_id,
+            command,
+            mentioned_agents,
+            source_event_id=event.event_id,
+            names_me=model_selection_names_runtime(content, client.user_id),
+        ):
             async with self.deps.ingress.admitted_reply_decision(
                 requester_user_id,
                 room.room_id,
@@ -684,6 +665,9 @@ class TurnIngress:
         )
         if await self.deps.personal_room_command(room, event, facts.lane_requester_id):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+        if facts.routed_event_ids and not self.deps.resolver.pre_hydration_mentions(room=room, event=event)[1]:
+            # Every bot ran its hooks for the person's message: only the responder a route names runs any for it.
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         self._log_callback_started(room, event, callback_name="message")
         ticket = None
         approval_card_event_id = event_info.reply_to_event_id
@@ -770,13 +754,8 @@ class TurnIngress:
                 ticket.close()
                 handed_off = await self._handle_edit_event(room, event, facts)
                 return TurnDispatchOutcome.DEFERRED if handed_off is True else TurnDispatchOutcome.INTENTIONALLY_IGNORED
-            discovery_alias = facts.discovery_event_id
             claimed = await ticket.claim_turn(
-                TurnRecord.create(
-                    [event.event_id],
-                    discovery_event_ids=(discovery_alias,) if discovery_alias else (),
-                    completed=False,
-                ),
+                TurnRecord.create([event.event_id], discovery_event_ids=facts.discovery_event_ids, completed=False),
             )
             if claimed is not None:
                 return claimed
@@ -784,7 +763,6 @@ class TurnIngress:
                 room,
                 event,
                 facts,
-                dispatch_timing=dispatch_timing,
                 ticket=ticket,
             )
         finally:
@@ -796,7 +774,6 @@ class TurnIngress:
         event: nio.RoomMessageFormatted,
         facts: IngressFacts,
         *,
-        dispatch_timing: DispatchPipelineTiming | None,
         ticket: IngressTicket,
     ) -> TurnDispatchOutcome:
         """Resolve, normalize, and admit one live (non-edit) text event."""
@@ -809,20 +786,6 @@ class TurnIngress:
                 self._log_unplaceable_event(room, event)
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
             raise
-        if await self._should_skip_router_before_shared_ingress_work(
-            room,
-            event,
-            facts=facts,
-            thread_id=ingress_thread_id,
-        ):
-            self.deps.logger.debug(
-                "skip_router_shared_ingress_work",
-                event_id=event.event_id,
-                room_id=room.room_id,
-                thread_id=ingress_thread_id,
-            )
-            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-
         self.deps.logger.info(
             "Received message",
             event_id=event.event_id,
@@ -830,14 +793,10 @@ class TurnIngress:
             sender=event.sender,
             thread_id=ingress_thread_id,
         )
-        prepared_event = await self._normalize_with_ingress_timing(
-            self.deps.normalizer.resolve_text_event(TextNormalizationRequest(event=event)),
-            dispatch_timing,
-        )
-        return await self._dispatch_prepared_text_like_ingress(
-            room=room,
-            prepared_event=prepared_event,
-            facts=facts,
+        return await self._normalize_and_dispatch_text(
+            room,
+            event,
+            facts,
             ticket=ticket,
             coalescing_thread_id=ingress_thread_id,
         )
@@ -897,7 +856,7 @@ class TurnIngress:
                     self._log_unplaceable_event(room, event)
                     return TurnDispatchOutcome.INTENTIONALLY_IGNORED
                 if is_file_message_event(event) and is_v2_sidecar_text_preview(event.source):
-                    dispatch_outcome = await self._dispatch_file_sidecar_text_preview(
+                    dispatch_outcome = await self._normalize_and_dispatch_text(
                         room,
                         event,
                         facts,
@@ -915,7 +874,6 @@ class TurnIngress:
                         room,
                         prepare_media_ingress(event),
                         facts=facts,
-                        target=target,
                         envelope=self.deps.resolver.build_envelope(event=event, facts=facts, target=target),
                         coalescing_thread_id=coalescing_thread_id,
                         ticket=ticket,
@@ -927,23 +885,26 @@ class TurnIngress:
             ticket.close()
         return dispatch_outcome
 
-    async def _dispatch_file_sidecar_text_preview(
+    async def _normalize_and_dispatch_text(
         self,
         room: nio.MatrixRoom,
-        event: FileMessageEvent,
+        event: nio.RoomMessageFormatted | FileMessageEvent,
         facts: IngressFacts,
         *,
         ticket: IngressTicket,
         coalescing_thread_id: str | None,
     ) -> TurnDispatchOutcome:
-        """Dispatch one sidecar-backed file preview through the normal text pipeline."""
-        prepared_text_event = await self._normalize_with_ingress_timing(
-            self.deps.normalizer.prepare_file_sidecar_text_event(event),
-            get_dispatch_pipeline_timing(event.source),
-        )
+        """Normalize a text message or sidecar preview, then dispatch it."""
+        dispatch_timing = get_dispatch_pipeline_timing(event.source)
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_start")
+        prepared_event = await self.deps.normalizer.resolve_text_event(TextNormalizationRequest(event=event))
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_ready")
+        attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
         return await self._dispatch_prepared_text_like_ingress(
             room=room,
-            prepared_event=prepared_text_event,
+            prepared_event=prepared_event,
             facts=facts,
             ticket=ticket,
             coalescing_thread_id=coalescing_thread_id,

@@ -69,7 +69,7 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg
-from mindroom.tool_system.events import FailedReply, StructuredStreamChunk
+from mindroom.tool_system.events import FailedReply, StructuredStreamChunk, tool_markers_in_text
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -3349,7 +3349,12 @@ async def _approving_team_bot(
     bot = _team_bot(team)
     cards: list[MatrixDelivery] = []
 
-    async def prepare_event(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> dict[str, Any]:
+    async def prepare_event(
+        _room_id: str,
+        _thread_id: str | None,
+        content: dict[str, Any],
+        _sender_entity: str,
+    ) -> dict[str, Any]:
         return content
 
     async def send_card(delivery: MatrixDelivery) -> str:
@@ -3365,8 +3370,8 @@ async def _approving_team_bot(
         send_approval_delivery=send_card,
         resolve_approval_delivery=AsyncMock(return_value=None),
         cards=bot._journal_store.principal("router@shared"),
-        transport_sender_id=lambda: "@router:localhost",
-        transport_device_id=lambda: "DEVICE",
+        sender_bot=lambda _entity_name, _room_id: object(),
+        sender_device_id=AsyncMock(return_value="DEVICE"),
     )
     try:
         with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=streaming)):
@@ -3398,9 +3403,10 @@ async def _approve(bot: AgentBot, card_event_id: str) -> None:
 
 
 def _shown(bot: AgentBot) -> str:
-    """Return what the reply shows now: the body of its last send or edit."""
+    """Return what the reply shows now: the body of its last send or edit, with its tool markers back."""
     content = bot.client.room_send.await_args_list[-1].kwargs["content"]
-    return str(content.get("m.new_content", content)["body"])
+    shown = content.get("m.new_content", content)
+    return str(tool_markers_in_text(shown)["body"])
 
 
 @pytest.mark.asyncio

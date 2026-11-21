@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from fastapi.responses import JSONResponse
 
 from mindroom.api.openai_request_parsing import (
@@ -153,10 +154,10 @@ class TestValidateChatRequest:
         assert _error_body(response)["code"] == "model_not_found"
 
     def test_router_is_not_addressable(self) -> None:
-        """The built-in router is never a /v1 model."""
-        config = _config()
-        config.agents[ROUTER_AGENT_NAME] = AgentConfig(display_name="Router", role="", rooms=[])
-        response = validate_chat_request(_request(ROUTER_AGENT_NAME), config)
+        """The owner account is never a /v1 model: no agent may carry its name, so the name is an unknown model."""
+        with pytest.raises(ValueError, match="reserved internal entity names"):
+            Config(agents={ROUTER_AGENT_NAME: AgentConfig(display_name="Router", role="", rooms=[])})
+        response = validate_chat_request(_request(ROUTER_AGENT_NAME), _config())
         assert isinstance(response, JSONResponse)
         assert response.status_code == 404
 

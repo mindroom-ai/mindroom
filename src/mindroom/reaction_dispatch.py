@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 from mindroom.approval.inbound import handle_tool_approval_action
 from mindroom.commands import config_confirmation
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import SemanticConsumer
@@ -258,9 +257,9 @@ class ReactionDispatcher:
         pending_change = (
             await config_confirmation.resolve_reaction_pending_change(
                 self._client(),
-                room.room_id,
+                self.deps.runtime_paths,
                 event,
-                enabled=self.deps.agent_name == ROUTER_AGENT_NAME,
+                room.room_id,
             )
             if semantic_consumer in {None, SemanticConsumer.CONFIG_CONFIRMATION}
             else None

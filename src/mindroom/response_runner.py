@@ -119,7 +119,7 @@ from mindroom.streaming import (
     UnfinishedStreamedReply,
 )
 from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
-from mindroom.teams.members import allow_direct_private_team_agents, requested_team_agent_names
+from mindroom.teams.members import allow_direct_private_team_agents
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_models import set_thread_model_override
 from mindroom.timing import bind_reply_pipeline_timing, timed
@@ -293,7 +293,10 @@ def _participation_for_request(
     """Own one participation decision from locked preparation through delivery."""
     if request.participation is None:
         return None
-    gate = ParticipationGate(instructions=request.participation.instructions)
+    gate = ParticipationGate(
+        instructions=request.participation.instructions,
+        on_approved=request.on_participation_approved,
+    )
     if request.existing_event_id is not None:
         gate.approve_existing_response()
     else:
@@ -790,10 +793,7 @@ class ResponseRunner:
         continuation = await self.deps.approval_store.approval_continuation_for_source(source_event_id)
         if continuation is None:
             return
-        request = self.approvals.approval_response_request(
-            continuation,
-            target=continuation_target(continuation, reply_to_event_id=source_event_id),
-        )
+        request = self.approvals.approval_response_request(continuation, target=continuation_target(continuation))
 
         async def ownership_disappeared(_target: MessageTarget) -> SourceFate:
             # Reached only when no approval owns the source any more: whoever ended it settled its sources.
@@ -997,6 +997,7 @@ class ResponseRunner:
             matrix_run_metadata=_turn_run_metadata(request),
             current_sender_id=request.response_envelope.origin.speaker_id,
             history_boundary_event_id=request.history_boundary_event_id,
+            prompt_source_event_ids=request.prompt_source_event_ids,
             member_display_names=request.member_display_names,
             transient_enrichment_items=with_matrix_message_target(
                 transient_enrichment_items,
@@ -1596,7 +1597,7 @@ class ResponseRunner:
                         thread_id=resolved_target.resolved_thread_id,
                         explicit=request.scheduled_model,
                     ),
-                    requested_team_agent_names(team.member_names),
+                    list(team.member_names),
                     self._turn_budget(request),
                 )
             )
@@ -1719,7 +1720,7 @@ class ResponseRunner:
         execution_identity = tool_context.execution_identity
         configured_team_name = self.deps.runtime.config.configured_team_name(self.deps.agent_name)
         self.deps.runtime.config.assert_team_agents_supported(
-            requested_team_agent_names(agent_names),
+            agent_names,
             allow_direct_private_agents=allow_direct_private_team_agents(
                 execution_identity,
                 configured_team_name=configured_team_name,

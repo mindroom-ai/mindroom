@@ -184,8 +184,8 @@ Matrix cannot move messages between rooms, so `move_thread(room_id, thread_id=No
 The original thread gets a `Moved to <link>` notice and is marked `resolved`.
 Without `thread_id`, it moves the active thread.
 
-Each agent re-posts its own messages, so the agents in the thread continue the conversation in the new thread with its earlier messages as context.
-The router re-posts messages from people, and from agents that are not in the target room, prefixed with the author's name.
+The agent doing the move re-posts every message, so the agents in the thread continue the conversation in the new thread with its earlier messages as context.
+It posts its own messages as they were, and everyone else's prefixed with the author's name.
 The copies never trigger agent replies.
 
 ```yaml
@@ -195,7 +195,7 @@ agents:
       - thread_move
 ```
 
-A move is refused when the requester is not joined to the target room, when the router or the agent doing the move is not in it, when the original room is end-to-end encrypted and the target room is not, or when the thread cannot be read in full.
+A move is refused when the requester is not joined to the target room, when the agent doing the move is not in it, when the original room is end-to-end encrypted and the target room is not, or when the thread cannot be read in full.
 Copies have new timestamps and keep only the latest edit of each message.
 Reactions, notices such as thread summaries, and replies still being written are not copied.
 Earlier tool-call results, per-thread model choices, agent modes, todos, scheduled tasks, and pending approvals stay with the original thread.

@@ -332,7 +332,7 @@ def replay_gateway_body(body: bytes, receive: Receive) -> Receive:
     """Replay consumed input once, retaining the original disconnect channel."""
     sent = False
 
-    async def replay() -> dict[str, Any]:
+    async def replay() -> Message:
         nonlocal sent
         if not sent:
             sent = True
@@ -454,9 +454,9 @@ class GatewayServer:
         name: str,
         arguments: dict[str, Any],
     ) -> types.CallToolResult:
-        if name not in _OPERATION_NAMES:
+        schema = _input_schema(name) if name in _OPERATION_NAMES else None
+        if schema is None:
             return _result(_error(GatewayErrorCode.TOOL_NOT_FOUND, "Unknown gateway operation."))
-        schema = _input_schema(name)
         if not Draft202012Validator(schema).is_valid(arguments):
             return _result(_error(GatewayErrorCode.INVALID_ARGUMENTS, "Gateway operation arguments are invalid."))
         identity = _request_identity(ctx)

@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 ROOM = "!project:example.org"
 BAS = "@bas:example.org"
 CAROL = "@carol:example.org"
-ROUTER = "@mindroom_router:example.org"
+ACCOUNT = "@mindroom_code:example.org"
 
 
 @dataclass
@@ -47,7 +47,7 @@ class Harness:
     tmp_path: Path
     monkeypatch: pytest.MonkeyPatch
     rights: dict[str, bool | None] = field(default_factory=dict)
-    router_right: bool | None = True
+    own_right: bool | None = True
     smtp: bool = True
     mails: list[EmailMessage] = field(default_factory=list)
     mail_error: EmailInviteMailError | None = None
@@ -66,13 +66,13 @@ class Harness:
             test_runtime_paths(self.tmp_path),
         )
         self.paths: RuntimePaths = runtime_paths_for(self.config)
-        self.router_id = tool_module.entity_identity_registry(self.config, self.paths).current_id("router").full_id
         self.client = AsyncMock()
+        self.client.user_id = ACCOUNT
 
         async def may_invite(_client: object, room_id: str, user_id: str, approvers: object = ()) -> bool | None:
             assert room_id == ROOM
-            if user_id == self.router_id:
-                return self.router_right
+            if user_id == ACCOUNT:
+                return self.own_right
             if user_id in (approvers or ()):
                 return True
             return self.rights.get(user_id, False)
@@ -151,12 +151,12 @@ async def test_refuses_refused_rooms(harness: Harness, kind: str, text: str) -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("router_right", [False, None])
-async def test_refuses_when_router_may_not_invite(harness: Harness, router_right: bool | None) -> None:
-    """A router without the invite right refuses."""
-    harness.router_right = router_right
+@pytest.mark.parametrize("own_right", [False, None])
+async def test_refuses_when_the_answering_account_may_not_invite(harness: Harness, own_right: bool | None) -> None:
+    """The account that answers sends the Matrix invite, so without the invite right it refuses."""
+    harness.own_right = own_right
     result = await harness.call("invite_by_email", BAS, "alice@example.com")
-    assert result == "Error: the router may not invite people to this room."
+    assert result == "Error: I need moderator rights in this room to invite people."
     assert harness.rows() == []
     assert harness.mails == []
 
@@ -226,7 +226,7 @@ async def test_approver_sends_waiting_request(harness: Harness) -> None:
     found = store.find_by_code(harness.paths, code)
     assert found is not None
     assert found.id == row.id
-    assert invite_link("https://chat.example.org", harness.router_id, code) in body
+    assert invite_link("https://chat.example.org", ACCOUNT, code) in body
 
 
 @pytest.mark.asyncio
@@ -270,7 +270,7 @@ async def test_no_smtp_mode_returns_link(harness: Harness) -> None:
     assert result == (
         "No mail server is configured, so nothing was mailed. Give this link to alice@example.com yourself. "
         f"It works once, expires on {_date(row.expires_at)}, and lets whoever opens it join this room: "
-        f"{invite_link('https://chat.example.org', harness.router_id, code)}"
+        f"{invite_link('https://chat.example.org', ACCOUNT, code)}"
     )
     assert harness.mails == []
 

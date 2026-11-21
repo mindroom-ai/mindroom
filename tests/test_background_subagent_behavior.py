@@ -785,7 +785,7 @@ async def test_a_continued_subagents_call_waits_for_its_own_approval(
         else:
             asked_again.set()
 
-    async def prepare(_room_id: str, _thread_id: str | None, payload: object) -> object:
+    async def prepare(_room_id: str, _thread_id: str | None, payload: object, _sender_entity: str) -> object:
         return payload
 
     with registered_probe_tools() as probe:

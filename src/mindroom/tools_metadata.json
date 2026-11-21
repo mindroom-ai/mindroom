@@ -277,9 +277,9 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Invite the MindRoom router to the current Matrix room",
+      "description": "Deprecated: no longer needed, rooms work without another account",
       "display_name": "Invite Router",
-      "docs_url": "https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing",
+      "docs_url": "https://docs.mindroom.chat/authorization/",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -291,7 +291,7 @@
       "name": "invite_router",
       "requires_conversation": false,
       "requires_primary_runtime": true,
-      "requires_room_context": true,
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -660,7 +660,7 @@
         "slack_watch"
       ],
       "helper_text": "Each user connects their own Slack account through the MindRoom Slack app. Store the app's client ID and secret in the slack_oauth_client credential service, and its bot token, signing secret and, for watches, app-level token in slack_app.",
-      "icon": "SiSlack",
+      "icon": "FaSlack",
       "icon_color": "text-purple-600",
       "name": "slack",
       "requires_conversation": false,
@@ -1278,7 +1278,7 @@
         "send_sms"
       ],
       "helper_text": null,
-      "icon": "SiTwilio",
+      "icon": "TbBrandTwilio",
       "icon_color": "text-red-600",
       "name": "twilio",
       "requires_conversation": false,
@@ -5600,7 +5600,7 @@
         "transcribe_audio"
       ],
       "helper_text": null,
-      "icon": "SiOpenai",
+      "icon": "TbBrandOpenai",
       "icon_color": "text-green-600",
       "name": "openai",
       "requires_conversation": false,
@@ -8620,7 +8620,7 @@
       "function_names": [
         "desktop"
       ],
-      "helper_text": "Ask the requester to send `/desktop setup` in a private Matrix room containing only them and one Desktop-enabled agent, plus the router when it serves the command.",
+      "helper_text": "Ask the requester to send `/desktop setup` in a private Matrix room containing only them and one Desktop-enabled agent.",
       "icon": "MonitorUp",
       "icon_color": "text-cyan-500",
       "name": "desktop",

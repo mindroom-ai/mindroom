@@ -10,11 +10,13 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.scheduling.runtime import _MISSED_TASK_MAX_AGE_SECONDS, _TaskRunner
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from tests.conftest import make_matrix_client_mock
 from tests.scheduling_helpers import (
+    persist_schedule_writer,
     schedule_runtime_paths,
     scheduled_task_runtime,
     scheduling_bot,
@@ -23,6 +25,9 @@ from tests.scheduling_helpers import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.bot import AgentBot
+    from mindroom.scheduling.runtime import ScheduledTaskRuntime
 
 _SCHEDULE_WRITER_ID = "@s:server"
 
@@ -51,8 +56,17 @@ def _once(execute_at: datetime, description: str = "Task") -> ScheduledWorkflow:
     )
 
 
-def _router_client(*events: dict) -> AsyncMock:
-    """Return the router's client, the account that wrote every task in the room."""
+def _restoring_agent(tmp_path: Path, client: AsyncMock, *others: AgentBot) -> tuple[ScheduledTaskRuntime, AgentBot]:
+    """Return a runtime over agent ``general`` on ``client`` and any other bots, and that agent's bot."""
+    runtime_paths = schedule_runtime_paths(tmp_path)
+    persist_schedule_writer(runtime_paths, _SCHEDULE_WRITER_ID, entity_name="general")
+    bot = scheduling_bot(client, agent_name="general")
+    config = Config(agents={"general": AgentConfig(display_name="General")})
+    return scheduled_task_runtime(runtime_paths, bot, *others, config=config), bot
+
+
+def _agent_client(*events: dict) -> AsyncMock:
+    """Return the client of agent ``general``, the account that wrote every task in the room and so runs it."""
     client = make_matrix_client_mock(user_id=_SCHEDULE_WRITER_ID)
     serve_room_schedule_state(client, "!r:server", list(events), sender=_SCHEDULE_WRITER_ID)
     client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
@@ -74,13 +88,12 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(tmp_pa
         room_id="!r:server",
         thread_id="$t",
     )
-    client = _router_client(
+    client = _agent_client(
         _make_state_event("id1", _once(datetime.now(UTC) - timedelta(minutes=10)), idx=1),
         _make_state_event("id2", cron, idx=2),
         _make_state_event("id3", cron, status="cancelled", idx=3),
     )
-    bot = scheduling_bot(client)
-    runtime = scheduled_task_runtime(schedule_runtime_paths(tmp_path, _SCHEDULE_WRITER_ID), bot, config=Config())
+    runtime, bot = _restoring_agent(tmp_path, client)
 
     with patch.object(runtime, "_start_runner", return_value=True) as start:
         restored = await runtime.restore_room(bot, "!r:server")
@@ -88,16 +101,15 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(tmp_pa
     # recent past once-task is restored; invalid cron and cancelled cron are skipped
     assert restored == 1
     start.assert_called_once()
-    assert start.call_args.args[:2] == ("router", "id1")
+    assert start.call_args.args[:2] == ("general", "id1")
 
 
 @pytest.mark.asyncio
 async def test_restore_marks_ancient_missed_task_as_failed(tmp_path: Path) -> None:
     """One-time task older than the grace period should be marked as failed."""
     ancient_once = _once(datetime.now(UTC) - timedelta(seconds=_MISSED_TASK_MAX_AGE_SECONDS + 3600), "Ancient task")
-    client = _router_client(_make_state_event("id-ancient", ancient_once))
-    bot = scheduling_bot(client)
-    runtime = scheduled_task_runtime(schedule_runtime_paths(tmp_path, _SCHEDULE_WRITER_ID), bot, config=Config())
+    client = _agent_client(_make_state_event("id-ancient", ancient_once))
+    runtime, bot = _restoring_agent(tmp_path, client)
 
     restored = await runtime.restore_room(bot, "!r:server")
 
@@ -111,28 +123,22 @@ async def test_restore_marks_ancient_missed_task_as_failed(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_restore_marks_ancient_missed_task_failed_through_a_bot_that_may_write_state(tmp_path: Path) -> None:
-    """A refused failure write goes through another ready bot whose room power allows it."""
+async def test_restore_marks_ancient_missed_task_failed_through_the_room_steward(tmp_path: Path) -> None:
+    """The failure write goes through the room's steward, not through the restoring bot the room would refuse."""
     ancient_once = _once(datetime.now(UTC) - timedelta(seconds=_MISSED_TASK_MAX_AGE_SECONDS + 3600), "Ancient task")
-    client = _router_client(_make_state_event("id-ancient", ancient_once))
+    client = _agent_client(_make_state_event("id-ancient", ancient_once))
     client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
-    writer = make_matrix_client_mock(user_id="@mindroom_general:server")
+    writer = make_matrix_client_mock(user_id="@mindroom_helper:server")
     room = nio.MatrixRoom("!r:server", writer.user_id)
     room.power_levels.users[writer.user_id] = 100
     writer.rooms = {"!r:server": room}
     writer.room_put_state.return_value = nio.RoomPutStateResponse.from_dict({"event_id": "$w"}, room_id="!r:server")
-    bot = scheduling_bot(client)
-    runtime = scheduled_task_runtime(
-        schedule_runtime_paths(tmp_path, _SCHEDULE_WRITER_ID),
-        bot,
-        scheduling_bot(writer, agent_name="general"),
-        config=Config(),
-    )
+    runtime, bot = _restoring_agent(tmp_path, client, scheduling_bot(writer, agent_name="helper"))
 
     restored = await runtime.restore_room(bot, "!r:server")
 
     assert restored == 0
-    client.room_put_state.assert_awaited_once()
+    client.room_put_state.assert_not_awaited()
     writer.room_put_state.assert_awaited_once()
     content = writer.room_put_state.call_args.kwargs["content"]
     assert content["task_id"] == "id-ancient"
@@ -143,9 +149,8 @@ async def test_restore_marks_ancient_missed_task_failed_through_a_bot_that_may_w
 @pytest.mark.asyncio
 async def test_restore_future_task_still_works(tmp_path: Path) -> None:
     """Future one-time tasks should be restored normally."""
-    client = _router_client(_make_state_event("id-future", _once(datetime.now(UTC) + timedelta(hours=2))))
-    bot = scheduling_bot(client)
-    runtime = scheduled_task_runtime(schedule_runtime_paths(tmp_path, _SCHEDULE_WRITER_ID), bot, config=Config())
+    client = _agent_client(_make_state_event("id-future", _once(datetime.now(UTC) + timedelta(hours=2))))
+    runtime, bot = _restoring_agent(tmp_path, client)
 
     with patch.object(runtime, "_start_runner", return_value=True) as start:
         restored = await runtime.restore_room(bot, "!r:server")
@@ -157,9 +162,8 @@ async def test_restore_future_task_still_works(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_restore_on_every_join_starts_each_task_once(tmp_path: Path) -> None:
     """Joining a room again, by any path, never starts a second runner for a task that already runs."""
-    client = _router_client(_make_state_event("id1", _once(datetime.now(UTC) + timedelta(minutes=10))))
-    bot = scheduling_bot(client)
-    runtime = scheduled_task_runtime(schedule_runtime_paths(tmp_path, _SCHEDULE_WRITER_ID), bot, config=Config())
+    client = _agent_client(_make_state_event("id1", _once(datetime.now(UTC) + timedelta(minutes=10))))
+    runtime, bot = _restoring_agent(tmp_path, client)
     started = asyncio.Event()
 
     async def wait_forever(_self: _TaskRunner, _workflow: ScheduledWorkflow) -> None:

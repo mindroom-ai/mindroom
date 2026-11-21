@@ -1,6 +1,6 @@
 """How a call between people runs: who is in it and may act on it, Pause, speech, how it ends, its row and message.
 
-All Matrix and network work goes through what the service is given: the room side (the router's view of the room),
+All Matrix and network work goes through what the service is given: the room side (MindRoom's view of the room),
 the transcriber and the notes writer. The store runs in a worker thread. A call with an agent is read live from the
 agent's own transcript, through the agent's view of its room.
 """
@@ -109,7 +109,7 @@ class Call:
     id: str
     room_id: str
     row_event_id: str | None
-    """The notice the router posts in the room for the call; None until it is up."""
+    """The notice the room's poster posts in the room for the call; None until it is up."""
     started_at: float
     ended_at: float | None
     """None while the call is live."""
@@ -189,18 +189,18 @@ class _RoomReader(Protocol):
 
 
 class _CallRoom(_RoomReader, Protocol):
-    """The router's side of the rooms calls are in."""
+    """MindRoom's side of the rooms calls are in: each is read through its steward and posted to through its poster."""
 
-    def router_joined(self, room_id: str) -> bool | None:
-        """Return whether the router is joined to the room, None while it is not ready."""
+    def poster_joined(self, room_id: str) -> bool | None:
+        """Return whether an account that posts call messages is joined to the room, None while not ready."""
         ...
 
     async def may_post(self, room_id: str, user_id: str) -> bool | None:
         """Return whether ``user_id`` may post messages in the room by its power levels, None when it cannot tell."""
         ...
 
-    async def router_may_post(self, room_id: str) -> bool | None:
-        """Return whether the router may post messages in the room by its power levels, None when it cannot tell."""
+    async def poster_may_post(self, room_id: str) -> bool | None:
+        """Return whether the room's poster may post messages by its power levels, None when it cannot tell."""
         ...
 
     async def post_row(self, room_id: str, call_id: str) -> str | None:
@@ -260,7 +260,7 @@ class AgentCallRoom:
 
     room_id: str
     room: _RoomReader
-    """The room as the agent reads it, so it can be read without the router or call transcripts."""
+    """The room as the agent reads it, so it can be read without call transcripts."""
     call: _AgentCall | None
 
     async def live(self, user_id: str, *, after: str | None = None) -> LiveCall:
@@ -393,9 +393,7 @@ class CallTranscriptService:
         while the room cannot be read, the person drops out a minute after their app last checked in.
         """
         call = await self._fresh(call_id)
-        member = await self._room.is_member(call.room_id, user_id)
-        if member is None:
-            raise CallRefusedError(code="unavailable", message=_UNREADABLE)
+        member = await _is_room_member(self._room, call.room_id, user_id)
         await self._leave(call, user_id)
         if not member:
             raise CallRefusedError(code="not-found", message=_NO_SUCH_CALL)
@@ -608,8 +606,8 @@ class CallTranscriptService:
             return None
         if _past_a_day(call, now):
             return "not-posted-for-a-day"
-        if self._transcript_due(call, now) and self._room.router_joined(call.room_id) is False:
-            return "router-not-in-room"
+        if self._transcript_due(call, now) and self._room.poster_joined(call.room_id) is False:
+            return "no-agent-in-room"
         return None
 
     def _falls_due_at(self, call: StoredCall) -> float | None:
@@ -618,7 +616,7 @@ class CallTranscriptService:
             call.ended_at is None
             or call.transcript_done_at is not None
             or call.id in self._settling
-            or self._room.router_joined(call.room_id) is not True
+            or self._room.poster_joined(call.room_id) is not True
         ):
             return None
         return max(call.ended_at + _TRANSCRIPT_DELAY_SECONDS, call.retry_at or 0.0)
@@ -737,12 +735,12 @@ class CallTranscriptService:
             task.add_done_callback(lambda _: self._settling.pop(call.id, None))
 
     def _can_settle(self, call: StoredCall, now: float) -> bool:
-        """Return whether the router can make Matrix writes the call owes now: its row, its due message, a row edit.
+        """Return whether the room's poster can make Matrix writes the call owes now: its row, its due message, a row edit.
 
         Nothing is owed a day after the call's end, and nothing is tried while the writes wait after a failure.
         """
         if (
-            self._room.router_joined(call.room_id) is not True
+            self._room.poster_joined(call.room_id) is not True
             or (call.retry_at is not None and call.retry_at > now)
             or _past_a_day(call, now)
         ):
@@ -770,14 +768,14 @@ class CallTranscriptService:
     async def _settle_step(self, call: StoredCall) -> None:
         """Make the first Matrix write the call owes, or hold its writes a minute if it cannot be made.
 
-        Nothing is sent while the router may not post: a due message is given up, as when it left the room, before any
+        Nothing is sent while the poster may not post: a due message is given up, as when it left the room, before any
         notes or upload, and the other writes wait.
         """
-        if await self._room.router_may_post(call.room_id) is False:
+        if await self._room.poster_may_post(call.room_id) is False:
             if self._transcript_due(call, self._clock()):
-                await self._finish(call, given_up="router-may-not-post")
+                await self._finish(call, given_up="poster-may-not-post")
             else:
-                await self._postpone(call, reason="router-may-not-post")
+                await self._postpone(call, reason="poster-may-not-post")
         elif call.row_event_id is None:
             event_id = await self._room.post_row(call.room_id, call.id)
             if event_id is None:
@@ -927,7 +925,7 @@ class CallTranscriptService:
         """Refuse someone not joined to the room (``not-found``), or anyone while the room cannot be checked.
 
         Someone whose app is in the live ``call`` is checked in first, so a room that cannot be read for a while, as
-        while the router restarts or the homeserver is down, never counts them out; once it can be read, someone no
+        while a bot restarts or the homeserver is down, never counts them out; once it can be read, someone no
         longer joined to it leaves the call.
         """
         in_call = call is not None and await self._check_in(call, user_id)

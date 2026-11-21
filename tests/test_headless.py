@@ -817,7 +817,7 @@ async def test_the_prompt_says_where_the_tools_work_beside_a_workdir(
     assert "code that `python` runs uses this process's current directory, so give it absolute paths." in system
     (write_file,) = (tool for tool in provider.requests[0].tools if tool.name == "write_file")
     description = write_file.parameters["properties"]["mindroom_output_path"]["description"]
-    assert description.startswith("Optional MindRoom-managed path relative to your saved tool outputs directory.")
+    assert description.startswith("Optional path under your saved tool outputs directory:")
 
 
 @pytest.mark.asyncio

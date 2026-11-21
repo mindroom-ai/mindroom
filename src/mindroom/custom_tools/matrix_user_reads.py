@@ -35,6 +35,8 @@ from mindroom.matrix.media import (
     parse_matrix_media_event_source,
 )
 from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
+from mindroom.matrix_identifiers import has_agent_username
+from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -609,6 +611,8 @@ def _message_columns(
         default=None,
     )
     content = _content(message) if latest is None else _mapping(_content(latest).get("m.new_content"))
+    if has_agent_username(message.get("sender")):
+        content = tool_markers_in_text(content)
     text, file_note = _said(message, content)
     notes = [
         text,
@@ -746,6 +750,7 @@ async def search_messages(
     search_filter: dict[str, object] = {"limit": _clamped(limit, _SEARCH_LIMIT, _MAX_SEARCH_LIMIT)}
     if room_id is not None:
         search_filter["rooms"] = [room_id]
+    # The homeserver matches the body it holds, which has an agent's prose and none of its tool marker lines.
     criteria = {"search_term": query, "order_by": "recent", "keys": ["content.body"], "filter": search_filter}
     path = "/search" + (f"?{urlencode({'next_batch': page_token})}" if page_token else "")
     answer = await matrix_json(client, "POST", path, {"search_categories": {"room_events": criteria}})

@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.api.config_lifecycle import require_api_state
 from mindroom.config.main import Config
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.orchestration.config_updates import configured_entity_names
 from mindroom.orchestrator import _MultiAgentOrchestrator
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
+    from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import EventJournalStore
 
@@ -23,11 +26,14 @@ class ReadyRuntime(_MultiAgentOrchestrator):
 
     Bot tests drive bots without starting them, so liveness does not come from registered bots: every configured
     entity counts as running and first-synced unless `unavailable` or `not_ready` names it, and unknown names stay
-    unavailable. Liveness never grants room access; reply membership stays the index's decision.
+    unavailable. Liveness never grants room access; reply membership stays the index's decision. Nor does a room's
+    steward come from the bots' room caches: it is the entity `steward` names in every room, the owner account
+    unless the test names another or none.
     """
 
     unavailable: set[str] = field(default_factory=set)
     not_ready: set[str] = field(default_factory=set)
+    steward: str | None = ROUTER_AGENT_NAME
     journal_store: EventJournalStore | None = None
 
     def __post_init__(self) -> None:
@@ -46,6 +52,12 @@ class ReadyRuntime(_MultiAgentOrchestrator):
             return None
         return entity_name not in self.unavailable and entity_name not in self.not_ready
 
+    def room_steward(self, room_id: str) -> AgentBot | None:  # noqa: ARG002
+        """Return the entity the test made every room's steward: its registered bot, else a stand-in with its name."""
+        if self.steward is None:
+            return None
+        return self.agent_bots.get(self.steward) or cast("AgentBot", SimpleNamespace(agent_name=self.steward))
+
     def event_journal_store(self) -> EventJournalStore:
         """Return the store the test handed in, or the runtime's own."""
         return self.journal_store if self.journal_store is not None else super().event_journal_store()
@@ -53,11 +65,13 @@ class ReadyRuntime(_MultiAgentOrchestrator):
 
 @dataclass
 class RecordingRouter:
-    """A running router bot, recording what each grant refresh's follow-up asks of it."""
+    """A running, synced router bot, recording what each grant refresh's follow-up asks of it."""
 
     client: object
     config: Config
     running: bool = True
+    observes_room_members: bool = True
+    accepting_work: bool = True
     follow_ups: list[str] = field(default_factory=list)
 
     def schedule_pending_invite_reconciliation(self) -> None:

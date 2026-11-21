@@ -5,15 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.matrix.client_room_admin import get_joined_rooms
-
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
-    from mindroom.external_triggers.store import TriggerDeliverySnapshot
 
 
 @dataclass
@@ -27,25 +23,16 @@ class ExternalTriggerRuntimeCoordinator:
         config: Config,
         bots: Mapping[str, AgentBot],
     ) -> None:
-        """Bind trigger delivery runtime after router is running."""
-        if not self.api_enabled:
+        """Bind trigger delivery through each trigger's target once any bot runs."""
+        if not self.api_enabled or not any(_running(bot) for bot in bots.values()):
             return
-        router_bot = bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or router_bot.client is None or not router_bot.running:
-            return
-
-        async def is_trigger_snapshot_ready(snapshot: TriggerDeliverySnapshot) -> bool:
-            return await self._is_ready(snapshot, bots)
 
         from mindroom.api import main as api_main  # noqa: PLC0415
 
         api_main.bind_external_trigger_runtime(
             api_main.app,
-            client=router_bot.client,
-            conversation_reader=router_bot.conversation_reader,
             runtime_config=config,
-            is_trigger_snapshot_ready=is_trigger_snapshot_ready,
-            admission_fence=router_bot.admission_fence,
+            target_bot=lambda entity_name: _running(bots.get(entity_name)),
         )
 
     def unbind(self) -> None:
@@ -56,27 +43,7 @@ class ExternalTriggerRuntimeCoordinator:
 
         api_main.unbind_external_trigger_runtime(api_main.app)
 
-    async def _is_ready(
-        self,
-        snapshot: TriggerDeliverySnapshot,
-        bots: Mapping[str, AgentBot],
-    ) -> bool:
-        """Return whether router and target clients are currently joined to one trigger room."""
-        if not snapshot.enabled:
-            return False
-        router_bot = bots.get(ROUTER_AGENT_NAME)
-        target_bot = bots.get(snapshot.target.agent)
-        if (
-            router_bot is None
-            or router_bot.client is None
-            or not router_bot.running
-            or target_bot is None
-            or target_bot.client is None
-            or not target_bot.running
-        ):
-            return False
-        router_joined_room_ids = frozenset(await get_joined_rooms(router_bot.client) or ())
-        target_joined_room_ids = frozenset(await get_joined_rooms(target_bot.client) or ())
-        return (
-            snapshot.resolved_room_id in router_joined_room_ids and snapshot.resolved_room_id in target_joined_room_ids
-        )
+
+def _running(bot: AgentBot | None) -> AgentBot | None:
+    """Return the bot while it runs with a client: the one test of a trigger target for binding and delivery."""
+    return bot if bot is not None and bot.running and bot.client is not None else None

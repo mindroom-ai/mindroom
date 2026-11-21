@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -118,4 +118,4 @@ _OPERATION_ADAPTER = TypeAdapter(AgentCliOperation)
 
 def parse_operation(payload: object) -> AgentCliOperation:
     """Validate one untrusted operation without adding caller identity."""
-    return cast("AgentCliOperation", _OPERATION_ADAPTER.validate_python(payload))
+    return _OPERATION_ADAPTER.validate_python(payload)

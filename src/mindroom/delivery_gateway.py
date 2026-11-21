@@ -18,7 +18,7 @@ import nio
 from mindroom import constants, interactive
 from mindroom import reply_lifecycle as rl
 from mindroom.cancellation import classify_cancel_source
-from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import ACTING_REQUESTER_KEY, ROUTE_EVENT_TYPE, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     MatrixDelivery,
@@ -79,6 +79,7 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, build_reaction_content
 from mindroom.matrix.room_history_reads import (
     find_outbox_delivery_event_id_via_room_messages,
+    find_route_event_id_via_room_messages,
     missing_outbox_delivery_copy_indices_via_room_messages,
 )
 from mindroom.matrix.segmented_messages import first_segment_target_bytes, segment_matrix_content
@@ -129,6 +130,7 @@ from mindroom.streaming import (
     send_streaming_response,
     stream_progress_edits,
 )
+from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -408,6 +410,8 @@ class SendTextRequest:  # noqa: D101
     # command confirmation -- and takes the direct path, because a synthetic
     # turn ID would put a row in the outbox that recovery cannot reason about.
     delivery_turn_id: str | None = None
+    # The Matrix transaction of a send that is not a turn's, so its retry collapses onto the event already accepted.
+    transaction_id: str | None = None
     # The stored turn the producer recorded this answer for; its FINAL binds that turn and settles its sources.
     delivery_turn_key: str | None = None
     delivery_result: dict[str, object] | None = None
@@ -735,6 +739,8 @@ class DeliveryGateway:
         if not isinstance(content, dict):
             msg = f"Matrix returned delivered event {event_id!r} without content"
             raise _DeliveryObservationError(msg)
+        # This account sent the event, and the projection holds its replies with their tool markers in their text.
+        content = tool_markers_in_text(content)
         return ProjectedEvent(
             event_id=event_id,
             room_id=room_id,
@@ -912,11 +918,7 @@ class DeliveryGateway:
                 result=request.delivery_result,
             )
         if request.delivery_turn_id is None:
-            return await send_message_outcome(
-                client,
-                room_id,
-                content,
-            )
+            return await send_message_outcome(client, room_id, content, transaction_id=request.transaction_id)
         requested_delivery: DeliveredMatrixEvent | None = None
 
         async def send(claimed: MatrixDelivery) -> str:
@@ -1587,6 +1589,28 @@ class DeliveryGateway:
             **resolved_target.log_context,
         )
         return None
+
+    async def send_route(self, room_id: str, content: dict[str, Any]) -> str | None:
+        """Send a steward's hidden route event, a long one with its long-text file or not at all; return its event ID."""
+        outcome = await send_message_outcome(
+            self._ready_client(),
+            room_id,
+            content,
+            message_type=ROUTE_EVENT_TYPE,
+            sidecar_required=True,
+        )
+        return outcome.event_id if isinstance(outcome, DeliveredMatrixEvent) else None
+
+    async def sent_route(self, room_id: str, source_event_ids: Sequence[str]) -> str | None:
+        """Return the route this bot sent for exactly these messages, when the room's history since them holds one.
+
+        Raises ``UnresolvedOpaqueRoomHistoryError`` when an event of this bot's that it cannot read may be that route.
+        """
+        return await find_route_event_id_via_room_messages(
+            self._ready_client(),
+            room_id,
+            source_event_ids=source_event_ids,
+        )
 
     async def _edit_content(
         self,

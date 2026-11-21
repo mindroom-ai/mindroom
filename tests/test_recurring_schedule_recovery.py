@@ -674,7 +674,8 @@ async def test_owner_stopped_during_a_one_time_send_leaves_the_trigger_to_its_re
 
     assert old_client.room_send.await_count == new_client.room_send.await_count == 1
     assert new_client.room_send.await_args.kwargs["tx_id"] == old_client.room_send.await_args.kwargs["tx_id"]
-    assert new_client.room_send.await_args.kwargs["tx_id"] == "schedule_!room:example.org_daily"
+    # The ID names the task and the saved workflow, so an edited task fires under another one.
+    assert new_client.room_send.await_args.kwargs["tx_id"].startswith("schedule_!room:example.org_daily_")
     assert task.message in new_client.room_send.await_args.kwargs["content"]["body"]
     assert [call.kwargs["content"]["status"] for call in new_client.room_put_state.await_args_list] == ["completed"]
     assert [(log["event"], log["log_level"]) for log in logs if log["log_level"] == "error"] == []

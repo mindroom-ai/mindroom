@@ -55,7 +55,7 @@ class _ClockOnToday(datetime):
     """The dreaming automation's clock, read through ``_now``."""
 
     @classmethod
-    def now(cls, tz: tzinfo | None = None) -> datetime:
+    def now(cls, tz: tzinfo | None = None) -> datetime:  # ty: ignore[incompatible-method-override]  # test clock
         return _now().astimezone(tz)
 
 

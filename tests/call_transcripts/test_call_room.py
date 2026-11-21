@@ -6,14 +6,15 @@ import asyncio
 import gc
 import json
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import aiohttp
 import nio
 import pytest
 
-from mindroom.call_transcripts import router_room
-from mindroom.call_transcripts.router_room import RouterCallRoom
+from mindroom.call_transcripts import call_room
+from mindroom.call_transcripts.call_room import CallRoom
 from mindroom.call_transcripts.service import CallTranscript, EndedRow, TranscriptMessage, _Turn
 from mindroom.constants import CALL_TRANSCRIPT_CONTENT_KEY, SKIP_MENTIONS_KEY
 from tests.test_journal_ingress import TestAdmittedWorkReachesItsCallback as _AdmittedWork
@@ -184,14 +185,25 @@ def _room(
     *,
     monotonic: Callable[[], float] = lambda: 0.0,
     titles: list[tuple[str, str, str, str]] | None = None,
-) -> RouterCallRoom:
-    """The room side over ``client``; each request to title a thread again goes into ``titles``."""
+    poster: FakeRouterClient | None = None,
+) -> CallRoom:
+    """The room side over ``client``, which reads and, unless ``poster`` is given, posts in the rooms it is in.
+
+    Each request to title a thread again goes into ``titles``.
+    """
     asked = [] if titles is None else titles
-    return RouterCallRoom(
-        client=lambda: cast("nio.AsyncClient | None", client),
+    return CallRoom(
+        ready=lambda _room_id: client is not None,
+        reader=partial(_in_room, client),
+        poster=partial(_in_room, poster or client),
         retitle=lambda *request: asked.append(request),
         monotonic=monotonic,
     )
+
+
+def _in_room(client: FakeRouterClient | None, room_id: str) -> nio.AsyncClient | None:
+    """Return the client for a room it is in, as the runtime picks a room's steward and poster among the joined bots."""
+    return cast("nio.AsyncClient", client) if client is not None and room_id in client.rooms else None
 
 
 def _ended_row(*, transcript_event_id: str | None = None) -> EndedRow:
@@ -232,7 +244,7 @@ async def test_without_a_ready_router_nothing_can_be_told() -> None:
     """Before the router is ready, or after it stopped, every question is answered with None and nothing is posted."""
     room = _room(None)
 
-    assert room.router_joined(ROOM) is None
+    assert room.poster_joined(ROOM) is None
     assert await room.is_member(ROOM, ANN) is None
     assert await room.may_post(ROOM, ANN) is None
     assert await room.display_names(ROOM, [ANN]) is None
@@ -245,12 +257,12 @@ async def test_without_a_ready_router_nothing_can_be_told() -> None:
 async def test_a_room_the_router_is_not_in_has_no_members() -> None:
     """The router reads only rooms it is in: in any other, nobody is a member or may post."""
     client = FakeRouterClient(state={ROOM: [_member(ANN)]})
-    assert _room(client).router_joined(ROOM) is True
+    assert _room(client).poster_joined(ROOM) is True
     client.rooms.clear()
 
     room = _room(client)
 
-    assert room.router_joined(ROOM) is False
+    assert room.poster_joined(ROOM) is False
     assert await room.is_member(ROOM, ANN) is False
     assert await room.may_post(ROOM, ANN) is False
     assert await room.display_names(ROOM, [ANN]) is None
@@ -359,7 +371,7 @@ async def test_a_read_that_raises_cannot_tell_and_never_raises(error: BaseExcept
 @pytest.mark.asyncio
 async def test_a_read_of_the_room_that_takes_too_long_cannot_tell(monkeypatch: pytest.MonkeyPatch) -> None:
     """A homeserver that does not answer a read of the room in time is a room that cannot be read, never a wait."""
-    monkeypatch.setattr(router_room, "_STATE_READ_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(call_room, "_STATE_READ_TIMEOUT_SECONDS", 0.01)
     client = FakeRouterClient(state={ROOM: [_member(ANN)]}, gate=asyncio.Event())
     room = _room(client)
 
@@ -413,9 +425,9 @@ async def test_the_router_is_held_to_the_power_levels_for_messages_too() -> None
     """Whether the router may post its calls' messages follows the same rule; without a ready router it cannot tell."""
     levels = _power_levels(users={ROUTER: 0}, events_default=50)
 
-    assert await _room(FakeRouterClient(state={ROOM: [_create("11"), levels]})).router_may_post(ROOM) is False
-    assert await _room(FakeRouterClient(state={ROOM: [_create("11")]})).router_may_post(ROOM) is True
-    assert await _room(None).router_may_post(ROOM) is None
+    assert await _room(FakeRouterClient(state={ROOM: [_create("11"), levels]})).poster_may_post(ROOM) is False
+    assert await _room(FakeRouterClient(state={ROOM: [_create("11")]})).poster_may_post(ROOM) is True
+    assert await _room(None).poster_may_post(ROOM) is None
 
 
 @pytest.mark.asyncio
@@ -430,12 +442,12 @@ async def test_posting_in_an_encrypted_room_follows_the_power_levels_for_encrypt
 
     assert await encrypted.may_post(ROOM, ANN) is True
     assert await encrypted.may_post(ROOM, BOB) is False
-    assert await encrypted.router_may_post(ROOM) is False
+    assert await encrypted.poster_may_post(ROOM) is False
 
     plain = _room(FakeRouterClient(state={ROOM: [_create("11"), levels]}))
 
     assert await plain.may_post(ROOM, BOB) is True
-    assert await plain.router_may_post(ROOM) is True
+    assert await plain.poster_may_post(ROOM) is True
 
     by_default = _power_levels(users={ANN: 50, BOB: 10}, events_default=50, events={"m.room.message": 0})
     encrypted = _room(FakeRouterClient(state={ROOM: [_create("11"), _encryption(), by_default]}))
@@ -657,7 +669,12 @@ async def test_switching_off_while_the_sidecar_uploads_sends_nothing() -> None:
     """A transcript whose sidecar is still uploading when call transcripts go off is never sent."""
     client = FakeRouterClient(state={ROOM: [_member(ANN)]}, upload_gate=asyncio.Event())
     on = True
-    room = RouterCallRoom(client=lambda: cast("nio.AsyncClient", client) if on else None, retitle=lambda *_: None)
+    room = CallRoom(
+        ready=lambda _room_id: on,
+        reader=partial(_in_room, client),
+        poster=partial(_in_room, client),
+        retitle=lambda *_: None,
+    )
     turns = tuple(_Turn(sender=ANN if index % 2 else BOB, text="word " * 400) for index in range(60))
     posting = asyncio.ensure_future(room.post_transcript(_message(turns=turns)))
     await client.uploading.wait()
@@ -691,6 +708,37 @@ async def test_a_failed_post_to_a_room_the_router_has_not_synced_answers_none() 
     client.rooms.clear()
 
     assert await _room(client).post_row(OTHER_ROOM, "call1") is None
+
+
+@pytest.mark.asyncio
+async def test_call_rows_posted_by_room_poster() -> None:
+    """In a room with one person, one agent and no owner account, the room's poster sends the row and the message."""
+    steward = FakeRouterClient(state={ROOM: [_member(ANN)]}, user_id="@mindroom_steward:example.org")
+    agent = FakeRouterClient(state={ROOM: [_member(ANN)]}, user_id="@mindroom_code:example.org")
+    room = _room(steward, poster=agent)
+
+    assert room.poster_joined(ROOM) is True
+    assert await room.is_member(ROOM, ANN) is True
+    assert await room.poster_may_post(ROOM) is True
+    assert await room.post_row(ROOM, "call1") == "$event-0"
+    assert await room.edit_row(_ended_row()) == "$event-1"
+    assert await room.post_transcript(_message()) == "$event-2"
+    assert len(agent.sent) == 3
+    assert (steward.sent, steward.state_reads, agent.state_reads) == ([], 1, 0)
+
+
+@pytest.mark.asyncio
+async def test_no_agent_room_gets_no_transcript() -> None:
+    """A room no agent is in has no poster: its call's row and transcript are never posted, by anyone."""
+    elsewhere = FakeRouterClient(state={OTHER_ROOM: [_member(ANN)]})
+    room = _room(elsewhere)
+
+    assert room.poster_joined(ROOM) is False
+    assert await room.poster_may_post(ROOM) is False
+    assert await room.post_row(ROOM, "call1") is None
+    assert await room.post_transcript(_message()) is None
+    assert elsewhere.sent == []
+    assert elsewhere.reads == 0
 
 
 @pytest.mark.asyncio

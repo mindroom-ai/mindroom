@@ -28,6 +28,7 @@ from mindroom.model_catalog_receiver import (
     register_model_catalog_receiver,
 )
 from mindroom.room_model_overrides import set_room_model_override
+from mindroom.room_steward import room_poster
 from mindroom.thread_models import set_thread_model_override
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_client, picker_setup
@@ -84,10 +85,10 @@ def receiver_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple:
     current = [config]
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
         runtime_paths=paths,
         config_getter=lambda: current[0],
         membership_index=index,
+        answers_in_room=lambda _room_id: True,
         callback_wrapper=lambda callback: callback,
     )
     callback = client.add_to_device_callback.call_args.args[0]
@@ -278,10 +279,10 @@ async def test_duplicates_and_capacity_are_bounded_before_task_queue(
 
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
+        answers_in_room=lambda _room_id: True,
         callback_wrapper=wrapper,
     )
     callback = client.add_to_device_callback.call_args.args[0]
@@ -310,7 +311,7 @@ async def test_shared_in_flight_pool_drop_is_logged(tmp_path: Path) -> None:
 
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
+        answers_in_room=lambda _room_id: True,
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
@@ -341,10 +342,10 @@ async def test_one_account_with_many_devices_leaves_capacity_for_other_users(tmp
 
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
+        answers_in_room=lambda _room_id: True,
         callback_wrapper=wrapper,
     )
     callback = client.add_to_device_callback.call_args.args[0]
@@ -384,10 +385,10 @@ async def test_completed_requests_from_many_devices_share_one_rate_window(
 
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
+        answers_in_room=lambda _room_id: True,
         callback_wrapper=wrapper,
     )
     callback = client.add_to_device_callback.call_args.args[0]
@@ -403,18 +404,61 @@ async def test_completed_requests_from_many_devices_share_one_rate_window(
 
 
 @pytest.mark.asyncio
-async def test_non_router_does_not_register(tmp_path: Path) -> None:
-    """Only the runtime router advertises discovery."""
-    client, config, paths, index, _, _ = picker_setup(tmp_path)
+async def test_agent_device_answers_discovery_in_room_without_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent answers discovery on its own device, so a room without the owner account has a catalog."""
+    _, config, paths, index, _, agent = picker_setup(tmp_path)
+    client = picker_client(config, paths, USER, account="helper")
+    device = OlmDevice(USER, "REQUESTER", {"ed25519": "fingerprint", "curve25519": "curve"})
+    client.olm = SimpleNamespace(device_store={USER: {"REQUESTER": device}})
+    sent = AsyncMock()
+    monkeypatch.setattr("mindroom.model_catalog_receiver.send_encrypted_to_device", sent)
     register_model_catalog_receiver(
         client=client,
-        agent_name="helper",
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
+        answers_in_room=lambda _room_id: True,
         callback_wrapper=lambda callback: callback,
     )
-    client.add_to_device_callback.assert_not_called()
+    await client.add_to_device_callback.call_args.args[0](request())
+    assert sent.call_args.kwargs["content"]["agent_user_ids"] == [agent]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("owner_joined", "answering"), [(True, "router"), (False, "helper")])
+async def test_one_device_per_room_answers_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_joined: bool,
+    answering: str,
+) -> None:
+    """A room has one catalog: its poster's, the owner account where joined, else the agent with the lowest ID."""
+    _, config, paths, index, router, agent = picker_setup(tmp_path)
+    accounts = ("router", "helper") if owner_joined else ("helper",)
+    members = (USER, agent, router) if owner_joined else (USER, agent)
+    sent = AsyncMock()
+    monkeypatch.setattr("mindroom.model_catalog_receiver.send_encrypted_to_device", sent)
+    bots = {}
+    for account in accounts:
+        client = picker_client(config, paths, *members, account=account)
+        device = OlmDevice(USER, "REQUESTER", {"ed25519": "fingerprint", "curve25519": "curve"})
+        client.olm = SimpleNamespace(device_store={USER: {"REQUESTER": device}})
+        bots[account] = SimpleNamespace(client=client, running=True)
+        register_model_catalog_receiver(
+            client=client,
+            runtime_paths=paths,
+            config_getter=lambda: config,
+            membership_index=index,
+            answers_in_room=lambda room_id, bot=bots[account]: room_poster(bots, room_id) is bot,
+            callback_wrapper=lambda callback: callback,
+        )
+    for bot in bots.values():
+        await bot.client.add_to_device_callback.call_args.args[0](request())
+
+    assert [call.args[0] for call in sent.call_args_list] == [bots[answering].client]
 
 
 @pytest.mark.asyncio
@@ -491,7 +535,7 @@ async def test_inherited_team_and_stale_room_override_name_their_accounts(
     monkeypatch.setattr("mindroom.model_catalog_receiver.send_encrypted_to_device", sent)
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
+        answers_in_room=lambda _room_id: True,
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=AgentReplyMembershipIndex(),
@@ -682,10 +726,10 @@ async def test_queued_request_cannot_repin_replaced_device(tmp_path: Path, monke
 
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
+        answers_in_room=lambda _room_id: True,
         callback_wrapper=wrapper,
     )
     await client.add_to_device_callback.call_args.args[0](request())
@@ -782,10 +826,10 @@ async def test_catalog_receiver_delivers_through_public_nio_transport(
         monkeypatch.setattr(client, "add_to_device_callback", registered)
         register_model_catalog_receiver(
             client=client,
-            agent_name="router",
             runtime_paths=paths,
             config_getter=lambda: config,
             membership_index=index,
+            answers_in_room=lambda _room_id: True,
             callback_wrapper=lambda callback: callback,
         )
         event = request()

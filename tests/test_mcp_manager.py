@@ -1132,6 +1132,9 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
+            return None
+
         async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, object]:
             error = " Invalid_Grant "
             description = "refresh grant rejected: provider-token-value"
@@ -1264,6 +1267,9 @@ async def test_mcp_bridge_preserves_credentials_and_retries_transient_refresh_fa
             return self
 
         async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
             return None
 
         async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, object]:
@@ -1717,6 +1723,9 @@ async def test_mcp_manager_logs_successful_oauth_refresh_and_persists_credential
             return self
 
         async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
             return None
 
         async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, object]:
@@ -4836,48 +4845,6 @@ async def test_a_local_collision_keeps_the_server_and_leaves_out_only_its_mcp_fu
     owners = {function.name: toolkit.name for toolkit in agent.spec.toolkits for function in toolkit.functions}
     assert owners["run_shell_command"] == "shell_tools"
     assert owners["run_status"] == "mcp_demo"
-
-
-@pytest.mark.asyncio
-async def test_mcp_manager_reserves_matrix_runtime_invite_router_function(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """An MCP function named like the router recovery call leaves the agent's tools; its server stays connected."""
-    _patch_manager(monkeypatch)
-    _FakeClientSession.tool_list = [_tool("router")]
-    runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
-        {
-            "defaults": {"tools": []},
-            "mcp_servers": {
-                "demo": {
-                    "transport": "stdio",
-                    "command": "npx",
-                    "tool_prefix": "invite",
-                },
-            },
-            "models": {"default": {"provider": "openai", "id": "test-model"}},
-            "agents": {
-                "code": {
-                    "display_name": "Code",
-                    "role": "Write code",
-                    "tools": ["mcp_demo"],
-                },
-            },
-        },
-        runtime_paths,
-    )
-    manager = MCPServerManager(runtime_paths)
-    persist_entity_accounts(config, runtime_paths)
-    bind_mcp_server_manager(manager)
-    try:
-        assert await manager.sync_servers(config) == {"demo"}
-        assert manager.failed_server_ids() == set()
-        agent = _code_agent(config, runtime_paths)
-    finally:
-        await manager.shutdown()
-    assert "invite_router" not in _function_names(agent)
 
 
 @pytest.mark.asyncio

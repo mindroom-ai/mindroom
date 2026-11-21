@@ -146,29 +146,13 @@ def insert_scope(transaction: Transaction, principal_id: str, *, delivery_id: st
     )
 
 
-def _current(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    room_id: str,
-    consent_epoch: int,
-    responder_principal_id: str,
-    responder_epoch: int,
-) -> bool:
-    return _epoch(transaction, principal_id, room_id) == consent_epoch and (
-        _epoch(transaction, responder_principal_id, room_id) == responder_epoch
-    )
+def _current(transaction: Transaction, room_id: str, responder_principal_id: str, responder_epoch: int) -> bool:
+    # The ledger's epoch in a grant's scope never changes, so the membership of the responder alone ages a grant.
+    return _epoch(transaction, responder_principal_id, room_id) == responder_epoch
 
 
-def _row_current(transaction: Transaction, principal_id: str, row: Row) -> bool:
-    return _current(
-        transaction,
-        principal_id,
-        room_id=str(row["room_id"]),
-        consent_epoch=int(row["consent_epoch"]),
-        responder_principal_id=str(row["responder_principal_id"]),
-        responder_epoch=int(row["responder_epoch"]),
-    )
+def _row_current(transaction: Transaction, row: Row) -> bool:
+    return _current(transaction, str(row["room_id"]), str(row["responder_principal_id"]), int(row["responder_epoch"]))
 
 
 def _grant_select(extra_columns: str = "") -> str:
@@ -231,14 +215,7 @@ def apply_active(
 ) -> bool:
     """Approve a new call under an active grant of its scope and reserve its receipt in the offered card's place."""
     card, scope = offer.card, offer.scope
-    if scope is None or not _current(
-        transaction,
-        principal_id,
-        room_id=room_id,
-        consent_epoch=scope.consent_epoch,
-        responder_principal_id=scope.responder_principal_id,
-        responder_epoch=scope.responder_epoch,
-    ):
+    if scope is None or not _current(transaction, room_id, scope.responder_principal_id, scope.responder_epoch):
         return False
     now = time.time_ns()
     grant_row = transaction.fetchone(
@@ -249,7 +226,7 @@ def apply_active(
         """,
         (principal_id, scope.scope_key, now),
     )
-    if grant_row is None or not _row_current(transaction, principal_id, grant_row):
+    if grant_row is None or not _row_current(transaction, grant_row):
         return False
     expires = transaction.fetchone(
         "SELECT expires_at_ns FROM approval_calls WHERE owner_id = ? AND generation = ? AND tool_call_id = ?",
@@ -287,7 +264,7 @@ def apply_active(
     )
     if not decided.recorded:
         return False
-    approval_cards.reserve_receipt(
+    approval_cards.reserve(
         transaction,
         principal_id,
         kind="grant_receipt",
@@ -297,6 +274,7 @@ def apply_active(
         room_id=room_id,
         thread_id=thread_id,
         membership_epoch=membership_epoch,
+        sender_principal_id=card.sender_principal_id,
         payload=approval_cards.terminal_content(
             card.payload,
             status="approved",
@@ -313,7 +291,7 @@ _OFFERING_CARDS = """
     SELECT cards.delivery_id, cards.room_id, cards.thread_id,
            cards.owner_id, cards.generation, cards.tool_call_id,
            scope.scope_key, scope.operation, scope.requester_id, scope.entity_name, scope.invoking_agent,
-           scope.responder_principal_id, scope.responder_epoch, scope.consent_epoch
+           scope.responder_principal_id, scope.responder_epoch
     FROM approval_cards AS cards
     JOIN approval_card_scopes AS scope
       ON scope.principal_id = cards.principal_id AND scope.delivery_id = cards.delivery_id
@@ -352,7 +330,7 @@ def create(
     if (
         row is None
         or str(row["requester_id"]) != sender_id
-        or not _row_current(transaction, principal_id, row)
+        or not _row_current(transaction, row)
         or (current_binding is not None and not str(row["operation"]).startswith(current_binding + ":"))
     ):
         return ()
@@ -441,7 +419,7 @@ def revoke(
         row is None
         or str(row["grant_id"]) != grant_id
         or row["requester_id"] != sender_id
-        or not _row_current(transaction, principal_id, row)
+        or not _row_current(transaction, row)
     ):
         return None
     grant = _grant(row)
@@ -492,7 +470,7 @@ def maintain(transaction: Transaction, principal_id: str, *, grant_id: str | Non
     for row in rows:
         grant = _grant(row)
         if (
-            not _row_current(transaction, principal_id, row)
+            not _row_current(transaction, row)
             or (grant.revoked_at_ns is None and grant.expires_at_ns <= now)
             or row["revocation_event_id"] is not None
         ):

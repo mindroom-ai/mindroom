@@ -66,8 +66,7 @@ function storedBroker() {
   const config = useConfigStore.getState().config;
   return config
     ? (readConfigRoot(config, "egress_broker") as
-        | { services: Record<string, unknown> }
-        | undefined)
+        { services: Record<string, unknown> } | undefined)
     : undefined;
 }
 

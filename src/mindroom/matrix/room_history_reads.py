@@ -18,8 +18,10 @@ from aiohttp import ClientError
 from nio.responses import Response, RoomThreadsError, RoomThreadsResponse, verify
 from nio.schemas import Schemas
 
+from mindroom.constants import ROUTE_EVENT_TYPE, SILENT_SCHEDULE_EVENT_TYPE
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
+from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
@@ -32,7 +34,7 @@ _MAX_ENUMERATED_THREAD_ROOTS = 2000
 _MAX_THREAD_ENUMERATION_PAGES = 100
 
 
-class _UnresolvedOpaqueRoomHistoryError(RuntimeError):
+class UnresolvedOpaqueRoomHistoryError(RuntimeError):
     """Raised when undecryptable events from a delivery's sender could hide the exact delivery a scan must prove."""
 
 
@@ -88,6 +90,27 @@ def _room_threads_page_error_from_exception(exc: BaseException) -> RoomThreadsPa
     return RoomThreadsPageError(response=response)
 
 
+async def _backward_page(
+    client: nio.AsyncClient,
+    room_id: str,
+    start: str | None,
+    event_types: Collection[str],
+    scan_name: str,
+) -> nio.RoomMessagesResponse:
+    """Read one page of a room's history, newest first, or raise for a scan that could not read it."""
+    response = await client.room_messages(
+        room_id,
+        start=start,
+        limit=100,
+        message_filter={"types": list(event_types)},
+        direction=nio.MessageDirection.back,
+    )
+    if not isinstance(response, nio.RoomMessagesResponse):
+        msg = f"{scan_name} room scan failed for {room_id}: {response}"
+        raise RuntimeError(msg)  # noqa: TRY004
+    return response
+
+
 async def find_response_event_ids_via_room_messages(
     client: nio.AsyncClient,
     room_id: str,
@@ -107,16 +130,7 @@ async def find_response_event_ids_via_room_messages(
     pages_fetched = 0
 
     while remaining_sources or (not sources and response_content is not None and not response_event_ids):
-        response = await client.room_messages(
-            room_id,
-            start=from_token,
-            limit=100,
-            message_filter={"types": list(event_types)},
-            direction=nio.MessageDirection.back,
-        )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            msg = f"response recovery room scan failed for {room_id}: {response}"
-            raise RuntimeError(msg)  # noqa: TRY004
+        response = await _backward_page(client, room_id, from_token, event_types, "response recovery")
         pages_fetched += 1
         for event in response.chunk:
             if not isinstance(event, nio.Event):
@@ -130,7 +144,10 @@ async def find_response_event_ids_via_room_messages(
                 exact_content_required=response_content is not None,
             )
             event_info = EventInfo.from_event(event_source)
-            exact_content = response_content is not None and event_source.get("content") == response_content
+            # This sender's reply reached Matrix without its tool markers, and its outbox row holds it with them.
+            own = response_content is not None and event_source.get("sender") == response_sender
+            content = event_source.get("content") if own else None
+            exact_content = isinstance(content, dict) and tool_markers_in_text(content) == response_content
             replies_to_source = (
                 not event_info.is_edit and not event_info.is_thread_fallback and event_info.reply_to_event_id in sources
             )
@@ -161,6 +178,54 @@ async def find_response_event_ids_via_room_messages(
     return frozenset(response_event_ids)
 
 
+async def find_route_event_id_via_room_messages(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    source_event_ids: Collection[str],
+) -> str | None:
+    """Return the hidden route this client's account sent for exactly these messages, None when history holds none.
+
+    The walk starts at the room's newest event and ends at the route, at the newest of the messages, which every route
+    of them follows, or at the scan's page bound: a route older than that was lost long ago.
+    Raises ``UnresolvedOpaqueRoomHistoryError`` when it finds no route and passed an event of the account, newer than
+    those messages, that this device cannot read: it may be that route.
+    """
+    sources = sorted(source_event_ids)
+    opaque = False
+    from_token: str | None = None
+    for _page in range(_MAX_EXACT_DELIVERY_SCAN_PAGES):
+        response = await _backward_page(
+            client,
+            room_id,
+            from_token,
+            (*_ROOM_HISTORY_MESSAGE_TYPES, ROUTE_EVENT_TYPE, SILENT_SCHEDULE_EVENT_TYPE),
+            "route recovery",
+        )
+        for event in response.chunk:
+            if not isinstance(event, nio.Event):
+                continue
+            event_source = event.source if isinstance(event.source, dict) else {}
+            content = event_source.get("content")
+            route = content.get(ROUTE_EVENT_TYPE) if isinstance(content, dict) else None
+            routed = route.get("event_ids") if isinstance(route, dict) else None
+            own_type = event_source.get("type") if event_source.get("sender") == client.user_id else None
+            if own_type == ROUTE_EVENT_TYPE and isinstance(routed, list) and sorted(map(str, routed)) == sources:
+                return event.event_id
+            if event_source.get("event_id") in sources:
+                break
+            opaque = opaque or own_type == "m.room.encrypted"
+        else:
+            from_token = response.end
+            if from_token:
+                continue
+        break
+    if opaque:
+        msg = f"route recovery room scan for {room_id} passed events of its sender that this device cannot read"
+        raise UnresolvedOpaqueRoomHistoryError(msg)
+    return None
+
+
 def _refuse_opaque_exact_delivery_candidate(
     *,
     room_id: str,
@@ -173,7 +238,7 @@ def _refuse_opaque_exact_delivery_candidate(
         return
     if event_source.get("type") == "m.room.encrypted":
         msg = f"exact delivery room scan for {room_id} contains undecryptable events from its sender"
-        raise _UnresolvedOpaqueRoomHistoryError(msg)
+        raise UnresolvedOpaqueRoomHistoryError(msg)
 
 
 async def find_outbox_delivery_event_id_via_room_messages(
@@ -229,7 +294,7 @@ def _matched_delivery_copy_key(
     content = event_source.get("content")
     if not isinstance(content, dict):
         return None
-    key = _canonical_content_key(content)
+    key = _canonical_content_key(tool_markers_in_text(content))
     return key if key in expected else None
 
 
@@ -251,16 +316,13 @@ async def _count_delivery_copies_via_room_messages(
         return all(found[key] >= count for key, count in expected.items())
 
     while not all_found():
-        response = await client.room_messages(
+        response = await _backward_page(
+            client,
             room_id,
-            start=from_token,
-            limit=100,
-            message_filter={"types": [delivery_event_type, "m.room.encrypted"]},
-            direction=nio.MessageDirection.back,
+            from_token,
+            (delivery_event_type, "m.room.encrypted"),
+            "delivery copy count",
         )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            msg = f"delivery copy count room scan failed for {room_id}: {response}"
-            raise RuntimeError(msg)  # noqa: TRY004
         pages_fetched += 1
         for event in response.chunk:
             key = _matched_delivery_copy_key(

@@ -23,6 +23,8 @@ from mindroom.constants import (
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
     REASONING_CONTENT_KEY,
+    SCHEDULED_HISTORY_LIMIT_KEY,
+    SCHEDULED_MODEL_KEY,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
@@ -65,6 +67,8 @@ _PASSTHROUGH_CONTENT_KEYS = frozenset(
         ORIGINAL_SENDER_KEY,
         PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
         PER_FIRE_THREAD_ROOT_KEY,
+        SCHEDULED_HISTORY_LIMIT_KEY,
+        SCHEDULED_MODEL_KEY,
         AI_RUN_METADATA_KEY,
         STREAM_STATUS_KEY,
         STREAM_WARMUP_SUFFIX_KEY,
@@ -808,6 +812,9 @@ def _ensure_minimum_preview_can_fit(
     smallest possible fallback cannot fit, uploading cannot make the event
     deliverable and would only leave an unreferenced attachment behind.
     """
+    if "body" not in source_content:
+        msg = f"Matrix event without text exceeds the event size limit in room {room_id}"
+        raise MatrixEventTooLargeError(msg)
     preview_msgtype = "m.notice" if source_content.get("msgtype") == "m.notice" else "m.text"
     minimum_preview: dict[str, Any] = {"msgtype": preview_msgtype, "body": ""}
     _copy_preview_metadata(source_content, minimum_preview)
@@ -901,11 +908,13 @@ async def prepare_large_message(
         room_encrypted=encrypted_delivery_safe,
     )
     current_size = calculate_event_size(content)
-    if current_size <= size_limit and calculate_delivery_event_size(content) <= _MATRIX_EVENT_HARD_LIMIT:
+    source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
+    # An event without text, such as a hidden route, has nothing a sidecar could carry: only the event limit binds it.
+    textless = "body" not in source_content
+    if (textless or current_size <= size_limit) and calculate_delivery_event_size(content) <= _MATRIX_EVENT_HARD_LIMIT:
         return content
 
-    source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
-    preview_text = source_content["body"]
+    preview_text = source_content.get("body", "")
     _ensure_minimum_preview_can_fit(
         content,
         source_content,

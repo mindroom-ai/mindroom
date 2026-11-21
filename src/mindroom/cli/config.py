@@ -1312,7 +1312,6 @@ agents:
 
 router:
   model: {router_model}
-  accept_invites: true
 {mindroom_user_block}
 administrators:
   # MindRoom Chat pairing writes the paired owner's Matrix user ID here.
@@ -1341,8 +1340,6 @@ memory:
     provider: sentence_transformers
     config:
       model: {SENTENCE_TRANSFORMERS_DEFAULT}
-  file:
-    max_entrypoint_lines: 200
   search:
     mode: semantic
     include:

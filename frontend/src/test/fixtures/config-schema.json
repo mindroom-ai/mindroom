@@ -1198,7 +1198,7 @@
             "notes_model": null,
             "languages": []
           },
-          "description": "Transcripts of calls between people in rooms with the router"
+          "description": "Transcripts of calls between people in rooms with a MindRoom account"
         }
       },
       "title": "CallsConfig",
@@ -1847,11 +1847,12 @@
           "title": "Allow Self Config",
           "type": "boolean"
         },
-        "max_preload_chars": {
-          "default": 50000,
-          "description": "Hard cap for extra role preload context loaded from context_files",
+        "max_preload_file_chars": {
+          "default": 30000,
+          "description": "Characters of each file inlined into the system prompt, context files and MEMORY.md alike; a longer file keeps its first whole lines within this limit",
+          "maximum": 200000,
           "minimum": 1,
-          "title": "Max Preload Chars",
+          "title": "Max Preload File Chars",
           "type": "integer"
         },
         "automations": {
@@ -3902,14 +3903,6 @@
           "default": null,
           "description": "LLM configuration for memory"
         },
-        "file": {
-          "$ref": "#/$defs/_MemoryFileConfig",
-          "default": {
-            "max_entrypoint_lines": 200,
-            "max_entrypoint_tokens": 50000
-          },
-          "description": "File-backed memory configuration"
-        },
         "search": {
           "$ref": "#/$defs/MemorySearchConfig",
           "default": {
@@ -4759,7 +4752,7 @@
         },
         "trigger_tokens": {
           "default": 20000,
-          "description": "Post the prompt once MEMORY.md and the context files total more than this many of the agent model's tokens; a MEMORY.md the preload cannot show whole (memory.file.max_entrypoint_lines or max_entrypoint_tokens) also posts it",
+          "description": "Post the prompt once MEMORY.md and the context files total more than this many of the agent model's tokens; a file the preload cannot show whole (over defaults.max_preload_file_chars) also posts it",
           "minimum": 1,
           "title": "Trigger Tokens",
           "type": "integer"
@@ -5077,7 +5070,7 @@
         },
         "reply_mode": {
           "default": "auto",
-          "description": "'auto' lets the router and the room's only agent or team answer a message that mentions no one; 'mentions' answers only messages that mention an agent or team, and follow-ups in threads an agent or team already replied in or is still answering",
+          "description": "'auto' lets the best-fitting or the room's only agent or team answer a message that mentions no one; 'mentions' answers only messages that mention an agent or team, and follow-ups in threads an agent or team already replied in or is still answering",
           "enum": [
             "auto",
             "mentions"
@@ -5140,7 +5133,7 @@
     },
     "RouterConfig": {
       "additionalProperties": false,
-      "description": "Configuration for the router system.",
+      "description": "Configuration for routing and for the MindRoom owner account.",
       "properties": {
         "model": {
           "default": "default",
@@ -5173,10 +5166,13 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            {
+              "type": "null"
             }
           ],
-          "default": true,
-          "description": "true accepts every room invite to the router, false accepts none, and a list accepts only invites from matching inviter Matrix IDs or glob patterns",
+          "default": null,
+          "description": "Deprecated and ignored: the MindRoom owner account accepts no room invites",
           "title": "Accept Invites"
         },
         "access": {
@@ -5756,7 +5752,7 @@
         },
         "visible_router_echo": {
           "default": true,
-          "description": "Show router voice progress, or direct fallback text when transcription is disabled",
+          "description": "Post the transcript of a voice message before the reply",
           "title": "Visible Router Echo",
           "type": "boolean"
         },
@@ -5986,28 +5982,6 @@
         }
       },
       "title": "_MemoryEmbedderConfig",
-      "type": "object"
-    },
-    "_MemoryFileConfig": {
-      "additionalProperties": false,
-      "description": "File-backed memory configuration.",
-      "properties": {
-        "max_entrypoint_lines": {
-          "default": 200,
-          "description": "Maximum number of lines to preload from MEMORY.md",
-          "minimum": 1,
-          "title": "Max Entrypoint Lines",
-          "type": "integer"
-        },
-        "max_entrypoint_tokens": {
-          "default": 50000,
-          "description": "Maximum tokens, as the turn's model counts them, of whole lines to preload from MEMORY.md",
-          "minimum": 1,
-          "title": "Max Entrypoint Tokens",
-          "type": "integer"
-        }
-      },
-      "title": "_MemoryFileConfig",
       "type": "object"
     },
     "_MemoryLLMConfig": {
@@ -6289,7 +6263,7 @@
         "allow_shell_without_worker": false,
         "worker_grantable_credentials": null,
         "allow_self_config": false,
-        "max_preload_chars": 50000,
+        "max_preload_file_chars": 30000,
         "automations": [],
         "tool_output_auto_save_threshold_bytes": 51200,
         "streaming": {
@@ -6323,10 +6297,6 @@
           "provider": "openai"
         },
         "llm": null,
-        "file": {
-          "max_entrypoint_lines": 200,
-          "max_entrypoint_tokens": 50000
-        },
         "search": {
           "exclude": [],
           "include": [
@@ -6456,7 +6426,7 @@
       "default": {
         "model": "default",
         "judgment": null,
-        "accept_invites": true,
+        "accept_invites": null,
         "access": null
       },
       "description": "Router configuration"

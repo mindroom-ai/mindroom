@@ -21,6 +21,8 @@ class RoomHistoryRecovery:
     state: HistoryRecoveryState
     revision: int = 0
     attempted_policy_rank: int = 0
+    # The room's projection generation when the obligation was read; a departure since then refuses its walk.
+    projection_generation: int = 0
 
 
 class HistoryRecoveryOutcome(StrEnum):
