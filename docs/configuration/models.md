@@ -550,8 +550,9 @@ Changing `seed` changes the response length, split point, and tool-call choice, 
 Use `provider: anthropic` with OpenRouter's Messages endpoint and set `context_window` to enable planning for Claude [native compaction](history.md#native-compaction).
 Use Anthropic's ID (`claude-opus-5-5`), not OpenRouter's slug (`anthropic/claude-opus-5.5`), so MindRoom selects the correct Claude capabilities.
 Set `base_url` to `https://openrouter.ai/api` without `/v1` because the Anthropic SDK appends it.
-Set a model-specific OpenRouter `api_key`; MindRoom refuses to build this route without one and does not use your shared Anthropic key.
-Set [OpenRouter provider preferences](#openrouter-provider-routing) in `extra_kwargs.request_params.extra_body.provider` on this route.
+Always set a model-specific OpenRouter `api_key`; without it, MindRoom can send your shared Anthropic key to OpenRouter.
+Any `ANTHROPIC_CUSTOM_HEADERS` are also sent to OpenRouter, even with a model-specific key.
+Put OpenRouter routing fields (`provider`, `models`, and `fallbacks`) under `extra_kwargs.request_params.extra_body`.
 Do not change an existing thread's OpenRouter `provider.order` or `provider.only` pin to an upstream that cannot read earlier signed thinking: OpenRouter returns HTTP 400 in that case, while unpinned requests stay on a compatible upstream.
 This route uses the partner limits of 5 MiB per base64 image and 16 MB of inline media per request.
 The `provider: openrouter` route uses Chat Completions and keeps text compaction.
