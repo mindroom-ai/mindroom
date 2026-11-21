@@ -49,7 +49,7 @@ Requester identity is split into several identities because each protects a diff
 The crash guarantee is durable callback acceptance with retryable callback execution, then durable turn ownership and terminal deduplication once the turn record exists.
 
 A physical source event ID is an exclusive turn claim, while a discovery alias is only an advisory settlement key.
-Aliases stay separate from canonical source identity so recovery can index every triggering event, such as an interactive selection or the human sources of a coalesced router relay, and later edits and redactions reach the owned prompt, without making one message look coalesced.
+Aliases stay separate from canonical source identity so recovery can index every triggering event, such as an interactive selection or the human sources of a coalesced route, and later edits and redactions reach the owned prompt, without making one message look coalesced.
 
 Approval replies and reactions can have several semantic consumers, so a durable claim selects exactly one before any side effect, and recovery routes only to the claimed consumer instead of rediscovering intent from mutable runtime state.
 Each consumer owns the replay semantics of its own side effects; generic reaction hooks, for example, are at-least-once.

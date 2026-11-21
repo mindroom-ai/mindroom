@@ -20,7 +20,7 @@ agents:
       - shell
 ```
 
-The toolkit is opt-in and works only for a configured agent replying in a Matrix conversation; teams and the router cannot use it.
+The toolkit is opt-in and works only for a configured agent replying in a Matrix conversation; teams and the owner account cannot use it.
 A subagent running as a different agent cannot use it; the replying agent must make the request.
 Canvases need a separate opt-in; see [Turn canvases on](https://docs.mindroom.chat/canvases/#turn-canvases-on).
 The agent cannot choose the recipient, room, thread, or a URL: every request goes to the current conversation and is addressed to the user the agent is answering.

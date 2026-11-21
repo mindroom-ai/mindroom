@@ -225,7 +225,7 @@ Recurring schedules cannot pre-approve calls.
 ## Timezone
 
 The top-level `timezone` setting (default `UTC`) is the IANA timezone MindRoom uses for the current date in agent prompts, message timestamps, file-memory daily notes, automation `cron` times, and interpreting and displaying scheduled times.
-An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones; the router and chat commands such as `!schedule` use the top-level setting.
+An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones; routing and chat commands such as `!schedule` use the top-level setting.
 A team reply uses the timezone of the account that posts it: a configured team uses the top-level setting, and an [ad hoc team](https://docs.mindroom.chat/configuration/teams/#ad-hoc-teams) uses the timezone of the agent whose account posts its reply.
 An unknown timezone name fails config validation.
 
@@ -259,7 +259,7 @@ A run waits rather than proceeding when membership cannot be confirmed.
 
 Schedules are stored in Matrix room state and survive restarts.
 In a room MindRoom did not create, a room admin may need to raise one MindRoom account's power level to the room's state-event level, usually 50, before schedules can be saved; the account with the most power in the room stores the schedules of every agent there, and an agent that cannot save one answers `I need moderator rights in this room to save schedules.`
-MindRoom only acts on schedule state written by its own router, agent, or team accounts; schedule state written by any other account, including a room admin, is ignored and logged.
+MindRoom only acts on schedule state written by its own owner, agent, or team accounts; schedule state written by any other account, including a room admin, is ignored and logged.
 The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16), as Synapse, Tuwunel, and Dendrite do; otherwise reading tasks fails.
 
 ### Scheduled Task Restoration
