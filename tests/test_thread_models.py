@@ -18,14 +18,17 @@ from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.coalescing.batch import requester_coalescing_key
 from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import CommandType, command_parser, get_command_help
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing, ReasoningConfig
-from mindroom.constants import AI_RUN_METADATA_KEY, FORK_CONTENT_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, FORK_CONTENT_KEY, ROUTER_AGENT_NAME
 from mindroom.custom_tools.thread_model import ThreadModelTools
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.llm.runs import RunStatus
 from mindroom.message_target import MessageTarget
+from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.thread_models import (
     _get_thread_model_override,
@@ -49,18 +52,24 @@ from tests.authorization_helpers import (
     isolated_membership_index,
     make_test_tool_runtime_context,
 )
+from tests.bot_helpers import _matrix_room, unique_room_send_responses
 from tests.conftest import (
     bind_runtime_paths,
+    drain_coalescing,
+    install_model_providers,
     make_conversation_reader_mock,
+    make_matrix_client_mock,
     make_relation_lookup,
     make_visible_message,
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.test_hook_sender import _agent_bot, _dispatch_context
 from tests.test_model_selection_commands import OTHER, resolved_thread_models, restricted_config
 from tests.test_model_selection_scope import ROOM, USER
-from tests.turn_dispatch_helpers import make_test_turn
+from tests.threading_helpers import seed_hydrated_conversation
+from tests.turn_dispatch_helpers import dispatch_test_turn, make_test_turn
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -228,7 +237,12 @@ def _fork_bot(tmp_path: Path, agent_name: str = "code") -> AgentBot:
     return bot
 
 
-async def _dispatch_fork_turn(bot: AgentBot, source_event_ids: tuple[str, ...] = (_FORK_ID,)) -> None:
+async def _dispatch_fork_turn(
+    bot: AgentBot,
+    source_event_ids: tuple[str, ...] = (_FORK_ID,),
+    *,
+    pick: str | None = None,
+) -> None:
     """Prepare one turn of the fork ``_FORK_ID`` of ``THREAD_ID`` whose sources are ``source_event_ids``."""
     room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@mindroom_code:localhost")
     event = nio.RoomMessageText.from_dict(
@@ -239,6 +253,12 @@ async def _dispatch_fork_turn(bot: AgentBot, source_event_ids: tuple[str, ...] =
             "content": {"msgtype": "m.text", "body": "@mindroom_code:localhost carry on"},
         },
     )
+    if pick is not None:
+        event.source["content"][THREAD_MODEL_CONTENT_KEY] = {
+            "version": 1,
+            "runtime_user_id": bot.matrix_id.full_id,
+            "model": pick,
+        }
     fork_root = make_visible_message(
         event_id=_FORK_ID,
         content={"body": "carry on", FORK_CONTENT_KEY: {"thread_id": THREAD_ID, "event_id": "$parent-reply:localhost"}},
@@ -263,21 +283,25 @@ def _fork_model(bot: AgentBot) -> str:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("source_event_ids", "inherited"),
+    ("source_event_ids", "pick", "inherited"),
     [
-        ((_FORK_ID,), "large"),
-        ((_FORK_ID, "$fork-next:localhost"), "large"),
-        (("$fork-next:localhost",), "default"),
+        ((_FORK_ID,), None, "large"),
+        ((_FORK_ID, "$fork-next:localhost"), None, "large"),
+        (("$fork-next:localhost",), None, "default"),
+        ((_FORK_ID,), "default", "default"),
+        ((_FORK_ID,), "unknown", "large"),
     ],
-    ids=["first-message", "coalesced-first-messages", "later-message"],
+    ids=["first-message", "coalesced-first-messages", "later-message", "explicit-pick", "invalid-pick"],
 )
 async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispatch(
     tmp_path: Path,
     source_event_ids: tuple[str, ...],
+    pick: str | None,
     inherited: str,
 ) -> None:
-    """The fork's first turn copies the parent's thread model, so its first reply already runs on it; later turns do not."""
+    """A fork's first turn inherits the parent model unless it has a valid pick of its own."""
     bot = _fork_bot(tmp_path)
+    bot.config.agents["code"].access = ResponderAccessConfig(users=["@user:localhost"])
     set_thread_model_override(
         bot._turn_dispatcher.deps.runtime_paths,
         thread_id=THREAD_ID,
@@ -286,9 +310,108 @@ async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispat
         config=bot.config,
     )
 
-    await _dispatch_fork_turn(bot, source_event_ids)
+    await _dispatch_fork_turn(bot, source_event_ids, pick=pick)
 
     assert _fork_model(bot) == inherited
+
+
+def _conversation_event(bot: AgentBot, event_id: str, body: str, **content: object) -> nio.RoomMessageText:
+    """Build one human prompt aimed at the bot, with optional composer metadata."""
+    return nio.RoomMessageText.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": body,
+                "m.mentions": {"user_ids": [bot.matrix_id.full_id]},
+                **content,
+            },
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_opening_pick_drives_the_reply_model_and_stays_in_its_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use the picked provider on the first reply and next; reset and new roots use the inherited provider."""
+    bot = _fork_bot(tmp_path)
+    bot.config.agents["code"].access = ResponderAccessConfig(users=["@user:localhost"])
+    bot.config.agents["code"].memory_backend = "none"
+    bot.config.router.access = ResponderAccessConfig(users=["@someone_else:localhost"], current_room_members=False)
+    paths = runtime_paths_for(bot.config)
+    catalog_account = entity_identity_registry(bot.config, paths).current_id(ROUTER_AGENT_NAME).full_id
+    client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
+    room = _matrix_room(ROOM_ID, client.user_id, user_ids=(client.user_id, catalog_account, "@user:localhost"))
+    client.rooms[ROOM_ID] = room
+    bot.client = client
+    unique_room_send_responses(client)
+    picked = ScriptedModel([answer("Picked answer"), answer("Picked follow-up")])
+    inherited = ScriptedModel([answer("Inherited answer"), answer("Inherited after reset")])
+    bot.config.models["large"].reasoning = ReasoningConfig(levels=["low", "high"], default="low")
+    install_model_providers(monkeypatch, {"default": inherited, "large@high": picked})
+    root = _conversation_event(
+        bot,
+        "$opening",
+        "First prompt",
+        **{THREAD_MODEL_CONTENT_KEY: {"version": 1, "runtime_user_id": catalog_account, "model": "large@high"}},
+    )
+    relation = {"m.relates_to": {"rel_type": "m.thread", "event_id": root.event_id}}
+    await seed_hydrated_conversation(bot, room_id=ROOM_ID, thread_id=root.event_id)
+    dispatcher = bot._turn_dispatcher
+
+    async def send(event: nio.RoomMessageText) -> None:
+        await dispatch_test_turn(dispatcher, room, event, event.sender)
+        await drain_coalescing(bot)
+
+    await send(root)
+    assert (len(picked.requests), len(inherited.requests)) == (1, 0)
+    assert resolve_thread_model_override(paths, root.event_id, config=bot.config).active == {"code": "large@high"}
+    await send(_conversation_event(bot, "$follow-up", "More in this thread", **relation))
+    assert (len(picked.requests), len(inherited.requests)) == (2, 0)
+    await send(_conversation_event(bot, "$new-root", "New topic"))
+    assert (len(picked.requests), len(inherited.requests)) == (2, 1)
+    await send(_conversation_event(bot, "$reset", "!model reset", **relation))
+    assert not resolve_thread_model_override(paths, root.event_id, config=bot.config).active
+    await dispatcher._prepare_dispatch(make_test_turn(room, root, root.sender))
+    await send(_conversation_event(bot, "$after-reset", "Follow-up after reset", **relation))
+    assert (len(picked.requests), len(inherited.requests)) == (2, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ignored",
+    ["reply", "room-mode", "other-runtime", "unknown-model", "unknown-level", "managed-sender", "no-access"],
+)
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_ineligible_opening_model_pick_does_not_write(tmp_path: Path, ignored: str) -> None:
+    """Only new threads, valid choices, a runtime's own accounts, and the human's reply grants can seed the store."""
+    bot = _fork_bot(tmp_path)
+    bot.config.agents["code"].access = ResponderAccessConfig(
+        users=["@someone_else:localhost" if ignored == "no-access" else "@user:localhost"],
+    )
+    room = _matrix_room(ROOM_ID, bot.matrix_id.full_id, user_ids=(bot.matrix_id.full_id, "@user:localhost"))
+    if ignored == "room-mode":
+        bot.config.agents["code"].thread_mode = "room"
+    model = {"unknown-model": "unconfigured", "unknown-level": "large@high"}.get(ignored, "large")
+    runtime = "@other_runtime:localhost" if ignored == "other-runtime" else bot.matrix_id.full_id
+    content = {THREAD_MODEL_CONTENT_KEY: {"version": 1, "runtime_user_id": runtime, "model": model}}
+    if ignored == "reply":
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$existing"}
+        await seed_hydrated_conversation(bot, room_id=ROOM_ID, thread_id="$existing")
+    event = _conversation_event(bot, "$event", "A prompt", **content)
+    deps = bot._turn_dispatcher.deps
+    if ignored == "managed-sender":
+        event.sender = "@mindroom_router:localhost"
+    facts = deps.ingress.classify(event, room_id=ROOM_ID)
+    await bot._turn_dispatcher._prepare_dispatch(make_test_turn(room, event, facts=facts))
+
+    assert not _store_path(deps.runtime_paths).exists()
 
 
 @pytest.mark.asyncio

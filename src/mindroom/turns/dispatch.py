@@ -9,7 +9,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.attachments.storage import parse_attachment_ids_from_event_source
-from mindroom.authorization import is_requester_joined_to_room
+from mindroom.authorization import addressable_responder_names, is_requester_joined_to_room
 from mindroom.background_tasks import create_background_task
 from mindroom.bot_runtime_view import RunPhase
 from mindroom.constants import (
@@ -38,6 +38,7 @@ from mindroom.dispatch_source import (
     ScheduledHistoryBudget,
     scheduled_history_limit_from_content,
 )
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import MessageEnvelope, hook_ingress_policy
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.event_info import EventInfo
@@ -55,7 +56,7 @@ from mindroom.response_payload_preparation import (
 from mindroom.response_sources import ResponseSources
 from mindroom.router.relay import execute_router_relay
 from mindroom.teams.formation import TeamIntent, select_ad_hoc_team_mode
-from mindroom.thread_models import copy_thread_model_override
+from mindroom.thread_models import apply_root_thread_model, copy_thread_model_override
 from mindroom.thread_summary.automatic import maybe_generate_prompt_summary
 from mindroom.thread_summary.schedule import first_reply_reaches_first_threshold
 from mindroom.thread_utils import mentions_another_participant
@@ -115,6 +116,36 @@ def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
 _SCHEDULED_RUN_INTENTS = frozenset({TurnIntent.SCHEDULED_FIRE, TurnIntent.ROUTER_HANDOFF, TurnIntent.ROUTER_NOTICE})
 # Hook dispatches come only from managed senders, such as automations choosing a model for their prompt.
 _PER_RUN_MODEL_INTENTS = _SCHEDULED_RUN_INTENTS | {TurnIntent.HOOK_DISPATCH}
+
+
+def _apply_root_thread_model(deps: TurnDispatchDeps, turn: PreparedTurn, thread_id: str | None) -> None:
+    """Seed the thread before routing or any responder chooses its model."""
+    choice = turn.thread_model_choice
+    if (
+        choice is None
+        or thread_id is None
+        or thread_id not in turn.handled_turn.source_event_ids
+        or turn.facts.sender_is_managed
+    ):
+        return
+    config, paths = deps.runtime.config, deps.runtime_paths
+    # Discovery can name any account of this runtime, not necessarily the one dispatching the opening turn.
+    if not entity_identity_registry(config, paths).is_managed_user_id(choice.runtime_user_id):
+        return
+    if choice.model not in config.models:
+        deps.logger.info("Ignoring root thread model choice", thread_id=thread_id, reason="unknown_model")
+        return
+    names = addressable_responder_names(
+        turn.facts.run_requester_id,
+        turn.room.room_id,
+        config,
+        paths,
+        deps.runtime.agent_reply_memberships,
+    )
+    if not names:
+        deps.logger.info("Ignoring root thread model choice", thread_id=thread_id, reason="no_addressable_responder")
+        return
+    apply_root_thread_model(paths, thread_id=thread_id, model_name=choice.model, entity_names=names)
 
 
 def _inherit_fork_thread_models(
@@ -893,6 +924,7 @@ class TurnDispatcher:
             extract_context_start,
             path=context_path,
         )
+        _apply_root_thread_model(self.deps, turn, target.resolved_thread_id)
         _inherit_fork_thread_models(self.deps, turn, target.resolved_thread_id, context.thread_history)
         envelope_start = time.monotonic()
         envelope = self.deps.resolver.build_envelope(
