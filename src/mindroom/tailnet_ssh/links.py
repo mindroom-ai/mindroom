@@ -8,8 +8,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from dataclasses import dataclass
-from functools import partial
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import aiohttp
 from pydantic import BaseModel, ConfigDict, NonNegativeInt
@@ -23,14 +22,8 @@ from mindroom.tailnet_ssh.eligibility import link_ineligibility
 from mindroom.tailnet_ssh.projection import authorized_key_lines, clear_authorized_keys, signin_keys, write_projection
 from mindroom.tailnet_ssh.store import new_link, read_links, update_links
 from mindroom.terminal.resolution import agent_terminals
+from mindroom.tool_system import worker_routing
 from mindroom.tool_system.sandbox_proxy import worker_call, worker_runner_address
-from mindroom.tool_system.worker_routing import (
-    build_requester_execution_identity,
-    resolve_worker_key,
-    user_agent_worker_key_requester,
-    worker_key_agent_name,
-    worker_log_id,
-)
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerSpec
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
@@ -41,11 +34,12 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.shared_directories.store import SharedDirectory
     from mindroom.tailnet_ssh.store import Link, LinkBook
     from mindroom.tool_system.sandbox_proxy import WorkerCall
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
     from mindroom.workers.models import WorkerHandle, WorkerSshEndpoint
+
+    type ReadConfig = Callable[[], tuple[Config, RuntimePaths]]
 
 logger = get_logger(__name__)
 
@@ -81,20 +75,23 @@ class ConnectRefused(Exception):  # noqa: N818 - a refusal the gateway is answer
         self.detail = detail
 
 
-def _resolve_target(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    requester_id: str,
-    agent_name: str,
-) -> ResolvedWorkerTarget:
-    identity = build_requester_execution_identity(agent_name=agent_name, runtime_paths=runtime_paths, requester_id=requester_id)
-    return resolve_agent_execution(agent_name, config, runtime_paths, execution_identity=identity).worker_target
+def _resolve_target(config: Config, paths: RuntimePaths, requester: str, agent: str) -> ResolvedWorkerTarget:
+    identity = worker_routing.build_requester_execution_identity(
+        agent_name=agent,
+        runtime_paths=paths,
+        requester_id=requester,
+    )
+    return resolve_agent_execution(agent, config, paths, execution_identity=identity).worker_target
 
 
 def _worker_key(paths: RuntimePaths, requester_id: str, agent_name: str) -> str:
     # Derive from the ledger pair even after the agent is deleted or its scope changes.
-    identity = build_requester_execution_identity(agent_name=agent_name, runtime_paths=paths, requester_id=requester_id)
-    key = resolve_worker_key("user_agent", identity)
+    identity = worker_routing.build_requester_execution_identity(
+        agent_name=agent_name,
+        runtime_paths=paths,
+        requester_id=requester_id,
+    )
+    key = worker_routing.resolve_worker_key("user_agent", identity)
     assert key is not None
     return key
 
@@ -111,87 +108,108 @@ def _list_workers(runtime_paths: RuntimePaths) -> list[WorkerHandle] | None:
         return None
 
 
-def _discover(
-    book: LinkBook, handles: Mapping[str, WorkerHandle], config: Config, paths: RuntimePaths,
-    memberships: AgentReplyMembershipIndex, directories: list[SharedDirectory],
-) -> None:
-    pairs = {(link.agent_name, link.requester_id) for link in book.links}
-    reserved = {link.hostname for link in book.links}
-    candidates = {}
-    for key in handles:
-        requester, agent = user_agent_worker_key_requester(key), worker_key_agent_name(key)
-        if requester and agent and (agent, requester) not in pairs and key == _worker_key(paths, requester, agent):
-            candidates[agent, requester] = key
-    for (agent, requester), key in sorted(candidates.items()):
-        if link_ineligibility(config, paths, requester, agent, key, memberships, directories) is None:
-            link = new_link(requester, agent, reserved)
-            book.links.append(link)
-            reserved.add(link.hostname)
+def _candidate_pairs(handles: Mapping[str, WorkerHandle]) -> set[tuple[str, str]]:
+    return {
+        (agent, requester)
+        for key in handles
+        if (agent := worker_routing.worker_key_agent_name(key))
+        and (requester := worker_routing.user_agent_worker_key_requester(key))
+    }
 
 
-def _sync_keys(endpoint: WorkerSshEndpoint, link: Link, keys: dict[str, str]) -> bool:
+def _sync_keys(link: Link, keys: dict[str, str], handle: WorkerHandle | None, cleared: list[WorkerHandle]) -> None:
     """Refresh an existing admission, or clear it and request a stop. Connect alone enables admission."""
-    projection = endpoint.projection_dir
+    if handle is None or handle.ssh_endpoint is None:
+        return
+    projection = handle.ssh_endpoint.projection_dir
     try:
         old = (projection / "authorized_keys").read_bytes().strip()
     except FileNotFoundError:
-        return False
+        return
     if not old:
-        return False
+        return
     if not keys:
         clear_authorized_keys(projection)
-        return True
+        cleared.append(handle)
+        return
     lines = authorized_key_lines(keys)
     if old != "\n".join(lines).encode():
         write_projection(projection, link, lines)
-    return False
+
+
+def _reconcile(
+    read_config: ReadConfig,
+    paths: RuntimePaths,
+    memberships: AgentReplyMembershipIndex,
+    status: GatewayStatus,
+    monotonic: float,
+) -> tuple[list[dict[str, object]], list[WorkerHandle]]:
+    config, _ = read_config()
+    discover = monotonic - status.discovered_at >= 60
+    listed = _list_workers(paths) if discover or read_links(paths).links else None
+    handles = {h.worker_key: h for h in listed or [] if h.ssh_endpoint is not None}
+    cleared: list[WorkerHandle] = []
+
+    def reconcile(book: LinkBook) -> list[dict[str, object]]:
+        # Don't use a list taken before a different config opened or revoked a connection.
+        current, current_paths = read_config()
+        if current is not config or paths != current_paths:
+            raise ConnectRefused(503, "Configuration changed; retry the link list.")
+        directories = load_shared_directories(paths)
+        stored = {(link.agent_name, link.requester_id): link for link in book.links}
+        reserved = {link.hostname for link in book.links}
+        candidates = set()
+        if listed is not None and monotonic - status.discovered_at >= 60:
+            candidates = _candidate_pairs(handles) - stored.keys()
+            status.discovered_at = monotonic
+        rows = []
+        for agent, requester in (*stored, *sorted(candidates)):
+            link = stored.get((agent, requester))
+            key = _worker_key(paths, requester, agent)
+            # Only the exact normal key is a discovery candidate; compute eligibility once per pair.
+            denied = link_ineligibility(config, paths, requester, agent, key, memberships, directories)
+            if link is None:
+                if denied is not None or key not in handles:
+                    continue
+                link = new_link(requester, agent, reserved)
+                book.links.append(link)
+                reserved.add(link.hostname)
+            if agent not in config.agents:
+                book.retiring_ids.add(link.id)
+            retiring = link.id in book.retiring_ids
+            login = config.tailnet_ssh.logins.get(requester, "")
+            keys = signin_keys(config, requester) if not retiring and login.strip() and denied is None else {}
+            try:
+                _sync_keys(link, keys, handles.get(key), cleared)
+            except OSError as error:
+                logger.warning("tailnet_ssh_projection_failed", link_id=link.id, error=str(error))
+                continue
+            if keys or (retiring and listed is not None):
+                revision = hashlib.sha256(json.dumps([login, sorted(keys)]).encode()).hexdigest() if keys else ""
+                rows.append(
+                    {
+                        "id": link.id,
+                        "hostname": link.hostname,
+                        "desired": "on" if keys else "removing",
+                        "allowed_login": login if keys else None,
+                        "access_revision": revision,
+                    },
+                )
+        return rows
+
+    return update_links(paths, reconcile), cleared
 
 
 async def desired_links(
-    read_config: Callable[[], tuple[Config, RuntimePaths]], paths: RuntimePaths,
-    memberships: AgentReplyMembershipIndex, status: GatewayStatus, *, monotonic: float,
+    read_config: ReadConfig,
+    paths: RuntimePaths,
+    memberships: AgentReplyMembershipIndex,
+    status: GatewayStatus,
+    *,
+    monotonic: float,
 ) -> list[dict[str, object]]:
-    """Reconcile the ledger and send best-effort stops without blocking the response on runners."""
-
-    def reconcile(book: LinkBook) -> list[dict[str, object]]:
-        discover = monotonic - status.discovered_at >= 60
-        listed = _list_workers(paths) if discover or book.links else []
-        config, current_paths = read_config()
-        if current_paths != paths:
-            raise ConnectRefused(503, "The worker runtime changed; retry the link list.")
-        handles = {h.worker_key: h for h in listed or [] if h.ssh_endpoint is not None}
-        directories = load_shared_directories(paths)
-        if discover and listed is not None:
-            _discover(book, handles, config, paths, memberships, directories)
-            status.discovered_at = monotonic
-        rows = []
-        for link in book.links:
-            if link.agent_name not in config.agents:
-                book.retiring_ids.add(link.id)
-            retiring = link.id in book.retiring_ids
-            key = _worker_key(paths, link.requester_id, link.agent_name)
-            login = config.tailnet_ssh.logins.get(link.requester_id, "")
-            keys = signin_keys(config, link.requester_id)
-            if retiring or not login.strip() or link_ineligibility(
-                config, paths, link.requester_id, link.agent_name, key, memberships, directories,
-            ) is not None:
-                keys = {}
-            if (handle := handles.get(key)) is not None and handle.ssh_endpoint is not None:
-                try:
-                    if _sync_keys(handle.ssh_endpoint, link, keys):
-                        cleared.append(handle)
-                except OSError as error:
-                    logger.warning("tailnet_ssh_projection_failed", link_id=link.id, error=str(error))
-                    continue
-            if keys:
-                rev = hashlib.sha256(json.dumps([login, sorted(keys)]).encode()).hexdigest()
-                rows.append({"id": link.id, "hostname": link.hostname, "desired": "on", "allowed_login": login, "access_revision": rev})
-            elif retiring and listed is not None:
-                rows.append({"id": link.id, "hostname": link.hostname, "desired": "removing", "allowed_login": None, "access_revision": ""})
-        return rows
-
-    cleared: list[WorkerHandle] = []
-    rows = await asyncio.to_thread(update_links, paths, reconcile)
+    """Publish lists after projection sync, without waiting on best-effort runner stops."""
+    rows, cleared = await asyncio.to_thread(_reconcile, read_config, paths, memberships, status, monotonic)
     if cleared:
         task = asyncio.gather(*(_stop_sshd(paths, h) for h in cleared))
         _STOPPING.add(task)
@@ -201,6 +219,7 @@ async def desired_links(
 
 def record_status(paths: RuntimePaths, status: GatewayStatus, payload: StatusReport, *, monotonic: float) -> None:
     """Retire only acknowledged retiring IDs and publish one whole activity report for known active links."""
+
     def settle(book: LinkBook) -> LinkBook:
         removed = book.retiring_ids.intersection(payload.removed)
         book.links = [link for link in book.links if link.id not in removed]
@@ -208,11 +227,14 @@ def record_status(paths: RuntimePaths, status: GatewayStatus, payload: StatusRep
         return book
 
     book = update_links(paths, settle) if payload.removed else read_links(paths)
-    status.report = (monotonic, frozenset(
-        _worker_key(paths, link.requester_id, link.agent_name)
-        for link in book.links
-        if link.id not in book.retiring_ids and payload.open_connections.get(link.id, 0) > 0
-    ))
+    status.report = (
+        monotonic,
+        frozenset(
+            _worker_key(paths, link.requester_id, link.agent_name)
+            for link in book.links
+            if link.id not in book.retiring_ids and payload.open_connections.get(link.id, 0) > 0
+        ),
+    )
 
 
 def _ready_endpoint(runtime_paths: RuntimePaths, target: ResolvedWorkerTarget) -> WorkerSshEndpoint:
@@ -251,7 +273,12 @@ def _shell_call(config: Config, paths: RuntimePaths, link: Link, target: Resolve
 
 
 def _admission(
-    config: Config, paths: RuntimePaths, memberships: AgentReplyMembershipIndex, book: LinkBook, link_id: str, peer_login: str,
+    book: LinkBook,
+    config: Config,
+    paths: RuntimePaths,
+    memberships: AgentReplyMembershipIndex,
+    link_id: str,
+    peer_login: str,
 ) -> tuple[Link, ResolvedWorkerTarget, list[str]]:
     link = book.by_id(link_id)
     if link is None:
@@ -264,9 +291,8 @@ def _admission(
     key = _worker_key(paths, link.requester_id, link.agent_name)
     denied = link_ineligibility(config, paths, link.requester_id, link.agent_name, key, memberships)
     if denied is not None:
-        if denied.pending:
-            raise ConnectRefused(503, "Agent membership is not yet known; retry shortly.")
-        raise ConnectRefused(409, denied.reason)
+        detail = "Agent membership is not yet known; retry shortly." if denied.pending else denied.reason
+        raise ConnectRefused(503 if denied.pending else 409, detail)
     target = _resolve_target(config, paths, link.requester_id, link.agent_name)
     if target.worker_key != key:
         raise ConnectRefused(409, "This link's worker is no longer the agent's.")
@@ -277,13 +303,14 @@ def _admission(
 
 
 def _admit(
-    read_config: Callable[[], tuple[Config, RuntimePaths]],
+    read_config: ReadConfig,
     memberships: AgentReplyMembershipIndex,
     link_id: str,
     peer_login: str,
 ) -> tuple[WorkerSshEndpoint, WorkerCall]:
     config, paths = read_config()
-    link, target, _ = _admission(config, paths, memberships, read_links(paths), link_id, peer_login)
+
+    link, target, _ = _admission(read_links(paths), config, paths, memberships, link_id, peer_login)
     endpoint = _ready_endpoint(paths, target)
 
     def project(book: LinkBook) -> WorkerCall:
@@ -291,7 +318,7 @@ def _admit(
         current, current_paths = read_config()
         if current_paths != paths:
             raise ConnectRefused(409, "The worker runtime changed during wake.")
-        current_link, current_target, lines = _admission(current, paths, memberships, book, link_id, peer_login)
+        current_link, current_target, lines = _admission(book, current, paths, memberships, link_id, peer_login)
         if current_link != link or current_target != target:
             raise ConnectRefused(409, "This link's worker changed during wake.")
         call = _shell_call(current, paths, current_link, current_target)
@@ -305,17 +332,10 @@ def _admit(
     return endpoint, update_links(paths, project)
 
 
-async def _post_ssh(
-    api_root: str,
-    headers: Mapping[str, str],
-    operation: Literal["start", "stop"],
-    body: object,
-    *,
-    seconds: float,
-) -> int:
+async def _post_ssh(root: str, headers: Mapping[str, str], route: str, body: object, seconds: float) -> int:
     async with (
         aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=seconds)) as client,
-        client.post(f"{api_root}/ssh/{operation}", headers=headers, json=body, allow_redirects=False) as response,
+        client.post(f"{root}/ssh/{route}", headers=headers, json=body, allow_redirects=False) as response,
     ):
         await collect_bounded_bytes(response.content.iter_chunked(16384), max_bytes=16384)
         return response.status
@@ -332,32 +352,29 @@ async def _start_sshd(call: WorkerCall) -> None:
 
 
 async def connect(
-    read_config: Callable[[], tuple[Config, RuntimePaths]],
+    read_config: ReadConfig,
     membership_index: AgentReplyMembershipIndex,
     link_id: str,
     peer_login: str,
     peer_node: str,
 ) -> tuple[str, int]:
     """Wake and admit this peer, project current keys, and start sshd before returning its endpoint."""
-    admit = partial(_admit, read_config, membership_index, link_id, peer_login)
+    peer = {"link_id": link_id, "peer_login": peer_login, "peer_node": peer_node}
+    loop = asyncio.get_running_loop()
     try:
-        endpoint, call = await asyncio.get_running_loop().run_in_executor(_CONNECT_EXECUTOR, copy_context().run, admit)
+        context = copy_context()
+        args = (read_config, membership_index, link_id, peer_login)
+        endpoint, call = await loop.run_in_executor(_CONNECT_EXECUTOR, context.run, _admit, *args)
         await _start_sshd(call)
     except ConnectRefused as refused:
-        logger.info(
-            "tailnet_ssh_connect_refused",
-            link_id=link_id,
-            peer_login=peer_login,
-            peer_node=peer_node,
-            status_code=refused.status_code,
-        )
+        logger.info("tailnet_ssh_connect_refused", **peer, status_code=refused.status_code)
         raise
-    logger.info("tailnet_ssh_connect", link_id=link_id, peer_login=peer_login, peer_node=peer_node)
+    logger.info("tailnet_ssh_connect", **peer)
     return endpoint.host, endpoint.port
 
 
 async def _stop_sshd(runtime_paths: RuntimePaths, handle: WorkerHandle) -> None:
-    worker = worker_log_id(handle.worker_key)
+    worker = worker_routing.worker_log_id(handle.worker_key)
     try:
         api_root, headers = worker_runner_address(runtime_paths, handle)
         status = await _post_ssh(api_root, headers, "stop", None, seconds=10)

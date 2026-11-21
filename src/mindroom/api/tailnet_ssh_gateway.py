@@ -15,8 +15,7 @@ from starlette.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
 from mindroom.api.script_gateway import SCRIPT_GATEWAY_PORT_ENV, listener_port, serve_listener
-from mindroom.logging_config import get_logger
-from mindroom.tailnet_ssh.links import ConnectRefused, GatewayStatus, StatusReport, active_worker_keys, connect, desired_links, record_status
+from mindroom.tailnet_ssh import links as ssh
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -25,8 +24,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-
-logger = get_logger(__name__)
 
 TOKEN_ENV = "MINDROOM_TAILNET_SSH_GATEWAY_TOKEN"  # noqa: S105 - the variable's name
 PORT_ENV = "MINDROOM_TAILNET_SSH_PORT"
@@ -41,9 +38,9 @@ class _Peer(BaseModel):
 
 
 def active_tailnet_ssh_worker_keys(app: FastAPI) -> frozenset[str]:
-    """Return the workers with an open SSH connection, read on the app's event loop; none while tailnet SSH is off."""
+    """Return the workers held by fresh SSH activity."""
     status = config_lifecycle.app_state(app).tailnet_ssh_status
-    return frozenset() if status is None else active_worker_keys(status, monotonic=time.monotonic())
+    return frozenset() if status is None else ssh.active_worker_keys(status, monotonic=time.monotonic())
 
 
 def _read_config(api_app: FastAPI) -> tuple[Config, RuntimePaths]:
@@ -56,8 +53,7 @@ def _read_config(api_app: FastAPI) -> tuple[Config, RuntimePaths]:
 async def _body[T: BaseModel](request: Request, model: type[T]) -> T:
     try:
         return model.model_validate_json(await request.body())
-    except ValidationError as error:
-        logger.warning("tailnet_ssh_gateway_body_refused", error_count=error.error_count())
+    except ValidationError:
         raise HTTPException(422, "Invalid gateway request body.") from None
 
 
@@ -72,13 +68,13 @@ def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
         return await call_next(request)
 
-    @app.exception_handler(ConnectRefused)
-    async def refused(_request: Request, error: ConnectRefused) -> JSONResponse:
+    @app.exception_handler(ssh.ConnectRefused)
+    async def refused(_request: Request, error: ssh.ConnectRefused) -> JSONResponse:
         return JSONResponse({"detail": error.detail}, status_code=error.status_code)
 
     read_config = partial(_read_config, api_app)
 
-    def ready() -> tuple[RuntimePaths, GatewayStatus]:
+    def ready() -> tuple[RuntimePaths, ssh.GatewayStatus]:
         status = config_lifecycle.app_state(api_app).tailnet_ssh_status
         if status is None:
             raise HTTPException(503, "Tailnet SSH is disabled.")
@@ -88,20 +84,20 @@ def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
     async def links() -> list[dict[str, object]]:
         paths, status = ready()
         memberships = config_lifecycle.app_state(api_app).runtime.agent_reply_memberships
-        return await desired_links(read_config, paths, memberships, status, monotonic=time.monotonic())
+        return await ssh.desired_links(read_config, paths, memberships, status, monotonic=time.monotonic())
 
     @app.post("/status", status_code=204)
     async def post_status(request: Request) -> None:
         paths, status = ready()
-        report = await _body(request, StatusReport)
-        await asyncio.to_thread(record_status, paths, status, report, monotonic=time.monotonic())
+        report = await _body(request, ssh.StatusReport)
+        await asyncio.to_thread(ssh.record_status, paths, status, report, monotonic=time.monotonic())
 
     @app.post("/links/{link_id}/connect")
     async def connect_link(link_id: str, request: Request) -> dict[str, str | int]:
         ready()
         peer = await _body(request, _Peer)
         memberships = config_lifecycle.app_state(api_app).runtime.agent_reply_memberships
-        host, port = await connect(read_config, memberships, link_id, peer.peer_login, peer.peer_node)
+        host, port = await ssh.connect(read_config, memberships, link_id, peer.peer_login, peer.peer_node)
         return {"host": host, "port": port}
 
     return app
@@ -126,7 +122,7 @@ async def serve_tailnet_ssh_gateway_listener(
         msg = f"{PORT_ENV} must differ from the API's port and from {SCRIPT_GATEWAY_PORT_ENV}, not {port}."
         raise ValueError(msg)
     state = config_lifecycle.app_state(api_app)
-    state.tailnet_ssh_status = GatewayStatus()
+    state.tailnet_ssh_status = ssh.GatewayStatus()
     try:
         async with serve_listener(
             gateway_app(api_app, token),

@@ -32,7 +32,12 @@ from mindroom.tailnet_ssh.links import (
 )
 from mindroom.tailnet_ssh.store import Link, new_link, read_links, update_links
 from mindroom.tool_system.sandbox_proxy import WorkerCall
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, subagent_worker_key, worker_log_id
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    resolve_worker_key,
+    subagent_worker_key,
+    worker_log_id,
+)
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerSshEndpoint
 from mindroom.workers.protocol import ExecuteRequest
@@ -145,17 +150,36 @@ def _store(paths: RuntimePaths, *stored: Link) -> None:
 
 
 async def _rows(
-    config: Config, paths: RuntimePaths, status: GatewayStatus | None = None, *,
-    memberships: AgentReplyMembershipIndex | None = None, monotonic: float = NOW,
+    config: Config,
+    paths: RuntimePaths,
+    status: GatewayStatus | None = None,
+    *,
+    memberships: AgentReplyMembershipIndex | None = None,
+    monotonic: float = NOW,
 ) -> list[dict[str, object]]:
-    return await desired_links(lambda: (config, paths), paths, memberships or AgentReplyMembershipIndex(), status or GatewayStatus(), monotonic=monotonic)
+    return await desired_links(
+        lambda: (config, paths),
+        paths,
+        memberships or AgentReplyMembershipIndex(),
+        status or GatewayStatus(),
+        monotonic=monotonic,
+    )
 
 
 def _post(
-    paths: RuntimePaths, status: GatewayStatus, counts: dict[str, int] | None = None, *,
-    monotonic: float = NOW, removed: list[str] | None = None,
+    paths: RuntimePaths,
+    status: GatewayStatus,
+    counts: dict[str, int] | None = None,
+    *,
+    monotonic: float = NOW,
+    removed: list[str] | None = None,
 ) -> None:
-    record_status(paths, status, StatusReport(open_connections=counts or {}, removed=removed or []), monotonic=monotonic)
+    record_status(
+        paths,
+        status,
+        StatusReport(open_connections=counts or {}, removed=removed or []),
+        monotonic=monotonic,
+    )
 
 
 def _handle(worker_key: str, ssh_dir: Path | None, *, status: str = "ready") -> WorkerHandle:
@@ -318,7 +342,10 @@ def test_resolve_target_is_the_persons_own_worker(config: Config, paths: Runtime
 
 @pytest.mark.asyncio
 async def test_discovery_uses_exact_marked_worker_keys_without_a_status_report(
-    config: Config, paths: RuntimePaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The sorted eligible workers get stable claims; credentials alone never create a node."""
     config.tailnet_ssh.logins[BOB] = "bob@github"
@@ -349,7 +376,10 @@ async def test_discovery_uses_exact_marked_worker_keys_without_a_status_report(
 
 @pytest.mark.asyncio
 async def test_a_worker_discovered_without_credentials_reuses_its_link(
-    config: Config, paths: RuntimePaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Credentials gate advertisement, not the durable identity; reuse that identity even without a live worker."""
     manager = _manager(monkeypatch, _handle(_key(BOB, "mind"), tmp_path / "ssh"))
@@ -388,7 +418,10 @@ async def test_ineligible_links_are_omitted_then_reused(config: Config, paths: R
 
 @pytest.mark.asyncio
 async def test_a_worker_key_shared_by_two_agents_is_not_discovered(
-    config: Config, paths: RuntimePaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Name collisions in worker keys fail even though DNS collisions can be resolved."""
     config.agents["mine_"] = config.agents["mine"].model_copy(update={"tailnet_ssh": False})
@@ -399,7 +432,10 @@ async def test_a_worker_key_shared_by_two_agents_is_not_discovered(
 
 @pytest.mark.asyncio
 async def test_restoring_a_deleted_agent_can_never_reuse_a_retiring_id(
-    config: Config, paths: RuntimePaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Delete, restore, and delete again; a delayed acknowledgement of the first ID cannot delete the second."""
     link = _link()
@@ -409,7 +445,11 @@ async def test_restoring_a_deleted_agent_can_never_reuse_a_retiring_id(
     del deleted.agents["mine"]
     [retirement] = await _rows(deleted, paths)
     assert retirement == {
-        "id": link.id, "hostname": link.hostname, "desired": "removing", "allowed_login": None, "access_revision": "",
+        "id": link.id,
+        "hostname": link.hostname,
+        "desired": "removing",
+        "allowed_login": None,
+        "access_revision": "",
     }
     manager.handles = [_handle(_link_key(link), tmp_path / "ssh")]
     assert await _rows(config, paths) == [retirement]
@@ -432,7 +472,12 @@ async def test_restoring_a_deleted_agent_can_never_reuse_a_retiring_id(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("retry", ["list", "clear"])
 async def test_retirement_retries_before_ack_and_stops_only_its_own_worker(
-    config: Config, paths: RuntimePaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: FakeRunner, retry: str,
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: FakeRunner,
+    retry: str,
 ) -> None:
     """Retry a failed list or projection clear; a removal neither stops early nor clears a different worker."""
     link, other = _link(), _link(agent="mind")
@@ -440,7 +485,11 @@ async def test_retirement_retries_before_ack_and_stops_only_its_own_worker(
     ssh, other_ssh = tmp_path / "ssh", tmp_path / "other"
     _projected_keys(ssh, link)
     _projected_keys(other_ssh, other)
-    manager = _manager(monkeypatch, fake_runner.handle(_link_key(link), ssh), fake_runner.handle(_link_key(other), other_ssh))
+    manager = _manager(
+        monkeypatch,
+        fake_runner.handle(_link_key(link), ssh),
+        fake_runner.handle(_link_key(other), other_ssh),
+    )
     clear = links.clear_authorized_keys
     listed = manager.list_workers
 
@@ -475,7 +524,11 @@ async def test_retirement_retries_before_ack_and_stops_only_its_own_worker(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("trigger", ["keys", "login", "scope", "disabled"])
 async def test_omission_clears_running_projection_and_stops_sshd(
-    config: Config, paths: RuntimePaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: FakeRunner,
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: FakeRunner,
     trigger: str,
 ) -> None:
     """The unpinned key still identifies the old worker when its agent no longer has eligible scope."""
@@ -500,7 +553,11 @@ async def test_omission_clears_running_projection_and_stops_sshd(
 
 @pytest.mark.asyncio
 async def test_stops_run_together_and_apart_from_the_caller(
-    config: Config, paths: RuntimePaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: FakeRunner,
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: FakeRunner,
 ) -> None:
     """A slow or failed stop neither delays the link list nor serializes other workers' stops."""
     one, two = _link(), _link(agent="mind")
@@ -526,13 +583,17 @@ async def test_stops_run_together_and_apart_from_the_caller(
             await asyncio.gather(*links._STOPPING)
     assert fake_runner.posts == [_STOP, _STOP]
     assert {log["worker"] for log in logs if log["event"] == "tailnet_ssh_sshd_not_stopped"} == {
-        worker_log_id(_link_key(one)), worker_log_id(_link_key(two)),
+        worker_log_id(_link_key(one)),
+        worker_log_id(_link_key(two)),
     }
 
 
 @pytest.mark.asyncio
 async def test_changed_key_revision_refreshes_only_live_projections(
-    config: Config, paths: RuntimePaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Comments and duplicates do not revoke sessions; changing the key identity or login does."""
     link, idle = _link(), _link(agent="mind")
@@ -559,12 +620,18 @@ async def test_changed_key_revision_refreshes_only_live_projections(
 
 @pytest.mark.asyncio
 async def test_shared_directories_are_read_once_per_reconcile(
-    config: Config, paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """All links are checked against the same directory list."""
     _store(paths, _link(), _link(agent="mind"))
     reads: list[str] = []
-    monkeypatch.setattr(links, "load_shared_directories", _recorded(reads, "directories", links.load_shared_directories))
+    monkeypatch.setattr(
+        links,
+        "load_shared_directories",
+        _recorded(reads, "directories", links.load_shared_directories),
+    )
     assert len(await _rows(config, paths)) == 2
     assert reads == ["directories"]
 
@@ -572,7 +639,9 @@ async def test_shared_directories_are_read_once_per_reconcile(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("index", ["fresh", "invalidated", "denied"])
 async def test_unresolved_or_denied_room_membership_omits_without_retirement(
-    room_config: Config, paths: RuntimePaths, index: str,
+    room_config: Config,
+    paths: RuntimePaths,
+    index: str,
 ) -> None:
     """Membership loss is reversible and retains the ID and host key."""
     link = _link(agent="research")
@@ -618,7 +687,11 @@ async def test_connect_refuses_while_room_membership_is_pending(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("login", [None, "", "   "])
 async def test_missing_or_empty_configured_login_admits_nobody(
-    config: Config, paths: RuntimePaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, login: str | None,
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    login: str | None,
 ) -> None:
     """An unknown or tagged peer cannot wake a worker even if config validation was bypassed."""
     link = _link()
@@ -677,7 +750,10 @@ async def test_connect_without_ssh_endpoint_calls_no_runner(
 
 @pytest.mark.asyncio
 async def test_connect_refuses_wrong_peer_unknown_ineligible_and_retiring(
-    config: Config, paths: RuntimePaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A peer must match the exact link owner; revoked or retiring links cannot wake their worker."""
     link, ineligible, retiring = _link(agent="mind"), _link(), _link(BOB, "mind")
@@ -687,8 +763,10 @@ async def test_connect_refuses_wrong_peer_unknown_ineligible_and_retiring(
     add_shared_directory_member(paths, owner="other", name="specs", member="mine")
     manager = _wire_connect(monkeypatch, tmp_path, link)
     for link_id, peer, code in (
-        (link.id, "bob@github", 403), ("0" * 16, "alice@github", 404),
-        (ineligible.id, "alice@github", 409), (retiring.id, "bob@github", 409),
+        (link.id, "bob@github", 403),
+        ("0" * 16, "alice@github", 404),
+        (ineligible.id, "alice@github", 409),
+        (retiring.id, "bob@github", 409),
     ):
         with pytest.raises(ConnectRefused) as refused:
             await _connect(config, paths, link_id, peer)
@@ -749,7 +827,10 @@ async def test_connect_refuses_without_the_agents_own_shell(
 
 @pytest.mark.asyncio
 async def test_a_connect_whose_keys_admit_nobody_starts_no_sshd(
-    config: Config, paths: RuntimePaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No keys for this requester means no wake, projection, or runner call."""
     link = _link()
@@ -766,7 +847,11 @@ async def test_a_connect_whose_keys_admit_nobody_starts_no_sshd(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["keys", "runtime", "same-backend-new-keys"])
 async def test_connect_admission_uses_config_and_runtime_from_after_wake(
-    config: Config, paths: RuntimePaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str,
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
 ) -> None:
     """A worker may wake either under a revoked admission or with a new key set."""
     link = _link()
@@ -805,7 +890,11 @@ async def test_connect_admission_uses_config_and_runtime_from_after_wake(
 
 @pytest.mark.asyncio
 async def test_key_revocation_serializes_with_projection_write(
-    config: Config, paths: RuntimePaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: FakeRunner,
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: FakeRunner,
 ) -> None:
     """A connect paused after revalidation cannot write a removed key after reconciliation clears it."""
     link = _link()

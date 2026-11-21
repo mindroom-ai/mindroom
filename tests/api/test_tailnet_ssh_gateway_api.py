@@ -237,10 +237,19 @@ def test_get_links_clears_the_keys_of_a_removed_links_worker(
     del config.agents["mine"]
     ssh_dir = tmp_path / "ssh"
     link_service.write_projection(ssh_dir, moved, [f"restrict,pty {PUBLIC_KEY}"])
-    handle = SimpleNamespace(worker_key=_worker_key(paths, ALICE, "mine"), ssh_endpoint=SimpleNamespace(projection_dir=ssh_dir))
+    handle = SimpleNamespace(
+        worker_key=_worker_key(paths, ALICE, "mine"),
+        ssh_endpoint=SimpleNamespace(projection_dir=ssh_dir),
+    )
+    handle.status = "ready"
     manager = MagicMock(list_workers=MagicMock(return_value=[handle]))
     manager.__enter__.return_value = manager
     monkeypatch.setattr(link_service, "lease_configured_primary_worker_manager", lambda _paths: manager)
+
+    async def stop(*_args: object) -> None:
+        pass
+
+    monkeypatch.setattr(link_service, "_stop_sshd", stop)
     on_event_loop = calls_on_event_loop(link_service, "clear_authorized_keys")
 
     response = client.get("/links", headers=AUTH)
@@ -287,7 +296,7 @@ def test_status_is_stored_and_answers_204(
 ) -> None:
     """The gateway's report is kept on the primary's app, each link's worker beside it, stored off the event loop."""
     link = _stored_link(api_app)
-    on_event_loop = calls_on_event_loop(tailnet_ssh_gateway, "record_status")
+    on_event_loop = calls_on_event_loop(link_service, "record_status")
 
     response = client.post(
         "/status",
@@ -301,16 +310,21 @@ def test_status_is_stored_and_answers_204(
     assert active_tailnet_ssh_worker_keys(api_app) == {_worker_key(paths, ALICE, "mine")}
 
 
-@pytest.mark.parametrize("body", [
-    {"open_connections": {}},
-    {"removed": [], "open_connections": {"abc": -1}},
-    {"removed": [], "open_connections": {"abc": "2"}},
-    {"removed": [], "open_connections": {"abc": True}},
-    {"removed": [1], "open_connections": {}},
-    {"removed": [], "open_connections": {}, "unexpected": "secret-value"},
-])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"open_connections": {}},
+        {"removed": [], "open_connections": {"abc": -1}},
+        {"removed": [], "open_connections": {"abc": "2"}},
+        {"removed": [], "open_connections": {"abc": True}},
+        {"removed": [1], "open_connections": {}},
+        {"removed": [], "open_connections": {}, "unexpected": "secret-value"},
+    ],
+)
 def test_status_outside_the_contract_is_refused_and_changes_nothing(
-    api_app: FastAPI, client: TestClient, body: dict[str, object],
+    api_app: FastAPI,
+    client: TestClient,
+    body: dict[str, object],
 ) -> None:
     """Invalid status never publishes activity, retires IDs, or echoes values."""
     response = client.post("/status", headers=AUTH, json=body)
@@ -326,7 +340,6 @@ def test_a_refused_body_does_not_log_request_keys_or_values(client: TestClient) 
     assert response.status_code == 422
     assert "sensitive" not in repr(logs)
     assert "sensitive" not in response.text
-    assert any(log["event"] == "tailnet_ssh_gateway_body_refused" for log in logs)
 
 
 @pytest.mark.parametrize(("path", "body"), BAD_BODIES)
@@ -356,7 +369,7 @@ def test_connect_answers_endpoint_or_refusal_detail(
             raise outcome
         return outcome
 
-    monkeypatch.setattr(tailnet_ssh_gateway, "connect", connect)
+    monkeypatch.setattr(link_service, "connect", connect)
 
     admitted = client.post("/links/abc/connect", headers=AUTH, json=PEER)
     outcome = ConnectRefused(409, "x")
@@ -372,7 +385,6 @@ def test_connect_answers_endpoint_or_refusal_detail(
         assert parameters == [state.runtime.agent_reply_memberships, "abc", "alice@github", "laptop"]
 
 
-
 def test_connect_of_an_unknown_link_is_the_services_404(client: TestClient) -> None:
     """The link service itself runs behind the route: a link the store does not hold is refused, unpatched."""
     response = client.post("/links/abc/connect", headers=AUTH, json=PEER)
@@ -381,7 +393,9 @@ def test_connect_of_an_unknown_link_is_the_services_404(client: TestClient) -> N
 
 
 def test_the_go_gateways_fixtures_are_what_this_listener_takes_and_answers(
-    api_app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch,
+    api_app: FastAPI,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Both row variants and both POST bodies match the gateway's shared fixtures."""
     status_body = (GATEWAY_FIXTURES / "status.json").read_bytes()
@@ -399,7 +413,7 @@ def test_the_go_gateways_fixtures_are_what_this_listener_takes_and_answers(
         peers.append(args[-3:])
         return "10.0.0.5", 2222
 
-    monkeypatch.setattr(tailnet_ssh_gateway, "connect", connect)
+    monkeypatch.setattr(link_service, "connect", connect)
     assert client.get("/links", headers=AUTH).json() == expected
     posted = client.post("/status", headers=AUTH, content=status_body)
     assert (posted.status_code, posted.content) == (204, b"")
@@ -414,7 +428,11 @@ def test_the_go_gateways_fixtures_are_what_this_listener_takes_and_answers(
 
 @pytest.mark.parametrize("revoked", ["login", "keys", "opt-in"])
 def test_connect_rereads_the_committed_config_replaced_during_wake(
-    api_app: FastAPI, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revoked: str,
+    api_app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    revoked: str,
 ) -> None:
     """A real committed snapshot change during ensure_worker must prevent projection and /ssh/start."""
     link = _stored_link(api_app)
@@ -435,7 +453,11 @@ def test_connect_rereads_the_committed_config_replaced_during_wake(
         assert spec.worker_key == _worker_key(paths, ALICE, "mine")
         with state.config_lock:
             state.snapshot = config_lifecycle.ApiSnapshot(2, paths, runtime_config=changed)
-        return SimpleNamespace(worker_key=spec.worker_key, status="ready", ssh_endpoint=WorkerSshEndpoint("worker", 2222, ssh))
+        return SimpleNamespace(
+            worker_key=spec.worker_key,
+            status="ready",
+            ssh_endpoint=WorkerSshEndpoint("worker", 2222, ssh),
+        )
 
     manager.ensure_worker.side_effect = wake
     monkeypatch.setattr(link_service, "lease_configured_primary_worker_manager", lambda _paths: manager)

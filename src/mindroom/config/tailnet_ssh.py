@@ -11,7 +11,6 @@ from mindroom.config.schema_hints import dashboard_hint
 
 # OpenSSH key type names, such as ssh-ed25519, ecdsa-sha2-nistp256, or sk-ssh-ed25519@openssh.com.
 _KEY_TYPE_PATTERN = re.compile(r"(?:ssh|ecdsa|sk)-[A-Za-z0-9.@-]+")
-# OpenSSH, PEM, or PKCS#8 private key armor.
 _PRIVATE_KEY_HEADER = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 _NOT_A_KEY = "Expected an SSH public key line from a .pub file."
 
@@ -25,14 +24,8 @@ def _is_canonical_base64(token: str) -> bool:
 
 
 def normalize_public_key(line: str) -> str:
-    """Return one OpenSSH public key line as ``<type> <base64>[ <comment>]``, or raise ``ValueError`` with a sentence.
-
-    Options such as ``command=`` are refused, because the projected ``authorized_keys`` sets its own.
-    """
+    """Normalize one OpenSSH public key line; the primary sets its own key options."""
     text = line.strip()
-    if not text:
-        msg = "SSH public key lines cannot be empty."
-        raise ValueError(msg)
     if _PRIVATE_KEY_HEADER.match(text):
         msg = "Use the .pub file, not the private key."
         raise ValueError(msg)
@@ -40,10 +33,12 @@ def normalize_public_key(line: str) -> str:
         msg = "Each entry must be one SSH public key line."
         raise ValueError(msg)
     fields = text.split(maxsplit=2)
+    if len(fields) < 2:
+        raise ValueError(_NOT_A_KEY)
     if not _KEY_TYPE_PATTERN.fullmatch(fields[0]):
         msg = "Expected an SSH public key type, not key options such as command=."
         raise ValueError(msg)
-    if len(fields) < 2 or not _is_canonical_base64(fields[1]):
+    if not _is_canonical_base64(fields[1]):
         raise ValueError(_NOT_A_KEY)
     # Deferred: cryptography's SSH serialization loads bcrypt, which the slim config entry points must not.
     from cryptography.exceptions import UnsupportedAlgorithm  # noqa: PLC0415

@@ -33,7 +33,11 @@ def test_new_link_has_16_hex_id_and_loadable_host_key() -> None:
     key = serialization.load_ssh_private_key(link.host_key.encode(), password=None)
     assert isinstance(key, Ed25519PrivateKey)
     restored = new_link(ALICE, "mind_alice")
-    assert (restored.hostname, restored.id != link.id, restored.host_key != link.host_key) == (link.hostname, True, True)
+    assert (restored.hostname, restored.id != link.id, restored.host_key != link.host_key) == (
+        link.hostname,
+        True,
+        True,
+    )
 
 
 def test_default_hostname() -> None:
@@ -157,13 +161,13 @@ def test_invalid_file_error_names_fields_but_not_secrets(tmp_path: Path) -> None
         assert "mind-alice" not in rendered
 
 
-def test_one_link_per_requester_and_agent() -> None:
-    """A link is found by its person and agent, and by its id."""
+def test_same_agent_has_distinct_ids_and_host_keys_per_requester() -> None:
+    """Two requesters of one agent have different node identities and distinct claimed hostnames."""
     alice = new_link(ALICE, "mind_shared")
-    bob = new_link(BOB, "mind_bob")
+    bob = new_link(BOB, "mind_shared", {alice.hostname})
     book = LinkBook(links=[alice, bob])
-    assert book.link(ALICE, "mind_shared") is alice
-    assert book.link(BOB, "mind_shared") is None
-    assert book.link(ALICE, "mind_bob") is None
+    assert bob.id != alice.id
+    assert bob.host_key != alice.host_key
+    assert bob.hostname == "mind-shared-bob"
     assert book.by_id(bob.id) is bob
     assert book.by_id("0" * 16) is None

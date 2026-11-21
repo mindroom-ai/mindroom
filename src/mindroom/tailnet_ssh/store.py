@@ -7,8 +7,8 @@ import re
 import secrets
 from typing import TYPE_CHECKING
 
-from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mindroom.constants import tracking_dir
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+
 
 class Link(BaseModel):
     """One person's SSH node for one agent."""
@@ -41,13 +42,6 @@ class LinkBook(BaseModel):
     links: list[Link] = Field(default_factory=list)
     retiring_ids: set[str] = Field(default_factory=set)
 
-    def link(self, requester_id: str, agent_name: str) -> Link | None:
-        """Return the person's link to the agent, of which there is at most one."""
-        return next(
-            (link for link in self.links if link.requester_id == requester_id and link.agent_name == agent_name),
-            None,
-        )
-
     def by_id(self, link_id: str) -> Link | None:
         """Return the link with this id."""
         return next((link for link in self.links if link.id == link_id), None)
@@ -63,12 +57,12 @@ def _hostname(requester_id: str, agent_name: str, reserved: Collection[str]) -> 
     if base not in reserved:
         return base
     localpart = default_hostname(requester_id.removeprefix("@").partition(":")[0])[:61].rstrip("-")
-    prefix = f"{base[:62 - len(localpart)].rstrip('-')}-{localpart}"
+    prefix = f"{base[: 62 - len(localpart)].rstrip('-')}-{localpart}"
     if prefix not in reserved:
         return prefix
     digest = hashlib.sha256(f"{requester_id}\0{agent_name}".encode()).hexdigest()
     for length in range(8, 63, 2):
-        candidate = f"{prefix[:62 - length].rstrip('-')}-{digest[:length]}"
+        candidate = f"{prefix[: 62 - length].rstrip('-')}-{digest[:length]}"
         if candidate not in reserved:
             return candidate
     msg = "Could not allocate a unique tailnet SSH hostname."
@@ -82,9 +76,9 @@ def new_link(requester_id: str, agent_name: str, reserved: Collection[str] = ())
         requester_id=requester_id,
         agent_name=agent_name,
         hostname=_hostname(requester_id, agent_name, reserved),
-        host_key=Ed25519PrivateKey.generate().private_bytes(
-            serialization.Encoding.PEM, serialization.PrivateFormat.OpenSSH, serialization.NoEncryption(),
-        ).decode(),
+        host_key=Ed25519PrivateKey.generate()
+        .private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption())
+        .decode(),
     )
 
 
@@ -93,10 +87,7 @@ def _links_path(runtime_paths: RuntimePaths) -> Path:
 
 
 def _parse(path: Path, text: str) -> LinkBook:
-    """Return the stored book, or raise ``ValueError`` with the path and the error types only.
-
-    Pydantic's message, its error locations, and the chained error quote the input, which holds private host keys.
-    """
+    # Omit validation locations, values, and the chained exception: they can expose private host keys.
     try:
         return LinkBook.model_validate_json(text)
     except ValidationError as exc:  # Invalid JSON is a ValidationError too.

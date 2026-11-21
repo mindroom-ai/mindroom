@@ -641,10 +641,12 @@ def tailnet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Tailnet]:
 @pytest.fixture(scope="module")
 def stack(tailnet: _Tailnet) -> Iterator[_Stack]:
     """Two owners and their nodes in one operator-managed tailnet."""
-    config = Config(tailnet_ssh={
-        "logins": {person.requester_id: person.login for person in tailnet.people.values()},
-        "authorized_keys": {person.requester_id: [person.public_key] for person in tailnet.people.values()},
-    })
+    config = Config(
+        tailnet_ssh={
+            "logins": {person.requester_id: person.login for person in tailnet.people.values()},
+            "authorized_keys": {person.requester_id: [person.public_key] for person in tailnet.people.values()},
+        },
+    )
     with _gateway(tailnet, "key", config, auth_key=_pre_auth_key(tailnet.headscale, "operator")) as stack:
         for person in tailnet.people.values():
             node = _add_link(stack, person, f"mind-{person.login}")
