@@ -7,7 +7,7 @@ import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -241,7 +241,7 @@ def record_status(paths: RuntimePaths, status: GatewayStatus, payload: StatusRep
     )
 
 
-def _ready_endpoint(runtime_paths: RuntimePaths, target: ResolvedWorkerTarget) -> WorkerSshEndpoint:
+def _ready_worker(runtime_paths: RuntimePaths, target: ResolvedWorkerTarget) -> WorkerHandle:
     worker_key = target.worker_key
     assert worker_key is not None
     try:
@@ -256,7 +256,7 @@ def _ready_endpoint(runtime_paths: RuntimePaths, target: ResolvedWorkerTarget) -
         raise ConnectRefused(503, "The worker is not ready.")
     if handle.worker_key != worker_key or handle.ssh_endpoint is None:
         raise ConnectRefused(409, "This worker has no marked SSH endpoint.")
-    return handle.ssh_endpoint
+    return handle
 
 
 def _shell_call(config: Config, paths: RuntimePaths, link: Link, target: ResolvedWorkerTarget) -> WorkerCall:
@@ -315,9 +315,9 @@ def _admit(
     config, paths = read_config()
 
     link, target, _ = _admission(read_links(paths), config, paths, memberships, link_id, peer_login)
-    endpoint = _ready_endpoint(paths, target)
+    ready = _ready_worker(paths, target)
 
-    def project(book: LinkBook) -> WorkerCall:
+    def project(book: LinkBook) -> tuple[WorkerSshEndpoint, WorkerCall]:
         # A slow wake can span a committed config replacement. Recheck while serialized with revocation.
         current, current_paths = read_config()
         if current_paths != paths:
@@ -326,14 +326,19 @@ def _admit(
         if current_link != link or current_target != target:
             raise ConnectRefused(409, "This link's worker changed during wake.")
         call = _shell_call(current, paths, current_link, current_target)
+        handle = call.handle
+        # Touching the worker changes its last-use timestamp, not its generation or addresses.
+        if handle is None or handle.ssh_endpoint is None or replace(handle, last_used_at=ready.last_used_at) != ready:
+            raise ConnectRefused(409, "This link's worker changed during wake.")
+        endpoint = handle.ssh_endpoint
         try:
             write_projection(endpoint.projection_dir, current_link, lines)
         except OSError as error:
             logger.warning("tailnet_ssh_projection_not_written", link_id=link_id, error=str(error))
             raise ConnectRefused(503, "The worker's SSH files could not be written.") from None
-        return call
+        return endpoint, call
 
-    return endpoint, update_links(paths, project)
+    return update_links(paths, project)
 
 
 async def _post_ssh(root: str, headers: Mapping[str, str], route: str, body: object, seconds: float) -> int:

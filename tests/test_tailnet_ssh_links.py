@@ -31,6 +31,7 @@ from mindroom.tailnet_ssh.links import (
     record_status,
 )
 from mindroom.tailnet_ssh.store import Link, new_link, read_links, update_links
+from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.sandbox_proxy import WorkerCall
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -239,7 +240,9 @@ def _recorded[**P, T](calls: list[str], name: str, function: Callable[P, T]) -> 
 
 def _worker_call(worker_key: str, api_root: str = "http://10.0.0.5:8766/api/sandbox-runner") -> WorkerCall:
     request = ExecuteRequest(protocol=1, worker_key=worker_key, tool_name="shell", function_name="run_shell_command")
-    return WorkerCall(request=request, api_root=api_root, headers={"x-mindroom-sandbox-token": "runner-token"})
+    return WorkerCall(
+        request=request, api_root=api_root, headers={"x-mindroom-sandbox-token": "runner-token"}, handle=None
+    )
 
 
 def _wire_connect(
@@ -260,7 +263,11 @@ def _wire_connect(
     monkeypatch.setattr(links, "link_ineligibility", _recorded(calls, "eligibility", links.link_ineligibility))
     monkeypatch.setattr(links, "write_projection", _recorded(calls, "projection", links.write_projection))
     monkeypatch.setattr(links, "agent_terminals", lambda *_args, **_kwargs: SimpleNamespace(stand_ins=object()))
-    monkeypatch.setattr(links, "worker_call", lambda *_args, **_kwargs: call or _worker_call(_link_key(link)))
+    monkeypatch.setattr(
+        links,
+        "worker_call",
+        lambda *_args, **_kwargs: replace(call or _worker_call(_link_key(link)), handle=manager.handles[0]),
+    )
     monkeypatch.setattr(links, "_start_sshd", start_sshd)
     return manager
 
@@ -734,6 +741,49 @@ async def test_connect_order(
     assert manager.specs == [WorkerSpec(_link_key(link), private_agent_names=frozenset({"mind"}))]
     assert (tmp_path / "ssh" / "authorized_keys").read_text() == f"restrict,pty {PUBLIC_KEY}\n"
     assert (tmp_path / "ssh" / "ssh_host_ed25519_key").read_text() == link.host_key
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marked", [True, False])
+async def test_connect_refuses_replacement_between_wake_and_runner_lookup(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    marked: bool,
+) -> None:
+    link = _link()
+    _store(paths, link)
+    config.agents["mine"].tools = ["shell"]
+    config.agents["mine"].worker_tools = ["shell"]
+    handle = _handle(_link_key(link), tmp_path / "ssh")
+    assert handle.ssh_endpoint is not None
+    replacement = replace(
+        handle,
+        endpoint=handle.endpoint.replace(":8766/", ":18766/"),
+        ssh_endpoint=replace(handle.ssh_endpoint, port=12222) if marked else None,
+    )
+    manager = _manager(monkeypatch, handle)
+
+    def touch_worker(key: str) -> WorkerHandle:
+        assert key == handle.worker_key
+        manager.calls.append("touch_worker")
+        return replacement
+
+    async def start_sshd(_call: WorkerCall) -> None:
+        manager.calls.append("ssh_start")
+
+    monkeypatch.setattr(manager, "touch_worker", touch_worker, raising=False)
+    monkeypatch.setattr(sandbox_proxy, "lease_worker_manager", lambda *_: manager)
+    monkeypatch.setattr(links, "_start_sshd", start_sshd)
+
+    with pytest.raises(ConnectRefused, match="worker changed") as refused:
+        await _connect(config, paths, link.id)
+
+    assert refused.value.status_code == 409
+    assert manager.calls == ["ensure_worker", "touch_worker"]
+    assert not (tmp_path / "ssh" / "authorized_keys").exists()
 
 
 @pytest.mark.asyncio

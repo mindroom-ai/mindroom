@@ -1020,6 +1020,7 @@ class WorkerCall:
     # The runner's API root, such as ``http://worker:8766/api/sandbox-runner``, under which it serves each operation.
     api_root: str
     headers: dict[str, str] = field(repr=False)
+    handle: WorkerHandle | None = field(repr=False, compare=False)
 
 
 def worker_runner_address(
@@ -1063,7 +1064,7 @@ def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = 
         return None
     # Without a worker of its own, the call goes to the shared runner, whose URL its route has already required.
     api_root, headers = worker_runner_address(runtime_paths, worker_handle)
-    return WorkerCall(request=request, api_root=api_root, headers=headers)
+    return WorkerCall(request, api_root, headers, worker_handle)
 
 
 __all__ = [
