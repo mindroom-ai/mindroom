@@ -26,7 +26,6 @@ from tests.history_helpers import (  # noqa: F401
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.history.compaction import _CompactionRewriteResult
     from mindroom.llm.provider import ModelProvider
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
@@ -38,7 +37,7 @@ async def _rewrite_with_summary_model(
     working_session: ConversationSession,
     summary_input_budget: int,
     summary_model: ModelProvider,
-) -> _CompactionRewriteResult | None:
+) -> bool:
     return await _rewrite_working_session_for_compaction(
         storage=storage,
         persisted_session=working_session,
@@ -96,7 +95,7 @@ async def test_chunk_events_report_the_summary_input_as_the_summary_model_counts
             summary_model=_summary_model(token_counter=fake_token_counter()),
         )
 
-    assert rewrite_result is not None
+    assert rewrite_result
     for event in ("Compaction summary chunk request", "Compaction summary chunk completed"):
         _assert_truthful_sizing_fields(
             _single_event(logs, event),
@@ -156,7 +155,7 @@ async def test_no_run_fit_warning_uses_token_budget_field(tmp_path: Path) -> Non
             summary_model=_summary_model(),
         )
 
-    assert rewrite_result is None
+    assert not rewrite_result
     event = _single_event(logs, "Compaction skipped because no run fit the single-pass summary budget")
     assert event["summary_input_budget_tokens"] == 1
     assert "summary_input_budget" not in event

@@ -17,7 +17,7 @@ from mindroom.ai import stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.ai_runtime import reply_ended_for_follow_up
 from mindroom.approval.response import continuation_response_kind, continuation_target
-from mindroom.authorization import ReplyMembershipPendingError
+from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.bot_runtime_view import RunPhase
 from mindroom.config.resolution import cheap_model as agent_cheap_model
@@ -191,7 +191,7 @@ if TYPE_CHECKING:
 
 # How many restarts may cut one turn short before its replay stops continuing from the stopped attempts' own messages.
 _NATIVE_RECOVERY_LIMIT = 2
-_COMPACTION_DEFERRED = "Couldn't compact now; will compact before the next reply."
+_COMPACTION_DEFERRED = "Couldn't compact now. Try /compact again later."
 
 
 def _paused_with_committed_presentation(
@@ -836,16 +836,20 @@ class ResponseRunner:
             await self.deps.settle_ignored_sources((event.event_id,))
 
     async def _run_compaction(self, event: JournalEvent) -> None:
-        origin = str(event.source["origin_event_id"])
+        origin, requester = event.source.get("origin_event_id"), event.source.get("requester_id")
+        if not isinstance(origin, str) or not origin or not isinstance(requester, str) or not requester:
+            self.deps.logger.warning("invalid_compaction_source", source=event.event_id)
+            await self.deps.settle_ignored_sources((event.event_id,))
+            return
         target = MessageTarget.resolve(event.room_id, event.thread_id, origin)
         runtime = self.deps.runtime
         try:
-            fold = partial(self._fold_compaction, target, str(event.source["requester_id"]), origin, event.event_id)
+            fold = partial(self._fold_compaction, target, requester, origin, event.event_id)
             notice = await self.lifecycle_coordinator.run_lock_only(
                 target,
                 runtime.admission_fence,
                 fold,
-                runtime.wait_until_ready_or_shutdown,
+                runtime.wait_for_admission_or_shutdown,
             )
         except ResponseAdmissionRefusedError:
             raise  # Replacement must replay the pending source.
@@ -854,36 +858,45 @@ class ResponseRunner:
             notice = _COMPACTION_DEFERRED
         if notice:
             with suppress(Exception):  # Best-effort notice only; transport failure must not retry this row.
-                await self.deps.delivery_gateway.send_text(
-                    SendTextRequest(target, notice, skip_mentions=True, extra_content={"msgtype": "m.notice"}),
-                )
+                if await self._compaction_epoch(event.room_id, origin, event.event_id) is not None:
+                    await self.deps.delivery_gateway.send_text(
+                        SendTextRequest(target, notice, skip_mentions=True, extra_content={"msgtype": "m.notice"}),
+                    )
         await self.deps.settle_ignored_sources((event.event_id,))
 
-    async def _compaction_epoch(self, target: MessageTarget, origin: str, source_id: str) -> int | None:
-        store, room = self.deps.replies.store, target.room_id
-        if await store.room_history_recovery(room) is not None:
-            return None
-        # The target must observe the command in its own Matrix sync first.
+    async def _compaction_epoch(self, room: str, origin: str, source: str, *, wait: bool = False) -> int | None:
+        store = self.deps.replies.store
         try:
-            async with asyncio.timeout(3):
-                while (owner := await store.admitted_membership_owner(origin)) is None:  # noqa: ASYNC110
+            async with asyncio.timeout(3 if wait else None):
+                while (owner := await store.admitted_membership_owner(origin)) is None and wait:  # noqa: ASYNC110
                     await asyncio.sleep(0.05)
         except TimeoutError:
             return None
+        row_owner = await store.admitted_membership_owner(source)
         epoch = await store.membership_epoch(room)
-        return epoch if owner == (room, epoch) == await store.admitted_membership_owner(source_id) else None
+        return epoch if owner == row_owner == (room, epoch) else None
 
-    async def _fold_compaction(self, target: MessageTarget, requester: str, origin: str, source: str) -> str | None:
-        config, paths = self.deps.runtime.config, self.deps.runtime_paths
+    async def _fold_compaction(self, target: MessageTarget, requester: str, origin: str, source: str) -> str | None:  # noqa: PLR0911
+        runtime = self.deps.runtime
+        config, paths = runtime.config, self.deps.runtime_paths
+        store, room, thread = self.deps.replies.store, target.room_id, target.resolved_thread_id
+        if not is_sender_allowed_for_responder(
+            requester,
+            self.deps.agent_name,
+            room,
+            config,
+            paths,
+            runtime.agent_reply_memberships,
+        ):
+            return None
         scope = self.deps.state_writer.history_scope()
         identity = self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester)
-        load = partial(load_scope_session, scope, target.session_id, paths, config, identity)
-        context = await run_blocking_until_complete(load)
-        if (session := context.session) is None or not read_scope_state(session).force_compact_before_next_run:
+        if not await self._has_queued_forced_compaction(target.session_id, scope, identity):
             return None
-        store, room, thread = self.deps.replies.store, target.room_id, target.resolved_thread_id
-        if (epoch := await self._compaction_epoch(target, origin, source)) is None:
+        if await store.room_history_recovery(room) is not None:
             return _COMPACTION_DEFERRED
+        if (epoch := await self._compaction_epoch(room, origin, source, wait=True)) is None:
+            return None
         if thread is not None and is_thread_history_degraded(
             await self.deps.resolver.fetch_thread_history(room, thread),
         ):
@@ -893,6 +906,10 @@ class ResponseRunner:
         if isinstance(plan, str):
             return _COMPACTION_DEFERRED
         model_name, inputs = plan
+        load = partial(load_scope_session, scope, target.session_id, paths, config, identity)
+        context = await run_blocking_until_complete(load)
+        if (session := context.session) is None or not read_scope_state(session).force_compact_before_next_run:
+            return None
         redactions = partial(self.deps.redacted_history_events, target)
         await remove_history_of_redacted_events(context.storage, session, redactions)
         if await store.room_history_recovery(room) is not None or epoch != await store.membership_epoch(room):
@@ -972,7 +989,6 @@ class ResponseRunner:
 
     async def _has_queued_forced_compaction(
         self,
-        *,
         session_id: str,
         scope: HistoryScope,
         execution_identity: ToolExecutionIdentity | None,
@@ -982,12 +998,8 @@ class ResponseRunner:
         Every turn pays for this before its placeholder is sent, so it reads
         one session row, without its runs, on a thread.
         """
-        return await asyncio.to_thread(
-            self._read_queued_forced_compaction,
-            session_id=session_id,
-            scope=scope,
-            execution_identity=execution_identity,
-        )
+        read = self._read_queued_forced_compaction
+        return await asyncio.to_thread(read, session_id=session_id, scope=scope, execution_identity=execution_identity)
 
     def _read_queued_forced_compaction(
         self,
@@ -1341,11 +1353,7 @@ class ResponseRunner:
         if (
             placeholder_message is None
             or existing_event_id(request) is not None
-            or await self._has_queued_forced_compaction(
-                session_id=resolved_target.session_id,
-                scope=history_scope,
-                execution_identity=execution_identity,
-            )
+            or await self._has_queued_forced_compaction(resolved_target.session_id, history_scope, execution_identity)
         ):
             return None
         handle = current_span()

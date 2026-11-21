@@ -1031,9 +1031,10 @@ class AgentBot:
             return False
         origin = target.reply_to_event_id
         assert origin is not None
-        result = await self.journal_principal().admit(
+        store, source = self.journal_principal(), f"compact:{origin}:{self.agent_name}"
+        result = await store.admit(
             InboundEvent(
-                event_id=f"compact:{origin}:{self.agent_name}",
+                event_id=source,
                 room_id=target.room_id,
                 thread_id=target.resolved_thread_id,
                 kind=EventKind.COMPACTION,
@@ -1043,9 +1044,10 @@ class AgentBot:
                 source={"requester_id": requester_id, "origin_event_id": origin},
             ),
         )
-        if result is AdmissionResult.ADMITTED:
-            self._journal_dispatcher.wake()
-        return True  # Duplicate means the durable row was already admitted.
+        if result is AdmissionResult.DUPLICATE:
+            return bool(await store.pending_among((source,)))
+        self._journal_dispatcher.wake()
+        return True
 
     def _build_reply_turn_owners(self, deps: ReplyTurnDeps) -> None:
         """Build one reply turn's owners so the dependency between them runs one way.

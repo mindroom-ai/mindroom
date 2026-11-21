@@ -259,13 +259,6 @@ class _SummaryChunk:
     summarizer: Summarizer
 
 
-@dataclass(frozen=True)
-class _CompactionRewriteResult:
-    summary_text: str
-    compacted_run_count: int
-    served_by: SummaryModel
-
-
 async def clear_manual_compaction_request(
     *,
     storage: ConversationStore,
@@ -409,10 +402,10 @@ async def compact_scope_history(
 
     outcome = None
 
-    async def report(result: _CompactionRewriteResult) -> None:
+    async def report(chunk: _SummaryChunk, compacted_run_count: int) -> None:
         nonlocal outcome
         await clear_manual_compaction_request(storage=storage, session=session, state=state)
-        summary_model, compacted_run_count = result.served_by, result.compacted_run_count
+        summary_model = chunk.summarizer.model
         logger.info(
             "Compaction summary generated",
             session_id=session.session_id,
@@ -431,7 +424,7 @@ async def compact_scope_history(
                 mode=mode,
                 session_id=session.session_id,
                 scope=scope.key,
-                summary=result.summary_text,
+                summary=chunk.summary,
                 summary_model=summary_model.name,
                 before_tokens=before_tokens,
                 after_tokens=after_tokens,
@@ -449,7 +442,7 @@ async def compact_scope_history(
         )
 
     try:
-        result = await _rewrite_working_session_for_compaction(
+        stored = await _rewrite_working_session_for_compaction(
             storage=storage,
             persisted_session=session,
             working_session=working_session,
@@ -465,7 +458,7 @@ async def compact_scope_history(
         # The reply replays what the conversation holds now; a manual request stays for the next reply.
         await run_session_storage_operation(lambda: storage, lambda opened: opened.reload_log(session))
         raise
-    if result is None:
+    if not stored:
         await clear_manual_compaction_request(storage=storage, session=session, state=state)
     return outcome
 
@@ -482,15 +475,15 @@ async def _rewrite_working_session_for_compaction(
     model: ModelProvider,
     before_persist: Callable[[Sequence[AnyRunRecord]], Awaitable[None]],
     after_persist: Callable[[_SummaryChunk, int, int], Awaitable[None]],
-    report: Callable[[_CompactionRewriteResult], Coroutine[object, object, None]],
-) -> _CompactionRewriteResult | None:
+    report: Callable[[_SummaryChunk, int], Coroutine[object, object, None]],
+) -> bool:
     """Fold ``runs``, oldest first, into one appended summary row per chunk.
 
     Stops when the conversation changes or a chunk's summary, as ``model``'s route sizes it, exceeds ``max_summary_tokens``;
     with nothing stored yet, either stop fails the compaction.
     """
     scope = owner_scope(persisted_session)
-    result = None
+    last_chunk = None
     remaining = list(runs)
 
     async def persist(chunk: _SummaryChunk, basis: ChunkBasis, runs_remaining: int) -> bool:
@@ -510,7 +503,7 @@ async def _rewrite_working_session_for_compaction(
         working_session.runs = runs_without(working_session.runs, compacted_run_ids)
         await after_persist(chunk, len(runs) - runs_remaining, runs_remaining)
         if not runs_remaining:
-            await report(_CompactionRewriteResult(chunk.summary, len(runs), chunk.summarizer.model))
+            await report(chunk, len(runs))
         return True
 
     while remaining:
@@ -550,11 +543,11 @@ async def _rewrite_working_session_for_compaction(
         if not await (commit if runs_remaining else run_coroutine_until_complete(commit)):
             _stop_compaction(ConversationChangedError(), persisted_session.session_id, scope, compacted_run_count)
             break
-        result = _CompactionRewriteResult(chunk.summary, len(runs) - runs_remaining, chunk.summarizer.model)
+        last_chunk = chunk
         summarizer, remaining = chunk.summarizer, remaining[len(chunk.included_runs) :]
-    if remaining and result is not None:
-        await run_coroutine_until_complete(report(result))
-    return result
+    if remaining and last_chunk is not None:
+        await run_coroutine_until_complete(report(last_chunk, len(runs) - len(remaining)))
+    return last_chunk is not None
 
 
 def _summary_budget_error(summary_tokens: int, max_summary_tokens: int | None) -> RuntimeError | None:

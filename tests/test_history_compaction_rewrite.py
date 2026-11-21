@@ -101,7 +101,7 @@ from tests.history_helpers import (
 from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
-    from mindroom.history.compaction import _CompactionRewriteResult, _SummaryChunk
+    from mindroom.history.compaction import _SummaryChunk
     from mindroom.llm.provider import ModelProvider
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
@@ -118,7 +118,8 @@ async def _rewrite_single_run(
     fallback_summary_model_name: str | None = None,
     fallback_summary_input_budget: int | None = None,
     served_models: list[str] | None = None,
-) -> _CompactionRewriteResult | None:
+    report: AsyncMock | None = None,
+) -> bool:
     # Compaction folds runs of a stored conversation.
     seed_session(storage, working_session)
 
@@ -150,7 +151,7 @@ async def _rewrite_single_run(
         max_summary_tokens=None,
         before_persist=AsyncMock(),
         after_persist=after_persist,
-        report=AsyncMock(),
+        report=report or AsyncMock(),
         model=ScriptedModel([]),
     )
 
@@ -198,13 +199,13 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
             summary_input_budget=110_000,
         )
 
-    assert rewrite_result is not None
+    assert rewrite_result
     assert len(summary_inputs) == 1
     assert build_summary_input_spy.call_count == 1
     assert build_summary_input_spy.call_args.kwargs["max_input_tokens"] == 110_000
     assert "run-1 user" in summary_inputs[0]
     assert "run-5 user" in summary_inputs[0]
-    assert rewrite_result.compacted_run_count == 5
+    assert len(folded_run_ids(storage)) == 5
 
 
 def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() -> None:
@@ -308,7 +309,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_shrinkable_error
     ):
         rewrite_result = await _rewrite_single_run(storage=storage, working_session=working_session)
 
-    assert rewrite_result is not None
+    assert rewrite_result
     assert len(summary_inputs) == 2
     assert quarter_tokens(summary_inputs[1]) < quarter_tokens(summary_inputs[0])
 
@@ -345,7 +346,7 @@ async def test_rewrite_starts_later_chunks_at_a_shrunk_budget(tmp_path: Path) ->
             summary_input_budget=50_000,
         )
 
-    assert rewrite_result is not None
+    assert rewrite_result
     budgets = [call.kwargs["max_input_tokens"] for call in build_spy.call_args_list]
     assert budgets[0] == 50_000
     assert len(budgets) > 2
@@ -381,7 +382,7 @@ async def test_rewrite_keeps_a_later_run_whole_when_the_full_budget_holds_it(tmp
             summary_input_budget=50_000,
         )
 
-    assert rewrite_result is not None
+    assert rewrite_result
     summary_inputs = [call.kwargs["summary_input"] for call in summary_mock.await_args_list]
     assert len(summary_inputs) == 3
     assert "run-3 question" not in summary_inputs[1]
@@ -625,7 +626,7 @@ async def test_summary_built_on_a_checkpoint_folds_its_run(tmp_path: Path) -> No
             summary_input_budget=6_000,
         )
 
-    assert rewrite_result is not None
+    assert rewrite_result
     first_input = summary_mock.await_args_list[0].kwargs["summary_input"]
     assert "CHECKPOINT" in first_input
     assert "run-1 question" not in first_input
@@ -687,6 +688,7 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     )
     retry_sleep = AsyncMock()
     served_models: list[str] = []
+    report = AsyncMock()
 
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
@@ -705,9 +707,10 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
             fallback_summary_model=fallback,
             fallback_summary_model_name="fallback-model",
             served_models=served_models,
+            report=report,
         )
 
-    assert rewrite_result is not None
+    assert rewrite_result
     summary_inputs = [call.kwargs["summary_input"] for call in summary_mock.await_args_list]
     summary_models = [call.kwargs["model"] for call in summary_mock.await_args_list]
     assert len(summary_inputs) == 3
@@ -724,9 +727,11 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
         StoredSummaryRow(summary="first chunk summary", legacy=False),
         StoredSummaryRow(summary="merged summary", legacy=False),
     ]
-    assert rewrite_result.compacted_run_count == 2
-    assert rewrite_result.served_by.model is fallback
-    assert rewrite_result.served_by.name == "fallback-model"
+    report.assert_awaited_once()
+    chunk, count = report.await_args.args
+    assert count == 2
+    assert chunk.summarizer.model.model is fallback
+    assert chunk.summarizer.model.name == "fallback-model"
     assert served_models == ["fallback-model", "fallback-model"]
     persisted = storage.load_session("session-1")
     assert persisted is not None
@@ -816,7 +821,7 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
     ):
         rewrite_result = await _rewrite_single_run(storage=storage, working_session=working_session)
 
-    assert rewrite_result is not None
+    assert rewrite_result
     summary_inputs = [call.kwargs["summary_input"] for call in summary_mock.await_args_list]
     assert len(summary_inputs) == 2
     assert summary_inputs[1] == summary_inputs[0]
@@ -1516,7 +1521,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
         tool_runtime_context(runtime_context),
         patch(
             "mindroom.history.compaction._rewrite_working_session_for_compaction",
-            new=AsyncMock(return_value=None),
+            new=AsyncMock(return_value=False),
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
@@ -1858,8 +1863,7 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
             report=AsyncMock(),
             model=ScriptedModel([]),
         )
-    assert rewrite_result is not None
-    assert rewrite_result.compacted_run_count == 1
+    assert rewrite_result
     assert [run.run_id for run in working_session.runs] == ["run-2"]
 
     stored = storage.load_session("session-1")

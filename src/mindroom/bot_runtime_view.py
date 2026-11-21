@@ -64,9 +64,10 @@ class BotRuntimeView(Protocol):
 
     def admission_fence(self) -> AbstractAsyncContextManager[None]: ...  # noqa: D102
 
-    async def wait_for_admission_or_shutdown(self) -> bool: ...  # noqa: D102
-
-    async def wait_until_ready_or_shutdown(self, ready: Coroutine[None, None, object]) -> bool: ...  # noqa: D102
+    async def wait_for_admission_or_shutdown(  # noqa: D102
+        self,
+        ready: Coroutine[None, None, object] | None = None,
+    ) -> bool: ...
 
 
 @dataclass
@@ -131,13 +132,9 @@ class BotRuntimeState:
         self._stopping.clear()
         return True
 
-    async def wait_for_admission_or_shutdown(self) -> bool:
-        """Return whether the runtime reopened response admission before this generation stopped accepting work."""
-        return await self.wait_until_ready_or_shutdown(self.response_admission_gate.wait_until_open())
-
-    async def wait_until_ready_or_shutdown(self, ready: Coroutine[None, None, object]) -> bool:
-        """Wait for readiness or for this generation to stop accepting work."""
-        ready_task = asyncio.create_task(ready)
+    async def wait_for_admission_or_shutdown(self, ready: Coroutine[None, None, object] | None = None) -> bool:
+        """Wait for admission (or its prerequisite) unless this generation stops accepting work."""
+        ready_task = asyncio.create_task(ready if ready is not None else self.response_admission_gate.wait_until_open())
         stopping = asyncio.create_task(self._stopping.wait())
         try:
             await asyncio.wait((ready_task, stopping), return_when=asyncio.FIRST_COMPLETED)
