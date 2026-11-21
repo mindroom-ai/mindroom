@@ -241,7 +241,8 @@ async def await_child(
         try:
             waited = await wait(approval_timeout=None if waiting else 0, work_timeout=0 if waiting else left)
         except JobAccessError as exc:
-            return ("denied", str(exc)), None, None
+            # A read that is denied says nothing of what the turn did, so its call is not one to run again.
+            return ("indeterminate" if handle.dispatched else "denied", str(exc)), None, None
         job, claim = waited.job, waited.claim
         if left is not None and not waiting:
             left -= loop.time() - since

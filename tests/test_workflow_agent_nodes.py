@@ -668,7 +668,30 @@ async def test_answer_of_a_job_that_cannot_be_read_yet_is_not_taken(stack: Workf
     else:
         with pytest.raises(NodeFailed) as refused:
             await stack.result("@0", "agent", _PROMPT)
-        assert (refused.value.kind, _node(stack).result) == ("denied", None)
+        # The turn ended, whatever it did: a read that is denied does not say that it did nothing.
+        assert (refused.value.kind, _node(stack).result) == ("indeterminate", None)
+
+
+@pytest.mark.asyncio
+async def test_agent_whose_answer_may_not_be_read_is_not_run_again_once_it_may(stack: WorkflowStack) -> None:
+    """A denied read of an ended turn proves no failure: the call waits for a resume that names it, and writes once."""
+    gate = asyncio.Event()
+    stack.child_script(calls(tool_call("append", "c1", line="a")), [Await(gate.wait), *answer("done")])
+    await stack.submit("@0", "agent", _PROMPT)
+    stack.admission = "pending"
+    gate.set()
+    await wait_for_status(stack.jobs, stack.node_job("@0").job_id, "completed")
+    stack.admission = "denied"
+    with pytest.raises(NodeFailed):
+        await stack.result("@0", "agent", _PROMPT)
+    stack.admission = "allowed"
+    stack.child_script(calls(tool_call("append", "c2", line="a")), answer("again"))
+
+    await _replayed(stack)
+
+    with pytest.raises(NodeFailed) as blocked:
+        await stack.result("@0", "agent", _PROMPT)
+    assert (blocked.value.kind, _node(stack).generation, stack.counting_tool.lines) == ("indeterminate", 1, ["a"])
 
 
 @pytest.mark.asyncio
