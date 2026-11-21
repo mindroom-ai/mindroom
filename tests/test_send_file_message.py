@@ -825,7 +825,6 @@ class TestJoinRoom:
     async def test_treats_non_dict_room_cache_as_uninitialized(self) -> None:
         """Join should succeed without mutating when the room cache is not a real dict."""
         client = AsyncMock(spec=nio.AsyncClient)
-        client.user_id = "@mindroom_test:localhost"
         client.rooms = AsyncMock()
         client.user_id = "@mindroom_test:localhost"
         client.join.return_value = nio.JoinResponse("!room:localhost")
@@ -875,7 +874,6 @@ class TestJoinRoom:
     ) -> None:
         """Only explicit terminal JoinError codes may suppress later retries."""
         client = AsyncMock(spec=nio.AsyncClient)
-        client.user_id = "@mindroom_test:localhost"
         client.join.return_value = response
 
         outcome = await join_room(client, "!room:localhost")

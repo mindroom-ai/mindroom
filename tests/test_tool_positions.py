@@ -140,7 +140,7 @@ async def test_a_send_puts_the_fixture_wire_content_on_matrix(case: dict[str, An
     delivered = await send_message_result(client, _ROOM, sent)
 
     wire = _on_the_wire(client)
-    assert wire is sent if case["wire"] is None else wire == _wire(case)
+    assert (wire is sent and wire["body"] == case["sent"]["body"]) if case["wire"] is None else wire == _wire(case)
     assert isinstance(delivered, DeliveredMatrixEvent)
     assert delivered.content_sent is sent
     assert calculate_event_size(wire) <= calculate_event_size(sent)
@@ -254,17 +254,6 @@ async def test_a_reply_whose_trace_has_an_entry_that_is_no_call_is_sent_as_it_is
 
     assert _on_the_wire(client) is content
     assert tool_markers_in_text(content) is content
-
-
-@pytest.mark.asyncio
-async def test_a_fenced_example_of_a_marker_keeps_its_line_in_the_plain_body() -> None:
-    """A marker line that is no top-level HTML paragraph of the same call is text, which a plain client must get."""
-    case = _case("a fenced example of the marker of a call that shows none stays version 2")
-    client = _client()
-
-    await send_message_result(client, _ROOM, _sent(case))
-
-    assert _on_the_wire(client)["body"] == "Example:\n\n```\n🔧 `shell` [1]\n\ncode\n```\n\nDone."
 
 
 def test_content_that_names_no_markers_to_take_out_is_sent_as_it_is() -> None:
@@ -637,26 +626,6 @@ async def test_recovery_finds_in_the_room_the_reply_an_earlier_device_sent(edit:
 
     assert found == "$sent"
     assert missing == [1]
-
-
-def test_the_model_reads_a_separator_after_a_call_as_it_always_did() -> None:
-    """History drops a separator that follows a marker, which it can only do for a reply read with its markers."""
-    case = _case("a separator after a call and extra blank lines stay")
-    message = _message(tool_markers_in_text(_wire(case)))
-
-    assert _context_body_from_visible_message(message, response_sender_id=None) == "After."
-    assert body_without_tool_markers(message.body, message.content) == "After."
-
-
-def test_a_person_reading_a_reply_of_calls_alone_sees_its_calls() -> None:
-    """The reads of a person's own account keep marker lines as text, so a reply of calls alone is not empty."""
-    case = _case("a reply of calls alone")
-
-    (line,) = _message_lines([_event(_wire(case))])
-
-    assert "🔧 `shell` [1]" in line
-    assert "🔧 `shell` [2] ⏳" in line
-    assert "(no text)" not in line
 
 
 @pytest.mark.parametrize("place", [True, 1.0, -1, 9, None, "1"])

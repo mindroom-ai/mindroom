@@ -215,8 +215,7 @@ class _Homeserver:
 
 def _body(content: Mapping[str, Any]) -> str:
     """Return the body MindRoom Chat reads, following an edit into its replacement, with its tool markers back."""
-    shown = visible_content_from_content(content)
-    return str(tool_markers_in_text(shown).get("body", ""))
+    return str(tool_markers_in_text(visible_content_from_content(content)).get("body", ""))
 
 
 def _trace_events(content: Mapping[str, Any]) -> list[dict[str, Any]]:

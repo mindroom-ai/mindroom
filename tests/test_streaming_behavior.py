@@ -106,8 +106,7 @@ _INTERRUPTION_SUMMARY = "(turn stopped before completion)"
 
 def _shown_body(content: dict[str, Any]) -> str:
     """Return the body MindRoom Chat reads from one sent payload: its replacement's, with its tool markers back."""
-    shown = content.get("m.new_content", content)
-    return tool_markers_in_text(shown)["body"]
+    return tool_markers_in_text(content.get("m.new_content", content))["body"]
 
 
 async def _aiter(*events: object) -> AsyncIterator[object]:
