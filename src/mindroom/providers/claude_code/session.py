@@ -12,64 +12,52 @@ import asyncio
 import os
 import re
 import tempfile
-from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
-import mcp.types
 from claude_agent_sdk import (
     ClaudeAgentOptions,
-    ClaudeSDKClient,
     ClaudeSDKError,
     CLINotFoundError,
     RateLimitEvent,
     SystemMessage,
 )
-from mcp.server import Server
 
 from mindroom import __version__
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
-from mindroom.claude_sdk_process import open_client
+from mindroom.claude_sdk_process import ClaudeProcess, user_message
 from mindroom.llm.errors import AuthenticationFailed, ProviderError, ProviderUnavailable
 from mindroom.logging_config import get_logger
-from mindroom.providers.claude_code.prompt import TOOL_PREFIX, canonical_arguments, tool_names
+from mindroom.providers.claude_code.bridge import SERVER_NAME, ToolBridge
+from mindroom.providers.claude_code.prompt import TOOL_PREFIX, tool_names
 from mindroom.runtime_shutdown import close_at_process_shutdown
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from claude_agent_sdk import Message as ClaudeMessage
-    from claude_agent_sdk import RateLimitInfo
+    from claude_agent_sdk import ClaudeSDKClient, RateLimitInfo
 
     from mindroom.llm.provider import ToolSpec
     from mindroom.providers.claude_code.prompt import Emitted
 
-__all__ = ["NOT_SIGNED_IN", "SERVER_NAME", "SESSIONS", "LiveSession", "start"]
+__all__ = ["NOT_SIGNED_IN", "SESSIONS", "LiveSession", "start"]
 
 logger = get_logger(__name__)
 
 # The oldest binary this route was run against; before 2.1.295 the model could reach tools beyond ``--tools``.
 _MIN_VERSION = (2, 1, 328)
-# The request metadata Claude Code sends with an MCP tool call: the id of the ``tool_use`` block that made the call.
-_TOOL_USE_ID_META = "claudecode/toolUseId"
-SERVER_NAME = "mindroom"
 _PARKED_TTL_SECONDS = 30 * 60.0
 _IDLE_TTL_SECONDS = 5 * 60.0
 # A process takes a few hundred megabytes. One that answers a request is never closed to make room for another.
 _MAX_PROCESSES = 8
 _SWEEP_INTERVAL_SECONDS = 60.0
-# How long a tool call waits for the model message that made it, which Claude Code sends before the call.
-_UNMADE_CALL_SECONDS = 30.0
 # How long Claude Code may take to say that it is ready, with MindRoom's tool server connected.
 _READY_SECONDS = 30.0
 # A tool result that holds images comes back from Claude Code as one message.
 _MAX_MESSAGE_BYTES = 32 * 1024 * 1024
-# Claude Code cuts a longer MCP tool description itself.
-_DESCRIPTION_LIMIT = 2048
-_CUT_DESCRIPTIONS: set[str] = set()
 # Claude Code features that would duplicate MindRoom's or hide its tools: memory files, compaction, and tool search.
 _ISOLATION_ENV = {
     "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
@@ -92,132 +80,13 @@ _REFUSED_NAMES = {"CLAUDE_BG_AUTH_SNAPSHOT_PATH", "CLAUDE_AUTO_BACKGROUND_TASKS"
 _SET_FOR_THE_PROCESS = {"CLAUDE_CODE_ENTRYPOINT", *_ISOLATION_ENV}
 # How Claude Code names the plans of a Claude subscription; an account without one is "Claude API".
 _PLAN = re.compile(r"Claude (Pro|Team|Enterprise|Max( \d+x)?)")
-NOT_SIGNED_IN = "Claude Code is not signed in. Run `claude auth login` as the user that runs MindRoom."
+_SIGN_IN_HINT = "Run `claude auth login` as the user that runs MindRoom."
+NOT_SIGNED_IN = f"Claude Code is not signed in. {_SIGN_IN_HINT}"
 _NOT_FOUND = (
     "Claude Code was not found. Install it (https://claude.com/claude-code), run `claude auth login` as the user "
     "that runs MindRoom, and set `extra_kwargs.cli_path` if `claude` is not on MindRoom's PATH."
 )
 _OTHER_TOOLS = "Claude Code did not connect exactly MindRoom's tools, so it got no request."
-
-
-@dataclass(eq=False)
-class _Call:
-    """One tool call a process waits on: what the model wrote, the result MindRoom gives, and whether it was made."""
-
-    made: asyncio.Future[tuple[str, str]]
-    result: asyncio.Future[dict[str, Any]]
-    entered: bool = False
-
-
-@dataclass(eq=False)
-class _ToolBridge:
-    """The tool calls of one Claude Code process, by call id: each waits for the result MindRoom's loop produces.
-
-    A call is in ``calls`` until Claude Code was handed its result, then its id is ``unconfirmed`` until Claude Code
-    said it took the result, and ``spent`` for good. ``failure`` says why the process can no longer be trusted.
-    """
-
-    names: dict[str, str]
-    messages: asyncio.Queue[ClaudeMessage | Exception] = field(default_factory=asyncio.Queue)
-    calls: dict[str, _Call] = field(default_factory=dict)
-    unconfirmed: set[str] = field(default_factory=set)
-    spent: set[str] = field(default_factory=set)
-    failure: str | None = None
-
-    def _call(self, tool_use_id: str) -> _Call:
-        if tool_use_id not in self.calls:
-            loop = asyncio.get_running_loop()
-            self.calls[tool_use_id] = _Call(loop.create_future(), loop.create_future())
-        return self.calls[tool_use_id]
-
-    def made(self, tool_use_id: str, name: str, arguments: object) -> bool:
-        """Keep a tool call the model wrote, which Claude Code then brings to the tool server; False for a used id."""
-        if tool_use_id in self.spent or (call := self._call(tool_use_id)).made.done():
-            return False
-        call.made.set_result((name, canonical_arguments(arguments)))
-        return True
-
-    def resolve(self, results: dict[str, dict[str, Any]]) -> None:
-        """Give each waiting tool call its result, which continues the turn."""
-        for tool_use_id, result in results.items():
-            # Claude Code can give a call up at any moment, which the request that reads the process then learns.
-            if not (call := self.calls[tool_use_id]).result.done():
-                call.result.set_result(result)
-
-    @property
-    def undelivered(self) -> bool:
-        """Whether Claude Code has not taken a result MindRoom gave, without which its model must not go on."""
-        return bool(self.unconfirmed) or any(call.result.done() for call in self.calls.values())
-
-    def fail(self, reason: str) -> None:
-        """Mark the process as broken and wake the request that reads it."""
-        if self.failure is None:
-            self.failure = reason
-            self.messages.put_nowait(ClaudeSDKError(reason))
-
-    def _refuse(self, reason: str) -> mcp.types.CallToolResult:
-        """Fail the process and answer a call with ``reason`` instead of a result: no call is ever guessed."""
-        self.fail(reason)
-        return mcp.types.CallToolResult(content=[mcp.types.TextContent(type="text", text=reason)], is_error=True)
-
-    async def _answer(self, params: mcp.types.CallToolRequestParams) -> mcp.types.CallToolResult:
-        """Wait for the result of the call the model wrote under this call's id, and for no other call."""
-        tool_use_id = (params.meta or {}).get(_TOOL_USE_ID_META)
-        if not isinstance(tool_use_id, str) or params.name not in self.names:
-            return self._refuse(f"Claude Code called {params.name} without a usable call id")
-        if tool_use_id in self.spent or (call := self._call(tool_use_id)).entered:
-            return self._refuse(f"Claude Code made the tool call {tool_use_id} twice")
-        call.entered = True
-        try:
-            try:
-                # Only a call that outran its model message waits here.
-                made = await asyncio.wait_for(asyncio.shield(call.made), _UNMADE_CALL_SECONDS)
-            except TimeoutError:
-                return self._refuse(f"Claude Code made a tool call the model did not write: {tool_use_id}")
-            if made != (params.name, canonical_arguments(params.arguments or {})):
-                return self._refuse(f"Claude Code made the tool call {tool_use_id} unlike the model wrote it")
-            result = mcp.types.CallToolResult.model_validate(await call.result)
-        except asyncio.CancelledError:
-            self.fail(f"Claude Code gave up the tool call {tool_use_id}")
-            raise
-        # Nothing of a call that is done is kept but its id, which no later call may use.
-        del self.calls[tool_use_id]
-        self.spent.add(tool_use_id)
-        self.unconfirmed.add(tool_use_id)
-        return result
-
-    def server(self, tools: Sequence[ToolSpec]) -> Server:
-        """Return the MCP server that offers ``tools`` and parks each call until its result arrives."""
-        listed = mcp.types.ListToolsResult(
-            tools=[
-                mcp.types.Tool(
-                    name=short,
-                    description=_description(tool),
-                    input_schema=dict(tool.parameters),
-                    # Claude Code runs calls that are not read-only one after another.
-                    annotations=mcp.types.ToolAnnotations(read_only_hint=False),
-                    _meta={"anthropic/alwaysLoad": True, "anthropic/maxResultSizeChars": 500_000},
-                )
-                for short, tool in zip(self.names, tools, strict=True)
-            ],
-        )
-
-        async def on_list_tools(_context: object, _params: object) -> mcp.types.ListToolsResult:
-            return listed
-
-        async def on_call_tool(_context: object, params: mcp.types.CallToolRequestParams) -> mcp.types.CallToolResult:
-            return await self._answer(params)
-
-        return Server(SERVER_NAME, version=__version__, on_list_tools=on_list_tools, on_call_tool=on_call_tool)
-
-
-def _description(tool: ToolSpec) -> str:
-    """Return the description Claude Code takes for ``tool``, saying once when it loses its end."""
-    description = tool.description or ""
-    if len(description) > _DESCRIPTION_LIMIT and tool.name not in _CUT_DESCRIPTIONS:
-        _CUT_DESCRIPTIONS.add(tool.name)
-        logger.warning("claude_code_tool_description_cut", tool=tool.name, length=len(description))
-    return description[:_DESCRIPTION_LIMIT]
 
 
 @dataclass(eq=False)
@@ -229,10 +98,8 @@ class LiveSession:
     process had used by the end of its last turn, and ``rejected`` is the plan limit it last reported.
     """
 
-    client: ClaudeSDKClient
-    owner: asyncio.Task[None]
-    close_requested: asyncio.Event
-    bridge: _ToolBridge
+    process: ClaudeProcess
+    bridge: ToolBridge
     provider: str
     inventoried: bool = False
     counted: dict[str, int] = field(default_factory=dict)
@@ -256,13 +123,9 @@ class LiveSession:
 
     async def send(self, blocks: list[dict[str, Any]]) -> None:
         """Send one user message, which starts a turn."""
-
-        async def messages() -> Any:  # noqa: ANN401 - the SDK takes an async iterable of message dicts
-            yield {"type": "user", "message": {"role": "user", "content": blocks}, "parent_tool_use_id": None}
-
         self.inventoried, self.counted = False, {}
         try:
-            await self.client.query(messages())
+            await self.process.client.query(user_message(blocks))
         except ClaudeSDKError as error:
             msg = f"Claude Code stopped: {error}"
             raise ProviderUnavailable(msg, provider=self.provider) from error
@@ -289,14 +152,14 @@ def _startup_error(info: dict[str, Any] | None, provider: str) -> Authentication
             "MindRoom's environment and run `claude auth login`, or use `provider: anthropic` to pay with a key."
         )
     elif account.get("apiProvider") != "firstParty" or not _PLAN.fullmatch(str(account.get("subscriptionType"))):
-        message = f"Claude Code is not signed in to a Claude subscription. {NOT_SIGNED_IN.partition('. ')[2]}"
+        message = f"Claude Code is not signed in to a Claude subscription. {_SIGN_IN_HINT}"
     else:
         return None
     return AuthenticationFailed(message, provider=provider, status_code=401)
 
 
-async def _refuse_unless_ready(client: ClaudeSDKClient, offered: list[str], provider: str) -> None:
-    """Raise unless Claude Code may get a prompt: signed in to a subscription, with exactly the ``offered`` tools.
+async def _refuse_unless_ready(client: ClaudeSDKClient, bridge: ToolBridge, provider: str) -> None:
+    """Raise unless Claude Code may get a prompt: signed in to a subscription, with exactly the tools MindRoom offers.
 
     Its tool server connects a moment after it starts, so that is awaited.
     """
@@ -306,7 +169,7 @@ async def _refuse_unless_ready(client: ClaudeSDKClient, offered: list[str], prov
     logger.debug("claude_code_started", cli=client.options.cli_path or "bundled", version=version)
     if (refused := _startup_error(info, provider)) is not None:
         raise refused
-    wanted = {SERVER_NAME: ("connected", sorted(offered))} if offered else {}
+    wanted = bridge.expected_inventory()
     while True:
         servers = (await client.get_mcp_status()).get("mcpServers")
         if not isinstance(servers, list):
@@ -401,7 +264,7 @@ async def _launch(
     try:
         if freed is not None:
             await freed
-        bridge = _ToolBridge(names=tool_names(tools, provider))
+        bridge = ToolBridge(names=tool_names(tools, provider))
         cwd, prompt = await asyncio.to_thread(_prepare, storage_root, system)
         sdk_options = ClaudeAgentOptions(
             **options,
@@ -426,18 +289,14 @@ async def _launch(
             server = bridge.server(tools)
             sdk_options.mcp_servers = {SERVER_NAME: {"type": "sdk", "name": SERVER_NAME, "instance": server}}
             sdk_options.allowed_tools = [f"{TOOL_PREFIX}*"]
-        client = ClaudeSDKClient(options=sdk_options)
-        close_requested = asyncio.Event()
-        owner = await open_client(client, close_requested, bridge.messages)
-        # From here the process holds the slot its start took.
-        session = LiveSession(client, owner, close_requested, bridge, provider)
-        SESSIONS.live.add(session)
-        SESSIONS.starting -= 1
+        process = await ClaudeProcess.open(sdk_options, messages=bridge.messages)
+        session = LiveSession(process, bridge, provider)
+        SESSIONS.finish_start(session)
         async with asyncio.timeout(_READY_SECONDS):
-            await _refuse_unless_ready(client, list(bridge.names), provider)
+            await _refuse_unless_ready(process.client, bridge, provider)
     except BaseException as error:
         if session is None:
-            SESSIONS.starting -= 1
+            SESSIONS.finish_start(None)
         else:
             await SESSIONS.retire(session)
         if isinstance(error, CLINotFoundError):
@@ -454,11 +313,7 @@ async def _launch(
     return session
 
 
-async def _close(session: LiveSession) -> None:
-    """Stop one process; a tool call it still waits on is never answered."""
-    session.close_requested.set()
-    with suppress(Exception):
-        await session.owner
+type RestKey = tuple[str, str, tuple[str, ...]]
 
 
 class _SessionRegistry:
@@ -470,7 +325,7 @@ class _SessionRegistry:
 
     def __init__(self) -> None:
         self.live: set[LiveSession] = set()
-        self.resting: dict[tuple[str, str, tuple[str, ...]], LiveSession] = {}
+        self.resting: dict[RestKey, LiveSession] = {}
         self.starting = 0
         self._sweep: asyncio.Task[None] | None = None
 
@@ -491,18 +346,28 @@ class _SessionRegistry:
         self.starting += 1
         return None if replaced is None else self.retire(replaced)
 
+    def finish_start(self, session: LiveSession | None) -> None:
+        """End a startup reservation, handing its slot to the process if it opened."""
+        self.starting -= 1
+        if session is not None:
+            self.live.add(session)
+
+    def claim(self, key: RestKey) -> LiveSession | None:
+        """Take a resting process out of circulation, so no other request can continue it."""
+        return self.resting.pop(key, None)
+
     def retire(self, session: LiveSession) -> asyncio.Task[None]:
         """Close ``session`` on a task no stopped request cuts short; it holds its slot until it is gone."""
 
         async def run() -> None:
             try:
-                await _close(session)
+                await session.process.close()
             finally:
                 self.live.discard(session)
 
         return create_background_task(run(), name="claude_code_close", owner=self, context=Context())
 
-    def rest(self, key: tuple[str, str, tuple[str, ...]], session: LiveSession) -> None:
+    def rest(self, key: RestKey, session: LiveSession) -> None:
         """Keep ``session`` for the request that follows the answer it just gave."""
         if (replaced := self.resting.pop(key, None)) is not None:
             self.retire(replaced)

@@ -31,7 +31,7 @@ from mindroom.llm.usage import add_usage
 from mindroom.providers.anthropic.wire import parse_claude_usage, stop_reason_of
 from mindroom.providers.assistant_turn import finished_turn
 from mindroom.providers.claude_code.prompt import TOOL_PREFIX, emitted
-from mindroom.providers.claude_code.session import NOT_SIGNED_IN, SERVER_NAME
+from mindroom.providers.claude_code.session import NOT_SIGNED_IN
 from mindroom.providers.errors import classify_provider_error
 
 if TYPE_CHECKING:
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from mindroom.providers.assistant_turn import TurnTimer
     from mindroom.providers.claude_code.session import LiveSession
 
-__all__ = ["Outrun", "read_step"]
+__all__ = ["ResultsOutrun", "read_step"]
 
 # The counters of Claude's usage, each with its name in the ledger Claude Code keeps of all a process used.
 _COUNTERS = {
@@ -57,7 +57,7 @@ _COUNTERS = {
 }
 
 
-class Outrun(ProviderUnavailable):
+class ResultsOutrun(ProviderUnavailable):
     """Claude Code's model went on before the results MindRoom gave it had reached it; none of that answer counts."""
 
 
@@ -108,7 +108,7 @@ class _Step:
         for counter in _COUNTERS:
             session.counted[counter] = session.counted.get(counter, 0) + (usage.get(counter) or 0)
 
-    def accept(self, message: ClaudeMessage, session: LiveSession, provider: str) -> list[ModelEvent]:
+    def accept(self, message: ClaudeMessage, session: LiveSession) -> list[ModelEvent]:
         """Return the events of one message of the process, raising for a turn that failed or lost its isolation."""
         if isinstance(message, SystemMessage):
             if message.subtype == "init":
@@ -122,25 +122,25 @@ class _Step:
         elif not session.inventoried:
             # Nothing a process says counts before it said that it runs with exactly MindRoom's tools.
             msg = "Claude Code did not start its turn with exactly MindRoom's tools, so the turn was stopped."
-            raise ProviderError(msg, provider=provider)
+            raise ProviderError(msg, provider=session.provider)
         elif isinstance(message, StreamEvent | AssistantMessage | ResultMessage) and session.bridge.undelivered:
             msg = "Claude Code went on without the tool results MindRoom gave it."
-            raise Outrun(msg, provider=provider)
+            raise ResultsOutrun(msg, provider=session.provider)
         elif isinstance(message, StreamEvent) and message.parent_tool_use_id is None:
             return self._stream_event(message.event, session)
         elif isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
-            return self._assistant(message, session, provider)
+            return self._assistant(message, session)
         elif isinstance(message, ResultMessage):
-            self._end(message, session, provider)
+            self._end(message, session)
         return []
 
-    def _end(self, result: ResultMessage, session: LiveSession, provider: str) -> None:
+    def _end(self, result: ResultMessage, session: LiveSession) -> None:
         """End the step with the result of Claude Code's turn, raising for a turn that failed."""
-        failure = _turn_failure(result, error=self.error, rejected=session.rejected, provider=provider)
+        failure = _turn_failure(result, error=self.error, rejected=session.rejected, provider=session.provider)
         if failure is None and self.calls:
             # Without the end of the model message that made them, the process never waited on these calls.
             msg = "Claude Code ended its turn without waiting for MindRoom's tool results."
-            failure = ProviderError(msg, provider=provider)
+            failure = ProviderError(msg, provider=session.provider)
         if failure is not None:
             raise failure
         # What the turn used beyond its model messages, such as a request Claude Code made for itself with another
@@ -188,7 +188,7 @@ class _Step:
                 return self._think(piece["thinking"])
         return []
 
-    def _assistant(self, message: AssistantMessage, session: LiveSession, provider: str) -> list[ModelEvent]:
+    def _assistant(self, message: AssistantMessage, session: LiveSession) -> list[ModelEvent]:
         """Keep a complete block's tool call; a message that did not stream also gives its text and its usage."""
         if message.error is not None:
             # The text of a request that failed is Claude Code's diagnostic, not an answer.
@@ -201,7 +201,7 @@ class _Step:
         events: list[ModelEvent] = []
         for block in message.content:
             if isinstance(block, ToolUseBlock):
-                self.calls.append(_tool_call(block, session, provider))
+                self.calls.append(_tool_call(block, session))
             elif self.seen[message.message_id]:
                 continue
             elif isinstance(block, TextBlock) and block.text:
@@ -211,11 +211,11 @@ class _Step:
         if self.calls and self.streaming is None:
             # No end of a model message follows calls that did not stream, so which call is its last is not known.
             msg = "Claude Code did not stream the model message that called MindRoom's tools."
-            raise ProviderUnavailable(msg, provider=provider)
+            raise ProviderUnavailable(msg, provider=session.provider)
         return events
 
 
-def _tool_call(block: ToolUseBlock, session: LiveSession, provider: str) -> dict[str, Any]:
+def _tool_call(block: ToolUseBlock, session: LiveSession) -> dict[str, Any]:
     """Return the call of a MindRoom tool the model wrote, which the process then waits on."""
     short = block.name.removeprefix(TOOL_PREFIX)
     name = session.bridge.names.get(short) if block.name.startswith(TOOL_PREFIX) else None
@@ -223,10 +223,10 @@ def _tool_call(block: ToolUseBlock, session: LiveSession, provider: str) -> dict
     if name is None:
         # The model may not name it again in a new process, which the retry of the request starts.
         msg = f"Claude called {block.name}, which MindRoom did not offer."
-        raise ProviderUnavailable(msg, provider=provider)
+        raise ProviderUnavailable(msg, provider=session.provider)
     if not session.bridge.made(block.id, short, block.input):
         msg = f"Claude wrote the tool call {block.id} twice."
-        raise ProviderError(msg, provider=provider)
+        raise ProviderError(msg, provider=session.provider)
     return {"id": block.id, "type": "function", "function": {"name": name, "arguments": json.dumps(block.input)}}
 
 
@@ -266,9 +266,12 @@ def _only_mindrooms_tools(init: dict[str, Any], session: LiveSession) -> bool:
     tools, servers = init.get("tools"), init.get("mcp_servers")
     if not isinstance(tools, list) or not isinstance(servers, list):
         return False
-    offered = sorted(f"{TOOL_PREFIX}{name}" for name in session.bridge.names)
+    inventory = session.bridge.expected_inventory()
+    offered = [f"{TOOL_PREFIX}{tool}" for _, names in inventory.values() for tool in names]
     connected = [(server.get("name"), server.get("status")) for server in servers]
-    return sorted(map(str, tools)) == offered and connected == ([(SERVER_NAME, "connected")] if offered else [])
+    return sorted(map(str, tools)) == offered and connected == [
+        (name, status) for name, (status, _) in inventory.items()
+    ]
 
 
 async def read_step(session: LiveSession, identity: ModelIdentity, timer: TurnTimer) -> AsyncIterator[ModelEvent]:
@@ -278,11 +281,11 @@ async def read_step(session: LiveSession, identity: ModelIdentity, timer: TurnTi
     """
     step = _Step()
     while step.stop_reason is None:
-        message = await session.bridge.messages.get()
+        message = await session.process.messages.get()
         if isinstance(message, Exception):
             msg = f"Claude Code stopped: {message}"
             raise ProviderUnavailable(msg, provider=identity.provider) from message
-        for event in timer.chunk(step.accept(message, session, identity.provider)):
+        for event in timer.chunk(step.accept(message, session)):
             yield event
     if (failure := session.bridge.failure) is not None:
         raise ProviderUnavailable(failure, provider=identity.provider)

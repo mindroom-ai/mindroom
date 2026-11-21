@@ -22,7 +22,7 @@ from mindroom.providers.assistant_turn import TurnTimer
 from mindroom.providers.claude_code import session as runtime
 from mindroom.providers.claude_code.prompt import decide, rebuild_input
 from mindroom.providers.claude_code.settings import ClaudeCodeSettings
-from mindroom.providers.claude_code.turn import Outrun, read_step
+from mindroom.providers.claude_code.turn import ResultsOutrun, read_step
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.identity import model_identity
 from mindroom.providers.prompt_cache_key import derive_session_routing_key
@@ -163,7 +163,7 @@ class ClaudeCodeProvider:
         if answered is not None and (prefix := prefixes[answered]) is not None:
             # Taken out of the resting ones, no other request continues it.
             key = (self._conversation, prefix, tuple(call["id"] for call in tail[0].tool_calls or ()))
-            session = runtime.SESSIONS.resting.pop(key, None)
+            session = runtime.SESSIONS.claim(key)
         # A process that went on without the results it waited for is replaced by one given the whole conversation.
         for continued in (tail, []):
             session = await self._session(request, continued, session)
@@ -180,7 +180,7 @@ class ClaudeCodeProvider:
                         runtime.SESSIONS.rest(key, session)
                         rests = True
                     yield event
-            except Outrun:
+            except ResultsOutrun:
                 if not continued:
                     raise
                 # The process that starts over closes this one when it takes its slot, and no sooner.
@@ -195,7 +195,7 @@ class ClaudeCodeProvider:
     async def preflight(self) -> None:
         """Start Claude Code as a request would, send it nothing, and close it, raising what a request would."""
         await runtime.SESSIONS.retire(
-            await runtime.start(provider=self.identity.provider, storage_root=self.storage_root, **self._launch)
+            await runtime.start(provider=self.identity.provider, storage_root=self.storage_root, **self._launch),
         )
 
 

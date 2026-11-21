@@ -39,6 +39,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.providers.claude_code import adapter as adapter_module
+from mindroom.providers.claude_code import bridge as bridge_module
 from mindroom.providers.claude_code import session as session_module
 from mindroom.providers.claude_code.prompt import rebuild_input
 from mindroom.providers.claude_code.session import SESSIONS
@@ -370,7 +371,7 @@ async def test_a_call_that_already_returned_is_not_answered_a_second_time(tmp_pa
 
 @pytest.mark.asyncio
 async def test_a_call_the_model_never_made_gets_no_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(session_module, "_UNMADE_CALL_SECONDS", 0.05)
+    monkeypatch.setattr(bridge_module, "_UNMADE_CALL_SECONDS", 0.05)
     turn = [{"tools": [call("toolu_a", "a"), {**call("toolu_x", "b"), "hidden": True}]}, {"text": "never"}]
     cli = fake_cli(tmp_path, {"turns": [turn]})
     provider = cli.provider()
@@ -404,7 +405,7 @@ async def test_a_parked_process_with_a_call_the_model_never_made_is_rebuilt_at_o
 
 @pytest.mark.asyncio
 async def test_a_result_for_a_call_claude_code_gave_up_meanwhile_is_dropped() -> None:
-    bridge = session_module._ToolBridge(names={"lookup": "lookup"})
+    bridge = bridge_module.ToolBridge(names={"lookup": "lookup"})
     bridge.made("toolu_a", "lookup", {"key": "a"})
     bridge.made("toolu_b", "lookup", {"key": "b"})
     bridge.calls["toolu_a"].result.cancel()
@@ -769,14 +770,14 @@ async def test_claude_code_refuses_linked_runtime_directories(tmp_path: Path, pa
 def held_start(monkeypatch: pytest.MonkeyPatch) -> tuple[asyncio.Event, asyncio.Event]:
     """Hold each start where it opens Claude Code: the first event says one got there, the second lets it go on."""
     reached, released = asyncio.Event(), asyncio.Event()
-    open_client = session_module.open_client
+    open_process = session_module.ClaudeProcess.open
 
-    async def held(*args: Any) -> asyncio.Task[None]:  # noqa: ANN401
+    async def held(*args: Any, **kwargs: Any) -> session_module.ClaudeProcess:  # noqa: ANN401
         reached.set()
         await released.wait()
-        return await open_client(*args)
+        return await open_process(*args, **kwargs)
 
-    monkeypatch.setattr(session_module, "open_client", held)
+    monkeypatch.setattr(session_module.ClaudeProcess, "open", staticmethod(held))
     return reached, released
 
 
@@ -811,13 +812,13 @@ async def test_a_slot_is_not_free_before_the_process_that_held_it_is_gone(
 ) -> None:
     monkeypatch.setattr(session_module, "_MAX_PROCESSES", 1)
     gone = asyncio.Event()
-    close = session_module._close
+    close = session_module.ClaudeProcess.close
 
-    async def slow_close(session: session_module.LiveSession) -> None:
+    async def slow_close(process: session_module.ClaudeProcess) -> None:
         await asyncio.wait_for(gone.wait(), 5)
-        await close(session)
+        await close(process)
 
-    monkeypatch.setattr(session_module, "_close", slow_close)
+    monkeypatch.setattr(session_module.ClaudeProcess, "close", slow_close)
     cli = fake_cli(tmp_path, {"turns": [text_turn("One.")]})
     await complete(cli.provider(execution_identity=CONVERSATION), ModelRequest(messages=[user("First")]))
     # The second request takes the slot of the resting process, whose close does not end, and is cancelled.

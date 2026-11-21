@@ -9,22 +9,68 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from contextvars import Context
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
-from claude_agent_sdk import CLIConnectionError
+from claude_agent_sdk import ClaudeSDKClient, CLIConnectionError
 
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from claude_agent_sdk import ClaudeSDKClient, Message
+    from collections.abc import AsyncIterator
 
-__all__ = ["open_client"]
+    from claude_agent_sdk import ClaudeAgentOptions, Message
+
+__all__ = ["ClaudeProcess", "user_message"]
 
 logger = get_logger(__name__)
 _START_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
-async def open_client(
+@dataclass(slots=True)
+class ClaudeProcess:
+    """A connected Claude SDK client owned by a dedicated task, with its unread messages."""
+
+    client: ClaudeSDKClient
+    owner: asyncio.Task[None]
+    close_requested: asyncio.Event
+    messages: asyncio.Queue[Message | Exception]
+
+    @classmethod
+    async def open(
+        cls,
+        options: ClaudeAgentOptions,
+        *,
+        messages: asyncio.Queue[Message | Exception] | None = None,
+    ) -> ClaudeProcess:
+        """Open a Claude Code process, optionally sharing its message queue with the tool bridge."""
+        client = ClaudeSDKClient(options=options)
+        close_requested = asyncio.Event()
+        if messages is None:
+            messages = asyncio.Queue()
+        owner = await _open_client(client, close_requested, messages)
+        return cls(client, owner, close_requested, messages)
+
+    async def close(self) -> None:
+        """Signal the owner to disconnect and wait for it to finish."""
+        self.close_requested.set()
+        with suppress(Exception):
+            await self.owner
+
+
+async def user_message(
+    content: str | list[dict[str, Any]],
+    *,
+    uuid: str | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Yield one SDK user message, optionally tagged with a UUID Claude Code echoes back."""
+    message = {"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
+    if uuid is not None:
+        message["uuid"] = uuid
+    yield message
+
+
+async def _open_client(
     client: ClaudeSDKClient,
     close_requested: asyncio.Event,
     messages: asyncio.Queue[Message | Exception],

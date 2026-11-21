@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import collections
 import typing
-from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
 from time import monotonic
@@ -15,7 +14,6 @@ from uuid import uuid4
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
-    ClaudeSDKClient,
     ClaudeSDKError,
     ResultMessage,
     SystemMessage,
@@ -25,7 +23,7 @@ from claude_agent_sdk import (
 )
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
-from mindroom.claude_sdk_process import open_client
+from mindroom.claude_sdk_process import ClaudeProcess, user_message
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
@@ -34,11 +32,6 @@ from mindroom.runtime_shutdown import close_at_process_shutdown
 from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.runtime_context import current_requester_id, get_tool_runtime_context
-
-if typing.TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
-    from claude_agent_sdk import Message
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 _VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = get_args(_PermissionMode)
@@ -89,10 +82,7 @@ class _ClaudeSessionState:
 
     key: str
     namespace: str
-    client: ClaudeSDKClient
-    owner: asyncio.Task[None]
-    close_requested: asyncio.Event
-    messages: asyncio.Queue[Message | Exception]
+    process: ClaudeProcess
     model: str | None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     created_at: float = field(default_factory=monotonic)
@@ -155,17 +145,10 @@ class _ClaudeSessionManager:
                 # Evicted sessions close while this one starts, so a shutdown meanwhile waits for their closes.
                 closing = self._close_many(self._evict_if_needed_locked(namespace))
 
-                client = ClaudeSDKClient(options=options)
-                close_requested = asyncio.Event()
-                messages: asyncio.Queue[Message | Exception] = asyncio.Queue()
-                owner = await open_client(client, close_requested, messages)
                 session = _ClaudeSessionState(
                     key=session_key,
                     namespace=namespace,
-                    client=client,
-                    owner=owner,
-                    close_requested=close_requested,
-                    messages=messages,
+                    process=await ClaudeProcess.open(options),
                     model=options.model,
                     ttl_seconds=self._namespace_ttl_seconds(namespace),
                 )
@@ -274,12 +257,10 @@ async def _close(session: _ClaudeSessionState) -> None:
     Such a turn is, for example, a stopped call's answer.
     """
     async with session.lock:
-        session.close_requested.set()
-        with suppress(Exception):
-            await session.owner
+        await session.process.close()
         turn = _ClaudeTurn()
-        while not session.messages.empty():
-            message = session.messages.get_nowait()
+        while not session.process.messages.empty():
+            message = session.process.messages.get_nowait()
             if isinstance(message, AssistantMessage):
                 _add_response(turn, message)
             elif isinstance(message, ResultMessage):
@@ -350,16 +331,6 @@ async def _record_turn_usage(
     except Exception as error:
         # Claude has already done the work, so a usage write failure must not hide its reply.
         logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
-
-
-async def _prompt_message(prompt: str, prompt_id: str) -> AsyncIterator[dict[str, typing.Any]]:
-    """Yield ``prompt`` as one user message whose ``uuid`` Claude Code echoes inside the turn that uses it."""
-    yield {
-        "type": "user",
-        "message": {"role": "user", "content": prompt},
-        "parent_tool_use_id": None,
-        "uuid": prompt_id,
-    }
 
 
 def _self_started(result: ResultMessage) -> bool:
@@ -636,10 +607,10 @@ class ClaudeAgentTools(Toolkit):
             try:
                 if session.model != resolved_model:
                     # A reused session runs each turn on that reply's model, such as an over-budget fallback.
-                    await session.client.set_model(resolved_model)
+                    await session.process.client.set_model(resolved_model)
                     session.model = resolved_model
                 prompt_id = str(uuid4())
-                await session.client.query(_prompt_message(trimmed_prompt, prompt_id))
+                await session.process.client.query(user_message(trimmed_prompt, uuid=prompt_id))
                 response = await self._collect_response(session, prompt_id)
             except Exception as exc:
                 # Any failure leaves the session unusable, such as a control request Claude Code never answered.
@@ -678,10 +649,10 @@ class ClaudeAgentTools(Toolkit):
         answered = False
 
         while True:
-            message = await session.messages.get()
+            message = await session.process.messages.get()
             if isinstance(message, Exception):
                 # The stream has ended, so a call already waiting for this session reads the same error.
-                session.messages.put_nowait(message)
+                session.process.messages.put_nowait(message)
                 raise message
             turn = turns[-1]
             if isinstance(message, UserMessage):
@@ -754,7 +725,7 @@ class ClaudeAgentTools(Toolkit):
             return f"No active Claude session for `{session_key}`."
 
         try:
-            await session.client.interrupt()
+            await session.process.client.interrupt()
             session.last_used_at = monotonic()
         except ClaudeSDKError as exc:
             return f"Failed to interrupt Claude session: {exc}"
