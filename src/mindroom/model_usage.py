@@ -6,10 +6,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.llm.messages import usage_sums_attempts
+from mindroom.providers.names import ROUTE_PROVIDERS
 
 if TYPE_CHECKING:
     from mindroom.llm.messages import Message
     from mindroom.llm.usage import MessageMetrics
+
+
+# The ``claude_code`` route as a config names it and as stored runs and usage name it; Claude Code reports Claude's usage.
+_CLAUDE_CODE_NAMES = frozenset({"claude_code", ROUTE_PROVIDERS["claude_code"].lower()})
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +55,7 @@ def provider_reports_cache_tokens_outside_input(
     model_key = (model_id or "").lower()
     if "anthropic" in provider_key or "bedrock" in provider_key:
         return True
-    if configured_provider_key == "vertexai_claude":
+    if configured_provider_key == "vertexai_claude" or provider_key in _CLAUDE_CODE_NAMES:
         return True
     return "vertex" in provider_key and "claude" in model_key
 

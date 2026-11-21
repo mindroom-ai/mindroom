@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelRequest, StreamEvent, TokenCounter
+    from mindroom.providers.claude_code.session import LiveSession
     from mindroom.token_counting.requests import RequestParts
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -76,57 +77,70 @@ class ClaudeCodeProvider:
         """Identify the tools and settings of ``request``, which a Claude Code process is started with."""
         return route_context_key(self.identity, self.token_counter, request, self._parts)
 
-    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        """Answer ``request`` with the process that waits for it, or with a new one given the whole conversation."""
+    async def _session(self, request: ModelRequest, resting: str | None) -> LiveSession:
+        """Return the process that answers ``request``: the one resting under ``resting``, continued, or a new one."""
         # The SDK loads only once a request is sent.
         from mindroom.providers.claude_code.session import SESSIONS, start  # noqa: PLC0415
-        from mindroom.providers.claude_code.turn import read_step  # noqa: PLC0415
 
-        timer = TurnTimer()
         provider = self.identity.provider
         messages = request.messages
-        # Digesting a long history would stall the replies that share the event loop.
-        prefixes = await asyncio.to_thread(request_prefixes, self, request)
-        answered = max((index for index, message in enumerate(messages) if message.role == "assistant"), default=None)
-        session = None
-        if answered is not None and (key := prefixes[answered]) is not None:
-            session = SESSIONS.claim(self.scope + key)
+        session = None if resting is None else SESSIONS.claim(resting)
         try:
-            resume = None
-            if session is not None and answered is not None and session.emitted is not None and not session.broken():
-                resume = await asyncio.to_thread(decide, session.emitted, messages[answered:], provider)
-            if session is not None and resume is None:
+            if session is not None and session.emitted is not None and session.broken() is None:
+                tail = messages[max(index for index, message in enumerate(messages) if message.role == "assistant") :]
+                resume = await asyncio.to_thread(decide, session.emitted, tail, provider)
+                if resume is not None:
+                    sent = {"mode": "continue", "results": resume.results, "input": resume.blocks}
+                    await request.on_send({"model": self.identity.id, **sent})
+                    if resume.results:
+                        session.resolve(resume.results)
+                    else:
+                        await session.send(resume.blocks)
+                    return session
+            if session is not None:
                 SESSIONS.retire(session)
                 session = None
-            if session is None or resume is None:
-                tools = () if request.tool_choice == "none" else request.tools
-                system, blocks = await asyncio.to_thread(rebuild_input, messages, provider)
-                sent = {"mode": "rebuild", "system": system, "tools": [tool.name for tool in tools], "input": blocks}
-                await request.on_send({"model": self.identity.id, **sent})
-                session = await start(
-                    model=self.identity.id,
-                    settings=self.settings,
-                    system=system,
-                    tools=tools,
-                    storage_root=self.storage_root,
-                    provider=provider,
-                )
-                await session.send(blocks)
-            else:
-                sent = {"mode": "continue", "results": resume.results, "input": resume.blocks}
-                await request.on_send({"model": self.identity.id, **sent})
-                if resume.results:
-                    session.resolve(resume.results)
-                else:
-                    await session.send(resume.blocks)
+            tools = () if request.tool_choice == "none" else request.tools
+            system, blocks = await asyncio.to_thread(rebuild_input, messages, provider)
+            sent = {"mode": "rebuild", "system": system, "tools": [tool.name for tool in tools], "input": blocks}
+            await request.on_send({"model": self.identity.id, **sent})
+            session = await start(
+                model=self.identity.id,
+                settings=self.settings,
+                system=system,
+                tools=tools,
+                storage_root=self.storage_root,
+                provider=provider,
+            )
+            await session.send(blocks)
+        except BaseException:
+            if session is not None:
+                SESSIONS.retire(session)
+            raise
+        return session
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        """Answer ``request`` with the process that waits for it, or with a new one given the whole conversation."""
+        from mindroom.providers.claude_code.session import SESSIONS  # noqa: PLC0415 - loads the SDK
+        from mindroom.providers.claude_code.turn import read_step  # noqa: PLC0415 - loads the SDK
+
+        timer = TurnTimer()
+        # Digesting a long history would stall the replies that share the event loop.
+        prefixes = await asyncio.to_thread(request_prefixes, self, request)
+        # A process rests under the identity of the request it answered, which precedes its answer in the next one.
+        answered = max((i for i, message in enumerate(request.messages) if message.role == "assistant"), default=None)
+        resting = None if answered is None or prefixes[answered] is None else f"{self.scope}{prefixes[answered]}"
+        session = await self._session(request, resting)
+        rests = False
+        try:
             async for event in read_step(session, self.identity, timer):
-                if isinstance(event, TurnCompleted) and (key := prefixes[-1]) is not None:
+                if isinstance(event, TurnCompleted) and prefixes[-1] is not None:
                     # The process rests before the turn is handed over, since the caller may stop reading there.
-                    SESSIONS.rest(self.scope + key, session)
-                    session = None
+                    SESSIONS.rest(f"{self.scope}{prefixes[-1]}", session)
+                    rests = True
                 yield event
         finally:
-            if session is not None:
+            if not rests:
                 # A request that failed or was abandoned leaves a process nothing can continue.
                 SESSIONS.retire(session)
 

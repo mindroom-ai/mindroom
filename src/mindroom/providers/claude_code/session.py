@@ -49,6 +49,7 @@ MIN_VERSION = (2, 1, 248)
 # The request metadata Claude Code sends with an MCP tool call: the id of the ``tool_use`` block that made the call.
 _TOOL_USE_ID_META = "claudecode/toolUseId"
 _SERVER_NAME = "mindroom"
+_CWD, _SYSTEM_FILE = "cwd", "system.txt"
 PARKED_TTL_SECONDS = 30 * 60.0
 IDLE_TTL_SECONDS = 5 * 60.0
 MAX_PROCESSES = 16
@@ -204,6 +205,19 @@ def startup_error(info: dict[str, Any] | None, provider: str) -> AuthenticationF
     return AuthenticationFailed(message, provider=provider, status_code=401)
 
 
+def _new_directory(root: Path, system: str) -> Path:
+    """Return a new directory for one process: an empty working directory, and its system prompt beside it.
+
+    The process runs where no project file or setting reaches it, and the prompt goes in a file because a long one
+    does not fit a command line.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(dir=root))
+    (directory / _CWD).mkdir()
+    (directory / _SYSTEM_FILE).write_text(system, encoding="utf-8")
+    return directory
+
+
 async def start(
     *,
     model: str,
@@ -215,21 +229,15 @@ async def start(
 ) -> LiveSession:
     """Start a Claude Code process that has only ``tools``, and check that it is signed in to a subscription."""
     SESSIONS.make_room()
-    root = storage_root / "claude_code"
-    await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
-    directory = Path(await asyncio.to_thread(tempfile.mkdtemp, dir=root))
-    # The process runs in an empty directory of its own, so no project file or setting reaches it.
-    cwd, system_file = directory / "cwd", directory / "system.txt"
-    await asyncio.to_thread(cwd.mkdir)
-    await asyncio.to_thread(system_file.write_text, system)
+    directory = await asyncio.to_thread(_new_directory, storage_root / "claude_code", system)
     bridge = ToolBridge(names=tool_names(tools))
     options = ClaudeAgentOptions(
         model=model,
         # The SDK otherwise prefers the copy it ships over the one the user signed in with and keeps updated.
         cli_path=settings.cli_path or shutil.which("claude"),
-        effort=settings.effort,  # ty: ignore[invalid-argument-type]
-        system_prompt={"type": "file", "path": str(system_file)} if system else "",
-        cwd=cwd,
+        effort=settings.effort,
+        system_prompt={"type": "file", "path": str(directory / _SYSTEM_FILE)} if system else "",
+        cwd=directory / _CWD,
         tools=[],
         skills=[],
         setting_sources=[],

@@ -38,7 +38,6 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import ModelProvider, StreamEvent
 
-pytestmark = pytest.mark.asyncio
 
 _SYSTEM = Message(role="system", content="You are the test agent.")
 _TWO_CALLS = [{"text": "Looking.", "tools": [call("toolu_a", "a"), call("toolu_b", "b")]}]
@@ -67,6 +66,7 @@ async def _closed() -> None:
 # --- one answer -------------------------------------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
 async def test_a_text_answer_streams_its_reasoning_and_text_and_reports_usage_once(tmp_path: Path) -> None:
     usage = {"input_tokens": 3, "cache_creation_input_tokens": 40, "cache_read_input_tokens": 200, "output_tokens": 9}
     cli = fake_cli(tmp_path, {"turns": [[{"thinking": "Greet them.", "text": "Hello, Alice.", "usage": usage}]]})
@@ -95,6 +95,7 @@ async def test_a_text_answer_streams_its_reasoning_and_text_and_reports_usage_on
     assert any(isinstance(event, UsageReported) and not event.final for event in events)
 
 
+@pytest.mark.asyncio
 async def test_claude_code_starts_isolated_with_mindroom_system_prompt_and_the_user_text_verbatim(
     tmp_path: Path,
 ) -> None:
@@ -124,10 +125,16 @@ async def test_claude_code_starts_isolated_with_mindroom_system_prompt_and_the_u
     assert sent["client_composed"] is True
 
 
+def test_an_effort_claude_code_does_not_know_fails_the_model_build(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="effort must be one of low, medium, high, xhigh, max"):
+        fake_cli(tmp_path, {}).provider(effort="ultra")
+
+
 # --- tool calls -------------------------------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("call_before_stop", [False, True], ids=["call after the message", "call before it ends"])
+@pytest.mark.asyncio
 async def test_a_tool_turn_parks_the_process_and_its_results_continue_the_same_turn(
     tmp_path: Path,
     call_before_stop: bool,
@@ -178,6 +185,7 @@ async def test_a_tool_turn_parks_the_process_and_its_results_continue_the_same_t
     assert args[args.index("--allowedTools") + 1] == "mcp__mindroom__*"
 
 
+@pytest.mark.asyncio
 async def test_a_failed_tool_result_reaches_claude_code_as_an_error(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [[{"tools": [call("toolu_a", "a")]}, {"text": "It failed."}]]})
     provider = cli.provider()
@@ -192,6 +200,7 @@ async def test_a_failed_tool_result_reaches_claude_code_as_an_error(tmp_path: Pa
     assert entry["result"]["content"] == [{"type": "text", "text": "no such key"}]
 
 
+@pytest.mark.asyncio
 async def test_a_request_that_no_longer_matches_the_parked_turn_rebuilds_in_a_new_process(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [_TWO_CALLS]}, {"turns": [text_turn("Rebuilt.")]})
     provider = cli.provider()
@@ -216,6 +225,7 @@ async def test_a_request_that_no_longer_matches_the_parked_turn_rebuilds_in_a_ne
     assert '"output": "LEMON-IBIS"' in rebuilt
 
 
+@pytest.mark.asyncio
 async def test_results_that_do_not_answer_every_parked_call_rebuild_and_retire_the_process(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [_TWO_CALLS]}, {"turns": [text_turn("Rebuilt.")]})
     provider = cli.provider()
@@ -232,6 +242,7 @@ async def test_results_that_do_not_answer_every_parked_call_rebuild_and_retire_t
     assert len(cli.events("exit")) == 1
 
 
+@pytest.mark.asyncio
 async def test_a_tool_call_without_claude_codes_call_id_fails_the_request_and_retires_the_process(
     tmp_path: Path,
 ) -> None:
@@ -251,6 +262,7 @@ async def test_a_tool_call_without_claude_codes_call_id_fails_the_request_and_re
     assert SESSIONS.resting == {}
 
 
+@pytest.mark.asyncio
 async def test_a_parked_process_whose_call_came_without_a_call_id_is_rebuilt_not_continued(tmp_path: Path) -> None:
     step = {"tools": [call("toolu_a", "a")], "omit_tool_use_id": True}
     cli = fake_cli(tmp_path, {"turns": [[step, {"text": "never"}]]}, {"turns": [text_turn("Rebuilt.")]})
@@ -268,6 +280,7 @@ async def test_a_parked_process_whose_call_came_without_a_call_id_is_rebuilt_not
     assert '"output": "LILAC-HERON"' in cli.events("user")[1]["content"][0]["text"]
 
 
+@pytest.mark.asyncio
 async def test_a_request_without_tool_choice_offers_claude_code_no_tools(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("No tools.")]})
 
@@ -281,6 +294,7 @@ async def test_a_request_without_tool_choice_offers_claude_code_no_tools(tmp_pat
 # --- the next turn ----------------------------------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
 async def test_an_idle_process_answers_the_next_user_message_of_its_conversation(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("It is LILAC-HERON."), text_turn("It is LEMON-IBIS.")]})
     provider = cli.provider()
@@ -295,6 +309,7 @@ async def test_an_idle_process_answers_the_next_user_message_of_its_conversation
     assert cli.events("user")[1]["content"] == [{"type": "text", "text": "And b?"}]
 
 
+@pytest.mark.asyncio
 async def test_a_changed_system_prompt_rebuilds_instead_of_continuing(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("One.")]}, {"turns": [text_turn("Two.")]})
     provider = cli.provider()
@@ -310,6 +325,7 @@ async def test_a_changed_system_prompt_rebuilds_instead_of_continuing(tmp_path: 
 # --- lifetime ---------------------------------------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
 async def test_a_stream_that_is_abandoned_closes_its_process(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("Hello, Alice.")]})
 
@@ -324,6 +340,7 @@ async def test_a_stream_that_is_abandoned_closes_its_process(tmp_path: Path) -> 
     assert SESSIONS.resting == {}
 
 
+@pytest.mark.asyncio
 async def test_a_process_past_its_time_to_live_is_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cli = fake_cli(tmp_path, {"turns": [_TWO_CALLS]}, {"turns": [text_turn("Idle.")]})
     provider = cli.provider()
@@ -341,6 +358,7 @@ async def test_a_process_past_its_time_to_live_is_closed(tmp_path: Path, monkeyp
     assert len(cli.events("exit")) == 2
 
 
+@pytest.mark.asyncio
 async def test_a_new_process_past_the_limit_evicts_an_idle_one_before_a_parked_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -371,6 +389,7 @@ async def _failure(tmp_path: Path, process: dict[str, Any], **extra_kwargs: obje
     return raised.value
 
 
+@pytest.mark.asyncio
 async def test_a_signed_out_claude_code_says_how_to_sign_in_and_sends_nothing(tmp_path: Path) -> None:
     error = await _failure(tmp_path, {"account": {"tokenSource": "none", "apiProvider": "firstParty"}})
 
@@ -378,6 +397,7 @@ async def test_a_signed_out_claude_code_says_how_to_sign_in_and_sends_nothing(tm
     assert str(error) == ("Claude Code is not signed in. Run `claude auth login` as the user that runs MindRoom.")
 
 
+@pytest.mark.asyncio
 async def test_an_api_key_from_the_environment_is_refused_by_name(tmp_path: Path) -> None:
     account = {"tokenSource": "claude.ai", "apiKeySource": "ANTHROPIC_API_KEY", "apiProvider": "firstParty"}
 
@@ -397,6 +417,7 @@ async def test_an_api_key_from_the_environment_is_refused_by_name(tmp_path: Path
     ],
     ids=["a token from the environment", "another API provider", "no subscription"],
 )
+@pytest.mark.asyncio
 async def test_an_account_that_is_not_a_plain_subscription_sign_in_is_refused(
     tmp_path: Path,
     account: dict[str, str],
@@ -406,6 +427,7 @@ async def test_an_account_that_is_not_a_plain_subscription_sign_in_is_refused(
     assert isinstance(error, AuthenticationFailed)
 
 
+@pytest.mark.asyncio
 async def test_a_claude_code_too_old_to_send_prompts_verbatim_is_refused(tmp_path: Path) -> None:
     error = await _failure(tmp_path, {"version": "2.1.247", "turns": [text_turn("never")]})
 
@@ -414,6 +436,7 @@ async def test_a_claude_code_too_old_to_send_prompts_verbatim_is_refused(tmp_pat
     assert "claude update" in str(error)
 
 
+@pytest.mark.asyncio
 async def test_a_missing_claude_binary_says_how_to_install_it(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {})
 
@@ -426,6 +449,7 @@ async def test_a_missing_claude_binary_says_how_to_install_it(tmp_path: Path) ->
     [{"extra_tools": ["Bash"]}, {"mcp_status": "failed"}],
     ids=["a tool MindRoom did not offer", "the tool server is not connected"],
 )
+@pytest.mark.asyncio
 async def test_a_process_that_is_not_isolated_to_mindrooms_tools_fails_closed(
     tmp_path: Path,
     process: dict[str, Any],
@@ -436,6 +460,7 @@ async def test_a_process_that_is_not_isolated_to_mindrooms_tools_fails_closed(
     assert "MindRoom's tools" in str(error)
 
 
+@pytest.mark.asyncio
 async def test_a_plan_limit_is_a_final_quota_error_with_its_reset_time(tmp_path: Path) -> None:
     rejected = {"status": "rejected", "resetsAt": 1900000000, "rateLimitType": "five_hour"}
     turn = [
@@ -452,6 +477,7 @@ async def test_a_plan_limit_is_a_final_quota_error_with_its_reset_time(tmp_path:
     assert str(error) == "Claude subscription limit reached (five hour). Resets at 2030-03-17T17:46:40+00:00."
 
 
+@pytest.mark.asyncio
 async def test_a_prompt_that_is_too_long_asks_mindroom_to_compact(tmp_path: Path) -> None:
     turn = [
         {"text": "Prompt is too long", "error": "invalid_request"},
@@ -461,6 +487,7 @@ async def test_a_prompt_that_is_too_long_asks_mindroom_to_compact(tmp_path: Path
     assert isinstance(await _failure(tmp_path, {"turns": [turn]}), ContextWindowExceeded)
 
 
+@pytest.mark.asyncio
 async def test_a_sign_in_that_expired_mid_conversation_says_how_to_sign_in(tmp_path: Path) -> None:
     turn = [
         {"text": "Invalid API key · Please run /login", "error": "authentication_failed"},
@@ -473,6 +500,7 @@ async def test_a_sign_in_that_expired_mid_conversation_says_how_to_sign_in(tmp_p
     assert "claude auth login" in str(error)
 
 
+@pytest.mark.asyncio
 async def test_a_server_error_claude_code_already_retried_is_final(tmp_path: Path) -> None:
     turn = [
         {"text": "API Error: 529 Overloaded", "error": "server_error"},
@@ -485,12 +513,14 @@ async def test_a_server_error_claude_code_already_retried_is_final(tmp_path: Pat
     assert error.status_code == 529
 
 
+@pytest.mark.asyncio
 async def test_a_process_that_dies_mid_turn_is_a_retryable_failure(tmp_path: Path) -> None:
     error = await _failure(tmp_path, {"turns": [[{"exit": 1}]]})
 
     assert isinstance(error, ProviderUnavailable)
 
 
+@pytest.mark.asyncio
 async def test_two_requests_with_the_same_history_never_share_a_parked_process(tmp_path: Path) -> None:
     turn = [*_TWO_CALLS, {"text": "{toolu_a}+{toolu_b}"}]
     cli = fake_cli(tmp_path, {"turns": [turn]}, {"turns": [text_turn("Rebuilt.")]})

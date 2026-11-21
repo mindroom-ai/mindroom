@@ -986,6 +986,23 @@ def test_a_retired_role_map_fails_config_load_with_its_reason(tmp_path: Path, pr
     )
 
 
+def test_a_claude_code_model_takes_only_its_cli_path_and_effort(tmp_path: Path) -> None:
+    """The route signs in through Claude Code, so no endpoint, header, or environment setting reaches it."""
+    runtime_paths = _runtime_paths(tmp_path)
+    model = {"provider": "claude_code", "id": "claude-sonnet-5-5"}
+    accepted = {"models": {"default": {**model, "extra_kwargs": {"cli_path": "/opt/claude", "effort": "high"}}}}
+    refused = {"models": {"default": {**model, "extra_kwargs": {"base_url": "https://proxy.example", "env": {}}}}}
+
+    Config.validate_with_runtime(accepted, runtime_paths)
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(refused, runtime_paths)
+
+    assert str(exc_info.value) == (
+        "models.default: Unsupported extra_kwargs for provider 'claude_code': base_url, env; remove or correct them. "
+        "Accepted keys: api_key, cli_path, effort"
+    )
+
+
 _MODELS_DOC = Path(__file__).resolve().parents[1] / "docs" / "configuration" / "models.md"
 
 

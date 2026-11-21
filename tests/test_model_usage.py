@@ -34,6 +34,27 @@ def test_message_context_tokens_add_cache_tokens_only_where_reported_outside_inp
     ) == ContextTokens(100, cache_read_tokens=90)
 
 
+@pytest.mark.parametrize(
+    ("provider", "configured_provider"),
+    [("Claude subscription (Claude Code)", "claude_code"), ("Claude subscription (Claude Code)", None)],
+    ids=["a configured model", "a stored run"],
+)
+def test_a_claude_code_response_reports_its_cache_tokens_outside_its_input(
+    provider: str,
+    configured_provider: str | None,
+) -> None:
+    answer = _assistant(
+        MessageMetrics(tokens=TokenCounts(input_tokens=10, cache_read_tokens=90, cache_write_tokens=5)),
+    )
+
+    assert message_context_tokens(
+        answer,
+        provider=provider,
+        configured_provider=configured_provider,
+        model_id="claude-sonnet-5-5",
+    ) == ContextTokens(105, cache_read_tokens=90, cache_write_tokens=5)
+
+
 @pytest.mark.parametrize("stored", [False, True], ids=["reported", "stored-under-provider-metrics"])
 def test_native_final_iteration_context_wins_over_billed_counters(stored: bool) -> None:
     """A Claude response's context reports each counter, a zero one too, however an earlier release stored it."""
