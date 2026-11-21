@@ -694,13 +694,25 @@ async def test_live_sdk_ends_stalled_content_close_recovery(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("elapsed", [299, 301], ids=["within-window", "outside-window"])
+@pytest.mark.parametrize(
+    ("elapsed", "replacement_confirmed", "retryable"),
+    [
+        pytest.param(5, True, True, id="fast-repeat"),
+        pytest.param(60, False, True, id="unconfirmed-replacement"),
+        pytest.param(30, True, False, id="fast-repeat-boundary"),
+        pytest.param(60, True, False, id="within-window"),
+        pytest.param(300, True, None, id="recovery-boundary"),
+    ],
+)
 async def test_live_sdk_caps_repeated_content_closes(
     provider: _ProviderHTTP,
     monkeypatch: pytest.MonkeyPatch,
     elapsed: int,
+    replacement_confirmed: bool,
+    retryable: bool | None,
 ) -> None:
-    """A second moderation close ends the call only inside the recovery window."""
+    """A fast repeat rejoins fresh; only a later repeat inside the window ends the call."""
+    provider.acknowledge_reconnect = replacement_confirmed
     now = 0.0
     monkeypatch.setattr(live_voice_agent, "time", SimpleNamespace(time=time.time, monotonic=lambda: now))
     terminated: list[bool] = []
@@ -723,40 +735,42 @@ async def test_live_sdk_caps_repeated_content_closes(
             await bridge.start_agent(options)
             await provider.socket.next_event("session.start")
             provider.socket.content_close()
-            await asyncio.wait_for(provider.socket.closed_event.wait(), 2)
-            assert terminated == []
             await asyncio.wait_for(provider.connected_again.wait(), 2)
             second = provider.sockets[1]
             await second.next_event("session.start")
             provider.connected_again.clear()
 
             now += elapsed
+            # When enabled, the fake socket has already queued session.started ahead of this close.
             second.content_close()
             await asyncio.wait_for(second.closed_event.wait(), 2)
-            if elapsed < 300:
-                assert terminated == [False]
-                assert len(provider.sockets) == 2
-                (notice,) = notices
-                assert "moderation closed the voice session again" in notice
-                assert "call ended" in notice
-                assert "rejoin to start a new call" in notice
-            else:
+            if retryable is None:
                 await asyncio.wait_for(provider.connected_again.wait(), 2)
                 await provider.sockets[2].next_event("session.start")
-                assert terminated == []
+            else:
+                assert len(provider.sockets) == 2
+            assert terminated == ([] if retryable is None else [retryable])
+            if retryable is False:
+                (notice,) = notices
+                assert "moderation closed the voice session again, so the call ended" in notice
+            else:
                 assert notices == []
         finally:
             await asyncio.wait_for(bridge.aclose(), 3)
 
-    closes = [(entry["reason"], entry["action"]) for entry in logs if entry["event"] == "call_live_session_closed"]
+    close_logs = [entry for entry in logs if entry["event"] == "call_live_session_closed"]
+    closes = [(entry["reason"], entry["action"]) for entry in close_logs]
     usage_totals = [(usage.provider_session_id, usage.duration_seconds, usage.finalized) for usage in usages]
-    previous_sessions = [("session-test-1", 3.0, True), ("session-test-2", 3.0, True)]
-    if elapsed < 300:
-        assert closes == [("content", "recovering"), ("content", "ending")]
-        assert usage_totals == previous_sessions
-    else:
+    expected_usage = [("session-test-1", 3.0, True)]
+    if replacement_confirmed:
+        expected_usage.append(("session-test-2", 3.0, True))
+    if retryable is None:
         assert closes == [("content", "recovering"), ("content", "recovering"), ("close_requested", "ending")]
-        assert usage_totals == [*previous_sessions, ("session-test-3", 0.0, True)]
+        expected_usage.append(("session-test-3", 0.0, True))
+    else:
+        assert closes == [("content", "recovering"), ("content", "ending")]
+        assert close_logs[-1].get("fast_repeat_fallback", False) is retryable
+    assert usage_totals == expected_usage
 
 
 @pytest.mark.asyncio
