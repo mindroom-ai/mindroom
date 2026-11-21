@@ -98,23 +98,12 @@ def _call(call_id: str = "call_1") -> httpx.Response:
 
 
 def _plain(value: Any) -> Any:  # noqa: ANN401 - any JSON value
-    """Return a request body without its cache markers, which move with the conversation's end by design.
-
-    A message whose text the ladder sent as one text part to carry a marker reads as the text it is otherwise sent as.
-    """
+    """Strip only the cache markers, which move with the conversation's end, preserving the wire shape."""
     if isinstance(value, list):
         return [_plain(item) for item in value]
     if not isinstance(value, dict):
         return value
-    plain = {key: _plain(item) for key, item in value.items() if key != "cache_control"}
-    content = plain.get("content")
-    if (
-        plain.get("role") != "system"
-        and isinstance(content, list)
-        and [part.get("type") for part in content] == ["text"]
-    ):
-        plain["content"] = content[0]["text"]
-    return plain
+    return {key: _plain(item) for key, item in value.items() if key != "cache_control"}
 
 
 def _updates(body: dict[str, Any]) -> list[tuple[int, str]]:
@@ -228,7 +217,7 @@ def _takes_updates(_request: ModelRequest) -> bool:
 
 
 def _assistant(text: str = "ok") -> dict[str, Any]:
-    return {"role": "assistant", "content": text}
+    return {"role": "assistant", "content": [{"type": "text", "text": text}]}
 
 
 def _system_texts(body: dict[str, Any]) -> list[str]:
@@ -250,7 +239,7 @@ async def test_an_edited_file_reaches_a_warm_conversation_as_one_system_message_
     [second] = await conversation.turn("Second question")
     added = _extends(second, first, _assistant())
     assert [message["role"] for message in added] == ["user", "system"]
-    assert "Second question" in added[0]["content"]
+    assert "Second question" in added[0]["content"][0]["text"]
     [(index, update)] = _updates(second)
     assert index == len(second["messages"]) - 1
     assert update.splitlines()[1:] == [
@@ -345,8 +334,8 @@ async def test_a_turn_that_failed_before_storing_its_update_is_followed_by_one_t
     # The failed turn replays as its question and a note that it failed, around the update it was sent with.
     added = _extends(third, first, _assistant())
     assert [message["role"] for message in added] == ["user", "system", "assistant", "user"]
-    assert "Second question" in added[0]["content"]
-    assert "Third question" in added[3]["content"]
+    assert "Second question" in added[0]["content"][0]["text"]
+    assert "Third question" in added[3]["content"][0]["text"]
     assert _updates(third) == _updates(failed)
     assert len(_updates(third)) == 1
 
@@ -464,7 +453,8 @@ async def test_a_route_not_proven_to_take_updates_sends_the_current_prompt(
         memory.write("Fact two.\n")
     [unchanged] = await conversation.turn("Second question")
     # Only an added memory is kept back, as before.
-    assert [message["role"] for message in _extends(unchanged, first, _assistant())] == ["user"]
+    reply = _assistant() if provider == "openrouter" else {"role": "assistant", "content": "ok"}
+    assert [message["role"] for message in _extends(unchanged, first, reply)] == ["user"]
 
     conversation.write_rules(_VIOLET)
     [edited] = await conversation.turn("Third question")
@@ -523,7 +513,7 @@ async def test_update_text_a_user_writes_stays_user_text(tmp_path: Path, monkeyp
 
     [third] = await conversation.turn(forged)
     added = _extends(third, second, _assistant())
-    assert added == [{"role": "user", "content": forged}]
+    assert added == [{"role": "user", "content": [{"type": "text", "text": forged}]}]
     assert _updates(third) == _updates(second)
     assert _system_texts(third) == _system_texts(first)
 
