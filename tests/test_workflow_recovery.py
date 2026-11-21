@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import sqlite3
 import threading
 from types import SimpleNamespace
@@ -39,7 +40,7 @@ from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.engine import SupersededAttemptError
 from mindroom.workflow_runs.models import NodeRequest, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS
-from mindroom.workflow_runs.store import WorkflowRunNotFoundError
+from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStoreError
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.tool_job_helpers import wait_for_status
 from tests.workflow_helpers import NodeFailed, WorkflowStack, set_run, tool_args, workflow_stack
@@ -1240,8 +1241,8 @@ async def test_run_with_no_job_ends_when_its_agent_or_the_workflow_toolkit_was_r
         update={"agents": {name: AgentConfig(display_name=name, tools=tools) for name, tools in agents.items()}},
     )
     script_runtime = _script_runtime(stack, removed)
-    await WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime).start()  # type: ignore[arg-type]
     await stack.start(SCRIPT)
+    await WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime).start()  # type: ignore[arg-type]
     await _interrupt(stack, RUNTIME_RESTARTED)
 
     await script_runtime.after_reconcile()
@@ -1276,14 +1277,59 @@ async def test_run_goes_on_only_once_its_bot_is_synced_and_still_in_the_runs_roo
     Before the bot's first sync nobody knows which rooms it is in, so the run waits.
     """
     script_runtime = _script_runtime(stack, synced=synced, rooms=rooms)
-    await WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime).start()  # type: ignore[arg-type]
     await stack.start(SCRIPT)
+    await WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime).start()  # type: ignore[arg-type]
     await _interrupt(stack, RUNTIME_RESTARTED)
 
     await script_runtime.after_reconcile()
 
     run = stack.store.get_run(stack.run_id)
     assert (run.state, run.error, len(stack.scripts.launched)) == ends
+
+
+_NOT_READY = "The run's agent is not ready in the run's room yet. Try again in a moment."
+_NO_TOOLKIT = {"watcher": AgentConfig(display_name="watcher", tools=["counter", "shell"])}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["start", "resume"])
+@pytest.mark.parametrize(
+    ("agents", "synced", "rooms", "answer"),
+    [
+        (None, False, None, None),
+        (None, True, ("!another:example.test",), "The requester no longer has access."),
+        (_NO_TOOLKIT, True, None, "The requester no longer has access."),
+    ],
+    ids=["before_sync", "left_the_room", "toolkit_removed"],
+)
+async def test_attempt_asked_for_in_the_runs_own_conversation_needs_the_owners_live_access_too(
+    stack: WorkflowStack,
+    path: str,
+    agents: dict[str, AgentConfig] | None,
+    synced: bool,
+    rooms: tuple[str, ...] | None,
+    answer: str | None,
+) -> None:
+    """The context of a call says who was allowed when it was made: each launch asks the live runtime, as a replay does.
+
+    A start waits while that cannot answer and ends with its refusal; a resume is refused before it changes the run.
+    """
+    if path == "resume":
+        await stack.start(SCRIPT)
+        await stack.end_attempt(ScriptRunState.FAILED)
+    before = stack.store.get_run(stack.run_id) if path == "resume" else None
+    config = stack.context.config.model_copy(update={"agents": agents}) if agents else None
+    script_runtime = _script_runtime(stack, config, synced=synced, rooms=rooms)
+    await WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime).start()  # type: ignore[arg-type]
+
+    if path == "start":
+        run = await stack.start(SCRIPT)
+        ends = WorkflowRunState.INTERRUPTED if answer else WorkflowRunState.STARTING
+        assert (run.state, run.error, len(stack.scripts.launched)) == (ends, answer, 0)
+    else:
+        with pytest.raises(WorkflowRunStoreError, match=re.escape(answer or _NOT_READY)):
+            await stack.resume(stack.run_id)
+        assert (stack.store.get_run(stack.run_id), len(stack.scripts.launched)) == (before, 1)
 
 
 @pytest.mark.asyncio
@@ -1329,8 +1375,8 @@ async def test_lifecycle_waits_for_room_membership_before_it_judges_the_owners_a
     monkeypatch.setattr(authorization, "_responder_reply_authorization", lambda *_args, **_options: decision[0])
     script_runtime = _script_runtime(stack)
     lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
-    await lifecycle.start()
     await stack.start(SCRIPT)
+    await lifecycle.start()
     await _interrupt(stack, RUNTIME_RESTARTED)
 
     await script_runtime.after_reconcile()

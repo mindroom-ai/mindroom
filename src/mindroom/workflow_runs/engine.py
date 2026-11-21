@@ -144,19 +144,18 @@ class WorkflowEngine:
 
         The one check of a start, a person's resume and a replay after an interruption: asked before a resume
         changes anything, and again under the run's lock right before any attempt starts. Every attempt runs in the
-        conversation the run was started in. A first attempt and a resume that *caller* makes from there start with
-        the caller's own context and *limits*. Any other needs the saved owner's access there, as the live runtime
-        answers it: the serving bot synced and in the room, the requester allowed, the agent with its `workflow`
-        toolkit. A run that waits has working time left, and has not replayed too often without finishing a call.
+        conversation the run was started in, and needs the saved owner's access there as the live runtime answers it
+        now: the serving bot synced and in the room, the requester allowed, the agent with its `workflow` toolkit. A
+        first attempt and a resume that *caller* makes from there then start with the caller's own context and
+        *limits*. A run that waits has working time left, and has not replayed too often without finishing a call.
         """
         replay = run.state is WorkflowRunState.STARTING and run.script_run_id is not None
         place = (run.room_id, run.thread_root_event_id)
-        if caller is not None and not replay and place == (caller.room_id, caller.resolved_thread_id):
-            access: ResumeAccess = (caller, limits or WorkflowLimits())
-        else:
-            access = self.owner_access(run)
+        access = self.owner_access(run)
         if not isinstance(access, tuple):
             return NO_ACCESS if access == "revoked" else None
+        if caller is not None and not replay and place == (caller.room_id, caller.resolved_thread_id):
+            access = (caller, limits or WorkflowLimits())
         if run.state is WorkflowRunState.STARTING and run.runtime_seconds_left == 0:
             return _OUT_OF_TIME.format(hours=access[1].max_runtime_hours)
         return _IDLE.format(attempts=_MAX_IDLE_RESUMES) if replay and run.idle_resumes >= _MAX_IDLE_RESUMES else access

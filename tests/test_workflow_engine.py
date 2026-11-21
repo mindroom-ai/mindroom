@@ -706,7 +706,6 @@ async def test_maintenance_pass_ends_every_run_it_can_and_prunes_expired_runs(
     with workflow_stack(tmp_path) as stack:
         script_runtime = _script_runtime(stack)
         lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
-        await lifecycle.start()
         orphan = await stack.start()
         unsettled = _dispatched_node(stack)
         await stack.scripts.end(stack.attempt.run_id, ScriptRunState.EXITED)
@@ -725,6 +724,7 @@ async def test_maintenance_pass_ends_every_run_it_can_and_prunes_expired_runs(
         await stack.engine.finish(stack.attempt, result="done", error=None)
         await stack.scripts.end(stack.attempt.run_id, ScriptRunState.EXITED)
 
+        await lifecycle.start()
         await script_runtime.after_reconcile()
 
         states = {run.run_id: (run.state, run.error) for run in stack.store.list_runs()}
