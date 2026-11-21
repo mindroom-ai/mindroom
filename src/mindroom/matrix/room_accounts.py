@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import nullcontext
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
@@ -31,7 +30,6 @@ async def reconcile_room_accounts(
     runtime_paths: RuntimePaths,
     room_id: str,
     *,
-    roster_lock: asyncio.Lock | None = None,
     repeat_failure: Callable[[], bool] = lambda: False,
 ) -> bool:
     """Write the client's list of the room's joined MindRoom accounts when it changed and return whether it is current.
@@ -40,39 +38,38 @@ async def reconcile_room_accounts(
 
     The state key is the writing account's user ID, the room's steward, which Matrix lets only that account write.
     """
+    phase = "room_lock"
     try:
-        # Serialize each read and write so a slower trigger cannot replace a newer list with an older one.
-        async with _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
-            async with roster_lock or nullcontext(), asyncio.timeout(10):
-                members = await get_room_members(client, room_id, repeat_failure=repeat_failure)
+        # Bound lock waits too; the lock prevents an older comparison from overwriting a newer roster.
+        async with asyncio.timeout(10), _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
+            phase = "joined_members"
+            members = await get_room_members(client, room_id, repeat_failure=repeat_failure)
             if members is None:
                 return False
-            async with asyncio.timeout(10):
-                accounts = members & prepared_entity_names_by_user_id(config, runtime_paths).keys()
-                content = {"accounts": sorted(accounts)}
-                current = await client.room_get_state_event(room_id, MINDROOM_ACCOUNTS_EVENT_TYPE, client.user_id)
-                if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
-                    return True
-                response = await client.room_put_state(
-                    room_id,
-                    MINDROOM_ACCOUNTS_EVENT_TYPE,
-                    content,
-                    state_key=client.user_id,
-                )
-                if not isinstance(response, nio.RoomPutStateResponse):
-                    # A room whose power levels keep this account from sending this state refuses it on every trigger.
-                    forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
-                    log = logger.debug if forbidden or repeat_failure() else logger.warning
-                    log("room_accounts_publish_failed", room_id=room_id, error=str(response))
-                    return forbidden
+            accounts = members & prepared_entity_names_by_user_id(config, runtime_paths).keys()
+            content = {"accounts": sorted(accounts)}
+            phase = "state_get"
+            current = await client.room_get_state_event(room_id, MINDROOM_ACCOUNTS_EVENT_TYPE, client.user_id)
+            if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
                 return True
-    except TimeoutError:
+            phase = "state_put"
+            response = await client.room_put_state(
+                room_id,
+                MINDROOM_ACCOUNTS_EVENT_TYPE,
+                content,
+                state_key=client.user_id,
+            )
+            if not isinstance(response, nio.RoomPutStateResponse):
+                # A room whose power levels keep this account from sending this state refuses it on every trigger.
+                forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
+                log = logger.debug if forbidden or repeat_failure() else logger.warning
+                log("room_accounts_publish_failed", room_id=room_id, error=str(response))
+                return forbidden
+            return True
+    except Exception as exc:
         log = logger.debug if repeat_failure() else logger.warning
-        log("room_accounts_publish_failed", room_id=room_id, error="TimeoutError")
-        return False
-    except Exception:
-        log = logger.debug if repeat_failure() else logger.warning
-        log("room_accounts_publish_failed", room_id=room_id, exc_info=True)
+        detail = {"error": "TimeoutError", "phase": phase} if isinstance(exc, TimeoutError) else {"exc_info": True}
+        log("room_accounts_publish_failed", room_id=room_id, **detail)
         return False
 
 
@@ -90,6 +87,7 @@ async def reconcile_room_router_binding(
     take turns overwriting it; a stale one only leaves voice echoes as standalone rows until a room admin clears it. A room whose power levels refuse the write
     is done too, since retrying cannot help. Other failures leave it to the next trigger.
     """
+    phase = "state_get"
     try:
         async with asyncio.timeout(10):
             current = await client.room_get_state_event(room_id, ROUTER_BINDING_EVENT_TYPE, state_key="")
@@ -107,6 +105,7 @@ async def reconcile_room_router_binding(
                 return False
             if may_claim is not None and not may_claim():
                 return True
+            phase = "state_put"
             response = await client.room_put_state(
                 room_id,
                 ROUTER_BINDING_EVENT_TYPE,
@@ -119,10 +118,8 @@ async def reconcile_room_router_binding(
                 log("room_router_binding_publish_failed", room_id=room_id, error=str(response))
                 return forbidden
             return True
-    except TimeoutError:
+    except Exception as exc:
         log = logger.debug if repeat_failure() else logger.warning
-        log("room_router_binding_publish_failed", room_id=room_id, error="TimeoutError")
-    except Exception:
-        log = logger.debug if repeat_failure() else logger.warning
-        log("room_router_binding_publish_failed", room_id=room_id, exc_info=True)
-    return False
+        detail = {"error": "TimeoutError", "phase": phase} if isinstance(exc, TimeoutError) else {"exc_info": True}
+        log("room_router_binding_publish_failed", room_id=room_id, **detail)
+        return False

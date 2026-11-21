@@ -159,14 +159,7 @@ async def ensure_room_membership_synced(
             try:
                 response = await read_joined_members(client, room.room_id)
             except Exception as exc:
-                log = logger.debug if repeat_failure() else logger.warning
-                log(
-                    "authoritative_room_membership_fetch_failed",
-                    room_id=room.room_id,
-                    sender_id=sender_id,
-                    error=str(exc),
-                )
-                return False
+                response = exc
             if not isinstance(response, nio.JoinedMembersResponse):
                 log = logger.debug if repeat_failure() else logger.warning
                 log(

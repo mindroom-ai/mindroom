@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import nio
 
 from mindroom.background_tasks import create_background_task
+from mindroom.bot_runtime_view import RunPhase
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.hooks import (
@@ -32,7 +34,7 @@ from mindroom.matrix.room_member_joins import (
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection
 
     import structlog
 
@@ -123,11 +125,7 @@ async def reconcile_held_room_states(runtime: OrchestratorRuntime) -> None:
     room_ids = {room_id for bot in bots if bot.client is not None for room_id in bot.client.rooms}
     stewards = ((runtime.room_steward(room_id), room_id) for room_id in room_ids)
     await asyncio.gather(
-        *(
-            bot.steward_duties._publish_room_state(room_id, bounded=True)
-            for bot, room_id in stewards
-            if bot is not None
-        ),
+        *(bot.steward_duties._publish_room_state(room_id) for bot, room_id in stewards if bot is not None),
     )
 
 
@@ -157,12 +155,12 @@ class StewardDuties:
     _joined_room_ids: set[str] = field(default_factory=set, init=False, repr=False)
     # The marked-room publishes in flight, which run in the background so no sync frame waits for a room state read.
     _room_state_publishes: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
-    # Only the roster reads share nio's per-client crypto lock, not the state GETs and PUTs.
-    _room_roster_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     # Warn once per room until reconciliation succeeds.
     _room_state_warned: set[str] = field(default_factory=set, init=False, repr=False)
     # One backoff loop per failed room.
     _room_state_retries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
+    # Pending operations, including fresh failures that race an in-flight retry.
+    _room_state_reruns: dict[str, set[str]] = field(default_factory=dict, init=False, repr=False)
 
     @property
     def _is_owner(self) -> bool:
@@ -227,20 +225,20 @@ class StewardDuties:
     async def _publish_rooms(self, room_ids: set[str]) -> None:
         await asyncio.gather(*(self._publish_room_state(room_id) for room_id in room_ids))
 
-    async def _publish_room_state(self, room_id: str, *, bounded: bool = False) -> None:
+    async def _publish_room_state(self, room_id: str) -> None:
         """Reconcile one held room and let transient failures retry without another trigger."""
-        try:
-            async with asyncio.timeout(10 if bounded else None):
-                if await self._reconcile_room_state(room_id):
-                    return
-        except TimeoutError:
-            # A caller's budget includes queueing; the background attempt has its own request deadlines.
-            pass
+        failed = await self._reconcile_room_state(room_id)
+        if not failed:
+            self._room_state_warned.discard(room_id)
+            return
+        if self.deps.runtime.phase is not RunPhase.ACCEPTING:
+            return
+        self._room_state_reruns.setdefault(room_id, set()).update(failed)
         pending = self._room_state_retries.get(room_id)
         if pending is None or pending.done():
             retry = create_background_task(
                 self._retry_room_state(room_id),
-                name="steward_room_state_retry",
+                "steward_room_state_retry",
                 owner=self.deps.runtime,
             )
             self._room_state_retries[room_id] = retry
@@ -249,56 +247,50 @@ class StewardDuties:
     def _retire_room_state_retry(self, room_id: str, task: asyncio.Task[None]) -> None:
         if self._room_state_retries.get(room_id) is task:
             del self._room_state_retries[room_id]
+            self._room_state_reruns.pop(room_id, None)
 
     async def _retry_room_state(self, room_id: str) -> None:
-        """Retry a failed reconcile with capped exponential backoff while this bot stewards the room."""
+        """Retry failed operations with capped backoff, including failures that arrive mid-attempt."""
         delay = 1
-        while True:
+        while room_id in self._room_state_reruns:
             await asyncio.sleep(delay)
-            if await self._reconcile_room_state(room_id):
-                return
+            failed = await self._reconcile_room_state(room_id, self._room_state_reruns.pop(room_id))
+            if failed:
+                self._room_state_reruns.setdefault(room_id, set()).update(failed)
             delay = min(delay * 2, 60)
+        self._room_state_warned.discard(room_id)
 
     def _may_publish_room_state(self, room_id: str) -> bool:
         """Recheck the election and hand work over to a different steward's next sync frame."""
         steward = self.deps.runtime.orchestrator.room_steward(room_id)
-        if steward is None:
+        if steward is not None and steward.agent_name != self.deps.hook_context.agent_name:
+            steward.steward_duties.mark_joined_for_room_state(room_id)
             return False
-        if steward.agent_name == self.deps.hook_context.agent_name:
-            return True
-        steward.steward_duties.mark_joined_for_room_state(room_id)
-        return False
+        return steward is not None
 
-    async def _reconcile_room_state(self, room_id: str) -> bool:
-        """Reconcile one stewarded room and return whether it needs no retry."""
+    async def _reconcile_room_state(self, room_id: str, needed: Collection[str] | None = None) -> set[str]:
+        """Return only the operations that still need a retry in this room."""
         runtime = self.deps.runtime
         client = runtime.client
         if not self._may_publish_room_state(room_id) or client is None or room_id not in client.rooms:
-            self._room_state_warned.discard(room_id)
-            return True
+            return set()
 
         def repeat_failure() -> bool:
-            # Claim when logging, not when the gather ends: another trigger may fail while this one is still running.
-            if room_id in self._room_state_warned:
-                return True
+            # Claim at the warning site so concurrent triggers do not both warn.
+            repeat = room_id in self._room_state_warned
             self._room_state_warned.add(room_id)
-            return False
+            return repeat
 
         args = (client, runtime.config, runtime.runtime_paths, room_id)
-        accounts, mode, binding = await asyncio.gather(
-            reconcile_room_accounts(*args, roster_lock=self._room_roster_lock, repeat_failure=repeat_failure),
-            reconcile_room_thread_mode(*args, roster_lock=self._room_roster_lock, repeat_failure=repeat_failure),
-            reconcile_room_router_binding(
-                client,
-                room_id,
-                may_claim=lambda: self._may_publish_room_state(room_id),
-                repeat_failure=repeat_failure,
-            ),
-        )
-        current = accounts and mode is not False and binding
-        if current:
-            self._room_state_warned.discard(room_id)
-        return current
+        may_claim = partial(self._may_publish_room_state, room_id)
+        checks = {
+            "accounts": partial(reconcile_room_accounts, *args),
+            "mode": partial(reconcile_room_thread_mode, *args),
+            "binding": partial(reconcile_room_router_binding, client, room_id, may_claim=may_claim),
+        }
+        needed = checks.keys() if needed is None else needed
+        results = await asyncio.gather(*(checks[check](repeat_failure=repeat_failure) for check in needed))
+        return {check for check, result in zip(needed, results, strict=True) if result is False}
 
     async def member_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
         """Refresh responder presentation, the room's MindRoom accounts and the welcome, and emit human membership hooks."""
@@ -308,7 +300,7 @@ class StewardDuties:
             runtime.config,
             runtime.runtime_paths,
         ):
-            await self._publish_room_state(room.room_id, bounded=True)
+            await self._publish_room_state(room.room_id)
             if self._is_owner:
                 # An edit can wait on a slow homeserver, so it holds none of the room's later events.
                 create_background_task(
