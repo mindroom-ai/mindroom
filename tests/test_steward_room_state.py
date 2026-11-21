@@ -284,8 +284,15 @@ async def test_a_room_that_refuses_the_routers_state_is_no_warning(
     _config, _paths, _, _, client = room_state
     client.room_put_state.side_effect = None
     client.room_put_state.return_value = nio.RoomPutStateError("user_level (0) < send_level (50)", status_code)
-    with capture_logs() as logs:
-        await _room_setup(room_state).publish_room_state()
+    duties = _owner_bot(room_state).steward_duties
+    try:
+        with capture_logs() as logs:
+            await reconcile_held_room_states(duties.deps.runtime.orchestrator)
+        if status_code == "M_FORBIDDEN":
+            assert not duties._room_state_retries
+            assert client.room_put_state.await_count == 3  # Exactly one PUT for each state event.
+    finally:
+        duties.stopping()
     assert {write.args[1] for write in client.room_put_state.await_args_list} == {
         EVENT_TYPE,
         ACCOUNTS_EVENT_TYPE,
@@ -1367,6 +1374,70 @@ async def test_startup_serializes_durable_membership_reads_per_bot(
     assert peak == 1
     assert not [log for log in logs if log["event"].endswith("_failed")]
     assert {write.args[0] for write in _writes(client, ACCOUNTS_EVENT_TYPE)} == client.rooms.keys()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", [ACCOUNTS_EVENT_TYPE, EVENT_TYPE])
+async def test_own_request_deadline_starts_after_waiting_for_the_room(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+    event_type: str,
+) -> None:
+    """Two six-second comparisons in one room both succeed even though the second finishes after ten seconds."""
+    config, paths, _, _, client = room_state
+    clock = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    started: list[int] = []
+    read = client.room_get_state_event.side_effect
+
+    async def read_state(room_id: str, kind: str, state_key: str = "") -> object:
+        if kind == event_type:
+            started.append(clock)
+            await asyncio.sleep(6)
+        return await read(room_id, kind, state_key)
+
+    client.room_get_state_event.side_effect = read_state
+    reconcile = reconcile_room_accounts if event_type == ACCOUNTS_EVENT_TYPE else reconcile_room_thread_mode
+    attempts = asyncio.gather(*(reconcile(client, config, paths, ROOM_ID) for _ in range(2)))
+    try:
+        for tick in range(15):
+            clock = tick
+            for _ in range(30):
+                await asyncio.sleep(0)
+        assert attempts.done()
+        assert await attempts == [True, True]
+        assert started == [0, 6]
+    finally:
+        if not attempts.done():
+            attempts.cancel()
+            await asyncio.gather(attempts, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "diagnostic"),
+    [
+        (ACCOUNTS_EVENT_TYPE, "room_accounts_publish_failed"),
+        (EVENT_TYPE, "room_thread_mode_reconcile_failed"),
+        (ROUTER_EVENT_TYPE, "room_router_binding_publish_failed"),
+    ],
+)
+async def test_room_state_timeout_is_retryable_and_logs_one_compact_warning(
+    room_state: RoomState,
+    event_type: str,
+    diagnostic: str,
+) -> None:
+    """All three operations report a retryable timeout without a traceback."""
+    config, paths, _, _, client = room_state
+    client.room_put_state.side_effect = TimeoutError
+    with capture_logs() as logs:
+        if event_type == ROUTER_EVENT_TYPE:
+            current = await reconcile_room_router_binding(client, ROOM_ID)
+        else:
+            reconcile = reconcile_room_accounts if event_type == ACCOUNTS_EVENT_TYPE else reconcile_room_thread_mode
+            current = await reconcile(client, config, paths, ROOM_ID)
+    assert current is False
+    assert logs == [{"event": diagnostic, "log_level": "warning", "room_id": ROOM_ID, "error": "TimeoutError"}]
 
 
 @pytest.mark.asyncio
