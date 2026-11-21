@@ -72,9 +72,11 @@ class TailnetSshConfig(BaseModel):
     def _validate_logins(cls, value: dict[str, str]) -> dict[str, str]:
         validate_concrete_matrix_user_ids(list(value), field_name="tailnet_ssh.logins")
         # A tagged device has an empty login, so an empty value would admit every tagged device.
-        blank = sorted(user_id for user_id, login in value.items() if not login.strip())
-        if blank:
-            msg = f"tailnet_ssh.logins needs a Tailscale login for {', '.join(blank)}, not an empty value."
+        if any(not login or login != login.strip() for login in value.values()):
+            msg = "tailnet_ssh.logins needs nonempty logins with no surrounding whitespace."
+            raise ValueError(msg)
+        if len(set(value.values())) != len(value):
+            msg = "tailnet_ssh.logins must map Matrix users to distinct logins."
             raise ValueError(msg)
         return value
 

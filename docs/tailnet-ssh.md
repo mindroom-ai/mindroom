@@ -16,8 +16,8 @@ The operator configures both the tailnet login and the SSH public keys; this is 
 
 ## Configure MindRoom
 
-In `config.yaml`, `tailnet_ssh.logins` maps concrete Matrix user IDs to exact, nonblank Tailscale or Headscale login strings, and `tailnet_ssh.authorized_keys` maps the same IDs to lists of OpenSSH `.pub` lines without key options or private keys.
-Both maps default to empty, and the gateway admits neither tagged client devices nor devices without a known matching login.
+In `config.yaml`, `tailnet_ssh.logins` maps concrete Matrix user IDs to exact, nonblank Tailscale or Headscale login strings without surrounding whitespace, and `tailnet_ssh.authorized_keys` maps the same IDs to lists of OpenSSH `.pub` lines without key options or private keys.
+A tailnet login may map to only one Matrix user. Both maps default to empty, and the gateway admits neither tagged client devices nor devices without a known matching login.
 Set `agents.<name>.tailnet_ssh: true` to opt in (`false` by default).
 Replace the example login and public key with the requester's real values.
 

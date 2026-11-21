@@ -329,6 +329,22 @@ def test_config_authorized_keys_are_normalized_and_keyed_by_concrete_ids(tmp_pat
             _load(_paths(tmp_path), data)
 
 
+@pytest.mark.parametrize(
+    ("logins", "detail"),
+    [
+        ({ALICE: " alice@github"}, "whitespace"),
+        ({ALICE: "alice@github "}, "whitespace"),
+        ({ALICE: "alice@github", BOB: "alice@github"}, "distinct"),
+    ],
+)
+def test_tailnet_logins_are_trimmed_and_unique(tmp_path: Path, logins: dict[str, str], detail: str) -> None:
+    """Reject ambiguous or unreachable login mappings at config load."""
+    data = _data()
+    data["tailnet_ssh"] = {"logins": logins}
+    with pytest.raises(ValueError, match=detail):
+        _load(_paths(tmp_path), data)
+
+
 def test_empty_tailnet_ssh_section_is_left_out_of_authored_config(tmp_path: Path) -> None:
     """A null section loads empty and is not written back."""
     data = _data()
