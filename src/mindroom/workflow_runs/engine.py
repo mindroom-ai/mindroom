@@ -198,19 +198,23 @@ class WorkflowEngine:
                 # A reserved run gets one attempt from one launch; a run that was launched or has ended gets none,
                 # and a stopping engine starts none.
                 return run
-            try:
-                attempt = await self.scripts.run(
-                    context,
-                    source=run.source,
-                    workflow_run_id=run_id,
-                    resource_profile=cast("ScriptResourceProfileName | None", run.resource_profile),
-                    limits=ScriptRunLimits(max_tool_calls_per_minute=limits.max_tool_calls_per_minute),
-                )
-            except Exception as exc:
-                logger.warning("workflow_launch_refused", run_id=run_id, error=str(exc))
-                attempt, refusal = None, str(exc)
-            if attempt is None and automatic:
-                return run
+            # An attempt the engine starts on its own counts toward the idle limit once the run names it.
+            idle = automatic and run.idle_resumes >= _MAX_IDLE_RESUMES
+            attempt, refusal = None, _IDLE.format(attempts=_MAX_IDLE_RESUMES)
+            if not idle:
+                try:
+                    attempt = await self.scripts.run(
+                        context,
+                        source=run.source,
+                        workflow_run_id=run_id,
+                        resource_profile=cast("ScriptResourceProfileName | None", run.resource_profile),
+                        limits=ScriptRunLimits(max_tool_calls_per_minute=limits.max_tool_calls_per_minute),
+                    )
+                except Exception as exc:
+                    logger.warning("workflow_launch_refused", run_id=run_id, error=str(exc))
+                    refusal = str(exc)
+                if attempt is None and automatic:
+                    return run
             if attempt is not None:
                 self._launched.add(attempt.run_id)
                 # Before the run reads `running`, so whoever sees that state sees its time counted from here.
@@ -222,6 +226,7 @@ class WorkflowEngine:
                     state=WorkflowRunState.RUNNING,
                     attempt=run.attempt + 1,
                     script_run_id=attempt.run_id,
+                    idle_resumes=run.idle_resumes + automatic,
                 )
                 if launched.script_run_id != attempt.run_id:
                     # The run ended while its process started, so nothing names this attempt: stop it.
@@ -232,7 +237,7 @@ class WorkflowEngine:
                     self._spawn(run_id, self._watch_time(run_id, limits.max_runtime_hours))
                 return launched
         # The gate is free again, which ending a run takes.
-        return await self._end_run(run, WorkflowRunState.FAILED, refusal)
+        return await self._end_run(run, WorkflowRunState.INTERRUPTED if idle else WorkflowRunState.FAILED, refusal)
 
     async def cancel(self, run_id: str, *, reason: str) -> WorkflowRun:
         """Revoke the run's attempt, end its process and end the run cancelled; completed nodes stay saved."""
@@ -397,14 +402,10 @@ class WorkflowEngine:
         """Start the next attempt of an interrupted run that waits for one, as *access* allows; return whether it started."""
         if access is None or access == "pending" or run.state is not WorkflowRunState.STARTING:
             return False
-        idle = run.idle_resumes >= _MAX_IDLE_RESUMES
-        if isinstance(access, str) or idle:
-            refusal = _IDLE.format(attempts=_MAX_IDLE_RESUMES) if idle else _NO_ACCESS
-            await self._end_run(run, WorkflowRunState.INTERRUPTED, refusal)
+        if isinstance(access, str):
+            await self._end_run(run, WorkflowRunState.INTERRUPTED, _NO_ACCESS)
             return False
         context, limits = access
-        count = partial(self.store.update_run, run.run_id, when={WorkflowRunState.STARTING})
-        await asyncio.to_thread(count, idle_resumes=run.idle_resumes + 1)
         return (await self.launch(run.run_id, context, limits, automatic=True)).attempt > run.attempt
 
     async def close(self) -> None:
@@ -663,9 +664,6 @@ class WorkflowEngine:
         await hold("before_settle")
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation)
         await asyncio.to_thread(settle, state=state, result=result, error=error)
-        if state is WorkflowNodeState.COMPLETED and self.store.get_run(node.run_id).idle_resumes:
-            # A call finished, so the attempts the run is given on its own count from here again.
-            await asyncio.to_thread(self.store.update_run, node.run_id, idle_resumes=0)
         await self._notify(node.run_id)
 
     async def _watch_time(self, run_id: str, hours: float) -> None:

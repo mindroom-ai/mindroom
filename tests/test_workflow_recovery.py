@@ -413,6 +413,54 @@ async def test_refused_launch_of_an_automatic_resume_is_tried_again(stack: Workf
 
 
 @pytest.mark.asyncio
+async def test_refused_launches_count_as_no_idle_attempt(stack: WorkflowStack) -> None:
+    """A worker that is away for six passes uses up none of the five attempts: no attempt started."""
+    await _started(stack)
+    await _interrupt(stack, RUNTIME_RESTARTED)
+    stack.scripts.refuse_launch = RuntimeError("Background script runtime reconciliation is in progress.")
+
+    for _ in range(6):
+        assert await stack.maintain() == []
+    refused = stack.store.get_run(stack.run_id)
+    stack.scripts.refuse_launch = None
+
+    assert (refused.state, refused.idle_resumes) == (WorkflowRunState.STARTING, 0)
+    assert await stack.maintain() == [stack.run_id]
+    assert stack.store.get_run(stack.run_id).idle_resumes == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["value", "group", "receipt"])
+async def test_durable_progress_of_any_kind_starts_the_idle_count_again(
+    stack: WorkflowStack,
+    kind: str,
+    barrier: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A value, a group, and a receipt that is copied into its node after the restart are each a finished call."""
+    await _started(stack)
+    await _interrupt(stack, RUNTIME_RESTARTED)
+    assert await stack.maintain() == [stack.run_id]
+    assert stack.store.get_run(stack.run_id).idle_resumes == 1
+
+    if kind == "receipt":
+        await _killed_at(stack, barrier, "before_settle", monkeypatch)
+        await stack.recover()
+        # The new attempt is the first one since the receipt was copied into its node.
+        assert stack.store.get_run(stack.run_id).idle_resumes == 1
+        return
+    monkeypatch.delenv("MINDROOM_WORKFLOW_FAULT_DIR")
+    request = ("value", {"op": "now"}, {}) if kind == "value" else ("group", {}, {"members": ["/0:0"]})
+    await stack.submit("@0", *request)
+    assert stack.store.get_run(stack.run_id).idle_resumes == 0
+    # A call that is only read back is no progress.
+    await _interrupt(stack, RUNTIME_RESTARTED)
+    assert await stack.maintain() == [stack.run_id]
+    assert (await stack.submit("@0", *request)).cached
+    assert stack.store.get_run(stack.run_id).idle_resumes == 1
+
+
+@pytest.mark.asyncio
 async def test_automatic_resume_keeps_the_used_time(stack: WorkflowStack) -> None:
     """Only a person's resume gives the full working time again."""
     await _started(stack)

@@ -215,6 +215,7 @@ class WorkflowRunStore:
             result, result_file = self._inline_result(node.run_id, saved["seq"], node.generation, node.result)
             node = replace(node, seq=saved["seq"], result=result, result_file=result_file)
             _insert(connection, "INSERT OR REPLACE INTO workflow_nodes", _row_values(node, _NODE_JSON_FIELDS))
+            _count_progress(connection, node.run_id, node.state)
         return node
 
     def update_node(self, run_id: str, key: str, generation: int, **changes: object) -> bool:
@@ -286,6 +287,7 @@ class WorkflowRunStore:
                 """,
                 (state, _dumps(stored), result_file, _dumps(error), utc_timestamp(), run_id, key),
             )
+            _count_progress(connection, run_id, state)
         return True
 
     def mark_stale(self, run_id: str, keys: Iterable[str]) -> None:
@@ -549,6 +551,12 @@ def _totals(entries: Iterable[dict[str, Any]]) -> UsageTotals:
         else:
             totals["cost_usd"] += entry["cost_usd"]
     return totals
+
+
+def _count_progress(connection: sqlite3.Connection, run_id: str, state: WorkflowNodeState) -> None:
+    """Start the run's count of idle attempts again with the node that completed, in that node's own transaction."""
+    if state is WorkflowNodeState.COMPLETED:
+        connection.execute("UPDATE workflow_runs SET idle_resumes = 0 WHERE run_id = ?", (run_id,))
 
 
 def _create_schema(connection: sqlite3.Connection) -> None:
