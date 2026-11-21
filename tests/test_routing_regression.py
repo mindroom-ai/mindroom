@@ -193,6 +193,39 @@ def setup_test_bot(
     return install_runtime_journal_support(bot)
 
 
+def _alpha_beta_owner_bot(tmp_path: Path, room_id: str) -> tuple[AgentBot, dict[str, MatrixID]]:
+    """Build the owner bot in a room configured with Alpha and Beta."""
+    test_config = _runtime_bound_config(
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "alpha": AgentConfig(display_name="AlphaAgent", rooms=[room_id]),
+                    "beta": AgentConfig(display_name="BetaAgent", rooms=[room_id]),
+                },
+                room_models={},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+                router=RouterConfig(model="default"),
+                authorization={},
+            ),
+        ),
+        tmp_path,
+    )
+    runtime_paths = runtime_paths_for(test_config)
+    ids = entity_ids(test_config, runtime_paths)
+    router_bot = setup_test_bot(
+        AgentMatrixUser(
+            agent_name="router",
+            password=TEST_PASSWORD,
+            display_name="MindRoom",
+            user_id=ids["router"].full_id,
+        ),
+        tmp_path,
+        room_id,
+        config=test_config,
+    )
+    return router_bot, ids
+
+
 def _router_readiness_runtime(
     tmp_path: Path,
     *,
@@ -1284,34 +1317,7 @@ class TestRoutingRegression:
     ) -> None:
         """Router relay provenance is human-origin metadata, not managed-agent identity."""
         test_room_id = "!managed-requester:localhost"
-        test_config = _runtime_bound_config(
-            with_current_room_member_access(
-                Config(
-                    agents={
-                        "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
-                        "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
-                    },
-                    room_models={},
-                    models={"default": ModelConfig(provider="openai", id="test-model")},
-                    router=RouterConfig(model="default"),
-                    authorization={},
-                ),
-            ),
-            tmp_path,
-        )
-        runtime_paths = runtime_paths_for(test_config)
-        ids = entity_ids(test_config, runtime_paths)
-        router_bot = setup_test_bot(
-            AgentMatrixUser(
-                agent_name="router",
-                password=TEST_PASSWORD,
-                display_name="MindRoom",
-                user_id=ids["router"].full_id,
-            ),
-            tmp_path,
-            test_room_id,
-            config=test_config,
-        )
+        router_bot, ids = _alpha_beta_owner_bot(tmp_path, test_room_id)
 
         mock_suggest_responder.return_value = ResponderSelection("beta")
         mock_send_response = _room_send_response("$managed_requester_response")
@@ -1362,34 +1368,7 @@ class TestRoutingRegression:
     ) -> None:
         """A failed selection goes to the candidate with the lowest Matrix ID; a turn nobody fits gets no relay."""
         test_room_id = "!router-failure:localhost"
-        test_config = _runtime_bound_config(
-            with_current_room_member_access(
-                Config(
-                    agents={
-                        "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
-                        "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
-                    },
-                    room_models={},
-                    models={"default": ModelConfig(provider="openai", id="test-model")},
-                    router=RouterConfig(model="default"),
-                    authorization={},
-                ),
-            ),
-            tmp_path,
-        )
-        runtime_paths = runtime_paths_for(test_config)
-        ids = entity_ids(test_config, runtime_paths)
-        router_bot = setup_test_bot(
-            AgentMatrixUser(
-                agent_name="router",
-                password=TEST_PASSWORD,
-                display_name="MindRoom",
-                user_id=ids["router"].full_id,
-            ),
-            tmp_path,
-            test_room_id,
-            config=test_config,
-        )
+        router_bot, ids = _alpha_beta_owner_bot(tmp_path, test_room_id)
 
         mock_suggest_responder.return_value = selection
         mock_send_response = _room_send_response("$router_failure_response")
@@ -1432,34 +1411,7 @@ class TestRoutingRegression:
     ) -> None:
         """Router relays only honor provenance when canonical relay metadata is present."""
         test_room_id = "!router-mentions:localhost"
-        test_config = _runtime_bound_config(
-            with_current_room_member_access(
-                Config(
-                    agents={
-                        "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
-                        "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
-                    },
-                    room_models={},
-                    models={"default": ModelConfig(provider="openai", id="test-model")},
-                    router=RouterConfig(model="default"),
-                    authorization={},
-                ),
-            ),
-            tmp_path,
-        )
-        runtime_paths = runtime_paths_for(test_config)
-        ids = entity_ids(test_config, runtime_paths)
-        router_bot = setup_test_bot(
-            AgentMatrixUser(
-                agent_name="router",
-                password=TEST_PASSWORD,
-                display_name="MindRoom",
-                user_id=ids["router"].full_id,
-            ),
-            tmp_path,
-            test_room_id,
-            config=test_config,
-        )
+        router_bot, ids = _alpha_beta_owner_bot(tmp_path, test_room_id)
 
         router_sender = ids["router"].full_id
 
