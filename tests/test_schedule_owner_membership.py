@@ -922,29 +922,33 @@ def test_owner_room_view_parses_only_matrix_state() -> None:
     assert set(room.users) == {_ROUTER_ID, _ALPHA}
 
 
-def test_router_owned_task_goes_to_first_mentioned_joined_agent() -> None:
-    """A task the router owned goes to the first agent its message mentions that is joined, before a lower Matrix ID."""
-    room = ownership.room_from_state(_OWNER_ROOM, _ALPHA, _owner_room_state({_ROUTER_ID: 100, _ALPHA: 0, _BETA: 0}))
+@pytest.mark.parametrize(
+    ("members", "reader", "candidates"),
+    [
+        pytest.param(
+            {_ROUTER_ID: 100, _ALPHA: 0, _BETA: 0},
+            _ALPHA,
+            # The message mentions an agent that left, then one that is joined; every agent follows by Matrix ID.
+            [_ZETA, _BETA, _ALPHA, _BETA, _ZETA],
+            id="first-mentioned-joined",
+        ),
+        pytest.param(
+            {_ROUTER_ID: 100, _BETA: 0, _ZETA: 0},
+            _BETA,
+            [_ALPHA, _BETA, _ZETA],
+            id="lowest-joined",
+        ),
+    ],
+)
+def test_router_owned_task_goes_to_an_eligible_joined_agent(
+    members: dict[str, int],
+    reader: str,
+    candidates: list[str],
+) -> None:
+    """A legacy task goes to the first joined mention, or the lowest joined agent ID without a mention."""
+    room = ownership.room_from_state(_OWNER_ROOM, reader, _owner_room_state(members))
 
-    owner = ownership.legacy_router_task_owner(
-        room,
-        _owner_workflow(),
-        # The message mentions an agent that left, then one that is joined; every agent follows by Matrix ID.
-        agent_ids=[_ZETA, _BETA, _ALPHA, _BETA, _ZETA],
-    )
-
-    assert owner == _BETA
-
-
-def test_router_owned_task_without_mention_goes_to_lowest_id_agent() -> None:
-    """A task the router owned whose message mentions nobody goes to the joined agent with the lowest Matrix ID."""
-    room = ownership.room_from_state(_OWNER_ROOM, _BETA, _owner_room_state({_ROUTER_ID: 100, _BETA: 0, _ZETA: 0}))
-
-    owner = ownership.legacy_router_task_owner(
-        room,
-        _owner_workflow(),
-        agent_ids=[_ALPHA, _BETA, _ZETA],
-    )
+    owner = ownership.legacy_router_task_owner(room, _owner_workflow(), agent_ids=candidates)
 
     assert owner == _BETA
 
