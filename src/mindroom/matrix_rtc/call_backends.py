@@ -203,14 +203,19 @@ def _normalized_service_url(url: str | None) -> str | None:
         return None
     try:
         parsed = httpx.URL(url)
-    except httpx.InvalidURL:
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.host
+            or parsed.userinfo
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        # HTTPX's default-port lookup uses the original, possibly uppercase scheme.
+        default_port = 443 if parsed.scheme == "https" else 80
+        if parsed.port == default_port:
+            parsed = parsed.copy_with(port=None)
+        return str(parsed).rstrip("/")
+    except (httpx.InvalidURL, UnicodeError):
+        # Host access can raise on malformed IDNA even when URL construction succeeds.
         return None
-    if (
-        parsed.scheme not in {"http", "https"}
-        or parsed.host is None
-        or parsed.userinfo
-        or parsed.query
-        or parsed.fragment
-    ):
-        return None
-    return str(parsed).rstrip("/")

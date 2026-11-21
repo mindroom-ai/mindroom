@@ -694,13 +694,15 @@ async def test_manager_joins_sdk_45_caller_on_trusted_focus(tmp_path: Path) -> N
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("deliver_frame_keys")
 async def test_manager_accepts_trusted_sdk_45_late_joiner_alongside_sdk_41(tmp_path: Path) -> None:
-    """Operate one encrypted call with both SDK versions on the trusted service."""
-    legacy = _remote_member_event(created_ts=1_000)
-    modern = _sdk_45_member_event("ALICESECOND", 1_001)
+    """Operate one encrypted call with both SDK versions and equivalent service URLs."""
+    config = _config()
+    config.calls.livekit_service_url = f"{SERVICE_URL}/p"
+    legacy = _remote_member_event(created_ts=1_000, livekit_service_url=f"{SERVICE_URL}/p")
+    modern = _sdk_45_member_event("ALICESECOND", 1_001, "HTTPS://RTC.EXAMPLE.ORG:443/p/")
     client = _client()
     client.room_get_state.return_value = _state_response(legacy)
     bridge = FakeBridge()
-    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: 2_000)
+    manager = _manager(client, bridge, tmp_path, config, clock_ms=lambda: 2_000)
     room = _room(encrypted=True)
 
     try:
@@ -774,23 +776,83 @@ async def test_manager_refuses_foreign_sdk_45_focus(tmp_path: Path, timing: str)
 
 
 @pytest.mark.asyncio
-async def test_manager_does_not_trust_alternate_direct_sfu_from_sdk_45(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "replacement_focus",
+    [
+        pytest.param("https://rtc.foreign.example/p", id="foreign"),
+        pytest.param("https://xn--/p", id="invalid-idna"),
+        pytest.param("https://rtc.example.org:8443/p", id="different-port"),
+        pytest.param("http://rtc.example.org/p", id="different-scheme"),
+        pytest.param("https://rtc.example.org/P", id="different-path-case"),
+    ],
+)
+async def test_manager_refuses_sdk_45_focus_changed_in_place(tmp_path: Path, replacement_focus: str) -> None:
+    """Refresh of the same membership must stop the call if its focus no longer matches."""
+    focus = f"{SERVICE_URL}/p"
+    config = _config()
+    config.calls.livekit_service_url = focus
+    client = _client()
+    client.room_get_state.return_value = _state_response(_sdk_45_member_event("ALICEDEV", 1_000, focus))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, config, clock_ms=lambda: 2_000)
+    room = _room()
+
+    try:
+        await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+        assert bridge.connected_grant == GRANT
+
+        update = _sdk_45_member_event("ALICEDEV", 1_500, replacement_focus)
+        update["event_id"] = "$refreshed"
+        # SDK 45 MembershipManager.ts:1058 retains created_ts when refreshing a membership.
+        update["content"]["created_ts"] = 1_000
+        client.room_get_state.return_value = _state_response(update)
+        with capture_logs() as logs:
+            await _deliver(manager, manager.on_room_event(room, nio.UnknownEvent(update, CALL_MEMBER_EVENT_TYPE)))
+
+        assert any(
+            log["event"] == "call_focus_not_trusted" and log["advertised_url"] == replacement_focus for log in logs
+        )
+        assert _call_state(manager).session is None
+        assert bridge.closed
+        assert client.get_openid_token.await_count == 1
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("late", [False, True], ids=["initial", "late"])
+async def test_manager_does_not_trust_alternate_direct_sfu_from_sdk_45(tmp_path: Path, late: bool) -> None:
     """The SDK's transitional transport is not proof it publishes on the trusted SFU."""
-    modern = _sdk_45_member_event("ALICEDEV", 1_000)
+    modern = _sdk_45_member_event("ALICESECOND", 1_001)
     # matrix-js-sdk 45.1.0 src/matrixrtc/LivekitTransport.ts:69-82 allows both forms together.
     modern["content"]["foci_preferred"][0]["url"] = "wss://rtc.foreign.example"
     client = _client()
-    client.room_get_state.return_value = _state_response(modern)
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path, clock_ms=lambda: 2_000)
+    room = _room()
 
     try:
-        with capture_logs() as logs:
-            await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+        if late:
+            legacy = _remote_member_event(created_ts=1_000)
+            client.room_get_state.return_value = _state_response(legacy)
+            await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+            assert bridge.connected_grant == GRANT
+            client.room_get_state.return_value = _state_response(legacy, modern)
+        else:
+            client.room_get_state.return_value = _state_response(modern)
 
-        assert any(log["event"] == "call_focus_not_trusted" for log in logs)
-        assert bridge.agent_options is None
-        client.get_openid_token.assert_not_awaited()
+        with capture_logs() as logs:
+            await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+
+        assert any(log["event"] == "call_focus_not_trusted" and log["device_id"] == "ALICESECOND" for log in logs)
+        assert _call_state(manager).session is None
+        if late:
+            assert bridge.closed
+            assert bridge.participant_rosters == [frozenset({"@alice:example.org:ALICEDEV"})]
+            assert client.get_openid_token.await_count == 1
+        else:
+            assert bridge.agent_options is None
+            client.get_openid_token.assert_not_awaited()
     finally:
         await manager.shutdown()
 
@@ -4734,6 +4796,26 @@ async def test_livekit_service_rejects_unconfigured_same_server_focus() -> None:
     )
 
     assert service is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("scheme", "port"), [("https", 443), ("http", 80)])
+async def test_livekit_service_accepts_equivalent_legacy_focus(scheme: str, port: int) -> None:
+    """Scheme case and explicit default ports do not change the oldest member's focus."""
+    advertised = f"{scheme.upper()}://RTC.EXAMPLE.ORG:{port}/p/"
+    trusted = f"{scheme}://rtc.example.org/p"
+    member = _member("@alice:example.org", "ALICEDEV", livekit_service_url=advertised)
+
+    assert await resolve_livekit_service([member], user_id=BOT_USER, configured_url=trusted, ssl_verify=True) == trusted
+
+
+@pytest.mark.asyncio
+async def test_livekit_service_rejects_hostless_focus_even_if_configured() -> None:
+    """An absolute service URL must have a host, even if both spellings match."""
+    hostless = "https:///p"
+    member = _member("@alice:example.org", "ALICEDEV", livekit_service_url=hostless)
+
+    assert await resolve_livekit_service([member], user_id=BOT_USER, configured_url=hostless, ssl_verify=True) is None
 
 
 @pytest.mark.asyncio

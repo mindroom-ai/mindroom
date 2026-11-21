@@ -35,7 +35,8 @@ def _preferred_livekit_service_url(content: dict[str, Any], *, uses_multi_sfu: b
     focus = foci[0]
     if not isinstance(focus, dict) or focus.get("type") != "livekit":
         return None
-    # A direct WebSocket transport might publish elsewhere even with a trusted service URL.
+    # Deliberately refuse direct WebSocket transports in multi_sfu mode:
+    # the service URL cannot prove where these members actually publish.
     if uses_multi_sfu and "url" in focus:
         return None
     candidate = focus.get("livekit_service_url")

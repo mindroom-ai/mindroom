@@ -124,6 +124,24 @@ def test_parse_membership_rejects_unsupported_focus_mode(focus_active: object) -
     assert parse_membership_event(_membership_event({**content, "focus_active": focus_active})) is None
 
 
+def test_parse_oldest_membership_keeps_service_url_when_transport_also_has_url() -> None:
+    """Legacy focus selection still reads livekit_service_url from a dual-form transport."""
+    content = build_membership_content(
+        user_id=USER,
+        device_id=DEVICE,
+        livekit_service_url=SERVICE_URL,
+        expires_ms=123,
+    )
+    # matrix-js-sdk 45.1.0 src/matrixrtc/LivekitTransport.ts:69-82.
+    content["foci_preferred"][0]["url"] = "wss://sfu.example.org"
+
+    member = parse_membership_event(_membership_event(content))
+
+    assert member is not None
+    assert not member.uses_multi_sfu
+    assert member.livekit_service_url == SERVICE_URL
+
+
 def test_parse_membership_does_not_scan_past_primary_focus() -> None:
     """An incompatible primary transport cannot be bypassed by a later LiveKit entry."""
     content = build_membership_content(
