@@ -253,9 +253,9 @@ async def test_old_attempt_is_refused_after_resume(stack: WorkflowStack) -> None
     old = stack.attempt
     await stack.end_attempt(ScriptRunState.FAILED)
 
-    await stack.engine.reopen(stack.run_id)
+    await stack.engine.reopen(stack.run_id, stack.context)
     with pytest.raises(SupersededAttemptError):
-        # The run is ready for its next attempt and still names the old one: that one gets no call in.
+        # The run is ready for its next attempt and names none: the old one gets no call in.
         await stack.engine.submit_node(old, NodeRequest("@0", "tool", _A, {}))
     await stack.engine.launch(stack.run_id, stack.context)
 
@@ -379,6 +379,19 @@ async def test_resume_refuses_an_unknown_call_in_rerun_by_name(stack: WorkflowSt
     assert str(refusal.value) == f"Run {stack.run_id} has no call n7."
     assert stack.store.get_run(stack.run_id).state is WorkflowRunState.FAILED
     assert len(stack.scripts.launched) == 1
+
+
+@pytest.mark.asyncio
+async def test_look_at_the_old_attempt_after_a_resume_took_the_run_leaves_the_resume(stack: WorkflowStack) -> None:
+    """A pass that read the run before it ended and was resumed judges the old attempt, which the run names no more."""
+    seen = stack.store.get_run(stack.run_id)
+    await stack.end_attempt(ScriptRunState.EXITED)
+    await stack.engine.reopen(stack.run_id, stack.context)
+
+    assert not await stack.engine._reconcile_run(seen, stack.engine.owner_access(seen))
+
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.error, len(stack.scripts.launched)) == (WorkflowRunState.STARTING, None, 1)
 
 
 @pytest.mark.asyncio

@@ -239,15 +239,18 @@ class WorkflowEngine:
             raise WorkflowRunStoreError(_NO_ACCESS if access == "revoked" else _OWNER_NOT_READY)
         return access[0]
 
-    async def cancel(self, run_id: str, *, reason: str) -> WorkflowRun:
-        """Revoke the run's attempt, end its process and end the run cancelled; completed nodes stay saved."""
-        return await self._stop(run_id, WorkflowRunState.CANCELLED, reason)
+    async def cancel(self, run_id: str, *, reason: str, job_id: str | None = None) -> WorkflowRun:
+        """Revoke the run's attempt, end its process and end the run cancelled; completed nodes stay saved.
 
-    async def _stop(self, run_id: str, state: WorkflowRunState, reason: str) -> WorkflowRun:
+        With *job_id*, only a run that is still that job's is cancelled: one that a resume gave to another job is left.
+        """
+        return await self._stop(run_id, WorkflowRunState.CANCELLED, reason, job_id)
+
+    async def _stop(self, run_id: str, state: WorkflowRunState, reason: str, job_id: str | None = None) -> WorkflowRun:
         """Revoke the run's attempt, end its process and end the run in *state*, unless the attempt ended before."""
         async with self._condition(run_id):
             run = self.store.get_run(run_id)
-        if run.state in TERMINAL_RUN_STATES:
+        if run.state in TERMINAL_RUN_STATES or job_id not in (None, run.job_id):
             return run
         outcome: tuple[WorkflowRunState, str | None] = (state, reason)
         # A run that waits for its next attempt has no process: how its last one ended says nothing about this stop.
@@ -259,9 +262,12 @@ class WorkflowEngine:
                 outcome = _run_outcome(self.store.get_run(run_id), attempt, stopped=state)
         return await self._end_run(run, *outcome)
 
-    def resumable(self, run_id: str, rerun: Sequence[str] = ()) -> frozenset[str]:
-        """Return the keys of the calls *rerun* names, for a run that has ended; a live run or an unknown ID is refused."""
-        if self.store.get_run(run_id).state not in TERMINAL_RUN_STATES:
+    def resumable(self, run_id: str, rerun: Sequence[str] = (), *, claimed: bool = False) -> frozenset[str]:
+        """Return the keys of the calls *rerun* names, for a run that has ended; a live run or an unknown ID is refused.
+
+        A resume that is *claimed* compares the run's end when it takes the run, so only the calls are checked here.
+        """
+        if not claimed and self.store.get_run(run_id).state not in TERMINAL_RUN_STATES:
             msg = f"Run {run_id} is still running. Cancel it first."
             raise WorkflowRunStoreError(msg)
         try:
@@ -272,46 +278,52 @@ class WorkflowEngine:
     async def reopen(
         self,
         run_id: str,
+        context: ToolRuntimeContext,
         *,
         source: str | None = None,
         rerun: Sequence[str] = (),
         limits: WorkflowLimits | None = None,
         job_id: str | None = None,
-        attempt: int | None = None,
+        claim: object = None,
     ) -> tuple[WorkflowRun, bool]:
         """Make an ended run ready for its next attempt, with the full working time; `launch` then starts it.
 
         The saved calls stay: the next attempt replays the script, with *source* when given, and reuses them, except
         the calls *rerun* names. The answer has the form of a reservation that found its run.
 
-        The run becomes *job_id*'s in the same write, or no job's. A resume that was accepted while the run had made
-        *attempt* attempts is refused once another resume has taken the run, and then changes nothing.
+        Nothing changes before the resume takes the run, and it takes it in one write: the run becomes *job_id*'s, or
+        no job's, names no attempt, and the calls of *rerun* are marked. *context* is refused first when the run's
+        own conversation is closed to it. *claim* is the job and the end the run had when the resume was accepted:
+        a run that another resume took since, also one whose attempt never started, is refused.
         """
         hours = (limits or WorkflowLimits()).max_runtime_hours
+        run = self.store.get_run(run_id)
+        keys = self.resumable(run_id, rerun, claimed=claim is not None)
+        self._owner_context(run, context)
+        text = run.source if source is None else source
+        take = partial(
+            self.store.claim_run,
+            run_id,
+            claim,
+            keys,
+            state=WorkflowRunState.STARTING,
+            source=text,
+            source_digest=hashlib.sha256(text.encode()).hexdigest(),
+            previous_source_digest=run.source_digest,
+            runtime_seconds_left=hours * 3600 if hours else None,
+            idle_resumes=0,
+            job_id=job_id,
+            script_run_id=None,
+            result=None,
+            error=None,
+            finished_at=None,
+        )
         async with self._condition(run_id):
-            run = self.store.get_run(run_id)
-            if attempt is not None and (run.attempt != attempt or run.state not in TERMINAL_RUN_STATES):
-                msg = f"Run {run_id} was resumed by another call."
-                raise WorkflowRunStoreError(msg)
-            keys = self.resumable(run_id, rerun)
-            text = run.source if source is None else source
-            # Saved with the calls themselves, so every later attempt runs them again until one of them did.
-            await asyncio.to_thread(self.store.forget_digests, run_id, keys)
-            reopened = await asyncio.to_thread(
-                self.store.update_run,
-                run_id,
-                when=TERMINAL_RUN_STATES,
-                state=WorkflowRunState.STARTING,
-                source=text,
-                source_digest=hashlib.sha256(text.encode()).hexdigest(),
-                previous_source_digest=run.source_digest,
-                runtime_seconds_left=hours * 3600 if hours else None,
-                idle_resumes=0,
-                job_id=job_id,
-                result=None,
-                error=None,
-                finished_at=None,
-            )
+            # Waited for also by a caller that is cancelled here, so the run it finds says whether it took it.
+            reopened = await wait_for_future_until_complete(asyncio.ensure_future(asyncio.to_thread(take)))
+        if reopened is None:
+            msg = f"Run {run_id} was resumed by another call."
+            raise WorkflowRunStoreError(msg)
         return reopened, False
 
     async def resume(
@@ -323,7 +335,7 @@ class WorkflowEngine:
         **request: Any,  # noqa: ANN401
     ) -> WorkflowRun:
         """Start the next attempt of an ended run for a person; see `reopen` for the *request*."""
-        await self.reopen(run_id, limits=limits, **request)
+        await self.reopen(run_id, context, limits=limits, **request)
         return await self.launch(run_id, context, limits)
 
     async def wait(self, run_id: str) -> WorkflowRun:
@@ -412,7 +424,11 @@ class WorkflowEngine:
                 await self._end_run(run, state, error)
                 return False
             # The attempt is over and the run is not: its nodes are settled, and it waits for its next attempt.
-            run = await self._end_run(run, WorkflowRunState.STARTING, None, finished_at=None)
+            waiting = await self._end_run(run, WorkflowRunState.STARTING, None, finished_at=None)
+            if waiting.script_run_id != run.script_run_id:
+                # A resume took the run since this look began: the attempt it judged says nothing about that one.
+                return False
+            run = waiting
         return await self._relaunch(run, access)
 
     async def _relaunch(self, run: WorkflowRun, access: ResumeAccess) -> bool:

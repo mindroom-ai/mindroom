@@ -218,7 +218,7 @@ class WorkflowTools(Toolkit):
         arguments = {"run_id": run_id, "source": source, "path": path, "rerun": rerun}
         run, request = await self._resumption(engine, context, arguments)
         # One of the calls that wait for this run, as an inline start is: the last one to leave stops the run.
-        reopen = partial(engine.reopen, run.run_id, limits=self.limits, **request)
+        reopen = partial(engine.reopen, run.run_id, context, limits=self.limits, **request)
         return _outcome_text(await engine.attend(run.run_id, reopen, context, self.limits))
 
     async def managed_job(
@@ -275,7 +275,7 @@ class WorkflowTools(Toolkit):
     ) -> tuple[WorkflowRun, dict[str, Any]]:
         """Check one resume and return its run and the request its job is admitted with; a refusal raises.
 
-        The request names the attempt the run had made, so it takes the run only if no other resume did since.
+        The request names the job and the end the run has now, so it takes the run only if no other resume did since.
         *accepted* is the request this same call was admitted with before, which is returned unchecked.
         """
         source, path, rerun = arguments.get("source"), arguments.get("path"), arguments.get("rerun") or ()
@@ -290,7 +290,7 @@ class WorkflowTools(Toolkit):
             raise WorkflowRunStoreError(msg)
         edited = source is not None or path is not None
         text = (await engine.scripts.resolve_source(context, source=source, path=path)).decode() if edited else None
-        return run, {"source": text, "rerun": list(rerun), "attempt": run.attempt}
+        return run, {"source": text, "rerun": list(rerun), "claim": [run.job_id, run.finished_at]}
 
     async def _reserve(
         self,
@@ -364,7 +364,7 @@ def _run_job(
     *after* gets the report for the plugins' hooks, and *refused* undoes a start the runtime did not admit.
     *resume* is the accepted request of a resume, saved with the job so that a restart goes on with exactly it.
     """
-    store, run_id = engine.store, run.run_id
+    run_id = run.run_id
 
     async def operation() -> BackgroundOutcome:
         try:
@@ -382,12 +382,11 @@ def _run_job(
             # A stopping primary cancels nothing: the run is the restart's to continue or to end.
             return None
         try:
-            if store.get_run(run_id).job_id != job_id:
-                # The run is another job's: a resume that never took it, or a job whose run was resumed since.
-                return None
-            return _workflow_job_outcome(await engine.cancel(run_id, reason="The run's job was cancelled."))
+            ended = await engine.cancel(run_id, reason="The run's job was cancelled.", job_id=job_id)
         except WorkflowRunNotFoundError:
             return None
+        # A run of another job is left: a resume that never took it, or a job whose run was resumed since.
+        return _workflow_job_outcome(ended) if ended.job_id == job_id else None
 
     def handle(job: BackgroundJob) -> str:
         return json.dumps({"job_id": job.job_id, "run_id": run_id, "status": job.status, "title": run.title})

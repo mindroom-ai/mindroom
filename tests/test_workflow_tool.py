@@ -13,7 +13,7 @@ import threading
 from dataclasses import asdict, replace
 from functools import partial
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
 import pytest_asyncio
@@ -962,6 +962,7 @@ async def _failed(stack: WorkflowStack, **arguments: object) -> dict[str, str]:
 async def test_resume_registers_a_new_job_when_the_old_one_ended(stack: WorkflowStack) -> None:
     """The resumed run is a new job with the same handle shape; the run keeps the job that first started it."""
     first = await _failed(stack, title="Count things")
+    ended_at = stack.store.get_run(stack.run_id).finished_at
 
     handle = json.loads(await stack.call("resume_workflow", run_id=first["run_id"]))
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
@@ -977,7 +978,8 @@ async def test_resume_registers_a_new_job_when_the_old_one_ended(stack: Workflow
     assert job.adapter == {
         "workflow_job": handle["job_id"],
         "workflow": first["run_id"],
-        "resume": {"source": None, "rerun": [], "attempt": 1},
+        # What the run was when the resume was accepted: its job and its end.
+        "resume": {"source": None, "rerun": [], "claim": [first["job_id"], ended_at]},
     }
     assert (run.origin_job_id, run.job_id) == (first["job_id"], handle["job_id"])
     assert stack.counting_tool.lines == ["a"]
@@ -1004,22 +1006,31 @@ async def test_resume_from_another_thread_runs_in_the_runs_own_conversation(stac
 
 
 @pytest.mark.asyncio
-async def test_resume_from_another_thread_is_refused_when_the_runs_conversation_is_closed_to_its_owner(
+@pytest.mark.parametrize(
+    ("access", "refusal"),
+    [
+        ("revoked", "The requester no longer has access."),
+        ("pending", "The run's agent is not ready in the run's room yet. Try again in a moment."),
+    ],
+)
+async def test_resume_from_another_thread_that_the_runs_conversation_refuses_changes_nothing(
     stack: WorkflowStack,
+    access: Literal["pending", "revoked"],
+    refusal: str,
 ) -> None:
-    """The run's own conversation is checked again, and no attempt starts anywhere else."""
+    """The run's own conversation is checked before the resume takes the run: its script, report and calls stay."""
     first = await _failed(stack)
-    stack.access = "revoked"
+    before = stack.store.get_run(stack.run_id), stack.store.nodes(stack.run_id)
+    stack.access = access
     elsewhere = replace(
         owner_context(stack.tmp_path, **stack.owner_options, thread_id="$elsewhere:example.test"),
         orchestrator=stack.context.orchestrator,
     )
 
-    handle = json.loads(await stack.call("resume_workflow", context=elsewhere, run_id=first["run_id"]))
-    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        job = (await stack.jobs.wait(handle["job_id"], owner=elsewhere.execution_identity, depth=0)).job
+    options = {"context": elsewhere, "run_id": first["run_id"], "source": _EDITED.format("x"), "rerun": ["n1"]}
 
-    assert (job.status, await stack.collect(job)) == ("failed", "The requester no longer has access.")
+    assert await _refused(stack, "resume_workflow", **options) == refusal
+    assert (stack.store.get_run(stack.run_id), stack.store.nodes(stack.run_id)) == before
     assert len(stack.scripts.launched) == 1
 
 
@@ -1056,6 +1067,76 @@ async def test_two_resume_calls_at_once_give_the_run_to_one_job(
     # The job that lost cleans up nothing of the run it does not own.
     assert stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING
     assert (stack.attempt.state, len(stack.scripts.launched)) == (ScriptRunState.RUNNING, 2)
+
+
+@pytest.mark.asyncio
+async def test_resume_that_took_the_run_and_could_not_start_keeps_it_from_a_call_admitted_with_it(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run was taken, also when no attempt came of it: the other call admitted against the same end owns nothing."""
+    first = await _failed(stack)
+    gates: dict[str, asyncio.Event] = {}
+    reopen = stack.engine.reopen
+
+    async def held(*args: Any, **options: Any) -> tuple[WorkflowRun, bool]:  # noqa: ANN401
+        await gates.setdefault(options["job_id"], asyncio.Event()).wait()
+        return await reopen(*args, **options)
+
+    monkeypatch.setattr(stack.engine, "reopen", held)
+    winner, loser = [
+        json.loads(await stack.call("resume_workflow", run_id=first["run_id"], rerun=rerun)) for rerun in ([], ["n1"])
+    ]
+    await stack.until(lambda: len(gates) == 2)
+    stack.scripts.refuse_launch = ScriptRunManagerError("The worker backend refused the script.")
+    gates[winner["job_id"]].set()
+    won = await _ended_job(stack, winner["job_id"])
+    stack.scripts.refuse_launch = None
+    gates[loser["job_id"]].set()
+    lost = await _ended_job(stack, loser["job_id"])
+
+    run = stack.store.get_run(stack.run_id)
+    assert (won.status, run.job_id, run.error) == ("failed", winner["job_id"], "The worker backend refused the script.")
+    assert (lost.status, await stack.collect(lost)) == ("failed", f"Run {run.run_id} was resumed by another call.")
+    assert (run.attempt, len(stack.scripts.launched)) == (1, 1)
+    # The call it named to run again is not marked in a run it did not take.
+    assert stack.store.nodes(stack.run_id)[0].digest
+
+
+@pytest.mark.asyncio
+async def test_resume_cancelled_at_its_write_marks_no_call_of_a_run_it_did_not_take(stack: WorkflowStack) -> None:
+    """The run and the calls to run again are taken in one write: a call is marked only in a run the resume took."""
+    first = await _failed(stack)
+    writer = sqlite3.connect(stack.store.database_path, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    resuming = asyncio.create_task(stack.engine.resume(stack.context, first["run_id"], rerun=["n1"]))
+    # The resume's write waits in its thread for the database, which is where the cancellation finds it.
+    await asyncio.sleep(0.2)
+    resuming.cancel()
+    await asyncio.sleep(0)
+    writer.execute("COMMIT")
+    writer.close()
+    with pytest.raises(asyncio.CancelledError):
+        await resuming
+    await stack.until(lambda: not stack.store.nodes(stack.run_id)[0].digest)
+
+    assert stack.store.get_run(stack.run_id).state is WorkflowRunState.STARTING
+
+
+@pytest.mark.asyncio
+async def test_cancel_for_a_job_leaves_a_run_that_another_job_took(stack: WorkflowStack) -> None:
+    """A job's cancel names the job: once a resume gave the run to another one, it ends nothing."""
+    first = await _failed(stack)
+    taken = json.loads(await stack.call("resume_workflow", run_id=first["run_id"]))
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+
+    left = await stack.engine.cancel(stack.run_id, reason="The run's job was cancelled.", job_id=first["job_id"])
+
+    assert (left.state, left.job_id, stack.attempt.state) == (
+        WorkflowRunState.RUNNING,
+        taken["job_id"],
+        ScriptRunState.RUNNING,
+    )
 
 
 @pytest.mark.asyncio

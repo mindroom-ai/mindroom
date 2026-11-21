@@ -145,17 +145,20 @@ class WorkflowRunStore:
             raise WorkflowRunStoreError(msg)
         with self._write_transaction() as connection:
             run = _select_run(connection, run_id)
-            if when and run.state not in when:
-                return run
-            run = replace(run, **changes)
-            values = _row_values(run, _RUN_JSON_FIELDS)
-            columns = [_column(name, _RUN_JSON_FIELDS) for name in changes]
-            if columns:
-                connection.execute(
-                    f"UPDATE workflow_runs SET {', '.join(f'{column} = ?' for column in columns)} WHERE run_id = ?",  # noqa: S608
-                    (*(values[column] for column in columns), run_id),
-                )
-        return run
+            return run if when and run.state not in when else _write_run(connection, run, changes)
+
+    def claim_run(self, run_id: str, claim: object, keys: Iterable[str], **changes: object) -> WorkflowRun | None:
+        """Take an ended run for its next attempt in one write, or return None and change nothing.
+
+        *claim* is the job and the end the run had when the resume was accepted; None takes any ended run. Only a
+        run that still has both is written with *changes*, and only then do the nodes at *keys* lose their digests.
+        """
+        with self._write_transaction() as connection:
+            run = _select_run(connection, run_id)
+            if run.state not in TERMINAL_RUN_STATES or claim not in (None, [run.job_id, run.finished_at]):
+                return None
+            _forget(connection, run_id, keys)
+            return _write_run(connection, run, changes)
 
     def list_runs(
         self,
@@ -302,10 +305,7 @@ class WorkflowRunStore:
     def forget_digests(self, run_id: str, keys: Iterable[str]) -> None:
         """Make the nodes at *keys* match no request, so the next attempt that reaches one runs its call again."""
         with self._write_transaction() as connection:
-            connection.executemany(
-                "UPDATE workflow_nodes SET digest = '' WHERE run_id = ? AND key = ?",
-                [(run_id, key) for key in keys],
-            )
+            _forget(connection, run_id, keys)
 
     def whole_result(self, node: WorkflowNode) -> object:
         """Return the node's whole result, read from its file when the row keeps only the start of it."""
@@ -534,6 +534,26 @@ def _select_run(connection: sqlite3.Connection, run_id: str) -> WorkflowRun:
     if row is None:
         raise WorkflowRunNotFoundError(run_id)
     return _run_from_row(row)
+
+
+def _write_run(connection: sqlite3.Connection, run: WorkflowRun, changes: dict[str, object]) -> WorkflowRun:
+    """Write *changes* to the row of *run* and return the run as stored."""
+    run = replace(run, **changes)
+    values = _row_values(run, _RUN_JSON_FIELDS)
+    columns = [_column(name, _RUN_JSON_FIELDS) for name in changes]
+    if columns:
+        connection.execute(
+            f"UPDATE workflow_runs SET {', '.join(f'{column} = ?' for column in columns)} WHERE run_id = ?",  # noqa: S608
+            (*(values[column] for column in columns), run.run_id),
+        )
+    return run
+
+
+def _forget(connection: sqlite3.Connection, run_id: str, keys: Iterable[str]) -> None:
+    connection.executemany(
+        "UPDATE workflow_nodes SET digest = '' WHERE run_id = ? AND key = ?",
+        [(run_id, key) for key in keys],
+    )
 
 
 def owned_run(store: WorkflowRunStore, run_id: str, *, agent_name: str, requester_id: str) -> WorkflowRun:
