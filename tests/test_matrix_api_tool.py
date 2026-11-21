@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from collections import defaultdict, deque
 from dataclasses import replace
@@ -1200,47 +1201,45 @@ async def test_matrix_api_search_event_context_preserves_profile_info() -> None:
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_search_snippets_show_an_agents_tool_calls_and_put_none_in_a_persons_message() -> None:
-    """A snippet is made from the reply as its agent built it, which Matrix holds without its tool marker lines.
+async def test_matrix_api_search_finds_a_reply_by_its_prose_and_shows_it_with_its_tool_calls() -> None:
+    """The homeserver picks the hits from the body it holds, and a found reply is shown as its agent built it.
 
-    The homeserver picks the hits, from the text it holds, so the search goes out as it was asked: a tool's name
-    finds no reply that named the tool in a marker line alone. A homeserver may answer with a sender that is no ID.
+    Matrix holds a reply without its tool marker lines, so a tool's name finds a reply from before they left the
+    text and none that named the tool in a marker line alone. A homeserver may answer with a sender that is no ID.
     """
     tool = MatrixApiTools()
     ctx = _make_context()
     agent = entity_identity_registry(ctx.config, ctx.runtime_paths).current_ids["general"].full_id
 
-    async def snippets(hit: dict[str, object], neighbour: dict[str, object], sender: object) -> list[object]:
-        ctx.client._send.return_value = _MatrixSearchResponse(
-            count=1,
-            next_batch=None,
-            results=[
-                _search_result(
-                    result={**_raw_event(content=hit), "sender": sender},
-                    context={
-                        "events_before": [{**_raw_event(content=neighbour), "sender": sender}],
-                        "events_after": [],
-                    },
-                ),
-            ],
-        )
+    async def found(
+        term: str, content: dict[str, object], neighbour: dict[str, object], sender: object
+    ) -> list[object]:
+        """Return the snippets, of each hit and of the message before it, that a search of one stored reply shows."""
+        context = {"events_before": [{**_raw_event(content=neighbour), "sender": sender}], "events_after": []}
+
+        async def search(_response: object, _method: str, _path: str, data: str) -> _MatrixSearchResponse:
+            asked = json.loads(data)["search_categories"]["room_events"]["search_term"]
+            # As a homeserver searches: for a word of the body it holds.
+            hit = asked in re.findall(r"\w+", str(content["body"]))
+            results = [_search_result(result={**_raw_event(content=content), "sender": sender}, context=context)]
+            return _MatrixSearchResponse(count=int(hit), next_batch=None, results=results if hit else [])
+
+        ctx.client._send.side_effect = search
         with tool_runtime_context(ctx):
-            payload = json.loads(await tool.matrix_api(action="search", search_term="needle", event_context={}))
-        (result,) = payload["results"]
-        return [result["snippet"], result["context"]["events_before"][0]["snippet"]]
+            payload = json.loads(await tool.matrix_api(action="search", search_term=term, event_context={}))
+        return [[result["snippet"], result["context"]["events_before"][0]["snippet"]] for result in payload["results"]]
 
-    hit, held_hit = reply_with_calls("The needle.\n\n🔧 `shell` [1]", 1)
+    built, held = reply_with_calls("The needle.\n\n🔧 `shell` [1]", 1)
     neighbour, held_neighbour = reply_with_calls("🔧 `shell` [1]", 1)
-    assert (held_hit["body"], held_neighbour["body"]) == ("The needle.", "")
+    assert (held["body"], held_neighbour["body"]) == ("The needle.", "")
+    with_calls = [["The needle. 🔧 `shell` [1]", "🔧 `shell` [1]"]]
 
-    assert await snippets(held_hit, held_neighbour, agent) == ["The needle. 🔧 `shell` [1]", "🔧 `shell` [1]"]
-    criteria = json.loads(ctx.client._send.await_args.args[3])["search_categories"]["room_events"]
-    assert criteria["search_term"] == "needle"
-    assert "shell" in hit["body"]
-    assert "shell" not in held_hit["body"]
-    assert await snippets(hit, neighbour, agent) == ["The needle. 🔧 `shell` [1]", "🔧 `shell` [1]"]
+    assert await found("needle", held, held_neighbour, agent) == with_calls
+    assert await found("needle", built, neighbour, agent) == with_calls
+    assert await found("shell", built, neighbour, agent) == with_calls
+    assert await found("shell", held, held_neighbour, agent) == []
     for sender in ("@alice:localhost", [agent], {"id": agent}):
-        assert await snippets(held_hit, held_neighbour, sender) == ["The needle.", ""]
+        assert await found("needle", held, held_neighbour, sender) == [["The needle.", ""]]
 
 
 @pytest.mark.asyncio
