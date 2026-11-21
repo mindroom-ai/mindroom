@@ -469,9 +469,10 @@ def _completing(
     return run
 
 
-# The relay context a route carries for its responder. Any other content of a route is dropped.
 # What ties a route too long for one event to the file that holds all of it.
 _LONG_TEXT_FILE_KEYS = ("io.mindroom.long_text", "url", "file")
+
+# The relay context a route carries for its responder. Any other content of a route is dropped.
 _ROUTE_CONTEXT_KEYS = (
     SOURCE_KIND_KEY,
     ORIGINAL_SENDER_KEY,
