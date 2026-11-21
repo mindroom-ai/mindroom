@@ -24,7 +24,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_turn import AttemptResolved, CompletedAttempt
 from mindroom.tool_jobs.resources import ExecutionResourceReference, current_execution_resources, execution_resources
 from mindroom.tool_system import sandbox_proxy as sandbox_proxy_module
-from mindroom.tool_system.agno_toolkits import toolkit_function
+from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function
 from mindroom.tool_system.catalog import builtin_tool_registry
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins
@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
     from mindroom.workers.backend import WorkerBackend
     from mindroom.workers.models import WorkerStatus
@@ -754,13 +755,13 @@ def _shell(runtime_paths: RuntimePaths) -> tuple[Callable[..., Any], ResolvedWor
     return _offered_entrypoint(shell, "run_shell_command"), target
 
 
-def _tool_context(runtime_paths: RuntimePaths, turn_id: str = _TURN) -> object:
+def _tool_context(runtime_paths: RuntimePaths, turn_id: str = _TURN, *, config: Config = _CONFIG) -> ToolRuntimeContext:
     return make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(room_id="!room:example.org", thread_id="$thread", reply_to_event_id=None),
         requester_id="@alice:example.org",
         client=object(),
-        config=_CONFIG,
+        config=config,
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
@@ -907,6 +908,73 @@ async def test_workers_run_prints_saved_output_from_its_named_worker(
     output = capsys.readouterr()
     assert "shard-output" in output.out
     assert f"full output saved to {receipt['path']}" in output.err
+
+
+@pytest.mark.asyncio
+async def test_cli_catalog_explains_why_named_workers_are_not_offered(
+    tmp_path: Path,
+    runtime_paths: RuntimePaths,
+    backend: _FakeBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real CLI dispatch refuses a hidden worker argument without running the shell."""
+    from uuid import uuid4  # noqa: PLC0415
+
+    from mindroom.agent_cli.protocol import ToolCallOperation  # noqa: PLC0415
+    from mindroom.agent_cli.session import CliTurnOwner  # noqa: PLC0415
+    from mindroom.agent_cli.shell_contract import AgentCliShellEnv  # noqa: PLC0415
+    from mindroom.tool_system.output_files import ToolOutputFilePolicy  # noqa: PLC0415
+    from mindroom.tool_system.tool_access import ToolKey  # noqa: PLC0415
+    from tests.conftest import live_turn_tools_for_test  # noqa: PLC0415
+    from tests.minimal_agent_fixtures import settled_receipt  # noqa: PLC0415
+    from tests.test_agent_tool_calls import _catalog  # noqa: PLC0415
+
+    config = Config(agents={"code": AgentConfig(display_name="Code", named_workers=0, worker_scope="user_agent")})
+    target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
+    shell = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        runs_in_worker=True,
+        runtime_config=config,
+        worker_target=target,
+    )
+    posts = _route_through(monkeypatch, backend)
+    catalog = await _catalog(tmp_path, [replace(adapt_toolkit(shell, key="shell"), name="shell")])
+    catalog.runtime_context = _tool_context(runtime_paths, config=config)
+    binding = await catalog.bind(ToolKey("shell", "run_shell_command"))
+    assert binding.function.parameters["additionalProperties"] is False
+    assert {"worker", "resource_profile"}.isdisjoint(binding.function.parameters["properties"])
+
+    async def authorize(_key: object, _args: object) -> None:
+        pass
+
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, _TURN, "run"),
+        catalog=catalog,
+        authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path),
+    )
+    owner.shell_env = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
+    try:
+        async with execution_resources(response=True), owner._window("driver"):
+            queued = await owner.operation(
+                window="driver",
+                operation=ToolCallOperation(
+                    operation="tools.call",
+                    call_id=uuid4(),
+                    toolkit="shell",
+                    function="run_shell_command",
+                    arguments={"args": ["true"], "worker": "build", "timeout": 3600, "tail": 100},
+                ),
+            )
+            receipt = await settled_receipt(owner, queued["call_id"])
+    finally:
+        await owner.close()
+
+    assert receipt["status"] == "failed"
+    assert receipt["outcome"] == "Named workers are off for this agent; named_workers in its config allows them."
+    assert not posts
 
 
 @pytest.mark.asyncio
