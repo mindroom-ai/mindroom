@@ -1037,9 +1037,11 @@ def test_the_shell_offers_named_workers_only_to_an_agent_that_may_run_them(
 
 
 @pytest.mark.parametrize("named_workers", [0, 2])
+@pytest.mark.parametrize("deferred", [False, True], ids=["eager", "deferred"])
 def test_a_minimal_agent_is_told_of_named_workers_only_when_it_may_run_them(
     runtime_paths: RuntimePaths,
     named_workers: int,
+    deferred: bool,
 ) -> None:
     """Minimal Bash has no ``worker`` argument, so its prompt names the command that runs in a named worker."""
     config = Config(
@@ -1047,7 +1049,7 @@ def test_a_minimal_agent_is_told_of_named_workers_only_when_it_may_run_them(
         agents={
             "code": AgentConfig(
                 display_name="Code",
-                tools=["shell"],
+                tools=[{"shell": {"defer": True}}] if deferred else ["shell"],
                 worker_tools=["shell"],
                 named_workers=named_workers,
                 worker_scope="user_agent",
