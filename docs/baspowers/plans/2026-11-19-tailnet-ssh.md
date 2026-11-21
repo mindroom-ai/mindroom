@@ -1,8 +1,7 @@
 # Tailnet SSH Implementation Plan
 
-> Tasks 8 and 13 and the login-link steps below are superseded by the spec's [Single-tailnet v1 (2026-11-21)](../specs/2026-11-19-tailnet-ssh-design.md#single-tailnet-v1-2026-11-21) section.
-
-> **For agentic workers:** REQUIRED SUB-SKILL: implement this plan task-by-task with the skill named in **Execution**. Steps use checkbox (`- [ ]`) syntax.
+> **Historical plan.** This entire document is superseded. Do not implement its tasks or use its contracts.
+> The spec's [Single-tailnet v1 (2026-11-21)](../specs/2026-11-19-tailnet-ssh-design.md#single-tailnet-v1-2026-11-21) section is the current implementation reference.
 
 **Execution:** baspowers:subagent-driven-development — 14 tasks across three PRs share one wire contract and one eligibility rule, and a mistake in either is a tenant-isolation bug.
 
