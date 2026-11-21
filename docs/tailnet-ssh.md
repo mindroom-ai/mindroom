@@ -119,6 +119,7 @@ The gateway policy allows DNS, internal endpoints, and outbound TCP 443 to publi
 
 The gateway enrolls one node per eligible worker, even before it has started, so there is no need to run a tool first.
 Find the worker's node in the tailnet control plane and use its actual MagicDNS hostname.
+For `user` and `user_agent` workers, the hostname is derived from a key containing the Matrix user ID and can expose it to the operator's tailnet.
 The operator can derive its public host key from the Ed25519 key for that worker in the primary's `tracking/tailnet_ssh.json`; share only the public key and pin it to the hostname in `~/.ssh/known_hosts`.
 
 ```bash
