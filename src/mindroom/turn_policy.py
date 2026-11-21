@@ -199,6 +199,16 @@ class TurnPolicy:
             self.deps.runtime_paths,
         )
 
+    def _classify_candidates(self, room: nio.MatrixRoom, requester_id: str) -> ResponderCandidatePermissions:
+        """Classify the room's responder candidates for one requester from its cached membership."""
+        return classify_responder_candidates_from_cached_room(
+            room,
+            requester_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            self.deps.agent_reply_memberships,
+        )
+
     def adaptive_participation(
         self,
         *,
@@ -210,13 +220,7 @@ class TurnPolicy:
         participation = self._adaptive_thread_participation(context, requester_user_id)
         if participation is None or not self._is_participating_thread_agent(context):
             return None
-        candidates = classify_responder_candidates_from_cached_room(
-            room,
-            requester_user_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            self.deps.agent_reply_memberships,
-        )
+        candidates = self._classify_candidates(room, requester_user_id)
         available = self._filter_materializable_responders(candidates.allowed, self._responder_availability())
         return participation if self.deps.matrix_id in available else None
 
@@ -258,13 +262,7 @@ class TurnPolicy:
     ) -> list[MatrixID]:
         """Return candidates from the boundary-prepared room membership snapshot."""
         availability = self._responder_availability()
-        candidates = classify_responder_candidates_from_cached_room(
-            room,
-            requester_user_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            self.deps.agent_reply_memberships,
-        )
+        candidates = self._classify_candidates(room, requester_user_id)
         if self._filter_materializable_responders(candidates.pending, availability):
             raise ReplyMembershipPendingError
         return self._filter_materializable_responders(candidates.allowed, availability)
@@ -730,13 +728,7 @@ class TurnPolicy:
     ) -> bool:
         """Return whether this agent surfaces the team these mentioned agents ask for, picked as a turn picks it."""
         availability = self._responder_availability()
-        candidates = classify_responder_candidates_from_cached_room(
-            room,
-            envelope.requester_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            self.deps.agent_reply_memberships,
-        )
+        candidates = self._classify_candidates(room, envelope.requester_id)
         sender_visible_responders = [*candidates.allowed, *candidates.pending]
         # Two or more tagged agents ask for the same team in any thread or room.
         form_team = decide_team_formation(
@@ -827,16 +819,7 @@ class TurnPolicy:
         requester_user_id = dispatch.requester_user_id
         planning_thread_history = context.planning_thread_history
         availability = self._responder_availability()
-        candidates = self._only_the_contact_answerer(
-            dispatch,
-            classify_responder_candidates_from_cached_room(
-                room,
-                requester_user_id,
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-                self.deps.agent_reply_memberships,
-            ),
-        )
+        candidates = self._only_the_contact_answerer(dispatch, self._classify_candidates(room, requester_user_id))
         available_responders_in_room = self._filter_materializable_responders(candidates.allowed, availability)
         pending_responders_in_room = self._filter_materializable_responders(candidates.pending, availability)
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
