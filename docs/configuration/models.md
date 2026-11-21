@@ -446,6 +446,7 @@ A reply fails with a message that names the fix in these cases:
 
 - Claude Code or the Claude Agent SDK is missing, or Claude Code is older than 2.1.328: install the required dependency or run `claude update`.
 - Claude Code is not signed in to a Pro, Max, Team, or Enterprise plan: run `claude auth login` as the user that runs MindRoom.
+- `CLAUDE_CODE_STREAM_CLOSE_TIMEOUT` or `CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK` is set: unset it in MindRoom's environment because the SDK reads it directly.
 - The plan's usage limit is reached: the message gives the time the limit resets when Claude Code reports it.
 
 ## OpenRouter Provider Routing

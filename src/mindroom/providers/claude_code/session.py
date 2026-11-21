@@ -25,7 +25,6 @@ from claude_agent_sdk import (
     RateLimitEvent,
     SystemMessage,
 )
-from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
 from mindroom import __version__
 from mindroom.atomic_file import atomic_write_bytes_at
@@ -69,6 +68,8 @@ _ISOLATION_ENV = {
     "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
     # The SDK only defaults this when it did not inherit a value, so set it explicitly.
     "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
+    # Give the SDK and CLI the default explicitly so the SDK need not read the parent environment.
+    "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "600000",
     # A call that waits long is not moved to the background, where the model would go on without its result.
     "CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND": "1",
     "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS": "0",
@@ -80,12 +81,15 @@ _ISOLATION_ENV = {
 # Claude Code reads its sign-in, where it sends requests, and what it adds to them from variables named like these.
 _SCRUB_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_")
 _SCRUB_NAMES = {"CLAUDE_BG_AUTH_SNAPSHOT_PATH", "CLAUDE_AUTO_BACKGROUND_TASKS"}
+# The SDK reads these in the parent during connect, with no options override.
+_SDK_PARENT_ENV = {"CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"}
 # Fail safe: only these trusted names survive the scrub, even if the SDK adds other prefixed settings.
 _SET_FOR_THE_PROCESS = {"CLAUDE_CODE_ENTRYPOINT", *_ISOLATION_ENV}
 _CLI_ENV = "MINDROOM_CLAUDE_CODE_CLI"
 _LAUNCHER_LOCK = Lock()
 _LAUNCHER = f"""\
 import os
+import signal
 import sys
 
 try:
@@ -95,6 +99,10 @@ try:
     for name in tuple(os.environ):
         if name not in keep and (name.startswith({_SCRUB_PREFIXES!r}) or name in {tuple(sorted(_SCRUB_NAMES))!r}):
             del os.environ[name]
+    # Undo Python's ignored signals, which would otherwise survive exec.
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    if hasattr(signal, "SIGXFSZ"):
+        signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
     os.execv(real, [real, *sys.argv[1:]])
 except (KeyError, OSError, ValueError) as error:
     detail = f": {{error.strerror}}" if isinstance(error, OSError) and error.strerror else ""
@@ -241,8 +249,13 @@ def _prepare(root: Path, system: str, provider: str, cli_path: str | None) -> tu
 def _resolve_cli(cli_path: str | None, provider: str) -> Path:
     """Resolve a configured path or command, or use the SDK's fallback discovery if the builder found none."""
     if not cli_path:
-        # Reuse the SDK's bundled and standard-install lookup without starting its transport.
-        cli_path = SubprocessCLITransport("", ClaudeAgentOptions())._find_cli()
+        # Reuse the SDK's lookup without depending on its private transport when a path is supplied.
+        try:
+            from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport  # noqa: PLC0415
+
+            cli_path = SubprocessCLITransport("", ClaudeAgentOptions())._find_cli()
+        except (ImportError, AttributeError) as error:
+            raise AuthenticationFailed(_NOT_FOUND, provider=provider) from error
     elif os.sep not in cli_path:
         cli_path = shutil.which(cli_path)
     if cli_path is not None:
@@ -300,6 +313,9 @@ class _SessionRegistry:
 
         Cancellation cannot cut short startup: only at its end do we know whether the process holds the slot.
         """
+        if names := sorted(_SDK_PARENT_ENV.intersection(os.environ)):
+            msg = f"Unset {', '.join(names)} in MindRoom's environment. The Claude Agent SDK reads these directly."
+            raise AuthenticationFailed(msg, provider=provider, status_code=401)
         freed = self._reserve(provider, replaces)
         starting = create_background_task(
             self._launch(freed, provider, storage_root, system, tools, options),
