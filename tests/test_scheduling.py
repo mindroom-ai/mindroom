@@ -667,8 +667,10 @@ async def test_list_scheduled_tasks_tasks_in_other_threads(tmp_path: Path) -> No
         config=Config(),
     )
 
-    assert "No scheduled tasks in this thread" in result
-    assert "1 task(s) scheduled in other threads" in result
+    assert result == (
+        "No scheduled tasks in this thread.\n\n"
+        "📌 1 task(s) scheduled in other threads. Use /list_schedules in those threads to see details."
+    )
 
 
 @pytest.mark.asyncio
