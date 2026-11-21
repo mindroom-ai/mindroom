@@ -151,16 +151,23 @@ def test_tailnet_ssh_requires_native_shell_to_win(
 
 
 @pytest.mark.parametrize(
-    ("prefix", "server_filters", "refused"),
-    [("run", {}, True), ("other", {}, False), ("run", {"exclude_tools": ["shell_command"]}, False)],
+    ("prefix", "server_filters", "assignment", "refused"),
+    [
+        ("run", {}, "mcp_example", True),
+        ("run", {}, {"mcp_example": {"include_tools": []}}, True),
+        ("run", {}, {"mcp_example": {"exclude_tools": ["shell_command"]}}, False),
+        ("other", {}, "mcp_example", False),
+        ("run", {"exclude_tools": ["shell_command"]}, "mcp_example", False),
+    ],
 )
 def test_tailnet_ssh_refuses_a_possible_mcp_collision(
     tmp_path: Path,
     prefix: str,
     server_filters: dict[str, list[str]],
+    assignment: str | dict[str, dict[str, list[str]]],
     refused: bool,
 ) -> None:
-    """Config validation uses namespace metadata only, without asking the server for its functions."""
+    """Config validation uses namespace and filters without asking the server for its functions."""
     data = _data()
     data["mcp_servers"] = {
         "example": {
@@ -170,7 +177,7 @@ def test_tailnet_ssh_refuses_a_possible_mcp_collision(
             **server_filters,
         },
     }
-    data["agents"]["mine"] = {"display_name": "Mine", "tools": ["shell", "mcp_example"], "tailnet_ssh": True}
+    data["agents"]["mine"] = {"display_name": "Mine", "tools": ["shell", assignment], "tailnet_ssh": True}
     paths = test_runtime_paths(tmp_path)
 
     if refused:

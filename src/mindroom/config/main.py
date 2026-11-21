@@ -1569,6 +1569,7 @@ class Config(BaseModel):
                 if i == shell_index:
                     continue
                 metadata = tools.entries[entry.name]
+                overrides = entry.tool_config_overrides
                 function = SHELL_FUNCTION
                 if (server_id := metadata.mcp_server_id) is not None:
                     # MCP catalogs are live, but the namespace and remote name filters are authored.
@@ -1580,11 +1581,14 @@ class Config(BaseModel):
                         exclude=server.exclude_tools,
                     ):
                         continue
-                    metadata = replace(metadata, function_names=(function,))
-                elif i > shell_index and metadata.function_names:
+                    # MCP treats an empty assignment allowlist as unrestricted.
+                    overrides = {**overrides, "include_tools": overrides.get("include_tools") or None}
+                elif metadata.function_names and (i > shell_index or function not in metadata.function_names):
                     continue
-                functions, _ = offered_functions(metadata, entry.tool_config_overrides)
-                if functions is None or function in functions:
+                # Check the possible function, not defaults which stored settings can change.
+                possible = replace(metadata, function_names=(function,), config_fields=None)
+                functions, _ = offered_functions(possible, overrides)
+                if functions:
                     msg = f"agents.{name}.tailnet_ssh: Toolkit {entry.name!r} can take precedence for {SHELL_FUNCTION}."
                     raise ToolConfigOverrideError(msg)
 
