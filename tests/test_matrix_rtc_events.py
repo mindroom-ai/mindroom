@@ -189,6 +189,14 @@ def test_key_to_device_content_round_trip() -> None:
         device_id=DEVICE,
         sent_ts=777,
     )
+    # matrix-js-sdk 41.7.0 src/matrixrtc/ToDeviceKeyTransport.ts:73-86.
+    assert content == {
+        "room_id": "!room:example.org",
+        "keys": {"index": 3, "key": "a2V5a2V5a2V5a2V5a2V5a2U="},
+        "member": {"id": f"{USER}:{DEVICE}", "claimed_device_id": DEVICE},
+        "session": {"application": "m.call", "call_id": "", "scope": "m.room"},
+        "sent_ts": 777,
+    }
     received = parse_key_to_device_content(
         USER,
         content,
@@ -200,6 +208,52 @@ def test_key_to_device_content_round_trip() -> None:
     assert received.received_at_ms == 888
     # A key for a different room must not leak into this session.
     assert parse_key_to_device_content(USER, content, room_id="!other:example.org", received_at_ms=888) is None
+
+
+@pytest.mark.parametrize("variant", ["wire", "modern_only", "different_legacy_key", "malformed_modern_key"])
+def test_parse_sdk_45_to_device_key(variant: str) -> None:
+    """Read the SDK 45 media key, preferring it over the deprecated copy when valid."""
+    room_id = "!room:example.org"
+    key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+    media_key = {"index": 5, "key": key}
+    # matrix-js-sdk 45.1.0 src/matrixrtc/ToDeviceKeyTransport.ts:91-107.
+    content = {
+        "room_id": room_id,
+        "member_id": f"{USER}:{DEVICE}",
+        "media_key": media_key,
+        "keys": media_key,
+        "member": {"id": f"{USER}:{DEVICE}", "claimed_device_id": DEVICE},
+    }
+    # SDK 45 types.ts:78-114 allows omitting the deprecated copies.
+    if variant == "modern_only":
+        del content["keys"]
+        content["member"] = {"claimed_device_id": DEVICE}
+    elif variant == "different_legacy_key":
+        content["keys"] = {"index": 9, "key": "QUJDREVGR0hJSktMTU5PUA=="}
+    elif variant == "malformed_modern_key":
+        content["media_key"] = {"index": True, "key": key}
+
+    received = parse_key_to_device_content(USER, content, room_id=room_id, received_at_ms=888)
+
+    assert received is not None
+    assert received.user_id == USER
+    assert received.claimed_device_id == DEVICE
+    assert received.key_index == 5
+    assert received.key_base64 == key
+    assert received.received_at_ms == 888
+
+
+def test_parse_sdk_45_rejects_invalid_member_id() -> None:
+    """A modern key event with a non-string member ID is malformed."""
+    media_key = {"index": 5, "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="}
+    content = {
+        "room_id": "!room:example.org",
+        "member_id": 42,
+        "media_key": media_key,
+        "keys": media_key,
+        "member": {"id": f"{USER}:{DEVICE}", "claimed_device_id": DEVICE},
+    }
+    assert parse_key_to_device_content(USER, content, room_id="!room:example.org", received_at_ms=888) is None
 
 
 def test_parse_key_content_requires_key_and_claimed_device() -> None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 
+import pytest
+
 from mindroom.matrix_rtc.events import CallMember, ReceivedFrameKey
 from mindroom.matrix_rtc.frame_keys import (
     _KEY_ROTATION_GRACE_PERIOD_MS,
@@ -38,6 +40,7 @@ def test_first_key_is_index_zero_and_immediately_usable() -> None:
     assert distribution.apply_after_ms == 0
     assert distribution.targets == (alice,)
     assert base64.b64decode(distribution.key_base64) == distribution.key
+    assert len(distribution.key) == 16
     manager.mark_distributed(distribution)
     assert manager.update_memberships([alice], now_ms=1) is None
 
@@ -203,12 +206,25 @@ def test_receive_rejects_invalid_base64() -> None:
     assert manager.receive(bad, participant_identity="@alice:example.org:DEV") is None
 
 
-def test_receive_rejects_wrong_length_key() -> None:
-    """MatrixRTC frame keys are exactly 16 bytes."""
-    manager = _manager()
+@pytest.mark.parametrize("size", [16, 32])
+def test_receive_accepts_matrix_rtc_key_lengths(size: int) -> None:
+    """Accept SDK 41 and SDK 45 frame keys without changing their bytes."""
+    # matrix-js-sdk 45.1.0 src/matrixrtc/RTCEncryptionManager.ts:517-521 generates 32 bytes.
+    key = b"A" * size
+    inbound = _manager().receive(
+        _received(key, 0, received_at_ms=0),
+        participant_identity="@alice:example.org:DEV",
+    )
+    assert inbound is not None
+    assert inbound.key == key
+
+
+@pytest.mark.parametrize("size", [15, 17, 24, 31, 33])
+def test_receive_rejects_wrong_length_key(size: int) -> None:
+    """Reject frame keys of every length except 16 and 32 bytes."""
     assert (
-        manager.receive(
-            _received(b"A" * 15, 0, received_at_ms=0),
+        _manager().receive(
+            _received(b"A" * size, 0, received_at_ms=0),
             participant_identity="@alice:example.org:DEV",
         )
         is None

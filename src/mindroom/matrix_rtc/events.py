@@ -170,26 +170,17 @@ def parse_key_to_device_content(
     room_id: str,
     received_at_ms: int,
 ) -> ReceivedFrameKey | None:
-    """Parse ``io.element.call.encryption_keys`` to-device content.
-
-    Mirrors the validation in matrix-js-sdk's ``ToDeviceKeyTransport``: the
-    room must match and the key entry and claimed device must be present.
-    """
+    """Parse SDK 41 or 45 ``io.element.call.encryption_keys`` to-device content."""
     if content.get("room_id") != room_id:
         return None
-    keys = content.get("keys")
-    if not isinstance(keys, dict):
+    # The member ID is advisory; key ownership comes from the authenticated Matrix device.
+    member_id = content.get("member_id")
+    if member_id is not None and not isinstance(member_id, str):
         return None
-    key = keys.get("key")
-    index = keys.get("index")
-    if (
-        not isinstance(key, str)
-        or not key
-        or not isinstance(index, int)
-        or isinstance(index, bool)
-        or not 0 <= index < 256
-    ):
+    media_key = _parse_media_key(content.get("media_key")) or _parse_media_key(content.get("keys"))
+    if media_key is None:
         return None
+    key, index = media_key
     member = content.get("member")
     if not isinstance(member, dict):
         return None
@@ -203,3 +194,20 @@ def parse_key_to_device_content(
         key_index=index,
         received_at_ms=received_at_ms,
     )
+
+
+def _parse_media_key(entry: object) -> tuple[str, int] | None:
+    """Validate a modern or legacy media key entry."""
+    if not isinstance(entry, dict):
+        return None
+    key = entry.get("key")
+    index = entry.get("index")
+    if (
+        not isinstance(key, str)
+        or not key
+        or not isinstance(index, int)
+        or isinstance(index, bool)
+        or not 0 <= index < 256
+    ):
+        return None
+    return key, index

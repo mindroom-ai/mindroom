@@ -1,9 +1,10 @@
 """Per-sender media frame key management for MatrixRTC calls.
 
 Ports the key policy of matrix-js-sdk's ``RTCEncryptionManager``: every
-participant encrypts their outbound media with their own 16-byte key,
-distributed to the other participants over an encrypted transport. Keys
-rotate when someone leaves (so leavers lose access) and when someone joins
+participant encrypts their outbound media with their own key, distributed to
+the other participants over an encrypted transport. We send 16-byte keys for
+SDK 41 compatibility and accept both 16- and 32-byte keys. Keys rotate when
+someone leaves (so leavers lose access) and when someone joins
 after a grace period (so joiners cannot decrypt earlier media). Indices
 cycle through 0-255.
 """
@@ -25,7 +26,7 @@ _USE_KEY_DELAY_MS = 1000
 #: Skip rotation for joiners when the current key is younger than this.
 _KEY_ROTATION_GRACE_PERIOD_MS = 10_000
 
-_KEY_SIZE_BYTES = 16
+_OUTBOUND_KEY_SIZE_BYTES = 16
 _KEY_INDEX_MODULUS = 256
 
 
@@ -92,7 +93,7 @@ class FrameKeyManager:
 
         if self._key is None:
             # First key: usable immediately, shared with everyone present.
-            self._key = secrets.token_bytes(_KEY_SIZE_BYTES)
+            self._key = secrets.token_bytes(_OUTBOUND_KEY_SIZE_BYTES)
             self._key_index = 0
             self._key_created_ms = now_ms
             self._key_activation_ms = now_ms
@@ -121,7 +122,7 @@ class FrameKeyManager:
         return None
 
     def _rotate(self, members_by_share: dict[_SharedWith, CallMember], now_ms: int) -> _KeyDistribution:
-        self._key = secrets.token_bytes(_KEY_SIZE_BYTES)
+        self._key = secrets.token_bytes(_OUTBOUND_KEY_SIZE_BYTES)
         self._key_index = (self._key_index + 1) % _KEY_INDEX_MODULUS
         self._key_created_ms = now_ms
         self._key_activation_ms = now_ms + _USE_KEY_DELAY_MS
@@ -175,7 +176,7 @@ class FrameKeyManager:
             key = base64.b64decode(received.key_base64, validate=True)
         except ValueError:
             return None
-        if len(key) != _KEY_SIZE_BYTES:
+        if len(key) not in (16, 32):
             return None
         # Record the dedup timestamp only for keys that validate, so a
         # malformed payload cannot poison the filter against a good retry.
