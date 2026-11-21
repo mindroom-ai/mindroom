@@ -5790,7 +5790,6 @@ depends_on = [
 path = "mindroom.tool_system.filters"
 depends_on = []
 visibility = [
-    "mindroom.config.main",
     "mindroom.mcp.manager",
     "mindroom.mcp.toolkit",
     "mindroom.tool_jobs.authorization",
