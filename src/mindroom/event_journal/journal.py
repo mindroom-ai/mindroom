@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTE_REVISION_KEY, ROUTER_AGENT_NAME
 from mindroom.event_journal.history_recovery import (
     HistoryRecoveryOutcome,
     HistoryRecoveryState,
@@ -219,10 +219,8 @@ def _require_matching_semantic_event(
         raise IngestionBatchIntegrityError
     # An opaque history marker identifies an envelope, whose encrypted kind
     # and thread are unknown. It never owns a callback or becomes actionable.
-    # An edit of a pending message can turn its file into a text or back (revise_pending); it is the same event.
-    revised = {row["kind"], event.kind.value} <= {EventKind.MEDIA.value, EventKind.MESSAGE.value}
     if EventKind.OPAQUE_HISTORY not in (row["kind"], event.kind) and (
-        (row["kind"] != event.kind.value and not revised) or row["thread_id"] != encode_thread_id(event.thread_id)
+        row["kind"] != event.kind.value or row["thread_id"] != encode_thread_id(event.thread_id)
     ):
         raise IngestionBatchIntegrityError
     return row
@@ -1348,14 +1346,15 @@ def load(
 
 
 def revise_pending(transaction: Transaction, principal_id: str, event_id: str, content: Mapping[str, object]) -> None:
-    """Store the content its sender edited a pending message to, and its kind: a file event only for a long text."""
+    """Store the content its sender edited a pending message to, which names that edit under ``ROUTE_REVISION_KEY``.
+
+    Its row keeps the kind it was admitted as, which a redelivery is matched against.
+    """
     stored = load(transaction, principal_id, event_id)
     if stored is not None:
-        kind = EventKind.MEDIA if content.get("msgtype") == "m.file" else EventKind.MESSAGE
         transaction.execute(
-            "UPDATE journal_events SET kind = ?, source_json = ? "
-            "WHERE principal_id = ? AND event_id = ? AND state = 'pending'",
-            (kind.value, json.dumps({**stored.source, "content": content}), principal_id, event_id),
+            "UPDATE journal_events SET source_json = ? WHERE principal_id = ? AND event_id = ? AND state = 'pending'",
+            (json.dumps({**stored.source, "content": content}), principal_id, event_id),
         )
 
 
@@ -1543,11 +1542,15 @@ def _journal_event(row: Row) -> JournalEvent:
     if not isinstance(source, dict):
         msg = f"Journal event {row['event_id']!r} has a non-object source"
         raise TypeError(msg)
+    kind, content = EventKind(row["kind"]), source.get("content")
+    if kind in (EventKind.MESSAGE, EventKind.MEDIA) and isinstance(content, dict) and ROUTE_REVISION_KEY in content:
+        # A waiting message replays as what its sender edited it to (revise_pending): a file event only for a long text.
+        kind = EventKind.MEDIA if content.get("msgtype") == "m.file" else EventKind.MESSAGE
     return JournalEvent(
         event_id=row["event_id"],
         room_id=row["room_id"],
         thread_id=decode_thread_id(row["thread_id"]),
-        kind=EventKind(row["kind"]),
+        kind=kind,
         sender=row["sender"],
         origin_server_ts=int(row["origin_server_ts"]),
         source=source,

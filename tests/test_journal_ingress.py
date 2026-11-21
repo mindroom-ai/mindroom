@@ -1723,19 +1723,21 @@ class TestPendingEventWorker:
         await self._admit(alice, text_event("$answered", "May.", ts=1_001))
         await alice.settle("$answered")
 
+        # The content a waiting message takes names the edit it is (``ROUTE_REVISION_KEY``), which marks it revised.
+        short = {"body": "July, not June.", "msgtype": "m.text", ROUTE_REVISION_KEY: [1_002, "$edit"]}
         for event_id in ("$waiting", "$answered", "$unknown"):
-            await alice.revise_pending(event_id, {"body": "July, not June.", "msgtype": "m.text"})
+            await alice.revise_pending(event_id, short)
 
         [waiting] = await alice.pending()
         assert waiting.event_id == "$waiting"
         assert waiting.kind is EventKind.MESSAGE
-        assert waiting.source["content"] == {"body": "July, not June.", "msgtype": "m.text"}
+        assert waiting.source["content"] == short
         assert waiting.source["sender"] == ALICE
         answered = await alice.load_event("$answered")
         assert answered is not None
         assert answered.source == {}
         # An edit to a long text, whose file was not read, waits as the file event it is.
-        await alice.revise_pending("$waiting", {"body": "July, and", "msgtype": "m.file"})
+        await alice.revise_pending("$waiting", {**short, "body": "July, and", "msgtype": "m.file"})
         assert [event.kind for event in await alice.pending()] == [EventKind.MEDIA]
 
     async def test_a_failed_event_stays_pending(self, alice: PrincipalStore) -> None:

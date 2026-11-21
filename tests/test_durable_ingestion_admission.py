@@ -17,11 +17,12 @@ from nio.durable import RecordKind, SyncBatch, SyncRecord
 from nio.durable.codec import restore_event
 from nio.durable.model import CryptoEvidence, OwnMembership
 
-from mindroom.constants import AGENT_AUTHORED_KEY, STREAM_STATUS_KEY
+from mindroom.constants import AGENT_AUTHORED_KEY, ROUTE_REVISION_KEY, STREAM_STATUS_KEY
 from mindroom.event_journal import (
     AdmissionFacts,
     DeliveryProjectionPendingError,
     EventJournalStore,
+    EventKind,
     InboundEvent,
     IngestionBatchAdmission,
     IngestionBatchIntegrityError,
@@ -620,21 +621,50 @@ async def test_batch_binding_order_and_semantic_duplicates(journal_database: Cal
 async def test_redelivery_of_a_pending_long_text_edited_to_a_short_one_is_a_duplicate(
     journal_database: Callable[[], EventJournalStore],
 ) -> None:
-    """A long text sent as a file and edited to a short one while it waits is still the event it was when redelivered."""
+    """A long text sent as a file and edited to a short one while it waits is still the event it was when redelivered.
+
+    It replays as the text it now is, and its row keeps the kind it was admitted as, settled too.
+    """
     store = journal_database()
     original = message("$long")
     original.source["content"] = {"msgtype": "m.file", "body": "long.txt", "url": "mxc://example.org/long"}
     batch = SyncBatch(uuid4(), 1, (original,))
     principal = await principal_for(store, batch.stream_id)
     await consume_one_ingestion_batch(Session(batch), principal, account_id=ACCOUNT)
-    await principal.revise_pending("$long", {"msgtype": "m.text", "body": "short"})
+    short = {"msgtype": "m.text", "body": "short", ROUTE_REVISION_KEY: [11, "$edit"]}
+    await principal.revise_pending("$long", short)
 
     result = await consume_one_ingestion_batch(Session(replace(batch, sequence=2)), principal, account_id=ACCOUNT)
 
     assert result.receipt_new
     assert not result.semantic_event_new
     [pending] = await principal.pending()
-    assert pending.source["content"] == {"msgtype": "m.text", "body": "short"}
+    assert (pending.kind, pending.source["content"]) == (EventKind.MESSAGE, short)
+    await principal.settle("$long")
+    result = await consume_one_ingestion_batch(Session(replace(batch, sequence=3)), principal, account_id=ACCOUNT)
+    assert not result.semantic_event_new
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_redelivery_of_an_unedited_text_as_an_image_is_refused(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """Only an edit a waiting message took changes what it replays as: a batch that contradicts its kind is refused."""
+    store = journal_database()
+    batch = SyncBatch(uuid4(), 1, (message("$text"),))
+    principal = await principal_for(store, batch.stream_id)
+    await consume_one_ingestion_batch(Session(batch), principal, account_id=ACCOUNT)
+    image = message("$text")
+    image.source["content"] = {"msgtype": "m.image", "body": "cat.png", "url": "mxc://example.org/cat"}
+
+    with pytest.raises(IngestionBatchIntegrityError):
+        await consume_one_ingestion_batch(
+            Session(SyncBatch(batch.stream_id, 2, (image,))), principal, account_id=ACCOUNT
+        )
+
+    [pending] = await principal.pending()
+    assert (pending.kind, pending.source["content"]["body"]) == (EventKind.MESSAGE, "hello")
     await store.close()
 
 
