@@ -123,6 +123,8 @@ class WorkflowEngine:
         # The attempts this engine started, each with the epoch its run got when it began: all it may ever write
         # with. No other attempt is served: one an earlier primary left is a leftover process.
         self._launched: dict[str, int] = {}
+        # The runs whose wait for an attempt was logged as refused, so the tries that follow say nothing.
+        self._refused: set[str] = set()
         # The lanes in which a call ran in each run's current attempt.
         self._dirty: dict[str, DirtyLanes] = {}
         # When each running run's working time was last charged, by the engine's clock.
@@ -224,7 +226,9 @@ class WorkflowEngine:
                         limits=ScriptRunLimits(max_tool_calls_per_minute=limits.max_tool_calls_per_minute),
                     )
                 except Exception as exc:
-                    logger.warning("workflow_launch_refused", run_id=run_id, error=str(exc))
+                    if run_id not in self._refused:
+                        logger.warning("workflow_launch_refused", run_id=run_id, error=str(exc))
+                    self._refused.add(run_id)
                     if replay or (run.job_id is not None and isinstance(exc, ScriptRuntimeNotReadyError)):
                         return run
                     state, refusal = WorkflowRunState.FAILED, str(exc)
@@ -820,6 +824,7 @@ class WorkflowEngine:
             self._dirty.pop(run.run_id, None)
             self._charged.pop(run.run_id, None)
             self._launched.pop(current.script_run_id or "", None)
+            self._refused.discard(run.run_id)
             condition.notify_all()
         return ended
 

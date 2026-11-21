@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import pytest_asyncio
+import structlog
 
 from mindroom import authorization
 from mindroom.config.agent import AgentConfig
@@ -667,14 +668,17 @@ async def test_refused_launch_of_an_automatic_resume_is_tried_again(stack: Workf
     await _interrupt(stack, RUNTIME_RESTARTED)
     stack.scripts.refuse_launch = RuntimeError("Background script runtime reconciliation is in progress.")
 
-    assert await stack.maintain() == []
-    await stack.until(lambda: stack.scripts.refused >= 2)
+    with structlog.testing.capture_logs() as logs:
+        assert await stack.maintain() == []
+        await stack.until(lambda: stack.scripts.refused >= 3)
     refused = stack.store.get_run(stack.run_id)
     stack.scripts.refuse_launch = None
     await _next_attempt(stack)
 
     assert (refused.state, refused.error) == (WorkflowRunState.STARTING, None)
     assert stack.store.get_run(stack.run_id).attempt == 2
+    # Said once for the attempt the run waits for, not with every try.
+    assert [log["event"] for log in logs].count("workflow_launch_refused") == 1
 
 
 @pytest.mark.asyncio
