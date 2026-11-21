@@ -944,11 +944,10 @@ async def test_run_cron_task_executes_latest_state_workflow(tmp_path: Path) -> N
     )
     admin = object()
 
-    async def _fetch_task(*_args: object, **_kwargs: object) -> ScheduledTaskRecord:
-        return _record("task_cron_updated", updated_workflow)
+    record = _record("task_cron_updated", updated_workflow)
 
     with (
-        patch("mindroom.scheduling.runtime.get_scheduled_task", side_effect=_fetch_task),
+        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
         patch(
             "mindroom.scheduling.executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
