@@ -217,10 +217,7 @@ def bind_claim(paths: RuntimePaths, invite_id: int, claimant: str, now: int | No
 def start_sending(paths: RuntimePaths, invite_id: int, claimant: str, now: int | None = None) -> bool:
     """Move an open request bound to `claimant` to sending; only the one call that wins may send its Matrix invite."""
     current = _now(now)
-    sql = (
-        "UPDATE email_invites SET sending_at = ? WHERE id = ? AND claimed_by = ? AND revoked = 0"
-        " AND expires_at > ? AND invited_at IS NULL AND sending_at IS NULL"
-    )
+    sql = f"UPDATE email_invites SET sending_at = ? WHERE id = ? AND claimed_by = ? AND {_OPEN}"  # noqa: S608
     return _update(paths, current, sql, (current, invite_id, claimant, current))
 
 
