@@ -1306,7 +1306,7 @@ class MatrixApiTools(Toolkit):
         - search: Full-text search one room's events with `search_term`, optional `keys`, pagination, and context.
 
         `room_id` defaults to the current Matrix tool runtime context room.
-        `get_event` returns the raw event: an agent's tool markers are in `io.mindroom.tool_trace`, not in its body.
+        `get_event` returns the raw event: a version 3 reply has its calls in `io.mindroom.tool_trace.events` alone.
         `search` enforces a single-room scope via `room_id`; if `filter.rooms` is supplied it must match that room.
         `search` always uses the top-level `limit`; `filter.limit` is rejected to avoid conflicting inputs.
         `com.mindroom.*`, `io.mindroom.*`, and the chat client's `chat.mindroom.*` are reserved for runtime metadata:
