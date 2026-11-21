@@ -36,9 +36,8 @@ class _KeyDistribution:
     key: bytes
     key_index: int
     targets: tuple[CallMember, ...]
-    #: Wait this long before encrypting outbound media with the key. Zero for
-    #: keys that are already in use and are only being shared with joiners.
-    apply_after_ms: int
+    #: Counts rotations without wrapping, so a newer key always compares newer than an older one.
+    generation: int
 
     @property
     def key_base64(self) -> str:
@@ -74,8 +73,8 @@ class FrameKeyManager:
     _key: bytes | None = field(default=None, init=False)
     _key_index: int = field(default=0, init=False)
     _key_created_ms: int = field(default=0, init=False)
-    # When our senders switch to the current key; ``None`` until its first send has returned.
-    _key_activation_ms: int | None = field(default=None, init=False)
+    _key_generation: int = field(default=0, init=False)
+    _armed_generation: int = field(default=-1, init=False)
     # Sets keep each distribution linear in the roster, which a caller can inflate with planted devices.
     _shared_with: set[_SharedWith] = field(default_factory=set, init=False)
     _exposed_to: set[_SharedWith] = field(default_factory=set, init=False)
@@ -96,12 +95,11 @@ class FrameKeyManager:
             self._key = secrets.token_bytes(_KEY_SIZE_BYTES)
             self._key_index = 0
             self._key_created_ms = now_ms
-            self._key_activation_ms = now_ms
             return _KeyDistribution(
                 key=self._key,
                 key_index=self._key_index,
                 targets=tuple(members_by_share.values()),
-                apply_after_ms=0,
+                generation=self._key_generation,
             )
 
         # A member that rejoined with a new membership event needs the key again.
@@ -114,12 +112,11 @@ class FrameKeyManager:
             # A device this key already targeted but did not reach gets it again, however late.
             retry_only = all(_share(member) in self._exposed_to for member in joined)
             if retry_only or now_ms - self._key_created_ms < _KEY_ROTATION_GRACE_PERIOD_MS:
-                activation_ms = self._key_activation_ms
                 return _KeyDistribution(
                     key=self._key,
                     key_index=self._key_index,
                     targets=tuple(joined),
-                    apply_after_ms=_USE_KEY_DELAY_MS if activation_ms is None else max(0, activation_ms - now_ms),
+                    generation=self._key_generation,
                 )
             return self._rotate(members_by_share, now_ms)
         return None
@@ -128,8 +125,7 @@ class FrameKeyManager:
         self._key = secrets.token_bytes(_KEY_SIZE_BYTES)
         self._key_index = (self._key_index + 1) % _KEY_INDEX_MODULUS
         self._key_created_ms = now_ms
-        # Set by mark_distributed: the delay counts from the end of the send, however slow it was.
-        self._key_activation_ms = None
+        self._key_generation += 1
         self._shared_with = set()
         self._exposed_to = set()
         # Rotation always re-shares with every current member.
@@ -137,30 +133,27 @@ class FrameKeyManager:
             key=self._key,
             key_index=self._key_index,
             targets=tuple(members_by_share.values()),
-            apply_after_ms=_USE_KEY_DELAY_MS,
+            generation=self._key_generation,
         )
-
-    def is_current_outbound_key(self, key: bytes, key_index: int) -> bool:
-        """Return whether a delayed activation still targets the newest key."""
-        return self._key == key and self._key_index == key_index
 
     def mark_distributed(
         self,
         distribution: _KeyDistribution,
         delivered: tuple[CallMember, ...] | None = None,
-        *,
-        now_ms: int,
-    ) -> None:
+    ) -> bool:
         """Record successful sends so unavailable targets are retried later.
 
-        The first completed send of a key fixes when it activates; a later re-share never moves that earlier.
+        Returns whether this was the key generation's first completed send, which fixes its one
+        activation deadline. A send that reached nobody still counts (callers hear silence, never
+        the old key); a raised send is never reported, so a key superseded after one never activates.
         """
-        if self._key_activation_ms is None and self.is_current_outbound_key(distribution.key, distribution.key_index):
-            self._key_activation_ms = now_ms + distribution.apply_after_ms
+        first_send = distribution.generation > self._armed_generation
+        self._armed_generation = max(self._armed_generation, distribution.generation)
         self.mark_exposed(distribution)
         self._shared_with.update(
             _share(member) for member in (distribution.targets if delivered is None else delivered)
         )
+        return first_send
 
     def mark_exposed(self, distribution: _KeyDistribution) -> None:
         """Record every device that may have received this key before transport returns."""
