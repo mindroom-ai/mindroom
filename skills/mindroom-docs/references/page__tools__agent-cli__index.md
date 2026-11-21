@@ -149,14 +149,14 @@ mindroom-agent workers run NAME [--resource-profile small|standard|large] [--tim
 The command is everything after `--`: several arguments run as that exact argument list, and a single argument runs as a `bash -c` command line.
 The CLI waits until the command ends and prints the last `--tail` lines (default 100) of its output; for a failed command it prints stdout under `Output:` and stderr under `Stderr:`.
 `--timeout` (default 3600 seconds) stops the command, and `--resource-profile` sizes the worker when its name is first used.
-While the command runs, a result the CLI cannot read is read again for up to a minute before the CLI gives up.
+If the CLI loses the submission response or cannot read a running command’s receipt, it retries reading the receipt for up to a minute. It never submits the command twice.
 Stopping `workers run` itself, with Ctrl-C or at the `timeout` of the shell command it runs in, does not stop its command, which runs on in its worker until it ends or reaches `--timeout`.
 
 | Code | Meaning |
 | --- | --- |
 | The command's exit code | The command ran in the named worker; a command a signal killed exits with 128 plus the signal's number, such as `137` |
 | `124` | The command was stopped at `--timeout` |
-| `125` | The command did not run in the named worker, or its outcome is unknown: the call was refused, failed, or cancelled, MindRoom could not be reached to submit it, or its result stayed unreadable for a minute while the command may still run; the reason is on stderr |
+| `125` | The command did not run in the named worker, or its outcome is unknown: the call was refused, its command could not start, the call was cancelled, or its result stayed unreadable for a minute while the command may still be running; the reason is on stderr |
 | `2` | Invalid CLI arguments |
 
 This script runs eight shards at once, each in a worker of its own, and fails if any shard fails:

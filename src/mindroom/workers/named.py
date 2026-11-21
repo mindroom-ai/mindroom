@@ -31,6 +31,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
+from mindroom.workers.backends.kubernetes_config import NAMED_WORKERS_MAX_ENV, configured_named_workers_max
 from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
 from mindroom.workers.runtime import idle_worker_cleanup_runs, lease_configured_primary_worker_manager
 
@@ -53,6 +54,7 @@ __all__ = [
 
 logger = get_logger(__name__)
 
+_DISABLED_REFUSAL = f"This deployment disabled named workers with {NAMED_WORKERS_MAX_ENV}=0."
 _NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 # Why an agent whose workers are not one per requester and agent runs no named workers: its normal worker's key
 # would not name whose limit a named worker counts against.
@@ -235,6 +237,8 @@ def named_workers_refusal(agent_name: str | None, config: Config | None, runtime
             "Named workers need the kubernetes worker backend and idle-worker cleanup, which the API server runs "
             "when MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS is above 0."
         )
+    if configured_named_workers_max(runtime_paths) == 0:
+        return _DISABLED_REFUSAL
     return None
 
 
@@ -298,6 +302,8 @@ def ensure_named_worker(
     call asked for, whatever size this call names, and replaces a stopped worker of this name with an empty one.
     """
     if backend.named_workers_max < 1:
+        if backend.backend_name == "kubernetes":
+            raise NamedWorkerError(_DISABLED_REFUSAL)
         msg = "Named workers need the kubernetes worker backend."
         raise NamedWorkerError(msg)
     worker_key = spec.worker_key

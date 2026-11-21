@@ -233,6 +233,7 @@ If a named worker crashes, the call that ran in it fails, and the next call with
 A reply that pauses for a [tool approval](../tool-approval.md) gives up its named workers unless one of its background jobs still runs, and its calls after the approval start new ones, so an agent whose shell commands need approval gets a new worker for each command.
 
 A named worker counts against `named_workers` for its requester, and against `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` for the whole deployment, from the call that starts it until it is removed, so also while it starts, sits idle, or has failed.
+Set `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX=0` to disable named workers for the whole deployment.
 A call that would start one more than either limit allows fails instead of waiting; calls to workers the reply already started always go through.
 Only calls of a reply in a Matrix conversation can name a worker, so [background scripts](background-scripts.md) and [OpenAI-compatible API](../openai-api.md) requests cannot.
 [Approved egress](../deployment/approved-egress.md#requesting-access) grants do not reach named workers.

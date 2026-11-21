@@ -114,7 +114,7 @@ _AUTH_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["auth_secret
 _SECCOMP_PROFILE_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["seccomp_profile_json"]
 _NAMED_WORKER_IDLE_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["named_worker_idle_timeout"]
 _NAMED_WORKER_MAX_AGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["named_worker_max_age"]
-_NAMED_WORKERS_MAX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["named_workers_max"]
+NAMED_WORKERS_MAX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["named_workers_max"]
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
 _EXTRA_CONTAINER_ALLOWED_KEYS = frozenset(
     {
@@ -496,7 +496,10 @@ class KubernetesWorkerBackendConfig:
     named_workers_max: int = _DEFAULT_NAMED_WORKERS_MAX
 
     def __post_init__(self) -> None:
-        """Reject storage prefixes that are not strict relative descendants."""
+        """Validate and normalize Kubernetes configuration."""
+        if self.named_workers_max < 0:
+            msg = f"{NAMED_WORKERS_MAX_ENV} must be non-negative."
+            raise WorkerBackendError(msg)
         parts = self.storage_subpath_prefix.split("/")
         if (
             not self.storage_subpath_prefix
@@ -627,8 +630,17 @@ class KubernetesWorkerBackendConfig:
                 _NAMED_WORKER_MAX_AGE_ENV,
                 _DEFAULT_NAMED_WORKER_MAX_AGE_SECONDS,
             ),
-            named_workers_max=read_int_env(env, _NAMED_WORKERS_MAX_ENV, _DEFAULT_NAMED_WORKERS_MAX),
+            named_workers_max=configured_named_workers_max(runtime_paths),
         )
+
+
+def configured_named_workers_max(runtime_paths: RuntimePaths) -> int:
+    """Read the named worker limit without loading the full Kubernetes backend configuration."""
+    raw = runtime_paths.env_value(NAMED_WORKERS_MAX_ENV, default=str(_DEFAULT_NAMED_WORKERS_MAX))
+    try:
+        return int(raw)
+    except ValueError:
+        return _DEFAULT_NAMED_WORKERS_MAX
 
 
 def kubernetes_backend_config_signature(

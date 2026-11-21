@@ -484,6 +484,7 @@ async def test_reusing_a_named_worker_does_not_depend_on_the_deployment_list(
     backend: _FakeBackend,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A namespace-wide list failure need not block a call to a healthy, already admitted worker."""
     async with reply_named_workers(_TURN):
         call = _call(runtime_paths, "a")
         worker = _run(backend, call)
@@ -619,6 +620,13 @@ def test_a_call_that_names_no_worker_asks_for_none(runtime_paths: RuntimePaths) 
             )
         ),
         ("code", _CONFIG, {"MINDROOM_WORKER_BACKEND": "docker"}, True, "need the kubernetes worker backend"),
+        (
+            "code",
+            _CONFIG,
+            {"MINDROOM_KUBERNETES_NAMED_WORKERS_MAX": "0"},
+            True,
+            "MINDROOM_KUBERNETES_NAMED_WORKERS_MAX",
+        ),
         ("code", _CONFIG, {"MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "0"}, True, "idle-worker cleanup"),
         ("code", _CONFIG, {}, False, "idle-worker cleanup"),
     ],
@@ -671,6 +679,7 @@ def test_a_backend_without_named_workers_refuses_them(runtime_paths: RuntimePath
     """Only a backend that limits and removes named workers runs them."""
 
     class _PlainBackend:
+        backend_name = "docker"
         named_workers_max = 0
 
     call = NamedWorkerCall("a", None, 2, runtime_paths, named_module._NamedWorkerFleet(_TURN))
@@ -786,6 +795,7 @@ async def test_workers_run_prints_saved_output_from_its_named_worker(
     capsys: pytest.CaptureFixture[str],
     exit_code: int,
 ) -> None:
+    """The CLI keeps the real exit status and saved output path after the runner auto-saves a result."""
     from mindroom.agent_cli.main import main  # noqa: PLC0415
 
     worker_paths = resolve_primary_runtime_paths(
@@ -814,7 +824,7 @@ async def test_workers_run_prints_saved_output_from_its_named_worker(
             outcome = await shell(command, worker="shard")
 
     class Client:
-        def operation(self, payload: dict[str, object]) -> dict[str, object]:
+        def operation(self, payload: dict[str, Any]) -> dict[str, object]:
             assert payload["arguments"]["args"] == command
             return {"status": "completed", "outcome": outcome}
 
@@ -916,11 +926,21 @@ async def test_a_refused_shell_call_fails_with_the_reason_and_starts_nothing(
 
 
 @pytest.mark.parametrize("named_workers", [0, 2])
+@pytest.mark.parametrize("deployment_limit", [0, 16])
 def test_the_shell_offers_named_workers_only_to_an_agent_that_may_run_them(
     runtime_paths: RuntimePaths,
     named_workers: int,
+    deployment_limit: int,
 ) -> None:
-    """The model sees ``worker`` and ``resource_profile``, and how to use them, only when its agent may name workers."""
+    """The model sees worker arguments only when its deployment and agent may name workers."""
+    runtime_paths = replace(
+        runtime_paths,
+        process_env={
+            **runtime_paths.process_env,
+            "MINDROOM_KUBERNETES_NAMED_WORKERS_MAX": str(deployment_limit),
+        },
+    )
+    enabled = bool(named_workers and deployment_limit)
     config = Config(
         agents={"code": AgentConfig(display_name="Code", named_workers=named_workers, worker_scope="user_agent")},
     )
@@ -937,9 +957,9 @@ def test_the_shell_offers_named_workers_only_to_an_agent_that_may_run_them(
     assert function is not None
 
     offered = set(function.parameters["properties"])
-    assert ({"worker", "resource_profile"} <= offered) is bool(named_workers)
+    assert ({"worker", "resource_profile"} <= offered) is enabled
     assert {"args", "tail", "timeout"} <= offered
-    assert ("mindroom-agent workers run" in (function.description or "")) is bool(named_workers)
+    assert ("mindroom-agent workers run" in (function.description or "")) is enabled
 
 
 @pytest.mark.parametrize("named_workers", [0, 2])
@@ -1039,6 +1059,7 @@ async def test_named_shell_launch_errors_fail_the_tool_without_matching_command_
     supervised: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Named launch errors fail the tool without treating successful command output as a diagnostic."""
     from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV  # noqa: PLC0415
 
     process_env = {"MINDROOM_SANDBOX_RUNNER_MODE": "true"}

@@ -168,7 +168,7 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 | _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON` | `{}` | Per-requester worker resources |
 | _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKER_IDLE_TIMEOUT_SECONDS` | `600` | Time without a running command after which a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) is removed, at most the worker idle timeout |
 | _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKER_MAX_AGE_SECONDS` | `14400` | Time after its start at which a named worker is removed, whatever runs in it |
-| _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` | `16` | Most named workers that may run at once for all agents and requesters together |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` | `16` | Most named workers that may run at once for all agents and requesters together; `0` disables named workers, and negative values are invalid |
 
 Changing the image, environment, resources, or RuntimeClass recreates scaled-down workers on the next cleanup pass and running workers on their next use, so no manual recycling is needed; finish active work before changing them.
 Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior.

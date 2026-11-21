@@ -31,7 +31,9 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
 - **Limits count every named Deployment that is not being deleted, plus the starts in flight.**
   A worker counts from its start until it is removed, whatever its status, because a failed or idle one still holds a pod or its state until cleanup removes it.
   Counting from the cluster makes a worker a crashed primary left behind use up its requester's limit, which is what bounds the pods a restart loop could accumulate.
-  The starts in flight are read before the Deployments are listed, so a start that finishes in between is counted in the listing and never in neither.
+  A deployed worker its reply already owns needs only a check of its own Deployment. New or missing workers use the full count.
+  The starts in flight are read before the Deployments are listed, so a start that finishes in between is counted in the listing.
+  A deployment can set its limit to zero to disable named workers entirely.
   A call past a limit fails with the count instead of waiting, because a queue needs an owner, an order, and a cancellation path that a refused call does not.
 - **Admission decides a worker's size under the lock that starts it.**
   The first admitted call records the size, and every call's start applies the recorded size, so two calls that name a new worker at the same time cannot apply two pod templates and restart the pod under a running command.
@@ -47,13 +49,16 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   It adds no route and no server state.
   It exits with the command's exit code, so its own failures use 124 and 125 as `timeout` and `docker run` do, instead of the CLI's 1 to 4, which commands use too.
   It reads the exit code and the stop at the time limit from the words the shell leads its result with, which tests build with the shell's own formatters; a receipt field for the exit status would be a second contract through the runner, the proxy, and the receipt for the same fact.
-  It submits once and retries only reads, because a second submission could run the command twice.
+  A launch failure is a failed tool call, not command output. When the runner saves the output, the worker header and the shell’s exit line are in the preview.
+  It submits once and retries only receipt reads, even when the submission response is lost, because a second submission could run the command twice.
 - **Maintenance retries a failed removal from the worker's files.**
   A removal deletes the Deployment before the files, because the pod must be gone first, so a failure in between left files no pass found.
   A worker directory that no Deployment names for a grace period, and whose startup manifest names a pinned key that maps to that directory, is removed under the worker's lock.
   A removal first writes a marker beside the directory that names the worker's key, because deleting the files can stop after the manifest is gone; a later pass, also of a restarted primary, finishes a marked removal without the manifest.
+  Pinned workers record their startup identity before provisioning credentials, so maintenance can find even an early failed start.
+  Retirement markers are read and written relative to the validated workers directory without following symlinks.
   A manifest that cannot be read is read again after the grace period.
-  A directory whose manifest names any other key, or none, and that has no marker is never touched: a normal worker keeps its state when someone deletes its Deployment, and a script worker's run retries its own removal.
+  An orphan sweep only trusts manifests and markers for subagent and named workers. A script worker’s run retries its own removal.
 - **The worker protocol moves to 9 with an unchanged wire schema**, as 8 did, because a runner must map a `named=` key to its normal key.
 
 ## Rejected alternatives
@@ -70,7 +75,7 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
 - Approved-egress grants do not reach a named worker, because the egress proxy matches a pod by its own worker key and reads a shared agent's name from the fourth key part.
   Teaching the proxy to match a pinned key's normal key would carry grants over to named and subagent workers alike, and is the place to fix it, so MindRoom mints no extra grants meanwhile.
 - While the primary is down nothing is removed; commands stop because their connections drop, and the workers go on the first maintenance pass once the primary is back.
-- A turn that resumes after its fleet was released, such as after an approval that outlived the reply and its jobs, gets new workers, so an agent whose shell commands need approval gets a new worker for each command.
+- A turn that resumes after its fleet was released, such as after an approval that outlived the reply and its jobs, gets new workers, so an agent whose shell commands need approval gets a new worker when the paused turn no longer owns the original fleet. This also applies to CLI approval recovery.
 - Agents whose workers are shared or per user run no named workers.
 - Stopping `workers run` does not stop its command, because the CLI has no operation that cancels a call; the command's own time limit stops it.
 - A subagent owns the named workers its own turn starts, not its caller's, and only when its own agent sets `named_workers`.

@@ -4624,6 +4624,7 @@ def test_kubernetes_maintenance_reads_an_unreadable_manifest_again(
 
 
 def test_kubernetes_retirement_refuses_a_symbolic_link_marker(tmp_path: Path) -> None:
+    """Retirement refuses a linked marker before changing a Deployment or any files."""
     backend, apps, _core = _named_backend(tmp_path)
     worker = backend.ensure_worker(_named_spec(), now=0.0)
     root = backend.storage_root / backend._state_subpath(worker.worker_key)
@@ -4642,11 +4643,13 @@ def test_kubernetes_retirement_refuses_a_symbolic_link_marker(tmp_path: Path) ->
 
 
 def test_kubernetes_maintenance_keeps_a_script_worker_with_an_interrupted_retirement(tmp_path: Path) -> None:
+    """Only explicit script retirement may resume its marker."""
     backend, apps, _core = _named_backend(tmp_path)
     normal_key = "v1:test:user_agent:@alice:example.test:watcher"
     key = script_worker_key_for_run(normal_key, f"script-{'c' * 32}")
     worker = backend.ensure_worker(
-        _spec(key, state_scope_worker_key=normal_key, private_agent_names=frozenset()), now=0.0
+        _spec(key, state_scope_worker_key=normal_key, private_agent_names=frozenset()),
+        now=0.0,
     )
     root = backend.storage_root / backend._state_subpath(key)
     root.with_name(f"{root.name}.retiring").write_text(key, encoding="utf-8")
@@ -4664,6 +4667,7 @@ def test_kubernetes_maintenance_removes_pinned_state_after_a_failed_auth_secret(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An early failed start leaves an ownership record even before it creates cluster resources."""
     backend, apps, _core = _named_backend(tmp_path)
     spec = _named_spec()
     root = backend.storage_root / backend._state_subpath(spec.worker_key)
@@ -4796,6 +4800,26 @@ def test_kubernetes_named_worker_settings_come_from_the_environment(tmp_path: Pa
     # The manager is rebuilt when a limit changes, and unchanged defaults keep the signature older releases built.
     assert custom_signature != default_signature
     assert not any(part.startswith("named-workers:") for part in default_signature)
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_kubernetes_named_worker_limit_can_disable_but_not_be_negative(tmp_path: Path, limit: int) -> None:
+    """The deployment limit accepts zero and rejects a negative value instead of clamping either."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "test-image",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "test-pvc",
+            "MINDROOM_KUBERNETES_NAMED_WORKERS_MAX": str(limit),
+        },
+    )
+    if limit < 0:
+        with pytest.raises(WorkerBackendError, match="MINDROOM_KUBERNETES_NAMED_WORKERS_MAX"):
+            KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    else:
+        assert KubernetesWorkerBackendConfig.from_runtime(runtime_paths).named_workers_max == 0
 
 
 def test_script_recovery_contract_ignores_named_worker_limits() -> None:
