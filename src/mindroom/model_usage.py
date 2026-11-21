@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from mindroom.llm.usage import MessageMetrics
 
 
-# The ``claude_code`` route as a config names it and as stored runs and usage name it; Claude Code reports Claude's usage.
+# The ``claude_code`` route as a config names it and as stored runs name it: that label is stored, so it stays as it is.
 _CLAUDE_CODE_NAMES = frozenset({"claude_code", ROUTE_PROVIDERS["claude_code"].lower()})
 
 
