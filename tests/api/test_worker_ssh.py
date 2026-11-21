@@ -293,6 +293,19 @@ async def test_start_keeps_the_latest_launch_while_sshd_runs(
 
 
 @pytest.mark.asyncio
+async def test_start_503_when_launch_cannot_be_stored(client: httpx.AsyncClient, tmp_path: Path) -> None:
+    """A blocked launch write returns a generic refusal without following the symlink."""
+    other = tmp_path / "untrusted"
+    other.mkdir()
+    session.LAUNCH_PATH.parent.symlink_to(other, target_is_directory=True)
+
+    response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
+
+    assert (response.status_code, response.json()) == (503, {"detail": "The worker's SSH server did not start."})
+    assert not list(other.iterdir())
+
+
+@pytest.mark.asyncio
 async def test_start_503_when_image_has_no_sshd(
     client: httpx.AsyncClient,
     tmp_path: Path,

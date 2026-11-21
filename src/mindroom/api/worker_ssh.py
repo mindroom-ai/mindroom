@@ -158,6 +158,8 @@ async def start(request: Request, payload: _Start) -> dict[str, int]:
         await asyncio.to_thread(_store_launch, request.app, payload.request)
     except TerminalError as error:
         raise HTTPException(status_code=error.status_code, detail=error.detail) from None
+    except OSError:
+        raise HTTPException(503, _START_FAILED) from None
     state = _worker_ssh(request.app)
     async with state.lock:
         await _ensure_sshd(request.app, state)
