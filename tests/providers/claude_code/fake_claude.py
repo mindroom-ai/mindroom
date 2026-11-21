@@ -391,6 +391,8 @@ class FakeClaude:
         started = {"cwd": str(Path.cwd()), "system_prompt": system_prompt, "prompt_modes": modes}
         background = ("CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND", "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS")
         started["background"] = [os.environ.get(name) for name in background]
+        trusted = ("DISABLE_AUTO_COMPACT", "CLAUDE_CODE_SDK_READS_SESSION_STATE")
+        started["trusted_env"] = {name: os.environ.get(name) for name in trusted}
         self.log("spawn", args=self.args, tool_timeout=timeout, env_names=sorted(os.environ), **started)
         while (message := self.queued.pop(0) if self.queued else self.read()) is not None:
             if message.get("type") == "control_request":

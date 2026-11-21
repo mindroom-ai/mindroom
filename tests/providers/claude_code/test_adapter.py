@@ -12,9 +12,9 @@ import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-import claude_agent_sdk
 import pytest
-from claude_agent_sdk import ClaudeSDKClient, CLIConnectionError, RateLimitEvent, RateLimitInfo
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, CLIConnectionError, RateLimitEvent, RateLimitInfo
+from claude_agent_sdk._internal.transport import subprocess_cli
 from structlog.testing import capture_logs
 
 from mindroom.agent_loop.tools import media_follow_up
@@ -916,9 +916,24 @@ async def test_inherited_claude_settings_are_removed_only_from_the_child(
         "CLAUDE_BG_AUTH_SNAPSHOT_PATH",
         "CLAUDE_AUTO_BACKGROUND_TASKS",
     }
-    kept = {"CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CONFIG_DIR", *session_module._ISOLATION_ENV}
-    launcher_names = {"MINDROOM_CLAUDE_CODE_CLI", "MINDROOM_CLAUDE_CODE_SCRUB"}
-    parent_names = inherited | kept | launcher_names
+    kept = {
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+        "CLAUDE_CONFIG_DIR",
+        *session_module._ISOLATION_ENV,
+    }
+    launcher_name = "MINDROOM_CLAUDE_CODE_CLI"
+    parent_names = inherited | kept | {launcher_name}
+    late_name = "ANTHROPIC_LATE_TEST_SETTING"
+    monkeypatch.delenv(late_name, raising=False)
+    open_process = session_module.ClaudeProcess.open
+
+    async def inject_late_setting(options: ClaudeAgentOptions, **kwargs: Any) -> session_module.ClaudeProcess:  # noqa: ANN401
+        # The SDK has its options but has not copied os.environ for the subprocess yet.
+        monkeypatch.setenv(late_name, "inherited")
+        return await open_process(options, **kwargs)
+
+    monkeypatch.setattr(session_module.ClaudeProcess, "open", staticmethod(inject_late_setting))
     for name in parent_names:
         monkeypatch.setenv(name, "inherited")
     cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
@@ -927,9 +942,10 @@ async def test_inherited_claude_settings_are_removed_only_from_the_child(
 
     [spawn] = cli.events("spawn")
     child_names = set(spawn["env_names"])
-    assert child_names.isdisjoint(inherited | launcher_names)
+    assert child_names.isdisjoint(inherited | {late_name, launcher_name})
     assert child_names.issuperset(kept)
-    assert all(os.environ[name] == "inherited" for name in parent_names)
+    assert spawn["trusted_env"] == {"DISABLE_AUTO_COMPACT": "1", "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1"}
+    assert all(os.environ[name] == "inherited" for name in parent_names | {late_name})
 
 
 async def test_two_starts_reuse_the_same_private_launcher(tmp_path: Path) -> None:
@@ -947,16 +963,37 @@ async def test_two_starts_reuse_the_same_private_launcher(tmp_path: Path) -> Non
     assert (first.st_ino, first.st_mtime_ns) == (second.st_ino, second.st_mtime_ns)
 
 
-async def test_a_non_executable_launcher_explains_why_claude_code_cannot_start(tmp_path: Path) -> None:
+async def test_a_launcher_with_the_wrong_mode_is_replaced(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
+    launcher = cli.storage_root / "claude_code" / "exec-claude"
     request = ModelRequest(messages=[user("Hi")])
     await complete(cli.provider(), request)
-    (cli.storage_root / "claude_code" / "exec-claude").chmod(0o600)
+    launcher.chmod(0o600)
+    old_inode = launcher.stat().st_ino
 
+    assert (await complete(cli.provider(), request)).content == "Hello."
+
+    current = launcher.stat()
+    assert stat.S_IMODE(current.st_mode) == 0o700
+    assert current.st_ino != old_inode
+
+
+async def test_a_non_executable_launcher_explains_why_claude_code_cannot_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
+    launcher = cli.storage_root / "claude_code" / "exec-claude"
+    access = os.access
+
+    def noexec(path: str | Path, mode: int) -> bool:
+        return False if path == launcher and mode == os.X_OK else access(path, mode)
+
+    monkeypatch.setattr(os, "access", noexec)
     with pytest.raises(ProviderUnavailable, match="launcher is not executable"):
-        await complete(cli.provider(), request)
+        await complete(cli.provider(), ModelRequest(messages=[user("Hi")]))
 
-    assert len(cli.events("spawn")) == 1
+    assert not cli.events("spawn")
 
 
 async def test_a_claude_code_older_than_the_one_this_route_was_run_against_gets_no_prompt(tmp_path: Path) -> None:
@@ -968,19 +1005,32 @@ async def test_a_claude_code_older_than_the_one_this_route_was_run_against_gets_
     assert "claude update" in str(error)
 
 
-async def test_use_the_sdk_bundled_cli_when_claude_is_not_on_path(
+async def test_a_configured_cli_name_is_searched_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cli = fake_cli(tmp_path / "bin", {"turns": [text_turn("On PATH.")]})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(cli.path.parent))
+    provider = cli.provider(cli_path="claude")
+
+    assert (await complete(provider, ModelRequest(messages=[user("Hi")]))).content == "On PATH."
+    assert provider.cli_path == "claude"
+
+
+@pytest.mark.parametrize("location", ["_bundled", ".npm-global/bin"], ids=["bundled", "standard install"])
+async def test_uses_sdk_discovery_when_claude_is_not_on_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    location: str,
 ) -> None:
-    cli = fake_cli(tmp_path / "_bundled", {"turns": [text_turn("Bundled.")]})
+    cli = fake_cli(tmp_path / location, {"turns": [text_turn("Discovered.")]})
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.setattr(claude_agent_sdk, "__file__", str(tmp_path / "__init__.py"))
+    monkeypatch.setattr(subprocess_cli, "__file__", str(tmp_path / "_internal/transport/subprocess_cli.py"))
     provider = cli.provider(cli_path=None)
 
     with capture_logs() as logs:
         answer = await complete(provider, ModelRequest(messages=[user("Hi")]))
 
-    assert answer.content == "Bundled."
+    assert answer.content == "Discovered."
     assert provider.cli_path is None
     assert [entry["cli"] for entry in logs if entry["event"] == "claude_code_started"] == [str(cli.path)]
 
