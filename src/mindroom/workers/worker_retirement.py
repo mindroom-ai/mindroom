@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import logging
 import os
 import shutil
 import stat
@@ -31,6 +33,8 @@ _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _IDENTITY_FILE_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _MAX_IDENTITY_METADATA_BYTES = 4 * 1024 * 1024
 _RETIREMENT_MARKER_SUFFIX = ".retiring"
+
+logger = logging.getLogger(__name__)
 
 
 def _validate_segment(segment: str) -> None:
@@ -218,12 +222,19 @@ class _BoundWorkerStateRoot:
     @contextmanager
     def retire(self, worker_key: str, path: tuple[str, ...], field_path: tuple[str, ...]) -> Iterator[None]:
         """Validate ownership before backend cleanup, then mark, remove, and unmark the tree."""
-        if self.retirement_key() != worker_key and self.worker_fd is not None:
+        resumed = self.retirement_key() == worker_key
+        if not resumed and self.worker_fd is not None:
             require_worker_identity(self.worker_fd, worker_key, identity_path=path, identity_field_path=field_path)
         yield
         marker = self.worker_name + _RETIREMENT_MARKER_SUFFIX
-        if self.exists and self.workers_fd is not None:
-            write_worker_marker(self.workers_fd, marker, worker_key)
+        if not resumed and self.exists and self.workers_fd is not None:
+            try:
+                write_worker_marker(self.workers_fd, marker, worker_key)
+            except OSError as exc:
+                if exc.errno not in (errno.ENOSPC, errno.EDQUOT):
+                    raise
+                # Removing the cache frees space; only recovery from an interruption needs the marker.
+                logger.warning("worker_retirement_marker_allocation_failed", extra={"errno": exc.errno})
         self.remove()
         if self.workers_fd is not None:
             with suppress(FileNotFoundError):

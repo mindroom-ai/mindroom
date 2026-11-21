@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -4508,6 +4510,51 @@ def test_kubernetes_maintenance_removes_the_files_a_failed_removal_left_behind(
     backend.maintain_workers(now=11.0 + grace)
 
     assert pinned_root.exists() is False
+
+
+@pytest.mark.parametrize(
+    ("failure_errno", "matching_marker"),
+    [(errno.ENOSPC, False), (errno.EDQUOT, False), (errno.EIO, True)],
+    ids=["full", "quota", "reuse"],
+)
+def test_kubernetes_retirement_can_free_space_when_a_marker_cannot_be_allocated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure_errno: int,
+    matching_marker: bool,
+) -> None:
+    """A full volume cannot trap the subagent's removable cache, even with named workers disabled."""
+    backend, apps, _core = _named_backend(tmp_path)
+    backend.named_workers_max = 0
+    key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32)
+    worker = backend.ensure_worker(_spec(key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    root = backend.storage_root / backend._state_subpath(key)
+    (root / "cache").write_text("discard", encoding="utf-8")
+    marker = root.with_name(f"{root.name}.retiring")
+    if matching_marker:
+        marker.write_text(key, encoding="utf-8")
+    open_at = os.open
+
+    def fail_marker_creation(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if flags & os.O_CREAT and os.fsdecode(path).startswith(".retiring-"):
+            assert worker.worker_id not in apps.deployments
+            raise OSError(failure_errno, os.strerror(failure_errno))
+        return open_at(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(worker_retirement_module.os, "open", fail_marker_creation)
+    backend.retire_worker(key)
+
+    assert worker.worker_id not in apps.deployments
+    assert not root.exists()
+    assert not marker.exists()
+    assert caplog.messages.count("worker_retirement_marker_allocation_failed") == int(not matching_marker)
 
 
 @pytest.mark.parametrize("blocker", ["running", "terminating", "replica_set", "lookup_fails"])
