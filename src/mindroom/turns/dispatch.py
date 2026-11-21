@@ -38,6 +38,7 @@ from mindroom.dispatch_source import (
     ScheduledHistoryBudget,
     scheduled_history_limit_from_content,
 )
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import MessageEnvelope, hook_ingress_policy
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.event_info import EventInfo
@@ -117,28 +118,36 @@ _SCHEDULED_RUN_INTENTS = frozenset({TurnIntent.SCHEDULED_FIRE, TurnIntent.ROUTER
 _PER_RUN_MODEL_INTENTS = _SCHEDULED_RUN_INTENTS | {TurnIntent.HOOK_DISPATCH}
 
 
-def _apply_root_thread_model(deps: TurnDispatchDeps, turn: PreparedTurn, thread_id: str | None) -> None:
-    """Seed the thread before routing or any responder chooses its model."""
+def _apply_root_thread_model(
+    deps: TurnDispatchDeps,
+    turn: PreparedTurn,
+    thread_id: str | None,
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    blocked: bool,
+) -> bool:
+    """Return whether the opening pick and any fork snapshot have been recorded."""
     choice = turn.thread_model_choice
-    if (
-        choice is None
-        or thread_id is None
-        or thread_id not in turn.handled_turn.source_event_ids
-        or turn.command is not None
-        # The batch filters each source; also check the provenance of the turn as a whole.
-        or turn.facts.sender_is_managed
-        or turn.facts.acts_for_requester
-    ):
-        return
-    poster = deps.runtime.orchestrator.room_poster(turn.room.room_id)
-    client = None if poster is None else poster.client
-    if client is None or (client.user_id, client.device_id) != (choice.runtime_user_id, choice.runtime_device_id):
-        deps.logger.debug("Ignoring root thread model choice", thread_id=thread_id, reason="other_runtime_device")
-        return
+    if choice is None:
+        return False
     config, paths = deps.runtime.config, deps.runtime_paths
-    if choice.model not in config.models:
-        deps.logger.info("Ignoring root thread model choice", thread_id=thread_id, reason="unknown_model")
-        return
+    entity = entity_identity_registry(config, paths).current_entity_name_for_user_id(choice.runtime_user_id)
+    if entity is None:
+        return False  # The pick is for another runtime.
+    client = deps.runtime.orchestrator.running_entity_client(entity)
+    reason = None
+    if client is None or (client.user_id, client.device_id) != (choice.runtime_user_id, choice.runtime_device_id):
+        reason = "other_runtime_device"
+    elif blocked:
+        reason = "opening_blocked"
+    elif turn.command is not None or turn.facts.sender_is_managed or turn.facts.acts_for_requester:
+        reason = "not_direct_opening_prompt"
+    elif choice.model not in config.models:
+        reason = "unknown_model"
+    if reason is not None or thread_id is None or thread_id not in turn.handled_turn.source_event_ids:
+        deps.logger.info("Ignoring root thread model choice", thread_id=thread_id, reason=reason or "not_opening_turn")
+        return False
+    # Use the same sender rule as `!model`, including reply-authorized bridge accounts.
     names = addressable_responder_names(
         turn.facts.run_requester_id,
         turn.room.room_id,
@@ -148,15 +157,16 @@ def _apply_root_thread_model(deps: TurnDispatchDeps, turn: PreparedTurn, thread_
     )
     if not names:
         deps.logger.info("Ignoring root thread model choice", thread_id=thread_id, reason="no_addressable_responder")
-        return
+        return False
     root = (turn.handled_turn.source_event_metadata or {}).get(thread_id)
     timestamp_ms = turn.event.server_timestamp if turn.event.event_id == thread_id else None
-    apply_root_thread_model(
+    return apply_root_thread_model(
         paths,
         thread_id=thread_id,
         root_timestamp_ms=timestamp_ms if root is None else root.timestamp_ms,
         model_name=choice.model,
         entity_names=names,
+        parent_thread_id=fork_parent_thread_id(thread_history, thread_id),
     )
 
 
@@ -855,6 +865,7 @@ class TurnDispatcher:
         envelope: MessageEnvelope,
         handled_turn: TurnRecord,
         routed: bool,
+        before_suppressed_settlement: Callable[[], None] | None = None,
     ) -> bool:
         """Run the authorized ingress hook and settle when it blocks dispatch."""
         hooks_start = time.monotonic()
@@ -883,6 +894,8 @@ class TurnDispatcher:
         )
         if not suppressed:
             return False
+        if before_suppressed_settlement is not None:
+            before_suppressed_settlement()
         await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
         return True
 
@@ -950,12 +963,34 @@ class TurnDispatcher:
             envelope_start,
             source_kind=envelope.source_kind,
         )
-        if await self._message_received_hook_settles_turn(
+        has_pick = turn.thread_model_choice is not None
+        inherit = partial(
+            _inherit_fork_thread_models,
+            self.deps,
+            turn,
+            target.resolved_thread_id,
+            context.thread_history,
+        )
+        if not has_pick:
+            inherit()
+        blocked = await self._message_received_hook_settles_turn(
             room=room,
             envelope=envelope,
             handled_turn=handled_turn,
             routed=bool(facts.routed_event_ids),
-        ):
+            before_suppressed_settlement=inherit if has_pick else None,
+        )
+        if has_pick:
+            recorded = _apply_root_thread_model(
+                self.deps,
+                turn,
+                target.resolved_thread_id,
+                context.thread_history,
+                blocked=blocked,
+            )
+            if not blocked and not recorded:
+                inherit()
+        if blocked:
             return None
 
         origin = envelope.origin
@@ -978,8 +1013,6 @@ class TurnDispatcher:
             await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
             return None
 
-        _apply_root_thread_model(self.deps, turn, target.resolved_thread_id)
-        _inherit_fork_thread_models(self.deps, turn, target.resolved_thread_id, context.thread_history)
         return PreparedDispatch(
             requester_user_id=requester_user_id,
             context=context,

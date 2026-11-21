@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 import mindroom.tools  # noqa: F401
 from mindroom import thread_models
@@ -83,6 +84,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.turn_policy import PreparedDispatch
 
 THREAD_ID = "$thread-root:localhost"
 ROOM_ID = "!room:localhost"
@@ -137,8 +139,7 @@ def test_store_roundtrip(tmp_path: Path) -> None:
         (("apply", "apply-other"), {"test_agent": "large"}),
         (("apply", "reset", "apply"), {}),
         (("set", "apply"), {"test_agent": "default"}),
-        (("reset", "apply"), {}),
-        (("set", "reset", "apply"), {}),
+        (("set", "reset", "apply"), {"test_agent": "large"}),
     ],
 )
 def test_root_thread_model_is_consumed_once(
@@ -172,22 +173,18 @@ def test_root_thread_model_is_consumed_once(
     assert resolve_thread_model_override(paths, THREAD_ID, config=config).active == expected
 
 
-@pytest.mark.parametrize("intervening", ["set", "reset"])
-def test_opening_pick_respects_each_entitys_intervening_command(tmp_path: Path, intervening: str) -> None:
-    """A command targeting one responder must not consume another responder's pick."""
+def test_opening_pick_preserves_an_existing_choice_for_one_responder(tmp_path: Path) -> None:
+    """An existing choice stays in place; the pick applies to the other addressable responder."""
     config = _config_with_models(tmp_path)
     config.agents["other"] = AgentConfig(display_name="Other", model="default")
     paths = runtime_paths_for(config)
-    if intervening == "reset":
-        clear_thread_model_override(paths, THREAD_ID, entity_names=("test_agent",), config=config)
-    else:
-        set_thread_model_override(
-            paths,
-            thread_id=THREAD_ID,
-            model_name="default",
-            entity_names=("test_agent",),
-            config=config,
-        )
+    set_thread_model_override(
+        paths,
+        thread_id=THREAD_ID,
+        model_name="default",
+        entity_names=("test_agent",),
+        config=config,
+    )
     thread_models.apply_root_thread_model(
         paths,
         thread_id=THREAD_ID,
@@ -206,21 +203,81 @@ def test_opening_pick_respects_each_entitys_intervening_command(tmp_path: Path, 
     ] == ["default", "large"]
 
 
-@pytest.mark.parametrize("reset_first", [False, True])
-def test_eviction_cannot_reapply_an_opening_model(
+@pytest.mark.parametrize("explicit_first", [False, True])
+def test_opening_pick_cannot_expand_on_a_later_handling(tmp_path: Path, explicit_first: bool) -> None:
+    """Freeze the first addressable set even if every entity already had an explicit choice."""
+    config = _config_with_models(tmp_path)
+    config.agents["other"] = AgentConfig(display_name="Other", model="default")
+    paths = runtime_paths_for(config)
+    if explicit_first:
+        set_thread_model_override(
+            paths,
+            thread_id=THREAD_ID,
+            model_name="default",
+            entity_names=("test_agent",),
+            config=config,
+        )
+    sent_at = datetime.now(UTC).timestamp() * 1000
+    thread_models.apply_root_thread_model(
+        paths,
+        thread_id=THREAD_ID,
+        root_timestamp_ms=sent_at,
+        model_name="large",
+        entity_names=("test_agent",),
+    )
+    assert resolve_thread_model_override(paths, THREAD_ID, config=config).active == {
+        "test_agent": "default" if explicit_first else "large",
+    }
+    initial = _store_path(paths).read_bytes()
+    thread_models.apply_root_thread_model(
+        paths,
+        thread_id=THREAD_ID,
+        root_timestamp_ms=sent_at,
+        model_name="large",
+        entity_names=("test_agent", "other"),
+    )
+    assert _store_path(paths).read_bytes() == initial
+    assert clear_thread_model_override(paths, THREAD_ID, entity_names=("test_agent",), config=config)
+    thread_models.apply_root_thread_model(
+        paths,
+        thread_id=THREAD_ID,
+        root_timestamp_ms=sent_at,
+        model_name="large",
+        entity_names=("test_agent", "other"),
+    )
+    assert resolve_thread_model_override(paths, THREAD_ID, config=config).active == {}
+
+
+def test_empty_fork_snapshot_has_the_same_eviction_priority_as_other_thread_records(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    reset_first: bool,
 ) -> None:
-    """Eviction removes the selection but retains which entities have already been decided."""
+    """A fresh snapshot with no inherited model must not be dropped just because the store is full."""
     config = _config_with_models(tmp_path)
     paths = runtime_paths_for(config)
     monkeypatch.setattr(thread_models, "_MAX_TRACKED_THREADS", 1)
-    names = ("test_agent",)
+    set_thread_model_override(
+        paths,
+        thread_id=THREAD_ID,
+        model_name="large",
+        entity_names=("test_agent",),
+        config=config,
+    )
+    copy_thread_model_override(paths, "$empty-parent", "$empty-fork")
+    assert _get_thread_model_override(paths, THREAD_ID) is None
+    assert (_get_thread_model_override(paths, "$empty-fork") or {}).get("inherited_from") == "$empty-parent"
+
+
+def test_old_opening_pick_cannot_reapply_after_eviction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The seven-day limit blocks old picks even after ordinary eviction forgets the marker."""
+    config = _config_with_models(tmp_path)
+    paths = runtime_paths_for(config)
+    monkeypatch.setattr(thread_models, "_MAX_TRACKED_THREADS", 1)
     clock = MagicMock(wraps=datetime)
     now = datetime.now(UTC)
     clock.now.return_value = now
     monkeypatch.setattr(thread_models, "datetime", clock)
+    names = ("test_agent",)
 
     def apply() -> None:
         thread_models.apply_root_thread_model(
@@ -232,52 +289,21 @@ def test_eviction_cannot_reapply_an_opening_model(
         )
 
     apply()
-    if reset_first:
-        assert clear_thread_model_override(paths, THREAD_ID, entity_names=names, config=config)
-    clock.now.return_value = now + timedelta(minutes=1)
-    set_thread_model_override(
-        paths,
-        thread_id="$newer",
-        model_name="large",
-        entity_names=names,
-        config=config,
-    )
-    assert resolve_thread_model_override(paths, THREAD_ID, config=config).active == {}
+    assert clear_thread_model_override(paths, THREAD_ID, entity_names=names, config=config)
+    clock.now.return_value = now + timedelta(days=7)
+    set_thread_model_override(paths, thread_id="$newer", model_name="large", entity_names=names, config=config)
+    assert _get_thread_model_override(paths, THREAD_ID) is None
     apply()
-    assert resolve_thread_model_override(paths, THREAD_ID, config=config).active == {}
+    assert _get_thread_model_override(paths, THREAD_ID) is None
     assert resolve_thread_model_override(paths, "$newer", config=config).active == {"test_agent": "large"}
-    clock.now.return_value = now + timedelta(days=10)
-    clear_thread_model_override(paths, "$prune", entity_names=names, config=config)
-    assert _get_thread_model_override(paths, THREAD_ID) is None
-    apply()
-    assert _get_thread_model_override(paths, THREAD_ID) is None
 
 
-def test_noop_reset_receipts_expire_without_evicting_a_live_model(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A reset of an untouched thread must not spend the active quota or leave a permanent row."""
+def test_noop_reset_does_not_create_a_model_record(tmp_path: Path) -> None:
+    """No-op resets do not reserve a slot or create a receipt before the opening pick."""
     config = _config_with_models(tmp_path)
     paths = runtime_paths_for(config)
-    monkeypatch.setattr(thread_models, "_MAX_TRACKED_THREADS", 1)
-    clock = MagicMock(wraps=datetime)
-    now = datetime(2026, 10, 1, tzinfo=UTC)
-    clock.now.return_value = now
-    monkeypatch.setattr(thread_models, "datetime", clock)
-    set_thread_model_override(
-        paths,
-        thread_id=THREAD_ID,
-        model_name="large",
-        entity_names=("test_agent",),
-        config=config,
-    )
-    assert not clear_thread_model_override(paths, "$untouched", entity_names=("test_agent",), config=config)
-    assert resolve_thread_model_override(paths, THREAD_ID, config=config).active == {"test_agent": "large"}
-    clock.now.return_value = now + timedelta(days=10)
-    clear_thread_model_override(paths, "$another-reset", entity_names=("test_agent",), config=config)
-    assert _get_thread_model_override(paths, "$untouched") is None
-    assert resolve_thread_model_override(paths, THREAD_ID, config=config).active == {"test_agent": "large"}
+    assert not clear_thread_model_override(paths, THREAD_ID, entity_names=("test_agent",), config=config)
+    assert not _store_path(paths).exists()
 
 
 def test_copy_thread_model_override_copies_once_and_never_overwrites(tmp_path: Path) -> None:
@@ -314,12 +340,6 @@ def test_copy_thread_model_override_copies_once_and_never_overwrites(tmp_path: P
     clear_thread_model_override(runtime_paths, fork_id, entity_names=("test_agent", "router"), config=config)
     copy_thread_model_override(runtime_paths, THREAD_ID, fork_id)
     assert entity_models(fork_id) == {}
-
-    # A reset before the fork prepared only suppresses inheritance for the addressed entity.
-    early_reset = "$early-reset:localhost"
-    assert not clear_thread_model_override(runtime_paths, early_reset, entity_names=("test_agent",), config=config)
-    copy_thread_model_override(runtime_paths, THREAD_ID, early_reset)
-    assert entity_models(early_reset) == {"model:router": "large"}
 
 
 @pytest.mark.parametrize("damage", ["unreadable", "corrupt"])
@@ -363,7 +383,7 @@ async def _dispatch_fork_turn(
     source_event_ids: tuple[str, ...] = (_FORK_ID,),
     *,
     pick: str | None = None,
-) -> None:
+) -> PreparedDispatch | None:
     """Prepare one turn of the fork ``_FORK_ID`` of ``THREAD_ID`` whose sources are ``source_event_ids``."""
     room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@mindroom_code:localhost")
     event = nio.RoomMessageText.from_dict(
@@ -395,7 +415,7 @@ async def _dispatch_fork_turn(
         coalescing_key=requester_coalescing_key(ROOM_ID, _FORK_ID, "@user:localhost"),
         handled_turn=TurnRecord.create(list(source_event_ids)),
     )
-    await bot._turn_dispatcher._prepare_dispatch(turn)
+    return await bot._turn_dispatcher._prepare_dispatch(turn)
 
 
 def _fork_model(bot: AgentBot) -> str:
@@ -447,6 +467,35 @@ async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispat
     assert router.model_name == ("large" if _FORK_ID in source_event_ids else "default")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pick", [None, "default"])
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_suppressed_fork_opener_keeps_parent_model_on_its_next_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pick: str | None,
+) -> None:
+    """Suppression blocks the opening pick and response, not the fork's inheritance."""
+    bot = _fork_bot(tmp_path)
+    bot.config.agents["code"].access = ResponderAccessConfig(users=["@user:localhost"])
+    paths = runtime_paths_for(bot.config)
+    set_thread_model_override(paths, thread_id=THREAD_ID, model_name="large", entity_names=("code",), config=bot.config)
+    deps = bot._turn_dispatcher.deps
+    monkeypatch.setattr(deps.ingress_hook_runner, "emit_message_received_hooks", AsyncMock(side_effect=[True, False]))
+
+    async def settle(_turn: TurnRecord) -> None:
+        assert _fork_model(bot) == "large"
+
+    settlement = AsyncMock(side_effect=settle)
+    monkeypatch.setattr(deps.visible_responses, "settle_source_events_ignored", settlement)
+    assert await _dispatch_fork_turn(bot, pick=pick) is None
+    settlement.assert_awaited_once()
+    child = await _dispatch_fork_turn(bot, ("$next:localhost",))
+    assert child is not None
+    assert child.target.resolved_thread_id == _FORK_ID
+    assert _fork_model(bot) == "large"
+
+
 def _join_model_test_bot(bot: AgentBot, room: nio.MatrixRoom, device_id: str = "TESTDEVICE") -> AsyncMock:
     """Attach a logged-in client so the real room-poster election sees this bot."""
     client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
@@ -458,7 +507,7 @@ def _join_model_test_bot(bot: AgentBot, room: nio.MatrixRoom, device_id: str = "
 
 
 def _conversation_event(bot: AgentBot, event_id: str, body: str, **content: object) -> nio.RoomMessageText:
-    """Build one human prompt aimed at the bot, with optional composer metadata."""
+    """Build one requester prompt aimed at the bot, with optional composer metadata."""
     return nio.RoomMessageText.from_dict(
         {
             "type": "m.room.message",
@@ -537,14 +586,15 @@ async def test_opening_pick_drives_the_reply_model_and_stays_in_its_thread(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target_name", ["helper", "crew"])
+@pytest.mark.parametrize(("target_name", "re_elect"), [("helper", False), ("crew", False), ("helper", True)])
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_route_and_first_reply_use_the_opening_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     target_name: str,
+    re_elect: bool,
 ) -> None:
-    """The catalog poster routes on the pick, and the chosen agent or team uses it to answer."""
+    """The steward routes on the pick even after poster re-election, and the agent or team answers on it."""
     sender = "@user:localhost"
     grant = ResponderAccessConfig(users=[sender])
     paths = test_runtime_paths(tmp_path)
@@ -578,8 +628,11 @@ async def test_route_and_first_reply_use_the_opening_model(
         unique_room_send_responses(client, prefix=f"${name}-sent")
         return bot, client
 
-    router, catalog = make_bot(ROUTER_AGENT_NAME, "CATALOG")
     responder, client = make_bot(target_name, "RESPONDER")
+    assert runtime.room_poster(ROOM_ID) is responder
+    router, router_client = make_bot(ROUTER_AGENT_NAME, "CATALOG")
+    assert runtime.room_poster(ROOM_ID) is router
+    catalog = client if re_elect else router_client
     selection = answer(json.dumps({"entity_name": target_name, "reasoning": "Matches the prompt"}))
     picked = ScriptedModel([selection, answer("Picked response")])
     inherited = ScriptedModel([selection, answer("Wrong response")])
@@ -592,7 +645,7 @@ async def test_route_and_first_reply_use_the_opening_model(
             THREAD_MODEL_CONTENT_KEY: {
                 "version": 1,
                 "runtime_user_id": catalog.user_id,
-                "runtime_device_id": "CATALOG",
+                "runtime_device_id": catalog.device_id,
                 "model": "large",
             },
         },
@@ -603,7 +656,7 @@ async def test_route_and_first_reply_use_the_opening_model(
     assert (len(picked.requests), len(inherited.requests)) == (1, 0)
     (route,) = [
         call.kwargs["content"]
-        for call in catalog.room_send.await_args_list
+        for call in router_client.room_send.await_args_list
         if call.kwargs["message_type"] == ROUTE_EVENT_TYPE
     ]
     assert route[ROUTE_EVENT_TYPE]["entity"] == client.user_id
@@ -612,7 +665,7 @@ async def test_route_and_first_reply_use_the_opening_model(
     handoff = _route_as_message(
         parsed_route(
             route,
-            sender=catalog.user_id,
+            sender=router_client.user_id,
             event_id="$routed:localhost",
             room_id=ROOM_ID,
             origin_server_ts=root.server_timestamp + 1,
@@ -653,7 +706,10 @@ async def test_opening_pick_names_one_of_two_devices_on_the_same_runtime_account
                 },
             },
         )
-        await bot._turn_dispatcher._prepare_dispatch(make_test_turn(room, event, event.sender))
+        with capture_logs() as logs:
+            await bot._turn_dispatcher._prepare_dispatch(make_test_turn(room, event, event.sender))
+        ignored = [entry["log_level"] for entry in logs if entry.get("reason") == "other_runtime_device"]
+        assert ignored == (["info"] if device_id == "NOT_PICKED" else [])
         stores.append(
             resolve_thread_model_override(runtime_paths_for(bot.config), event.event_id, config=bot.config).active,
         )
@@ -681,7 +737,7 @@ async def test_ineligible_opening_model_pick_does_not_write(
     ignored: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only new threads, valid choices, a runtime's own accounts, and the human's reply grants can seed the store."""
+    """Only new threads, valid choices, a runtime's own devices, and the sender's reply grants can seed the store."""
     bot = _fork_bot(tmp_path)
     bot.config.agents["code"].access = ResponderAccessConfig(
         users=["@someone_else:localhost" if ignored == "no-access" else "@user:localhost"],

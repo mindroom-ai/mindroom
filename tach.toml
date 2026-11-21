@@ -6499,6 +6499,7 @@ depends_on = [
     "mindroom.bot_runtime_view",
     "mindroom.constants",
     "mindroom.dispatch_replay_guard",
+    "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.matrix.event_info",
     "mindroom.matrix.thread_history_result",

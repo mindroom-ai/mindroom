@@ -112,19 +112,23 @@ Refresh on picker opening; expire requests after 12 seconds and discard late res
 
 ### Model Choice on a New Thread
 
-A catalog advertising `thread_model_on_root` supports an optional pick on the person's own opening `m.room.message`, including a media upload:
+A catalog advertising `thread_model_on_root` supports an optional pick on the requester's own opening `m.room.message`, including a media upload:
 
 ```json
 {"io.mindroom.thread_model":{"version":1,"runtime_user_id":"@mindroom_helper:example.org","runtime_device_id":"DEVICE","model":"fast@high"}}
 ```
 
 Use the account and device that answered authenticated discovery for `runtime_user_id` and `runtime_device_id`, and a catalog key or `key@level` for `model`.
+The device must still be running in this runtime, but it need not still be the room's elected catalog poster.
 The values must be nonempty, unpadded strings: up to 255 characters for the device ID and 1024 each for the account ID and model.
 Omit the key to inherit the defaults; it is not a room-wide setting or a separate event.
-For a coalesced opening turn, the latest source from the human requester carrying the key supplies the choice, and editing a message does not change or add a choice.
+For a coalesced opening turn, the latest direct source from the requester carrying the key supplies the choice.
+Edits and runtime relays cannot supply or replace a choice.
 The resolved thread root must be among that turn's source events and no more than seven days old, so ordinary replies and old replays cannot seed it.
 A root timestamp more than five minutes in the future is ignored.
-A valid pick applies before the first reply for the entities the sender may address under `!model` rules, takes precedence over fork inheritance, and is not reapplied after a later `!model` change or reset.
+An opening pick uses the same sender rule as `!model`, including reply-authorized bridge accounts.
+At opening, the pick applies only to responders the sender may address that do not already have an explicit choice, and it takes precedence over fork inheritance for those responders.
+While the thread's bounded record is retained, later handling does not reapply the pick, even after a reset or expanded access.
 Invalid or unauthorized picks are ignored without an acknowledgement, and the reply uses the inherited model.
 The key has the same visibility as the message it travels in.
 
