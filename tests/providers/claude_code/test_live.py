@@ -85,7 +85,7 @@ async def test_a_tool_turn_runs_on_the_signed_in_subscription(tmp_path: Path, mo
 
     assert "COPPER-OTTER" in (first.content or "")
     assert "DONE" in (second.content or "")
-    calls = [(call.tool_name, call.tool_args or {}) for call in (*first.tools, *second.tools)]
+    calls = [(call.tool_name, call.tool_args or {}) for record in (first, second) for call in record.tools or ()]
     assert sorted(args["key"] for name, args in calls if name == "lookup") == ["a", "b"]
     [confirmed] = [args["markers"] for name, args in calls if name == "confirm"]
     assert sorted(confirmed) == sorted([MARKERS["a"], MARKERS["b"]])
