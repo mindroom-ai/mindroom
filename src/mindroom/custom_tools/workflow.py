@@ -149,7 +149,7 @@ class WorkflowTools(Toolkit):
         engine, context = _waiting_runtime()
         origin = _inline_origin(context)
         reserve = partial(self._reserve, engine, context, origin, arguments)
-        return _outcome_text(await engine.attend(origin, reserve, context, self.limits))
+        return (await engine.attend(origin, reserve, context, self.limits)).outcome_text()
 
     async def get_workflow(self, run_id: str, nodes: Literal["active", "failed", "all"] = "active") -> str:
         """Return a run's status, cost, open questions, failed calls and nodes. nodes is "active" (default), "failed" or "all".
@@ -184,7 +184,7 @@ class WorkflowTools(Toolkit):
         }
         if run.state in TERMINAL_RUN_STATES:
             # The report, or why there is none, also for a run whose caller is gone.
-            status["result"] = _outcome_text(run)
+            status["result"] = run.outcome_text()
         return json.dumps(status, indent=2)
 
     async def cancel_workflow(self, run_id: str) -> str:
@@ -219,9 +219,12 @@ class WorkflowTools(Toolkit):
         arguments = {"run_id": run_id, "source": source, "path": path, "rerun": rerun}
         origin = _inline_origin(context)
         run, request = await self._resumption(engine, context, arguments, owner=origin)
+        if run.owner != origin and (report := run.claims.get(origin)) is not None:
+            # This call took the run before and another has it now: it gets the report of its own attempt.
+            return report
         # The call owns the run it takes, as an inline start owns the run it reserves: its leaving stops that run.
         reopen = partial(engine.reopen, run.run_id, context, limits=self.limits, owner=origin, **request)
-        return _outcome_text(await engine.attend(origin, reopen, context, self.limits))
+        return (await engine.attend(origin, reopen, context, self.limits)).outcome_text()
 
     async def managed_job(
         self,
@@ -280,13 +283,14 @@ class WorkflowTools(Toolkit):
 
         The request names the epoch the run has now, so it takes the run only if nothing else did since.
         *accepted* is the request this same call was admitted with before, which is returned unchecked, and so is
-        the call that finds the run its own already: *owner*, the job or the waiting call, took it before.
+        the call that finds the run its own already, or among those that took it: *owner*, the job or the waiting
+        call, took it before, and the write that takes a run refuses it a second time.
         """
         source, path, rerun = arguments.get("source"), arguments.get("path"), arguments.get("rerun") or ()
         if source is not None and path is not None:
             raise WorkflowRunStoreError(_AT_MOST_ONE_SOURCE)
         run = _owned(engine, context, str(arguments.get("run_id")))
-        if accepted is not None or run.owner == owner:
+        if accepted is not None or owner in (run.owner, *run.claims):
             return run, accepted or {}
         engine.resumable(run.run_id, context, rerun, self.limits)
         delivered = ("absent", "stopped", "ended")
@@ -495,15 +499,8 @@ def workflow_limits(config: Config, agent_name: str) -> WorkflowLimits:
 
 def _workflow_job_outcome(run: WorkflowRun) -> BackgroundOutcome:
     """Return how the job of an ended run ends: with the whole report, or with why the run did not finish."""
-    text = _outcome_text(run)
+    text = run.outcome_text()
     return BackgroundOutcome(_JOB_STATUS[run.state], text, encode_result_payload(ToolResultPayload(value=text)))
-
-
-def _outcome_text(run: WorkflowRun) -> str:
-    """Return an ended run's report, a string as it is and any other value as indented JSON, or its error."""
-    if run.state is not WorkflowRunState.COMPLETED:
-        return run.error or f"Workflow run {run.run_id} ended {run.state.value}."
-    return run.result if isinstance(run.result, str) else json.dumps(run.result, indent=2)
 
 
 def _public_node(node: WorkflowNode) -> dict[str, object]:

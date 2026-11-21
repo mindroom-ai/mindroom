@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -89,11 +90,19 @@ class WorkflowRun:
     job_id: str | None = None
     owner: str | None = None
     """The invocation the run is now: its job's ID, or the key of the call that waits for it itself."""
+    claims: dict[str, str | None] = field(default_factory=dict)
+    """Each invocation that took the run when it had ended, with the report of a call that waited for it itself."""
     card_event_id: str | None = None
     result: object | None = None
     error: str | None = None
     created_at: str = field(default_factory=utc_timestamp)
     finished_at: str | None = None
+
+    def outcome_text(self) -> str:
+        """Return an ended run's report, a string as it is and any other value as indented JSON, or its error."""
+        if self.state is not WorkflowRunState.COMPLETED:
+            return self.error or f"Workflow run {self.run_id} ended {self.state.value}."
+        return self.result if isinstance(self.result, str) else json.dumps(self.result, indent=2)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

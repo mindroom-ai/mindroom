@@ -709,7 +709,7 @@ def test_migrations_run_in_order_from_version_zero(tmp_path: Path, monkeypatch: 
     path = tmp_path / "w.sqlite3"
     store = WorkflowRunStore(path)
     store.reserve_run(_run())
-    assert _schema_version(path) == store_module.SCHEMA_VERSION == 2
+    assert _schema_version(path) == store_module.SCHEMA_VERSION == 3
 
     calls: list[str] = []
 
@@ -725,21 +725,24 @@ def test_migrations_run_in_order_from_version_zero(tmp_path: Path, monkeypatch: 
     for _ in range(2):
         WorkflowRunStore(path)
     assert calls == ["second", "third"]
-    assert _schema_version(path) == 4
+    assert _schema_version(path) == 5
     with sqlite3.connect(path) as connection:
         assert connection.execute("SELECT placeholder FROM workflow_runs").fetchall() == [("migrated",)]
 
     fresh = tmp_path / "fresh.sqlite3"
     WorkflowRunStore(fresh)
     assert calls == ["second", "third", "second", "third"]
-    assert _schema_version(fresh) == 4
+    assert _schema_version(fresh) == 5
 
 
 def test_store_of_the_first_schema_gets_an_epoch_and_an_owner_for_each_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A store written before runs had either is upgraded: its runs start at epoch 0, owned by their job or their call."""
+    """A store written before runs had either is upgraded: its runs start at epoch 0, owned by their job or their call.
+
+    No invocation has taken one of them after it ended, as far as the run remembers.
+    """
     path = tmp_path / "w.sqlite3"
     monkeypatch.setattr(store_module, "_MIGRATIONS", store_module._MIGRATIONS[:1])
     WorkflowRunStore(path)
@@ -749,13 +752,14 @@ def test_store_of_the_first_schema_gets_an_epoch_and_an_owner_for_each_run(
         for run_id, (origin, job) in owners.items():
             run = _run(run_id, origin_job_id=origin, job_id=job)
             values = {**store_module._row_values(run, store_module._RUN_JSON_FIELDS), "reservation_digest": ""}
-            del values["epoch"], values["owner"]
+            del values["epoch"], values["owner"], values["claims_json"]
             store_module._insert(connection, "INSERT INTO workflow_runs", values)
 
     store = WorkflowRunStore(path)
 
-    assert _schema_version(path) == 2
+    assert _schema_version(path) == 3
     assert [(run.epoch, run.owner) for run in map(store.get_run, owners)] == [(0, "job-1"), (0, "inline:key")]
+    assert [run.claims for run in map(store.get_run, owners)] == [{}, {}]
     assert set_run(store, _RUN_A, state=WorkflowRunState.RUNNING).epoch == 1
     assert store.reserve_run(_run(_RUN_C))[1]
 

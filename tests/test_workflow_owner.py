@@ -23,6 +23,7 @@ from mindroom.script_runs.reasons import RUNTIME_RESTARTED
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.engine import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowRunState
+from mindroom.workflow_runs.store import WorkflowRunStoreError
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.tool_job_helpers import wait_for_status
 from tests.workflow_helpers import CallFailed, WorkflowStack, set_run, tool_args, workflow_stack
@@ -92,6 +93,65 @@ async def test_resume_call_delivered_again_after_its_run_ended_returns_that_repo
 
     assert stack.engine.status(stack.run_id) == ended
     assert (stack.counting_tool.lines, len(stack.scripts.launched)) == (["a", "a"], 2)
+
+
+@pytest.mark.asyncio
+async def test_resume_call_delivered_again_after_a_later_resume_ended_returns_its_own_report_and_takes_nothing(
+    stack: WorkflowStack,
+) -> None:
+    """A call that took a run once never takes it again: the run remembers each call that did, with how it ended.
+
+    Another resume has owned the run since, so the first call is no longer the run's owner. Delivered again, it gets
+    the report of its own attempt; no attempt starts, and its `rerun` is not applied a second time.
+    """
+    first = await _started(stack)
+    await stack.result("@0", "tool", _A)
+    await stack.finish_attempt(result="the first report")
+    await _ended_job(stack, first["job_id"])
+    resume = {"depth": 1, "call_id": "one-resume", "run_id": stack.run_id, "rerun": ["n1"]}
+    call = asyncio.create_task(stack.call("resume_workflow", **resume))
+    await stack.until(lambda: _run(stack).attempt == 2)
+    assert await stack.result("@0", "tool", _A) == "appended"
+    await stack.finish_attempt(result="the second report")
+    assert await call == "the second report"
+    later = asyncio.create_task(stack.call("resume_workflow", depth=1, call_id="a-later-resume", run_id=stack.run_id))
+    await stack.until(lambda: _run(stack).attempt == 3)
+    assert (await stack.submit("@0", "tool", _A)).cached
+    await stack.finish_attempt(result="the third report")
+    assert await later == "the third report"
+    ended = stack.engine.status(stack.run_id)
+
+    assert await stack.call("resume_workflow", **resume) == "the second report"
+
+    assert stack.engine.status(stack.run_id) == ended
+    assert (stack.counting_tool.lines, len(stack.scripts.launched)) == (["a", "a"], 3)
+
+
+@pytest.mark.asyncio
+async def test_invocation_that_took_a_run_before_takes_it_no_second_time_and_marks_no_call(
+    stack: WorkflowStack,
+) -> None:
+    """The write that takes an ended run refuses an owner the run has had: a job whose record is gone gets no report.
+
+    Its `rerun` marks nothing, in the same write that is refused.
+    """
+    first = await _started(stack)
+    await stack.result("@0", "tool", _A)
+    await stack.finish_attempt(result="the first report")
+    await _ended_job(stack, first["job_id"])
+    for owner in ("an-old-job", "a-later-job"):
+        await stack.engine.reopen(stack.run_id, stack.context, owner=owner, job_id=owner)
+        await stack.engine.launch(stack.run_id, stack.context, owner=owner)
+        await stack.finish_attempt(result=f"the report of {owner}")
+    ended = stack.engine.status(stack.run_id)
+    assert ended[0].claims == {"an-old-job": None, "a-later-job": None}
+
+    with pytest.raises(WorkflowRunStoreError, match=_TAKEN.format(stack.run_id)):
+        await stack.engine.reopen(stack.run_id, stack.context, owner="an-old-job", job_id="an-old-job", rerun=["n1"])
+
+    assert stack.engine.status(stack.run_id) == ended
+    assert (await stack.resume(stack.run_id)).attempt == 4
+    assert (await stack.submit("@0", "tool", _A)).cached
 
 
 @pytest.mark.asyncio

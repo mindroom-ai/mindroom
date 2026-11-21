@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 _BUSY_TIMEOUT_SECONDS = 10
 _MAX_INLINE_RESULT_BYTES = 8 * 1024 * 1024
 _RESULT_PREVIEW_BYTES = 64 * 1024
-_RUN_JSON_FIELDS = frozenset({"execution_identity", "persona", "args", "result"})
+_RUN_JSON_FIELDS = frozenset({"execution_identity", "persona", "args", "result", "claims"})
 _NODE_JSON_FIELDS = frozenset({"request", "handle", "members", "result", "error", "links"})
 # A run keeps the owner and the origin key it was reserved with; a redelivered start is checked against both.
 _OWNER_COLUMNS = ("agent_name", "owner_user_id", "room_id", "thread_root_event_id")
@@ -148,8 +148,10 @@ class WorkflowRunStore:
 
         The write is refused (`SupersededAttemptError`) unless the run still has that epoch and is in one of the
         states *when*. A write that takes the run, begins an attempt or ends one raises the epoch, so whoever held
-        the old one writes nothing more; an attempt that waits for a person and goes on stays the same attempt. A write that takes an ended run counts its owner's
-        live runs against *max_active* first, and only when it lands are the calls at the keys *rerun* marked.
+        the old one writes nothing more; an attempt that waits for a person and goes on stays the same attempt. A
+        write that takes an ended run counts its owner's live runs against *max_active* first, and only when it
+        lands are the calls at the keys *rerun* marked. It names the new owner, which the run then remembers
+        (`claims`): an invocation takes a run once, so a call delivered again never takes it a second time.
         """
         unknown = changes.keys() - _RUN_UPDATE_FIELDS
         if unknown:
@@ -157,6 +159,11 @@ class WorkflowRunStore:
             raise WorkflowRunStoreError(msg)
         with self._write_transaction() as connection:
             run = _fenced(connection, run_id, epoch, when)
+            if (taker := changes.get("owner")) is not None:
+                if taker in run.claims:
+                    msg = f"Run {run_id} was taken by this invocation before."
+                    raise SupersededAttemptError(msg)
+                changes["claims"] = run.claims | {taker: None}
             _require_slot(connection, run, max_active)
             connection.executemany(
                 "UPDATE workflow_nodes SET digest = '' WHERE run_id = ? AND key = ?",
@@ -719,6 +726,11 @@ def _add_epoch_and_owner(connection: sqlite3.Connection) -> None:
     connection.execute("UPDATE workflow_runs SET owner = COALESCE(job_id, origin_job_id)")
 
 
+def _add_claims(connection: sqlite3.Connection) -> None:
+    """Give each run the list of the invocations that took it after it had ended."""
+    connection.execute("ALTER TABLE workflow_runs ADD COLUMN claims_json TEXT NOT NULL DEFAULT '{}'")
+
+
 # Each entry upgrades the database by one schema version; the stored version is how many have run.
-_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_create_schema, _add_epoch_and_owner)
+_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_create_schema, _add_epoch_and_owner, _add_claims)
 SCHEMA_VERSION = len(_MIGRATIONS)
