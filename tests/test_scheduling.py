@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextvars
 import json
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -71,6 +72,8 @@ from tests.scheduling_helpers import (
 from tests.tool_approval_helpers import scheduled_call_approvals
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
@@ -1100,12 +1103,21 @@ async def test_run_cron_task_stops_when_cancelled_via_matrix_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_scheduled_task_persists_through_the_room_steward(
+@pytest.mark.parametrize(
+    ("cancel", "expected"),
+    [
+        (partial(cancel_scheduled_task, task_id="task1"), "✅ Cancelled task `task1`"),
+        (cancel_all_scheduled_tasks, "✅ Cancelled 1 scheduled task(s)"),
+    ],
+    ids=["single", "all"],
+)
+async def test_scheduled_task_cancellation_persists_through_the_room_steward(
     tmp_path: Path,
+    cancel: Callable[..., Awaitable[str]],
+    expected: str,
 ) -> None:
-    """Cancelling a task writes its state through the room's steward, not through the client that asked."""
+    """Cancellation writes through the room's steward, not the asking client."""
     client = AsyncMock()
-    serve_task_state_events(client)
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
     room_state: dict[str, dict[str, Any]] = {}
     state_writers, router = _recording_state_writer(room_state)
@@ -1113,40 +1125,28 @@ async def test_cancel_scheduled_task_persists_through_the_room_steward(
         schedule_type="once",
         created_by="@user:server",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
-        message="cancel me",
-        description="cancel me",
+        message="cancel all",
+        description="cancel all",
         room_id="!test:server",
         thread_id="$thread",
     )
-    client.room_get_state_event = AsyncMock(
-        return_value=nio.RoomGetStateEventResponse(
-            content={
-                "task_id": "taskcancel",
-                "workflow": workflow.model_dump_json(),
-                "status": "pending",
-                "created_at": datetime(2026, 1, 1, 12, 0, tzinfo=UTC).isoformat(),
-            },
-            event_type=SCHEDULED_TASK_EVENT_TYPE,
-            state_key="taskcancel",
-            room_id="!test:server",
-        ),
-    )
+    content = {"task_id": "task1", "workflow": workflow.model_dump_json(), "status": "pending"}
+    serve_room_schedule_state(client, "!test:server", [scheduled_task_state_event("task1", content)])
 
     with patch.object(state_writers, "cancel_runner") as cancel_runner:
-        result = await cancel_scheduled_task(
+        result = await cancel(
             client=client,
             room_id="!test:server",
-            task_id="taskcancel",
             runtime_paths=schedule_runtime_paths(tmp_path),
             task_runtime=state_writers,
         )
 
-    assert result == "✅ Cancelled task `taskcancel`"
-    cancel_runner.assert_called_once_with("taskcancel")
+    assert result == expected
+    cancel_runner.assert_called_once_with("task1")
     client.room_put_state.assert_not_awaited()
     router.room_put_state.assert_awaited_once()
-    assert room_state["taskcancel"]["content"]["status"] == "cancelled"
-    assert room_state["taskcancel"]["content"]["workflow"] == workflow.model_dump_json()
+    assert room_state["task1"]["content"]["status"] == "cancelled"
+    assert room_state["task1"]["content"]["workflow"] == workflow.model_dump_json()
 
 
 @pytest.mark.asyncio
@@ -1271,41 +1271,6 @@ async def test_a_task_stored_without_a_status_is_pending_to_listing_and_cancel_a
     assert [task.task_id for task in listed] == ["statusless"]
     assert result == "✅ Cancelled 1 scheduled task(s)"
     assert client.room_put_state.await_args.kwargs["content"]["status"] == "cancelled"
-
-
-@pytest.mark.asyncio
-async def test_cancel_all_scheduled_tasks_persists_through_the_room_steward(
-    tmp_path: Path,
-) -> None:
-    """Cancel-all writes each cancellation through the room's steward too."""
-    client = AsyncMock()
-    client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
-    room_state: dict[str, dict[str, Any]] = {}
-    state_writers, router = _recording_state_writer(room_state)
-    workflow = ScheduledWorkflow(
-        schedule_type="once",
-        created_by="@user:server",
-        execute_at=datetime.now(UTC) + timedelta(minutes=5),
-        message="cancel all",
-        description="cancel all",
-        room_id="!test:server",
-        thread_id="$thread",
-    )
-    content = {"task_id": "task1", "workflow": workflow.model_dump_json(), "status": "pending"}
-    serve_room_schedule_state(client, "!test:server", [scheduled_task_state_event("task1", content)])
-
-    with patch.object(state_writers, "cancel_runner") as cancel_runner:
-        result = await cancel_all_scheduled_tasks(
-            client=client,
-            room_id="!test:server",
-            runtime_paths=schedule_runtime_paths(tmp_path),
-            task_runtime=state_writers,
-        )
-
-    assert result == "✅ Cancelled 1 scheduled task(s)"
-    cancel_runner.assert_called_once_with("task1")
-    router.room_put_state.assert_awaited_once()
-    assert room_state["task1"]["content"]["status"] == "cancelled"
 
 
 @pytest.mark.asyncio
