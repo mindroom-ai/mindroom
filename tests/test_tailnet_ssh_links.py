@@ -647,6 +647,46 @@ async def test_shared_worker_admits_multiple_logins_and_reprojects_on_connect(
     assert desired_links(config, paths, memberships) == [row | {"allowed_logins": ["alice@github"]}]
 
 
+@pytest.mark.parametrize("working_route", [False, True])
+@pytest.mark.asyncio
+async def test_disabled_shell_routes_cannot_list_or_mask_a_working_shell(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    working_route: bool,
+) -> None:
+    """Only agents offering run_shell_command contribute to a worker's SSH routes."""
+    config.agents["mind"].tailnet_ssh = False
+    config.agents["mine"].worker_scope = "user"
+    config.agents["mine"].tools = [{"shell": {"enable_run_shell_command": False}}]
+    other = config.agents["other"]
+    other.worker_scope = "user"
+    other.access = config.agents["mine"].access
+    other.tools = ["shell"]
+    other.tailnet_ssh = working_route
+    key = _key(ALICE, "mine", "user")
+    with update_links(paths) as book:
+        link = book.ensure(key)
+    manager = _manager(monkeypatch, _handle(key, tmp_path / "ssh"))
+    monkeypatch.setattr(sandbox_proxy, "lease_worker_manager", lambda *_: manager)
+    rows = desired_links(config, paths, AgentReplyMembershipIndex())
+    if not working_route:
+        assert rows == []
+        with pytest.raises(ConnectRefused, match="not authorized"):
+            await _connect(config, paths, link.id)
+        assert manager.calls == []
+        return
+
+    async def start_sshd(_call: WorkerCall) -> None:
+        pass
+
+    monkeypatch.setattr(links, "_start_sshd", start_sshd)
+    assert rows == [{"id": link.id, "hostname": link.hostname, "allowed_logins": ["alice@github"]}]
+    assert await _connect(config, paths, link.id) == ("10.0.0.5", 2222)
+
+
 @pytest.mark.parametrize("backend", ["static_runner", "local", "docker_with_local_shell"])
 @pytest.mark.asyncio
 async def test_unsupported_shell_placement_never_wakes(

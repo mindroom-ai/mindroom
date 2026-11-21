@@ -41,7 +41,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Callable, Collection, Iterable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
@@ -693,6 +693,37 @@ class _ToolSettings:
     tool_init_overrides: dict[str, object] | None
     # The credentials manager the stored settings came from, which the toolkit and its worker calls also use.
     credentials_manager: CredentialsManager | None
+
+
+def offered_functions(
+    metadata: ToolMetadata,
+    settings: Mapping[str, object],
+) -> tuple[frozenset[str] | None, bool]:
+    """Return the toolkit's functions its settings leave on, and whether one it names as writing is among them.
+
+    A function stays on by Agno's ``all`` or ``enable_<function>``, then the filters. The functions are None when the
+    toolkit declares no function names, as a plugin or MCP server may, and no allowlist names them. A toolkit that
+    names no writing functions writes when it runs code.
+    """
+    values = {config_field.name: config_field.default for config_field in metadata.config_fields or ()} | dict(settings)
+    include, exclude = (
+        normalize_string_array_override(values.get(name), preserve_empty_list=True)
+        for name in ("include_tools", "exclude_tools")
+    )
+
+    def offered(names: Iterable[str]) -> frozenset[str]:
+        return frozenset(
+            function
+            for function in names
+            if (values.get("all") or values.get(f"enable_{function}", True))
+            and tool_name_allowed(function, include=include, exclude=exclude)
+        )
+
+    available = metadata.function_names or include
+    functions = None if available is None else offered(available)
+    if not metadata.workspace_writers:
+        return functions, metadata.executes_code
+    return functions, bool(offered(metadata.workspace_writers))
 
 
 def resolve_tool_settings(

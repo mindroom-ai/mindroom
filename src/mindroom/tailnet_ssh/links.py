@@ -22,6 +22,7 @@ from mindroom.tailnet_ssh.projection import write_projection
 from mindroom.tailnet_ssh.store import read_links, update_links
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.metadata import offered_functions, resolve_tool_settings
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement, worker_call
 from mindroom.tool_system.worker_routing import build_requester_execution_identity, normal_worker_key
@@ -68,7 +69,7 @@ class ConnectRefused(HTTPException):
     """An SSH connect was refused; the gateway receives only its safe detail."""
 
 
-def _roster(
+def _roster(  # noqa: C901 - keep the ordered route checks together
     config: Config,
     paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
@@ -85,13 +86,15 @@ def _roster(
     if not agents or not requesters:
         return {}
     tools = config_plugins(config, paths).tools
+    shell = tools.get("shell")
+    if shell is None:
+        return {}
     placement = tool_placement(paths, tools)
     roster: dict[str, dict[str, ResolvedWorkerTarget]] = {}
     for agent in agents:
         agent_tools = resolve_agent_tools(config, agent, tools)
-        if not agent_tools.runs_in_worker("shell", placement) or not any(
-            entry.name == "shell" for entry in agent_tools.candidates()
-        ):
+        entry = next((entry for entry in agent_tools.candidates() if entry.name == "shell"), None)
+        if entry is None or not agent_tools.runs_in_worker("shell", placement):
             continue
         for requester, login in requesters:
             try:
@@ -109,11 +112,25 @@ def _roster(
                 continue
             identity = build_requester_execution_identity(agent_name=agent, runtime_paths=paths, requester_id=requester)
             try:
-                target = resolve_agent_execution(agent, config, paths, identity).worker_target
+                execution = resolve_agent_execution(agent, config, paths, identity)
             except ValueError:
                 # The ordinary shell route can refuse an unresolved execution identity.
                 continue
-            if (key := normal_worker_key(target)) is not None:
+            target = execution.worker_target
+            if (key := normal_worker_key(target)) is None:
+                continue
+            settings = resolve_tool_settings(
+                "shell",
+                paths,
+                tools=tools,
+                worker_target=target,
+                allowed_shared_services=(
+                    config.get_worker_grantable_credentials() if execution.execution_scope is not None else None
+                ),
+                tool_config_overrides=entry.tool_config_overrides,
+            )
+            functions, _ = offered_functions(shell, settings.values)
+            if functions is not None and SHELL_FUNCTION in functions:
                 roster.setdefault(key, {}).setdefault(login, target)
     return roster
 
