@@ -300,7 +300,8 @@ async def test_calls_that_name_a_new_worker_at_the_same_time_start_it_with_one_s
     assert len(refused) + len(started) == len(profiles)
     assert len(refused) == sum(profile not in (None, size) for profile in profiles)
     assert all("was started with" in str(error) for error in refused)
-    assert len(backend.workers) == 1
+    [worker_key] = {spec.worker_key for spec in backend.specs}
+    assert await _retired(backend) == [worker_key]
 
 
 @pytest.mark.asyncio
@@ -577,8 +578,6 @@ async def test_a_removal_that_fails_is_left_to_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One worker that cannot be removed does not keep the reply's other workers."""
-    async with execution_resources(response=True):
-        stuck, removed = (_run(backend, _call(runtime_paths, name)).worker_key for name in ("a", "b"))
     retire = backend.retire_worker
 
     def fail_one(worker_key: str) -> None:
@@ -587,7 +586,9 @@ async def test_a_removal_that_fails_is_left_to_cleanup(
             raise WorkerBackendError(msg)
         retire(worker_key)
 
-    monkeypatch.setattr(backend, "retire_worker", fail_one)
+    async with execution_resources(response=True):
+        stuck, removed = (_run(backend, _call(runtime_paths, name)).worker_key for name in ("a", "b"))
+        monkeypatch.setattr(backend, "retire_worker", fail_one)
 
     assert await _retired(backend) == [removed]
     assert list(backend.workers) == [stuck]
@@ -802,6 +803,7 @@ async def test_a_shell_call_runs_in_the_worker_it_names(
             normal = await shell("echo hi")
             first = await shell("echo hi", worker="e2e-0", resource_profile="large")
             again = await shell(args="echo hi", worker="e2e-0")
+            named_endpoint = backend.workers[backend.specs[-1].worker_key].endpoint
 
     assert (normal, first, again) == (
         "sandbox-result",
@@ -815,7 +817,7 @@ async def test_a_shell_call_runs_in_the_worker_it_names(
     assert (named_spec.state_scope_worker_key, named_spec.resource_profile) == (target.worker_key, "large")
     # Each request goes to its own worker and names that worker's key, with the agent's own scope and identity.
     (normal_url, normal_post), (named_url, named_post), _ = posts
-    assert normal_url != named_url == backend.workers[named_spec.worker_key].endpoint
+    assert normal_url != named_url == named_endpoint
     assert (named_post["worker_key"], named_post["worker_scope"]) == (named_spec.worker_key, "user_agent")
     assert named_post["execution_identity"] == normal_post["execution_identity"]
     assert await _retired(backend) == [named_spec.worker_key]
@@ -935,8 +937,8 @@ async def test_a_stopped_shell_call_is_stopped_in_its_named_worker(
             with pytest.raises(asyncio.CancelledError):
                 await call
             assert await asyncio.to_thread(stopped.wait, SETTLE_TIMEOUT_SECONDS)
+            [worker] = backend.workers.values()
 
-    [worker] = backend.workers.values()
     (execute_url, execute), (cancel_url, cancel) = posts
     assert execute_url == worker.endpoint
     assert cancel_url == f"{worker.endpoint}/cancel"
