@@ -259,6 +259,36 @@ async def _noop_callback(_room: nio.MatrixRoom, _event: nio.Event) -> None:
     """Accept one event and do nothing with it."""
 
 
+def _journal_dispatcher(
+    store: PrincipalStore,
+    *,
+    sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    **callbacks: Any,
+) -> JournalDispatcher:
+    """Build a dispatcher whose callbacks do nothing and own nothing, except the ones a test names."""
+    noop = cast("Any", _noop_callback)
+    defaults: dict[str, Any] = {
+        "on_message": noop,
+        "on_media": noop,
+        "on_reaction": noop,
+        "on_approval": noop,
+        "on_room_lifecycle": noop,
+        "on_redaction": noop,
+        "on_approval_continuation": AsyncMock(return_value=None),
+        "source_has_live_owner": lambda _event_id: False,
+        "turn_has_live_claim": lambda _event_id: False,
+        "replies_ended": lambda _reply_ids: None,
+        "on_job_follow_up": AsyncMock(),
+        "on_job_cancel": AsyncMock(),
+    }
+    return JournalDispatcher(
+        store=store,
+        callbacks=JournalCallbacks(**(defaults | callbacks)),
+        room_for_id=lambda _room_id: room(),
+        sender_is_managed=sender_is_managed,
+    )
+
+
 PLACEHOLDER_ID = "$placeholder"
 PLACEHOLDER_BODY = "Thinking..."
 
@@ -3500,27 +3530,7 @@ async def test_a_follow_up_whose_turn_is_gone_is_dispatched_again(alice: Princip
     """A follow-up waits for the fleet at startup and for its live turn, and runs again once that turn is gone."""
     owners: set[str] = set()
 
-    async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
-        return None
-
-    dispatcher = JournalDispatcher(
-        store=alice,
-        callbacks=JournalCallbacks(
-            on_message=cast("Any", noop),
-            on_media=cast("Any", noop),
-            on_reaction=cast("Any", noop),
-            on_approval=cast("Any", noop),
-            on_room_lifecycle=cast("Any", noop),
-            on_redaction=cast("Any", noop),
-            on_approval_continuation=AsyncMock(return_value=None),
-            source_has_live_owner=lambda event_id: event_id in owners,
-            turn_has_live_claim=lambda _event_id: False,
-            replies_ended=lambda _reply_ids: None,
-            on_job_follow_up=AsyncMock(),
-            on_job_cancel=AsyncMock(),
-        ),
-        room_for_id=lambda _room_id: room(),
-    )
+    dispatcher = _journal_dispatcher(alice, source_has_live_owner=lambda event_id: event_id in owners)
     follow_up = cast("JournalEvent", SimpleNamespace(kind=EventKind.JOB_FOLLOW_UP, event_id="job-follow-up:1"))
     assert dispatcher._deferral_is_live(follow_up)
     dispatcher.release_turn_replay()
@@ -3539,28 +3549,7 @@ class TestOutOfBandDispatch:
         on_room_lifecycle: Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]],
     ) -> JournalDispatcher:
         """Build a dispatcher whose only interesting callback is the lifecycle one."""
-
-        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
-            return None
-
-        return JournalDispatcher(
-            store=store,
-            callbacks=JournalCallbacks(
-                on_message=cast("Any", noop),
-                on_media=cast("Any", noop),
-                on_reaction=cast("Any", noop),
-                on_approval=cast("Any", noop),
-                on_room_lifecycle=on_room_lifecycle,
-                on_redaction=cast("Any", noop),
-                on_approval_continuation=AsyncMock(return_value=None),
-                source_has_live_owner=lambda _event_id: False,
-                turn_has_live_claim=lambda _event_id: False,
-                replies_ended=lambda _reply_ids: None,
-                on_job_follow_up=AsyncMock(),
-                on_job_cancel=AsyncMock(),
-            ),
-            room_for_id=lambda _room_id: room(),
-        )
+        return _journal_dispatcher(store, on_room_lifecycle=on_room_lifecycle)
 
     async def test_concurrent_drains_keep_one_handler(self, alice: PrincipalStore) -> None:
         """Concurrent pump and explicit drains must share one room lane."""
@@ -3623,27 +3612,10 @@ class TestDeferralOwnership:
         turn_claimed: bool = False,
     ) -> JournalDispatcher:
         """Build a dispatcher whose two owner probes answer as configured."""
-
-        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
-            return None
-
-        return JournalDispatcher(
-            store=store,
-            callbacks=JournalCallbacks(
-                on_message=cast("Any", noop),
-                on_media=cast("Any", noop),
-                on_reaction=cast("Any", noop),
-                on_approval=cast("Any", noop),
-                on_room_lifecycle=cast("Any", noop),
-                on_redaction=cast("Any", noop),
-                on_approval_continuation=AsyncMock(return_value=None),
-                source_has_live_owner=lambda _event_id: gate_owns,
-                turn_has_live_claim=lambda _event_id: turn_claimed,
-                replies_ended=lambda _reply_ids: None,
-                on_job_follow_up=AsyncMock(),
-                on_job_cancel=AsyncMock(),
-            ),
-            room_for_id=lambda _room_id: room(),
+        return _journal_dispatcher(
+            store,
+            source_has_live_owner=lambda _id: gate_owns,
+            turn_has_live_claim=lambda _id: turn_claimed,
         )
 
     @staticmethod
@@ -4735,27 +4707,12 @@ class TestRecoveryDoesNotReenterALiveTurn:
         gate_owns: bool = False,
     ) -> JournalDispatcher:
         """Build a dispatcher whose turn claims are whatever the test says."""
-
-        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
-            return None
-
-        return JournalDispatcher(
-            store=store,
-            callbacks=JournalCallbacks(
-                on_message=cast("Any", on_turn),
-                on_media=cast("Any", on_turn),
-                on_reaction=cast("Any", noop),
-                on_approval=cast("Any", noop),
-                on_room_lifecycle=cast("Any", noop),
-                on_redaction=cast("Any", noop),
-                on_approval_continuation=AsyncMock(return_value=None),
-                source_has_live_owner=lambda _event_id: gate_owns,
-                turn_has_live_claim=lambda event_id: event_id in live_claims,
-                replies_ended=lambda _reply_ids: None,
-                on_job_follow_up=AsyncMock(),
-                on_job_cancel=AsyncMock(),
-            ),
-            room_for_id=lambda _room_id: room(),
+        return _journal_dispatcher(
+            store,
+            on_message=cast("Any", on_turn),
+            on_media=cast("Any", on_turn),
+            source_has_live_owner=lambda _id: gate_owns,
+            turn_has_live_claim=lambda event_id: event_id in live_claims,
         )
 
     @staticmethod
@@ -4973,27 +4930,9 @@ class TestAdmittedWorkReachesItsCallback:
         on_message: Callable[[nio.MatrixRoom, nio.Event], Awaitable[TurnDispatchOutcome]],
     ) -> JournalDispatcher:
         """Build a dispatcher whose only interesting callback is the message one."""
-
-        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
-            return None
-
-        return JournalDispatcher(
-            store=store,
-            callbacks=JournalCallbacks(
-                on_message=cast("Any", on_message),
-                on_media=cast("Any", noop),
-                on_reaction=cast("Any", noop),
-                on_approval=cast("Any", noop),
-                on_room_lifecycle=cast("Any", noop),
-                on_redaction=cast("Any", noop),
-                on_approval_continuation=AsyncMock(return_value=None),
-                source_has_live_owner=lambda _event_id: False,
-                turn_has_live_claim=lambda _event_id: False,
-                replies_ended=lambda _reply_ids: None,
-                on_job_follow_up=AsyncMock(),
-                on_job_cancel=AsyncMock(),
-            ),
-            room_for_id=lambda _room_id: room(),
+        return _journal_dispatcher(
+            store,
+            on_message=cast("Any", on_message),
             sender_is_managed=lambda sender: sender == BOT,
         )
 
