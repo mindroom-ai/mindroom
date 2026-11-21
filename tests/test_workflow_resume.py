@@ -405,7 +405,7 @@ async def test_resume_of_a_run_that_still_runs_is_refused(stack: WorkflowStack) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unknown", ["n7", "x1", "1", "n01", "n", "n1 ", "n\uff11"])
+@pytest.mark.parametrize("unknown", ["n7", "x1", "1", "n01", "n", "n1 ", "n\uff11", "n9223372036854775808"])
 async def test_resume_refuses_an_unknown_call_in_rerun_by_name(stack: WorkflowStack, unknown: str) -> None:
     """Only the exact ID of a saved call names it: any other starts nothing and leaves the run and its calls as they ended."""
     await stack.result("@0", "tool", _A)

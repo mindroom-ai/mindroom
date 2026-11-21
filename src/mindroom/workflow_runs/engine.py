@@ -701,7 +701,7 @@ class WorkflowEngine:
     def _node(self, run_id: str, node_id: str) -> WorkflowNode:
         seq = int(node_id[1:]) if node_id[1:].isdecimal() else 0
         # Only the ID a call is shown with names it: `n` and its sequence number, written as `get_workflow` writes it.
-        node = self.store.node_by_seq(run_id, seq) if node_id == f"n{seq}" else None
+        node = self.store.node_by_seq(run_id, seq) if node_id == f"n{seq}" and seq < 2**63 else None
         if node is None:
             msg = f"Run {run_id} has no call {node_id}."
             raise LookupError(msg)
