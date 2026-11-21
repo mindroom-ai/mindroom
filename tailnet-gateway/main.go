@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"log"
 	"os"
@@ -19,23 +20,17 @@ import (
 var version = "0.0.0"
 
 func main() {
-	token := os.Getenv("TAILNET_SSH_GATEWAY_TOKEN")
-	if token == "" {
-		log.Fatal("TAILNET_SSH_GATEWAY_TOKEN is not set")
-	}
-	primaryURL := os.Getenv("TAILNET_SSH_PRIMARY_URL")
-	if primaryURL == "" {
-		primaryURL = "http://127.0.0.1:8769"
-	}
-	stateDir := os.Getenv("TAILNET_SSH_STATE_DIR")
-	if stateDir == "" {
-		stateDir = "/state"
-	}
 	tags := strings.FieldsFunc(os.Getenv("TAILNET_SSH_TAGS"), func(r rune) bool { return r == ',' || r == ' ' })
 	nodes, err := NewTsnetNode(os.Getenv("TAILNET_SSH_LOGIN_SERVER"), os.Getenv("TAILNET_SSH_AUTH_KEY"), tags)
 	if err != nil {
 		log.Fatal(err)
 	}
+	token := os.Getenv("TAILNET_SSH_GATEWAY_TOKEN")
+	if token == "" {
+		log.Fatal("TAILNET_SSH_GATEWAY_TOKEN is not set")
+	}
+	primaryURL := cmp.Or(os.Getenv("TAILNET_SSH_PRIMARY_URL"), "http://127.0.0.1:8769")
+	stateDir := cmp.Or(os.Getenv("TAILNET_SSH_STATE_DIR"), "/state")
 
 	// Don't persist or upload node logs, or bind sockets to the default-route interface (which may be loopback).
 	envknob.SetNoLogsNoSupport()

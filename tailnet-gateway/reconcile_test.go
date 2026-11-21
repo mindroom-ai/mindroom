@@ -85,19 +85,6 @@ func (n *fakeNode) Close() error {
 	return n.listener.Close()
 }
 
-// called returns how often the gateway called the method.
-func (n *fakeNode) called(method string) int {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	count := 0
-	for _, call := range n.calls {
-		if call == method {
-			count++
-		}
-	}
-	return count
-}
-
 // fakeNodes is the factory of fake nodes: like tsnet it makes the node's directory.
 type fakeNodes struct {
 	mu        sync.Mutex
@@ -275,7 +262,12 @@ func newFixtures(t *testing.T) *fixtures {
 		t.Fatal(err)
 	}
 	f.gateway = NewGateway(NewPrimary(f.primary.URL, "tok"), f.nodes.start, f.state)
-	f.gateway.clock = f.clock
+	f.gateway.now, f.gateway.after = f.clock.Now, f.clock.After
+	t.Cleanup(func() {
+		for _, node := range f.nodes.started {
+			node.listener.Close()
+		}
+	})
 	return f
 }
 
@@ -743,6 +735,29 @@ func TestRemovingDeletesEvenWhenTheNodeDoesNotStart(t *testing.T) {
 
 	if exists(t, dir) || !f.wasRemoved(idA) {
 		t.Errorf("state directory kept or status %+v, want it deleted and removed", f.gateway.Status())
+	}
+}
+
+func TestRemovalIsNotAcknowledgedUntilStateCanBeDeleted(t *testing.T) {
+	f := newFixtures(t)
+	state := filepath.Join(f.state, idA)
+	mkdir(t, state)
+	f.primary.list(t, removing(idA))
+
+	// Simulate an inaccessible state root, without relying on the test user's privileges.
+	loop := filepath.Join(f.state, "loop")
+	if err := os.Symlink("loop", loop); err != nil {
+		t.Fatal(err)
+	}
+	f.gateway.stateDir = loop
+	f.reconcile(t)
+	if f.wasRemoved(idA) || !exists(t, state) {
+		t.Fatal("retirement was acknowledged before state was reachable for deletion")
+	}
+	f.gateway.stateDir = f.state
+	f.reconcile(t)
+	if !f.wasRemoved(idA) || exists(t, state) {
+		t.Fatal("the gateway did not retry and acknowledge successful deletion")
 	}
 }
 

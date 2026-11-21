@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -38,7 +39,8 @@ func (g *Gateway) carry(ctx context.Context, id string, node Node, conn net.Conn
 		return
 	}
 	defer g.forget(id, conn)
-	defer context.AfterFunc(ctx, func() { conn.Close() })()
+	stopClosing := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stopClosing()
 
 	whoCtx, whoDone := context.WithTimeout(ctx, nodeCallTimeout)
 	login, peer, err := node.WhoIs(whoCtx, conn.RemoteAddr().String())
@@ -55,7 +57,7 @@ func (g *Gateway) carry(ctx context.Context, id string, node Node, conn net.Conn
 	woken := make(chan worker, 1)
 	go func() { woken <- g.wake(ctx, id, conn, login, peer) }()
 	// Only this goroutine writes pre-banners; none can follow the worker's bytes.
-	for tick := g.clock.After(preBannerEvery); ; {
+	for tick := g.after(preBannerEvery); ; {
 		select {
 		case <-ctx.Done():
 			return
@@ -71,7 +73,7 @@ func (g *Gateway) carry(ctx context.Context, id string, node Node, conn net.Conn
 			if _, err := io.WriteString(conn, preBanner); err != nil {
 				return
 			}
-			tick = g.clock.After(preBannerEvery)
+			tick = g.after(preBannerEvery)
 		}
 	}
 }
@@ -84,16 +86,12 @@ type worker struct {
 func pipe(conn net.Conn, to worker) {
 	// Either copy finishing ends the pipe. carry then closes the peer and cancels the worker.
 	done := make(chan struct{}, 2)
-	go func() {
-		if _, err := conn.Write(to.first); err == nil {
-			io.Copy(conn, to.sshd)
-		}
+	copyTo := func(dst io.Writer, src io.Reader) {
+		io.Copy(dst, src)
 		done <- struct{}{}
-	}()
-	go func() {
-		io.Copy(to.sshd, conn)
-		done <- struct{}{}
-	}()
+	}
+	go copyTo(conn, io.MultiReader(bytes.NewReader(to.first), to.sshd))
+	go copyTo(to.sshd, conn)
 	<-done
 }
 
@@ -114,9 +112,11 @@ func (g *Gateway) wake(ctx context.Context, id string, conn net.Conn, login, pee
 	if err == nil {
 		// The caller may already have left; close this dial on cancellation even then.
 		context.AfterFunc(ctx, func() { sshd.Close() })
-		if !g.reach(id, conn) {
-			return worker{}
+		g.mu.Lock()
+		if kept := g.conns[id][conn]; kept != nil {
+			kept.reached = g.now()
 		}
+		g.mu.Unlock()
 		deadline, _ := inTime.Deadline()
 		if err = sshd.SetReadDeadline(deadline); err == nil {
 			first := make([]byte, 4096)
@@ -158,16 +158,6 @@ func (g *Gateway) forget(id string, conn net.Conn) {
 	delete(g.conns[id], conn)
 }
 
-func (g *Gateway) reach(id string, conn net.Conn) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if kept := g.conns[id][conn]; kept != nil {
-		kept.reached = g.clock.Now()
-		return true
-	}
-	return false
-}
-
 func (g *Gateway) admit(id string, conn net.Conn, login string) string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -177,7 +167,7 @@ func (g *Gateway) admit(id string, conn net.Conn, login string) string {
 	if allowed := g.links[id].AllowedLogin; login == "" || allowed == nil || *allowed != login {
 		return "its peer is not the link's login"
 	}
-	now := g.clock.Now()
+	now := g.now()
 	recent := g.connects[id]
 	for len(recent) > 0 && now.Sub(recent[0]) >= time.Minute {
 		recent = recent[1:]

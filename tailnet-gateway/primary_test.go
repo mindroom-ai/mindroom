@@ -303,7 +303,7 @@ func TestPrimaryThatDoesNotAnswerIsNotARefusal(t *testing.T) {
 }
 
 func TestPrimaryIsNeverReachedThroughAProxy(t *testing.T) {
-	client := NewPrimary("http://primary.invalid", "tok").(*httpPrimary)
+	client := NewPrimary("http://primary.invalid", "tok")
 
 	if transport := client.client.Transport.(*http.Transport); transport.Proxy != nil {
 		t.Error("the primary's client takes a proxy, which would be sent the gateway's token")
@@ -320,7 +320,7 @@ func (d deadlines) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func TestConnectMayTake610SecondsAndTheOthersTen(t *testing.T) {
-	client := NewPrimary("http://primary.invalid", "tok").(*httpPrimary)
+	client := NewPrimary("http://primary.invalid", "tok")
 	seen := deadlines{map[string]time.Duration{}}
 	client.client.Transport = seen
 

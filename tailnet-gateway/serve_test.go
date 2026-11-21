@@ -524,6 +524,10 @@ func TestAccessRevisionChangeClosesAllOpenConnections(t *testing.T) {
 	}
 	theirs := worker.conn(t)
 	theirs.SetReadDeadline(time.Now().Add(5 * time.Second))
+	other := node.dial(t)
+	if got := line(other); got != banner {
+		t.Fatalf("the second peer read %q, want the worker's banner", got)
+	}
 
 	// A pass with the value the connection was opened under closes nothing.
 	f.reconcile(t)
@@ -537,8 +541,8 @@ func TestAccessRevisionChangeClosesAllOpenConnections(t *testing.T) {
 	f.primary.list(t, link)
 	f.reconcile(t)
 
-	if !closed(t, peer) {
-		t.Error("the connection is open after the link's access revision changed")
+	if !closed(t, peer) || !closed(t, other) {
+		t.Error("a pipe stayed open after the link's access revision changed")
 	}
 }
 
@@ -562,6 +566,16 @@ func TestOmittedLinkRefusesNewAndClosesOpen(t *testing.T) {
 	}
 	if got := f.connects(); got != 1 {
 		t.Errorf("the primary got %d connect calls, want the 1 from before the link was omitted", got)
+	}
+
+	// An accept from the old node may reach carry only after the same ID is listed again.
+	f.primary.list(t, on(idA))
+	f.reconcile(t)
+	ours, theirs := net.Pipe()
+	defer theirs.Close()
+	go f.gateway.carry(context.Background(), idA, node, ours)
+	if !closed(t, theirs) || f.connects() != 1 {
+		t.Fatal("an accept from the stopped node reached the primary after the ID returned")
 	}
 }
 

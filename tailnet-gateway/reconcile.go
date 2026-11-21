@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -36,21 +37,12 @@ type held struct {
 	reached time.Time // zero until the connection reaches sshd
 }
 
-type clock interface {
-	Now() time.Time
-	After(time.Duration) <-chan time.Time
-}
-
-type systemClock struct{}
-
-func (systemClock) Now() time.Time                         { return time.Now() }
-func (systemClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
-
 type Gateway struct {
-	primary  Primary
+	primary  *Primary
 	factory  NodeFactory
 	stateDir string
-	clock    clock
+	now      func() time.Time
+	after    func(time.Duration) <-chan time.Time
 	dial     func(context.Context, string) (net.Conn, error)
 
 	// Reconcile alone writes links, nodes and removed. Other goroutines read them under mu.
@@ -62,9 +54,9 @@ type Gateway struct {
 	connects map[string][]time.Time
 }
 
-func NewGateway(p Primary, f NodeFactory, stateDir string) *Gateway {
+func NewGateway(p *Primary, f NodeFactory, stateDir string) *Gateway {
 	return &Gateway{
-		primary: p, factory: f, stateDir: stateDir, clock: systemClock{}, dial: dialWorker,
+		primary: p, factory: f, stateDir: stateDir, now: time.Now, after: time.After, dial: dialWorker,
 		nodes: map[string]Node{}, removed: map[string]bool{},
 		conns: map[string]map[net.Conn]*held{}, connects: map[string][]time.Time{},
 	}
@@ -77,16 +69,16 @@ func (g *Gateway) Run(ctx context.Context) {
 		defer close(done)
 		var posted StatusReport
 		var postedAt time.Time
-		tick := g.clock.After(reconcileEvery)
+		tick := g.after(reconcileEvery)
 		for ctx.Err() == nil {
 			select {
 			case <-ctx.Done():
 				return
 			case <-changed:
 			case <-tick:
-				tick = g.clock.After(reconcileEvery)
+				tick = g.after(reconcileEvery)
 			}
-			status, now := g.Status(), g.clock.Now()
+			status, now := g.Status(), g.now()
 			if reflect.DeepEqual(status, posted) && now.Sub(postedAt) < statusEvery {
 				continue
 			}
@@ -98,7 +90,6 @@ func (g *Gateway) Run(ctx context.Context) {
 			}
 		}
 	}()
-	defer func() { <-done }()
 	for ctx.Err() == nil {
 		if err := g.Reconcile(ctx); err != nil {
 			log.Printf("reconcile: %v", err)
@@ -109,9 +100,13 @@ func (g *Gateway) Run(ctx context.Context) {
 		}
 		select {
 		case <-ctx.Done():
-		case <-g.clock.After(reconcileEvery):
+		case <-g.after(reconcileEvery):
 		}
 	}
+	for id, node := range g.nodes {
+		g.closeNode(id, node)
+	}
+	<-done
 }
 
 func (g *Gateway) Reconcile(ctx context.Context) error {
@@ -131,26 +126,24 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 	// Revoke admissions and cancel pipes before any slow node operation.
 	g.mu.Lock()
 	var revoked []net.Conn
-	for id, open := range g.conns {
-		if link := listed[id]; link.Desired != "on" || link.AccessRevision != g.links[id].AccessRevision {
-			for conn, kept := range open {
-				kept.cancel()
-				revoked = append(revoked, conn)
-			}
-			delete(g.conns, id)
+	for id, previous := range g.links {
+		link := listed[id]
+		if link.Desired == "on" && previous.Desired == "on" && link.AccessRevision == previous.AccessRevision {
+			continue
 		}
-	}
-	g.links = listed
-	for id := range g.connects {
-		if listed[id].Desired != "on" {
+		for conn, kept := range g.conns[id] {
+			kept.cancel()
+			revoked = append(revoked, conn)
+		}
+		delete(g.conns, id)
+		if link.Desired != "on" {
 			delete(g.connects, id)
 		}
-	}
-	for id := range g.removed {
-		if listed[id].Desired != "removing" {
+		if link.Desired != "removing" {
 			delete(g.removed, id)
 		}
 	}
+	g.links = listed
 	g.mu.Unlock()
 	for _, conn := range revoked {
 		conn.Close()
@@ -208,10 +201,8 @@ func (g *Gateway) closeNode(id string, node Node) {
 func (g *Gateway) remove(ctx context.Context, link DesiredLink) bool {
 	dir := filepath.Join(g.stateDir, link.ID)
 	node := g.drop(link.ID)
-	if node == nil {
-		if _, err := os.Lstat(dir); err == nil {
-			node = g.startNode(link)
-		}
+	if _, err := os.Lstat(dir); node == nil && err == nil {
+		node = g.startNode(link)
 	}
 	if node != nil {
 		logoutCtx, cancel := context.WithTimeout(ctx, nodeCallTimeout)
@@ -231,8 +222,8 @@ func (g *Gateway) remove(ctx context.Context, link DesiredLink) bool {
 func (g *Gateway) Status() StatusReport {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	status := StatusReport{OpenConnections: map[string]int{}, Removed: make([]string, 0, len(g.removed))}
-	now := g.clock.Now()
+	status := StatusReport{OpenConnections: map[string]int{}, Removed: slices.Sorted(maps.Keys(g.removed))}
+	now := g.now()
 	for id, open := range g.conns {
 		for _, kept := range open {
 			if !kept.reached.IsZero() && now.Sub(kept.reached) >= countedAfter {
@@ -240,9 +231,5 @@ func (g *Gateway) Status() StatusReport {
 			}
 		}
 	}
-	for id := range g.removed {
-		status.Removed = append(status.Removed, id)
-	}
-	slices.Sort(status.Removed)
 	return status
 }

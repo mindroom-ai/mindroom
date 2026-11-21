@@ -31,14 +31,8 @@ type StatusReport struct {
 	Removed         []string       `json:"removed"`
 }
 
-type Primary interface {
-	Links(ctx context.Context) ([]DesiredLink, error)
-	PostStatus(ctx context.Context, report StatusReport) error
-	Connect(ctx context.Context, id, peerLogin, peerNode string) (host string, port int, err error)
-}
-
 type RefusedError struct {
-	StatusCode int
+	StatusCode int    `json:"-"`
 	Detail     string `json:"detail"`
 }
 
@@ -46,29 +40,32 @@ func (e *RefusedError) Error() string {
 	return fmt.Sprintf("primary answered %d: %s", e.StatusCode, e.Detail)
 }
 
-type httpPrimary struct {
-	baseURL string
-	token   string
-	client  *http.Client
+type Primary struct {
+	baseURL, token string
+	client         *http.Client
 }
 
-func NewPrimary(baseURL, token string) Primary {
+func NewPrimary(baseURL, token string) *Primary {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil // only the tailnet's control and relay traffic may use the proxy
-	return &httpPrimary{strings.TrimRight(baseURL, "/"), token, &http.Client{
+	return &Primary{strings.TrimRight(baseURL, "/"), token, &http.Client{
 		Transport:     transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
 }
 
-func (p *httpPrimary) call(ctx context.Context, timeout time.Duration, method, path string, body, out any) error {
+func (p *Primary) call(ctx context.Context, timeout time.Duration, method, path string, body, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	var raw []byte
+	var sent io.Reader
 	if body != nil {
-		raw, _ = json.Marshal(body) // only the gateway's string and integer wire types
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		sent = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, p.baseURL+path, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, method, p.baseURL+path, sent)
 	if err != nil {
 		return err
 	}
@@ -84,12 +81,9 @@ func (p *httpPrimary) call(ctx context.Context, timeout time.Duration, method, p
 	if out == nil && res.StatusCode == http.StatusNoContent {
 		return nil
 	}
-	answer, err := io.ReadAll(io.LimitReader(res.Body, maxAnswer+1))
+	answer, err := io.ReadAll(http.MaxBytesReader(nil, res.Body, maxAnswer))
 	if err != nil {
 		return err
-	}
-	if len(answer) > maxAnswer {
-		return errors.New("primary response exceeds size limit")
 	}
 	if out != nil && res.StatusCode == http.StatusOK {
 		return json.Unmarshal(answer, out)
@@ -101,7 +95,7 @@ func (p *httpPrimary) call(ctx context.Context, timeout time.Duration, method, p
 	return refused
 }
 
-func (p *httpPrimary) Links(ctx context.Context) ([]DesiredLink, error) {
+func (p *Primary) Links(ctx context.Context) ([]DesiredLink, error) {
 	var links []DesiredLink
 	if err := p.call(ctx, callTimeout, http.MethodGet, "/links", nil, &links); err != nil {
 		return nil, err
@@ -112,7 +106,7 @@ func (p *httpPrimary) Links(ctx context.Context) ([]DesiredLink, error) {
 	return links, nil
 }
 
-func (p *httpPrimary) PostStatus(ctx context.Context, report StatusReport) error {
+func (p *Primary) PostStatus(ctx context.Context, report StatusReport) error {
 	if report.OpenConnections == nil {
 		report.OpenConnections = map[string]int{}
 	}
@@ -122,11 +116,8 @@ func (p *httpPrimary) PostStatus(ctx context.Context, report StatusReport) error
 	return p.call(ctx, callTimeout, http.MethodPost, "/status", report, nil)
 }
 
-func (p *httpPrimary) Connect(ctx context.Context, id, peerLogin, peerNode string) (string, int, error) {
-	peer := struct {
-		PeerLogin string `json:"peer_login"`
-		PeerNode  string `json:"peer_node"`
-	}{peerLogin, peerNode}
+func (p *Primary) Connect(ctx context.Context, id, peerLogin, peerNode string) (string, int, error) {
+	peer := map[string]string{"peer_login": peerLogin, "peer_node": peerNode}
 	var target struct {
 		Host string `json:"host"`
 		Port int    `json:"port"`

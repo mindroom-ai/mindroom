@@ -27,13 +27,9 @@ func NewTsnetNode(loginServer, authKey string, tags []string) (NodeFactory, erro
 		// Listen starts the node without waiting for it to enroll.
 		listener, err := server.Listen("tcp", ":22")
 		if err != nil {
-			return nil, err
+			return nil, errors.New(strings.ReplaceAll(err.Error(), authKey, "[redacted]"))
 		}
-		client, err := server.LocalClient()
-		if err != nil {
-			server.Close()
-			return nil, err
-		}
+		client, _ := server.LocalClient() // Listen already started the server.
 		return &tsnetNode{server, client, listener}, nil
 	}, nil
 }
