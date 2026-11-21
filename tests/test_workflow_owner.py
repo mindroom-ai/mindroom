@@ -19,11 +19,13 @@ from mindroom.event_journal import ToolJobStore
 from mindroom.orchestration import tool_job_runtime as coordinator_module
 from mindroom.script_runs import manager as manager_module
 from mindroom.script_runs.models import ScriptRunState
+from mindroom.script_runs.reasons import RUNTIME_RESTARTED
 from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs.engine import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowRunState
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.tool_job_helpers import wait_for_status
-from tests.workflow_helpers import CallFailed, WorkflowStack, tool_args, workflow_stack
+from tests.workflow_helpers import CallFailed, WorkflowStack, set_run, tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -211,8 +213,12 @@ async def test_stop_that_a_restart_found_saved_delivers_the_report_of_a_run_that
         await wait(*waiter)
         return await asyncio.Event().wait()  # type: ignore[return-value]
 
+    dying: list[str] = []
+
     async def only_the_stop(store: ToolJobStore, job_id: str, job_json: str, *args: Any, **options: Any) -> None:  # noqa: ANN401
-        if '"cancel_requested"' not in job_json:
+        # The primary that dies saves the Stop and nothing after it; the next one saves as usual.
+        dying.append(store._runtime_generation)
+        if store._runtime_generation == dying[0] and '"cancel_requested"' not in job_json:
             msg = "MindRoom is gone."
             raise OSError(msg)
         await save(store, job_id, job_json, *args, **options)
@@ -224,10 +230,102 @@ async def test_stop_that_a_restart_found_saved_delivers_the_report_of_a_run_that
     await stack.jobs.cancel(handle["job_id"], owner=stack.context.execution_identity, depth=0)
     await stack.until(lambda: [job.status for job in stack.jobs.retained_jobs()] != ["cancel_requested"])
 
-    monkeypatch.setattr(ToolJobStore, "save", save)
     await stack.restart(kill=True)
-    await wait_for_status(stack.jobs, handle["job_id"], "completed")
+    await stack.until(lambda: stack.jobs.retained_jobs()[0].status in ("completed", "cancelled"))
 
     [job] = stack.jobs.retained_jobs()
     assert (job.status, await stack.collect(job)) == ("completed", "the report")
     assert (_run(stack).state, _run(stack).result) == (WorkflowRunState.COMPLETED, "the report")
+
+
+@pytest.mark.asyncio
+async def test_launch_for_an_owner_or_an_epoch_the_run_no_longer_has_starts_nothing(stack: WorkflowStack) -> None:
+    """Whoever launches says for whom and for which state of the run: a run that moved on is left as it is."""
+    run = stack.reserve(SCRIPT, owner="inline:the-call-that-waits")
+
+    for stale in ({"owner": "a-job-that-had-it-before"}, {"owner": run.owner, "epoch": run.epoch + 1}):
+        left = await stack.engine.launch(run.run_id, stack.context, **stale)
+        assert (left.state, left.attempt, stack.scripts.launched) == (WorkflowRunState.STARTING, 0, [])
+
+    launched = await stack.engine.launch(run.run_id, stack.context, owner=run.owner, epoch=run.epoch)
+    assert (launched.state, launched.attempt) == (WorkflowRunState.RUNNING, 1)
+
+
+@pytest.mark.asyncio
+async def test_pass_whose_launch_waited_while_another_owner_took_the_run_starts_nothing(stack: WorkflowStack) -> None:
+    """The pass names the owner and the epoch it judged, so its launch is no launch for whoever has the run by then."""
+    await stack.start(SCRIPT)
+    await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=RUNTIME_RESTARTED)
+    lock = stack.engine._condition(stack.run_id)
+    settle, settled = stack.engine.settle, asyncio.Event()
+
+    async def seen(*run: Any, **options: Any) -> WorkflowRun:  # noqa: ANN401
+        try:
+            return await settle(*run, **options)
+        finally:
+            await lock.acquire()
+            settled.set()
+
+    stack.engine.settle = seen  # type: ignore[method-assign]
+    passing = asyncio.create_task(stack.maintain())
+    await asyncio.wait_for(settled.wait(), SETTLE_TIMEOUT_SECONDS)
+    await asyncio.sleep(0.05)
+    # A cancel and a resume by a job, while the pass's launch waits for the run's lock.
+    set_run(stack.store, stack.run_id, state=WorkflowRunState.CANCELLED)
+    set_run(stack.store, stack.run_id, state=WorkflowRunState.STARTING, owner="the-job-of-a-resume")
+    lock.release()
+
+    assert await passing == []
+    assert (_run(stack).state, _run(stack).attempt, len(stack.scripts.launched)) == (WorkflowRunState.STARTING, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_stop_of_a_resume_that_never_took_its_run_is_no_report_of_that_run(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run is still its last owner's, report included: the stopped job ends cancelled, and the run stays as it ended."""
+    first = await _started(stack)
+    await stack.finish_attempt(result="the first report")
+    await _ended_job(stack, first["job_id"])
+    monkeypatch.setattr(stack.engine, "reopen", lambda *_args, **_options: asyncio.Event().wait())
+    handle = json.loads(await stack.call("resume_workflow", run_id=stack.run_id))
+
+    await stack.jobs.cancel(handle["job_id"], owner=stack.context.execution_identity, depth=0)
+    await wait_for_status(stack.jobs, handle["job_id"], "cancelled")
+
+    run = _run(stack)
+    assert (run.state, run.result, run.job_id) == (WorkflowRunState.COMPLETED, "the first report", first["job_id"])
+
+
+@pytest.mark.asyncio
+async def test_resume_call_delivered_again_while_its_run_still_runs_waits_for_that_run(stack: WorkflowStack) -> None:
+    """The second delivery of a call that waits for its run is no second resume: it is not told to cancel the run first."""
+    first = await _started(stack)
+    await stack.finish_attempt(result="the first report")
+    await _ended_job(stack, first["job_id"])
+    resume = {"depth": 1, "call_id": "one-resume", "run_id": stack.run_id}
+    calls = [asyncio.create_task(stack.call("resume_workflow", **resume))]
+    await stack.until(lambda: _run(stack).attempt == 2)
+
+    calls.append(asyncio.create_task(stack.call("resume_workflow", **resume)))
+    await asyncio.sleep(0.1)
+    await stack.finish_attempt(result="the second report")
+
+    assert await asyncio.gather(*calls) == ["the second report", "the second report"]
+    assert len(stack.scripts.launched) == 2
+
+
+@pytest.mark.asyncio
+async def test_attempt_after_an_interruption_starts_with_the_limits_the_agent_has_now(stack: WorkflowStack) -> None:
+    """The job's own context and limits are those of its call: a replay starts with what the live runtime answers."""
+    await _started(stack)
+    stack.limits = WorkflowLimits(max_tool_calls_per_minute=7)
+
+    await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=RUNTIME_RESTARTED)
+    assert await stack.maintain() == []
+    await stack.until(lambda: _run(stack).attempt == 2)
+
+    limits = stack.scripts.limits[-1]
+    assert limits is not None
+    assert limits.max_tool_calls_per_minute == 7
