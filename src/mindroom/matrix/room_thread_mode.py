@@ -43,10 +43,9 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
     """
     try:
         identities = prepared_entity_names_by_user_id(config, runtime_paths)
-        # The deadline covers the lock wait too, so a trigger queued behind other triggers waits at most 10 s.
-        async with asyncio.timeout(10):
-            # Serialize the comparison and write so concurrent triggers cannot send duplicate or stale values.
-            async with _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
+        # Serialize the comparison and write so concurrent triggers cannot send duplicate or stale values.
+        async with _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
+            async with asyncio.timeout(10):
                 room = client.rooms[room_id]
                 responders = configured_responder_entities_for_room(room, config, runtime_paths)
                 if responders is None:
@@ -79,8 +78,11 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
                     forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
                     log = logger.debug if forbidden else logger.warning
                     log("room_thread_mode_reconcile_failed", room_id=room_id, error=str(response))
-                    return False
+                    return None if forbidden else False
                 return True
+    except TimeoutError:
+        logger.warning("room_thread_mode_reconcile_failed", room_id=room_id, error="TimeoutError")
+        return False
     except Exception:
         logger.warning("room_thread_mode_reconcile_failed", room_id=room_id, exc_info=True)
         return False

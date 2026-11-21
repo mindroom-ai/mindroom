@@ -123,7 +123,7 @@ async def reconcile_held_room_states(runtime: OrchestratorRuntime) -> None:
     room_ids = {room_id for bot in bots if bot.client is not None for room_id in bot.client.rooms}
     stewards = ((runtime.room_steward(room_id), room_id) for room_id in room_ids)
     await asyncio.gather(
-        *(bot.steward_duties._reconcile_room_state(room_id) for bot, room_id in stewards if bot is not None),
+        *(bot.steward_duties._publish_room_state(room_id) for bot, room_id in stewards if bot is not None),
     )
 
 
@@ -153,10 +153,10 @@ class StewardDuties:
     _joined_room_ids: set[str] = field(default_factory=set, init=False, repr=False)
     # The marked-room publishes in flight, which run in the background so no sync frame waits for a room state read.
     _room_state_publishes: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
-    # The one background retry per room that a failed room state reconcile schedules.
+    # Durable joined_members serializes on nio's per-client crypto lock. Queue outside the reconcile deadlines.
+    _room_state_slot: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    # One backoff loop per failed room.
     _room_state_retries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
-    # Rooms where a trigger failed while their retry ran, so that retry runs once more.
-    _room_state_reruns: set[str] = field(default_factory=set, init=False, repr=False)
 
     @property
     def _is_owner(self) -> bool:
@@ -222,11 +222,7 @@ class StewardDuties:
         await asyncio.gather(*(self._publish_room_state(room_id) for room_id in room_ids))
 
     async def _publish_room_state(self, room_id: str) -> None:
-        """Reconcile one held room's thread mode and MindRoom accounts.
-
-        A failure, such as a reconcile that timed out queued behind a slower one, leaves the room to a background retry,
-        so the room catches up without another trigger while the caller still waits at most 10 s.
-        """
+        """Reconcile one held room and let transient failures retry without another trigger."""
         steward = self.deps.runtime.orchestrator.room_steward(room_id)
         if steward is not None and steward.agent_name != self.deps.hook_context.agent_name:
             # The election names another bot, as after a power or membership change: it publishes after its next frame.
@@ -241,30 +237,31 @@ class StewardDuties:
                 name="steward_room_state_retry",
                 owner=self.deps.runtime,
             )
-        else:
-            # This trigger may have held the room's locks until the retry ran out of time, so the retry runs once more.
-            self._room_state_reruns.add(room_id)
 
     async def _retry_room_state(self, room_id: str) -> None:
-        """Reconcile once, and once more if any trigger failed meanwhile; the retry's own failure ends it."""
-        while True:
-            self._room_state_reruns.discard(room_id)
-            await self._reconcile_room_state(room_id)
-            if room_id not in self._room_state_reruns:
-                return
+        """Retry a failed reconcile with capped exponential backoff while this bot stewards the room."""
+        delay = 1
+        try:
+            while self.is_steward(room_id):
+                await asyncio.sleep(delay)
+                if await self._reconcile_room_state(room_id):
+                    return
+                delay = min(delay * 2, 60)
+        finally:
+            self._room_state_retries.pop(room_id, None)
 
     async def _reconcile_room_state(self, room_id: str) -> bool:
-        """Reconcile one stewarded room's thread mode, MindRoom accounts and binding; return whether all are current."""
-        runtime = self.deps.runtime
-        client = runtime.client
-        if client is None or room_id not in client.rooms or not self.is_steward(room_id):
-            return True
-        current = await asyncio.gather(
-            reconcile_room_thread_mode(client, runtime.config, runtime.runtime_paths, room_id),
-            reconcile_room_accounts(client, runtime.config, runtime.runtime_paths, room_id),
-            reconcile_room_router_binding(client, room_id),
-        )
-        return all(current)
+        """Reconcile one stewarded room and return whether it needs no retry."""
+        async with self._room_state_slot:
+            runtime = self.deps.runtime
+            client = runtime.client
+            if client is None or room_id not in client.rooms or not self.is_steward(room_id):
+                return True
+            # Accounts and thread mode can both call joined_members, so do not contend with ourselves.
+            accounts = await reconcile_room_accounts(client, runtime.config, runtime.runtime_paths, room_id)
+            mode = await reconcile_room_thread_mode(client, runtime.config, runtime.runtime_paths, room_id)
+            binding = await reconcile_room_router_binding(client, room_id)
+            return accounts and mode is not False and binding
 
     async def member_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
         """Refresh responder presentation, the room's MindRoom accounts and the welcome, and emit human membership hooks."""

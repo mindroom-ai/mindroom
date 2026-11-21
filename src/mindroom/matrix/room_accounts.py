@@ -31,15 +31,14 @@ async def reconcile_room_accounts(
 ) -> bool:
     """Write the client's list of the room's joined MindRoom accounts when it changed and return whether it is current.
 
-    Failures leave it to the next trigger.
+    A write refused for lack of power does not need a retry until the room changes.
 
     The state key is the writing account's user ID, the room's steward, which Matrix lets only that account write.
     """
     try:
-        # The deadline covers the lock wait too, so a trigger queued behind other triggers waits at most 10 s.
-        async with asyncio.timeout(10):
-            # Serialize each read and write so a slower trigger cannot replace a newer list with an older one.
-            async with _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
+        # Serialize each read and write so a slower trigger cannot replace a newer list with an older one.
+        async with _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
+            async with asyncio.timeout(10):
                 members = await get_room_members(client, room_id)
                 if members is None:
                     return False
@@ -59,8 +58,11 @@ async def reconcile_room_accounts(
                     forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
                     log = logger.debug if forbidden else logger.warning
                     log("room_accounts_publish_failed", room_id=room_id, error=str(response))
-                    return False
+                    return forbidden
                 return True
+    except TimeoutError:
+        logger.warning("room_accounts_publish_failed", room_id=room_id, error="TimeoutError")
+        return False
     except Exception:
         logger.warning("room_accounts_publish_failed", room_id=room_id, exc_info=True)
         return False
@@ -100,6 +102,9 @@ async def reconcile_room_router_binding(client: nio.AsyncClient, room_id: str) -
                 log("room_router_binding_publish_failed", room_id=room_id, error=str(response))
                 return forbidden
             return True
+    except TimeoutError:
+        logger.warning("room_router_binding_publish_failed", room_id=room_id, error="TimeoutError")
+        return False
     except Exception:
         logger.warning("room_router_binding_publish_failed", room_id=room_id, exc_info=True)
         return False

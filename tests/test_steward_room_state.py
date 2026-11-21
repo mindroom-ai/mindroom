@@ -1192,53 +1192,59 @@ async def test_accounts_failure_is_nonfatal_and_retried(room_state: RoomState, f
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("earlier_triggers", [1, 2])
-async def test_joined_room_publish_waits_at_most_ten_seconds_behind_slow_triggers_in_its_room(
+async def test_startup_serializes_durable_membership_reads_per_bot(
     room_state: RoomState,
     monkeypatch: pytest.MonkeyPatch,
-    earlier_triggers: int,
 ) -> None:
-    """The reconcile timeout covers the wait for the room's lock, so a joined room's publish ends within 10 seconds."""
-    _config, _paths, _, _, client = room_state
-
-    async def unanswered(*_args: object, **_kwargs: object) -> None:
-        await asyncio.Future()
-
-    client.room_get_state_event.side_effect = unanswered
-    client.joined_members.side_effect = unanswered
+    """Slow but healthy member reads must not time out waiting in the same client's crypto queue."""
+    _, _, _, _, client = room_state
+    client.rooms = {f"!adhoc{i}:localhost": nio.MatrixRoom(f"!adhoc{i}:localhost", client.user_id) for i in range(3)}
+    client.room_get_state_event.side_effect = None
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError("missing", "M_NOT_FOUND")
+    client.room_put_state.side_effect = None
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$written", ROOM_ID)
     loop = asyncio.get_running_loop()
     now = 0
     monkeypatch.setattr(loop, "time", lambda: now)
-    setup = _room_setup(room_state)
-    triggers = [asyncio.create_task(setup.publish_room_state()) for _ in range(earlier_triggers)]
+    crypto_lock = asyncio.Lock()
+    pending = peak = 0
+
+    async def joined_members(room_id: str) -> nio.JoinedMembersResponse:
+        nonlocal pending, peak
+        pending += 1
+        peak = max(peak, pending)
+        try:
+            async with crypto_lock:
+                await asyncio.sleep(6)
+                return nio.JoinedMembersResponse([], room_id)
+        finally:
+            pending -= 1
+
+    client.joined_members.side_effect = joined_members
     duties = _router_duties(room_state)
-    duties.mark_joined_for_room_state(ROOM_ID)
-    frame = _publish_joined_rooms(duties)
-    while True:
-        # Drain ready callbacks and timeout cancellation without wall-clock sleeps.
-        for _ in range(20):
-            await asyncio.sleep(0)
-        if frame.done() or now == 60:
-            break
-        now += 1
-    assert frame.done()
-    assert now == 10
-    assert all(trigger.done() for trigger in triggers)
+    with capture_logs() as logs:
+        duties.publish_joined_room_state(every_room=True)
+        (frame,) = duties._room_state_publishes
+        for tick in range(50):
+            now = tick
+            for _ in range(30):
+                await asyncio.sleep(0)
+            if frame.done():
+                break
+        await frame
+    assert peak == 1
+    assert not [log for log in logs if log["event"].endswith("_failed")]
+    assert {write.args[0] for write in _writes(client, ACCOUNTS_EVENT_TYPE)} == client.rooms.keys()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("second_trigger", [None, "leave", "frame"])
-async def test_reconcile_that_times_out_behind_a_slow_one_is_retried(
+async def test_queued_reconciles_publish_latest_membership(
     room_state: RoomState,
     monkeypatch: pytest.MonkeyPatch,
     second_trigger: str | None,
 ) -> None:
-    """A member change whose reconcile times out in the room's queue still reaches the room state without another trigger.
-
-    Every accounts request takes 3 s: the reload holds the lock until 9 s, so agent2's leave times out at 14 s and its
-    retry starts. A second trigger at 6 s, agent1 leaving or a sync frame for the room, queues ahead of that retry, times
-    out at 16 s holding the lock and leaves the retry too little time, so the retry runs once more.
-    """
+    """A reload holding the room's lock does not prevent queued changes from publishing the latest accounts."""
     _config, _paths, ids, events, client = room_state
     loop = asyncio.get_running_loop()
     now = 0
@@ -1279,34 +1285,43 @@ async def test_reconcile_that_times_out_behind_a_slow_one_is_retried(
 
 
 @pytest.mark.asyncio
-async def test_failed_reconciles_are_retried_once_per_room(room_state: RoomState) -> None:
-    """Failures schedule one background retry per room, not one per trigger and not a loop."""
-    _, _, ids, _, client = room_state
-    client.room_put_state.side_effect = None
-    client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
-    duties = _router_duties(room_state)
-    event = _membership_event(ids["agent2"].full_id, "join", "leave")
-    await asyncio.gather(*(duties.member_event(client.rooms[ROOM_ID], event) for _ in range(2)))
-    for _ in range(50):
-        await asyncio.sleep(0)
-    # Two triggers, the retry, and one rerun for the trigger that failed while the retry ran; the retry's own failures
-    # schedule nothing.
-    assert len(_writes(client, ACCOUNTS_EVENT_TYPE)) == 4
+@pytest.mark.parametrize("lose_stewardship", [False, True])
+async def test_sweep_retries_failed_room_with_backoff(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+    lose_stewardship: bool,
+) -> None:
+    """Two timeouts do not strand a room; losing stewardship aborts the next attempt."""
+    _, _, _, _, client = room_state
+    bot = _owner_bot(room_state)
+    duties = bot.steward_duties
+    loop = asyncio.get_running_loop()
+    now = 0
+    monkeypatch.setattr(loop, "time", lambda: now)
+    write = client.room_put_state.side_effect
+    times: list[int] = []
 
+    async def fail_twice(room_id: str, event_type: str, content: dict, **kwargs: object) -> object:
+        if event_type == ACCOUNTS_EVENT_TYPE:
+            times.append(now)
+            if len(times) < 3:
+                raise TimeoutError
+        return await write(room_id, event_type, content, **kwargs)
 
-@pytest.mark.asyncio
-async def test_a_later_failure_gets_its_own_retry(room_state: RoomState) -> None:
-    """A failure after the room's earlier retry finished schedules another retry."""
-    _, _, ids, _, client = room_state
-    client.room_put_state.side_effect = None
-    client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
-    duties = _router_duties(room_state)
-    event = _membership_event(ids["agent2"].full_id, "join", "leave")
-    for expected_writes in (2, 4):
-        await duties.member_event(client.rooms[ROOM_ID], event)
-        for _ in range(50):
-            await asyncio.sleep(0)
-        assert len(_writes(client, ACCOUNTS_EVENT_TYPE)) == expected_writes
+    client.room_put_state.side_effect = fail_twice
+    with capture_logs() as logs:
+        await reconcile_held_room_states(duties.deps.runtime.orchestrator)
+        for now in range(6):
+            if now == 2 and lose_stewardship:
+                duties.deps.runtime.orchestrator.room_steward.return_value = None
+            for _ in range(30):
+                await asyncio.sleep(0)
+    assert times == ([0, 1] if lose_stewardship else [0, 1, 3])
+    assert not duties._room_state_retries
+    failures = [log for log in logs if log["event"] == "room_accounts_publish_failed"]
+    assert len(failures) == 2
+    assert all(log["error"] == "TimeoutError" and "exc_info" not in log for log in failures)
+    assert (_accounts(room_state) is None) == lose_stewardship
 
 
 @pytest.mark.asyncio
@@ -1357,7 +1372,7 @@ async def _hang_a_room_state_retry(duties: StewardDuties, state: RoomState) -> N
     async def refuse_then_hang(*_args: object, **_kwargs: object) -> nio.RoomPutStateError:
         if trigger_done:
             await asyncio.Future()
-        return nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+        return nio.RoomPutStateError("unavailable", "M_UNKNOWN")
 
     client.room_put_state.side_effect = refuse_then_hang
     await duties.member_event(client.rooms[ROOM_ID], _membership_event(ids["agent2"].full_id, "join", "leave"))
