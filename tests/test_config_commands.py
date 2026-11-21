@@ -44,7 +44,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_system.plugin_imports import SkippedPlugin
 from mindroom.tool_system.plugins import PluginReloadResult
-from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
@@ -594,12 +593,7 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
         requester_user_id="@alice:example.org",
     )
 
-    context.record_handled_turn.assert_called_once_with(
-        TurnRecord.create(
-            ["$event"],
-            response_event_id="$reply",
-        ),
-    )
+    context.record_handled_turn.assert_called_once_with("$reply")
 
 
 @pytest.mark.asyncio
@@ -840,7 +834,7 @@ async def test_config_preview_is_kept_locally_and_writes_no_room_state(
         restored.room_id,
         restored.thread_id,
     ) == ("defaults.markdown", False, False, "@alice:example.org", "!room:example.org", None)
-    context.record_handled_turn.assert_awaited_once_with(TurnRecord.create(["$event"], response_event_id="$preview"))
+    context.record_handled_turn.assert_awaited_once_with("$preview")
     client.room_put_state.assert_not_awaited()
     client.room_get_state.assert_not_awaited()
     client.room_get_state_event.assert_not_awaited()
