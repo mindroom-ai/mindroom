@@ -376,6 +376,8 @@ Matrix sync callback
 | `providers/names.py` | `provider_route`, the route a configured provider value selects with aliases such as `gemini` resolved, which model dispatch and the wire adapters compare, and `ROUTE_PROVIDERS`, the provider name of each route the provider registry builds, whose routes config validation accepts as a model's `provider`, in a module that imports nothing |
 | `providers/identity.py` | `model_identity`, a configured model's provider name and effective model ID read from its config alone, which every provider builder and pricing take |
 | `providers/anthropic/messages.py` | The Claude adapter (`ModelProvider`) for the direct API, Vertex AI, and Bedrock Mantle routes, with their client factories, error mapping, and `build_provider` |
+| `providers/claude_code/` | Claude Code subscription adapter: lazy SDK loading, isolated prompts and MCP tools, and parked process continuation |
+| `claude_sdk_process.py` | Shared Claude Agent SDK process ownership, message draining, and user-message envelope |
 | `providers/anthropic/settings.py` | Claude route settings parsed from `extra_kwargs` under Agno's field names, and the keys each route accepts |
 | `providers/anthropic/wire.py` | Claude Messages API formatting of messages and tools, and parsing of the finished response into an assistant message that stores its blocks once, in request shape |
 | `providers/anthropic/stored_turns.py` | The blocks a stored Claude assistant turn replays: its stored `claude_blocks`, or blocks rebuilt from its message fields, which never take a cache breakpoint |

@@ -108,6 +108,18 @@ def _sanitized_delivery_error_message(error: Exception) -> str:
     return _MATRIX_GENERIC_DELIVERY_ERROR_MESSAGE
 
 
+def _delivery_exception_site(error: Exception) -> str | None:
+    """Locate the innermost frame without exposing absolute paths or exception contents."""
+    frame = error.__traceback__
+    if frame is None:
+        return None
+    while frame.tb_next is not None:
+        frame = frame.tb_next
+    innermost = frame.tb_frame
+    module = innermost.f_globals.get("__name__", "<unknown>")
+    return f"{module}:{frame.tb_lineno} {innermost.f_code.co_name}"
+
+
 def _log_matrix_delivery_exception(
     client: nio.AsyncClient,
     error: Exception,
@@ -124,6 +136,7 @@ def _log_matrix_delivery_exception(
         operation=operation,
         cache_bypass=cache_bypass,
         exception_type=error.__class__.__name__,
+        exception_site=_delivery_exception_site(error),
         error_message=_sanitized_delivery_error_message(error),
     )
 

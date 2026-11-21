@@ -28,7 +28,7 @@ from google.genai.types import (
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
 from mindroom.llm.media import canonical_mime_type, file_text, image_mime_type, is_text_mime_type, rendered_label
-from mindroom.llm.messages import system_text, tool_result_view
+from mindroom.llm.messages import stored_tool_call, system_text, tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
@@ -598,14 +598,11 @@ def _read_part(reply: GeminiReply, part: Part) -> list[StreamEvent]:
                 events.append(TextDelta(part.text))
             _add_text(reply, part.text, signature)
     if part.function_call is not None:
-        call: dict[str, Any] = {
-            "id": part.function_call.id or str(uuid4()),
-            "type": "function",
-            "function": {
-                "name": part.function_call.name,
-                "arguments": "" if part.function_call.args is None else json.dumps(part.function_call.args),
-            },
-        }
+        call = stored_tool_call(
+            part.function_call.id or str(uuid4()),
+            part.function_call.name,
+            "" if part.function_call.args is None else json.dumps(part.function_call.args),
+        )
         if signature is not None:
             call["thought_signature"] = signature
         reply.tool_calls.append(call)

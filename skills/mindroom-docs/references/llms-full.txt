@@ -558,7 +558,7 @@ uvx mindroom run
 ```
 
 The generated `.env` lists the credentials the chosen preset needs; set them before running.
-See [`config init`](https://docs.mindroom.chat/cli/#config-init) for every option and the extra steps for the `codex`, `kimi`, `ollama`, and `llama.cpp` presets, and [Model Environment Variables](https://docs.mindroom.chat/configuration/models/#environment-variables) for each provider's credentials.
+See [`config init`](https://docs.mindroom.chat/cli/#config-init) for every option and the extra steps for the `codex`, `kimi`, `claude_code`, `ollama`, and `llama.cpp` presets, and [Model Environment Variables](https://docs.mindroom.chat/configuration/models/#environment-variables) for each provider's credentials.
 
 
 
@@ -2114,6 +2114,7 @@ The same model can have different IDs on different providers; check the [OpenAI]
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT login
 - `kimi` or `kimi_code` - Kimi models available through a local Kimi Code CLI login
+- `claude_code` - Claude models on your own Claude subscription, through a local Claude Code sign-in
 - `google` or `gemini` - Google Gemini models
 - `vertexai_claude` - Anthropic Claude models on Google Vertex AI
 - `ollama` - Local models via Ollama
@@ -2252,7 +2253,7 @@ models:
       base_url: http://localhost:8080/v1
 ```
 
-Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, as do downloads of media that tools return as URLs, OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
+MindRoom's own model clients, except `google`, `ollama`, and `synthetic`, verify an HTTPS endpoint's certificate against the operating system's trust store, as do downloads of media that tools return as URLs, OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
 Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces that store, so the file or directory must hold the public CAs too, for example the system CA bundle with the private CA appended.
 An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
 
@@ -2283,7 +2284,7 @@ Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a b
 A model key written as `${NAME}`, such as `api_key: ${OPENROUTER_TEAM_API_KEY}`, is read from that environment variable (or `NAME_FILE`), so two models of one provider can use different accounts while the keys stay out of `config.yaml`; the whole value must be the reference.
 When the variable is unset and that key is the one the model uses, `mindroom config validate` and `mindroom doctor` name it and replies fail with an error naming it; a key saved in the dashboard that overrides it prevents both.
 A model that authenticates another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or Vertex AI for `google` and `gemini`) never receives the shared key.
-`codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
+`codex`, `kimi`, `claude_code`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 
 Shared API keys are read from these variables:
 
@@ -2491,6 +2492,62 @@ Kimi K3.1 Pro and K3 reason before replying by default, so responses include rea
 Setting `extra_kwargs.reasoning_effort` to `none` makes K3.1 Pro requests fail with HTTP 400, while K3 then answers with K2.8 Preview without reasoning.
 The adapter depends on the Kimi Code CLI login format and backend, so a Kimi Code update can require a MindRoom update.
 
+## Claude Models with a Claude Subscription
+
+Use `provider: claude_code` to run Claude on your own Claude Pro, Max, Team, or Enterprise subscription instead of the billed Anthropic API.
+MindRoom runs the Claude Code CLI you signed in to, and that CLI talks to Anthropic.
+The agent keeps MindRoom's tools, memory, history, and approvals; Claude Code's own tools, skills, memory files, and your user and project settings and hooks are off.
+Managed settings an administrator installed for Claude Code on the machine, such as `/etc/claude-code/managed-settings.json`, still apply, including any hooks they define.
+Use it for a personal deployment that runs as the subscriber: every reply the agent gives, to anyone who may talk to it, counts toward that one subscription's limits.
+No reply is billed to an API key, but that does not mean no extra charge: Claude Code follows your Claude account's extra-usage setting.
+With extra usage turned on, replies continue past the plan's included usage and Anthropic charges the account for them; turn it off in your Claude account's usage settings if you want a hard limit.
+
+Set it up as the user that runs MindRoom:
+
+1. Install [Claude Code](https://code.claude.com/docs/en/setup) 2.1.328 or later.
+2. Run `claude auth login` and sign in with the subscription.
+3. Install the Claude Agent SDK with `pip install 'mindroom[claude_agent]'`; MindRoom installs it on first use unless auto-install is off.
+
+`mindroom config init --provider claude_code` generates this config (see [CLI](https://docs.mindroom.chat/cli/)):
+
+```yaml
+models:
+  default:
+    provider: claude_code
+    id: claude-sonnet-5-5
+    context_window: 200000
+  haiku:
+    provider: claude_code
+    id: claude-haiku-5-5
+    context_window: 200000
+
+router:
+  model: haiku
+
+defaults:
+  thread_summary_model: haiku
+```
+
+The `id` is any model ID or alias Claude Code takes for `--model`, such as `claude-opus-5-5` or `opus`, within what the plan includes.
+`extra_kwargs` accepts `cli_path`, the `claude` executable to run, and `effort`, one of `low`, `medium`, `high`, `xhigh`, or `max`.
+Without `cli_path`, MindRoom runs the `claude` on its `PATH`, and when there is none, the copy the Claude Agent SDK ships, which uses the same sign-in.
+MindRoom never reads Claude Code's credentials, ignores an authored `api_key`, and does not accept a token, endpoint, or headers for this provider.
+The provider supports text and image input; the model is told when an audio, video, or file attachment was left out.
+Use [reasoning levels](#reasoning-levels) to select effort with a model reference like `opus@high`.
+These conversations do not appear in Claude Code's own session history.
+MindRoom runs at most 8 Claude Code processes at a time; while all 8 are answering, another reply is retried and fails if none finishes meanwhile.
+[`mindroom doctor`](https://docs.mindroom.chat/cli/#doctor) starts Claude Code without sending it a prompt and reports the first three cases below.
+
+A reply fails with a message that names the fix in these cases:
+
+- Claude Code or the Claude Agent SDK is missing, or Claude Code is older than 2.1.328: install the required dependency or run `claude update`.
+- Claude Code is not signed in to a Pro, Max, Team, or Enterprise plan: run `claude auth login` as the user that runs MindRoom.
+- MindRoom's process environment sets a variable that Claude Code would use in place of the subscription sign-in, or to send it somewhere else: remove it from that environment.
+  These are every variable whose name starts with `ANTHROPIC_` or `CLAUDE_CODE_`, whatever its value, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`, and `CLAUDE_AUTO_BACKGROUND_TASKS`.
+  `CLAUDE_CODE_ENTRYPOINT` and the variables MindRoom sets for Claude Code itself are allowed.
+  The same variables in the `.env` beside `config.yaml` are fine, since only MindRoom's own `anthropic` models read them there.
+- The plan's usage limit is reached: the message gives the time the limit resets when Claude Code reports it.
+
 ## OpenRouter Provider Routing
 
 OpenRouter routes each request to one of several upstream providers serving the model, and upstream quality varies.
@@ -2613,6 +2670,7 @@ A null, empty, or whitespace-only `base_url`, `project_id`, `region`, `location`
 | `openai` with Responses | `api_key`, `base_url`, `cache_system_prompt`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `include`, `max_output_tokens`, `max_tool_calls`, `metadata`, `organization`, `parallel_tool_calls`, `reasoning`, `reasoning_effort`, `reasoning_summary`, `request_params`, `service_tier`, `store`, `strict_output`, `temperature`, `timeout`, `top_p`, `truncation`, `user`, `verbosity` |
 | `codex` | The Responses keys without `max_output_tokens` and `temperature`, which the Codex endpoint rejects, plus `codex_home`, `default_instructions`, `prompt_cache_key`, and `session_id` |
 | `anthropic` | `api_key`, `auth_token`, `base_url`, `betas`, `cache_system_prompt`, `client_params`, `context_management`, `default_headers`, `extended_cache_time`, `max_tokens`, `output_config`, `request_params`, `stop_sequences`, `temperature`, `thinking`, `timeout`, `top_k`, `top_p` |
+| `claude_code` | `api_key`, `cli_path`, `effort` |
 | `vertexai_claude` | The `anthropic` keys without `auth_token`, plus `project_id` and `region` |
 | `bedrock_claude` | The `anthropic` keys without `auth_token` and `base_url`, plus `aws_access_key`, `aws_profile`, `aws_region`, `aws_secret_key`, and `aws_session_token` |
 | `google`, `gemini` | `api_key`, `cached_content`, `client_params`, `frequency_penalty`, `generation_config`, `generative_model_kwargs`, `include_thoughts`, `location`, `logprobs`, `max_output_tokens`, `presence_penalty`, `project_id`, `safety_settings`, `search`, `seed`, `stop_sequences`, `temperature`, `thinking_budget`, `thinking_level`, `timeout`, `top_k`, `top_p`, `vertexai` |
@@ -2769,6 +2827,7 @@ MindRoom sends the level in the setting the provider reads, and the block wins o
 | `zai` | `reasoning_effort: L` | no `off` level |
 | `deepseek` | `reasoning_effort: L`, `use_thinking: true` | `use_thinking: false` |
 | `anthropic`, `vertexai_claude`, `bedrock_claude` | `output_config.effort: L`, and an authored `thinking: {type: disabled}` is dropped | `thinking: {type: disabled}`, and an authored `output_config.effort` is dropped |
+| `claude_code` | `effort: L` (no `minimal` level) | no `off` level |
 | `google` | `thinking_level: L` | `thinking_budget: 0` |
 | `ollama` | `think: L` | `think: false` |
 
@@ -2776,7 +2835,7 @@ Write `off` in quotes, as in `levels: ["off", low, high]` or `default: "off"`, b
 `groq`, `cerebras`, and `synthetic` take no level, so a `reasoning` block on them fails config load.
 Z.ai has no setting MindRoom can switch thinking off with, so listing `off` for a `zai` model fails config load too; set `extra_kwargs.extra_body.thinking` yourself on a separate model entry.
 MindRoom does not know which levels each model accepts, so list only levels the model supports; a level it rejects fails the reply with the provider's error, like a wrong `extra_kwargs` value.
-For example, Claude 5 models reject disabled thinking, so do not list `off` for them.
+Claude 5 models reject disabled thinking, so do not list `off` for them.
 `request_params` and `extra_body` still win over the block.
 
 To replace per-level entries such as `opus` and `opus_high`, add a `reasoning` block to `opus`, point references at `opus@high`, and delete `opus_high`.
@@ -16521,6 +16580,7 @@ update_agent({"role": "Answer in two sentences.", "instructions": None})
 
 `claude_agent` keeps Claude Agent SDK coding sessions alive across turns, so an agent can hand multi-step coding work to Claude Code and keep talking to the same session.
 It runs code in the primary runtime and cannot run in a worker, so enable it only for agents trusted with everything the primary runtime can reach; see [Security Posture](https://docs.mindroom.chat/architecture/security-posture/#file-access).
+To make Claude on a Claude subscription the agent's own model, with MindRoom's tools instead of Claude Code's, use the [`claude_code` model provider](https://docs.mindroom.chat/configuration/models/#claude-models-with-a-claude-subscription) instead.
 
 The tool exposes `claude_start_session()`, `claude_send()`, `claude_session_status()`, `claude_interrupt()`, and `claude_end_session()`.
 `claude_send()` creates the session if needed, so `claude_start_session()` is optional.
@@ -18092,6 +18152,7 @@ Every team's Mem0 records share one store, so the merge moves only records of th
 The one-time conversions of a database from an earlier release read its rows as untrusted input and write its `.pre-storage-v2` or `.pre-storage-v4` backup without following links, so worker code that tampers with a database can break only that agent's or team's history.
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
+The Claude Code model route keeps its empty working directory and temporary system-prompt files under primary-only `claude_code/` and refuses to use either directory if it is a symlink.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
 Knowledge indexes, including private agents' indexes and their publication and refresh-status files, live in the primary-only `knowledge_db/` storage directory, like knowledge Git directories, so no worker can write the index files the primary opens.
 
@@ -26696,7 +26757,7 @@ For hosted MindRoom Chat, `mindroom run` runs this setup interactively on first 
 | --- | --- |
 | `--path`, `-p` | Where to write `config.yaml`; `.env` goes in the same directory. Defaults to the auto-detected location, usually `~/.mindroom/config.yaml`. |
 | `--matrix-server` | Where MindRoom creates Matrix users and rooms: `mindroom.chat` (hosted, default) or `self-hosted` (your own homeserver). |
-| `--provider` | Default model provider: `anthropic`, `azure`, `bedrock_claude`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`; defaults to `openai`, except that `self-hosted` in a terminal asks. |
+| `--provider` | Default model provider: `anthropic`, `azure`, `bedrock_claude`, `claude_code`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`; defaults to `openai`, except that `self-hosted` in a terminal asks. |
 | `--print` | Print the generated `config.yaml` with syntax highlighting without writing `config.yaml`, `.env`, or starter workspace files. |
 | `--no-input` | Never prompt: keep an existing `config.yaml` unchanged, create anything missing, and use `openai` unless `--provider` is given. |
 | `--force` | Overwrite without asking: replaces `config.yaml`, `.env` (including API keys and pairing credentials), the Mind starter workspace files such as `MEMORY.md` and `USER.md`, and the `AGENTS.md` beside the config; back up anything you want to keep first. |
@@ -26724,6 +26785,7 @@ Some presets need a local login or server before MindRoom can answer:
 
 - `codex`: run `codex login` first; see [Codex Models](https://docs.mindroom.chat/configuration/models/#codex-models-with-chatgpt-login) for the generated models.
 - `kimi`: run `kimi` and `/login` first; see [Kimi Models](https://docs.mindroom.chat/configuration/models/#kimi-models-with-kimi-code-login).
+- `claude_code`: run `claude auth login` first; see [Claude Models with a Claude Subscription](https://docs.mindroom.chat/configuration/models/#claude-models-with-a-claude-subscription).
 - `ollama`: generates `gemma4` as `default` and `qwen3.8:27b` as `qwen3_8_27b`, each loaded with a 32,768-token context (see [Ollama Context Size](https://docs.mindroom.chat/configuration/models/#ollama-context-size) to change it), with `OLLAMA_HOST=http://localhost:11434`; pull both models first with `ollama pull gemma4` and `ollama pull qwen3.8:27b`.
 - `llama.cpp`: generates Unsloth GGUF models for a llama.cpp server at `http://localhost:8080/v1`; start it with one of the configured model refs:
 
@@ -26782,6 +26844,7 @@ It checks, in one pass:
   Doctor also warns about each environment variable a model needs but nothing sets, such as a missing key, Bedrock region, or Azure endpoint, as `config validate` does.
   Doctor checks the key the runtime uses, whether it comes from the environment or was saved in the dashboard, and names its source (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment)).
   Doctor skips the key check and reports it as not checked for a model that uses a custom endpoint, meaning its config sets an endpoint or headers (such as `base_url` or `default_headers`) or its provider's endpoint variable (such as `OPENAI_BASE_URL`) is set.
+  For `claude_code` models, doctor starts Claude Code without sending it a prompt; see [Claude Models with a Claude Subscription](https://docs.mindroom.chat/configuration/models/#claude-models-with-a-claude-subscription) for what the check reports.
 - **Memory config**: the memory LLM and embedder are reachable (Ollama, OpenAI embeddings, sentence-transformers).
 - **Matrix homeserver**: the homeserver answers `/_matrix/client/versions`.
 - **Pairing**: on hosted installs, whether this machine is paired with MindRoom Chat; before the first run it passes with `Not paired yet`, because `mindroom run` pairs automatically.

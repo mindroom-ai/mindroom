@@ -310,5 +310,5 @@ def test_runtime_dependency_requires_released_durable_nio() -> None:
         "1.4.0", "1.4.1",
     ):  # fmt: skip
         assert Version(older) not in requirement.specifier
-    assert Version("1.4.2") in requirement.specifier
+    assert Version("1.4.3") in requirement.specifier
     assert Version("2.0.0") not in requirement.specifier

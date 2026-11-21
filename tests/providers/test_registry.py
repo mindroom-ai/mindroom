@@ -35,6 +35,7 @@ from mindroom.llm.request_context import bind_request_headers
 from mindroom.providers import names
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
+from mindroom.providers.claude_code.adapter import ClaudeCodeProvider
 from mindroom.providers.gemini.adapter import GeminiProvider
 from mindroom.providers.identity import model_identity
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -47,7 +48,7 @@ from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_G
 from mindroom.providers.registry import build_model_provider, stream_idle_timeout_seconds
 from mindroom.providers.synthetic_adapter import SyntheticProvider
 from tests.agno_parity.golden_files import render
-from tests.providers.bare_adapter import bare_adapter
+from tests.providers.bare_adapter import bare_adapter, drain_into
 from tests.providers.golden_support import (
     FIXTURE_ROOT,
     Wire,
@@ -65,7 +66,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider, StreamEvent
+    from mindroom.llm.provider import StreamEvent
 
 _GOOGLE_TOKEN = "parity-google-token"  # noqa: S105 - synthetic SDK credential
 _BAD_REQUEST = {"type": "error", "error": {"type": "invalid_request_error", "message": "bad", "code": 400}}
@@ -94,12 +95,6 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 def _user(text: str = "Hi", **media: Any) -> Message:  # noqa: ANN401 - media fields
     return Message(role="user", content=text, **media)
-
-
-async def _collect(provider: ModelProvider, request: ModelRequest, events: list[StreamEvent]) -> None:
-    """Append each event of one request to ``events``, which keeps them when the request fails."""
-    async for event in provider.stream(request):
-        events.append(event)  # noqa: PERF401 - a comprehension would lose the events when the stream raises
 
 
 def _texts(gemini_body: dict[str, Any]) -> list[str]:
@@ -183,6 +178,11 @@ _ROUTES: dict[str, tuple[dict[str, Any], type, str]] = {
     "deepseek": ({"provider": "deepseek", "id": "deepseek-flash"}, ChatAdapter, "DeepSeek"),
     "zai": ({"provider": "zai", "id": "glm-5.3"}, ChatAdapter, "ZAI"),
     "synthetic": ({"provider": "synthetic", "id": "lorem-ipsum"}, SyntheticProvider, "Synthetic"),
+    "claude_code": (
+        {"provider": "claude_code", "id": "claude-sonnet-5-5", "extra_kwargs": {"effort": "low"}},
+        ClaudeCodeProvider,
+        "Anthropic (Claude Code)",
+    ),
 }
 
 
@@ -287,7 +287,7 @@ def test_config_load_rejects_an_unknown_provider_at_its_model() -> None:
     assert iter_config_validation_messages(info.value) == [
         (
             "models → default → provider",
-            "Unknown provider 'opneai': use one of anthropic, azure, bedrock_claude, cerebras, codex, "
+            "Unknown provider 'opneai': use one of anthropic, azure, bedrock_claude, cerebras, claude_code, codex, "
             "deepseek, google, groq, kimi, llama_cpp, ollama, openai, openrouter, synthetic, vertexai_claude, zai",
         ),
     ]
@@ -320,7 +320,7 @@ def test_every_model_name_config_load_accepts_builds(name: str, runtime_paths: R
 def test_config_accepts_exactly_the_providers_the_registry_builds() -> None:
     claude_routes = frozenset(get_args(ClaudeRouteKind.__value__))
 
-    assert OPENAI_FAMILY_PROVIDERS | claude_routes | {"google", "ollama", "synthetic"} == PROVIDER_ROUTES
+    assert OPENAI_FAMILY_PROVIDERS | claude_routes | {"claude_code", "google", "ollama", "synthetic"} == PROVIDER_ROUTES
 
 
 def test_the_dashboard_provider_fixture_lists_exactly_the_values_config_load_accepts() -> None:
@@ -868,6 +868,28 @@ async def test_routes_without_api_keys_never_send_a_configured_one(
 _LEVELS = {"levels": ["low", "high"], "default": "low"}
 
 
+@pytest.mark.parametrize(("reference", "level"), [("target", "low"), ("target@high", "high")])
+def test_claude_code_reasoning_level_overrides_authored_effort(
+    runtime_paths: RuntimePaths,
+    reference: str,
+    level: str,
+) -> None:
+    """Claude Code uses the selected reasoning level, not an authored effort for the same model."""
+    model = ModelConfig(provider="claude_code", id="m", reasoning=_LEVELS, extra_kwargs={"effort": "max"})
+    provider = build_model_provider(Config(models={"target": model}), runtime_paths, reference)
+
+    assert provider.model_params["effort"] == level
+
+
+@pytest.mark.parametrize("level", ["off", "minimal"])
+def test_claude_code_rejects_unavailable_reasoning_levels(runtime_paths: RuntimePaths, level: str) -> None:
+    """A configured level Claude Code cannot represent fails instead of silently choosing another effort."""
+    model = ModelConfig(provider="claude_code", id="m", reasoning={"levels": [level], "default": level})
+
+    with pytest.raises(ValueError, match=rf"provider claude_code has no {level} level"):
+        build_model_provider(Config(models={"target": model}), runtime_paths, "target")
+
+
 def _sends(body: Any, expected: Any) -> bool:  # noqa: ANN401 - JSON values
     """Return whether ``body`` carries every value of ``expected``, recursing into objects."""
     if isinstance(expected, dict):
@@ -1105,7 +1127,7 @@ async def test_a_refusal_fails_the_request_once_and_its_usage_is_counted(
     events: list[StreamEvent] = []
 
     with capture_logs() as logs, pytest.raises(ModelSafeguardRefusal) as raised:
-        await _collect(provider, request, events)
+        await drain_into(events, provider, request)
 
     assert len(wire.requests) == 1
     assert (raised.value.provider, raised.value.retryable) == ("Anthropic", False)

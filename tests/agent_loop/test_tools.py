@@ -20,7 +20,6 @@ from structlog.testing import capture_logs
 from mindroom.agent_loop.tools import (
     _PROGRESS_FLUSH_SECONDS,
     MAX_CONSECUTIVE_TOOL_FAILURES,
-    MEDIA_FOLLOW_UP_TEXT,
     NO_OUTPUT_TEXT,
     PreparedTools,
     RefusedCall,
@@ -34,6 +33,7 @@ from mindroom.agent_loop.tools import (
     toolkit_instructions,
 )
 from mindroom.llm.events import ToolProgress
+from mindroom.llm.messages import MEDIA_FOLLOW_UP_TEXT
 from mindroom.llm.runs import FailingTool, RunRecord, ToolExecution
 from mindroom.redaction import REDACTION_FAILED, redact_sensitive_text
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext

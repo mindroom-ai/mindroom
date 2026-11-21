@@ -1722,11 +1722,37 @@ async def _router_welcomed_an_empty_room(tmp_path: Path, monkeypatch: pytest.Mon
     room = nio.MatrixRoom(room_id="!adhoc:localhost", own_user_id="@mindroom_router:localhost")
     room.members_synced = False
     members: list[nio.RoomMember] = []
-    bot.client = AsyncMock()
-    bot.client.rooms = {"!adhoc:localhost": room}
+    state: dict[tuple[str, str], dict[str, object]] = {}
+
+    async def get_state_event(
+        room_id: str,
+        event_type: str,
+        state_key: str = "",
+    ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        if event_type == "m.room.member" and any(member.user_id == state_key for member in members):
+            return nio.RoomGetStateEventResponse({"membership": "join"}, event_type, state_key, room_id)
+        content = state.get((event_type, state_key))
+        if content is None:
+            return nio.RoomGetStateEventError("Absent", "M_NOT_FOUND", room_id=room_id)
+        return nio.RoomGetStateEventResponse(content, event_type, state_key, room_id)
+
+    async def put_state(
+        room_id: str,
+        event_type: str,
+        content: dict[str, object],
+        state_key: str = "",
+    ) -> nio.RoomPutStateResponse:
+        state[event_type, state_key] = content
+        return nio.RoomPutStateResponse("$state", room_id)
+
+    bot.client = make_matrix_client_mock(user_id=room.own_user_id)
+    bot.client.rooms = {room.room_id: room}
     bot.client.joined_members = AsyncMock(
         side_effect=lambda room_id: nio.JoinedMembersResponse(members=list(members), room_id=room_id),
     )
+    # Membership events also reconcile room state; model a healthy homeserver for that work.
+    bot.client.room_get_state_event = AsyncMock(side_effect=get_state_event)
+    bot.client.room_put_state = AsyncMock(side_effect=put_state)
     bot.client.room_messages = AsyncMock(
         return_value=nio.RoomMessagesResponse(room_id="!adhoc:localhost", chunk=[], start="", end=None),
     )

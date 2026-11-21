@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import collections
 import typing
-from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
 from time import monotonic
@@ -15,9 +14,7 @@ from uuid import uuid4
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
-    ClaudeSDKClient,
     ClaudeSDKError,
-    CLIConnectionError,
     ResultMessage,
     SystemMessage,
     TextBlock,
@@ -26,6 +23,7 @@ from claude_agent_sdk import (
 )
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
+from mindroom.claude_sdk_process import ClaudeProcess, user_message
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
@@ -34,11 +32,6 @@ from mindroom.runtime_shutdown import close_at_process_shutdown
 from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.runtime_context import current_requester_id, get_tool_runtime_context
-
-if typing.TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
-    from claude_agent_sdk import Message
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 _VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = get_args(_PermissionMode)
@@ -50,7 +43,6 @@ _MIN_SESSION_TTL_SECONDS = 60
 # As often as the shortest TTL, so an idle session closes at most that long after its TTL passed.
 _SWEEP_INTERVAL_SECONDS = _MIN_SESSION_TTL_SECONDS
 _MAX_STDERR_LINES = 12
-_START_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 logger = get_logger(__name__)
 _SYNTHETIC_MODEL = "<synthetic>"
@@ -90,10 +82,7 @@ class _ClaudeSessionState:
 
     key: str
     namespace: str
-    client: ClaudeSDKClient
-    owner: asyncio.Task[None]
-    close_requested: asyncio.Event
-    messages: asyncio.Queue[Message | Exception]
+    process: ClaudeProcess
     model: str | None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     created_at: float = field(default_factory=monotonic)
@@ -156,17 +145,10 @@ class _ClaudeSessionManager:
                 # Evicted sessions close while this one starts, so a shutdown meanwhile waits for their closes.
                 closing = self._close_many(self._evict_if_needed_locked(namespace))
 
-                client = ClaudeSDKClient(options=options)
-                close_requested = asyncio.Event()
-                messages: asyncio.Queue[Message | Exception] = asyncio.Queue()
-                owner = await self._open(client, close_requested, messages)
                 session = _ClaudeSessionState(
                     key=session_key,
                     namespace=namespace,
-                    client=client,
-                    owner=owner,
-                    close_requested=close_requested,
-                    messages=messages,
+                    process=await ClaudeProcess.open(options),
                     model=options.model,
                     ttl_seconds=self._namespace_ttl_seconds(namespace),
                 )
@@ -258,51 +240,6 @@ class _ClaudeSessionManager:
     def _namespace_max_sessions(self, namespace: str) -> int:
         return self._namespace_limits.get(namespace, _DEFAULT_LIMITS)[1]
 
-    @staticmethod
-    async def _open(
-        client: ClaudeSDKClient,
-        close_requested: asyncio.Event,
-        messages: asyncio.Queue[Message | Exception],
-    ) -> asyncio.Task[None]:
-        """Connect on a task that owns the client and queues its messages until ``close_requested`` is set.
-
-        The SDK's reader tasks and subprocess copy the connecting context and live as long as the session,
-        which outlives the tool call and turn that open it; that turn's contextvars hold its Agent and tools.
-        """
-        connected = asyncio.get_running_loop().create_future()
-
-        async def own() -> None:
-            try:
-                await client.connect()
-            except Exception as exc:
-                # The SDK has already disconnected; the caller raises the failure.
-                connected.set_exception(exc)
-                return
-            except BaseException:
-                connected.cancel()
-                raise
-            queueing = asyncio.create_task(_queue_messages(client, messages), name="claude_session_messages")
-            connected.set_result(None)
-            try:
-                await close_requested.wait()
-            finally:
-                # What the SDK already holds still reaches ``messages`` while it disconnects.
-                try:
-                    await client.disconnect()
-                finally:
-                    queueing.cancel()
-
-        owner = asyncio.create_task(own(), name="claude_session", context=Context())
-        try:
-            await asyncio.shield(connected)
-        except BaseException:
-            owner.cancel()
-            await _drain_failed_start(owner)
-            if connected.done() and not connected.cancelled():
-                connected.exception()
-            raise
-        return owner
-
     def _close_many(self, sessions: list[_ClaudeSessionState]) -> asyncio.Future[list[None]]:
         """Start closing sessions that have left the manager, on tasks of their own that a stopped caller cannot cut short.
 
@@ -320,50 +257,16 @@ async def _close(session: _ClaudeSessionState) -> None:
     Such a turn is, for example, a stopped call's answer.
     """
     async with session.lock:
-        session.close_requested.set()
-        with suppress(Exception):
-            await session.owner
+        await session.process.close()
         turn = _ClaudeTurn()
-        while not session.messages.empty():
-            message = session.messages.get_nowait()
+        while not session.process.messages.empty():
+            message = session.process.messages.get_nowait()
             if isinstance(message, AssistantMessage):
                 _add_response(turn, message)
             elif isinstance(message, ResultMessage):
                 turn.result = message
                 await _record_turn_usage(turn, session.model, session.usage_owner, session.requester_id)
                 turn = _ClaudeTurn()
-
-
-async def _queue_messages(client: ClaudeSDKClient, messages: asyncio.Queue[Message | Exception]) -> None:
-    """Move every message Claude Code sends into ``messages``, ending with the error that ends the stream.
-
-    The SDK holds at most 100 unread messages and then stops reading Claude Code's output, which also carries the
-    replies to control requests such as ``set_model``; Claude Code keeps sending messages between calls.
-    """
-    try:
-        async for message in client.receive_messages():
-            messages.put_nowait(message)
-    except Exception as error:
-        messages.put_nowait(error)
-    else:
-        messages.put_nowait(CLIConnectionError("Claude Code stopped sending messages."))
-
-
-async def _drain_failed_start(owner: asyncio.Task[None]) -> None:
-    """Give the SDK a bounded chance to disconnect a start that nothing tracks yet, even when cancelled again.
-
-    The caller holds the session manager's lock and re-raises what interrupted the start, so a failing or stuck
-    disconnect is only logged.
-    """
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _START_CLEANUP_TIMEOUT_SECONDS
-    while not owner.done() and (remaining := deadline - loop.time()) > 0:
-        with suppress(asyncio.CancelledError):
-            await asyncio.wait({owner}, timeout=remaining)
-    if not owner.done():
-        logger.warning("Claude session cleanup timed out", timeout_seconds=_START_CLEANUP_TIMEOUT_SECONDS)
-    elif not owner.cancelled() and (error := owner.exception()) is not None:
-        logger.warning("Claude session cleanup failed", error=str(error))
 
 
 def _input_counts(usage: dict[str, typing.Any]) -> TokenCounts:
@@ -428,16 +331,6 @@ async def _record_turn_usage(
     except Exception as error:
         # Claude has already done the work, so a usage write failure must not hide its reply.
         logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
-
-
-async def _prompt_message(prompt: str, prompt_id: str) -> AsyncIterator[dict[str, typing.Any]]:
-    """Yield ``prompt`` as one user message whose ``uuid`` Claude Code echoes inside the turn that uses it."""
-    yield {
-        "type": "user",
-        "message": {"role": "user", "content": prompt},
-        "parent_tool_use_id": None,
-        "uuid": prompt_id,
-    }
 
 
 def _self_started(result: ResultMessage) -> bool:
@@ -714,10 +607,10 @@ class ClaudeAgentTools(Toolkit):
             try:
                 if session.model != resolved_model:
                     # A reused session runs each turn on that reply's model, such as an over-budget fallback.
-                    await session.client.set_model(resolved_model)
+                    await session.process.client.set_model(resolved_model)
                     session.model = resolved_model
                 prompt_id = str(uuid4())
-                await session.client.query(_prompt_message(trimmed_prompt, prompt_id))
+                await session.process.client.query(user_message(trimmed_prompt, uuid=prompt_id))
                 response = await self._collect_response(session, prompt_id)
             except Exception as exc:
                 # Any failure leaves the session unusable, such as a control request Claude Code never answered.
@@ -756,10 +649,10 @@ class ClaudeAgentTools(Toolkit):
         answered = False
 
         while True:
-            message = await session.messages.get()
+            message = await session.process.messages.get()
             if isinstance(message, Exception):
                 # The stream has ended, so a call already waiting for this session reads the same error.
-                session.messages.put_nowait(message)
+                session.process.messages.put_nowait(message)
                 raise message
             turn = turns[-1]
             if isinstance(message, UserMessage):
@@ -832,7 +725,7 @@ class ClaudeAgentTools(Toolkit):
             return f"No active Claude session for `{session_key}`."
 
         try:
-            await session.client.interrupt()
+            await session.process.client.interrupt()
             session.last_used_at = monotonic()
         except ClaudeSDKError as exc:
             return f"Failed to interrupt Claude session: {exc}"

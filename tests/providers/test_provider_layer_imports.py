@@ -33,11 +33,12 @@ OWNED_PROVIDER_MODULES = (
     "mindroom.providers.gemini.wire",
     "mindroom.providers.gemini.files",
     "mindroom.providers.ollama.adapter",
+    "mindroom.providers.claude_code.adapter",
     "mindroom.providers.synthetic_adapter",
     "mindroom.providers.registry",
 )
 # The provider SDKs, which load only when a model of their family is built.
-_PROVIDER_SDKS = ("anthropic", "google.genai", "ollama", "openai")
+_PROVIDER_SDKS = ("anthropic", "claude_agent_sdk", "google.genai", "ollama", "openai")
 
 # Imports each module in turn and reports the first one after which an Agno module is loaded.
 _PROBE = """
@@ -97,7 +98,13 @@ with tempfile.TemporaryDirectory() as root:
 
 @pytest.mark.parametrize(
     ("provider", "sdk"),
-    [("anthropic", "anthropic"), ("google", "google.genai"), ("ollama", "ollama"), ("openai", "openai")],
+    [
+        ("anthropic", "anthropic"),
+        ("claude_code", "claude_agent_sdk"),
+        ("google", "google.genai"),
+        ("ollama", "ollama"),
+        ("openai", "openai"),
+    ],
 )
 def test_building_a_model_loads_its_sdk_before_its_first_request(provider: str, sdk: str) -> None:
     """A model's first request imports none of its SDK: building the model loads it.
@@ -127,6 +134,7 @@ with tempfile.TemporaryDirectory() as root:
     paths = resolve_runtime_paths(config_path=config_path, storage_path=Path(root) / "data", process_env={})
     families = ("openai", "codex", "anthropic", "vertexai_claude", "google", "ollama")
     models = {name: {"provider": name, "id": "m", "extra_kwargs": {"timeout": 5}} for name in families}
+    models["claude_code"] = {"provider": "claude_code", "id": "m", "extra_kwargs": {"effort": "high"}}
     Config.validate_with_runtime({"models": {**models, "synthetic": {"provider": "synthetic", "id": "m"}}}, paths)
     print(json.dumps(sorted(set(sys.argv[1:]) & set(sys.modules))))
 """

@@ -8,19 +8,24 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, run_model_loop
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
+from mindroom.agent_loop.tools import PreparedTools
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import RunMetrics
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.tool_function import ToolGate
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Sequence
 
+    from mindroom.agent_loop.model_loop import LoopEvent, LoopHooks
     from mindroom.llm.events import RunEvent
+    from mindroom.llm.provider import ModelProvider, ModelRequest
+    from mindroom.llm.runs import AnyRunRecord, RunRequirement
     from mindroom.tool_system.tool_function import AdaptedToolkit
-    from tests.fakes.scripted_model import ScriptedModel
 
 
 def add(a: int, b: int) -> str:
@@ -73,7 +78,7 @@ def external(*tools: Callable[..., object], name: str = "delegate") -> AdaptedTo
 
 
 def spec(
-    model: ScriptedModel,
+    model: ModelProvider,
     *toolkits: AdaptedToolkit,
     max_tool_calls_per_turn: int | None = None,
 ) -> AgentSpec:
@@ -96,6 +101,39 @@ def context(run_id: str = "run-1", session_id: str = "session-1") -> RunContext:
         user_id="@alice:example.org",
         metadata={"room_id": "!r"},
     )
+
+
+def run_record() -> RunRecord:
+    """Return the default record for a model-loop test."""
+    return RunRecord(run_id="run-1", agent_id="code", metrics=RunMetrics())
+
+
+async def run_loop(
+    agent: AgentSpec,
+    messages: list[Message],
+    *,
+    hooks: LoopHooks = NO_HOOKS,
+    record: AnyRunRecord | None = None,
+    request_template: ModelRequest = EMPTY_REQUEST,
+    resumed: Sequence[RunRequirement] | None = None,
+) -> tuple[list[LoopEvent], AnyRunRecord]:
+    """Run a model loop to completion with the supplied hooks and record."""
+    record = record or run_record()
+    events = [
+        event
+        async for event in run_model_loop(
+            agent.model,
+            messages,
+            PreparedTools(functions=agent.functions),
+            record=record,
+            run=context(),
+            hooks=hooks,
+            max_tool_calls_per_turn=agent.max_tool_calls_per_turn,
+            request_template=request_template,
+            resumed=resumed,
+        )
+    ]
+    return events, record
 
 
 async def collect(events: AsyncIterator[RunEvent]) -> tuple[list[RunEvent], RunRecord]:

@@ -604,6 +604,16 @@ class TestConfigInit:
         [
             ("codex", "mindroom.chat", "Run `codex login` before starting MindRoom (Matrix homeserver is prefilled)"),
             ("codex", "self-hosted", "Set your Matrix homeserver and run `codex login` before starting MindRoom"),
+            (
+                "claude_code",
+                "mindroom.chat",
+                "Run `claude auth login` before starting MindRoom (Matrix homeserver is prefilled)",
+            ),
+            (
+                "claude_code",
+                "self-hosted",
+                "Set your Matrix homeserver and run `claude auth login` before starting MindRoom",
+            ),
             ("openai", "mindroom.chat", "Set your API keys (Matrix homeserver is prefilled)"),
             ("openai", "self-hosted", "Set your API keys and Matrix homeserver"),
         ],
@@ -1955,6 +1965,27 @@ class TestConfigInit:
 
         assert "\nOPENAI_API_KEY=your-openai-key-here" in f"\n{env_content}"
         assert "\n# OPENROUTER_API_KEY=your-openrouter-key-here" in f"\n{env_content}"
+
+    def test_config_init_claude_code_preset_runs_on_the_claude_subscription(self, tmp_path: Path) -> None:
+        """Config init --provider claude_code writes Claude Code models and no API key."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "claude_code"])
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert config["models"] == {
+            "default": {"provider": "claude_code", "id": "claude-sonnet-5-5", "context_window": 200_000},
+            "haiku": {"provider": "claude_code", "id": "claude-haiku-5-5", "context_window": 200_000},
+        }
+        loaded_config = load_config_yaml(target)
+        assert loaded_config.router.model == "haiku"
+        assert loaded_config.defaults.thread_summary_model == "haiku"
+        assert loaded_config.agents["mind"].model == "default"
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "Run `claude auth login` as the user that runs MindRoom" in env_content
+        assert "\nANTHROPIC_API_KEY=" not in env_content
+        assert "claude auth login" in normalize_console_output(result.output)
 
     def test_init_codex_preset_uses_codex_models(self, tmp_path: Path) -> None:
         """Config init --provider codex uses Codex ChatGPT-login defaults."""
@@ -3599,7 +3630,7 @@ class TestRunErrorHandling:
         )
         provider_guidance = (
             "mindroom config init --provider "
-            "{anthropic,azure,bedrock_claude,codex,kimi,llama.cpp,ollama,openai,openrouter,vertexai_claude}"
+            "{anthropic,azure,bedrock_claude,claude_code,codex,kimi,llama.cpp,ollama,openai,openrouter,vertexai_claude}"
         )
         assert provider_guidance in result.output
         assert "mindroom run --provider" in result.output

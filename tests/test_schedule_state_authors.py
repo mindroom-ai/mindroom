@@ -136,17 +136,30 @@ async def test_task_written_by_managed_bot_account_fires(tmp_path: Path, entity_
 
 
 @pytest.mark.asyncio
-async def test_creatorless_task_written_by_human_is_ignored_without_cancellation(tmp_path: Path) -> None:
+async def test_creatorless_task_written_by_human_is_ignored_without_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Human-written creatorless state is skipped on restore and in a running poll, never canceled."""
+    monkeypatch.setattr(scheduling, "_logged_unmanaged_authors", set())
     runtime_paths = schedule_runtime_paths(tmp_path)
     workflow = _workflow(created_by=None)
     client = _room_with_task(_pending_content(workflow), sender=HUMAN_ID)
 
+    second_task_id = "task2"
+    client.room_get_state.return_value.events.append(
+        scheduled_task_state_event(second_task_id, _pending_content(workflow), room_id=ROOM_ID, sender=HUMAN_ID),
+    )
     bot = scheduling_bot(client)
     runtime = scheduled_task_runtime(runtime_paths, bot, config=Config())
     with capture_logs() as logs:
+        assert await runtime.restore_room(bot, ROOM_ID) == 0
         restored = await runtime.restore_room(bot, ROOM_ID)
-    execute = await _run_once(client, workflow, runtime_paths)
+        execute = await _run_once(client, workflow, runtime_paths)
+        assert (
+            await scheduling.cancel_all_scheduled_tasks(client, ROOM_ID, runtime_paths)
+            == "No scheduled tasks to cancel."
+        )
 
     assert restored == 0
     assert not runtime._runners
@@ -155,13 +168,29 @@ async def test_creatorless_task_written_by_human_is_ignored_without_cancellation
     assert [entry for entry in logs if entry["event"] == "scheduled_task_state_ignored_unmanaged_author"] == [
         {
             "event": "scheduled_task_state_ignored_unmanaged_author",
-            "log_level": "warning",
+            "log_level": "info",
             "room_id": ROOM_ID,
-            "task_id": TASK_ID,
-            "event_id": f"$state_{TASK_ID}",
+            "count": 2,
             "sender": HUMAN_ID,
         },
     ]
+    rejected = [entry for entry in logs if entry["event"] == "scheduled_task_event_ignored_unmanaged_author"]
+    assert [entry["task_id"] for entry in rejected] == [
+        TASK_ID,
+        second_task_id,
+        TASK_ID,
+        second_task_id,
+        TASK_ID,
+        TASK_ID,
+        second_task_id,
+    ]
+    assert all(
+        entry["log_level"] == "debug"
+        and entry["event_id"] == f"$state_{entry['task_id']}"
+        and entry["room_id"] == ROOM_ID
+        and entry["sender"] == HUMAN_ID
+        for entry in rejected
+    )
 
 
 @pytest.mark.asyncio
