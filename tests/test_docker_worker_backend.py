@@ -95,6 +95,12 @@ if TYPE_CHECKING:
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _ROTATED_AUTH_TOKEN = "rotated-token"  # noqa: S105
 _TEST_UNSCOPED_WORKER_KEY = "v1:default:unscoped:code"
+_TAILNET_SECRET_NAMES = (
+    "MINDROOM_TAILNET_SSH_GATEWAY_TOKEN",
+    "TAILNET_SSH_AUTH_KEY",
+    "TAILNET_SSH_GATEWAY_TOKEN",
+    "TS_AUTHKEY",
+)
 _STALE_IMAGE_MISMATCH = WorkerProtocolMismatch(error="stale worker image", worker_is_newer=False)
 
 
@@ -1972,6 +1978,27 @@ def test_docker_worker_manifest_holds_no_docker_backend_settings(
     assert committed.process_env["MATRIX_HOMESERVER"] == "https://chat.example.test"
     leaked = {*committed.process_env, *committed.env_file_values} & set(backend_env)
     assert leaked == set()
+
+
+def test_docker_container_launch_and_manifest_omit_tailnet_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The primary's tailnet secrets stay out of the container even when regular extra env is enabled."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=dict.fromkeys(_TAILNET_SECRET_NAMES, "test-only"),
+    )
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+
+    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    env = fake_client.containers.run_calls[0]["environment"]
+    assert env["EXTRA_ENV"] == "present"
+    assert set(_TAILNET_SECRET_NAMES).isdisjoint(env)
+    committed = _committed_startup_runtime(backend, _TEST_UNSCOPED_WORKER_KEY)
+    assert all(committed.env_value(name) is None for name in _TAILNET_SECRET_NAMES)
 
 
 @pytest.mark.parametrize(
@@ -4232,6 +4259,23 @@ def test_docker_worker_config_rejects_reserved_extra_env_names_from_env(tmp_path
         match="MINDROOM_SANDBOX_PROXY_TOKEN, MINDROOM_STORAGE_PATH",
     ):
         DockerWorkerBackendConfig.from_runtime(runtime_paths)
+
+
+@pytest.mark.parametrize("name", _TAILNET_SECRET_NAMES)
+def test_docker_worker_config_rejects_tailnet_secrets_in_extra_env(tmp_path: Path, name: str) -> None:
+    """The Docker extra-env option cannot pass a tailnet secret directly to the container."""
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+            "MINDROOM_DOCKER_WORKER_ENV_JSON": json.dumps({name: "test-only"}),
+        },
+    )
+
+    with pytest.raises(WorkerBackendError, match=rf"reserved env vars: {name}") as error:
+        DockerWorkerBackendConfig.from_runtime(paths)
+    assert "test-only" not in str(error.value)
 
 
 @pytest.mark.parametrize("credentials_in_env_file", [False, True], ids=["exported", "env-file-under-blank-export"])

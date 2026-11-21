@@ -19,6 +19,7 @@ from mindroom.credentials.manager import runtime_credentials_manager_key
 from mindroom.runtime_env_policy import (
     DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
+    TAILNET_SSH_SECRET_ENV_NAMES,
     WORKER_BACKEND_ENV,
     WORKER_COMPUTER_ENABLED_ENV,
 )
@@ -93,6 +94,7 @@ _EXTRA_ENV_JSON_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"]
 _EXTRA_LABELS_JSON_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_labels_json"]
 DOCKER_RESERVED_EXTRA_ENV_NAMES = frozenset(
     {
+        *TAILNET_SSH_SECRET_ENV_NAMES,
         SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
     },
 )
