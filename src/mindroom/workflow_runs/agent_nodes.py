@@ -15,7 +15,7 @@ from mindroom.delegation.background import delegation_child
 from mindroom.delegation.execution import delegation_call_job
 from mindroom.delegation.lifecycle import authorize_delegation, prepare_child_turn, reload_stopped_child_result
 from mindroom.delegation.recovery import read_child_run
-from mindroom.delegation.state import RUN_SUBAGENT, SubagentPersona
+from mindroom.delegation.state import RESTART_INTERRUPTION_REASON, RUN_SUBAGENT, SPENT_RUNS_KEY, SubagentPersona
 from mindroom.delegation.targets import resolve_fresh_target
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, JobAccessError
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.runs import ToolExecution
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.workflow_runs.models import WorkflowNode, WorkflowRun
@@ -236,26 +237,38 @@ async def await_child(
 
 
 async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[ChildOutcome, dict[str, object] | None]:
-    """Return how the turn of an ended *job* ended and what it used, read from the child's own run.
+    """Return how the turn of an ended *job* ended and what it used, read from the child's own runs.
 
-    The answer is the run's, whole and as the child wrote it: not the job's text, which adds a receipt. A turn that a
-    restart or a configuration reload stopped is no answer: it is safe to run again while it had called no tool.
+    The answer is the run's, whole and as the child wrote it: not the job's text, which adds a receipt. The usage is
+    that of every run of the job: the ones restarts cut short, and the one it ended with. A turn that a restart or
+    a configuration reload stopped is no answer: it is safe to run again while none of its runs called a tool.
     """
     child = delegation_child(job)
-    record = await read_child_run(child, runtime.config, runtime.paths)
+    spent = [replace(child, run_id=run_id) for run_id in job.adapter.get(SPENT_RUNS_KEY, ())]
+    *cut_short, record = [await read_child_run(turn, runtime.config, runtime.paths) for turn in (*spent, child)]
     text = (record.handover_content if record is not None else None) or job.result or _NO_ANSWER
     usage: dict[str, object] | None = None
-    if record is not None:
-        spent = turn_usage(prior_usage_of(record), record.metrics)
-        tokens = (spent.tokens.input_tokens, spent.tokens.output_tokens) if spent is not None else (0, 0)
-        usage = dict(zip(("input_tokens", "output_tokens"), tokens, strict=True))
-        usage |= {"tool_calls": len(record.tools or ()), "cost_usd": child.cost_usd}
+    if records := [run for run in (*cut_short, record) if run is not None]:
+        used = [turn_usage(prior_usage_of(run), run.metrics) for run in records]
+        usage = {
+            "input_tokens": sum(metrics.tokens.input_tokens for metrics in used if metrics is not None),
+            "output_tokens": sum(metrics.tokens.output_tokens for metrics in used if metrics is not None),
+            "tool_calls": sum(len(run.tools or ()) for run in records),
+            "cost_usd": child.cost_usd,
+        }
     stopped = record is not None and reload_stopped_child_result(child, record) is not None
     if job.status == "interrupted" or stopped:
-        # A run is saved before its first tool call starts, so a turn without one, or without calls, made none. A
-        # turn that was continued before had a run before this one, which is not looked at: it may have made some.
-        called = (record is not None and bool(record.tools)) or "restart_continuations" in job.adapter
+        # A run is saved before its first tool call starts, so a turn none of whose runs holds a call made none. A
+        # call that waited for a person's decision when the restart came had not started, and its run says so. A
+        # run that was cut short and cannot be read may have made some.
+        made = [tool for run in records for tool in run.tools or () if tool.confirmed or not _never_started(tool)]
+        called = len(records) < len(spent) + (record is not None) or bool(made)
         return ("indeterminate" if called else "interrupted", text), usage
     if job.status == "completed":
         return ("completed", (record.handover_content if record is not None else None) or ""), usage
     return (job.status, text), usage
+
+
+def _never_started(tool: ToolExecution) -> bool:
+    """Return whether a call of a child's run still waited for a decision, or did when a restart ended its turn."""
+    return tool.is_paused or tool.result == RESTART_INTERRUPTION_REASON

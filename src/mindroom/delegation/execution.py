@@ -28,6 +28,7 @@ from mindroom.delegation.lifecycle import (
     live_delegation_config,
     note_child_run_id,
     observe_child_event,
+    original_prompt,
     prepare_child_turn,
     reserve_child_turn,
     running_child_id,
@@ -405,7 +406,7 @@ async def _execute_child(
     if response.status == RunStatus.completed:
         decision = continuation_decision_from_tools(
             stopped_calls(response.tools or ()),
-            original_prompt=child.task,
+            original_prompt=original_prompt(child),
             continuation_count=0,
         )
         if decision.continuation is not None:

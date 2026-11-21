@@ -635,7 +635,14 @@ class WorkflowEngine:
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle)
         node = await asyncio.to_thread(partial(self.store.put_node, node, run.epoch, dirty_after=same_as is None))
         kept = cast("list[str] | None", (run.persona or {}).get("tools"))
-        call = partial(self.broker.execute_for_workflow, attempt, call_id=call_id, grant=grant, arguments=arguments)
+        call = partial(
+            self.broker.execute_for_workflow,
+            attempt,
+            call_id=call_id,
+            grant=grant,
+            arguments=arguments,
+            waits=partial(self._node_waits, node, run.epoch),
+        )
         self._spawn(run.run_id, self._run_tool_node(node, run.epoch, grant, call, kept, lanes))
         return _receipt(node)
 
@@ -773,6 +780,12 @@ class WorkflowEngine:
                     return _receipt(node)
                 with suppress(TimeoutError):
                     await asyncio.wait_for(condition.wait(), min(remaining, _RECHECK_SECONDS))
+
+    def node_prompt(self, run_id: str, key: str | None, generation: int | None) -> str | None:
+        """Return the prompt of the agent call that is *generation* of the node at *key*, while the run still has it."""
+        node = self.store.get_node(run_id, key) if key else None
+        prompt = node.request.get("prompt") if node is not None and node.generation == generation else None
+        return prompt if isinstance(prompt, str) else None
 
     async def node(self, attempt: ScriptRunRecord, node_id: str) -> WorkflowNode:
         """Return one node of the attempt's run, for its whole result."""

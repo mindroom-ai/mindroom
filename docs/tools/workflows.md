@@ -135,8 +135,10 @@ A turn that fails raises `AgentError`, whose `kind` says how: `failed`, `cancell
 A turn that may not start, for example because the model name is unknown or the agent may not reply to the requester, is `refused` with the sentence `run_subagent` gives.
 Stopping one agent from the Sub-agents panel fails only that call with kind `cancelled`; the run goes on.
 
-While an agent's tool call waits for an approval, the call and the run show `waiting`, and that time is not charged to the run's [working time](#working-time).
-A denied card denies that one tool call, and the agent goes on with its turn.
+While an agent's tool call waits for an approval, the agent's call shows `waiting`, and so does the run when no other call of it is working.
+Time the run spends `waiting` is not charged to its [working time](#working-time).
+A denied card, and one that expired after `tool_approval.timeout_days`, denies that one tool call, and the agent goes on with its turn.
+A `tool()` or `shell()` call of the script that needs an approval shows `waiting` in the same way, and a denial raises `ToolError` with kind `denied`.
 
 The agents of a run are not listed among the conversation's background jobs: the run reports them, and `get_workflow` shows each as a node with the IDs of its job and subagent.
 An agent keeps running when the attempt that asked for it ends, and the next attempt waits for the same turn instead of starting another.
@@ -192,6 +194,15 @@ A run whose script had already returned its report ends with that report and get
 - While MindRoom cannot tell how the run's job stands, for example because background jobs are turned off, the run gets no attempt and its reservation stays.
 - A script process that cannot start yet because MindRoom is still cleaning up after its own start leaves the run `starting`; it starts within about a minute.
 - What the interrupted attempt left is settled at once: a report it had returned ends the run without waiting for any of the above.
+- An agent that was working when MindRoom stopped is not started again: its job is continued as the same subagent, as a [subagent job](agent-orchestration.md#background-jobs) is, and the next attempt waits for it.
+  The continued agent is sent the whole prompt of its call again, with an account of the tool calls it had made.
+  The call's usage is what the turn used before and after the restart together.
+- An agent that cannot be continued, for example after three restarts in a row or because its session is gone, ends its call.
+  When it had started no tool call, the call fails with kind `interrupted` and the next attempt runs it again as a new agent.
+  When it had, the call is `indeterminate` and is never run again on its own.
+- An agent that was waiting for an approval when MindRoom stopped ends in the same two ways, and its card is closed.
+  A tool call that was still waiting for its decision counts as not started.
+- A `tool()` or `shell()` call of the script that was waiting for an approval when MindRoom stopped never ran: the next attempt asks again with a new card.
 - After 5 attempts in a row that finish no call, the run ends `interrupted` with `Stopped resuming after 5 attempts that finished nothing. Fix the script and call resume_workflow.`
 - A run with no job, which is one that `start_workflow` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.
   When the call that waited for it is gone, nothing delivers the report; `get_workflow(run_id)` returns it in `result`.

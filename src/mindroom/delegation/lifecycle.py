@@ -772,4 +772,25 @@ def prepare_child_turn(
         persona=persona,
         dedicated_worker=dedicated_worker,
         worker_resource_profile=worker_resource_profile,
+        # A follow-up turn of a workflow run's agent is a turn of the same call of that run.
+        workflow_run_id=previous.workflow_run_id if previous is not None else None,
+        workflow_node_key=previous.workflow_node_key if previous is not None else None,
+        workflow_generation=previous.workflow_generation if previous is not None else None,
     )
+
+
+def original_prompt(child: DelegationChild) -> str:
+    """Return what the child's turn was first sent: its task, or for the agent of a workflow run its call's prompt.
+
+    The task of such a child is only the label of its call. The run keeps the prompt, and the run's engine, which
+    the orchestrator of the current tool context holds, is asked for it.
+    """
+    context = get_tool_runtime_context()
+    if child.workflow_run_id is None or context is None or context.orchestrator is None:
+        return child.task
+    prompt = context.orchestrator.workflow_engine.node_prompt(
+        child.workflow_run_id,
+        child.workflow_node_key,
+        child.workflow_generation,
+    )
+    return prompt or child.task

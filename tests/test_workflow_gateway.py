@@ -182,7 +182,8 @@ async def test_poll_returns_when_the_node_changes_and_after_wait_otherwise(
     stack.resolver.hold_approvals.set()
     changed = await held
 
-    assert (unchanged.json()["state"], waited >= 0.2) == ("running", True)
+    # The call waits for an approval, which the receipt says.
+    assert (unchanged.json()["state"], waited >= 0.2) == ("waiting", True)
     assert (changed.json()["state"], changed.json()["result"]) == ("completed", "appended")
     assert loop.time() - started < SETTLE_TIMEOUT_SECONDS
 

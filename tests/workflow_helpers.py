@@ -637,6 +637,15 @@ class WorkflowStack:
         self.models[agent] = ScriptedModel(list(turns))
         return self.models[agent]
 
+    async def continue_agents(self, *, joined: bool = True) -> None:
+        """Run the job coordinator's pass over the agents' jobs that a restart stopped, as a starting primary does.
+
+        Without *joined* the owner's bot is no longer in the run's room, so each job ends instead of going on.
+        """
+        await continue_stopped_jobs(
+            self.jobs, self.context.config, self.context.runtime_paths, self.context, joined=joined,
+        )
+
     def node_job(self, key: str) -> BackgroundJob:
         """Return the job of the agent node at *key*, as the job runtime holds it."""
         node = self.store.get_node(self.run_id, key)

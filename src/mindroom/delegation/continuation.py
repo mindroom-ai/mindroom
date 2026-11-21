@@ -8,11 +8,16 @@ from typing import TYPE_CHECKING
 from mindroom.ai import run_delegated_child_response
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.execution import delegation_call_job
-from mindroom.delegation.lifecycle import authorize_delegation, delegation_grant, prepare_child_turn
+from mindroom.delegation.lifecycle import (
+    authorize_delegation,
+    delegation_grant,
+    original_prompt,
+    prepare_child_turn,
+)
 from mindroom.delegation.personas import follow_up_refusal
 from mindroom.delegation.recovery import read_child_run, settled_subagent
 from mindroom.delegation.sessions import SubagentSessionError
-from mindroom.delegation.state import CONTINUE_SUBAGENT, interrupted_by_restart
+from mindroom.delegation.state import CONTINUE_SUBAGENT, SPENT_RUNS_KEY, interrupted_by_restart
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, is_recovered_run
 from mindroom.tool_system.events import format_tool_completed_event
@@ -112,6 +117,10 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
     )
     if not isinstance(spec, str):
         spec.adapter.update({_CONTINUATIONS_KEY: continuations + 1, _PROMPT_KEY: prompt})
+        if "workflow" in job.adapter:
+            # The job stays the call of its workflow run, which reads what each run of the call used and did.
+            spec.adapter.update({key: job.adapter[key] for key in ("workflow", "node", "generation")})
+            spec.adapter[SPENT_RUNS_KEY] = [*dict.fromkeys([*job.adapter.get(SPENT_RUNS_KEY, ()), child.run_id])]
     return spec
 
 
@@ -151,7 +160,7 @@ async def _continuation_prompt(
     continuation note, what it was sent, and an account of its run's calls: the child's history limits apply to the
     recovered run as to any turn, and may leave out both.
     """
-    sent = job.adapter.get(_PROMPT_KEY, child.task)
+    sent = job.adapter.get(_PROMPT_KEY) or original_prompt(child)
     if child.delegation_id != delegation_child(job).delegation_id:
         return sent
     run = await read_child_run(child, config, runtime_paths)

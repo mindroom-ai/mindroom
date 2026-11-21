@@ -1,0 +1,285 @@
+"""Tests for the agents of a workflow run across a restart of MindRoom, and for calls that wait for an approval.
+
+Level: engine harness (`WorkflowStack`) with the real job runtime and real delegation; each agent's model is scripted.
+A restart is the harness's `restart()`: the job runtime keeps the agents' jobs, and the coordinator's pass continues them.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING
+
+import pytest
+import pytest_asyncio
+
+from mindroom.approval import manager as approval_manager
+from mindroom.delegation.background import delegation_child
+from mindroom.event_journal import BackgroundApprovalDecision
+from mindroom.script_runs.models import ScriptRunState
+from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
+from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
+from tests.tool_job_helpers import JobApprovalCards, wait_for_status
+from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflow_stack
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
+
+    from mindroom.tool_jobs.runtime import BackgroundJob
+    from mindroom.workflow_runs.models import WorkflowNode
+
+_PROMPT: dict[str, object] = {"prompt": "Do the long task"}
+_APPEND = tool_args("counter", "append", line="a")
+
+
+async def _opened(stack: WorkflowStack, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(engine_module, "_RECHECK_SECONDS", 0.05)
+    stack.continues = lambda job: job.kind == "delegation"
+    await stack.open_jobs()
+    stack.script_agents(monkeypatch)
+    await stack.start()
+
+
+@pytest_asyncio.fixture
+async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
+    """The harness with the real job runtime, scripted agents and one started run; no tool asks for approval."""
+    with workflow_stack(tmp_path, extra_tools=("workflow",), require_approval=()) as stack:
+        await _opened(stack, monkeypatch)
+        yield stack
+        await stack.close()
+
+
+@pytest_asyncio.fixture
+async def gated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
+    """The same harness, whose operator asks for approval before `append` runs; `cards` holds the open cards."""
+    with workflow_stack(tmp_path, extra_tools=("workflow",)) as stack:
+        await _opened(stack, monkeypatch)
+        cards = JobApprovalCards(asyncio.get_running_loop().create_future(), stack.jobs.journal)
+        monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
+        stack.cards = cards  # type: ignore[attr-defined]
+        yield stack
+        if not cards.decision.done():
+            cards.decision.cancel()
+        await stack.close()
+
+
+def _node(stack: WorkflowStack, key: str = "@0") -> WorkflowNode:
+    node = stack.store.get_node(stack.run_id, key)
+    assert node is not None
+    return node
+
+
+def _node_jobs(stack: WorkflowStack) -> list[BackgroundJob]:
+    return [job for job in stack.jobs.retained_jobs() if job.kind == "delegation"]
+
+
+def _sent(stack: WorkflowStack, request: int = -1) -> str:
+    """Return what the owner's copy was sent as the user's message of one of its model requests."""
+    messages = stack.models["watcher"].requests[request].messages
+    return str([message.content for message in messages if message.role == "user"][-1])
+
+
+async def _working(stack: WorkflowStack, *, after_append: bool) -> None:
+    """Submit the agent call and leave its turn hanging in a model request, after one `append` or before any call."""
+    hang = [Await(asyncio.Event().wait), *answer("never")]
+    turns = [calls(tool_call("append", "c1", line="a"), metrics=usage(7, 2)), hang] if after_append else [hang]
+    model = stack.child_script(*turns)
+    await stack.submit("@0", "agent", _PROMPT)
+    await stack.until(lambda: len(model.requests) == len(turns))
+
+
+async def _restarted(stack: WorkflowStack, *turns: object, continued: bool = True) -> None:
+    """Restart the primary, script the agent's next turns, and run the starting primary's passes.
+
+    With *continued* the coordinator continues the agents' jobs; without, its bot is no longer in the room, so each
+    job ends as the restart left it.
+    """
+    await stack.restart()
+    stack.child_script(*turns)
+    await stack.continue_agents(joined=continued)
+    assert await stack.recover() == [stack.run_id]
+
+
+@pytest.mark.asyncio
+async def test_running_agent_is_continued_not_restarted_and_its_node_attaches(stack: WorkflowStack) -> None:
+    """A restart cuts the turn short; its job goes on as the same subagent, and the replayed call waits for it."""
+    await _working(stack, after_append=True)
+    before = stack.node_job("@0")
+
+    await _restarted(stack, answer("done"))
+
+    assert await stack.result("@0", "agent", _PROMPT) == "done"
+    node, [job] = _node(stack), _node_jobs(stack)
+    assert (node.generation, node.attempt, stack.counting_tool.lines) == (1, 2, ["a"])
+    assert (job.job_id, job.adapter["workflow"], job.adapter["node"], job.adapter["generation"]) == (
+        before.job_id,
+        stack.run_id,
+        "@0",
+        1,
+    )
+    child = delegation_child(job)
+    assert (child.subagent_id, child.workflow_run_id, child.workflow_node_key, child.workflow_generation) == (
+        delegation_child(before).subagent_id,
+        stack.run_id,
+        "@0",
+        1,
+    )
+    assert "<interrupted_task>\nDo the long task\n</interrupted_task>" in _sent(stack)
+
+
+@pytest.mark.asyncio
+async def test_restart_before_the_first_tool_call_continues_with_the_full_prompt_at_the_same_depth(
+    stack: WorkflowStack,
+) -> None:
+    """The child's task is only its node's label: the continuation is sent the whole prompt, which the run keeps."""
+    prompt = "Summarize. " + "x" * 5_000
+    stack.child_script([Await(asyncio.Event().wait), *answer("never")])
+    await stack.submit("@0", "agent", {"prompt": prompt})
+    await stack.until(lambda: len(stack.models["watcher"].requests) == 1)
+
+    await _restarted(stack, answer("done"))
+
+    assert await stack.result("@0", "agent", {"prompt": prompt}) == "done"
+    child = delegation_child(stack.node_job("@0"))
+    assert (len(child.task), child.depth, _node(stack).generation) == (80, 1, 1)
+    assert prompt in _sent(stack)
+
+
+@pytest.mark.asyncio
+async def test_continuation_usage_is_added_once(stack: WorkflowStack) -> None:
+    """The node's usage is what the cut-short turn and its continuation used together, however often it is read."""
+    await _working(stack, after_append=True)
+
+    await _restarted(stack, answer("done", usage(5, 3)))
+
+    assert await stack.result("@0", "agent", _PROMPT) == "done"
+    await stack.until(lambda: stack.node_job("@0").consumed)
+    await stack.end_attempt(ScriptRunState.FAILED)
+    await stack.resume(stack.run_id)
+    assert (await stack.submit("@0", "agent", _PROMPT)).cached
+    totals = stack.store.usage_totals(stack.run_id)
+    assert (totals["input_tokens"], totals["output_tokens"], totals["tool_calls"]) == (12, 5, 1)
+
+
+@pytest.mark.asyncio
+async def test_agent_that_cannot_be_continued_after_a_tool_call_is_indeterminate(stack: WorkflowStack) -> None:
+    """A turn that had called a tool and cannot go on may have done anything: its call is not run again on its own."""
+    await _working(stack, after_append=True)
+
+    await _restarted(stack, continued=False)
+
+    with pytest.raises(NodeFailed) as stopped:
+        await stack.result("@0", "agent", _PROMPT)
+    assert (stopped.value.kind, _node(stack).state) == ("indeterminate", WorkflowNodeState.INDETERMINATE)
+    assert (stack.node_job("@0").status, stack.counting_tool.lines, len(_node_jobs(stack))) == ("interrupted", ["a"], 1)
+
+
+@pytest.mark.asyncio
+async def test_agent_that_cannot_be_continued_before_any_tool_call_runs_again(stack: WorkflowStack) -> None:
+    """A turn that had called no tool did nothing: the replay runs its call again, as a new job."""
+    await _working(stack, after_append=False)
+    first = stack.node_job("@0").job_id
+
+    await _restarted(stack, answer("second try"), continued=False)
+
+    assert await stack.result("@0", "agent", _PROMPT) == "second try"
+    assert (_node(stack).generation, stack.node_job("@0").job_id != first) == (2, True)
+    assert [job.status for job in _node_jobs(stack) if job.job_id == first] == ["interrupted"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrote", [True, False])
+async def test_restart_during_an_approval_wait_never_repeats_the_agents_earlier_write(
+    gated: WorkflowStack,
+    wrote: bool,
+) -> None:
+    """A job that waited for a person ends with the restart: its call is safe to run again only if it had written nothing."""
+    cards: JobApprovalCards = gated.cards  # type: ignore[attr-defined]
+    turns = [calls(tool_call("append", "c1", line="a")), calls(tool_call("append", "c2", line="b")), answer("never")]
+    gated.child_script(*turns[0 if wrote else 1 :])
+    await gated.submit("@0", "agent", _PROMPT)
+    if wrote:
+        await asyncio.wait_for(cards.posted.wait(), 10)
+        cards.decision.set_result(BackgroundApprovalDecision("approved", None))
+        await gated.until(lambda: gated.counting_tool.lines == ["a"])
+        cards.decision, cards.posted = asyncio.get_running_loop().create_future(), asyncio.Event()
+    await asyncio.wait_for(cards.posted.wait(), 10)
+    await gated.until(lambda: _node(gated).state is WorkflowNodeState.WAITING)
+
+    await _restarted(gated, answer("again"))
+
+    if wrote:
+        with pytest.raises(NodeFailed) as stopped:
+            await gated.result("@0", "agent", _PROMPT)
+        assert (stopped.value.kind, _node(gated).generation) == ("indeterminate", 1)
+    else:
+        assert await gated.result("@0", "agent", _PROMPT) == "again"
+        assert _node(gated).generation == 2
+    assert gated.counting_tool.lines == (["a"] if wrote else [])
+
+
+@pytest.mark.asyncio
+async def test_expired_card_denies_the_call_and_the_child_goes_on(gated: WorkflowStack) -> None:
+    """A card nobody answered is a denial of that call, as for every subagent; the engine sets no deadline of its own."""
+    cards: JobApprovalCards = gated.cards  # type: ignore[attr-defined]
+    gated.child_script(calls(tool_call("append", "c1", line="a")), answer("not sent"))
+    cards.decision.set_result(BackgroundApprovalDecision("expired", "Nobody answered."))
+
+    assert await gated.result("@0", "agent", _PROMPT) == "not sent"
+
+    assert (gated.counting_tool.lines, _node(gated).state) == ([], WorkflowNodeState.COMPLETED)
+
+
+@pytest.mark.asyncio
+async def test_script_tool_approval_shows_the_node_and_the_run_waiting(gated: WorkflowStack) -> None:
+    """While a script's own tool call waits for a person, its node and its run say so; the approved call runs once."""
+    gated.resolver.hold_approvals = asyncio.Event()
+    receipt = await gated.submit("@0", "tool", _APPEND)
+    await gated.until(lambda: gated.store.get_run(gated.run_id).state is WorkflowRunState.WAITING)
+
+    node = _node(gated)
+    assert (node.state, node.waiting_on, gated.counting_tool.lines) == (WorkflowNodeState.WAITING, "approval", [])
+    assert (await gated.engine.node_receipt(gated.attempt, receipt.id, wait=0)).state == "waiting"
+    gated.resolver.hold_approvals.set()
+
+    assert await gated.result("@0", "tool", _APPEND) == "appended"
+    assert (gated.counting_tool.lines, _node(gated).waiting_on) == (["a"], None)
+    assert gated.store.get_run(gated.run_id).state is WorkflowRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_script_tool_approval_after_restart_asks_again_and_runs_once(gated: WorkflowStack) -> None:
+    """A call that waited for a person when the primary stopped never ran: the replay asks again, as a new call."""
+    gated.resolver.hold_approvals = asyncio.Event()
+    await gated.submit("@0", "tool", _APPEND)
+    await gated.until(lambda: _node(gated).state is WorkflowNodeState.WAITING)
+
+    await gated.restart(kill=True)
+    assert await gated.recover() == [gated.run_id]
+
+    assert await gated.result("@0", "tool", _APPEND) == "appended"
+    assert (_node(gated).generation, gated.counting_tool.lines) == (2, ["a"])
+    assert gated.resolver.asks == ["counter.append"]
+
+
+@pytest.mark.asyncio
+async def test_job_that_ended_while_mindroom_was_down_is_read_once_it_is_up(stack: WorkflowStack) -> None:
+    """An agent whose answer was saved by its job, and not yet by its node, is not asked again after a restart."""
+    gate = asyncio.Event()
+    stack.child_script([Await(gate.wait), *answer("just in time")])
+    await stack.submit("@0", "agent", _PROMPT)
+    await stack.engine.close()
+    gate.set()
+    await wait_for_status(stack.jobs, stack.node_job("@0").job_id, "completed")
+
+    await stack.restart()
+    assert await stack.recover() == [stack.run_id]
+
+    receipt = await stack.submit("@0", "agent", _PROMPT)
+    assert (receipt.state, receipt.result, _node(stack).generation, len(_node_jobs(stack))) == (
+        "completed",
+        "just in time",
+        1,
+        1,
+    )

@@ -6,9 +6,10 @@ import asyncio
 import hmac
 import json
 from contextlib import nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from threading import Event
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.approval.tool_approval import (
     BackgroundScriptToolOrigin,
@@ -90,6 +91,8 @@ __all__ = [
 ]
 
 _CALL_UNAVAILABLE = "Background script call is unavailable."
+# What a workflow's call tells when it starts and stops waiting for a person; a plain script's call tells nobody.
+_APPROVAL_WAIT: ContextVar[Callable[[str | None], Awaitable[object]] | None] = ContextVar("approval_wait", default=None)
 _OWNER_RUNTIME_UNAVAILABLE = "Background script owner runtime is temporarily unavailable."
 _INDETERMINATE_ERROR = {
     "kind": "indeterminate",
@@ -440,13 +443,22 @@ class ScriptToolBroker:
         call_id: str,
         grant: ScriptToolGrant,
         arguments: dict[str, object],
+        waits: Callable[[str | None], Awaitable[object]] | None = None,
     ) -> ScriptCallRecord:
         """Claim one call of the workflow attempt *run*, which its gateway authenticated, and await its receipt.
 
         The stored receipt holds the tool's whole result, whatever its size, so the node can be settled from it later.
+        *waits* is told `approval` when the call starts to wait for a person's decision, and None when it has one.
         """
         request = ScriptToolCallRequest(run.run_id, call_id, grant, arguments)
-        await run_coroutine_until_complete(self._accept_prepared_call(request, authorization=None, authenticated=True))
+        # The call's task is created in here and keeps the context it is created in.
+        token = _APPROVAL_WAIT.set(waits)
+        try:
+            await run_coroutine_until_complete(
+                self._accept_prepared_call(request, authorization=None, authenticated=True),
+            )
+        finally:
+            _APPROVAL_WAIT.reset(token)
         task = self._tasks.get((run.run_id, call_id))
         if task is None:
             return await asyncio.to_thread(self.get_call, run.run_id, call_id)
@@ -835,6 +847,18 @@ def _validate_resolved_authority(
         raise ValueError(msg)
 
 
+async def _request_approval(runtime_resolver: ScriptRuntimeResolver, **request: Any) -> ToolApprovalDecision:  # noqa: ANN401
+    """Ask for the requester's decision on one call, and tell the workflow call that waits for it while it does."""
+    waits = _APPROVAL_WAIT.get()
+    if waits is None:
+        return await runtime_resolver.request_approval(**request)
+    await waits("approval")
+    try:
+        return await runtime_resolver.request_approval(**request)
+    finally:
+        await waits(None)
+
+
 def _build_background_approval_gate(
     *,
     runtime_resolver: ScriptRuntimeResolver,
@@ -868,7 +892,8 @@ def _build_background_approval_gate(
                 ),
             )
             if policy_requires_approval:
-                decision = await runtime_resolver.request_approval(
+                decision = await _request_approval(
+                    runtime_resolver,
                     origin=origin,
                     context=context,
                     grant=call.grant,
@@ -905,7 +930,8 @@ async def _request_authored_confirmation(
         run.agent_name,
         None,
     )
-    return await runtime_resolver.request_approval(
+    return await _request_approval(
+        runtime_resolver,
         origin=origin,
         context=context,
         grant=call.grant,
