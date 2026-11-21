@@ -412,7 +412,6 @@ def test_get_command_help() -> None:
     assert "Available Commands" in help_text
     assert "/schedule" in help_text
     assert "/help" in help_text
-    assert "/schedule" in help_text
     assert "/list_schedules" in help_text
     assert "/cancel_schedule" in help_text
     assert "/edit_schedule" in help_text
@@ -422,11 +421,6 @@ def test_get_command_help() -> None:
     schedule_help = get_command_help("schedule")
     assert "Schedule Command" in schedule_help
     assert "Usage:" in schedule_help
-    assert "Reminders" in schedule_help or "Workflows" in schedule_help
-
-    # Schedule command help
-    schedule_help = get_command_help("schedule")
-    assert "Schedule Command" in schedule_help
     assert "Simple Reminders:" in schedule_help
     assert "Agent and Team Workflows:" in schedule_help
     assert "in 5 minutes" in schedule_help
