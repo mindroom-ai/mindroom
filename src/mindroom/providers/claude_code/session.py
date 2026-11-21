@@ -56,10 +56,9 @@ _MIN_VERSION = (2, 1, 328)
 # The request metadata Claude Code sends with an MCP tool call: the id of the ``tool_use`` block that made the call.
 _TOOL_USE_ID_META = "claudecode/toolUseId"
 SERVER_NAME = "mindroom"
-# Only this user reads this runtime's directory, which goes when MindRoom exits. Every process runs in its empty
-# ``cwd``, where no project file or setting reaches it, and its system prompt lies beside that while it starts.
-_HOME = tempfile.TemporaryDirectory(prefix="mindroom-claude-code-")
-_CWD = Path(_HOME.name, "cwd")
+# This runtime's private directories, which go when MindRoom exits; the last one is in use. Every process runs in its
+# empty ``cwd``, where no project file or setting reaches it, and its system prompt lies beside that while it starts.
+_HOMES: list[tempfile.TemporaryDirectory[str]] = []
 _PARKED_TTL_SECONDS = 30 * 60.0
 _IDLE_TTL_SECONDS = 5 * 60.0
 # A process takes a few hundred megabytes. One that answers a request is never closed to make room for another.
@@ -245,17 +244,13 @@ class LiveSession:
     emitted: Emitted | None = None
     rested_at: float = 0.0
 
-    def limited(self, event: RateLimitEvent) -> None:
-        """Keep the plan limit Claude Code reports, which the result of a refused request does not repeat."""
-        self.rejected = event.rate_limit_info if event.rate_limit_info.status == "rejected" else None
-
     def broken(self) -> str | None:
         """Return why the resting process cannot be continued: its tool server failed, or it did not rest."""
         bridge = self.bridge
         while bridge.failure is None and not bridge.messages.empty():
             message = bridge.messages.get_nowait()
             if isinstance(message, RateLimitEvent):
-                self.limited(message)
+                self.rejected = message.rate_limit_info
             elif not isinstance(message, SystemMessage):
                 bridge.failure = f"Claude Code did not wait for MindRoom ({type(message).__name__})"
         if bridge.failure is None and not all(call.made.done() for call in bridge.calls.values()):
@@ -330,17 +325,20 @@ async def _refuse_unless_ready(client: ClaudeSDKClient, offered: list[str], prov
         await asyncio.sleep(0.05)
 
 
-def _prepare(system: str) -> Path | None:
-    """Make the runtime's directory, which a cleaner of temporary files may have removed, and write ``system`` there."""
-    Path(_HOME.name).mkdir(mode=0o700, exist_ok=True)
-    _CWD.mkdir(exist_ok=True)
+def _prepare(system: str) -> tuple[Path, Path | None]:
+    """Return the processes' working directory and the file that holds ``system``, which only this user can read."""
+    if not _HOMES or not Path(_HOMES[-1].name, "cwd").is_dir():
+        # A cleaner of temporary files removed the last one, whose name someone else could have taken since.
+        _HOMES.append(tempfile.TemporaryDirectory(prefix="mindroom-claude-code-", ignore_cleanup_errors=True))
+        Path(_HOMES[-1].name, "cwd").mkdir()
+    home = Path(_HOMES[-1].name)
     if not system:
-        return None
-    # A system prompt is too long for a command line; only this user can read its file.
-    descriptor, path = tempfile.mkstemp(dir=_HOME.name)
+        return home / "cwd", None
+    # A system prompt is too long for a command line.
+    descriptor, path = tempfile.mkstemp(dir=home)
     with os.fdopen(descriptor, "w", encoding="utf-8") as file:
         file.write(system)
-    return Path(path)
+    return home / "cwd", Path(path)
 
 
 async def start(
@@ -399,11 +397,11 @@ async def _launch(
         if freed is not None:
             await freed
         bridge = _ToolBridge(names=tool_names(tools, provider))
-        prompt = await asyncio.to_thread(_prepare, system)
+        cwd, prompt = await asyncio.to_thread(_prepare, system)
         sdk_options = ClaudeAgentOptions(
             **options,
             system_prompt={"type": "file", "path": str(prompt)} if prompt else "",
-            cwd=_CWD,
+            cwd=cwd,
             tools=[],
             skills=[],
             setting_sources=[],
@@ -458,19 +456,16 @@ async def _close(session: LiveSession) -> None:
         await session.owner
 
 
-# What a resting process is kept under: its conversation, the request it answered, and the calls it waits on.
-type _RestingKey = tuple[str, str, tuple[str, ...]]
-
-
 class _SessionRegistry:
     """Every Claude Code process of this runtime, and the resting ones by the request each answered.
 
+    A resting process is kept under its conversation, the request it answered, and the calls it waits on.
     A process holds a slot until it is gone: ``starting`` counts the starts without one yet, ``live`` holds the rest.
     """
 
     def __init__(self) -> None:
         self.live: set[LiveSession] = set()
-        self.resting: dict[_RestingKey, LiveSession] = {}
+        self.resting: dict[tuple[str, str, tuple[str, ...]], LiveSession] = {}
         self.starting = 0
         self._sweep: asyncio.Task[None] | None = None
 
@@ -480,6 +475,8 @@ class _SessionRegistry:
         That is ``replaced``, or at the limit a resting one this closes, an idle one before a parked one and the
         longest resting first. With every process answering a request, the new one is refused.
         """
+        if replaced not in self.live:
+            replaced = None  # A process that is gone holds no slot to take.
         if replaced is None and len(self.live) + self.starting >= _MAX_PROCESSES:
             if not self.resting:
                 msg = f"MindRoom already runs its limit of {_MAX_PROCESSES} Claude Code processes. Try again shortly."
@@ -500,7 +497,7 @@ class _SessionRegistry:
 
         return create_background_task(run(), name="claude_code_close", owner=self, context=Context())
 
-    def rest(self, key: _RestingKey, session: LiveSession) -> None:
+    def rest(self, key: tuple[str, str, tuple[str, ...]], session: LiveSession) -> None:
         """Keep ``session`` for the request that follows the answer it just gave."""
         if (replaced := self.resting.pop(key, None)) is not None:
             self.retire(replaced)

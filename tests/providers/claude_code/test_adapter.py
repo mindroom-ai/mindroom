@@ -8,6 +8,7 @@ import base64
 import json
 import os
 import shutil
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -37,14 +38,16 @@ from mindroom.llm.provider import (
     UsageReported,
     complete,
 )
+from mindroom.providers.claude_code import adapter as adapter_module
 from mindroom.providers.claude_code import session as session_module
+from mindroom.providers.claude_code.prompt import rebuild_input
 from mindroom.providers.claude_code.session import SESSIONS
 from tests.providers.claude_code.support import (
     CONVERSATION,
-    HOME,
     LOOKUP,
     call,
     fake_cli,
+    home,
     left_behind,
     result,
     text_turn,
@@ -150,7 +153,7 @@ async def test_claude_code_starts_isolated_with_mindroom_system_prompt_and_the_u
     assert "--thinking-display" in args
     assert "--setting-sources=" in args
     assert not {"--add-dir", "--plugin-dir"} & set(args)
-    assert spawn["cwd"] == str(HOME / "cwd")
+    assert spawn["cwd"] == str(home() / "cwd")
     assert int(spawn["tool_timeout"]) > 30 * 60 * 1000
     # A call that waits long stays a call, which the model does not go on without.
     assert spawn["background"] == ["1", "0"]
@@ -736,13 +739,21 @@ async def test_a_system_prompt_is_private_to_the_user_and_gone_once_claude_code_
 
 
 @pytest.mark.asyncio
-async def test_a_runtime_directory_that_was_cleaned_away_is_made_again_for_the_user_alone(tmp_path: Path) -> None:
+async def test_a_runtime_directory_that_was_cleaned_away_is_replaced_by_a_new_private_one(tmp_path: Path) -> None:
     cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
-    shutil.rmtree(HOME)
+    provider = cli.provider()
+    await complete(provider, ModelRequest(messages=[_SYSTEM, user("Hi")]))
+    cleaned = home()
+    shutil.rmtree(cleaned)
+    # Someone else could make a directory of that name again.
+    cleaned.mkdir()
 
-    assert (await complete(cli.provider(), ModelRequest(messages=[_SYSTEM, user("Hi")]))).content == "Hello."
+    assert (await complete(provider, ModelRequest(messages=[_SYSTEM, user("Hi")]))).content == "Hello."
 
-    assert cli.events("spawn")[0]["prompt_modes"] == [0o600, 0o700]
+    assert home() != cleaned
+    assert list(cleaned.iterdir()) == []
+    assert cli.events("spawn")[1]["cwd"] == str(home() / "cwd")
+    assert cli.events("spawn")[1]["prompt_modes"] == [0o600, 0o700]
 
 
 @pytest.fixture
@@ -1143,6 +1154,83 @@ async def test_a_claude_code_that_does_not_say_which_tools_it_connected_is_a_ret
 
 
 @pytest.mark.asyncio
+async def test_a_model_message_claude_code_gave_up_hands_over_none_of_its_calls(tmp_path: Path) -> None:
+    # The message ends without the reason a message that calls tools ends with, as one Claude Code retracts does.
+    retracted = {"tools": [call("toolu_a", "a")], "stop_reason": None}
+    cli = fake_cli(tmp_path, {"turns": [[retracted, {"text": "never"}]]})
+    events: list[StreamEvent] = []
+
+    async def read() -> None:
+        async for event in cli.provider().stream(ModelRequest(messages=[user("Look up a.")], tools=[LOOKUP])):
+            events.append(event)  # noqa: PERF401
+
+    with pytest.raises(ProviderUnavailable, match="gave up the model message"):
+        await read()
+    await _closed()
+
+    assert not any(isinstance(event, ToolCallReady | TurnCompleted) for event in events)
+    assert len(cli.events("exit")) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_process_that_starts_over_holds_the_slot_of_the_one_it_replaces_all_along(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_module, "_MAX_PROCESSES", 1)
+    turn = [{"tools": [{**call("toolu_a", "a"), "unused": True}]}, {"text": "An answer without the result."}]
+    cli = fake_cli(tmp_path, {"turns": [turn]}, {"turns": [text_turn("Rebuilt.")]})
+    provider = cli.provider()
+    messages = [user("Look up a.")]
+    asked = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
+    rendering, rendered = threading.Event(), threading.Event()
+
+    def held(*args: Any) -> Any:  # noqa: ANN401
+        if not rendering.is_set():
+            rendering.set()
+            rendered.wait(10)
+        return rebuild_input(*args)
+
+    monkeypatch.setattr(adapter_module, "rebuild_input", held)
+    messages += [asked.message, result("toolu_a", "LILAC-HERON")]
+    request = asyncio.create_task(complete(provider, ModelRequest(messages=messages, tools=[LOOKUP])))
+    # The process went on without the result, and the request that starts over is held where it renders its history.
+    await asyncio.to_thread(rendering.wait, 10)
+    await _closed()
+
+    other = cli.provider(execution_identity=CONVERSATION)
+    with pytest.raises(ProviderUnavailable, match="limit of 1"):
+        await complete(other, ModelRequest(messages=[user("Another conversation")], tool_choice="none"))
+    rendered.set()
+
+    assert (await request).content == "Rebuilt."
+    started = [json.loads(line)["event"] for line in cli.log.read_text().splitlines()]
+    assert [event for event in started if event in {"spawn", "exit"}] == ["spawn", "exit", "spawn"]
+
+
+@pytest.mark.asyncio
+async def test_a_process_that_is_gone_gives_its_slot_to_no_other(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_module, "_MAX_PROCESSES", 1)
+    cli = fake_cli(tmp_path, {"turns": [text_turn("One.")]})
+    provider = cli.provider(execution_identity=CONVERSATION)
+    await complete(provider, ModelRequest(messages=[user("Hi")]))
+    [gone] = SESSIONS.resting.values()
+    SESSIONS.resting.clear()
+    await SESSIONS.retire(gone)
+    await complete(provider, ModelRequest(messages=[user("Hi again")]))
+
+    # The one slot is held by another process now, which the new one must take as any start would.
+    new = await session_module.start(provider="invented", replaces=gone, model="invented", cli_path=str(cli.path))
+    await _closed()
+
+    assert SESSIONS.live == {new}
+    assert SESSIONS.resting == {}
+
+
+@pytest.mark.asyncio
 async def test_a_call_that_got_its_result_leaves_only_its_id_which_no_later_call_may_use(tmp_path: Path) -> None:
     turn = [_TWO_CALLS[0], {"tools": [call("toolu_a", "again")]}, {"text": "never"}]
     cli = fake_cli(tmp_path, {"turns": [turn]})
@@ -1300,6 +1388,30 @@ async def test_the_images_a_tool_made_reach_the_parked_process_with_its_result(t
     [delivered] = cli.events("tool_result")
     assert [block["type"] for block in delivered["result"]["content"]] == ["text", "image"]
     assert delivered["result"]["content"][1]["data"] == base64.b64encode(_PNG).decode()
+
+
+@pytest.mark.asyncio
+async def test_the_pooled_media_of_a_batch_of_several_calls_reach_a_new_process_as_their_own_turn(
+    tmp_path: Path,
+) -> None:
+    cli = fake_cli(tmp_path, {"turns": [_TWO_CALLS]}, {"turns": [text_turn("Rebuilt.")]})
+    provider = cli.provider()
+    messages = [user("Take a screenshot and look up b.")]
+    asked = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
+    shot = replace(result("toolu_a", "Captured."), images=[Image(content=_PNG, format="png")])
+    failed = replace(result("toolu_b", "No such key."), tool_call_error=True)
+    # Nothing says which call of the batch made the image, so no call's result may carry it.
+    follow_up = media_follow_up([shot, failed])
+    assert follow_up is not None
+
+    messages += [asked.message, shot, failed, follow_up]
+    answer = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
+
+    assert answer.content == "Rebuilt."
+    assert cli.events("tool_result") == []
+    *_history, said, image = cli.events("user")[1]["content"]
+    assert said["text"].endswith("</conversation-checkpoint>\nThe tool call above generated the attached media.")
+    assert image["type"] == "image"
 
 
 @pytest.mark.asyncio

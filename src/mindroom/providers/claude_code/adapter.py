@@ -102,8 +102,7 @@ class ClaudeCodeProvider:
         provider = self.identity.provider
         messages = request.messages
         try:
-            continues = bool(tail) and not request.portable_replay and session is not None
-            if session is not None and session.emitted is not None and continues and session.broken() is None:
+            if session and session.emitted and tail and not request.portable_replay and session.broken() is None:
                 resume = await asyncio.to_thread(decide, session.emitted, tail, provider)
                 if resume is not None:
                     results, blocks = resume
@@ -186,6 +185,8 @@ class ClaudeCodeProvider:
             except Outrun:
                 if not continued:
                     raise
+                # The process that starts over closes this one when it takes its slot, and no sooner.
+                rests = True
             else:
                 return
             finally:

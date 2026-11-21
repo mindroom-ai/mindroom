@@ -20,8 +20,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _FAKE = Path(__file__).with_name("fake_claude.py")
-# The private directory of the route's processes.
-HOME = Path(session._HOME.name)
 LOOKUP = ToolSpec(
     name="lookup",
     description="Look up a marker by key.",
@@ -80,8 +78,14 @@ class FakeCli:
 
 def left_behind() -> list[str]:
     """Return what the route's processes left in its private directory besides their empty working directory."""
-    root = HOME
-    return sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.name != "cwd")
+    if not session._HOMES:
+        return []
+    return sorted(str(path.relative_to(home())) for path in home().rglob("*") if path.name != "cwd")
+
+
+def home() -> Path:
+    """Return the private directory of the route's processes."""
+    return Path(session._HOMES[-1].name)
 
 
 def fake_cli(tmp_path: Path, *processes: dict[str, Any]) -> FakeCli:

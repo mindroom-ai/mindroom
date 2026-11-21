@@ -200,9 +200,9 @@ def decide(answer: Emitted, tail: Sequence[Message], provider: str) -> _Resume |
     """Return how ``tail`` continues the process that answered with ``answer``, or None when it must be rebuilt.
 
     ``tail`` starts at the request's last assistant message, which must be the answer the process gave. A process
-    parked on tool calls continues only when exactly one result per call follows, and then at most the images the
-    agent loop moved off the results, which ride on the last one. An idle process continues only when user messages
-    alone follow.
+    parked on tool calls continues only when exactly one result per call follows, and after the result of a single
+    call at most the images the agent loop moved off it, which ride on it. An idle process continues only when user
+    messages alone follow.
     """
     answered, rest = tail[0], tail[1:]
     # The answer of a process is plain text, so a message that holds blocks is not one as the process gave it.
@@ -213,7 +213,8 @@ def decide(answer: Emitted, tail: Sequence[Message], provider: str) -> _Resume |
     if not call_ids:
         blocks = _merged([block for message in rest for block in _user_blocks(message, provider)])
         return ({}, blocks) if blocks and all(message.role == "user" for message in rest) else None
-    media = rest[-1] if rest and is_media_follow_up(rest[-1]) else None
+    # The media of a batch are pooled, so only those of a batch of one call are known to be that call's.
+    media = rest[-1] if len(call_ids) == 1 and rest and is_media_follow_up(rest[-1]) else None
     results = [message for message in rest if message is not media]
     answered_ids = [str(message.tool_call_id) for message in results if message.role == "tool"]
     if len(results) != len(call_ids) or sorted(answered_ids) != sorted(call_ids):

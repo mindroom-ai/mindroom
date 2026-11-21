@@ -70,8 +70,8 @@ class _Step:
     """What one step produced so far.
 
     ``usage`` sums the model messages that ended and ``current`` is the usage of the one still streaming. ``seen``
-    holds each model message's id with whether it streams, ``streaming`` the id of the one that streams now, and
-    ``spoke`` the id of the one whose text came last. ``error`` is what Claude Code said about a failed request.
+    holds each model message's id with whether it streams, ``streaming`` the id of the one that streams now, ``ended``
+    why it ended, and ``spoke`` the id of the one whose text came last. ``error`` is a failed request's kind.
     """
 
     text: list[str] = field(default_factory=list)
@@ -81,6 +81,7 @@ class _Step:
     current: dict[str, Any] | None = None
     seen: dict[str | None, bool] = field(default_factory=dict)
     streaming: str | None = None
+    ended: str | None = None
     spoke: str | None = None
     error: str | None = None
     stop_reason: StopReason | None = None
@@ -113,7 +114,7 @@ class _Step:
             if message.subtype == "init":
                 session.inventoried = _only_mindrooms_tools(message.data, session)
         elif isinstance(message, RateLimitEvent):
-            session.limited(message)
+            session.rejected = message.rate_limit_info
         elif isinstance(message, UserMessage):
             # Claude Code says which tool results it took before its model goes on with them.
             blocks = message.content if isinstance(message.content, list) else []
@@ -160,16 +161,21 @@ class _Step:
             message = event["message"]
             self.streaming = message["id"]
             self.seen[self.streaming] = True
-            self.current, self.error = dict(message["usage"]), None
+            self.current, self.error, self.ended = dict(message["usage"]), None, None
             return self._reported()
         if kind == "message_delta":
             reported = {key: value for key, value in event["usage"].items() if value is not None}
             self.current = {**(self.current or {}), **reported}
+            self.ended = (event.get("delta") or {}).get("stop_reason") or self.ended
             return self._reported()
         if kind == "message_stop":
             if self.current is not None:
                 self._count(self.current, session)
             self.current = self.streaming = None
+            if self.calls and self.ended != "tool_use":
+                # Claude Code ends a model message it gave up without that reason, and its calls are not made.
+                msg = "Claude Code gave up the model message that called MindRoom's tools."
+                raise ProviderUnavailable(msg, provider=session.provider)
             if self.calls:
                 # The model message that called MindRoom's tools has ended: MindRoom's loop runs them now.
                 self.stop_reason = "tool_use"
@@ -242,6 +248,7 @@ def _turn_failure(
     text = result.result or "\n".join(result.errors or ()) or "Claude Code could not finish its reply"
     if error == "authentication_failed" or "/login" in text:
         return AuthenticationFailed(NOT_SIGNED_IN, provider=provider, status_code=401)
+    rejected = rejected if rejected is not None and rejected.status == "rejected" else None
     if error == "rate_limit" or (rejected is not None and status == 429):
         window = (rejected.rate_limit_type or "").replace("_", " ") if rejected is not None else ""
         message = f"Claude subscription limit reached ({window})." if window else "Claude subscription limit reached."
