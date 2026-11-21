@@ -88,17 +88,22 @@ def _store_launch(app: FastAPI, payload: ExecuteRequest) -> None:
         os.close(directory_fd)
 
 
+async def _port_accepts() -> bool:
+    try:
+        _, writer = await asyncio.open_connection("127.0.0.1", WORKER_SSH_PORT)
+    except OSError:
+        return False
+    writer.close()
+    return True
+
+
 async def _accepts(sshd: asyncio.subprocess.Process) -> bool:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _START_SECONDS
     while sshd.returncode is None and loop.time() < deadline:
-        try:
-            _, writer = await asyncio.open_connection("127.0.0.1", WORKER_SSH_PORT)
-        except OSError:
-            await asyncio.sleep(0.1)
-        else:
-            writer.close()
-            return True
+        if await _port_accepts():
+            return sshd.returncode is None
+        await asyncio.sleep(0.1)
     return False
 
 
@@ -109,6 +114,9 @@ async def _ensure_sshd(app: FastAPI, state: _WorkerSsh) -> None:
     if await asyncio.to_thread(_admits_nobody, projection_dir):
         raise HTTPException(409, "No SSH public keys are authorized.")
     if state.sshd is None or state.sshd.returncode is not None:
+        await _stop(state)
+        if await _port_accepts():
+            raise HTTPException(503, _START_FAILED)
         try:
             # Inherit stderr so reaping sshd doesn't wait for a pipe held open by a session.
             state.sshd = await create_subprocess_exec(
