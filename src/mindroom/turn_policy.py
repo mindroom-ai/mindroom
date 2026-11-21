@@ -503,23 +503,6 @@ class TurnPolicy:
             materializable_agent_names=availability.materializable_agent_names,
         )
 
-    def _thread_defers_to_named_responders(
-        self,
-        thread_history: Sequence[ResolvedVisibleMessage],
-        *,
-        sender_id: str,
-        available_responders: list[MatrixID],
-    ) -> bool:
-        """Return whether a thread's history leaves this sender's next message to the responders it names."""
-        return thread_requires_explicit_agent_targeting(
-            thread_history,
-            sender_id=sender_id,
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-            membership_index=self.deps.agent_reply_memberships,
-            available_responders_in_room=available_responders,
-        )
-
     async def aims_command_at_me(
         self,
         room: nio.MatrixRoom,
@@ -620,10 +603,13 @@ class TurnPolicy:
         if not self._routing_admits(requester_user_id, room.room_id):
             return ignore
         available_responders = await self.responder_candidates_for_room(room, requester_user_id)
-        if context.is_thread and self._thread_defers_to_named_responders(
+        if context.is_thread and thread_requires_explicit_agent_targeting(
             context.planning_thread_history,
             sender_id=requester_user_id,
-            available_responders=available_responders,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+            membership_index=self.deps.agent_reply_memberships,
+            available_responders_in_room=available_responders,
         ):
             self.deps.logger.info("Skipping routing: thread already requires explicit responder targeting")
             return ignore
