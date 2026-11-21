@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.cli.doctor import _check_single_provider
 from mindroom.config.main import Config
+from mindroom.providers.claude_code import adapter
 from tests.providers.claude_code.support import fake_cli, left_behind, text_turn
 
 if TYPE_CHECKING:
@@ -100,3 +101,19 @@ def test_doctor_fails_a_model_with_a_wrong_setting_and_goes_on_to_the_next(
     assert _check(cli, "default", effort="ultra") == (1, 1, 0)
 
     assert "effort must be one of" in capsys.readouterr().out.replace("\n", " ")
+
+
+def test_doctor_fails_when_the_claude_agent_sdk_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def missing(*_args: object) -> None:
+        msg = "Install it with: pip install 'mindroom[claude_agent]'"
+        raise ImportError(msg)
+
+    monkeypatch.setattr(adapter, "ensure_optional_deps", missing)
+
+    assert _check(fake_cli(tmp_path, {})) == (0, 1, 0)
+
+    assert "mindroom[claude_agent]" in capsys.readouterr().out.replace("\n", " ")

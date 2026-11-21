@@ -626,11 +626,10 @@ def _check_claude_code(config: Config, runtime_paths: RuntimePaths) -> tuple[int
                 continue
             checked.add(provider.cli_path)
             asyncio.run(provider.preflight())
-        except (ProviderError, ValueError) as exc:
-            # A process that did not start may start the next time; a refusal or a wrong setting needs the user.
+        except (ProviderError, ValueError, ImportError) as exc:
+            # A process that did not start may start the next time. A refusal, a wrong setting, or a missing or
+            # unfit Claude Agent SDK needs the user.
             valid, detail = (None if isinstance(exc, ProviderError) and exc.retryable else False), str(exc)
-        except ImportError as exc:
-            valid, detail = None, str(exc)
         else:
             valid, detail = True, ""
         p, f, w = _print_validation(

@@ -51,8 +51,9 @@ __all__ = ["NOT_SIGNED_IN", "SERVER_NAME", "SESSIONS", "LiveSession", "RestingKe
 
 logger = get_logger(__name__)
 
-# Older binaries ignore verbatim prompts, so a user's ``@path`` or ``/command`` would be read as a Claude Code command.
-_MIN_VERSION = (2, 1, 248)
+# The oldest binary this route was run against. Older ones can reach tools beyond ``--tools`` (fixed in 2.1.295), and
+# before 2.1.248 read a user's ``@path`` or ``/command`` as a Claude Code command.
+_MIN_VERSION = (2, 1, 328)
 # The request metadata Claude Code sends with an MCP tool call: the id of the ``tool_use`` block that made the call.
 _TOOL_USE_ID_META = "claudecode/toolUseId"
 SERVER_NAME = "mindroom"
@@ -60,7 +61,6 @@ SERVER_NAME = "mindroom"
 # ``cwd``, where no project file or setting reaches it, and its system prompt lies beside that while it starts.
 _HOME = tempfile.TemporaryDirectory(prefix="mindroom-claude-code-")
 _CWD = Path(_HOME.name, "cwd")
-_CWD.mkdir()
 _PARKED_TTL_SECONDS = 30 * 60.0
 _IDLE_TTL_SECONDS = 5 * 60.0
 # A process takes a few hundred megabytes. One that answers a request is never closed to make room for another.
@@ -96,7 +96,7 @@ _REFUSED_NAMES = {"CLAUDE_BG_AUTH_SNAPSHOT_PATH", "CLAUDE_AUTO_BACKGROUND_TASKS"
 # The Claude Agent SDK and MindRoom set these for the process themselves, whatever MindRoom inherited.
 _SET_FOR_THE_PROCESS = {"CLAUDE_CODE_ENTRYPOINT", *_ISOLATION_ENV}
 # How Claude Code names the plans of a Claude subscription; an account without one is "Claude API".
-_PLAN = re.compile(r"Claude (Pro|Max|Team|Enterprise)\b")
+_PLAN = re.compile(r"Claude (Pro|Team|Enterprise|Max( \d+x)?)")
 NOT_SIGNED_IN = "Claude Code is not signed in. Run `claude auth login` as the user that runs MindRoom."
 _NOT_FOUND = (
     "Claude Code was not found. Install it (https://claude.com/claude-code), run `claude auth login` as the user "
@@ -301,7 +301,7 @@ def _startup_error(info: dict[str, Any] | None, provider: str) -> Authentication
             f"Claude Code would use a credential from {other} instead of your Claude sign-in. Remove it from "
             "MindRoom's environment and run `claude auth login`, or use `provider: anthropic` to pay with a key."
         )
-    elif account.get("apiProvider") != "firstParty" or not _PLAN.match(str(account.get("subscriptionType"))):
+    elif account.get("apiProvider") != "firstParty" or not _PLAN.fullmatch(str(account.get("subscriptionType"))):
         message = f"Claude Code is not signed in to a Claude subscription. {NOT_SIGNED_IN.partition('. ')[2]}"
     else:
         return None
@@ -335,8 +335,15 @@ async def _refuse_unless_ready(client: ClaudeSDKClient, offered: list[str], prov
         await asyncio.sleep(0.05)
 
 
-def _write_prompt(system: str) -> Path:
-    """Write a system prompt, too long for a command line, to a file only this user can read."""
+def _prepare(system: str) -> Path | None:
+    """Make the runtime's directory, which a cleaner of temporary files may have removed, and write ``system`` there.
+
+    A system prompt is too long for a command line, so it goes to a file only this user can read.
+    """
+    Path(_HOME.name).mkdir(mode=0o700, exist_ok=True)
+    _CWD.mkdir(exist_ok=True)
+    if not system:
+        return None
     descriptor, path = tempfile.mkstemp(dir=_HOME.name)
     with os.fdopen(descriptor, "w", encoding="utf-8") as file:
         file.write(system)
@@ -399,8 +406,7 @@ async def _launch(
         if freed is not None:
             await freed
         bridge = _ToolBridge(names=tool_names(tools, provider))
-        if system:
-            prompt = await asyncio.to_thread(_write_prompt, system)
+        prompt = await asyncio.to_thread(_prepare, system)
         sdk_options = ClaudeAgentOptions(
             **options,
             system_prompt={"type": "file", "path": str(prompt)} if prompt else "",

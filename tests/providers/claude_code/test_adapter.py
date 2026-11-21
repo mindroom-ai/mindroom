@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -728,6 +729,16 @@ async def test_a_system_prompt_is_private_to_the_user_and_gone_once_claude_code_
     assert left_behind() == []
 
 
+@pytest.mark.asyncio
+async def test_a_runtime_directory_that_was_cleaned_away_is_made_again_for_the_user_alone(tmp_path: Path) -> None:
+    cli = fake_cli(tmp_path, {"turns": [text_turn("Hello.")]})
+    shutil.rmtree(HOME)
+
+    assert (await complete(cli.provider(), ModelRequest(messages=[_SYSTEM, user("Hi")]))).content == "Hello."
+
+    assert cli.events("spawn")[0]["prompt_modes"] == [0o600, 0o700]
+
+
 @pytest.fixture
 def held_start(monkeypatch: pytest.MonkeyPatch) -> tuple[asyncio.Event, asyncio.Event]:
     """Hold each start where it opens Claude Code: the first event says one got there, the second lets it go on."""
@@ -853,6 +864,7 @@ async def test_an_api_key_from_the_environment_is_refused_by_name(tmp_path: Path
         {"subscriptionType": "Claude API", "apiProvider": "firstParty"},
         {"subscriptionType": "Claude Console", "apiProvider": "firstParty"},
         {"subscriptionType": "Claude Prototype", "apiProvider": "firstParty"},
+        {"subscriptionType": "Claude Pro Preview", "apiProvider": "firstParty"},
     ],
     ids=[
         "a token from the environment",
@@ -861,6 +873,7 @@ async def test_an_api_key_from_the_environment_is_refused_by_name(tmp_path: Path
         "an API account",
         "a plan MindRoom does not know",
         "a plan whose name only starts like a known one",
+        "a known plan with something after its name",
     ],
 )
 @pytest.mark.asyncio
@@ -873,7 +886,7 @@ async def test_an_account_that_is_not_a_plain_subscription_sign_in_is_refused(
     assert isinstance(error, AuthenticationFailed)
 
 
-@pytest.mark.parametrize("plan", ["Claude Pro", "Claude Max 20x", "Claude Team", "Claude Enterprise"])
+@pytest.mark.parametrize("plan", ["Claude Pro", "Claude Max", "Claude Max 20x", "Claude Team", "Claude Enterprise"])
 @pytest.mark.asyncio
 async def test_each_claude_subscription_plan_is_answered(tmp_path: Path, plan: str) -> None:
     account = {"subscriptionType": plan, "apiProvider": "firstParty"}
@@ -937,11 +950,12 @@ async def test_a_variable_that_is_set_for_claude_code_anyway_is_not_refused(
 
 
 @pytest.mark.asyncio
-async def test_a_claude_code_too_old_to_send_prompts_verbatim_is_refused(tmp_path: Path) -> None:
-    error = await _failure(tmp_path, {"version": "2.1.247", "turns": [text_turn("never")]}, asked=False)
+async def test_a_claude_code_older_than_the_one_this_route_was_run_against_gets_no_prompt(tmp_path: Path) -> None:
+    # 2.1.294 still let the model reach tools beyond the ones it was started with.
+    error = await _failure(tmp_path, {"version": "2.1.294", "turns": [text_turn("never")]}, asked=False)
 
     assert isinstance(error, AuthenticationFailed)
-    assert "2.1.248" in str(error)
+    assert "2.1.328" in str(error)
     assert "claude update" in str(error)
 
 
