@@ -963,6 +963,74 @@ async def _pause_on_the_checker(
 
 
 @pytest.mark.asyncio
+async def test_approved_team_member_shell_reaches_its_named_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The team resumes the persisted member shell call before running its follow-up."""
+    from mindroom.event_journal import ApprovalCall, approval_arguments_digest  # noqa: PLC0415
+    from mindroom.workers import named  # noqa: PLC0415
+    from mindroom.workers.runtime import idle_worker_cleanup_owner  # noqa: PLC0415
+    from tests.test_named_workers import (  # noqa: PLC0415
+        _FakeBackend,
+        _retired,
+        _route_through,
+        _static_worker_manager_lease,
+    )
+
+    args = {"args": ["printf", "approved"], "worker": "team-build"}
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "checker", "Run it"), answer("Done.")],
+        checker=[calls(tool_call("run_shell_command", "call-shell", **args)), answer("Approved.")],
+        approval_rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+    )
+    team.runtime_paths = replace(
+        team.runtime_paths,
+        process_env={
+            **team.runtime_paths.process_env,
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "30",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+        },
+    )
+    checker = team.config.agents["checker"]
+    checker.tools = ["shell"]
+    checker.worker_scope = "user_agent"
+    checker.named_workers = 1
+    team.runtime = replace(team.runtime, runtime_paths=team.runtime_paths, turn_id="named-team-approval")
+    backend = _FakeBackend()
+    posts = _route_through(monkeypatch, backend)
+    monkeypatch.setattr(
+        named,
+        "lease_configured_primary_worker_manager",
+        lambda _paths: _static_worker_manager_lease(backend),
+    )
+    with idle_worker_cleanup_owner():
+        with pytest.raises(ResponsePausedForApproval) as raised:
+            await team.stream(show_tool_calls=False)
+        assert posts == []
+        paused = raised.value.paused
+        assert paused.toolkit_owners == {("checker", "run_shell_command"): "shell"}
+        call = ApprovalCall(
+            tool_call_id="call-shell",
+            tool_name="run_shell_command",
+            invoking_agent="checker",
+            toolkit_name="shell",
+            arguments_digest=approval_arguments_digest(args),
+            expires_at_ns=2**62,
+        )
+        result = await team.resume(paused, approved=True, approvals=(call,))
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert len(posts) == 1, team.models["checker-model"].requests[-1].messages[-1].content
+    [worker] = backend.specs
+    assert posts[0][1]["worker_key"] == worker.worker_key
+    assert await _retired(backend) == [worker.worker_key]
+
+
+@pytest.mark.asyncio
 async def test_a_member_approval_pauses_the_team_with_the_member_s_identity_and_toolkit_owner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

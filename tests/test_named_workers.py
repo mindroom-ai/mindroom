@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from contextvars import copy_context
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -43,7 +44,6 @@ from mindroom.workers.named import (
     ensure_named_worker,
     named_worker_call,
     named_workers_refusal,
-    reply_named_workers,
 )
 from mindroom.workers.runtime import idle_worker_cleanup_owner
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -233,7 +233,7 @@ async def test_a_name_starts_one_worker_that_later_calls_of_the_reply_reach(
     backend: _FakeBackend,
 ) -> None:
     """The first call with a name starts a worker beside the normal one, and the same name reaches it again."""
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         call = _call(runtime_paths, "e2e-0", "large")
         first = _run(backend, call)
         again = _run(backend, _call(runtime_paths, "e2e-0"))
@@ -258,7 +258,7 @@ async def test_a_call_that_asks_for_another_size_of_a_running_worker_is_refused(
     backend: _FakeBackend,
 ) -> None:
     """Resizing would restart the worker under its commands, so a name keeps the size it started with."""
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         _run(backend, _call(runtime_paths, "build", "small"))
 
         with pytest.raises(NamedWorkerError, match="was started with resource_profile small in this reply"):
@@ -280,7 +280,7 @@ async def _name_at_the_same_time(
         named.wait(SETTLE_TIMEOUT_SECONDS)
         return ensure_named_worker(cast("WorkerBackend", backend), spec, call)
 
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         return await asyncio.gather(*(asyncio.to_thread(run, profile) for profile in profiles), return_exceptions=True)
 
 
@@ -309,7 +309,7 @@ async def test_the_workers_of_a_reply_are_removed_when_it_ends(
     backend: _FakeBackend,
 ) -> None:
     """A reply that ends with no background job removes every worker its calls started."""
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         keys = sorted(_run(backend, _call(runtime_paths, name)).worker_key for name in ("a", "b"))
         assert backend.retired == []
 
@@ -325,11 +325,11 @@ async def test_a_background_job_keeps_the_workers_of_its_reply_until_it_ends(
     backend: _FakeBackend,
 ) -> None:
     """A job the reply started still reaches the reply's workers, which are removed when the job has ended too."""
-    async with execution_resources() as resources:
-        async with reply_named_workers(_TURN):
+    async with execution_resources(response=True) as resources:
+        job = resources.acquire()
+        # A job can be the first caller to name the worker, and borrows the reply's lifetime.
+        async with execution_resources():
             started = _run(backend, _call(runtime_paths, "shard"))
-            job = resources.acquire()
-        # The reply's turn is over, and its job names the worker again.
         assert _run(backend, _call(runtime_paths, "shard")).worker_key == started.worker_key
     assert await _retired(backend) == []
 
@@ -344,10 +344,10 @@ async def test_a_reply_that_resumes_while_its_job_runs_keeps_its_workers(
     backend: _FakeBackend,
 ) -> None:
     """A second turn under the same turn ID, such as after an approval, joins the workers a job still holds."""
-    async with execution_resources() as resources, reply_named_workers(_TURN):
+    async with execution_resources(response=True) as resources:
         started = _run(backend, _call(runtime_paths, "shard"))
         job = resources.acquire()
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         assert _run(backend, _call(runtime_paths, "shard")).worker_key == started.worker_key
     assert await _retired(backend) == []
 
@@ -365,14 +365,14 @@ async def test_another_reply_and_a_later_reply_get_workers_of_their_own(
     """A name maps to another worker in every reply, so a worker a restart left behind is never reached again."""
     # The first reply ends as a restart ends it: nothing removes its worker.
     monkeypatch.setattr(named_module, "lease_configured_primary_worker_manager", lambda _runtime_paths: None)
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         left_behind = _run(backend, _call(runtime_paths, "e2e-0"))
-        async with reply_named_workers("turn-2"):
+        async with execution_resources(response=True):
             concurrent = _run(backend, _call(runtime_paths, "e2e-0", turn_id="turn-2"), normal_key=_BOB)
     assert await _retired(backend) == []
 
     # The same turn resumes after the restart and names the same worker.
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         resumed = _run(backend, _call(runtime_paths, "e2e-0"))
 
         pins = {key.split(":")[-2] for key in (left_behind.worker_key, concurrent.worker_key, resumed.worker_key)}
@@ -389,7 +389,7 @@ async def test_a_new_worker_past_the_agent_limit_is_refused_not_queued(
     backend: _FakeBackend,
 ) -> None:
     """The limit counts one requester's running workers of the agent; a name that already runs is always reached."""
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         first = _run(backend, _call(runtime_paths, "a"))
         _run(backend, _call(runtime_paths, "b"))
         # Another requester's workers of the same agent do not count against this one.
@@ -415,7 +415,7 @@ async def test_a_new_worker_past_the_deployment_limit_is_refused(
 ) -> None:
     """The deployment's limit counts every requester's and agent's named workers together."""
     backend.named_workers_max = 2
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         _run(backend, _call(runtime_paths, "a"))
         _run(backend, _call(runtime_paths, "a"), normal_key=_BOB)
 
@@ -430,7 +430,7 @@ async def test_workers_that_are_starting_count_against_the_limit(
 ) -> None:
     """Calls that start workers at the same time cannot pass the limit together."""
     backend.hold_starts = threading.Event()
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         starting = [asyncio.create_task(asyncio.to_thread(_run, backend, _call(runtime_paths, name))) for name in "ab"]
         try:
             # Both starts are admitted and wait in the backend, which lists neither worker yet.
@@ -467,7 +467,7 @@ async def test_a_start_that_finishes_while_the_workers_are_counted_still_counts(
         backend.hold_starts.set()
         assert first_started.wait(SETTLE_TIMEOUT_SECONDS)
 
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         first = asyncio.create_task(asyncio.to_thread(start_first))
         assert await asyncio.to_thread(backend.entered.acquire, timeout=SETTLE_TIMEOUT_SECONDS)
         backend.after_listing = finish_the_first_start
@@ -485,7 +485,7 @@ async def test_reusing_a_named_worker_does_not_depend_on_the_deployment_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A namespace-wide list failure need not block a call to a healthy, already admitted worker."""
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         call = _call(runtime_paths, "a")
         worker = _run(backend, call)
 
@@ -508,7 +508,7 @@ async def test_a_worker_that_crashed_is_replaced_by_a_new_one(
     backend: _FakeBackend,
 ) -> None:
     """The next call with the name of a failed worker removes what it left and starts again, and says so."""
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         call = _call(runtime_paths, "e2e-0")
         crashed = _run(backend, call)
         assert call.header(crashed) == "[worker: e2e-0, started]"
@@ -525,7 +525,7 @@ async def test_a_worker_that_crashed_is_replaced_by_a_new_one(
 @pytest.mark.asyncio
 async def test_a_call_whose_reply_ended_starts_no_worker(runtime_paths: RuntimePaths, backend: _FakeBackend) -> None:
     """A call that outlives its reply and that reply's jobs cannot start a worker nothing would remove."""
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         call = _call(runtime_paths, "late")
         spec = call.worker_spec(WorkerSpec(_ALICE))
 
@@ -541,7 +541,7 @@ async def test_a_removal_that_fails_is_left_to_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One worker that cannot be removed does not keep the reply's other workers."""
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         stuck, removed = (_run(backend, _call(runtime_paths, name)).worker_key for name in ("a", "b"))
     retire = backend.retire_worker
 
@@ -669,7 +669,7 @@ async def test_a_worker_beside_a_normal_worker_that_is_not_per_requester_and_age
     normal_key: str,
 ) -> None:
     """Whatever the config said when the call was read, the key the call is routed by decides whose limit applies."""
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         with pytest.raises(NamedWorkerError, match="per requester and agent"):
             _run(backend, _call(runtime_paths, "a"), normal_key=normal_key)
     assert backend.specs == []
@@ -762,7 +762,7 @@ async def test_a_shell_call_runs_in_the_worker_it_names(
     assert target.worker_key is not None
 
     with tool_runtime_context(_tool_context(runtime_paths)):
-        async with reply_named_workers(_TURN):
+        async with execution_resources(response=True):
             normal = await shell("echo hi")
             first = await shell("echo hi", worker="e2e-0", resource_profile="large")
             again = await shell(args="echo hi", worker="e2e-0")
@@ -845,7 +845,7 @@ async def test_workers_run_prints_saved_output_from_its_named_worker(
         output_file_policy=ToolOutputFilePolicy(workspace_root=tmp_path, auto_save_threshold_bytes=32),
     )
     owner.shell_env = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
-    async with reply_named_workers(_TURN), owner._window("driver"):
+    async with execution_resources(response=True), owner._window("driver"):
         queued = await owner.operation(
             window="driver",
             operation=ToolCallOperation(
@@ -892,7 +892,7 @@ async def test_a_stopped_shell_call_is_stopped_in_its_named_worker(
     shell, _target = _shell(runtime_paths)
 
     with tool_runtime_context(_tool_context(runtime_paths)):
-        async with reply_named_workers(_TURN):
+        async with execution_resources(response=True):
             call = asyncio.create_task(shell("sleep 600", worker="e2e-0"))
             assert await asyncio.to_thread(running.wait, SETTLE_TIMEOUT_SECONDS)
             call.cancel()
@@ -927,7 +927,7 @@ async def test_a_shell_call_after_its_worker_crashed_runs_in_a_new_one(
     shell, _target = _shell(runtime_paths)
 
     with tool_runtime_context(_tool_context(runtime_paths)):
-        async with reply_named_workers(_TURN):
+        async with execution_resources(response=True):
             assert await shell("true", worker="e2e-0") == "[worker: e2e-0, started]\nsandbox-result"
             [crashed] = backend.workers.values()
             crash.set()
@@ -1156,19 +1156,27 @@ async def test_a_job_a_response_turn_started_keeps_the_turn_s_named_workers(
     """A turn that ends while a job it started still runs leaves its workers to that job."""
     started: list[str] = []
     jobs: list[ExecutionResourceReference] = []
+    job_context = None
 
     async def attempt(_run_state: object, _continuation: object) -> AsyncGenerator[str | AttemptResolved]:
         started.append(_run(backend, _call(runtime_paths, "e2e-0")).worker_key)
         resources = current_execution_resources()
         assert resources is not None
-        # A call the turn accepted as a background job holds the turn's resources until it ends.
+        # Accepted jobs keep a reference and the response context while they run independently.
+        nonlocal job_context
         jobs.append(resources.acquire())
+        job_context = copy_context()
         yield AttemptResolved(CompletedAttempt(replayable_text="done", has_visible_content=True))
+
+    async def reuse_from_job() -> str:
+        async with execution_resources():
+            return _run(backend, _call(runtime_paths, "e2e-0")).worker_key
 
     with tool_runtime_context(_tool_context(runtime_paths)):
         await _collect_turn(attempt, ctx=_ctx(background_tool_jobs=True))
-        assert await _retired(backend) == []
-        assert _run(backend, _call(runtime_paths, "e2e-0")).worker_key == started[0]
+    assert await _retired(backend) == []
+    assert job_context is not None
+    assert await asyncio.create_task(reuse_from_job(), context=job_context) == started[0]
 
     await jobs[0].release()
 
@@ -1212,7 +1220,7 @@ async def test_a_named_worker_counts_against_the_limit_until_it_is_removed(
     config = Config(agents={"code": AgentConfig(display_name="Code", named_workers=1, worker_scope="user_agent")})
     kubernetes, apps_api, _core_api = _named_backend(tmp_path)
 
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         first = _run(kubernetes, _call(runtime_paths, "a", config=config))
         # Unused for longer than the worker idle timeout, the worker still runs its pod.
         _annotate(apps_api, first, last_used_at="0.0")
@@ -1245,7 +1253,7 @@ async def test_named_workers_a_restart_left_behind_count_until_the_first_mainten
     """No reply can reach a named worker an earlier process started, so the first pass removes it, whatever its age."""
     config = Config(agents={"code": AgentConfig(display_name="Code", named_workers=1, worker_scope="user_agent")})
     before_restart, apps_api, core_api = _named_backend(tmp_path)
-    async with reply_named_workers(_TURN):
+    async with execution_resources(response=True):
         left_behind = _run(before_restart, _call(runtime_paths, "a", config=config))
     # Long unused, as after a primary that was down for a while.
     _annotate(apps_api, left_behind, last_used_at="0.0")
@@ -1254,7 +1262,7 @@ async def test_named_workers_a_restart_left_behind_count_until_the_first_mainten
 
     restarted, _apps_api, _core_api = _named_backend(tmp_path, process_started_at=time.time())
     restarted._resources.apps_api, restarted._resources.core_api = apps_api, core_api
-    async with reply_named_workers("turn-after-restart"):
+    async with execution_resources(response=True):
         with pytest.raises(NamedWorkerError, match="already has 1 of the 1 named workers"):
             _run(restarted, _call(runtime_paths, "a", config=config, turn_id="turn-after-restart"))
 

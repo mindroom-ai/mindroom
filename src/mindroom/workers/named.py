@@ -15,14 +15,13 @@ import secrets
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import agent_policy
 from mindroom.logging_config import get_logger
-from mindroom.tool_jobs.resources import defer_execution_cleanup
+from mindroom.tool_jobs.resources import current_response_resources
 from mindroom.tool_system.worker_routing import (
     named_worker_key,
     pinned_worker_state_scope_key,
@@ -36,8 +35,6 @@ from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
 from mindroom.workers.runtime import idle_worker_cleanup_runs, lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.workers.backend import WorkerBackend
@@ -49,7 +46,6 @@ __all__ = [
     "ensure_named_worker",
     "named_worker_call",
     "named_workers_refusal",
-    "reply_named_workers",
 ]
 
 logger = get_logger(__name__)
@@ -197,25 +193,20 @@ class NamedWorkerCall:
         return self._fleet.header(self.name, handle)
 
 
-@asynccontextmanager
-async def reply_named_workers(turn_id: str | None) -> AsyncIterator[None]:
-    """Own the named workers the calls of the reply ``turn_id`` start, until it and its background jobs end.
-
-    A reply that resumes under the same turn ID while its background jobs still run keeps their workers. None is a
-    turn outside a conversation, whose calls can name no worker.
-    """
-    if turn_id is None:
-        yield
-        return
+def _owned_fleet(turn_id: str | None) -> _NamedWorkerFleet | None:
+    """Keep each calling turn's fleet until the shared response and its background jobs settle."""
+    owner = current_response_resources()
+    if turn_id is None or owner is None:
+        return None
     with _lock:
-        fleet = _fleets.setdefault(turn_id, _NamedWorkerFleet(turn_id))
-        fleet.holders += 1
-    try:
-        yield
-    finally:
-        # Background jobs the reply started may still name workers, so the last of them releases the hold.
-        if not defer_execution_cleanup(fleet.release):
-            await fleet.release()
+        fleet = _fleets.get(turn_id) or _NamedWorkerFleet(turn_id)
+        retained = owner.retain(fleet, fleet.release)
+        if retained is None:
+            return None
+        if retained:
+            _fleets[turn_id] = fleet
+            fleet.holders += 1
+        return fleet
 
 
 def _agent_limit(agent_name: str | None, config: Config | None) -> int:
@@ -270,8 +261,7 @@ def named_worker_call(
     if resource_profile is not None and resource_profile not in SCRIPT_RESOURCE_PROFILE_NAMES:
         msg = "resource_profile must be small, standard, or large."
         raise NamedWorkerError(msg)
-    with _lock:
-        fleet = _fleets.get(turn_id) if turn_id is not None else None
+    fleet = _owned_fleet(turn_id)
     if fleet is None:
         msg = (
             "A named worker belongs to a reply in a conversation, and this call runs outside one, "

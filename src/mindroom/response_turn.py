@@ -55,9 +55,7 @@ from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation, FailedReply, StructuredStreamChunk
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT, continuation_decision_from_tools, stopped_calls
-from mindroom.workers.named import reply_named_workers
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
@@ -1164,15 +1162,12 @@ async def stream_response_turn[ChunkT](
             resume=resume or TurnResume(),
         ),
     )
-    tool_context = get_tool_runtime_context()
-    # The workers this turn's shell calls name stay until the turn and the background jobs it started end.
-    async with reply_named_workers(tool_context.turn_id if tool_context is not None else None):
-        try:
-            async with closing_async_stream(stream):
-                async for chunk in stream:
-                    yield chunk
-        finally:
-            await lifetime.close()
+    try:
+        async with closing_async_stream(stream):
+            async for chunk in stream:
+                yield chunk
+    finally:
+        await lifetime.close()
 
 
 async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
