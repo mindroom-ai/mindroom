@@ -120,12 +120,12 @@ class WorkflowRunStore:
                 raise WorkflowRunConflictError(msg) from exc
         return run, True
 
-    def delete_intent(self, run_id: str) -> bool:
-        """Delete a run that never got an attempt; return whether one was deleted."""
+    def delete_intent(self, run_id: str, owner: str | None, epoch: int) -> bool:
+        """Delete a run that never got an attempt and is still *owner*'s at *epoch*; return whether one was deleted."""
         with self._write_transaction() as connection:
             deleted = connection.execute(
-                "DELETE FROM workflow_runs WHERE run_id = ? AND state = ? AND attempt = 0",
-                (run_id, WorkflowRunState.STARTING),
+                "DELETE FROM workflow_runs WHERE run_id = ? AND state = ? AND attempt = 0 AND owner IS ? AND epoch = ?",
+                (run_id, WorkflowRunState.STARTING, owner, epoch),
             )
         return deleted.rowcount == 1
 
@@ -381,18 +381,21 @@ class WorkflowRunStore:
             ).fetchall()
         return [row["text"] for row in reversed(rows)]
 
-    def prune(self, finished_before: str) -> int:
+    def prune(self, finished_before: str, held: Collection[str] | None = ()) -> int:
         """Delete finished runs that ended before *finished_before*, with all they own; return how many.
 
+        A run of one of the jobs *held* stays: that job has not saved the run's report as its own end yet.
+        So does every run of a job while nobody can say which those are (None).
         The timestamps are compared as instants, because their text leaves out a zero fraction of a second.
         """
         cutoff = datetime.fromisoformat(finished_before)
         with self._write_transaction() as connection:
             rows = connection.execute(
-                f"SELECT run_id, finished_at FROM workflow_runs "  # noqa: S608
+                f"SELECT run_id, job_id, finished_at FROM workflow_runs "  # noqa: S608
                 f"WHERE state IN ({_TERMINAL_STATE_PLACEHOLDERS}) AND finished_at IS NOT NULL",
                 _TERMINAL_STATE_VALUES,
             ).fetchall()
+            rows = [row for row in rows if row["job_id"] is None or (held is not None and row["job_id"] not in held)]
             run_ids = [row["run_id"] for row in rows if datetime.fromisoformat(row["finished_at"]) < cutoff]
             connection.executemany("DELETE FROM workflow_runs WHERE run_id = ?", [(run_id,) for run_id in run_ids])
         for run_id in run_ids:
@@ -671,7 +674,7 @@ _SCHEMA_STATEMENTS = (
         execution_identity_json TEXT NOT NULL, persona_json TEXT NOT NULL, title TEXT,
         source TEXT NOT NULL, source_digest TEXT NOT NULL, previous_source_digest TEXT, args_json TEXT NOT NULL,
         max_concurrent INTEGER NOT NULL, max_cost_usd REAL, resource_profile TEXT, runtime_seconds_left REAL,
-        state TEXT NOT NULL, epoch INTEGER NOT NULL, attempt INTEGER NOT NULL, idle_resumes INTEGER NOT NULL,
+        state TEXT NOT NULL, attempt INTEGER NOT NULL, idle_resumes INTEGER NOT NULL,
         script_run_id TEXT, job_id TEXT, card_event_id TEXT, result_json TEXT NOT NULL, error TEXT,
         created_at TEXT NOT NULL, finished_at TEXT
     )
@@ -708,6 +711,14 @@ _SCHEMA_STATEMENTS = (
     "CREATE INDEX workflow_log_run_idx ON workflow_log(run_id, id)",
 )
 
+
+def _add_epoch_and_owner(connection: sqlite3.Connection) -> None:
+    """Give each run the epoch its writes name and the invocation that owns it: its job, or the call that reserved it."""
+    connection.execute("ALTER TABLE workflow_runs ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0")
+    connection.execute("ALTER TABLE workflow_runs ADD COLUMN owner TEXT")
+    connection.execute("UPDATE workflow_runs SET owner = COALESCE(job_id, origin_job_id)")
+
+
 # Each entry upgrades the database by one schema version; the stored version is how many have run.
-_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_create_schema,)
+_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_create_schema, _add_epoch_and_owner)
 SCHEMA_VERSION = len(_MIGRATIONS)

@@ -635,7 +635,8 @@ async def test_call_and_stop_of_an_attempt_that_the_run_moved_on_from_reach_no_l
 
     with pytest.raises(SupersededAttemptError):
         await stack.engine._admit(asked, old, NodeRequest("@0", "tool", _A, {}))
-    stopped = await stack.engine._stop(stack.run_id, WorkflowRunState.INTERRUPTED, "Out of time.", epoch=asked.epoch)
+    out_of_time = {"reason": "Out of time.", "state": WorkflowRunState.INTERRUPTED, "epoch": asked.epoch}
+    stopped = await stack.engine.cancel(stack.run_id, **out_of_time)
 
     assert stopped == stack.store.get_run(stack.run_id) == current
     assert (current.state, current.attempt) == (WorkflowRunState.RUNNING, 2)

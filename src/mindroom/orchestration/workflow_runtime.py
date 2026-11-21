@@ -8,7 +8,12 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
-from mindroom.custom_tools.workflow import workflow_job_standing, workflow_limits
+from mindroom.custom_tools.workflow import (
+    undelivered_workflow_jobs,
+    workflow_job_admission,
+    workflow_job_standing,
+    workflow_limits,
+)
 from mindroom.logging_config import get_logger
 from mindroom.script_runs.models import utc_timestamp
 from mindroom.workflow_runs.engine import WorkflowEngine
@@ -47,10 +52,13 @@ class WorkflowRuntimeLifecycle:
         """
         try:
             async with asyncio.timeout(self.script_runtime.pass_timeout_seconds / 2):
-                standing = partial(workflow_job_standing, self.script_runtime.runtime_paths)
-                await recover_runs(self.engine, standing)
+                paths = self.script_runtime.runtime_paths
+                standing, admission = partial(workflow_job_standing, paths), partial(workflow_job_admission, paths)
+                await recover_runs(self.engine, standing, admission)
                 cutoff = datetime.now(UTC) - timedelta(seconds=self.script_runtime.retention_seconds)
-                await asyncio.to_thread(self.engine.store.prune, utc_timestamp(cutoff))
+                # A report that a job has not saved as its own end is kept, also while nobody can say which those are.
+                undelivered = undelivered_workflow_jobs(paths)
+                await asyncio.to_thread(self.engine.store.prune, utc_timestamp(cutoff), undelivered)
         except Exception:
             logger.exception("workflow_maintenance_pass_failed")
 

@@ -438,7 +438,9 @@ async def test_intent_without_a_job_is_deleted(stack: WorkflowStack) -> None:
 
     await stack.restart(kill=True)
     fresh = stack.reserve(SCRIPT, origin_job_id="job-being-admitted-now", job_id="job-being-admitted-now")
-    assert await stack.recover() == []
+    # A delivery of a call holds its job's admission lock from the reservation until the job is saved.
+    async with stack.jobs.admission("job-being-admitted-now"):
+        assert await stack.recover() == []
 
     with pytest.raises(WorkflowRunNotFoundError):
         stack.store.get_run(left.run_id)
@@ -484,7 +486,9 @@ async def test_run_with_no_job_that_never_got_an_attempt_is_launched_once(stack:
     left = stack.reserve(SCRIPT)
 
     await stack.restart(kill=True)
-    fresh = stack.reserve(SCRIPT)
+    # The call that reserves a run waits for it, and is counted before it reserves.
+    stack.engine._attending["inline:here"] += 1
+    fresh = stack.reserve(SCRIPT, origin_job_id="inline:here")
     assert await stack.recover() == [left.run_id]
     assert await stack.maintain() == []
 
@@ -1280,6 +1284,35 @@ async def test_run_goes_on_only_once_its_bot_is_synced_and_still_in_the_runs_roo
 
     run = stack.store.get_run(stack.run_id)
     assert (run.state, run.error, len(stack.scripts.launched)) == ends
+
+
+@pytest.mark.asyncio
+async def test_pass_keeps_an_old_report_until_its_job_has_delivered_it(stack: WorkflowStack) -> None:
+    """A report that was stored before a long stop is older than the retention, and still the job's to deliver."""
+    handle = await _started(stack)
+    await stack.engine.finish(stack.attempt, result="the report", error=None)
+    set_run(stack.store, stack.run_id, finished_at="2026-01-01T00:00:00Z")
+    await stack.restart(kill=True)
+    await stack._retire_attempts(RUNTIME_RESTARTED)
+    script_runtime = _script_runtime(stack)
+    await WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime).start()  # type: ignore[arg-type]
+
+    # The job waits to be continued: the pass ends the run with its report and keeps it.
+    await script_runtime.after_reconcile()
+    run = stack.store.get_run(stack.run_id)
+    assert (run.state, run.result, run.finished_at) == (
+        WorkflowRunState.COMPLETED,
+        "the report",
+        "2026-01-01T00:00:00Z",
+    )
+    await stack.continue_jobs()
+    job = await _ended_job(stack, handle["job_id"])
+    assert (job.status, await stack.collect(job)) == ("completed", "the report")
+
+    # The report is saved as the job's end now, so the run is as old as it is.
+    await script_runtime.after_reconcile()
+    with pytest.raises(WorkflowRunNotFoundError):
+        stack.store.get_run(stack.run_id)
 
 
 @pytest.mark.asyncio

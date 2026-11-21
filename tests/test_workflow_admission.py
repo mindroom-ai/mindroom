@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import suppress
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -181,7 +182,9 @@ async def test_pass_starts_no_attempt_of_a_run_whose_job_was_stopped_before_its_
         waiting = stack.store.get_run(intent.run_id)
     finally:
         saved.set()
-    await call
+    # The call returns its job's handle, or the job's end when that came first.
+    with suppress(CallFailed):
+        await call
     await wait_for_status(stack.jobs, str(intent.job_id), "cancelled")
     assert await stack.maintain() == []
 
@@ -271,7 +274,7 @@ async def test_continued_job_never_waits_for_a_run_that_another_job_took(stack: 
     await stack.restart(kill=True)
     assert await stack.recover() == []
     # As if a resume had taken the run while this job still read `running` in the journal.
-    set_run(stack.store, stack.run_id, job_id="the-job-of-a-resume")
+    set_run(stack.store, stack.run_id, job_id="the-job-of-a-resume", owner="the-job-of-a-resume")
 
     await stack.continue_jobs()
     old = await _ended_job(stack, first["job_id"])

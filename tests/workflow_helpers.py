@@ -23,6 +23,7 @@ import httpx
 from fastapi import FastAPI
 
 import mindroom.workflow as sdk
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api.workflow_gateway import bind_workflow_engine
 from mindroom.api.workflow_gateway import router as workflow_router
 from mindroom.approval.tool_approval import ToolApprovalDecision
@@ -30,8 +31,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths
-from mindroom.custom_tools.workflow import WorkflowTools, workflow_job_standing
+from mindroom.custom_tools.workflow import WorkflowTools, workflow_job_admission, workflow_job_standing
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker
 from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, RUN_ID_ENV, TOKEN_PATH_ENV
 from mindroom.script_runs.manager import ScriptRunManager
@@ -635,7 +637,9 @@ class WorkflowStack:
             origin_job_id=None,
         )
         self.run_id = run.run_id
-        return self.store.reserve_run(replace(run, **options))[0]
+        run = replace(run, **options)
+        # The invocation that reserves a run owns it: its job, or the call that waits for it.
+        return self.store.reserve_run(replace(run, owner=run.owner or run.origin_job_id))[0]
 
     async def submit(
         self,
@@ -692,9 +696,19 @@ class WorkflowStack:
         """Start the real job runtime on the stack's journal as the instance of the owner's storage root."""
         paths = self.context.runtime_paths
         self.has_jobs = True
+        coordinator = ToolJobRuntimeCoordinator(
+            runtime_paths=paths,
+            config_provider=lambda: self.context.config,
+            bot_provider=lambda _name: None,
+            agent_reply_memberships=AgentReplyMembershipIndex(),
+            journal_provider=lambda: self.jobs.journal,
+            workflow_engine=lambda: self.engine,
+        )
         self.jobs = await tool_job_runtime(
             paths.storage_root,
             grant=lambda _job: self.admission,
+            # What the coordinator's runtime does for a job whose own handler is gone or declined.
+            cancel=coordinator._interrupt,
             continues=lambda job: self.continues(job),
         )
         self._instance = pin_background_tool_jobs(self.context.config, paths)
@@ -809,7 +823,7 @@ class WorkflowStack:
     async def maintain(self) -> list[str]:
         """Run the workflow pass that follows each pass of the script runtime."""
         standing = partial(workflow_job_standing, self.context.runtime_paths)
-        return await recover_runs(self.engine, standing)
+        return await recover_runs(self.engine, standing, partial(workflow_job_admission, self.context.runtime_paths))
 
     async def continue_jobs(self, context: ToolRuntimeContext | None = None) -> None:
         """Run the job coordinator's pass that continues the jobs a restart stopped, with the owner's access granted.

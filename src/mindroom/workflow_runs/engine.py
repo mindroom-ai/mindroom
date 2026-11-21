@@ -39,7 +39,7 @@ from mindroom.workflow_runs.models import (
     WorkflowRun,
     WorkflowRunState,
 )
-from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS
+from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS, NO_ACCESS
 from mindroom.workflow_runs.replay import DirtyLanes, decide, node_digest, result_digest, split_key, stale_keys
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunStoreError
 
@@ -70,7 +70,7 @@ _CHANGED_WITHOUT_EDIT = (
     "Call n{seq} changed between attempts without a script edit. It probably contains the time or a random value; "
     "use now() or random() from mindroom.workflow."
 )
-_NO_ACCESS = "The requester no longer has access."
+_TAKEN = "Run {} was resumed by another call."
 _OWNER_NOT_READY = "The run's agent is not ready in the run's room yet. Try again in a moment."
 _IDLE = "Stopped resuming after {attempts} attempts that finished nothing. Fix the script and call resume_workflow."
 # How many attempts in a row an interrupted run is given on its own while none of them finishes a call.
@@ -118,7 +118,6 @@ class WorkflowEngine:
         self.scripts = scripts
         self.broker = broker
         self._clock = clock
-        self.started_at = utc_timestamp()
         # What the saved owner of a run may start an attempt with now; set by the runtime that knows the live bots.
         self.owner_access: Callable[[WorkflowRun], ResumeAccess] = lambda _run: "pending"
         # The attempts this engine started, each with the epoch its run got when it began: all it may ever write
@@ -131,8 +130,8 @@ class WorkflowEngine:
         # One per run with a waiter or a launch in progress: polls and `wait` sleep on it, a launch holds its lock.
         self._changed: WeakValueDictionary[str, asyncio.Condition] = WeakValueDictionary()
         self._tasks: dict[str, set[asyncio.Task[Any]]] = {}
-        self._attending: Counter[object] = Counter()
-        self._inline_runs: dict[object, str] = {}
+        self._attending: Counter[str | None] = Counter()
+        self._inline_runs: dict[str, str] = {}
         self._closed = False
 
     def admit(
@@ -157,7 +156,7 @@ class WorkflowEngine:
         else:
             access = self.owner_access(run)
         if not isinstance(access, tuple):
-            return _NO_ACCESS if access == "revoked" else None
+            return NO_ACCESS if access == "revoked" else None
         if run.state is WorkflowRunState.STARTING and run.runtime_seconds_left == 0:
             return _OUT_OF_TIME.format(hours=access[1].max_runtime_hours)
         return _IDLE.format(attempts=_MAX_IDLE_RESUMES) if replay and run.idle_resumes >= _MAX_IDLE_RESUMES else access
@@ -167,8 +166,14 @@ class WorkflowEngine:
         run_id: str,
         caller: ToolRuntimeContext | None = None,
         limits: WorkflowLimits | None = None,
+        *,
+        owner: str | None = None,
+        epoch: int | None = None,
     ) -> WorkflowRun:
         """Start the attempt a run waits for, if `admit` allows one now; a refusal ends the run with the reason.
+
+        Whoever launches names the *owner* it launches for, and the pass the *epoch* it judged the run at: a run
+        that another invocation took since is left to that one.
 
         The engine owns a launch once it began: a caller that goes away leaves no process its run does not name, and
         only the engine's stop ends a launch, which leaves the run starting for the next primary. The run also stays
@@ -177,7 +182,7 @@ class WorkflowEngine:
         """
         if self._closed:
             return self.store.get_run(run_id)
-        launch = self._spawn(_ADMISSIONS, self._launch(run_id, caller, limits))
+        launch = self._spawn(_ADMISSIONS, self._launch(run_id, caller, limits, owner, epoch))
         try:
             return await asyncio.shield(launch)
         except asyncio.CancelledError:
@@ -192,16 +197,18 @@ class WorkflowEngine:
         run_id: str,
         caller: ToolRuntimeContext | None,
         limits: WorkflowLimits | None,
+        owner: str | None,
+        epoch: int | None,
     ) -> WorkflowRun:
         # Held until the run names the attempt: the new process's first request waits instead of being refused, and
         # a stop finds either no attempt or the one it has to end.
         async with self._condition(run_id):
             run = self.store.get_run(run_id)
-            # A reserved run gets one attempt from one launch; a run that was launched or has ended gets none, and
-            # a stopping engine starts none.
-            admitted = (
-                None if run.state is not WorkflowRunState.STARTING or self._closed else self.admit(run, caller, limits)
-            )
+            # A reserved run gets one attempt from one launch; a run that was launched or has ended gets none, a
+            # stopping engine starts none, and neither does a launcher whose run moved on to another owner.
+            moved = owner not in (None, run.owner) or epoch not in (None, run.epoch)
+            waits = run.state is WorkflowRunState.STARTING and not self._closed and not moved
+            admitted = self.admit(run, caller, limits) if waits else None
             if admitted is None:
                 return run
             # An attempt that follows one an interruption ended counts toward the idle limit; a first attempt, or
@@ -254,30 +261,24 @@ class WorkflowEngine:
             self._spawn(run.run_id, self._watch_time(run.run_id, launched.epoch, hours))
         return launched
 
-    async def cancel(self, run_id: str, *, reason: str, job_id: str | None = None) -> WorkflowRun:
-        """Revoke the run's attempt, end its process and end the run cancelled; completed nodes stay saved.
-
-        With *job_id*, only a run that is still that job's is cancelled: one that a resume gave to another job is left.
-        """
-        return await self._stop(run_id, WorkflowRunState.CANCELLED, reason, job_id)
-
-    async def _stop(
+    async def cancel(
         self,
         run_id: str,
-        state: WorkflowRunState,
+        *,
         reason: str,
-        job_id: str | None = None,
+        state: WorkflowRunState = WorkflowRunState.CANCELLED,
+        owner: str | None = None,
         epoch: int | None = None,
     ) -> WorkflowRun:
-        """Revoke the run's attempt, end its process and end the run in *state*, unless the attempt ended before.
+        """Revoke the run's attempt, end its process and end the run in *state*; completed nodes stay saved.
 
-        A stop wins against a launch: when the run got an attempt before the stop's write, that attempt is stopped,
-        and so on until the run has ended or is no longer what was to be stopped: *job_id*'s run, the attempt with
-        *epoch*.
+        An attempt that ended before the stop ends the run as it did. With *owner*, only a run that is still that
+        invocation's is stopped, and with *epoch* only that attempt: a run that a resume took since is left. A stop
+        wins against a launch: when the run got an attempt before the stop's write, that attempt is stopped too.
         """
         async with self._condition(run_id):
             run = self.store.get_run(run_id)
-        while run.state not in TERMINAL_RUN_STATES and job_id in (None, run.job_id) and epoch in (None, run.epoch):
+        while run.state not in TERMINAL_RUN_STATES and owner in (None, run.owner) and epoch in (None, run.epoch):
             outcome: tuple[WorkflowRunState, str | None] = (state, reason)
             # A run that waits for its next attempt has no process: how its last one ended says nothing about this stop.
             if run.script_run_id is not None and run.state is not WorkflowRunState.STARTING:
@@ -321,6 +322,7 @@ class WorkflowEngine:
         source: str | None = None,
         rerun: Sequence[str] = (),
         limits: WorkflowLimits | None = None,
+        owner: str | None = None,
         job_id: str | None = None,
         epoch: int | None = None,
     ) -> tuple[WorkflowRun, bool]:
@@ -330,12 +332,16 @@ class WorkflowEngine:
         the calls *rerun* names. The answer has the form of a reservation that found its run.
 
         Nothing changes before the resume takes the run (`resumable`), and it takes it in one write: the run becomes
-        *job_id*'s, or no job's, names no attempt, and the calls of *rerun* are marked. *epoch* is the one the run
-        had when the resume was accepted: a run that another resume took since, also one whose attempt never
-        started, is refused, as is one over its owner's limit of live runs.
+        *owner*'s, the invocation that resumes it, with *job_id* when that is a job, names no attempt, and the calls
+        of *rerun* are marked. A run that is *owner*'s already was taken by this same invocation, delivered again,
+        and is returned as it is. *epoch* is the one the run had when the resume was accepted: a run that another
+        resume took since, also one whose attempt never started, is refused, as is one over its owner's limit of
+        live runs.
         """
         limits = limits or WorkflowLimits()
         run = self.store.get_run(run_id)
+        if owner is not None and run.owner == owner:
+            return run, False
         text = run.source if source is None else source
         take = partial(
             self.store.update_run,
@@ -350,6 +356,7 @@ class WorkflowEngine:
             previous_source_digest=run.source_digest,
             runtime_seconds_left=limits.max_runtime_hours * 3600 if limits.max_runtime_hours else None,
             idle_resumes=0,
+            owner=owner,
             job_id=job_id,
             script_run_id=None,
             result=None,
@@ -361,23 +368,31 @@ class WorkflowEngine:
                 # Waited for also by a caller that is cancelled here, so the run it finds says whether it took it.
                 reopened = await wait_for_future_until_complete(asyncio.ensure_future(asyncio.to_thread(take)))
         except SupersededAttemptError:
-            msg = f"Run {run_id} was resumed by another call."
-            raise WorkflowRunStoreError(msg) from None
+            raise WorkflowRunStoreError(_TAKEN.format(run_id)) from None
         return reopened, False
 
-    async def wait(self, run_id: str, launch: Callable[[], Awaitable[WorkflowRun]] | None = None) -> WorkflowRun:
+    async def wait(
+        self,
+        run_id: str,
+        launch: Callable[[], Awaitable[WorkflowRun]] | None = None,
+        owner: str | None = None,
+    ) -> WorkflowRun:
         """Return the run once it has ended.
 
-        With *launch*, the waiter is the operation of the run's job, which alone starts the run's attempts while
-        the job is unfinished: whenever the run waits for an attempt it calls *launch*, again after a moment when
-        that started none.
+        With *launch*, the waiter is the invocation that owns the run, *owner*: a job's operation, or a call that
+        waits itself. It alone starts the run's attempts while it waits: whenever the run waits for one it calls
+        *launch*, again after a moment when that started none. A run that another invocation took is not waited
+        for: its report is that one's.
         """
         condition = self._condition(run_id)
         while True:
             async with condition:
-                while (run := self.store.get_run(run_id)).state not in TERMINAL_RUN_STATES and (
-                    launch is None or run.state is not WorkflowRunState.STARTING
-                ):
+                while True:
+                    run = self.store.get_run(run_id)
+                    if owner not in (None, run.owner):
+                        raise WorkflowRunStoreError(_TAKEN.format(run_id))
+                    if run.state in TERMINAL_RUN_STATES or (launch and run.state is WorkflowRunState.STARTING):
+                        break
                     # The saved run decides: a wake only shortens the wait, since a writer cancelled at its commit
                     # sends none.
                     with suppress(TimeoutError):
@@ -389,7 +404,7 @@ class WorkflowEngine:
 
     async def attend(
         self,
-        origin: str | None,
+        origin: str,
         reserve: Callable[[], Awaitable[tuple[WorkflowRun, bool]]],
         context: ToolRuntimeContext,
         limits: WorkflowLimits,
@@ -398,23 +413,28 @@ class WorkflowEngine:
 
         A cancelled call only stops waiting, and its reservation still ends. Whenever a call leaves, however it ends,
         and no other call of *origin* is left while MindRoom is not stopping, nobody can receive the report, so the
-        engine cancels the run. A call whose reservation is refused holds the run only until that refusal.
+        engine cancels the run. A call whose reservation is refused holds the run only until that refusal. *origin*
+        is the key of the call, the owner its reservation gave the run: a run that is another invocation's by now is
+        neither waited for nor cancelled.
         """
-        key: object = origin or object()
-        self._attending[key] += 1
+        self._attending[origin] += 1
         reserving = asyncio.ensure_future(reserve())
         try:
             run, _ = await wait_for_future_until_complete(reserving)
             # The call starts the run's attempt as a job's operation does, again while `admit` cannot answer yet.
-            return await self.wait(run.run_id, partial(self.launch, run.run_id, context, limits))
+            return await self.wait(run.run_id, partial(self.launch, run.run_id, context, limits, owner=origin), origin)
         finally:
             if not reserving.cancelled() and not reserving.exception():
-                self._inline_runs[key] = reserving.result()[0].run_id
-            self._attending -= Counter({key: 1})
+                self._inline_runs[origin] = reserving.result()[0].run_id
+            self._attending -= Counter({origin: 1})
             stopping = self._closed or context.orchestrator is None or not context.orchestrator.running
-            if not self._attending[key] and (run_id := self._inline_runs.pop(key, None)) and not stopping:
+            if not self._attending[origin] and (run_id := self._inline_runs.pop(origin, None)) and not stopping:
                 # A run that ended is left as it ended.
-                await run_coroutine_until_complete(self.cancel(run_id, reason=_ABANDONED))
+                await run_coroutine_until_complete(self.cancel(run_id, reason=_ABANDONED, owner=origin))
+
+    def attended(self, owner: str | None) -> bool:
+        """Return whether a call of this primary waits for the run it owns as *owner*, and so starts its attempts."""
+        return self._attending[owner] > 0
 
     def status(self, run_id: str) -> tuple[WorkflowRun, list[WorkflowNode]]:
         """Return the run and its current nodes."""
@@ -725,7 +745,8 @@ class WorkflowEngine:
                     run = await asyncio.to_thread(partial(self.store.update_run, run_id, epoch, **charge))
                 left = run.runtime_seconds_left
             if left is not None:
-                await self._stop(run_id, WorkflowRunState.INTERRUPTED, _OUT_OF_TIME.format(hours=hours), epoch=epoch)
+                out_of_time = _OUT_OF_TIME.format(hours=hours)
+                await self.cancel(run_id, reason=out_of_time, state=WorkflowRunState.INTERRUPTED, epoch=epoch)
 
     def _time_left(self, run: WorkflowRun) -> dict[str, object]:
         """Return, as a change to save, the working time *run* has left after what it used since the last charge.

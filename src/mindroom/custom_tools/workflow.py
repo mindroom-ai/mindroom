@@ -8,7 +8,8 @@ import json
 from collections import Counter
 from dataclasses import asdict, fields, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
+from uuid import uuid4
 
 from mindroom.background_tasks import run_blocking_or_compensate
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
@@ -216,10 +217,11 @@ class WorkflowTools(Toolkit):
         """
         engine, context = _waiting_runtime()
         arguments = {"run_id": run_id, "source": source, "path": path, "rerun": rerun}
-        run, request = await self._resumption(engine, context, arguments)
-        # One of the calls that wait for this run, as an inline start is: the last one to leave stops the run.
-        reopen = partial(engine.reopen, run.run_id, context, limits=self.limits, **request)
-        return _outcome_text(await engine.attend(run.run_id, reopen, context, self.limits))
+        origin = _inline_origin(context)
+        run, request = await self._resumption(engine, context, arguments, owner=origin)
+        # The call owns the run it takes, as an inline start owns the run it reserves: its leaving stops that run.
+        reopen = partial(engine.reopen, run.run_id, context, limits=self.limits, owner=origin, **request)
+        return _outcome_text(await engine.attend(origin, reopen, context, self.limits))
 
     async def managed_job(
         self,
@@ -254,11 +256,12 @@ class WorkflowTools(Toolkit):
             refused = request = None
             if function_name == _START:
                 run, _ = await self._reserve(engine, context, job_id, arguments, job_id=job_id)
-                refused = partial(asyncio.to_thread, engine.store.delete_intent, run.run_id)
+                refused = partial(asyncio.to_thread, engine.store.delete_intent, run.run_id, job_id, run.epoch)
             else:
                 # A call delivered again names the job that already holds what was accepted, and is checked no more.
                 known = next((job.adapter for job in runtime.retained_jobs() if job.job_id == job_id), None)
-                run, request = await self._resumption(engine, context, arguments, known and known.get("resume"))
+                accepted = known and known.get("resume")
+                run, request = await self._resumption(engine, context, arguments, accepted, owner=job_id)
         except ValueError as exc:
             return str(exc)
         after = partial(hooks, before=False)
@@ -270,18 +273,21 @@ class WorkflowTools(Toolkit):
         context: ToolRuntimeContext,
         arguments: Mapping[str, Any],
         accepted: dict[str, Any] | None = None,
+        *,
+        owner: str,
     ) -> tuple[WorkflowRun, dict[str, Any]]:
         """Check one resume and return its run and the request its job is admitted with; a refusal raises.
 
         The request names the epoch the run has now, so it takes the run only if nothing else did since.
-        *accepted* is the request this same call was admitted with before, which is returned unchecked.
+        *accepted* is the request this same call was admitted with before, which is returned unchecked, and so is
+        the call that finds the run its own already: *owner*, the job or the waiting call, took it before.
         """
         source, path, rerun = arguments.get("source"), arguments.get("path"), arguments.get("rerun") or ()
         if source is not None and path is not None:
             raise WorkflowRunStoreError(_AT_MOST_ONE_SOURCE)
         run = _owned(engine, context, str(arguments.get("run_id")))
-        if accepted is not None:
-            return run, accepted
+        if accepted is not None or run.owner == owner:
+            return run, accepted or {}
         engine.resumable(run.run_id, context, rerun, self.limits)
         delivered = ("absent", "stopped", "ended")
         if run.job_id is not None and workflow_job_standing(context.runtime_paths, run.job_id) not in delivered:
@@ -295,7 +301,7 @@ class WorkflowTools(Toolkit):
         self,
         engine: WorkflowEngine,
         context: ToolRuntimeContext,
-        origin: str | None,
+        origin: str,
         arguments: Mapping[str, Any],
         job_id: str | None = None,
     ) -> tuple[WorkflowRun, bool]:
@@ -334,13 +340,14 @@ class WorkflowTools(Toolkit):
             resource_profile=arguments.get("resource_profile"),
             runtime_seconds_left=hours * 3600 if hours else None,
             origin_job_id=origin,
+            owner=origin,
             job_id=job_id,
         )
         store = engine.store
 
         def take_back(reserved: tuple[WorkflowRun, bool]) -> None:
             if reserved[1]:
-                store.delete_intent(reserved[0].run_id)
+                store.delete_intent(reserved[0].run_id, origin, 0)
 
         # On a thread, where it waits for the store's writer. A call cancelled meanwhile takes back the intent it
         # wrote; the engine keeps an inline caller's cancellation away from here and ends the run itself.
@@ -370,30 +377,17 @@ def _run_job(
     run_id = run.run_id
 
     async def operation() -> BackgroundOutcome:
+        launch = partial(engine.launch, run_id, context, limits, owner=job_id)
         try:
-            if engine.store.get_run(run_id).job_id != job_id:
-                if resume is None:
-                    msg = f"Run {run_id} was resumed by another call."
-                    raise WorkflowRunStoreError(msg)  # noqa: TRY301
-                await engine.reopen(run_id, context, limits=limits, job_id=job_id, **resume)
+            if resume is not None:
+                await engine.reopen(run_id, context, limits=limits, owner=job_id, job_id=job_id, **resume)
+            outcome = _workflow_job_outcome(await engine.wait(run_id, launch, job_id))
         except WorkflowRunStoreError as exc:
             # Another call took the run: this job owns nothing of it, waits for none of its reports, and says so.
             return BackgroundOutcome("failed", str(exc), encode_result_payload(ToolResultPayload(value=str(exc))))
-        outcome = _workflow_job_outcome(await engine.wait(run_id, partial(engine.launch, run_id, context, limits)))
         if after is not None:
             await after(result=outcome.result)
         return outcome
-
-    async def cancel(_job: BackgroundJob) -> BackgroundOutcome | None:
-        if job_stopped_by_shutdown():
-            # A stopping primary cancels nothing: the run is the restart's to continue or to end.
-            return None
-        try:
-            ended = await engine.cancel(run_id, reason="The run's job was cancelled.", job_id=job_id)
-        except WorkflowRunNotFoundError:
-            return None
-        # A run of another job is left: a resume that never took it, or a job whose run was resumed since.
-        return _workflow_job_outcome(ended) if ended.job_id == job_id else None
 
     def handle(job: BackgroundJob) -> str:
         return json.dumps({"job_id": job.job_id, "run_id": run_id, "status": job.status, "title": run.title})
@@ -405,10 +399,34 @@ def _run_job(
         # Never changed afterwards, so a redelivered call names the same job and reattaches to it.
         adapter={"workflow_job": job_id, "workflow": run_id} | ({"resume": resume} if resume is not None else {}),
         operation=operation,
-        cancel=cancel,
+        cancel=partial(stopped_workflow_job, engine),
         refused=refused,
         handle=handle,
     )
+
+
+async def stopped_workflow_job(
+    engine: WorkflowEngine,
+    job: BackgroundJob,
+    *,
+    live: bool = True,
+) -> BackgroundOutcome | None:
+    """Stop the run of a stopped job and return how the job ends: as its run ended, while that run is still its own.
+
+    A Stop that a restart found saved (not *live*) stops no run here, since the pass ends the run of a stopped job:
+    it only gives the job the report of a run that had already ended.
+    """
+    if job_stopped_by_shutdown():
+        # A stopping primary cancels nothing: the run is the restart's to continue or to end.
+        return None
+    run_id = str(job.adapter.get("workflow"))
+    try:
+        cancel = partial(engine.cancel, run_id, reason="The run's job was cancelled.", owner=job.job_id)
+        run = await cancel() if live else engine.store.get_run(run_id)
+    except WorkflowRunNotFoundError:
+        return None
+    # A run of another owner is left: a resume that never took it, or a job whose run was resumed since.
+    return _workflow_job_outcome(run) if run.owner == job.job_id and run.state in TERMINAL_RUN_STATES else None
 
 
 async def continued_workflow_job(job: BackgroundJob) -> JobSpec:
@@ -444,6 +462,25 @@ def workflow_job_standing(runtime_paths: RuntimePaths, job_id: str) -> str:
     if job.status == "cancel_requested":
         return "stopping"
     return "waiting" if any(waiting.job_id == job_id for waiting in runtime.awaiting_continuation()) else "live"
+
+
+def workflow_job_admission(runtime_paths: RuntimePaths, job_id: str) -> asyncio.Lock:
+    """Return the lock a delivery of the call with *job_id* holds while its job is admitted."""
+    return cast("ToolJobRuntime", get_background_runtime(runtime_paths)).admission(job_id)
+
+
+def undelivered_workflow_jobs(runtime_paths: RuntimePaths) -> frozenset[str] | None:
+    """Return the jobs whose end the journal does not hold yet, so their runs' reports are still theirs to deliver.
+
+    None while there is no job runtime to ask.
+    """
+    runtime = get_background_runtime(runtime_paths)
+    if runtime is None:
+        return None
+    held = runtime.retained_jobs()
+    return frozenset(
+        job.job_id for job in held if job.status not in TERMINAL_STATUSES or not runtime.outcome_saved(job.job_id)
+    )
 
 
 def workflow_limits(config: Config, agent_name: str) -> WorkflowLimits:
@@ -504,14 +541,15 @@ def _jobs_enabled(context: ToolRuntimeContext) -> bool:
     return background_tool_jobs_enabled(config, paths) and not toolkit_is_background_excluded("workflow", config, paths)
 
 
-def _inline_origin(context: ToolRuntimeContext) -> str | None:
-    """Return the key an inline start is found again by: its owner, the model run that made the call, and the call.
+def _inline_origin(context: ToolRuntimeContext) -> str:
+    """Return the key a call that waits for its run owns that run by: its owner, its model run, and the call.
 
-    A provider's call ID alone is never a key, so a call without its run is never found again.
+    A delivery of the same call finds its run again by it. A provider's call ID alone is never a key, so a call
+    without its run gets a key of its own and is never found again.
     """
     call = current_tool_call()
     if call is None or not call.context.run_id or not call.context.call_id:
-        return None
+        return f"inline:{uuid4().hex}"
     owner = asdict(context.execution_identity)
     identity = {"owner": owner, "run_id": call.context.run_id, "tool_call_id": call.context.call_id}
     return "inline:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()

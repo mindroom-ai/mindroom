@@ -2525,7 +2525,7 @@ depends_on = ["mindroom.workflow_runs.models", "mindroom.workflow_runs.store"]
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.recovery"]
-expose = ["AUTO_RESUME_REASONS", "recover_runs"]
+expose = ["AUTO_RESUME_REASONS", "NO_ACCESS", "recover_runs"]
 
 [[modules]]
 path = "mindroom.workflow_runs.engine"

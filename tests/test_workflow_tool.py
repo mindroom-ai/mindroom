@@ -290,10 +290,10 @@ async def test_a_refused_start_cancelled_while_it_takes_its_intent_back_finishes
     deleting, release = threading.Event(), threading.Event()
     delete_intent = stack.store.delete_intent
 
-    def held(run_id: str) -> bool:
+    def held(*intent: Any) -> bool:  # noqa: ANN401
         deleting.set()
         release.wait(SETTLE_TIMEOUT_SECONDS)
-        return delete_intent(run_id)
+        return delete_intent(*intent)
 
     monkeypatch.setattr(stack.store, "delete_intent", held)
     stack.scripts.hold_launch = asyncio.Event()
@@ -1184,7 +1184,7 @@ async def test_cancel_for_a_job_leaves_a_run_that_another_job_took(stack: Workfl
     taken = json.loads(await stack.call("resume_workflow", run_id=first["run_id"]))
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
 
-    left = await stack.engine.cancel(stack.run_id, reason="The run's job was cancelled.", job_id=first["job_id"])
+    left = await stack.engine.cancel(stack.run_id, reason="The run's job was cancelled.", owner=first["job_id"])
 
     assert (left.state, left.job_id, stack.attempt.state) == (
         WorkflowRunState.RUNNING,

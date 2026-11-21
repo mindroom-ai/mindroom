@@ -284,14 +284,17 @@ def test_reserve_counts_the_owners_live_top_level_runs_in_the_write_that_stores_
 
 
 def test_delete_intent_removes_only_a_run_that_never_started(tmp_path: Path) -> None:
-    """An intent is a starting run with attempt 0; anything further along stays."""
+    """An intent is a starting run with attempt 0, deleted as its owner's at its epoch; anything else stays."""
     store = WorkflowRunStore(tmp_path / "w.sqlite3")
-    store.reserve_run(_run(_RUN_A))
-    store.reserve_run(_run(_RUN_B))
+    store.reserve_run(_run(_RUN_A, owner="job-a"))
+    store.reserve_run(_run(_RUN_B, owner="job-b"))
     set_run(store, _RUN_B, attempt=1)
-    assert store.delete_intent(_RUN_A)
-    assert not store.delete_intent(_RUN_A)
-    assert not store.delete_intent(_RUN_B)
+    assert not store.delete_intent(_RUN_A, "job-b", 0)
+    assert not store.delete_intent(_RUN_A, None, 0)
+    assert not store.delete_intent(_RUN_A, "job-a", 1)
+    assert store.delete_intent(_RUN_A, "job-a", 0)
+    assert not store.delete_intent(_RUN_A, "job-a", 0)
+    assert not store.delete_intent(_RUN_B, "job-b", 0)
     assert [run.run_id for run in store.list_runs()] == [_RUN_B]
 
 
@@ -706,7 +709,7 @@ def test_migrations_run_in_order_from_version_zero(tmp_path: Path, monkeypatch: 
     path = tmp_path / "w.sqlite3"
     store = WorkflowRunStore(path)
     store.reserve_run(_run())
-    assert _schema_version(path) == store_module.SCHEMA_VERSION == 1
+    assert _schema_version(path) == store_module.SCHEMA_VERSION == 2
 
     calls: list[str] = []
 
@@ -722,14 +725,39 @@ def test_migrations_run_in_order_from_version_zero(tmp_path: Path, monkeypatch: 
     for _ in range(2):
         WorkflowRunStore(path)
     assert calls == ["second", "third"]
-    assert _schema_version(path) == 3
+    assert _schema_version(path) == 4
     with sqlite3.connect(path) as connection:
         assert connection.execute("SELECT placeholder FROM workflow_runs").fetchall() == [("migrated",)]
 
     fresh = tmp_path / "fresh.sqlite3"
     WorkflowRunStore(fresh)
     assert calls == ["second", "third", "second", "third"]
-    assert _schema_version(fresh) == 3
+    assert _schema_version(fresh) == 4
+
+
+def test_store_of_the_first_schema_gets_an_epoch_and_an_owner_for_each_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store written before runs had either is upgraded: its runs start at epoch 0, owned by their job or their call."""
+    path = tmp_path / "w.sqlite3"
+    monkeypatch.setattr(store_module, "_MIGRATIONS", store_module._MIGRATIONS[:1])
+    WorkflowRunStore(path)
+    monkeypatch.undo()
+    owners = {_RUN_A: ("job-1", "job-1"), _RUN_B: ("inline:key", None)}
+    with sqlite3.connect(path) as connection:
+        for run_id, (origin, job) in owners.items():
+            run = _run(run_id, origin_job_id=origin, job_id=job)
+            values = {**store_module._row_values(run, store_module._RUN_JSON_FIELDS), "reservation_digest": ""}
+            del values["epoch"], values["owner"]
+            store_module._insert(connection, "INSERT INTO workflow_runs", values)
+
+    store = WorkflowRunStore(path)
+
+    assert _schema_version(path) == 2
+    assert [(run.epoch, run.owner) for run in map(store.get_run, owners)] == [(0, "job-1"), (0, "inline:key")]
+    assert set_run(store, _RUN_A, state=WorkflowRunState.RUNNING).epoch == 1
+    assert store.reserve_run(_run(_RUN_C))[1]
 
 
 def test_failed_migration_leaves_the_version_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -745,7 +773,7 @@ def test_failed_migration_leaves_the_version_unchanged(tmp_path: Path, monkeypat
     monkeypatch.setattr(store_module, "_MIGRATIONS", (*store_module._MIGRATIONS, broken))
     with pytest.raises(RuntimeError, match="placeholder failure"):
         WorkflowRunStore(path)
-    assert _schema_version(path) == 1
+    assert _schema_version(path) == store_module.SCHEMA_VERSION
     with sqlite3.connect(path) as connection:
         columns = [row[1] for row in connection.execute("PRAGMA table_info(workflow_runs)")]
     assert "placeholder" not in columns
@@ -868,3 +896,16 @@ def test_first_attempt_and_a_clean_stamp_blank_nothing(tmp_path: Path) -> None:
     # The stamp that says the group changed blanks what follows it, in its own write.
     assert store.update_node(_RUN_A, "@0", 1, 0, dirty_after=True, attempt=3)
     assert [node.digest for node in store.nodes(_RUN_A)] == ["digest", "", ""]
+
+
+def test_prune_keeps_the_run_of_a_job_that_has_not_saved_its_report(tmp_path: Path) -> None:
+    """An old run stays while its job still has to deliver it, and every run of a job while nobody can say which do."""
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    for run_id, job in ((_RUN_A, "job-a"), (_RUN_B, "job-b"), (_RUN_C, None)):
+        store.reserve_run(_run(run_id, job_id=job))
+        set_run(store, run_id, state=WorkflowRunState.COMPLETED, finished_at="2026-11-01T00:00:00Z")
+
+    assert store.prune("2026-11-05T00:00:00Z", None) == 1
+    assert store.prune("2026-11-05T00:00:00Z", {"job-a"}) == 1
+    assert [run.run_id for run in store.list_runs()] == [_RUN_A]
+    assert store.prune("2026-11-05T00:00:00Z", set()) == 1

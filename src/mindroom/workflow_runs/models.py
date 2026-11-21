@@ -87,6 +87,8 @@ class WorkflowRun:
     previous_source_digest: str | None = None
     script_run_id: str | None = None
     job_id: str | None = None
+    owner: str | None = None
+    """The invocation the run is now: its job's ID, or the key of the call that waits for it itself."""
     card_event_id: str | None = None
     result: object | None = None
     error: str | None = None

@@ -413,6 +413,7 @@ class _MultiAgentOrchestrator:
             agent_reply_memberships=self.agent_reply_memberships,
             journal_provider=self.event_journal_store,
             entity_unavailable=self.fleet.is_disabled,
+            workflow_engine=lambda: self._workflow_runtime.engine,
         )
         self._thread_export_runner = WorkspaceThreadExportRunner(
             WorkspaceThreadExportDeps(
