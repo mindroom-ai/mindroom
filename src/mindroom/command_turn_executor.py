@@ -93,12 +93,6 @@ class CommandTurnExecutor:
 
         ``acts_for_requester`` says an entity wrote the command for ``requester_user_id``.
         """
-        if command.type is CommandType.MODEL and model_selection_targets_other_runtime(
-            event.source.get("content", {}),
-            self._client().user_id,
-            self._client().device_id,
-        ):
-            return
         lock: asyncio.Lock | nullcontext[None] = nullcontext()
         if command.type is CommandType.MODEL:
             # Keep a strong local reference while waiting. Text and structured
