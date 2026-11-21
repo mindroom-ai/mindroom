@@ -6,6 +6,7 @@ import asyncio
 import os
 import re
 import tempfile
+from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -104,8 +105,9 @@ class LiveSession:
     def broken(self) -> str | None:
         """Return why the resting process cannot be continued: its tool server failed, or it did not rest."""
         bridge = self.bridge
-        while bridge.failure is None and not bridge.messages.empty():
-            message = bridge.messages.get_nowait()
+        messages = self.process.messages
+        while bridge.failure is None and not messages.empty():
+            message = messages.get_nowait()
             if isinstance(message, RateLimitEvent):
                 self.rejected = message.rate_limit_info
             elif not isinstance(message, SystemMessage):
@@ -178,26 +180,32 @@ async def _refuse_unless_ready(client: ClaudeSDKClient, bridge: ToolBridge, prov
         await asyncio.sleep(0.05)
 
 
-def _prepare(storage_root: Path, system: str) -> tuple[Path, Path | None]:
+def _prepare(storage_root: Path, system: str, provider: str) -> tuple[Path, Path | None]:
     """Use a primary-only empty working directory and, while starting, a private system-prompt file beside it."""
     home = storage_root / "claude_code"
     cwd = home / "cwd"
     for directory in (home, cwd):
         if directory.is_symlink():
             msg = f"Claude Code runtime directory is a symlink: {directory}"
-            raise OSError(msg)
+            raise ProviderError(msg, provider=provider)
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         directory.chmod(0o700)
     if any(cwd.iterdir()):
         msg = f"Claude Code working directory is not empty: {cwd}"
-        raise OSError(msg)
+        raise ProviderError(msg, provider=provider)
     if not system:
         return cwd, None
     # A system prompt is too long for a command line.
     descriptor, path = tempfile.mkstemp(dir=home)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-        file.write(system)
-    return cwd, Path(path)
+    prompt = Path(path)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+            file.write(system)
+    except BaseException:
+        with suppress(OSError):
+            prompt.unlink(missing_ok=True)
+        raise
+    return cwd, prompt
 
 
 type _RestKey = tuple[str, str, tuple[str, ...]]
@@ -273,7 +281,7 @@ class _SessionRegistry:
             if freed is not None:
                 await freed
             bridge = ToolBridge(names=tool_names(tools, provider))
-            cwd, prompt = await asyncio.to_thread(_prepare, storage_root, system)
+            cwd, prompt = await asyncio.to_thread(_prepare, storage_root, system, provider)
             sdk_options = ClaudeAgentOptions(
                 **options,
                 system_prompt={"type": "file", "path": str(prompt)} if prompt else "",

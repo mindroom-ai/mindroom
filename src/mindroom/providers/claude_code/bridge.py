@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import ToolSpec
 
+__all__ = ["SERVER_NAME", "TOOL_PREFIX", "ToolBridge", "tool_names"]
+
 logger = get_logger(__name__)
 SERVER_NAME = "mindroom"
 # Claude Code names an MCP tool ``mcp__<server>__<tool>`` and takes at most 64 characters of letters, digits, ``_``
@@ -145,6 +147,10 @@ class ToolBridge:
         self.spent.add(tool_use_id)
         self.unconfirmed.add(tool_use_id)
         return result
+
+    def offered_names(self) -> list[str]:
+        """Return the sorted, prefixed names Claude Code must report at the start of a turn."""
+        return [f"{TOOL_PREFIX}{name}" for name in sorted(self.names)]
 
     def expected_inventory(self) -> dict[str, tuple[str, list[str]]]:
         """Return the only permitted connected servers and their tools, without the CLI's tool prefix."""

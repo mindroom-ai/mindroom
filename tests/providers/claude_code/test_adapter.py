@@ -716,12 +716,41 @@ async def test_claude_code_refuses_linked_runtime_directories(tmp_path: Path, pa
     link.parent.mkdir(parents=True)
     link.symlink_to(target, target_is_directory=True)
 
-    with pytest.raises(ProviderUnavailable, match="symlink"):
+    with pytest.raises(ProviderError, match="symlink") as caught:
         await complete(cli.provider(), ModelRequest(messages=[_SYSTEM, user("Hi")]))
 
+    assert not caught.value.retryable
+    assert str(link) in str(caught.value)
     assert cli.events("spawn") == []
     assert stat.S_IMODE(target.stat().st_mode) == 0o755
     assert not list(target.iterdir())
+
+
+async def test_claude_code_refuses_a_nonempty_working_directory(tmp_path: Path) -> None:
+    cli = fake_cli(tmp_path, {})
+    cwd = cli.storage_root / "claude_code" / "cwd"
+    cwd.mkdir(parents=True)
+    (cwd / "existing").touch()
+
+    with pytest.raises(ProviderError, match="not empty") as caught:
+        await complete(cli.provider(), ModelRequest(messages=[_SYSTEM, user("Hi")]))
+
+    assert not caught.value.retryable
+    assert str(cwd) in str(caught.value)
+    assert cli.events("spawn") == []
+
+
+async def test_a_failed_prompt_write_leaves_no_file(tmp_path: Path) -> None:
+    cli = fake_cli(tmp_path, {})
+    # A lone surrogate cannot be written to the UTF-8 prompt file.
+    system = Message(role="system", content="cannot encode \ud800")
+
+    with pytest.raises(ProviderUnavailable) as caught:
+        await complete(cli.provider(), ModelRequest(messages=[system, user("Hi")]))
+
+    assert isinstance(caught.value.__cause__, UnicodeEncodeError)
+    assert cli.events("spawn") == []
+    assert left_behind(cli) == []
 
 
 @pytest.fixture
@@ -1206,7 +1235,7 @@ async def test_an_answer_that_did_not_take_mindrooms_results_is_discarded_and_th
         modes.append(body["mode"])
         gate.touch()
         # The first case holds the request until the process went on; the others let it go on only afterwards.
-        while how == "abandon" and len(modes) == 1 and parked.bridge.messages.empty():  # noqa: ASYNC110
+        while how == "abandon" and len(modes) == 1 and parked.process.messages.empty():  # noqa: ASYNC110
             await asyncio.sleep(0.01)
 
     messages += [asked.message, result("toolu_a", "LILAC-HERON")]
@@ -1509,7 +1538,7 @@ async def test_a_plan_limit_reported_while_the_process_rested_still_gives_its_re
     asked = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
     [parked] = SESSIONS.resting.values()
     limit = RateLimitInfo(status="rejected", resets_at=1900000000, rate_limit_type="five_hour")
-    parked.bridge.messages.put_nowait(RateLimitEvent(rate_limit_info=limit, uuid="invented", session_id="invented"))
+    parked.process.messages.put_nowait(RateLimitEvent(rate_limit_info=limit, uuid="invented", session_id="invented"))
 
     messages += [asked.message, result("toolu_a", "LILAC-HERON")]
     with pytest.raises(ProviderError, match=r"limit reached \(five hour\). Resets at 2030-03-17T17:46:40"):

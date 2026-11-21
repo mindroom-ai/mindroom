@@ -46,7 +46,8 @@ if TYPE_CHECKING:
 
 __all__ = ["ResultsOutrun", "read_step"]
 
-# The counters of Claude's usage, each with its name in the ledger Claude Code keeps of all a process used.
+# This route counts stream deltas and the process-wide ledger. The claude_agent tool instead attributes each
+# completed turn's result usage across its models; a shared reader would conflate the two accounting rules.
 _COUNTERS = {
     "input_tokens": "inputTokens",
     "cache_creation_input_tokens": "cacheCreationInputTokens",
@@ -265,9 +266,8 @@ def _only_mindrooms_tools(init: dict[str, Any], session: LiveSession) -> bool:
     if not isinstance(tools, list) or not isinstance(servers, list):
         return False
     inventory = session.bridge.expected_inventory()
-    offered = [f"{TOOL_PREFIX}{tool}" for _, names in inventory.values() for tool in names]
     connected = [(server.get("name"), server.get("status")) for server in servers]
-    return sorted(map(str, tools)) == offered and connected == [
+    return sorted(map(str, tools)) == session.bridge.offered_names() and connected == [
         (name, status) for name, (status, _) in inventory.items()
     ]
 
