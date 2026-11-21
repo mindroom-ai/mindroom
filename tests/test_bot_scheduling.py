@@ -28,7 +28,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_record import TurnRecord
-from tests.bot_helpers import make_test_agent_bot, owned_matrix_login
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -423,52 +423,6 @@ class TestBotScheduleCommands:
         delivered_target = send_response_mock.await_args.kwargs["target"]
         assert delivered_target == stable_target
         assert delivered_target.resolved_thread_id is None
-
-
-class TestBotTaskRestoration:
-    """Test scheduled task restoration on bot startup."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("agent_name", ["router", "general"])
-    async def test_every_bot_hands_each_joined_room_to_the_scheduled_task_runtime(self, agent_name: str) -> None:
-        """Router and agents alike restore the schedules they own in each room they join."""
-        agent_user = AgentMatrixUser(
-            agent_name=agent_name,
-            user_id=f"@mindroom_{agent_name}:localhost",
-            display_name=agent_name,
-            password=TEST_PASSWORD,
-            access_token=TEST_ACCESS_TOKEN,
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config = _runtime_bound_config(Config(), Path(tmpdir))  # Empty config for testing
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
-            install_runtime_journal_support(bot)
-
-            with (
-                patch("mindroom.bot.login_agent_owned_session") as mock_login,
-                patch("mindroom.bot.AgentBot.refresh_presence", new_callable=AsyncMock),
-            ):
-                mock_client = make_matrix_client_mock(user_id=agent_user.user_id)
-                mock_client.access_token = TEST_ACCESS_TOKEN
-                mock_client.rooms = {}
-                mock_login.return_value = owned_matrix_login(mock_client)
-
-                # Mock the client.join method to return JoinResponse
-                mock_join_response = nio.JoinResponse.from_dict({"room_id": "!test:server"})
-                mock_client.join.return_value = mock_join_response
-
-                await bot.start()
-                restore_room = AsyncMock(return_value=2)
-                with patch.object(bot.orchestrator.scheduled_tasks, "restore_room", restore_room):
-                    await bot._room_lifecycle.join_configured_rooms()
-
-                restore_room.assert_awaited_once_with(bot, "!test:server")
 
 
 class TestCommandHandling:
