@@ -10006,7 +10006,7 @@ A run whose script had already returned its report ends with that report and get
 - A run whose job has ended, because it was stopped or lost its access, gets no further attempt: it ends `interrupted` with the reason, and `resume_workflow` continues it.
 - A reservation whose job was never admitted when MindRoom stopped is deleted at the next start.
 - Removing the `workflow` tool or the agent, or revoking the requester's access, ends the run `interrupted`; it is not resumed on its own.
-- A script process that MindRoom did not start itself, such as one that survived a restart in a worker, is stopped, and each of its requests is refused with status 409.
+- A script process that MindRoom did not start itself, such as one that survived a restart in a worker, is stopped, and each of its requests is refused with status 409, before and after its capability is revoked, so the process exits at once.
 
 ## Working Time
 

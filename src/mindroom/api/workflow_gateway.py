@@ -12,7 +12,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from mindroom.json_utils import has_only_finite_numbers
-from mindroom.script_runs.broker import ScriptBrokerAuthenticationError, ScriptRuntimeUnavailableError
+from mindroom.script_runs.broker import (
+    ScriptBrokerAuthenticationError,
+    ScriptRuntimeUnavailableError,
+    WorkflowAttemptRevokedError,
+)
 from mindroom.script_runs.models import ScriptRunRecord
 from mindroom.workflow_runs.engine import SupersededAttemptError, WorkflowEngine
 from mindroom.workflow_runs.models import NodeRequest
@@ -77,6 +81,9 @@ async def _authenticated(
         raise HTTPException(status_code=503, detail="Workflow gateway is unavailable.")
     try:
         return engine, await asyncio.to_thread(engine.broker.authenticate, script_run_id, authorization)
+    except WorkflowAttemptRevokedError as exc:
+        # The process proved it is an attempt of ours, and a revoked one is told to exit as a replaced one is.
+        raise HTTPException(status_code=409, detail="superseded") from exc
     except ScriptBrokerAuthenticationError as exc:
         raise HTTPException(status_code=404, detail="Workflow run not found.") from exc
     except ScriptRuntimeUnavailableError as exc:

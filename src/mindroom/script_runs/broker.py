@@ -116,6 +116,10 @@ class ScriptBrokerAuthenticationError(ValueError):
     """Raised when a gateway capability cannot be authenticated safely."""
 
 
+class WorkflowAttemptRevokedError(ScriptBrokerAuthenticationError):
+    """Raised for the verified capability of a workflow attempt that takes no more calls: its process is to exit."""
+
+
 class ScriptCallPreparationPendingError(RuntimeError):
     """Raised when a call is still authenticating and has no durable claim yet."""
 
@@ -381,6 +385,8 @@ class ScriptToolBroker:
             run = None
         expected_hash = run.token_hash if run is not None else "0" * len(token_hash)
         matches = hmac.compare_digest(expected_hash, token_hash)
+        if run is not None and matches and not run.accepts_calls and run.workflow_run_id is not None:
+            raise WorkflowAttemptRevokedError(_CALL_UNAVAILABLE)
         if run is None or not matches or not run.accepts_calls or not self._live_authorization(run):
             raise ScriptBrokerAuthenticationError(_CALL_UNAVAILABLE)
         return run

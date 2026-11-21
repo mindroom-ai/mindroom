@@ -173,6 +173,13 @@ async def test_inherited_attempt_is_refused_before_anything_recovers(stack: Work
         ScriptRunState.INTERRUPTED,
         RUNTIME_RESTARTED,
     )
+    # Its capability is revoked now, and a process that is still there is still told to exit, not that it is unknown.
+    async with stack.http(token) as client:
+        late = [await client.get("run"), await client.post("nodes", json={"key": "@0", "kind": "tool", "args": _A})]
+    async with stack.http("another-capability") as client:
+        unknown = await client.get("run")
+    assert ([answer.status_code for answer in late], unknown.status_code) == ([409, 409], 404)
+    assert late[0].json() == {"detail": "superseded"}
 
 
 @pytest.mark.asyncio
