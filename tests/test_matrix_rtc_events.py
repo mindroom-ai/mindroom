@@ -109,11 +109,11 @@ def test_parse_membership_rejects_non_room_scope(scope: str) -> None:
     [
         None,
         {"type": "other", "focus_selection": "oldest_membership"},
-        {"type": "livekit", "focus_selection": "multi_sfu"},
+        {"type": "livekit", "focus_selection": "unknown"},
     ],
 )
 def test_parse_membership_rejects_unsupported_focus_mode(focus_active: object) -> None:
-    """Only LiveKit oldest-membership focus mode enters the single-SFU bridge."""
+    """Only the supported LiveKit focus modes can enter the call roster."""
     content = build_membership_content(
         user_id=USER,
         device_id=DEVICE,

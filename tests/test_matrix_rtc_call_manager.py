@@ -267,6 +267,28 @@ def _remote_member_event(
     }
 
 
+def _sdk_45_member_event(device: str, created_ts: int, service_url: str = SERVICE_URL) -> dict:
+    user = "@alice:example.org"
+    return {
+        "type": CALL_MEMBER_EVENT_TYPE,
+        "state_key": membership_state_key(user, device),
+        "sender": user,
+        "origin_server_ts": created_ts,
+        # matrix-js-sdk 45.1.0 src/matrixrtc/MembershipManager.ts:1038-1059.
+        "content": {
+            "application": "m.call",
+            "call_id": "",
+            "scope": "m.room",
+            "device_id": device,
+            "membershipID": f"{user}:{device}",
+            "expires": 14_400_000,
+            "m.call.intent": "audio",
+            "focus_active": {"type": "livekit", "focus_selection": "multi_sfu"},
+            "foci_preferred": [{"type": "livekit", "livekit_service_url": service_url, "livekit_alias": ROOM_ID}],
+        },
+    }
+
+
 def _room_member_event(user: str = "@alice:example.org", membership: str = "join") -> dict:
     return {
         "type": "m.room.member",
@@ -650,6 +672,127 @@ async def test_manager_joins_call_when_remote_member_appears(tmp_path: Path) -> 
     assert args[1] == CALL_MEMBER_EVENT_TYPE
     assert args[2]["device_id"] == BOT_DEVICE
     assert kwargs["state_key"] == membership_state_key(BOT_USER, BOT_DEVICE)
+
+
+@pytest.mark.asyncio
+async def test_manager_joins_sdk_45_caller_on_trusted_focus(tmp_path: Path) -> None:
+    """A caller publishing multi_sfu on our own service can start a call."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_sdk_45_member_event("ALICEDEV", 1_000, SERVICE_URL + "/"))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: 2_000)
+
+    try:
+        await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+        assert bridge.connected_grant == GRANT
+        assert bridge.agent_options is not None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("deliver_frame_keys")
+async def test_manager_accepts_trusted_sdk_45_late_joiner_alongside_sdk_41(tmp_path: Path) -> None:
+    """Operate one encrypted call with both SDK versions on the trusted service."""
+    legacy = _remote_member_event(created_ts=1_000)
+    modern = _sdk_45_member_event("ALICESECOND", 1_001)
+    client = _client()
+    client.room_get_state.return_value = _state_response(legacy)
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: 2_000)
+    room = _room(encrypted=True)
+
+    try:
+        await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+        await _deliver(manager, manager.on_to_device_event(_frame_key_event()))
+
+        client.room_get_state.return_value = _state_response(legacy, modern)
+        await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+        assert bridge.participant_rosters[-1] == {"@alice:example.org:ALICEDEV", "@alice:example.org:ALICESECOND"}
+
+        # matrix-js-sdk 45.1.0 src/matrixrtc/ToDeviceKeyTransport.ts:91-107.
+        key = bytes(range(32))
+        media_key = {"index": 5, "key": base64.b64encode(key).decode("ascii")}
+        modern_key = _frame_key_event(device_id="ALICESECOND")
+        modern_key.source["content"] = {
+            "room_id": ROOM_ID,
+            "member_id": "@alice:example.org:ALICESECOND",
+            "media_key": media_key,
+            "keys": media_key,
+            "member": {"id": "@alice:example.org:ALICESECOND", "claimed_device_id": "ALICESECOND"},
+        }
+        await _deliver(manager, manager.on_to_device_event(modern_key))
+
+        assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
+        assert ("@alice:example.org:ALICESECOND", key, 5) in bridge.frame_keys
+        assert not bridge.closed
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timing", ["initial", "mixed", "late"])
+async def test_manager_refuses_foreign_sdk_45_focus(tmp_path: Path, timing: str) -> None:
+    """Log a foreign advertised primary transport and refuse the call, including on roster updates."""
+    legacy = _remote_member_event(created_ts=1_000)
+    foreign = _sdk_45_member_event("ALICESECOND", 1_001, "https://rtc.foreign.example")
+    # The first transport is authoritative; a trusted second entry must not bypass the check.
+    foreign["content"]["foci_preferred"].append({"type": "livekit", "livekit_service_url": SERVICE_URL})
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: 2_000)
+    room = _room()
+
+    try:
+        if timing == "late":
+            client.room_get_state.return_value = _state_response(legacy)
+            await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+            assert bridge.connected_grant == GRANT
+
+        client.room_get_state.return_value = (
+            _state_response(foreign) if timing == "initial" else _state_response(legacy, foreign)
+        )
+        with capture_logs() as logs:
+            await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+
+        assert any(
+            log["event"] == "call_focus_not_trusted" and log["advertised_url"] == "https://rtc.foreign.example"
+            for log in logs
+        )
+        assert _call_state(manager).session is None
+        if timing == "late":
+            assert bridge.closed
+            assert bridge.participant_rosters == [frozenset({"@alice:example.org:ALICEDEV"})]
+            assert client.get_openid_token.await_count == 1
+        else:
+            assert bridge.connected_grant is None
+            assert bridge.agent_options is None
+            client.get_openid_token.assert_not_awaited()
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_manager_does_not_trust_alternate_direct_sfu_from_sdk_45(tmp_path: Path) -> None:
+    """The SDK's transitional transport is not proof it publishes on the trusted SFU."""
+    modern = _sdk_45_member_event("ALICEDEV", 1_000)
+    # matrix-js-sdk 45.1.0 src/matrixrtc/LivekitTransport.ts:69-82 allows both forms together.
+    modern["content"]["foci_preferred"][0]["url"] = "wss://rtc.foreign.example"
+    client = _client()
+    client.room_get_state.return_value = _state_response(modern)
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: 2_000)
+
+    try:
+        with capture_logs() as logs:
+            await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+        assert any(log["event"] == "call_focus_not_trusted" for log in logs)
+        assert bridge.agent_options is None
+        client.get_openid_token.assert_not_awaited()
+    finally:
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio

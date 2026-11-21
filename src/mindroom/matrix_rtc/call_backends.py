@@ -129,17 +129,14 @@ async def resolve_livekit_service(
 ) -> str | None:
     """Accept only the locally configured or discovered authorization service."""
     oldest_member = min(members, key=lambda member: member.created_ts)
-    advertised_url = oldest_member.livekit_service_url
-    if advertised_url is None:
-        return None
-    advertised_focus = _normalized_service_url(advertised_url)
-    if advertised_focus is None:
+    advertised_focus = _normalized_service_url(oldest_member.livekit_service_url)
+    if advertised_focus is None or (configured_url is None and not advertised_focus.startswith("https://")):
+        if oldest_member.uses_multi_sfu:
+            _log_untrusted_focus(oldest_member)
         return None
     local_server_name = MatrixID.parse(user_id).domain
     trusted_url = configured_url
     if trusted_url is None:
-        if not advertised_focus.startswith("https://"):
-            return None
         trusted_url = await discover_livekit_service_url(
             local_server_name,
             ssl_verify=ssl_verify,
@@ -153,15 +150,29 @@ async def resolve_livekit_service(
                 allow_private_networks=True,
                 max_age_s=0,
             )
-    trusted_focus = _normalized_service_url(trusted_url) if trusted_url is not None else None
+    trusted_focus = _normalized_service_url(trusted_url)
     if advertised_focus != trusted_focus:
-        logger.warning(
-            "call_focus_not_trusted",
-            user_id=oldest_member.user_id,
-            advertised_url=advertised_url,
-        )
+        _log_untrusted_focus(oldest_member)
         return None
-    return advertised_focus
+    return advertised_focus if multi_sfu_members_use_trusted_focus(members, advertised_focus) else None
+
+
+def multi_sfu_members_use_trusted_focus(members: list[CallMember], service_url: str) -> bool:
+    """Require every multi-SFU publisher to use the call's normalized trusted service URL."""
+    for member in members:
+        if member.uses_multi_sfu and _normalized_service_url(member.livekit_service_url) != service_url:
+            _log_untrusted_focus(member)
+            return False
+    return True
+
+
+def _log_untrusted_focus(member: CallMember) -> None:
+    logger.warning(
+        "call_focus_not_trusted",
+        user_id=member.user_id,
+        device_id=member.device_id,
+        advertised_url=member.livekit_service_url,
+    )
 
 
 async def fetch_sfu_grant(client: nio.AsyncClient, room_id: str, service_url: str, *, ssl_verify: bool) -> SfuGrant:
@@ -186,8 +197,10 @@ async def fetch_sfu_grant(client: nio.AsyncClient, room_id: str, service_url: st
     )
 
 
-def _normalized_service_url(url: str) -> str | None:
+def _normalized_service_url(url: str | None) -> str | None:
     """Normalize insignificant URL spelling differences for focus comparison."""
+    if url is None:
+        return None
     try:
         parsed = httpx.URL(url)
     except httpx.InvalidURL:

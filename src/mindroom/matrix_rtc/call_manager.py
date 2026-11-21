@@ -35,7 +35,12 @@ from mindroom.matrix.olm_to_device import authenticated_sender_is_current
 from mindroom.matrix.personal_room_store import personal_room_ids
 from mindroom.matrix.room_membership import cached_joined_member_ids
 from mindroom.matrix_rtc.audio_process import ProcessLiveVoiceBridge, prewarm_call_audio_process
-from mindroom.matrix_rtc.call_backends import fetch_sfu_grant, resolve_livekit_service, resolve_voice_backend
+from mindroom.matrix_rtc.call_backends import (
+    fetch_sfu_grant,
+    multi_sfu_members_use_trusted_focus,
+    resolve_livekit_service,
+    resolve_voice_backend,
+)
 from mindroom.matrix_rtc.call_origin import (
     AGENT_CALL_STATE_EVENT_TYPE,
     CALL_BRIEF_TOKEN_BUDGET,
@@ -842,7 +847,15 @@ class CallManager:
         """Apply one authoritative room/call roster to the active session."""
         if not members and self._hold_through_roster_gap(room, room_call, joined_user_ids):
             return
-        if not members or not self._members_are_authorized(members, room.room_id):
+        session = room_call.session
+        if (
+            not members
+            or (
+                session is not None
+                and not multi_sfu_members_use_trusted_focus(members, session.deps.livekit_service_url)
+            )
+            or not self._members_are_authorized(members, room.room_id)
+        ):
             room_call.clear_logical_call()
             room_call.pending_keys.clear()
             await room_call.stop_session()
@@ -859,7 +872,6 @@ class CallManager:
         elif logical_call.roster_gap_deadline_ms is not None:
             logical_call.roster_gap_deadline_ms = None
             logger.info("call_roster_gap_closed", room_id=room.room_id, agent=self._agent_name)
-        session = room_call.session
         if session is not None and session.requester_id == requester_id:
             await self._update_session_members(room, room_call, session, members)
             return
