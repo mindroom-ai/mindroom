@@ -37,7 +37,6 @@ from mindroom.matrix.client_delivery import (
 )
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagRecord, ThreadTagsError, ThreadTagsState
@@ -62,6 +61,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids
+from tests.tool_position_helpers import _marked
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -766,13 +766,7 @@ async def test_move_thread_sends_each_copy_of_a_reply_with_tool_calls_whole(tmp_
     """A copy goes through the real send: its markers leave its text there, or stay when its trace names no call."""
     move = _move(tmp_path)
     reply = f"Checking.\n\n🔧 `shell` [{len(events)}]\n\nDone."
-    with_calls = {
-        "msgtype": "m.text",
-        "body": reply,
-        "format": "org.matrix.custom.html",
-        "formatted_body": markdown_to_html(reply),
-        TOOL_TRACE_CONTENT_KEY: {"version": 2, "events": events},
-    }
+    with_calls = _marked(reply, events)
     history = _thread(move)
     history[1] = _message(move.ids["code"], with_calls, "$code:localhost")
     history[2] = _message(move.ids["research"], with_calls, "$research:localhost")
@@ -814,13 +808,7 @@ async def test_move_thread_copies_the_calls_of_a_reply_a_read_put_back_in_its_te
     sender = move.ids.get(sender, sender)
     said_by = "" if sender in move.ids.values() else f"{sender}: "
     reply = "Checking.\n\n🔧 `shell` [1]\n\nDone."
-    built = {
-        "msgtype": "m.text",
-        "body": reply,
-        "format": "org.matrix.custom.html",
-        "formatted_body": markdown_to_html(reply),
-        TOOL_TRACE_CONTENT_KEY: {"version": 2, "events": [_SHELL_CALL]},
-    }
+    built = _marked(reply, [_SHELL_CALL])
     held = tool_markers_out_of_text(built)
     assert held["body"] == "Checking.\n\nDone."
     history = _thread(move)

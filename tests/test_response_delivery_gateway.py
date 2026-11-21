@@ -93,6 +93,7 @@ from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import end_span_as_locked_turn, final_in_resume_span, final_in_span, reply_span
 from tests.test_turn_store import _in_room, _redact, _store
+from tests.tool_position_helpers import _SHELL, _marked
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
@@ -1451,11 +1452,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         """Matrix holds the reply without its tool markers, and the projection holds every reply with them."""
         outbox = FakeOutbox()
         built = {
-            "msgtype": "m.text",
-            "body": "🔧 `shell` [1]\n\nChoose",
-            "format": "org.matrix.custom.html",
-            "formatted_body": "<p>🔧 <code>shell</code> [1]</p>\n<p>Choose</p>\n",
-            "io.mindroom.tool_trace": {"version": 2, "events": [{"type": "tool_call_completed", "tool_name": "shell"}]},
+            **_marked("🔧 `shell` [1]\n\nChoose", [_SHELL]),
             "io.mindroom.interactive": {
                 "creator_agent": "agent",
                 "option_labels": {"1": "Yes"},

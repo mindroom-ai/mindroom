@@ -48,6 +48,7 @@ from tests.matrix_user_helpers import (
     sync_answer,
 )
 from tests.tool_approval_helpers import gated_functions
+from tests.tool_position_helpers import _SHELL, _marked
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -63,6 +64,7 @@ TURN_NEEDED = "download needs a chat turn: the file is handed to the conversatio
 WRITE_TURN_NEEDED = (
     "matrix_user_write needs a conversation with the agent, so it does not work through the MCP gateway."
 )
+
 # An alias, and the room the homeserver's directory says it names.
 ALIAS = "#general:example.com"
 ALIASED_ROOM = "!general:example.com"
@@ -707,13 +709,7 @@ async def test_the_owners_mcp_gateway_call_reads_as_the_owner(
 
 
 # An agent's reply as it built it; Matrix holds it without the marker line.
-_REPLY_WITH_A_CALL: dict[str, object] = {
-    "msgtype": "m.text",
-    "body": "Needle.\n\n🔧 `shell` [1]",
-    "format": "org.matrix.custom.html",
-    "formatted_body": "<p>Needle.</p>\n<p>🔧 <code>shell</code> [1]</p>\n",
-    "io.mindroom.tool_trace": {"version": 2, "events": [{"type": "tool_call_completed", "tool_name": "shell"}]},
-}
+_REPLY_WITH_A_CALL = _marked("Needle.\n\n🔧 `shell` [1]", [_SHELL])
 
 
 @pytest.mark.asyncio

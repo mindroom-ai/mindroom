@@ -8,7 +8,6 @@ two works on the reply with its markers in its text, exactly as before.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
@@ -75,54 +74,17 @@ from tests.cpu_budget_helpers import cpu_budget
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_matrix_api_tool import _make_context
 from tests.test_mentions import _default_runtime_paths, _make_config, _runtime_paths_for
+from tests.tool_position_helpers import _CASES, _SENT_CASES, _SHELL, _TRACE_KEY, _case, _content, _marked, _sent, _wire
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 _ROOM = "!room:localhost"
 _AGENT = "@mindroom_code:localhost"
 _PERSON = "@person:localhost"
-_TRACE_KEY = "io.mindroom.tool_trace"
-_CASES = json.loads((Path(__file__).parent / "fixtures" / "tool-positions-v1.json").read_text(encoding="utf-8"))[
-    "cases"
-]
-_SENT_CASES = [case for case in _CASES if case["wire"] is not None]
-_SHELL = {"type": "tool_call_completed", "tool_name": "shell"}
-
-
-def _case(name: str) -> dict[str, Any]:
-    return next(case for case in _CASES if case["name"] == name)
-
-
-def _content(body: str, html: str, version: int, events: list[Any]) -> dict[str, Any]:
-    return {
-        "msgtype": "m.text",
-        "body": body,
-        "format": "org.matrix.custom.html",
-        "formatted_body": html,
-        _TRACE_KEY: {"version": version, "events": events},
-    }
-
-
-def _marked(body: str, events: list[Any]) -> dict[str, Any]:
-    """Return a reply as the backend builds it: its markers in its text, its HTML rendered from its body."""
-    return _content(body, markdown_to_html(body), 2, events)
-
-
-def _sent(case: dict[str, Any]) -> dict[str, Any]:
-    sent = case["sent"]
-    return _content(sent["body"], sent["formatted_body"], 2, sent["events"])
-
-
-def _wire(case: dict[str, Any]) -> dict[str, Any]:
-    wire = case["wire"]
-    places = zip(case["sent"]["events"], wire["body_line"], wire["at"], strict=True)
-    events = [
-        {**event, **({} if line is None else {"body_line": line}), **({} if at is None else {"at": at})}
-        for event, line, at in places
-    ]
-    return _content(wire["body"], wire["formatted_body"], 3, events)
 
 
 def _event(content: dict[str, Any], event_id: str = "$reply", sender: object = _AGENT) -> dict[str, Any]:

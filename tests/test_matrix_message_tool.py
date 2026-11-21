@@ -43,7 +43,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.teams.members import _as_member
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
-from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content, tool_markers_out_of_text
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -69,6 +69,7 @@ from tests.conftest import (
 )
 from tests.identity_helpers import entity_ids
 from tests.matrix_state_helpers import save_matrix_state
+from tests.tool_position_helpers import _case, _sent, _wire
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -2516,18 +2517,8 @@ async def test_matrix_message_read_drops_tool_markers_from_bodies() -> None:
 
 def _reply_with_a_separator_after_its_call() -> tuple[dict[str, object], dict[str, object]]:
     """Return a reply as its agent built it and as Matrix holds it, where reading drops the separator with the marker."""
-    fixture = json.loads((Path(__file__).parent / "fixtures" / "tool-positions-v1.json").read_text(encoding="utf-8"))
-    sent = next(case for case in fixture["cases"] if case["name"].startswith("a separator after a call"))["sent"]
-    marked: dict[str, object] = {
-        "msgtype": "m.text",
-        "body": sent["body"],
-        "format": "org.matrix.custom.html",
-        "formatted_body": sent["formatted_body"],
-        "io.mindroom.tool_trace": {"version": 2, "events": sent["events"]},
-    }
-    wire = tool_markers_out_of_text(marked)
-    assert wire["body"] == "---\n\n\nAfter."
-    return marked, wire
+    case = _case("a separator after a call and extra blank lines stay")
+    return _sent(case), _wire(case)
 
 
 @pytest.mark.asyncio

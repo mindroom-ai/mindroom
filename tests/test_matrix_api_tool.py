@@ -28,9 +28,7 @@ from mindroom.custom_tools.matrix_api import MatrixApiTools, _MatrixSearchRespon
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.events import tool_markers_out_of_text
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -46,6 +44,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.tool_position_helpers import reply_with_calls
 
 
 @pytest.fixture(autouse=True)
@@ -1209,19 +1208,6 @@ async def test_matrix_api_search_snippets_show_an_agents_tool_calls_and_put_none
     ctx = _make_context()
     agent = entity_identity_registry(ctx.config, ctx.runtime_paths).current_ids["general"].full_id
 
-    def reply(body: str, calls: int) -> tuple[dict[str, object], dict[str, object]]:
-        built: dict[str, object] = {
-            "msgtype": "m.text",
-            "body": body,
-            "format": "org.matrix.custom.html",
-            "formatted_body": markdown_to_html(body),
-            "io.mindroom.tool_trace": {
-                "version": 2,
-                "events": [{"type": "tool_call_completed", "tool_name": "shell"}] * calls,
-            },
-        }
-        return built, tool_markers_out_of_text(built)
-
     async def snippets(hit: dict[str, object], neighbour: dict[str, object], sender: object) -> list[object]:
         ctx.client._send.return_value = _MatrixSearchResponse(
             count=1,
@@ -1241,7 +1227,8 @@ async def test_matrix_api_search_snippets_show_an_agents_tool_calls_and_put_none
         (result,) = payload["results"]
         return [result["snippet"], result["context"]["events_before"][0]["snippet"]]
 
-    (hit, held_hit), (neighbour, held_neighbour) = reply("The needle.\n\n🔧 `shell` [1]", 1), reply("🔧 `shell` [1]", 1)
+    hit, held_hit = reply_with_calls("The needle.\n\n🔧 `shell` [1]", 1)
+    neighbour, held_neighbour = reply_with_calls("🔧 `shell` [1]", 1)
     assert (held_hit["body"], held_neighbour["body"]) == ("The needle.", "")
 
     assert await snippets(held_hit, held_neighbour, agent) == ["The needle. 🔧 `shell` [1]", "🔧 `shell` [1]"]

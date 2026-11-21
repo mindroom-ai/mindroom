@@ -48,12 +48,10 @@ from mindroom.matrix.conversation_reads import (
     refetched_thread_history,
 )
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
-from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
-from mindroom.tool_system.events import tool_markers_out_of_text
 from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_download
 from tests.journal_helpers import record_room_history_recovery
-from tests.test_tool_positions import _SENT_CASES, _sent, _wire
+from tests.tool_position_helpers import _SENT_CASES, _sent, _wire, reply_with_calls
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
@@ -3357,23 +3355,6 @@ class TestEncryptedRelations:
 AGENT = "@mindroom_other:example.org"
 
 
-def _reply_with_calls(body: str, calls: int) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Return a reply as the backend builds it, its tool markers in its text, and as Matrix holds it, without them."""
-    built = {
-        "msgtype": "m.text",
-        "body": body,
-        "format": "org.matrix.custom.html",
-        "formatted_body": markdown_to_html(body),
-        "io.mindroom.tool_trace": {
-            "version": 2,
-            "events": [{"type": "tool_call_completed", "tool_name": "shell"}] * calls,
-        },
-    }
-    held = tool_markers_out_of_text(built)
-    assert held is not built
-    return built, held
-
-
 class TestRepliesWithToolCalls:
     """A fetched reply is stored as a synced one is: an agent's with its tool markers in its text."""
 
@@ -3384,7 +3365,7 @@ class TestRepliesWithToolCalls:
         sender: str,
     ) -> None:
         """The notice follows the whole reply, and nobody else's message gets marker lines its sender never wrote."""
-        built, held = _reply_with_calls("Before.\n\n🔧 `shell` [1]", 1)
+        built, held = reply_with_calls("Before.\n\n🔧 `shell` [1]", 1)
         await redact_current_edit(alice)
         edit_of_it = {"rel_type": "m.replace", "event_id": "$m"}
         client = FakeClient(
@@ -3423,7 +3404,7 @@ class TestRepliesWithToolCalls:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A page ends at a size, so the same replies must have the same size whichever way they arrived."""
-        built, held = _reply_with_calls("\n\n".join(f"🔧 `shell` [{index}]" for index in range(1, 9)), 8)
+        built, held = reply_with_calls("\n\n".join(f"🔧 `shell` [{index}]" for index in range(1, 9)), 8)
         sizes = [len(json.dumps(content, separators=(",", ":"))) for content in (built, held)]
         monkeypatch.setattr(reads, "PAGE_CONTENT_BUDGET_BYTES", sum(sizes))
 
