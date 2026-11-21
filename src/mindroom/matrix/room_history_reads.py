@@ -89,6 +89,27 @@ def _room_threads_page_error_from_exception(exc: BaseException) -> RoomThreadsPa
     return RoomThreadsPageError(response=response)
 
 
+async def _backward_page(
+    client: nio.AsyncClient,
+    room_id: str,
+    start: str | None,
+    event_types: Collection[str],
+    scan_name: str,
+) -> nio.RoomMessagesResponse:
+    """Read one page of a room's history, newest first, or raise for a scan that could not read it."""
+    response = await client.room_messages(
+        room_id,
+        start=start,
+        limit=100,
+        message_filter={"types": list(event_types)},
+        direction=nio.MessageDirection.back,
+    )
+    if not isinstance(response, nio.RoomMessagesResponse):
+        msg = f"{scan_name} room scan failed for {room_id}: {response}"
+        raise RuntimeError(msg)  # noqa: TRY004
+    return response
+
+
 async def find_response_event_ids_via_room_messages(
     client: nio.AsyncClient,
     room_id: str,
@@ -108,16 +129,7 @@ async def find_response_event_ids_via_room_messages(
     pages_fetched = 0
 
     while remaining_sources or (not sources and response_content is not None and not response_event_ids):
-        response = await client.room_messages(
-            room_id,
-            start=from_token,
-            limit=100,
-            message_filter={"types": list(event_types)},
-            direction=nio.MessageDirection.back,
-        )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            msg = f"response recovery room scan failed for {room_id}: {response}"
-            raise RuntimeError(msg)  # noqa: TRY004
+        response = await _backward_page(client, room_id, from_token, event_types, "response recovery")
         pages_fetched += 1
         for event in response.chunk:
             if not isinstance(event, nio.Event):
@@ -179,16 +191,13 @@ async def find_route_event_id_via_room_messages(
     opaque = False
     from_token: str | None = None
     for _page in range(_MAX_EXACT_DELIVERY_SCAN_PAGES):
-        response = await client.room_messages(
+        response = await _backward_page(
+            client,
             room_id,
-            start=from_token,
-            limit=100,
-            message_filter={"types": [*_ROOM_HISTORY_MESSAGE_TYPES, ROUTE_EVENT_TYPE, SILENT_SCHEDULE_EVENT_TYPE]},
-            direction=nio.MessageDirection.back,
+            from_token,
+            (*_ROOM_HISTORY_MESSAGE_TYPES, ROUTE_EVENT_TYPE, SILENT_SCHEDULE_EVENT_TYPE),
+            "route recovery",
         )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            msg = f"route recovery room scan failed for {room_id}: {response}"
-            raise RuntimeError(msg)  # noqa: TRY004
         for event in response.chunk:
             event_source = event.source if isinstance(event, nio.Event) and isinstance(event.source, dict) else {}
             content = event_source.get("content")
@@ -301,16 +310,13 @@ async def _count_delivery_copies_via_room_messages(
         return all(found[key] >= count for key, count in expected.items())
 
     while not all_found():
-        response = await client.room_messages(
+        response = await _backward_page(
+            client,
             room_id,
-            start=from_token,
-            limit=100,
-            message_filter={"types": [delivery_event_type, "m.room.encrypted"]},
-            direction=nio.MessageDirection.back,
+            from_token,
+            (delivery_event_type, "m.room.encrypted"),
+            "delivery copy count",
         )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            msg = f"delivery copy count room scan failed for {room_id}: {response}"
-            raise RuntimeError(msg)  # noqa: TRY004
         pages_fetched += 1
         for event in response.chunk:
             key = _matched_delivery_copy_key(
