@@ -335,7 +335,7 @@ async def test_a_call_that_already_returned_is_not_answered_a_second_time(tmp_pa
     asked = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
 
     messages += [asked.message, result("toolu_a", "LILAC-HERON"), result("toolu_b", "LEMON-IBIS")]
-    with pytest.raises(ProviderUnavailable, match="toolu_a"):
+    with pytest.raises(ProviderUnavailable, match="toolu_a twice"):
         await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
     await _closed()
 
@@ -363,13 +363,48 @@ async def test_a_call_the_model_never_made_gets_no_result(tmp_path: Path, monkey
     assert all(entry["result"]["isError"] for entry in cli.events("tool_result")[1:])
 
 
-@pytest.mark.parametrize("gone", ["abandon", "cancel"], ids=["it went on by itself", "it cancelled the call"])
+@pytest.mark.asyncio
+async def test_a_parked_process_with_a_call_the_model_never_made_is_rebuilt_at_once(tmp_path: Path) -> None:
+    # Claude Code brings a call the model did not write to the tool server before the model message ends.
+    step = {"tools": [{**call("toolu_x", "b"), "hidden": True}, call("toolu_a", "a")], "call_before_stop": True}
+    cli = fake_cli(tmp_path, {"turns": [[step, {"text": "never"}]]}, {"turns": [text_turn("Rebuilt.")]})
+    provider = cli.provider()
+    messages = [user("Look up a.")]
+    asked = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
+
+    messages += [asked.message, result("toolu_a", "LILAC-HERON")]
+    answered = await asyncio.wait_for(complete(provider, ModelRequest(messages=messages, tools=[LOOKUP])), 10)
+
+    assert answered.content == "Rebuilt."
+    assert cli.events("tool_result") == []
+
+
+@pytest.mark.asyncio
+async def test_a_result_for_a_call_claude_code_gave_up_meanwhile_is_dropped() -> None:
+    bridge = session_module._ToolBridge(names={"lookup": "lookup"})
+    bridge.made("toolu_a", "lookup", {"key": "a"})
+    bridge.made("toolu_b", "lookup", {"key": "b"})
+    bridge.calls["toolu_a"].result.cancel()
+    del bridge.calls["toolu_b"]
+
+    bridge.resolve({"toolu_a": {"content": []}, "toolu_b": {"content": []}})
+
+    assert bridge.calls["toolu_a"].result.cancelled()
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        [{"tools": [call("toolu_a", "a")], "abandon": True}, {"text": "An answer without the result."}],
+        [{"tools": [call("toolu_a", "a")], "cancel": True}, {"wait": True}],
+    ],
+    ids=["it went on by itself", "it cancelled the call"],
+)
 @pytest.mark.asyncio
 async def test_a_parked_process_that_did_not_wait_for_mindrooms_results_is_rebuilt_from_them(
     tmp_path: Path,
-    gone: str,
+    turn: list[dict[str, Any]],
 ) -> None:
-    turn = [{"tools": [call("toolu_a", "a")], gone: True}, {"text": "An answer without the result."}]
     cli = fake_cli(tmp_path, {"turns": [turn]}, {"turns": [text_turn("Rebuilt.")]})
     provider = cli.provider()
     messages = [user("Look up a.")]

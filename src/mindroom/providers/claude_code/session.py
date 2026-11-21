@@ -147,6 +147,14 @@ class _ToolBridge:
         """Keep a tool call the model wrote, which Claude Code then brings to the tool server."""
         self._call(tool_use_id).made = (name, canonical_arguments(arguments))
 
+    def resolve(self, results: dict[str, dict[str, Any]]) -> None:
+        """Give each waiting tool call its result, which continues the turn."""
+        for tool_use_id, result in results.items():
+            call = self.calls.get(tool_use_id)
+            # A call Claude Code gave up meanwhile has failed the process, which the request that reads it learns.
+            if call is not None and not call.result.done():
+                call.result.set_result(result)
+
     def fail(self, reason: str) -> None:
         """Mark the process as broken and wake the request that reads it."""
         if self.failure is None:
@@ -239,15 +247,13 @@ class LiveSession:
     def broken(self) -> str | None:
         """Return why the resting process cannot be continued, or None.
 
-        It cannot once its tool server failed, once it exited, and once it sent anything but notices while it
-        rested: Claude Code then answered a tool call itself and went on without MindRoom's result.
+        It cannot once its tool server failed, and once it sent anything but notices while it rested: it exited, or
+        it answered a tool call itself and went on without MindRoom's result.
         """
         bridge = self.bridge
         while bridge.failure is None and not bridge.messages.empty():
             if not isinstance(message := bridge.messages.get_nowait(), SystemMessage | RateLimitEvent):
                 bridge.failure = f"Claude Code did not wait for MindRoom ({type(message).__name__})"
-        if bridge.failure is None and self.owner.done():
-            bridge.failure = "Claude Code exited"
         if bridge.failure is None and any(call.made is None for call in bridge.calls.values()):
             bridge.failure = "Claude Code made a tool call the model did not write"
         return bridge.failure
@@ -263,14 +269,6 @@ class LiveSession:
         except ClaudeSDKError as error:
             msg = f"Claude Code stopped: {error}"
             raise ProviderUnavailable(msg, provider=self.provider) from error
-
-    def resolve(self, results: dict[str, dict[str, Any]]) -> None:
-        """Give each waiting tool call its result, which continues the turn."""
-        for tool_use_id, result in results.items():
-            call = self.bridge.calls.get(tool_use_id)
-            # A call Claude Code gave up meanwhile has failed the process, which the request that reads it learns.
-            if call is not None and not call.result.done():
-                call.result.set_result(result)
 
 
 def _environment_error(provider: str) -> AuthenticationFailed | None:

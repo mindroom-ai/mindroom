@@ -20,8 +20,8 @@ sends no such message. A step is one model message::
 
 whose text may hold ``{toolu_a}`` for the text an earlier tool call returned and whose first tool call can start,
 or also finish, before the message ends, or one of ``{"rate_limit": {...}}``,
-``{"result": {...}}`` to end the turn with those result fields, ``{"exit": 1}`` to die, and
-``{"die_after_result": true}`` to die once the turn has ended. A step with ``error`` is the placeholder message
+``{"result": {...}}`` to end the turn with those result fields, ``{"exit": 1}`` to die, ``{"wait": true}`` to send
+nothing more, and ``{"die_after_result": true}`` to die once the turn has ended. A step with ``error`` is the placeholder message
 Claude Code writes for a request that failed. ``start_text`` puts the first half of the text in the event that
 starts its block, and ``complete_only`` sends the message whole, without streaming it and without running its
 tools. A tool with ``"mcp": {"name": ..., "input": ...}`` reaches the tool server as that other call, and one with
@@ -315,6 +315,8 @@ class FakeClaude:
             if "exit" in step:
                 self.log("exit")
                 sys.exit(step["exit"])
+            elif "wait" in step:
+                self.finish("")
             elif "die_after_result" in step:
                 dies = True
             elif "rate_limit" in step:

@@ -108,7 +108,7 @@ class ClaudeCodeProvider:
                     sent = {"mode": "continue", "results": resume.results, "input": resume.blocks}
                     await request.on_send({"model": self.identity.id, **sent})
                     if resume.results:
-                        session.resolve(resume.results)
+                        session.bridge.resolve(resume.results)
                     else:
                         await session.send(resume.blocks)
                     return session
