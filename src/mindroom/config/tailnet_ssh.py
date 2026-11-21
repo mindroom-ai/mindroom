@@ -1,4 +1,4 @@
-"""The root `tailnet_ssh` config section: who may sign in to their worker from their tailnet, and with which keys."""
+"""The root `tailnet_ssh` config section: who may sign in to their worker from the operator's tailnet, and with which keys."""
 
 import base64
 import binascii
@@ -11,9 +11,9 @@ from mindroom.config.schema_hints import dashboard_hint
 
 # OpenSSH key type names, such as ssh-ed25519, ecdsa-sha2-nistp256, or sk-ssh-ed25519@openssh.com.
 _KEY_TYPE_PATTERN = re.compile(r"(?:ssh|ecdsa|sk)-[A-Za-z0-9.@-]+")
-# The armor line a pasted OpenSSH, PEM, or PKCS#8 private key starts with.
+# OpenSSH, PEM, or PKCS#8 private key armor.
 _PRIVATE_KEY_HEADER = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
-_NOT_A_KEY = "That is not an SSH public key line; paste one line from a .pub file."
+_NOT_A_KEY = "Expected an SSH public key line from a .pub file."
 
 
 def _is_canonical_base64(token: str) -> bool:
@@ -31,17 +31,17 @@ def normalize_public_key(line: str) -> str:
     """
     text = line.strip()
     if not text:
-        msg = "The key is empty; paste one line from a .pub file."
+        msg = "SSH public key lines cannot be empty."
         raise ValueError(msg)
     if _PRIVATE_KEY_HEADER.match(text):
-        msg = "That is a private key; paste the .pub file."
+        msg = "Use the .pub file, not the private key."
         raise ValueError(msg)
     if any(character in text for character in "\r\n\0"):
-        msg = "Paste one key per line."
+        msg = "Each entry must be one SSH public key line."
         raise ValueError(msg)
     fields = text.split(maxsplit=2)
-    if not _KEY_TYPE_PATTERN.fullmatch(fields[0]) and any(_KEY_TYPE_PATTERN.fullmatch(field) for field in text.split()):
-        msg = "Key options such as command= are not accepted; paste the key line without them."
+    if not _KEY_TYPE_PATTERN.fullmatch(fields[0]):
+        msg = "Expected an SSH public key type, not key options such as command=."
         raise ValueError(msg)
     if len(fields) < 2 or not _is_canonical_base64(fields[1]):
         raise ValueError(_NOT_A_KEY)
@@ -63,12 +63,12 @@ class TailnetSshConfig(BaseModel):
 
     logins: dict[str, str] = Field(
         default_factory=dict,
-        description="With an operator key: the Tailscale login, such as bas@github, each person's link admits",
+        description="Exact Tailscale or Headscale login each Matrix user may connect from",
         json_schema_extra=dashboard_hint(key_placeholder="@alice:example.org"),
     )
     authorized_keys: dict[str, list[str]] = Field(
         default_factory=dict,
-        description="SSH public key lines each person may sign in with, for installs where the operator knows them",
+        description="OpenSSH public key lines each Matrix user may authenticate with",
         json_schema_extra=dashboard_hint(key_placeholder="@alice:example.org"),
     )
 

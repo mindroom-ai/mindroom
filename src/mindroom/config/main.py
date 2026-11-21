@@ -479,7 +479,7 @@ class Config(BaseModel):
     )
     tailnet_ssh: TailnetSshConfig = Field(
         default_factory=TailnetSshConfig,
-        description="Tailnet SSH: the Tailscale login and SSH keys an operator sets for each person",
+        description="Tailnet SSH credentials for users of the operator-managed tailnet",
     )
     timezone: TimezoneName = Field(
         default="UTC",

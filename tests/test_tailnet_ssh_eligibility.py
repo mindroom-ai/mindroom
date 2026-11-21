@@ -185,13 +185,13 @@ def test_scope_refusals(tmp_path: Path) -> None:
     assert _ineligibility(paths, config, ALICE, "mine", _key(ALICE, "other")) == _Ineligible("scope")
 
 
-def test_joined_directory_names_it(tmp_path: Path) -> None:
-    """A directory the agent joined is another agent's data in its worker, so the card names it."""
+def test_joined_directory_is_ineligible(tmp_path: Path) -> None:
+    """A directory the agent joined is another agent's data in its worker."""
     paths = _paths(tmp_path)
     config = _load(paths)
     create_shared_directory(paths, owner="other", name="specs")
     add_shared_directory_member(paths, owner="other", name="specs", member="mine")
-    assert _ineligibility(paths, config, ALICE, "mine") == _Ineligible("joined_directory", "other/specs")
+    assert _ineligibility(paths, config, ALICE, "mine") == _Ineligible("joined_directory")
 
 
 def test_owned_directory_and_knowledge_base_pass(tmp_path: Path) -> None:
@@ -295,9 +295,9 @@ def test_normalize_public_key_shapes() -> None:
     assert normalize_public_key(f"{key} PRIVATE KEY backup") == f"{key} PRIVATE KEY backup"
     # OpenSSH decodes the blob strictly, so a character outside base64 makes the key unusable.
     key_type, blob = key.split()
-    with pytest.raises(ValueError, match=r"not an SSH public key"):
+    with pytest.raises(ValueError, match=r"Expected an SSH public key"):
         normalize_public_key(f"{key_type} {blob[:20]}!{blob[20:]}")
-    with pytest.raises(ValueError, match=r"not an SSH public key"):
+    with pytest.raises(ValueError, match=r"Expected an SSH public key"):
         normalize_public_key(f"{key_type} {blob[:-1]}")
     with pytest.raises(ValueError, match=r"\."):
         normalize_public_key("")
@@ -392,11 +392,27 @@ def test_names_that_share_a_key_are_no_ones(tmp_path: Path) -> None:
     """`mine` and `mine_` both load and resolve to one worker key, so neither a link nor a launch may claim it."""
     paths = _paths(tmp_path)
     data = _data()
-    data["agents"]["mine_"] = _mine_like()
+    data["agents"]["mine_"] = _mine_like(tailnet_ssh=False)
     config = _load(paths, data)
     assert _key(ALICE, "mine_") == _key(ALICE, "mine") == _ALICE_MINE_KEY
     assert _ineligibility(paths, config, ALICE, "mine") == _Ineligible("scope")
-    assert _ineligibility(paths, config, ALICE, "mine_") == _Ineligible("scope")
+    assert _ineligibility(paths, config, ALICE, "mine_") == _Ineligible("not_enabled")
     launch = _launch(config)
     assert ssh_eligible_launch(_ALICE_MINE_KEY, launch, None, ()) is False
     assert ssh_eligible_launch(_key(ALICE, "nobody"), launch, None, ()) is False
+
+
+def test_lone_private_agent_name_must_round_trip_at_load_and_launch(tmp_path: Path) -> None:
+    """A normalized private agent name could select the non-private workspace."""
+    paths = _paths(tmp_path)
+    data = _data()
+    data["agents"] = {"mine_": data["agents"]["mind"]}
+    with pytest.raises(ValueError, match=r"agents\.mine_\.tailnet_ssh.*round-trips"):
+        _load(paths, data)
+
+    data["agents"]["mine_"]["tailnet_ssh"] = False
+    config = _load(paths, data)
+    config.agents["mine_"].tailnet_ssh = True  # Bypass load validation, as a stale launch could.
+    assert _key(ALICE, "mine_") == _ALICE_MINE_KEY
+    assert not ssh_eligible_launch(_ALICE_MINE_KEY, _launch(config), frozenset({"mine_"}), ())
+    assert _ineligibility(paths, config, ALICE, "mine_") == _Ineligible("scope")

@@ -621,7 +621,7 @@
         },
         "tailnet_ssh": {
           "default": false,
-          "description": "Let each person reach their own worker for this agent with ssh from their tailnet; needs worker_scope user_agent and a private agent or access.users of concrete IDs with no room grants",
+          "description": "Let each person SSH to their own worker for this agent from the operator's tailnet; needs worker_scope user_agent and a private agent or access.users of concrete IDs with no room grants",
           "title": "Tailnet Ssh",
           "type": "boolean"
         }
@@ -5440,7 +5440,7 @@
             "type": "string"
           },
           "default": {},
-          "description": "With an operator key: the Tailscale login, such as bas@github, each person's link admits",
+          "description": "Exact Tailscale or Headscale login each Matrix user may connect from",
           "title": "Logins",
           "type": "object",
           "x-mindroom": {
@@ -5455,7 +5455,7 @@
             "type": "array"
           },
           "default": {},
-          "description": "SSH public key lines each person may sign in with, for installs where the operator knows them",
+          "description": "OpenSSH public key lines each Matrix user may authenticate with",
           "title": "Authorized Keys",
           "type": "object",
           "x-mindroom": {
@@ -6543,7 +6543,7 @@
         "logins": {},
         "authorized_keys": {}
       },
-      "description": "Tailnet SSH: the Tailscale login and SSH keys an operator sets for each person"
+      "description": "Tailnet SSH credentials for users of the operator-managed tailnet"
     },
     "timezone": {
       "default": "UTC",

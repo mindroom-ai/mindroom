@@ -479,7 +479,7 @@ class AgentConfig(BaseModel):
     tailnet_ssh: bool = Field(
         default=False,
         description=(
-            "Let each person reach their own worker for this agent with ssh from their tailnet; needs "
+            "Let each person SSH to their own worker for this agent from the operator's tailnet; needs "
             "worker_scope user_agent and a private agent or access.users of concrete IDs with no room grants"
         ),
     )

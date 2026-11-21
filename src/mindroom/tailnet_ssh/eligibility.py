@@ -36,14 +36,9 @@ _Reason = Literal["backend", "not_enabled", "scope", "shared_workspace", "joined
 
 @dataclass(frozen=True)
 class _Ineligible:
-    """The first condition a link fails; ``detail`` names a joined directory as ``owner/name``.
-
-    ``pending`` marks a ``not_authorized`` that only says the person's room membership is not known yet, as after a
-    primary's start or a reload: it may turn out either way, so it suspends a link and never removes it.
-    """
+    """The first condition a link fails; unresolved membership is retryable on connect."""
 
     reason: _Reason
-    detail: str | None = None
     pending: bool = False
 
 
@@ -79,24 +74,20 @@ def _key_agent(worker_key: str, agent_names: Iterable[str]) -> str | None:
     return names[0] if len(names) == 1 else None
 
 
-def _joined_directory(config: Config, agent_name: str, directories: Iterable[SharedDirectory]) -> str | None:
-    """Return the first shared directory the agent joined but does not own, as ``owner/name``."""
-    is_shareable = partial(is_shareable_agent, config)
-    for directory in directories:
-        if shared_directory_access(directory, (agent_name,), is_shareable) is False:
-            return f"{directory.owner}/{directory.name}"
-    return None
+def _has_joined_directory(config: Config, agent_name: str, directories: Iterable[SharedDirectory]) -> bool:
+    """Whether the agent mounts a shared directory it does not own."""
+    shareable = partial(is_shareable_agent, config)
+    return any(shared_directory_access(directory, (agent_name,), shareable) is False for directory in directories)
 
 
 def config_error(config: Config, agent_name: str) -> str | None:
-    """Return the sentence that makes ``tailnet_ssh: true`` on this agent invalid config, or None.
-
-    The number of users is not checked, because a created agent's owner may add co-owners; that suspends links.
-    """
+    """Reject opt-in that cannot work; the sole-user requirement is checked at launch and connect."""
     if not config.agents[agent_name].tailnet_ssh:
         return None
     policy = agent_policy(config, agent_name)
     prefix = f"agents.{agent_name}.tailnet_ssh requires "
+    if normalize_worker_key_part(agent_name) != agent_name:
+        return f"{prefix}an agent name that round-trips as a worker key part; rename this agent."
     if policy.effective_execution_scope != "user_agent":
         return f"{prefix}worker_scope: user_agent or private.per: user_agent, not {policy.scope_label}."
     if not policy.is_private and _concrete_users_alone(config, agent_name) is None:
@@ -146,10 +137,7 @@ def link_ineligibility(
     membership_index: AgentReplyMembershipIndex,
     directories: Sequence[SharedDirectory] | None = None,
 ) -> _Ineligible | None:
-    """Return the first condition a link of ``requester_id`` to ``agent_name`` over ``worker_key`` fails, or None.
-
-    ``directories`` are the stored shared directories, for a caller that checks many links and reads them once.
-    """
+    """Return the first failed link check, optionally reusing a shared-directory snapshot."""
     if not worker_backend_kind(runtime_paths).dedicated:
         return _Ineligible("backend")
     agent = config.agents.get(agent_name)
@@ -158,6 +146,7 @@ def link_ineligibility(
     policy = agent_policy(config, agent_name)
     if (
         policy.effective_execution_scope != "user_agent"
+        or normalize_worker_key_part(agent_name) != agent_name
         or worker_key is None
         or _key_agent(worker_key, config.agents) != agent_name
     ):
@@ -169,8 +158,7 @@ def link_ineligibility(
         return _Ineligible("shared_workspace")
     if directories is None:
         directories = load_shared_directories(runtime_paths)
-    joined = _joined_directory(config, agent_name, directories)
-    return None if joined is None else _Ineligible("joined_directory", joined)
+    return _Ineligible("joined_directory") if _has_joined_directory(config, agent_name, directories) else None
 
 
 def ssh_eligible_launch(
@@ -185,7 +173,7 @@ def ssh_eligible_launch(
     a private agent must be one the worker may see. A read-only shared mount is a directory another agent owns.
     """
     agent_name = _key_agent(worker_key, launch.agent_policies)
-    if agent_name is None:
+    if agent_name is None or normalize_worker_key_part(agent_name) != agent_name:
         return False
     requester_id = user_agent_worker_key_requester(worker_key)
     policy = launch.agent_policies[agent_name]
