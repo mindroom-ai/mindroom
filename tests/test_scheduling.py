@@ -2221,68 +2221,6 @@ async def test_schedule_task_persists_through_the_room_steward(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_explicit_history_limit_overrides_parse_and_round_trips(tmp_path: Path) -> None:
-    """An explicit history limit wins over the parse, persists to Matrix state, and surfaces in listings."""
-    client = AsyncMock()
-    client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
-    room_state: dict[str, dict[str, Any]] = {}
-    client.room_get_state = AsyncMock(side_effect=lambda room_id: _room_state_response(room_id, room_state))
-    state_writers, _router = _recording_state_writer(room_state)
-    room = _matrix_room("!test:server")
-    runtime_paths = schedule_runtime_paths(tmp_path)
-    config, ids = _assistant_config(runtime_paths)
-    workflow = ScheduledWorkflow(
-        schedule_type="cron",
-        cron_schedule=CronSchedule(minute="*/25"),
-        message="poll the queue",
-        description="Queue poller",
-    )
-
-    with (
-        patch(
-            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
-            return_value=[ids["assistant"]],
-        ),
-        patch("mindroom.scheduling.tasks._extract_mentioned_agents_from_text", return_value=[]),
-        patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
-        patch.object(ScheduledTaskRuntime, "start_new_task"),
-        patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
-    ):
-        message = await schedule_task(
-            runtime=_scheduling_runtime(
-                client=client,
-                config=config,
-                runtime_paths=runtime_paths,
-                room=room,
-                task_runtime=state_writers,
-            ),
-            room_id="!test:server",
-            thread_id="$thread",
-            scheduled_by="@alice:server",
-            full_text="every 25 minutes poll the queue with only the last 5 messages",
-            history_limit=5,
-            silent=True,
-        )
-
-    assert "**Task ID:** `task1234`" in message
-    assert "**History:** last 5 messages" in message
-    assert "**Mode:** Silent" in message
-    tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", runtime_paths=runtime_paths)
-    assert [task.task_id for task in tasks] == ["task1234"]
-    assert tasks[0].workflow.history_limit == 5
-    assert tasks[0].workflow.silent is True
-    listed = await list_scheduled_tasks(
-        client=client,
-        room_id="!test:server",
-        runtime_paths=runtime_paths,
-        thread_id="$thread",
-        config=config,
-    )
-    assert "History: last 5 messages" in listed
-    assert "Mode: Silent" in listed
-
-
-@pytest.mark.asyncio
 async def test_schedule_task_keeps_parse_produced_history_limit(tmp_path: Path) -> None:
     """Without an explicit override, the parse-produced history limit persists and surfaces."""
     client = AsyncMock()
@@ -2607,8 +2545,8 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
 
 
 @pytest.mark.asyncio
-async def test_schedule_model_persists_and_edits(tmp_path: Path) -> None:
-    """The chosen model survives state storage and edits, and can be cleared."""
+async def test_schedule_persists_model_and_history_limit_and_edits_model(tmp_path: Path) -> None:
+    """Model and history limit round-trip; the model can also be changed or cleared."""
     client = AsyncMock()
     serve_task_state_events(client)
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
@@ -2659,15 +2597,18 @@ async def test_schedule_model_persists_and_edits(tmp_path: Path) -> None:
             scheduled_by="@alice:server",
             full_text="every 25 minutes poll the queue with only the last 5 messages",
             model="cheap",
+            history_limit=5,
             silent=True,
         )
 
     assert "**Task ID:** `task1234`" in message
     assert "**Model:** cheap" in message
+    assert "**History:** last 5 messages" in message
     assert "**Mode:** Silent" in message
     tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", runtime_paths=runtime_paths)
     assert [task.task_id for task in tasks] == ["task1234"]
     assert tasks[0].workflow.model == "cheap"
+    assert tasks[0].workflow.history_limit == 5
     assert build_edited_scheduled_workflow(tasks[0].workflow, "!test:server", message="new task").model == "cheap"
     assert tasks[0].workflow.silent is True
     listed = await list_scheduled_tasks(
@@ -2678,6 +2619,7 @@ async def test_schedule_model_persists_and_edits(tmp_path: Path) -> None:
         config=config,
     )
     assert "Model: cheap" in listed
+    assert "History: last 5 messages" in listed
     assert "Mode: Silent" in listed
 
     with (
