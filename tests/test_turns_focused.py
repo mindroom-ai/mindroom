@@ -1130,7 +1130,7 @@ async def test_older_voice_turn_reaches_policy_despite_newer_text(
     """Only the turn that owns the older voice note can post its transcript and handle its source."""
     coalesced = kind == "voice-then-text-batch"
     transcribed = kind != "raw-audio-fallback"
-    harness = _build_harness(config, tmp_path, debounce_seconds=30.0 if coalesced else 0.0)
+    harness = _build_harness(config, tmp_path)
     await _serve_newer_requester_message(harness, config, history_degraded=history_degraded)
     room = _room_with_members(config, "general")
     event = _thread_upload_event("m.audio", event_id="$voice:localhost", origin_server_ts=1_999_000)
@@ -1146,6 +1146,8 @@ async def test_older_voice_turn_reaches_policy_despite_newer_text(
         constants.SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
         voice_flag: True,
     }
+    if coalesced:
+        content[constants.SUBMISSION_CONTENT_KEY] = {"id": "voice-batch", "more": True}
     await harness.turn_store.record_prepared_voice(
         _ROOM_ID,
         event.event_id,
@@ -1162,6 +1164,7 @@ async def test_older_voice_turn_reaches_policy_despite_newer_text(
                 thread_id=_THREAD_ROOT,
                 origin_server_ts=1_999_001,
             )
+            caption.source["content"][constants.SUBMISSION_CONTENT_KEY] = {"id": "voice-batch", "more": False}
             await harness.ingress.handle_text_event(room, caption)
             source_ids += (caption.event_id,)
         await harness.gate.drain_all()
