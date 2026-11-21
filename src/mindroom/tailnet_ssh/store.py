@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -15,7 +16,7 @@ from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -45,8 +46,7 @@ class LinkBook(BaseModel):
 
     def ensure(self, worker_key: str) -> Link:
         """Keep the existing identity, or allocate it the first time a worker is listed."""
-        digest = hashlib.sha256(worker_key.encode()).hexdigest()
-        link_id = digest[:16]
+        link_id = hashlib.sha256(worker_key.encode()).hexdigest()[:16]
         if (link := self.by_id(link_id)) is not None:
             if link.worker_key != worker_key:
                 msg = "Tailnet SSH link ID collision."
@@ -75,34 +75,29 @@ def _links_path(runtime_paths: RuntimePaths) -> Path:
     return tracking_dir(runtime_paths) / "tailnet_ssh.json"
 
 
-def _parse(path: Path, text: str) -> LinkBook:
-    # Omit validation locations, values, and the chained exception: they can expose private host keys.
+def read_links(runtime_paths: RuntimePaths) -> LinkBook:
+    """Return the stored book, or an empty one before the first link."""
+    path = _links_path(runtime_paths)
     try:
-        return LinkBook.model_validate_json(text)
-    except ValidationError as exc:  # Invalid JSON is a ValidationError too.
+        return LinkBook.model_validate_json(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return LinkBook()
+    except ValidationError as exc:
         errors = exc.errors()
+    # Validation locations, values, and the chained exception can expose private host keys.
     types = ", ".join(error["type"] for error in errors)
     msg = f"Tailnet SSH file {path} is invalid: {len(errors)} validation errors ({types})"
     raise ValueError(msg)
 
 
-def read_links(runtime_paths: RuntimePaths) -> LinkBook:
-    """Return the stored book, or an empty one before the first link."""
-    path = _links_path(runtime_paths)
-    try:
-        return _parse(path, path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return LinkBook()
-
-
-def update_links[T](runtime_paths: RuntimePaths, change: Callable[[LinkBook], T]) -> T:
-    """Run a change under the ledger lock and write durably only if changed."""
+@contextmanager
+def update_links(runtime_paths: RuntimePaths) -> Iterator[LinkBook]:
+    """Hold the ledger lock and write back changes only on success."""
     path = _links_path(runtime_paths)
     with advisory_file_lock(path.with_suffix(".lock")):
         book = read_links(runtime_paths)
         stored = book.model_dump(mode="json")
-        result = change(book)
+        yield book
         changed = book.model_dump(mode="json")
         if changed != stored:
             write_json_file_durable(path, changed, strict_atomic_replace=True)
-    return result

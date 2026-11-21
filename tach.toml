@@ -3817,10 +3817,6 @@ path = "mindroom.config.tailnet_ssh"
 depends_on = ["mindroom.config.schema_hints"]
 
 [[modules]]
-path = "mindroom.tailnet_ssh.eligibility"
-depends_on = []
-
-[[modules]]
 path = "mindroom.tailnet_ssh.store"
 depends_on = ["mindroom.constants"]
 
@@ -3838,7 +3834,6 @@ depends_on = [
     "mindroom.agent_cli.shell_contract",
     "mindroom.bounded_bytes",
     "mindroom.runtime_resolution",
-    "mindroom.tailnet_ssh.eligibility",
     "mindroom.tailnet_ssh.projection",
     "mindroom.tailnet_ssh.store",
     "mindroom.tool_system.agent_tools",

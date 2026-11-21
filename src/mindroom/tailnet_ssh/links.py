@@ -13,10 +13,10 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, NonNegativeInt
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
+from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_execution
-from mindroom.tailnet_ssh.eligibility import shell_authorized
 from mindroom.tailnet_ssh.projection import write_projection
 from mindroom.tailnet_ssh.store import read_links, update_links
 from mindroom.terminal.resolution import agent_terminals
@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.tailnet_ssh.store import LinkBook
     from mindroom.tool_system.sandbox_proxy import WorkerCall
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
     from mindroom.workers.models import WorkerSshEndpoint
@@ -94,7 +93,18 @@ def _roster(
         ):
             continue
         for requester, login in requesters:
-            if not shell_authorized(requester, agent, config, paths, memberships):
+            try:
+                if not is_sender_allowed_for_responder(
+                    requester,
+                    agent,
+                    None,
+                    config,
+                    paths,
+                    memberships,
+                    require_resolved_membership=True,
+                ):
+                    continue
+            except ReplyMembershipPendingError:
                 continue
             identity = build_requester_execution_identity(agent_name=agent, runtime_paths=paths, requester_id=requester)
             try:
@@ -117,14 +127,12 @@ def desired_links(
     if not roster:
         return []
 
-    def list_links(book: LinkBook) -> list[dict[str, object]]:
-        rows: list[dict[str, object]] = []
+    rows: list[dict[str, object]] = []
+    with update_links(paths) as book:
         for key, routes in sorted(roster.items()):
             link = book.ensure(key)
             rows.append({"id": link.id, "hostname": link.hostname, "allowed_logins": sorted(routes)})
-        return rows
-
-    return update_links(paths, list_links)
+    return rows
 
 
 def record_status(paths: RuntimePaths, status: GatewayStatus, payload: StatusReport, *, monotonic: float) -> None:
@@ -160,7 +168,6 @@ def _admit(  # noqa: C901 - keep the before/after wake and projection checks tog
     peer_login: str,
 ) -> tuple[WorkerSshEndpoint, WorkerCall]:
     config, paths = read_config()
-
     link = read_links(paths).by_id(link_id)
     if link is None:
         raise ConnectRefused(404, "No such link.")
@@ -177,27 +184,27 @@ def _admit(  # noqa: C901 - keep the before/after wake and projection checks tog
         raise ConnectRefused(503, "The worker did not start.") from None
     if ready.status != "ready":
         raise ConnectRefused(503, "The worker is not ready.")
-    if ready.worker_key != key or ready.ssh_endpoint is None:
+    endpoint = ready.ssh_endpoint
+    if ready.worker_key != key or endpoint is None:
         raise ConnectRefused(409, "This worker has no marked SSH endpoint.")
 
-    def project(book: LinkBook) -> tuple[WorkerSshEndpoint, WorkerCall]:
-        # Wake can span a config change; serialize the recheck and projection with other connects.
+    # Wake can span a config change; serialize the recheck and projection with other connects.
+    with update_links(paths) as book:
         current, current_paths = read_config()
         if current_paths != paths or book.by_id(link_id) != link:
             raise ConnectRefused(409, "The worker runtime changed during wake.")
         routes = _roster(current, paths, memberships).get(key, {})
-        if peer_login not in routes:
+        if (current_target := routes.get(peer_login)) is None:
             raise ConnectRefused(403, "This login is not authorized for this link.")
-        if routes[peer_login] != target:
+        if current_target != target:
             raise ConnectRefused(409, "This link's shell route changed during wake.")
         # Use a stable workspace for the worker, independent of which peer is connecting.
         launch_target = next(iter(routes.values()))
         call = _shell_call(current, paths, key, launch_target)
         handle = call.handle
         # Touching the worker changes its last-use timestamp, not its generation or addresses.
-        if handle is None or handle.ssh_endpoint is None or replace(handle, last_used_at=ready.last_used_at) != ready:
+        if handle is None or replace(handle, last_used_at=ready.last_used_at) != ready:
             raise ConnectRefused(409, "This link's worker changed during wake.")
-        endpoint = handle.ssh_endpoint
         try:
             write_projection(
                 endpoint.projection_dir,
@@ -212,9 +219,7 @@ def _admit(  # noqa: C901 - keep the before/after wake and projection checks tog
         except OSError as error:
             logger.warning("tailnet_ssh_projection_not_written", link_id=link_id, error=str(error))
             raise ConnectRefused(503, "The worker's SSH files could not be written.") from None
-        return endpoint, call
-
-    return update_links(paths, project)
+    return endpoint, call
 
 
 async def _start_sshd(call: WorkerCall) -> None:
@@ -245,11 +250,10 @@ async def connect(
 ) -> tuple[str, int]:
     """Wake and admit this peer, project current keys, and start sshd before returning its endpoint."""
     peer = {"link_id": link_id, "peer_login": peer_login, "peer_node": peer_node}
-    loop = asyncio.get_running_loop()
     try:
-        context = copy_context()
         args = (read_config, membership_index, link_id, peer_login)
-        endpoint, call = await loop.run_in_executor(_CONNECT_EXECUTOR, context.run, _admit, *args)
+        loop = asyncio.get_running_loop()
+        endpoint, call = await loop.run_in_executor(_CONNECT_EXECUTOR, copy_context().run, _admit, *args)
         await _start_sshd(call)
     except ConnectRefused as refused:
         logger.info("tailnet_ssh_connect_refused", **peer, status_code=refused.status_code)

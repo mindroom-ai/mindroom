@@ -29,7 +29,8 @@ def test_update_links_round_trips_and_writes_under_tracking(tmp_path: Path) -> N
     runtime_paths = test_runtime_paths(tmp_path)
     assert read_links(runtime_paths) == LinkBook()
 
-    link = update_links(runtime_paths, lambda book: book.ensure(KEY))
+    with update_links(runtime_paths) as ledger:
+        link = ledger.ensure(KEY)
     link_id = link.id
     path = tracking_dir(runtime_paths) / "tailnet_ssh.json"
     assert json.loads(path.read_text(encoding="utf-8")) == {"links": [link.model_dump()]}
@@ -38,13 +39,14 @@ def test_update_links_round_trips_and_writes_under_tracking(tmp_path: Path) -> N
     assert stored is not None
     assert stored == link
 
-    def fail(book: LinkBook) -> None:
-        book.links.clear()
-        msg = "boom"
-        raise RuntimeError(msg)
+    def fail() -> None:
+        with update_links(runtime_paths) as ledger:
+            ledger.links.clear()
+            msg = "boom"
+            raise RuntimeError(msg)
 
     with pytest.raises(RuntimeError, match="boom"):
-        update_links(runtime_paths, fail)
+        fail()
     assert read_links(runtime_paths) == book
 
 
@@ -53,21 +55,26 @@ def test_update_links_writes_only_a_changed_book(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     path = tracking_dir(runtime_paths) / "tailnet_ssh.json"
 
-    assert update_links(runtime_paths, lambda book: len(book.links)) == 0
+    with update_links(runtime_paths) as book:
+        assert not book.links
     assert not path.exists()
 
-    update_links(runtime_paths, lambda book: book.ensure(KEY))
+    with update_links(runtime_paths) as book:
+        book.ensure(KEY)
     stored = path.stat()
 
-    update_links(runtime_paths, lambda book: book.ensure(KEY))
+    with update_links(runtime_paths) as book:
+        book.ensure(KEY)
     assert (path.stat().st_ino, path.stat().st_mtime_ns) == (stored.st_ino, stored.st_mtime_ns)
 
-    update_links(runtime_paths, lambda book: book.ensure("v1:default:shared:code"))
+    with update_links(runtime_paths) as book:
+        book.ensure("v1:default:shared:code")
     assert path.stat().st_ino != stored.st_ino
     assert len(read_links(runtime_paths).links) == 2
 
 
-def test_invalid_file_error_names_fields_but_not_secrets(tmp_path: Path) -> None:
+@pytest.mark.parametrize("update", [False, True])
+def test_invalid_file_error_names_fields_but_not_secrets(tmp_path: Path, *, update: bool) -> None:
     """A corrupt file is reported by path and error types, never with its values or input-derived names."""
     runtime_paths = test_runtime_paths(tmp_path)
     record = LinkBook().ensure(KEY).model_dump(mode="json")
@@ -79,24 +86,30 @@ def test_invalid_file_error_names_fields_but_not_secrets(tmp_path: Path) -> None
     stored = {"links": [record], "host_key": secret}
     path.write_text(json.dumps(stored), encoding="utf-8")
 
-    for call in (lambda: read_links(runtime_paths), lambda: update_links(runtime_paths, lambda _book: None)):
-        with pytest.raises(ValueError, match="invalid") as caught:
-            call()
-        rendered = "".join(traceback.format_exception(caught.value))
-        assert str(path) in rendered
-        prefix = f"Tailnet SSH file {path} is invalid: 3 validation errors ("
-        message = str(caught.value)
-        assert message.startswith(prefix)
-        assert message.endswith(")")
-        assert sorted(message.removeprefix(prefix).removesuffix(")").split(", ")) == [
-            "extra_forbidden",
-            "extra_forbidden",
-            "missing",
-        ]
-        assert "hostname" not in rendered
-        assert "host_key" not in rendered
-        assert secret not in rendered
-        assert "mind_alice" not in rendered
+    def read() -> None:
+        if update:
+            with update_links(runtime_paths):
+                pytest.fail("Loaded an invalid link book.")
+        else:
+            read_links(runtime_paths)
+
+    with pytest.raises(ValueError, match="invalid") as caught:
+        read()
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert str(path) in rendered
+    prefix = f"Tailnet SSH file {path} is invalid: 3 validation errors ("
+    message = str(caught.value)
+    assert message.startswith(prefix)
+    assert message.endswith(")")
+    assert sorted(message.removeprefix(prefix).removesuffix(")").split(", ")) == [
+        "extra_forbidden",
+        "extra_forbidden",
+        "missing",
+    ]
+    assert "hostname" not in rendered
+    assert "host_key" not in rendered
+    assert secret not in rendered
+    assert "mind_alice" not in rendered
 
 
 def test_worker_identity_is_stable_and_has_a_loadable_host_key() -> None:

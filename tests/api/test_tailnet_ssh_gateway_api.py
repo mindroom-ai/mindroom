@@ -146,7 +146,8 @@ def client(api_app: FastAPI) -> TestClient:
 def _stored_link(api_app: FastAPI) -> Link:
     """Store Alice's link to the agent."""
     _, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
-    return update_links(paths, lambda book: book.ensure(_ALICE_MINE_KEY))
+    with update_links(paths) as book:
+        return book.ensure(_ALICE_MINE_KEY)
 
 
 def _status(api_app: FastAPI) -> GatewayStatus | None:

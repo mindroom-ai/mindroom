@@ -118,7 +118,8 @@ def _key(requester: str, agent: str, scope: str = "user_agent") -> str:
 
 
 def _link(paths: RuntimePaths, agent: str = "mine", requester: str = ALICE) -> Link:
-    return update_links(paths, lambda book: book.ensure(_key(requester, agent)))
+    with update_links(paths) as book:
+        return book.ensure(_key(requester, agent))
 
 
 def _handle(worker_key: str, ssh_dir: Path | None, *, status: str = "ready") -> WorkerHandle:
@@ -201,7 +202,11 @@ def _wire_connect(
     async def start_sshd(_call: WorkerCall) -> None:
         calls.append("ssh_start")
 
-    monkeypatch.setattr(links, "shell_authorized", _recorded(calls, "authorization", links.shell_authorized))
+    monkeypatch.setattr(
+        links,
+        "is_sender_allowed_for_responder",
+        _recorded(calls, "authorization", links.is_sender_allowed_for_responder),
+    )
     monkeypatch.setattr(links, "write_projection", _recorded(calls, "projection", links.write_projection))
     monkeypatch.setattr(links, "agent_terminals", lambda *_args, **_kwargs: SimpleNamespace(stand_ins=object()))
     monkeypatch.setattr(
