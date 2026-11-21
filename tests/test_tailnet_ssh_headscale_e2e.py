@@ -1,6 +1,7 @@
 """Tailnet SSH against a real tailnet: Headscale, the gateway image, workers that run sshd, and Tailscale clients.
 
-Use the primary's real link roster and key projection behind a small listener with a Docker wake fixture.
+Exercise real tailnet transport, WhoIs, and OpenSSH, using the production roster behind a stand-in primary connect.
+Production admission is covered by ``tests/test_tailnet_ssh_links.py`` and the kind probe, which calls real connect.
 Run with ``MINDROOM_TAILNET_SSH_E2E=1`` and the gateway and worker images, as in the ``headscale-e2e`` CI job.
 """
 
