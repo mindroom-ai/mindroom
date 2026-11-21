@@ -1,14 +1,4 @@
-"""Runner routes that start and stop a dedicated worker's SSH server, which tailnet SSH connections reach.
-
-The primary calls ``/start`` for every SSH connection it has admitted to this worker, with the request a shell call
-would send. The runner prepares that request as a terminal's (``prepare_terminal_launch``) and keeps the shell's
-environment and workspace where ``mindroom.tailnet_ssh.session``, which sshd runs for every session, reads them. Then
-it starts sshd unless one runs, on the files the primary wrote into ``<worker root>/.runtime/ssh``.
-
-sshd never starts at boot, so a worker has no SSH server until the primary has passed a connect for it. The primary
-calls ``/stop`` when it removes the worker's link, after it has emptied ``authorized_keys``; sshd ends only while that
-file still admits nobody, so a stop that arrives after a newer connect wrote keys and started sshd leaves it running.
-"""
+"""Token-gated sshd lifecycle for dedicated workers, using the primary's read-only key projection."""
 
 from __future__ import annotations
 
@@ -74,11 +64,7 @@ def _admits_nobody(projection_dir: Path) -> bool:
 
 
 def _sshd_argv(projection_dir: Path) -> list[str]:
-    """Return the sshd command that serves from the files the primary wrote into ``projection_dir``.
-
-    Only the worker knows where that folder is mounted and which interpreter it runs, so the paths and the session
-    program are options here and ``sshd_config`` names none (``mindroom.tailnet_ssh.projection``).
-    """
+    # Only the worker knows the projection mount and the interpreter for ForceCommand.
     return [
         "/usr/sbin/sshd",
         "-D",
@@ -180,11 +166,7 @@ async def start(request: Request, payload: _Start) -> dict[str, int]:
 
 @router.post("/stop", status_code=204, dependencies=[Depends(validate_runner_token)])
 async def stop(request: Request) -> None:
-    """End sshd if it runs and its ``authorized_keys`` admits nobody, as the primary leaves it for a removed link.
-
-    Starts take the same lock, and every start follows the keys its connect wrote, so a stop sent before a newer
-    connect never ends that connect's sshd. The gateway has closed the removed link's sessions already.
-    """
+    """Stop sshd only with empty keys, so a late stop cannot kill a newer admission."""
     state = _worker_ssh(request.app)
     async with state.lock:
         if await asyncio.to_thread(_admits_nobody, _projection_dir(request.app)):

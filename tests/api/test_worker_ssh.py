@@ -199,6 +199,7 @@ def fake_sshd(install_fake_sshd: Callable[..., _FakeSshd]) -> _FakeSshd:
 
 @pytest.fixture
 def keys(tmp_path: Path) -> Path:
+    """Project a key before an admitted start."""
     path = tmp_path / "worker" / ".runtime" / "ssh" / "authorized_keys"
     path.parent.mkdir(parents=True)
     path.write_text("restrict,pty ssh-ed25519 AAAA alice@laptop\n", encoding="utf-8")
@@ -208,6 +209,7 @@ def keys(tmp_path: Path) -> Path:
 @pytest_asyncio.fixture
 async def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keys: Path) -> AsyncIterator[httpx.AsyncClient]:
     """Call the runner of the dedicated worker at ``tmp_path/worker``, whose shell launch is ``_LAUNCH``."""
+    assert keys.is_file()
     app = sandbox_runner_app.app
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -520,6 +522,7 @@ async def test_start_refuses_missing_or_empty_keys(
     *,
     present: bool,
 ) -> None:
+    """A delayed start must not launch a listener after the primary clears its keys."""
     if present:
         keys.write_text("", encoding="utf-8")
     else:
@@ -539,6 +542,7 @@ async def test_listener_cleanup_does_not_wait_for_sessions(
     keys: Path,
     operation: str,
 ) -> None:
+    """The listener is reaped promptly even if a session inherited its stderr."""
     fake = install_fake_sshd(_LISTENS_WITH_A_SESSION, str(tmp_path))
     app = sandbox_runner_app.app
     try:
