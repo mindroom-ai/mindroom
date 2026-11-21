@@ -170,19 +170,6 @@ class ApprovalMatrixTransport:
                 raise ToolApprovalTransportError(msg)
             return str(response.event_id)
 
-        async def resolve_delivered(claimed: MatrixDelivery) -> str | None:
-            response_sender = client.user_id
-            if not response_sender:
-                return None
-            return await find_outbox_delivery_event_id_via_room_messages(
-                client,
-                claimed.room_id,
-                delivery_sender=response_sender,
-                source_event_ids=(continuation.response_event_id,),
-                delivery_content=claimed.payload,
-                delivery_event_type=claimed.event_type,
-            )
-
         delivery_id = (
             first[1]
             if first is not None
@@ -201,7 +188,11 @@ class ApprovalMatrixTransport:
                 send=send,
                 event_type="m.room.message",
                 sending_device_id=client.device_id or None,
-                resolve_delivered=resolve_delivered,
+                resolve_delivered=partial(
+                    self._resolve_approval_delivery,
+                    client,
+                    source_event_ids=(continuation.response_event_id,),
+                ),
             ).flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
         except ToolApprovalTransportError:
             logger.warning(
@@ -295,15 +286,21 @@ class ApprovalMatrixTransport:
             raise ToolApprovalTransportError(msg)
         return str(response.event_id)
 
-    async def _resolve_approval_delivery(self, client: nio.AsyncClient | None, claimed: MatrixDelivery) -> str | None:
-        """Adopt the exact card or terminal edit its sender left in the room before a device change."""
+    async def _resolve_approval_delivery(
+        self,
+        client: nio.AsyncClient | None,
+        claimed: MatrixDelivery,
+        *,
+        source_event_ids: tuple[str, ...] = (),
+    ) -> str | None:
+        """Adopt the exact card, terminal edit, or notice its sender left before a device change."""
         if client is None or not client.user_id:
             return None
         return await find_outbox_delivery_event_id_via_room_messages(
             client,
             claimed.room_id,
             delivery_sender=client.user_id,
-            source_event_ids=(),
+            source_event_ids=source_event_ids,
             delivery_content=_approval_delivery_content(claimed),
             delivery_event_type=claimed.event_type,
         )
