@@ -35,7 +35,7 @@ from mindroom.path_confinement import open_directory_within_root, open_regular_f
 from mindroom.tool_system.worker_routing import (
     WORKER_CREDENTIALS_DIRNAME,
     WORKER_SHARED_CREDENTIALS_DIRNAME,
-    subagent_worker_state_scope_key,
+    pinned_worker_state_scope_key,
     worker_log_id,
     worker_root_path,
 )
@@ -957,14 +957,14 @@ def _resolve_worker_credentials_manager(
 ) -> CredentialsManager:
     """Return the store of one worker, reusing the manager when this runtime is that worker.
 
-    A subagent's own worker serves its normal worker's key from its own store, where the primary mirrors the shared
-    credentials that worker gets.
+    A pinned worker, a subagent's own or a named one, serves its normal worker's key from its own store, where the
+    primary mirrors the shared credentials that worker gets.
     """
     current_storage_root = credentials_manager.storage_root.expanduser().resolve()
     current_worker_key = credentials_manager.current_worker_key
     if (
         current_worker_key is not None
-        and worker_key in (current_worker_key, subagent_worker_state_scope_key(current_worker_key))
+        and worker_key in (current_worker_key, pinned_worker_state_scope_key(current_worker_key))
         and credentials_manager.current_worker_root is not None
         and current_storage_root == credentials_manager.current_worker_root
     ):

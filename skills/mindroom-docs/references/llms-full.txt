@@ -1848,6 +1848,7 @@ agents:
 | `allow_self_config` | bool | `null` | Give the agent a tool to read and change its own entry under `agents:`; see [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) |
 | `delegate_to` | list | `[]` | Agents this agent may run as subagents, including itself only when listed; see [Agent Delegation](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation) |
 | `dedicated_subagent_workers` | bool | `false` | Let this agent run a subagent in a worker of its own on the Docker or Kubernetes worker backend; see [Dedicated workers](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) |
+| `named_workers` | int | `0` | How many [named workers](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) this agent's shell commands may have at once for one requester on the Kubernetes worker backend; the agent's workers must be per requester and agent (`worker_scope: user_agent`, or `private.per: user_agent`); `0` turns named workers off |
 | `thread_exports` | bool or object | `null` | Keep YAML exports of the agent's threads under `<workspace>/thread_exports/`; `true` uses the defaults. See [Thread Exports](https://docs.mindroom.chat/thread-exports/#thread-exports) |
 
 Unset fields that appear in the inheritance table under [Defaults](#defaults) take the `defaults` value; a per-agent value overrides it.
@@ -9542,6 +9543,7 @@ If shell permissions or deployment settings change after minimal mode was select
 The minimal prompt identifies the agent, lists its loaded workspace context files, and names the toolkits available through `mindroom-agent`.
 When the agent has skills, it names them; the agent reads one with `mindroom-agent context read skill:<name>`, which also gives the skill's directory.
 With file memory, it also names the workspace-relative `MEMORY.md` and `memory/` locations.
+When the agent may run [named workers](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers), it names [`mindroom-agent workers run`](#run-commands-in-named-workers), because Bash itself takes no `worker`.
 File contents, the role, ordinary instructions, and tool guidance are not in the prompt; the agent reads them through `mindroom-agent context` when it needs them.
 
 `minimal_instructions` (list of strings, default `[]`) is appended to the minimal prompt on every minimal request:
@@ -9591,6 +9593,7 @@ mindroom-agent calls get CALL_ID
 mindroom-agent calls wait CALL_ID
 mindroom-agent context list
 mindroom-agent context read NAME --offset 0 --limit 8000
+mindroom-agent workers run NAME -- COMMAND
 ```
 
 Tool names are qualified by toolkit, and `TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
@@ -9635,6 +9638,51 @@ Images, audio, and files are handled like ordinary response attachments.
 
 Scripts using `set -e` must handle exit code `3` explicitly.
 After exit code `4`, check the original call ID before retrying, because submitting with a fresh ID may repeat a side effect.
+`workers run` has [exit codes of its own](#run-commands-in-named-workers).
+
+## Run commands in named workers
+
+`workers run` runs one command in a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) of the current reply, so one shell script can spread work over several workers.
+It is the agent's own `run_shell_command` call with `worker` set, under the same approval rules and limits as every other CLI call, and it is available only where the agent is offered `worker`.
+
+```bash
+mindroom-agent workers run NAME [--resource-profile small|standard|large] [--timeout SECONDS] [--tail LINES] -- COMMAND [ARG...]
+```
+
+The command is everything after `--`. Multiple arguments run as the exact argument list. A single argument runs as an executable unless it contains whitespace or shell syntax, in which case Bash interprets it as a command line.
+For shell builtins or syntax, pass Bash explicitly, for example `mindroom-agent workers run build -- bash -c 'cd src && pwd'`.
+The CLI waits until the command ends. `--tail` (default 100) selects the last lines of stdout, and of stderr when the command succeeds; for a failed or timed-out command, the result puts stdout under `Output:` and all of stderr under `Stderr:`.
+If the shell result is [auto-saved](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files), the CLI prints its preview to stdout and the saved file's path to stderr. The preview may not include the last lines.
+`--timeout` (default 3600 seconds) stops the command, and `--resource-profile` sizes the worker when its name is first used.
+If the CLI loses the submission response or cannot read a running command’s receipt, it retries reading the receipt for up to a minute. It never submits the command twice.
+Stopping `workers run` itself, with Ctrl-C or at the `timeout` of the shell command it runs in, does not stop its command, which runs on in its worker until it ends or reaches `--timeout`.
+
+| Code | Meaning |
+| --- | --- |
+| The command's exit code | The command ran in the named worker; a command a signal killed exits with 128 plus the signal's number, such as `137` |
+| `124` | The command was stopped at `--timeout` |
+| `125` | The command did not run in the named worker, or its outcome is unknown: the call was refused, its command could not start, the call was cancelled, or its result stayed unreadable for a minute while the command may still be running; the reason is on stderr |
+| `2` | Invalid CLI arguments |
+
+Run this script from the shared workspace. It runs eight shards at once and fails if any shard fails.
+Each shard writes its full log to the shared workspace from inside its worker, so the log keeps the final summary even when CLI output would be previewed. CLI diagnostics go to a separate log.
+
+```bash
+out="runs/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$out"
+pids=()
+for i in $(seq 0 7); do
+  mindroom-agent workers run "shard-$i" --resource-profile large -- \
+    bash -c 'bash ci/shard.sh "$1" 8 > "$2" 2>&1' _ "$i" "$out/$i.log" \
+    > "$out/$i.cli.log" 2>&1 &
+  pids+=("$!")
+done
+failed=0
+for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+exit "$failed"
+```
+
+Run such a script as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) or with a `timeout` that covers it, because a script stopped at its time limit no longer collects its workers' results.
 
 ## Approvals, shells, and limits
 
@@ -10900,6 +10948,7 @@ delete_file("scratch/todo.txt")
 It runs commands only in a worker unless [`defaults.allow_shell_without_worker: true`](https://docs.mindroom.chat/configuration/agents/#defaults) lets them run in the MindRoom process; otherwise each call there is refused.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
 The tool returns the last `tail` lines of stdout (default 100), then the last `tail` lines of any stderr under `Stderr:`, each capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and all of stderr under `Stderr:`.
+If the result is auto-saved, read the saved file rather than relying on the preview for the last lines.
 When `tail` or the cap leaves lines out of a successful result, it starts with a notice for each stream that lost lines, such as `[Showing the last 100 of 230 lines. Pass a larger tail, or narrow the command.]` or `[Showing the last 100 of 230 stderr lines. ...]`.
 Blank lines count as lines in a notice and in the tail; output shown whole loses only its trailing newlines, and stderr of only blank lines still gets its `Stderr:` heading.
 A result that leads with a status line keeps it first and puts the notice at the start of the stream it describes: `Exit code <code>` on a failure, `Stopped after <timeout>s.` at the timeout, and `Status: FINISHED` or `Status: RUNNING` when a background command is checked.
@@ -10946,6 +10995,63 @@ run_shell_command(["git", "status", "--short"], tail=50)
 run_shell_command(["bash", "-lc", "make test"], timeout=900)
 run_shell_command("nohup npm run dev > dev.log 2>&1 &")
 ```
+
+### Named workers
+
+On the Kubernetes worker backend, an agent's shell commands can run in extra workers that the agent names, so one reply runs several isolated environments side by side, such as end-to-end test stacks that listen on the same ports, or the shards of a test suite or a build.
+Set [`named_workers`](https://docs.mindroom.chat/configuration/agents/#configuration-options) on the agent to the most named workers it may have at once for one requester; MindRoom then offers `worker` and `resource_profile` in its `run_shell_command`.
+The agent's workers must be per requester and agent: set `worker_scope: user_agent`, or make it a [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) with `private.per: user_agent`.
+The runtime must also run idle-worker cleanup, as for [dedicated subagent workers](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers).
+
+```yaml
+agents:
+  code:
+    display_name: Code
+    tools: [shell]
+    worker_tools: [shell]
+    worker_scope: user_agent
+    named_workers: 8
+```
+
+```python
+run_shell_command("bash e2e/shard.sh 0 2", worker="e2e-0", resource_profile="large", timeout=3600, background_after=0)
+run_shell_command("bash e2e/shard.sh 1 2", worker="e2e-1", resource_profile="large", timeout=3600, background_after=0)
+```
+
+- `worker` is a name of 1 to 32 lowercase letters, digits, or hyphens that starts with a letter or digit.
+  The first call with a name starts a worker, and later calls of the same reply with that name, including its [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) and its [`mindroom-agent`](https://docs.mindroom.chat/tools/agent-cli/#run-commands-in-named-workers) calls, run in it.
+  Another reply's calls with the same name get a worker of their own.
+- `resource_profile` is `small`, `standard`, or `large`, the [background script profiles](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings), and sizes the worker when its name is first used; omitting it gives the worker the normal worker resources.
+  A later call that asks for another size fails.
+- The result starts with `[worker: <name>]`, or `[worker: <name>, started]` on the first call to a Deployment or a start MindRoom recorded.
+  Kubernetes may replace a pod or restart its container without changing the Deployment. The marker does not report those restarts.
+- A named worker has its own processes, network ports, and `/tmp`.
+  It sees the same workspace, shared directories, and knowledge as the agent's normal worker, with the same leased tool settings and shared credentials, but not the packages installed into the normal worker's environment or its package caches.
+- Workers share the workspace, so give each one its own output directory, and its own git worktree when it changes a checkout, and build or install what all of them need once before starting them.
+
+Named workers are removed, with their processes and package caches, when the reply and its background jobs end.
+A named worker in which no command has run for 10 minutes is removed sooner, and every named worker is removed 4 hours after it started, whatever runs in it; [worker settings](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) lists both limits.
+Run long work as the call's own command rather than detached with `nohup`, and keep results in the workspace.
+Stopping the reply or cancelling a job stops its command in the named worker, as in the normal worker.
+A MindRoom restart ends a reply's use of its named workers: the first cleanup pass after the restart removes them, and a later reply's calls start new ones.
+If a named worker crashes, the call that ran in it fails, and the next call with its name starts a new one.
+A reply that pauses for a [tool approval](https://docs.mindroom.chat/tool-approval/) gives up its named workers unless one of its background jobs still runs, and its calls after the approval start new ones, so an agent whose shell commands need approval gets a new worker for each command.
+
+A named worker counts against `named_workers` for its requester, and against `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` for the whole deployment, from the call that starts it until it is removed, so also while it starts, sits idle, or has failed.
+Set `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX=0` to disable named workers for the whole deployment.
+A call that would start one more than either limit allows fails instead of waiting. Reusing a worker this reply started does not recheck the limits while the worker is starting or its Kubernetes Deployment exists and is not being removed. If idle cleanup removes it, starting it again is subject to both limits.
+Only calls of a reply in a Matrix conversation can name a worker, so [background scripts](https://docs.mindroom.chat/tools/background-scripts/) and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) requests cannot.
+[Approved egress](https://docs.mindroom.chat/deployment/approved-egress/#requesting-access) grants do not reach named workers.
+
+Errors:
+
+- `Named workers are off for this agent; named_workers in its config allows them.` - set `named_workers` on the agent.
+- `Named workers need an agent whose workers are per requester and agent: worker_scope: user_agent, or private.per: user_agent.` - set one of the two on the agent.
+- `Named workers need the kubernetes worker backend and idle-worker cleanup, which the API server runs when MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS is above 0.` - use the Kubernetes worker backend, run the API server, and set the cleanup interval.
+- `Cannot start worker '<name>': this agent already has <n> of the <n> named workers it may have for you.` - run the command in a worker this reply started, wait until an idle one is removed, or raise `named_workers`.
+- `Cannot start worker '<name>': this deployment already has its limit of <n> named workers.` - try again later, or raise `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX`.
+- `Worker '<name>' was started with resource_profile <profile> in this reply; omit resource_profile, or name another worker.` - a name keeps the size its first call gave it.
+- `A named worker belongs to a reply in a conversation, and this call runs outside one, or after its reply and that reply's background jobs ended.` - the call came from a background script, an API request, or a job that outlived a restart.
 
 ### Per-workspace environment
 
@@ -23206,11 +23312,14 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 | `workers.kubernetes.namePrefix` | `MINDROOM_KUBERNETES_WORKER_NAME_PREFIX` | `mindroom-worker` | Prefix for worker resource names |
 | `workers.kubernetes.runtimeClassName` | `MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME` | Cluster default | RuntimeClass for all dedicated workers, including background-script workers |
 | `workers.kubernetes.resources` | `MINDROOM_KUBERNETES_WORKER_CPU_REQUEST`, `_CPU_LIMIT`, `_MEMORY_REQUEST`, `_MEMORY_LIMIT` | `100m`, `500m`, `256Mi`, `1Gi` | Worker container resources |
-| `workers.kubernetes.scriptResources` | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE`, `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | `small`; profiles in `values.yaml` | The `small`, `standard`, and `large` [background script](https://docs.mindroom.chat/tools/background-scripts/) resource profiles, all three required; a [dedicated subagent worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) that names a profile uses it too |
+| `workers.kubernetes.scriptResources` | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE`, `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | `small`; profiles in `values.yaml` | The `small`, `standard`, and `large` [background script](https://docs.mindroom.chat/tools/background-scripts/) resource profiles, all three required; a [dedicated subagent worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) or a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) that names a profile uses it too |
 | `workers.kubernetes.nodeName`, `colocateWithControlPlaneNode` | `MINDROOM_KUBERNETES_WORKER_NODE_NAME`, `MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE` | Unset, `false` | Pin workers to one node (see [Storage Requirements](#storage-requirements)) |
 | `workers.kubernetes.extraEnv` | `MINDROOM_KUBERNETES_WORKER_ENV_JSON` | `{}` | Extra environment variables for worker pods |
 | _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT` | `1Gi` | Size of each worker's `/tmp` |
 | _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON` | `{}` | Per-requester worker resources |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKER_IDLE_TIMEOUT_SECONDS` | `600` | Time without a running command after which a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) is removed, at most the worker idle timeout |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKER_MAX_AGE_SECONDS` | `14400` | Time after its start at which a named worker is removed, whatever runs in it |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` | `16` | Most named workers that may run at once for all agents and requesters together; `0` disables named workers, and negative values are invalid |
 
 Changing the image, environment, resources, or RuntimeClass recreates scaled-down workers on the next cleanup pass and running workers on their next use, so no manual recycling is needed; finish active work before changing them.
 Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior.
@@ -24947,6 +25056,7 @@ Who a grant covers depends on the agent's effective [worker scope](https://docs.
 | `user` | Not supported, except from a subagent's dedicated worker; the request fails with `approved egress is not supported for worker_scope=user` |
 
 A grant that a subagent running in a [dedicated worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) requests applies to that dedicated worker alone, whatever its agent's scope, and grants made for the agent or its normal worker do not apply there, so the subagent requests its own.
+No grant applies to a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers), which reaches only the hostnames the static allowlist allows.
 
 ### Temporary Full Access
 
@@ -25832,7 +25942,7 @@ A call to a ready worker logs nothing, and calls that wait for the same start sh
 |-------|---------|
 | `worker` | The worker's log ID, the hash other worker logs name it by and the end of its state directory name |
 | `backend` | `kubernetes` or `docker` |
-| `kind` | `script` for the worker of one [background script](https://docs.mindroom.chat/tools/background-scripts/) run, `subagent` for the [dedicated worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) of one subagent, otherwise `tool` |
+| `kind` | `script` for the worker of one [background script](https://docs.mindroom.chat/tools/background-scripts/) run, `subagent` for the [dedicated worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) of one subagent, `named` for a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers), otherwise `tool` |
 | `scope` | The worker's [scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes): `shared`, `user`, `user_agent`, or `unscoped` for an agent without `worker_scope` |
 | `agent_name` | Agent the worker serves, as its worker key spells it, or `null` for a `user` worker, which serves every agent on that scope |
 | `outcome` | `ready`, `timeout` for a worker that did not become ready within the backend's ready timeout, or `error` |

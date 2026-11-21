@@ -120,6 +120,7 @@ def minimal_turn(
         skill_names=[skill.name for skill in surface.skills],
         memory_root=surface.memory_root,
         runtime_context=surface.runtime_context,
+        named_workers=surface.named_workers,
     )
     required = [item for item in system_enrichment if item.minimal_required]
     turn = join_sections((build.prompt.turn_context, render_system_enrichment_block(required) if required else None))

@@ -19,11 +19,11 @@ from mindroom.shared_directories.store import (
 )
 from mindroom.tool_system.worker_routing import (
     normalize_worker_key_part,
+    pinned_worker_kind,
     private_instance_scope_root_path,
     private_instances_root_path,
     resolved_worker_key_scope,
     shared_storage_root,
-    subagent_worker_state_scope_key,
     visible_workspace_roots,
     worker_key_agent_name,
     worker_log_id,
@@ -46,7 +46,7 @@ __all__ = [
     "plan_scoped_workspace_mounts",
     "plan_shared_directory_mounts",
     "resolve_state_scope_worker_key",
-    "retire_subagent_worker",
+    "retire_pinned_worker",
     "stable_json_digest",
     "stable_signature_json",
     "subagent_worker_expired",
@@ -100,18 +100,15 @@ def resolve_state_scope_worker_key(worker_key: str, state_scope_worker_key: str 
 
 def subagent_worker_expired(handle: WorkerHandle, idle_timeout_seconds: float, *, now: float) -> bool:
     """Return whether ``handle`` is a subagent's own worker, running or stopped, unused for the idle timeout."""
-    return (
-        subagent_worker_state_scope_key(handle.worker_key) is not None
-        and now - handle.last_used_at >= idle_timeout_seconds
-    )
+    return pinned_worker_kind(handle.worker_key) == "subagent" and now - handle.last_used_at >= idle_timeout_seconds
 
 
-def retire_subagent_worker(retire_locked: Callable[[str], None], worker_key: str) -> bool:
-    """Remove an expired subagent worker under the lock its caller holds; a failure is logged so cleanup goes on."""
+def retire_pinned_worker(retire_locked: Callable[[str], None], worker_key: str) -> bool:
+    """Remove a pinned worker under the lock its caller holds; a failure is logged so cleanup goes on."""
     try:
         retire_locked(worker_key)
     except WorkerBackendError:
-        logger.warning("subagent_worker_retire_failed", worker=worker_log_id(worker_key), exc_info=True)
+        logger.warning("pinned_worker_retire_failed", worker=worker_log_id(worker_key), exc_info=True)
         return False
     return True
 

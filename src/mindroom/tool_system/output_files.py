@@ -220,6 +220,16 @@ def saved_tool_output_receipt(
     return receipt
 
 
+def saved_output_envelope(result: object) -> dict[str, object] | None:
+    """Return an already saved output receipt, not text or a redirect failure."""
+    if not isinstance(result, dict) or result.keys() != {"mindroom_tool_output"}:
+        return None
+    inner = cast("dict[str, object]", result)["mindroom_tool_output"]
+    if isinstance(inner, dict) and inner.get("status") == "saved_to_file" and isinstance(inner.get("path"), str):
+        return {"mindroom_tool_output": dict(inner)}
+    return None
+
+
 def _error_receipt(error: str) -> dict[str, object]:
     return {
         "mindroom_tool_output": {

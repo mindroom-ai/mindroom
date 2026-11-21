@@ -54,6 +54,95 @@ def _save_parent(config: Config, paths: RuntimePaths, record: RunRecord) -> None
 
 
 @pytest.mark.asyncio
+async def test_approved_delegated_shell_reaches_the_childs_named_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approved child shell has a named worker under the child's turn, not only under its caller."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    from mindroom.workers import named  # noqa: PLC0415
+    from mindroom.workers.runtime import idle_worker_cleanup_owner  # noqa: PLC0415
+    from tests.test_named_workers import (  # noqa: PLC0415
+        _FakeBackend,
+        _retired,
+        _route_through,
+        _static_worker_manager_lease,
+    )
+
+    paths = _runtime_paths(tmp_path)
+    paths = replace(
+        paths,
+        process_env={
+            **paths.process_env,
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "30",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+        },
+    )
+    config = native_delegation_config(
+        agents={
+            "leader": AgentConfig(display_name="Leader", tools=[], delegate_to=["child"]),
+            "child": AgentConfig(display_name="Child", tools=["shell"], worker_scope="user_agent", named_workers=1),
+        },
+        tool_approval={"rules": [{"match": "run_shell_command", "action": "require_approval"}]},
+    )
+    entity_ids(config, paths)
+    identity = _identity()
+    args = {"args": ["printf", "approved"], "worker": "child-build"}
+    child = ScriptedModel([calls(tool_call("run_shell_command", "child-shell", **args)), answer("Child finished.")])
+    parent = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate", agent_name="child", task="Run it")), answer("Done.")],
+    )
+    ScriptedAgents({"leader": parent, "child": child}, by_session={identity.session_id or "": parent}).install(
+        monkeypatch,
+    )
+    backend = _FakeBackend()
+    posts = _route_through(monkeypatch, backend)
+    monkeypatch.setattr(
+        named,
+        "lease_configured_primary_worker_manager",
+        lambda _paths: _static_worker_manager_lease(backend),
+    )
+    with idle_worker_cleanup_owner():
+        paused = await respond(
+            "leader",
+            "Delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=identity,
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        assert posts == []
+        [pending] = paused.tools
+        call = ApprovalCall(
+            tool_call_id=pending.tool_call_id,
+            tool_name="run_shell_command",
+            invoking_agent="child",
+            toolkit_name="shell",
+            arguments_digest=approval_arguments_digest(pending.tool_args),
+            expires_at_ns=2**62,
+        )
+        result = await resume(
+            approval_executor(config, paths),
+            paused,
+            (call,),
+            agent_name="leader",
+            identity=identity,
+            config=config,
+            runtime_paths=paths,
+            decisions={call.tool_call_id: True},
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert len(posts) == 1, child.requests[-1].messages[-1].content
+    [worker] = backend.specs
+    assert posts[0][1]["worker_key"] == worker.worker_key
+    assert await _retired(backend) == [worker.worker_key]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("parent_kind", ["agent", "self"])
 @pytest.mark.parametrize(
     "decision",

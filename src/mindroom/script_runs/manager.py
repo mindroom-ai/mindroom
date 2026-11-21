@@ -71,7 +71,7 @@ from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     serialize_tool_execution_identity,
 )
-from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend import RetiringWorkerBackend, WorkerBackendError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, ScriptResourceProfiles, WorkerHandle, WorkerSpec
@@ -127,14 +127,6 @@ class _ScriptBroker(Protocol):
 class _ScriptResourceProfileBackend(Protocol):
     def script_resource_profiles(self) -> ScriptResourceProfiles:
         """Return the bounded resource profiles this backend can enforce."""
-
-
-@runtime_checkable
-class _RetiringWorkerBackend(Protocol):
-    cleanup_locator: str | None
-
-    def retire_worker(self, worker_key: str) -> None:
-        """Destructively retire one exact script-owned worker."""
 
 
 def script_execution_uses_worker(
@@ -1225,7 +1217,7 @@ def _raise_concurrent_run_limit() -> None:
 
 def _require_script_worker_backend(
     backend: WorkerBackend | None,
-) -> _RetiringWorkerBackend:
+) -> RetiringWorkerBackend:
     if backend is None:
         msg = "Background script worker backend is unavailable."
         raise ScriptRunManagerError(msg)
@@ -1238,7 +1230,7 @@ def _require_script_worker_backend(
     if backend.cleanup_locator is None:
         msg = "Background script worker backend has no durable cleanup locator."
         raise ScriptRunManagerError(msg)
-    if not isinstance(backend, _RetiringWorkerBackend):
+    if not isinstance(backend, RetiringWorkerBackend):
         msg = "Background script worker backend does not support exact worker retirement."
         raise ScriptRunManagerError(msg)
     return backend
@@ -1247,7 +1239,7 @@ def _require_script_worker_backend(
 def _require_script_launch_backend(
     backend: WorkerBackend | None,
     runtime_paths: RuntimePaths,
-) -> _RetiringWorkerBackend:
+) -> RetiringWorkerBackend:
     admitted_backend = _require_script_worker_backend(backend)
     if worker_backend_kind(runtime_paths) is WorkerBackendKind.KUBERNETES and not script_gateway_isolated(
         runtime_paths,
