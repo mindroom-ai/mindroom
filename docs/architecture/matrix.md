@@ -56,7 +56,7 @@ Discovery uses Olm-encrypted to-device events, including for unencrypted rooms, 
 One MindRoom account per room answers discovery on its own device: the owner account where it is joined, else the joined agent or team with the lowest Matrix ID.
 A room without the owner account therefore has a catalog, and a client sees one runtime per room.
 The answering account authenticates the actual requesting device and requires the requester and itself to be currently joined, plus at least one configured, joined agent the requester may address.
-An included thread must be a readable, unredacted root in that room, whether or not it is encrypted.
+An included thread must be a readable, unredacted root in that room both before the reply is prepared and when it is rechecked for handoff, whether or not it is encrypted.
 Replies go only to the authenticated device, and sending a catalog never verifies a previously untrusted device.
 Blocked devices, malformed requests, and unauthorized room or thread scopes receive no response.
 
@@ -102,7 +102,10 @@ Icons use Matrix `mxc://` URIs only; other local icon rules are on the [model co
 
 The answering account stops processing a request after 12 seconds, but a response already handed to nio is not retracted.
 Admission caps queued/in-flight requests at eight, and at four per Matrix user across all of that user's devices, and accepts at most eight fresh requests per user in 12 seconds; concurrent duplicate requests share the active request.
-Authorization is last checked when the response is handed to nio, so a requester who loses room access while nio prepares or retries the send can still receive that already-authorized catalog.
+Threaded discovery makes four scope reads: joined membership and the root before preparing the reply, then the root and joined membership at handoff.
+Room-only discovery makes two joined-membership reads and no root reads; neither count includes retries.
+Before handing the response to nio, the answering account drops changes to scope, config, or requesting-device authorization.
+A requester who loses room access while nio prepares or retries the send can still receive that already-authorized catalog.
 Clients must independently enforce current joined-agent eligibility and discard expired responses.
 
 Clients register their response listener before sending, correlate request, room, thread, and actual authenticated runtime device, and independently check returned agent membership.

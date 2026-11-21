@@ -21,7 +21,7 @@ from mindroom.matrix.olm_to_device import (
     send_encrypted_to_device,
 )
 from mindroom.model_catalog import ModelCatalog
-from mindroom.model_selection_scope import validate_model_picker_scope
+from mindroom.model_selection_scope import model_picker_thread_root_denial, validate_model_picker_scope
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.turn_model import resolve_inherited_model
 
@@ -192,8 +192,13 @@ class _Receiver:
         request: _Request,
         config: Config,
         *,
-        check_root: bool,
+        root_first: bool = False,
     ) -> ModelPickerScope:
+        thread_id = request.thread_id
+        if root_first and thread_id is not None:
+            if (denial := await model_picker_thread_root_denial(self.client, request.room_id, thread_id)) is not None:
+                raise _DroppedError(reason=denial)
+            thread_id = None
         scope = await validate_model_picker_scope(
             client=self.client,
             config=config,
@@ -201,8 +206,8 @@ class _Receiver:
             membership_index=self.membership_index,
             room_id=request.room_id,
             requester_user_id=event.sender,
-            thread_id=request.thread_id if check_root else None,
-            for_catalog=True,
+            thread_id=thread_id,
+            recheck_membership=False,
         )
         if isinstance(scope, str):
             raise _DroppedError(reason=scope)
@@ -237,7 +242,7 @@ class _Receiver:
             raise _DroppedError(reason="too_many_models")
         if not authenticated_sender_matches(self.client, event, target):
             raise _DroppedError(reason="sender_device_changed")
-        scope = await self._scope(event, request, config, check_root=True)
+        scope = await self._scope(event, request, config)
         entries, revision = await self.catalog.snapshot(config)
         content: dict[str, object] = {
             "version": 1,
@@ -258,7 +263,8 @@ class _Receiver:
         # Authorize at the NIO handoff; NIO owns preparation and delivery retries.
         if self.config_getter() is not config:
             raise _DroppedError(reason="config_changed")
-        if await self._scope(event, request, config, check_root=False) != scope:
+        # Reprove the root first so the final membership read catches departures during that lookup.
+        if await self._scope(event, request, config, root_first=True) != scope:
             raise _DroppedError(reason="scope_changed")
         if self.config_getter() is not config:
             raise _DroppedError(reason="config_changed")

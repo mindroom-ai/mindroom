@@ -113,6 +113,24 @@ async def test_scope_requires_actual_joined_authorized_agent(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_room_only_scope_does_not_reread_membership(tmp_path: Path) -> None:
+    """A room-only validation needs no second read because it does not await a root."""
+    client, config, paths, index, _, _ = picker_setup(tmp_path)
+    scope = await validate_model_picker_scope(
+        client=client,
+        config=config,
+        runtime_paths=paths,
+        membership_index=index,
+        room_id=ROOM,
+        requester_user_id=USER,
+        thread_id=None,
+    )
+    assert isinstance(scope, ModelPickerScope)
+    client.joined_members.assert_awaited_once_with(ROOM)
+    client.room_get_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_agent_device_answers_discovery_in_room_without_owner(tmp_path: Path) -> None:
     """The answering account is the one that must be joined: an agent validates a room the owner is not in."""
     _, config, paths, index, router, agent = picker_setup(tmp_path)
@@ -226,6 +244,8 @@ async def test_membership_loss_during_root_fetch_denies_scope(tmp_path: Path) ->
         )
         == "not_joined"
     )
+    reads = [call[0] for call in client.mock_calls if call[0] in {"joined_members", "room_get_event"}]
+    assert reads == ["joined_members", "room_get_event", "joined_members"]
 
 
 @pytest.mark.parametrize("absent", ["requester", "router"])
