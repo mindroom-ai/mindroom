@@ -142,9 +142,14 @@ async def test_creatorless_task_written_by_human_is_ignored_without_cancellation
     workflow = _workflow(created_by=None)
     client = _room_with_task(_pending_content(workflow), sender=HUMAN_ID)
 
+    second_task_id = "task2"
+    client.room_get_state.return_value.events.append(
+        scheduled_task_state_event(second_task_id, _pending_content(workflow), room_id=ROOM_ID, sender=HUMAN_ID),
+    )
     bot = scheduling_bot(client)
     runtime = scheduled_task_runtime(runtime_paths, bot, config=Config())
     with capture_logs() as logs:
+        assert await runtime.restore_room(bot, ROOM_ID) == 0
         restored = await runtime.restore_room(bot, ROOM_ID)
     execute = await _run_once(client, workflow, runtime_paths)
 
@@ -155,10 +160,9 @@ async def test_creatorless_task_written_by_human_is_ignored_without_cancellation
     assert [entry for entry in logs if entry["event"] == "scheduled_task_state_ignored_unmanaged_author"] == [
         {
             "event": "scheduled_task_state_ignored_unmanaged_author",
-            "log_level": "warning",
+            "log_level": "info",
             "room_id": ROOM_ID,
-            "task_id": TASK_ID,
-            "event_id": f"$state_{TASK_ID}",
+            "count": 2,
             "sender": HUMAN_ID,
         },
     ]
