@@ -689,7 +689,7 @@ class WorkflowEngine:
             if saved is not None and saved.generation == node.generation and saved.handle is not None:
                 self._spawn(run.run_id, self._run_agent_node(run, saved, run.epoch))
             raise
-        self._restate(run.run_id)
+        await self._restate(run.run_id)
         self._spawn(run.run_id, self._run_agent_node(run, node, run.epoch))
         return _receipt(node)
 
@@ -783,12 +783,15 @@ class WorkflowEngine:
             await self._settle_agent(run, node, epoch)
         return False
 
-    def _restate(self, run_id: str) -> None:
+    async def _restate(self, run_id: str) -> None:
         """Show the run as waiting while a call of it waits for a person and none runs, and as running otherwise.
 
         Time spent waiting is no working time, so the change charges what the run used up to it. The caller holds
         the run's lock.
         """
+        await asyncio.to_thread(self._restated, run_id)
+
+    def _restated(self, run_id: str) -> None:
         with suppress(SupersededAttemptError, WorkflowRunStoreError):
             run = self.store.get_run(run_id)
             if run.state in _SERVED_RUN_STATES:
@@ -872,7 +875,7 @@ class WorkflowEngine:
     async def _notify(self, run_id: str) -> None:
         """Wake the run's waiters after a call of it changed, and show whether the run waits for a person now."""
         async with (condition := self._condition(run_id)):
-            self._restate(run_id)
+            await self._restate(run_id)
             condition.notify_all()
 
     def _spawn[T](self, owner: str, work: Coroutine[None, None, T]) -> asyncio.Task[T]:
