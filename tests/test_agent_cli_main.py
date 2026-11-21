@@ -355,7 +355,14 @@ def test_workers_run_defaults_to_an_hour_and_the_normal_worker_size(monkeypatch)
 
 @pytest.mark.parametrize(
     "stdout",
-    ["Exit code 3 was expected", "Exit code 3\nand more", "Stopped after 5s.", "[cwd: genuine]\nkept"],
+    [
+        "Exit code 3 was expected",
+        "Exit code 3\nand more",
+        "Stopped after 5s.",
+        "Stopped after 60s. Nothing failed.",
+        "Stopped after 60s.\nThen finished.",
+        "[cwd: genuine]\nkept",
+    ],
 )
 def test_workers_run_keeps_successful_command_output_verbatim(stdout, capsys, monkeypatch) -> None:
     """Output that resembles CLI or shell metadata is still printed."""

@@ -297,8 +297,12 @@ def _run_in_worker(args: argparse.Namespace) -> int:
         code = int(failed[1])
         # A command a signal killed exits as a shell reports it: 128 plus the signal.
         return code if code >= 0 else 128 - code
-    # How `format_shell_timeout` leads the result of a command stopped at its time limit.
-    return _EXIT_TIMED_OUT if body.startswith(f"Stopped after {args.timeout:g}s.") else 0
+    # `format_shell_timeout` gives an exact line, then only output and stderr sections if present.
+    first_line, newline, streams = body.partition("\n")
+    stopped = first_line == f"Stopped after {args.timeout:g}s." and (
+        not newline or streams.startswith(("Output:\n", "Stderr:\n"))
+    )
+    return _EXIT_TIMED_OUT if stopped else 0
 
 
 def _script_tool_call(args: argparse.Namespace) -> dict[str, object]:
