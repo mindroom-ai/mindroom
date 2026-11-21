@@ -13,6 +13,7 @@ import os
 import secrets
 import select
 import shlex
+import signal
 import socket
 import subprocess
 import threading
@@ -161,9 +162,8 @@ class _Primary:
 
     token: str = field(default_factory=lambda: secrets.token_urlsafe(24))
     port: int = field(default_factory=_free_port)
-    # What GET /links answers, and how often it was asked.
+    # What GET /links answers.
     rows: list[dict[str, Any]] = field(default_factory=list)
-    listed: int = 0
     # The host port each link's worker publishes its sshd on, and how long each link's connect takes.
     workers: dict[str, int] = field(default_factory=dict)
     delays: dict[str, float] = field(default_factory=dict)
@@ -184,7 +184,6 @@ class _Primary:
 
         @app.get("/links")
         def links() -> list[dict[str, Any]]:
-            self.listed += 1
             return self.rows
 
         @app.post("/status", status_code=204)
@@ -341,21 +340,51 @@ def _run_ssh(
 def _ssh_session(stack: _Stack, node: _Node, argv: list[str]) -> Iterator[subprocess.Popen[str]]:
     """Start a client command that opens one connection to the node as its link's login, and end it on the way out."""
     _await_connect_slot(stack, node)
-    client = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    # In a process group of its own, so that the client ends together with its ProxyCommand.
+    client = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
         yield client
     finally:
-        client.kill()
-        client.communicate()
+        _end(client)
+
+
+def _end(client: subprocess.Popen[str]) -> tuple[str, str]:
+    """Kill the client and what it started, and return what they wrote, waited for ten seconds at most."""
+    # A client that is over was waited for, so its id may be another process's by now.
+    if client.poll() is None:
+        os.killpg(client.pid, signal.SIGKILL)
+    try:
+        return client.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        # Something the client started is in a group of its own and holds a pipe open; its container's removal ends it.
+        for pipe in (client.stdout, client.stderr):
+            assert pipe is not None
+            pipe.close()
+        return "", ""
 
 
 def _await_up(client: subprocess.Popen[str]) -> None:
     """Wait a minute at most for ``up``, the line the session's command prints first."""
     assert client.stdout is not None
-    ready, _, _ = select.select([client.stdout], [], [], 60)
-    if not ready or client.stdout.readline().strip() != "up":
-        client.kill()
-        pytest.fail(f"The session did not start: {client.communicate()}")
+    deadline = time.monotonic() + 60
+    line = b""
+    # Nothing is read through the client's own buffer, so no read waits longer than the deadline for a whole line.
+    while not line.endswith(b"\n") and (left := deadline - time.monotonic()) > 0:
+        ready, _, _ = select.select([client.stdout], [], [], left)
+        if ready:
+            byte = os.read(client.stdout.fileno(), 1)
+            if not byte:
+                break
+            line += byte
+    if line != b"up\n":
+        pytest.fail(f"The session did not start: it wrote {line!r}, and then {_end(client)}")
 
 
 def _peers(person: _Person) -> set[str]:
@@ -483,10 +512,32 @@ def _add_link(
     return node
 
 
+def _await_admitted(stack: _Stack, node: _Node) -> None:
+    """Connect to the node as its link's login, again and again, until the gateway takes a connection to the worker.
+
+    The gateway admits the login once a pass of it has read the row that names the login, and it reports no pass.
+    Until then it closes the login's connections and makes no connect call, so this costs the link one connect call.
+    """
+    link_id = node.link.id
+    argv = [*_client(stack.tailnet, node.owner), "-o", "ConnectTimeout=30", node.link.hostname, "true"]
+
+    def asked() -> int:
+        return sum(connect.link_id == link_id for connect in stack.primary.connects)
+
+    def admitted() -> bool:
+        done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=60, check=False)
+        return done.returncode == 0
+
+    before = asked()
+    _eventually(f"the gateway to admit the login of {node.link.hostname}", admitted, seconds=90)
+    assert asked() == before + 1
+    stack.opened[link_id] = stack.opened.get(link_id, 0) + 1
+
+
 def _enrol(stack: _Stack, node: _Node) -> None:
     """Sign the link's node in as its owner, by the login URL the gateway reports, and admit that login from then on.
 
-    The gateway admits the login once it has read the row that names it, so this returns after a pass that did.
+    A node with a worker is returned once the gateway took a connection of that login to it.
     """
     link_id = node.link.id
 
@@ -502,10 +553,8 @@ def _enrol(stack: _Stack, node: _Node) -> None:
     )
     running = _eventually(f"{node.link.hostname} to run", lambda: reported("running", "login_name"))
     node.row["allowed_login"] = running["login_name"]
-    # The gateway's passes follow each other: the first it starts from here on reads the row, and is over when the
-    # second starts.
-    listed = stack.primary.listed
-    _eventually("the gateway to read the link's login", lambda: stack.primary.listed >= listed + 2)
+    if node.root is not None:
+        _await_admitted(stack, node)
 
 
 def _set_keys(stack: _Stack, person: _Person, lines: list[str]) -> None:
@@ -763,8 +812,7 @@ def test_forwarding_is_refused(stack: _Stack, tmp_path: Path) -> None:
         _await_up(local)
         with socket.create_connection(("127.0.0.1", port), timeout=30) as through:
             assert through.recv(8) == b""
-        local.kill()
-        assert "open failed" in local.communicate()[1]
+        assert "open failed" in _end(local)[1]
 
     remote = _run_ssh(stack, node, [*ssh, "-o", "ExitOnForwardFailure=yes", "-R", f"0:{sshd}", "mind-alice", "true"])
     assert remote.returncode == 255
@@ -782,12 +830,12 @@ def test_forwarding_is_refused(stack: _Stack, tmp_path: Path) -> None:
         forwarded = _run_ssh(
             stack,
             node,
-            [*ssh, "-A", "mind-alice", f"find /tmp {_WORKER_ROOT} -type s; echo end"],
+            [*ssh, "-A", "mind-alice", f"find /tmp {_WORKER_ROOT} -type s && echo end"],
             env={**os.environ, "SSH_AUTH_SOCK": str(socket_path)},
         )
     finally:
         agent.terminate()
-        agent.wait()
+        agent.wait(timeout=10)
     assert (forwarded.returncode, forwarded.stdout.split()) == (0, ["end"]), forwarded.stderr
 
 
