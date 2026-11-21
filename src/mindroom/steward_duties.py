@@ -6,8 +6,10 @@ Every bot builds the duties, and each duty asks whether its bot is the room's st
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import asdict, dataclass, field
 from functools import partial
+from random import uniform
 from typing import TYPE_CHECKING, Any
 
 import nio
@@ -34,7 +36,7 @@ from mindroom.matrix.room_member_joins import (
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection
+    from collections.abc import Callable
 
     import structlog
 
@@ -227,13 +229,17 @@ class StewardDuties:
 
     async def _publish_room_state(self, room_id: str) -> None:
         """Reconcile one held room and let transient failures retry without another trigger."""
+        queued = self._room_state_reruns.get(room_id)
         failed = await self._reconcile_room_state(room_id)
+        # Supersede only the older work; concurrent failures replace the set.
+        if queued is not None and self._room_state_reruns.get(room_id) is queued:
+            del self._room_state_reruns[room_id]
         if not failed:
             self._room_state_warned.discard(room_id)
             return
         if self.deps.runtime.phase is not RunPhase.ACCEPTING:
             return
-        self._room_state_reruns.setdefault(room_id, set()).update(failed)
+        self._room_state_reruns[room_id] = self._room_state_reruns.get(room_id, set()) | failed
         pending = self._room_state_retries.get(room_id)
         if pending is None or pending.done():
             retry = create_background_task(
@@ -253,10 +259,12 @@ class StewardDuties:
         """Retry failed operations with capped backoff, including failures that arrive mid-attempt."""
         delay = 1
         while room_id in self._room_state_reruns:
-            await asyncio.sleep(delay)
-            failed = await self._reconcile_room_state(room_id, self._room_state_reruns.pop(room_id))
+            await asyncio.sleep(uniform(delay * 0.5, min(delay * 1.5, 60)))  # noqa: S311 - retry timing, not security
+            if not (needed := self._room_state_reruns.pop(room_id, None)):
+                break
+            failed = await self._reconcile_room_state(room_id, needed, delay)
             if failed:
-                self._room_state_reruns.setdefault(room_id, set()).update(failed)
+                self._room_state_reruns[room_id] = self._room_state_reruns.get(room_id, set()) | failed
             delay = min(delay * 2, 60)
         self._room_state_warned.discard(room_id)
 
@@ -268,18 +276,20 @@ class StewardDuties:
             return False
         return steward is not None
 
-    async def _reconcile_room_state(self, room_id: str, needed: Collection[str] | None = None) -> set[str]:
+    async def _reconcile_room_state(self, room_id: str, needed: set[str] | None = None, delay: int = 0) -> set[str]:
         """Return only the operations that still need a retry in this room."""
         runtime = self.deps.runtime
         client = runtime.client
         if not self._may_publish_room_state(room_id) or client is None or room_id not in client.rooms:
             return set()
 
-        def repeat_failure() -> bool:
-            # Claim at the warning site so concurrent triggers do not both warn.
-            repeat = room_id in self._room_state_warned
+        def failure_level(timed_out: bool) -> int:
+            if room_id in self._room_state_warned:
+                return logging.DEBUG
+            if timed_out and delay < 60:
+                return logging.INFO
             self._room_state_warned.add(room_id)
-            return repeat
+            return logging.WARNING
 
         args = (client, runtime.config, runtime.runtime_paths, room_id)
         may_claim = partial(self._may_publish_room_state, room_id)
@@ -288,9 +298,9 @@ class StewardDuties:
             "mode": partial(reconcile_room_thread_mode, *args),
             "binding": partial(reconcile_room_router_binding, client, room_id, may_claim=may_claim),
         }
-        needed = checks.keys() if needed is None else needed
-        results = await asyncio.gather(*(checks[check](repeat_failure=repeat_failure) for check in needed))
-        return {check for check, result in zip(needed, results, strict=True) if result is False}
+        names = checks.keys() if needed is None else needed
+        results = await asyncio.gather(*(checks[check](failure_level=failure_level) for check in names))
+        return {check for check, result in zip(names, results, strict=True) if result is False}
 
     async def member_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
         """Refresh responder presentation, the room's MindRoom accounts and the welcome, and emit human membership hooks."""

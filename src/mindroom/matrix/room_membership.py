@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
@@ -143,7 +144,7 @@ async def ensure_room_membership_synced(
     room: nio.MatrixRoom,
     *,
     sender_id: str,
-    repeat_failure: Callable[[], bool] = lambda: False,
+    failure_level: Callable[[bool], int] = lambda _: logging.WARNING,
 ) -> bool:
     """Reuse or fetch application membership without certifying nio's crypto projection."""
     if room_membership_is_complete(room):
@@ -161,12 +162,14 @@ async def ensure_room_membership_synced(
             except Exception as exc:
                 response = exc
             if not isinstance(response, nio.JoinedMembersResponse):
-                log = logger.debug if repeat_failure() else logger.warning
-                log(
+                timed_out = isinstance(response, TimeoutError)
+                logger.log(
+                    failure_level(timed_out),
                     "authoritative_room_membership_fetch_failed",
                     room_id=room.room_id,
                     sender_id=sender_id,
-                    error=str(response),
+                    error="TimeoutError" if timed_out else str(response),
+                    **({"phase": "joined_members"} if timed_out else {}),
                 )
                 return False
             # An ordinary nio client can complete its own projection during lookup.

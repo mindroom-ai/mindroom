@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, MutableMapping
 from enum import StrEnum
@@ -858,7 +859,7 @@ async def get_room_members(
     client: nio.AsyncClient,
     room_id: str,
     *,
-    repeat_failure: Callable[[], bool] = lambda: False,
+    failure_level: Callable[[bool], int] = lambda _: logging.WARNING,
 ) -> set[str] | None:
     """Get the current members of a room, or ``None`` when the fetch fails."""
     try:
@@ -868,8 +869,7 @@ async def get_room_members(
         response = error
     if isinstance(response, nio.JoinedMembersResponse):
         return {member.user_id for member in response.members}
-    log = logger.debug if repeat_failure() else logger.warning
-    log("matrix_room_members_fetch_failed", room_id=room_id, error=str(response))
+    logger.log(failure_level(False), "matrix_room_members_fetch_failed", room_id=room_id, error=str(response))
     return None
 
 

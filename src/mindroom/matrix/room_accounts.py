@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
@@ -30,7 +31,7 @@ async def reconcile_room_accounts(
     runtime_paths: RuntimePaths,
     room_id: str,
     *,
-    repeat_failure: Callable[[], bool] = lambda: False,
+    failure_level: Callable[[bool], int] = lambda _: logging.WARNING,
 ) -> bool:
     """Write the client's list of the room's joined MindRoom accounts when it changed and return whether it is current.
 
@@ -43,7 +44,7 @@ async def reconcile_room_accounts(
         # Bound lock waits too; the lock prevents an older comparison from overwriting a newer roster.
         async with asyncio.timeout(10), _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
             phase = "joined_members"
-            members = await get_room_members(client, room_id, repeat_failure=repeat_failure)
+            members = await get_room_members(client, room_id, failure_level=failure_level)
             if members is None:
                 return False
             accounts = members & prepared_entity_names_by_user_id(config, runtime_paths).keys()
@@ -62,14 +63,14 @@ async def reconcile_room_accounts(
             if not isinstance(response, nio.RoomPutStateResponse):
                 # A room whose power levels keep this account from sending this state refuses it on every trigger.
                 forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
-                log = logger.debug if forbidden or repeat_failure() else logger.warning
-                log("room_accounts_publish_failed", room_id=room_id, error=str(response))
+                level = logging.DEBUG if forbidden else failure_level(False)
+                logger.log(level, "room_accounts_publish_failed", room_id=room_id, error=str(response))
                 return forbidden
             return True
     except Exception as exc:
-        log = logger.debug if repeat_failure() else logger.warning
-        detail = {"error": "TimeoutError", "phase": phase} if isinstance(exc, TimeoutError) else {"exc_info": True}
-        log("room_accounts_publish_failed", room_id=room_id, **detail)
+        timed_out = isinstance(exc, TimeoutError)
+        detail = {"error": "TimeoutError", "phase": phase} if timed_out else {"exc_info": True}
+        logger.log(failure_level(timed_out), "room_accounts_publish_failed", room_id=room_id, **detail)
         return False
 
 
@@ -78,7 +79,7 @@ async def reconcile_room_router_binding(
     room_id: str,
     *,
     may_claim: Callable[[], bool] | None = None,
-    repeat_failure: Callable[[], bool] = lambda: False,
+    failure_level: Callable[[bool], int] = lambda _: logging.WARNING,
 ) -> bool:
     """Name this account, the room's steward, in the `io.mindroom.router` binding where no valid one exists.
 
@@ -100,8 +101,8 @@ async def reconcile_room_router_binding(
                     return True
             elif not (isinstance(current, nio.RoomGetStateEventError) and current.status_code == "M_NOT_FOUND"):
                 # An unreadable binding may name another router, so only absent or malformed state is claimed.
-                log = logger.debug if repeat_failure() else logger.warning
-                log("room_router_binding_publish_failed", room_id=room_id, error=str(current))
+                level = failure_level(False)
+                logger.log(level, "room_router_binding_publish_failed", room_id=room_id, error=str(current))
                 return False
             if may_claim is not None and not may_claim():
                 return True
@@ -114,12 +115,12 @@ async def reconcile_room_router_binding(
             )
             if not isinstance(response, nio.RoomPutStateResponse):
                 forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
-                log = logger.debug if forbidden or repeat_failure() else logger.warning
-                log("room_router_binding_publish_failed", room_id=room_id, error=str(response))
+                level = logging.DEBUG if forbidden else failure_level(False)
+                logger.log(level, "room_router_binding_publish_failed", room_id=room_id, error=str(response))
                 return forbidden
             return True
     except Exception as exc:
-        log = logger.debug if repeat_failure() else logger.warning
-        detail = {"error": "TimeoutError", "phase": phase} if isinstance(exc, TimeoutError) else {"exc_info": True}
-        log("room_router_binding_publish_failed", room_id=room_id, **detail)
+        timed_out = isinstance(exc, TimeoutError)
+        detail = {"error": "TimeoutError", "phase": phase} if timed_out else {"exc_info": True}
+        logger.log(failure_level(timed_out), "room_router_binding_publish_failed", room_id=room_id, **detail)
         return False

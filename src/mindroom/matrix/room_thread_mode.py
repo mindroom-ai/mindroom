@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
@@ -33,7 +34,7 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
     room_id: str,
     *,
     put_state: Callable[..., Awaitable[bool | None]] | None = None,
-    repeat_failure: Callable[[], bool] = lambda: False,
+    failure_level: Callable[[bool], int] = lambda _: logging.WARNING,
 ) -> bool | None:
     """Compare one state event with reply-path responders and return whether it is current.
 
@@ -55,7 +56,7 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
                     client,
                     room,
                     sender_id=client.user_id,
-                    repeat_failure=repeat_failure,
+                    failure_level=failure_level,
                 ):
                     logger.debug("room_thread_mode_membership_unavailable", room_id=room_id)
                     return False
@@ -77,8 +78,8 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
             if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
                 return True
             if isinstance(current, nio.RoomGetStateEventError) and current.status_code != "M_NOT_FOUND":
-                log = logger.debug if repeat_failure() else logger.warning
-                log("room_thread_mode_reconcile_failed", room_id=room_id, error=str(current))
+                level = failure_level(False)
+                logger.log(level, "room_thread_mode_reconcile_failed", room_id=room_id, error=str(current))
                 return False
             phase = "state_put"
             if put_state is not None:
@@ -87,14 +88,14 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
             if not isinstance(response, nio.RoomPutStateResponse):
                 # A room whose power levels keep this account from sending this state refuses it on every trigger.
                 forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
-                log = logger.debug if forbidden or repeat_failure() else logger.warning
-                log("room_thread_mode_reconcile_failed", room_id=room_id, error=str(response))
+                level = logging.DEBUG if forbidden else failure_level(False)
+                logger.log(level, "room_thread_mode_reconcile_failed", room_id=room_id, error=str(response))
                 return None if forbidden else False
             return True
     except Exception as exc:
-        log = logger.debug if repeat_failure() else logger.warning
-        detail = {"error": "TimeoutError", "phase": phase} if isinstance(exc, TimeoutError) else {"exc_info": True}
-        log("room_thread_mode_reconcile_failed", room_id=room_id, **detail)
+        timed_out = isinstance(exc, TimeoutError)
+        detail = {"error": "TimeoutError", "phase": phase} if timed_out else {"exc_info": True}
+        logger.log(failure_level(timed_out), "room_thread_mode_reconcile_failed", room_id=room_id, **detail)
         return False
 
 

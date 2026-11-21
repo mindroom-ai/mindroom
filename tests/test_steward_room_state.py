@@ -65,8 +65,9 @@ type RoomState = tuple[Config, RuntimePaths, dict[str, MatrixID], dict[tuple[str
 
 
 @pytest.fixture
-def room_state(tmp_path: Path) -> RoomState:
-    """Keep a mutable homeserver state behind the router's Matrix API."""
+def room_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RoomState:
+    """Keep a mutable homeserver and use nominal delays unless a test supplies its own jitter draws."""
+    monkeypatch.setattr("mindroom.steward_duties.uniform", lambda low, high: min(low * 2, high), raising=False)
     config = Config(
         agents={
             "agent1": AgentConfig(display_name="Agent 1", rooms=[ROOM_ID], thread_mode="room"),
@@ -1438,7 +1439,7 @@ async def test_setup_sweep_logs_a_real_roster_deadline(room_state: RoomState, mo
                 {
                     "event": "room_accounts_publish_failed",
                     "room_id": ROOM_ID,
-                    "log_level": "warning",
+                    "log_level": "info",
                     "error": "TimeoutError",
                     "phase": "joined_members",
                 },
@@ -1532,6 +1533,50 @@ async def test_queued_reconciles_publish_latest_membership(
 
 
 @pytest.mark.asyncio
+async def test_healthy_room_gets_a_turn_between_slow_roster_retries(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Jitter lets B publish even though A keeps consuming the shared crypto lock's entire deadline."""
+    config, _, _, _, client = room_state
+    healthy = "!healthy:localhost"
+    client.rooms[healthy] = nio.MatrixRoom(healthy, client.user_id)
+    config.agents["agent1"].rooms.append(healthy)
+    draws = iter((1.5, 0.5))  # A backs off longer; B backs off less.
+    monkeypatch.setattr("mindroom.steward_duties.uniform", lambda _low, high: next(draws, high), raising=False)
+    clock = 0.0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    crypto = asyncio.Lock()
+    read = client.joined_members.side_effect
+
+    async def roster(room_id: str) -> nio.JoinedMembersResponse:
+        async with crypto:
+            await asyncio.sleep(11 if room_id == ROOM_ID else 1)
+            return await read(room_id)
+
+    client.joined_members.side_effect = roster
+    duties = _router_duties(room_state)
+    tasks = []
+    try:
+        for quarter_second in range(121):
+            clock = quarter_second / 4
+            if quarter_second < 2:
+                duties.mark_joined_for_room_state(ROOM_ID if quarter_second == 0 else healthy)
+                duties.publish_joined_room_state()
+                tasks.extend(duties._room_state_publishes - set(tasks))
+            for _ in range(20):
+                await asyncio.sleep(0)
+            if _writes(client, ACCOUNTS_EVENT_TYPE):
+                break
+        assert [write.args[0] for write in _writes(client, ACCOUNTS_EVENT_TYPE)] == [healthy]
+        assert ROOM_ID in duties._room_state_retries  # A has not recovered.
+        assert clock < 30
+    finally:
+        duties.stopping()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("lose_stewardship", [False, True])
 async def test_sweep_retries_failed_room_with_backoff(
     room_state: RoomState,
@@ -1566,7 +1611,7 @@ async def test_sweep_retries_failed_room_with_backoff(
     assert times == ([0, 1] if lose_stewardship else [0, 1, 3])
     assert not duties._room_state_retries
     failures = [log for log in logs if log["event"] == "room_accounts_publish_failed"]
-    assert [log["log_level"] for log in failures] == ["warning", "debug"]
+    assert [log["log_level"] for log in failures] == ["info", "info"]
     assert all(log["error"] == "TimeoutError" and "exc_info" not in log for log in failures)
     assert (_accounts(room_state) is None) == lose_stewardship
 
@@ -1672,7 +1717,7 @@ async def test_persistent_accounts_failure_backs_off_to_sixty_seconds(
     room_state: RoomState,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The delay is capped even after a long outage; a final successful write retires the retry."""
+    """Persistent timeouts warn once at the cap, then go quiet until a successful retry retires."""
     _, _, _, _, client = room_state
     clock = 0
     monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
@@ -1682,19 +1727,24 @@ async def test_persistent_accounts_failure_backs_off_to_sixty_seconds(
     async def write_state(room_id: str, kind: str, content: dict, **kwargs: object) -> object:
         if kind == ACCOUNTS_EVENT_TYPE:
             attempts.append(clock)
-            if len(attempts) < 9:
+            if len(attempts) < 10:
                 raise TimeoutError
         return await write(room_id, kind, content, **kwargs)
 
     client.room_put_state.side_effect = write_state
     duties = _owner_bot(room_state).steward_duties
     try:
-        await reconcile_held_room_states(duties.deps.runtime.orchestrator)
-        for tick in range(184):
-            clock = tick
-            for _ in range(20):
-                await asyncio.sleep(0)
-        assert attempts == [0, 1, 3, 7, 15, 31, 63, 123, 183]
+        with capture_logs() as logs:
+            await reconcile_held_room_states(duties.deps.runtime.orchestrator)
+            for tick in range(244):
+                clock = tick
+                for _ in range(20):
+                    await asyncio.sleep(0)
+        assert attempts == [0, 1, 3, 7, 15, 31, 63, 123, 183, 243]
+        assert [log["log_level"] for log in logs if log["event"] == "room_accounts_publish_failed"] == ["info"] * 7 + [
+            "warning",
+            "debug",
+        ]
         assert not duties._room_state_retries
     finally:
         duties.stopping()
@@ -1734,31 +1784,115 @@ async def test_retry_does_not_repeat_a_siblings_forbidden_put(
 
 
 @pytest.mark.asyncio
-async def test_room_state_failure_warns_again_after_recovery(room_state: RoomState) -> None:
-    """A room's first failure warns again after its state returns to current."""
+@pytest.mark.parametrize("background", [False, True])
+async def test_room_state_failure_warns_again_after_recovery(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+    background: bool,
+) -> None:
+    """Recovery by a fresh trigger or by the background retry clears a room's warning latch."""
     _, _, _, events, client = room_state
+    clock = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
     duties = _router_duties(room_state)
     write = client.room_put_state.side_effect
     failing = True
 
     async def put_state(room_id: str, event_type: str, content: dict, **kwargs: object) -> object:
         if event_type == ACCOUNTS_EVENT_TYPE and failing:
-            raise TimeoutError
+            return nio.RoomPutStateError("unavailable", "M_UNKNOWN")
         return await write(room_id, event_type, content, **kwargs)
 
     client.room_put_state.side_effect = put_state
     try:
         with capture_logs() as logs:
-            for fail in (True, True, False, True):
-                failing = fail
-                events.pop((ACCOUNTS_EVENT_TYPE, client.user_id), None)
-                duties.mark_joined_for_room_state(ROOM_ID)
-                await _publish_joined_rooms(duties)
+            for tick in (0, 1, 3, 4):
+                if background:
+                    clock = tick
+                failing = tick != 3
+                if not background or tick in (0, 4):
+                    events.pop((ACCOUNTS_EVENT_TYPE, client.user_id), None)
+                    duties.mark_joined_for_room_state(ROOM_ID)
+                    await _publish_joined_rooms(duties)
+                for _ in range(30):
+                    await asyncio.sleep(0)
+                if tick == 3:
+                    assert _accounts(room_state) is not None
         assert [log["log_level"] for log in logs if log["event"] == "room_accounts_publish_failed"] == [
             "warning",
             "debug",
             "warning",
         ]
+    finally:
+        duties.stopping()
+
+
+@pytest.mark.asyncio
+async def test_delegated_roster_failures_share_a_room_warning_latch(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accounts and ad-hoc mode roster errors share one warning, including during retries."""
+    config, _, _, _, client = room_state
+    for agent in config.agents.values():
+        agent.rooms = []
+    clock = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    client.joined_members.side_effect = None
+    client.joined_members.return_value = nio.JoinedMembersError("unavailable")
+    duties = _router_duties(room_state)
+    try:
+        with capture_logs() as logs:
+            duties.mark_joined_for_room_state(ROOM_ID)
+            await _publish_joined_rooms(duties)
+            await asyncio.sleep(0)
+            clock = 1
+            for _ in range(30):
+                await asyncio.sleep(0)
+        diagnostics = {"matrix_room_members_fetch_failed", "authoritative_room_membership_fetch_failed"}
+        failures = [log for log in logs if log["event"] in diagnostics]
+        assert [log["event"] for log in failures].count("matrix_room_members_fetch_failed") == 2
+        assert [log["event"] for log in failures].count("authoritative_room_membership_fetch_failed") == 2
+        assert sorted(log["log_level"] for log in failures) == ["debug", "debug", "debug", "warning"]
+    finally:
+        duties.stopping()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forbidden", [False, True])
+async def test_later_terminal_accounts_result_retires_older_pending_retry(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+    forbidden: bool,
+) -> None:
+    """A later success or power refusal supersedes a queued retry of that same operation."""
+    _, _, _, _, client = room_state
+    clock = 0.0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    write = client.room_put_state.side_effect
+
+    async def put_state(room_id: str, event_type: str, content: dict, **kwargs: object) -> object:
+        if event_type == ACCOUNTS_EVENT_TYPE:
+            if clock == 0:
+                raise TimeoutError
+            if forbidden:
+                return nio.RoomPutStateError("Forbidden", "M_FORBIDDEN")
+        return await write(room_id, event_type, content, **kwargs)
+
+    client.room_put_state.side_effect = put_state
+    duties = _router_duties(room_state)
+    try:
+        for tick in (0.0, 0.25):
+            clock = tick
+            duties.mark_joined_for_room_state(ROOM_ID)
+            await _publish_joined_rooms(duties)
+            await asyncio.sleep(0)
+        clock = 2
+        for _ in range(30):
+            await asyncio.sleep(0)
+        assert client.joined_members.await_count == len(_writes(client, ACCOUNTS_EVENT_TYPE)) == 2
+        assert not duties._room_state_reruns
+        assert not duties._room_state_retries
     finally:
         duties.stopping()
 
@@ -1865,6 +1999,7 @@ async def test_router_stop_releases_a_retry_cancelled_before_it_starts(room_stat
     with pytest.raises(asyncio.CancelledError):
         await retry
     assert not duties._room_state_retries
+    assert not duties._room_state_reruns
 
 
 @pytest.mark.asyncio
