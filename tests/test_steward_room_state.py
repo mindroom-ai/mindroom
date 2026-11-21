@@ -200,26 +200,42 @@ async def test_worker_coalesces_marks(
     assert len(_writes(client, EVENT_TYPE)) == 1
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("when", ["before_attempt", "during_read"])
-async def test_worker_uses_current_steward(
-    worker_runtime: MagicMock,
-    room_state: RoomState,
-    when: str,
-) -> None:
-    """Use the current client at attempt time and fence an outgoing client before its PUT."""
-    _, _, ids, events, outgoing = room_state
+def _successor_client(room_state: RoomState) -> AsyncMock:
+    """Build a second joined client reading and writing the same fake homeserver state."""
+    _, _, ids, _, outgoing = room_state
     incoming = AsyncMock(spec=nio.AsyncClient)
     incoming.user_id = ids["agent1"].full_id
     incoming.rooms = outgoing.rooms
     incoming.room_get_state_event.side_effect = outgoing.room_get_state_event.side_effect
     incoming.joined_members.side_effect = outgoing.joined_members.side_effect
     incoming.room_put_state.side_effect = outgoing.room_put_state.side_effect
+    return incoming
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("when", "earlier_writes"),
+    [
+        ("before_attempt", []),
+        (EVENT_TYPE, []),
+        (ACCOUNTS_EVENT_TYPE, [EVENT_TYPE]),
+        (ROUTER_EVENT_TYPE, [EVENT_TYPE, ACCOUNTS_EVENT_TYPE]),
+    ],
+)
+async def test_worker_uses_current_steward(
+    worker_runtime: MagicMock,
+    room_state: RoomState,
+    when: str,
+    earlier_writes: list[str],
+) -> None:
+    """Use the current client at attempt time and fence an outgoing client before its PUT."""
+    _, _, _, events, outgoing = room_state
+    incoming = _successor_client(room_state)
     new_steward = MagicMock(client=incoming)
     read = outgoing.room_get_state_event.side_effect
 
     async def demote(room_id: str, kind: str, state_key: str = "") -> object:
-        if kind == EVENT_TYPE:
+        if kind == when:
             worker_runtime.room_steward.return_value = new_steward
         return await read(room_id, kind, state_key)
 
@@ -230,10 +246,46 @@ async def test_worker_uses_current_steward(
     else:
         outgoing.room_get_state_event.side_effect = demote
     assert await wait_for_background_tasks(timeout=2, owner=worker)
-    outgoing.room_put_state.assert_not_awaited()
+    assert [c.args[1] for c in outgoing.room_put_state.await_args_list] == earlier_writes
     assert events[EVENT_TYPE, ""] == {"mode": "mixed"}
     assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": incoming.user_id}
     assert (ACCOUNTS_EVENT_TYPE, incoming.user_id) in events
+
+
+@pytest.mark.asyncio
+async def test_worker_rechecks_all_state_when_the_steward_changes_during_backoff(
+    worker_runtime: MagicMock,
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new binding writer must publish its own roster even if only binding had failed before the handover."""
+    _, _, _, events, outgoing = room_state
+    incoming = _successor_client(room_state)
+    write = outgoing.room_put_state.side_effect
+    clock = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+
+    async def binding_timeout(room_id: str, kind: str, content: dict, **kwargs: object) -> object:
+        if kind == ROUTER_EVENT_TYPE:
+            raise TimeoutError
+        return await write(room_id, kind, content, **kwargs)
+
+    outgoing.room_put_state.side_effect = binding_timeout
+    worker = RoomStateWorker(worker_runtime)
+    try:
+        worker.mark(ROOM_ID)
+        await _yield_loop(40)
+        assert (ACCOUNTS_EVENT_TYPE, outgoing.user_id) in events
+        assert (ROUTER_EVENT_TYPE, "") not in events
+        # A bot can stop during backoff without a Matrix power or membership event.
+        worker_runtime.room_steward.return_value = MagicMock(client=incoming)
+        clock = 1
+        await _yield_loop(40)
+        assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": incoming.user_id}
+        assert (ACCOUNTS_EVENT_TYPE, incoming.user_id) in events
+    finally:
+        worker.stop()
+        await _yield_loop(10)
 
 
 @pytest.mark.asyncio
@@ -340,6 +392,7 @@ async def test_worker_stop_cancels_in_flight_and_queued_rooms(worker_runtime: Ma
         worker.stop()
         await cancelled.wait()
     assert await wait_for_background_tasks(timeout=2, owner=worker)
+    assert not worker._rooms
     client.room_get_state_event.assert_awaited_once()
     worker.mark(ROOM_ID)
     await asyncio.sleep(0)
@@ -674,7 +727,7 @@ async def test_router_binding_failure_is_nonfatal(room_state: RoomState) -> None
 
 @pytest.mark.asyncio
 async def test_router_publishes_its_binding_on_start_and_join(room_state: RoomState) -> None:
-    """Both router room-state paths, a start or reload and a room the router joined, publish the binding."""
+    """A sweep or managed membership change publishes a missing binding."""
     _config, _paths, ids, events, _client = room_state
     binding = {"user_id": ids[ROUTER_AGENT_NAME].full_id}
 
@@ -867,7 +920,7 @@ async def test_mention_only_room_keeps_all_assigned_responders(room_state: RoomS
 
 @pytest.mark.asyncio
 async def test_reloads_read_only_the_thread_mode_event(room_state: RoomState) -> None:
-    """Every reload compares one event; unchanged modes do not write."""
+    """A reload reads just the mode state event, not a whole state snapshot, for the mode comparison."""
     config, paths, _, events, client = room_state
     await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
     client.room_get_state.reset_mock()

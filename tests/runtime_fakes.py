@@ -57,7 +57,8 @@ class ReadyRuntime(_MultiAgentOrchestrator):
         if self.steward is None:
             return None
         return self.agent_bots.get(self.steward) or cast(
-            "AgentBot", SimpleNamespace(agent_name=self.steward, client=None)
+            "AgentBot",
+            SimpleNamespace(agent_name=self.steward, client=None),
         )
 
     def event_journal_store(self) -> EventJournalStore:

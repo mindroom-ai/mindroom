@@ -42,9 +42,10 @@ class RoomStateWorker:
             return
         dirty = asyncio.Event()
         dirty.set()
-        task = create_background_task(self._run(room_id, dirty), "room_state_worker", owner=self, context=Context())
+        context = Context()  # Room work outlives the sync callback that marked it.
+        task = create_background_task(self._run(room_id, dirty), "room_state_worker", owner=self, context=context)
         self._rooms[room_id] = (task, dirty)
-        task.add_done_callback(partial(self._retire, room_id))
+        task.add_done_callback(partial(self._retire, room_id), context=context)
 
     def _retire(self, room_id: str, task: asyncio.Task[None]) -> None:
         if (entry := self._rooms.get(room_id)) is not None and entry[0] is task:
