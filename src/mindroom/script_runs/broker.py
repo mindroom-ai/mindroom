@@ -85,6 +85,7 @@ __all__ = [
     "ScriptRuntimeWorkerAuthority",
     "ScriptToolBroker",
     "ScriptToolCallRequest",
+    "WorkflowAttemptRevokedError",
     "drain_script_tool_cleanup",
 ]
 
