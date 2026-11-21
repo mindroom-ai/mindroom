@@ -3581,6 +3581,7 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.teams",
     "mindroom.thread_models",
+    "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.follow_ups",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.events",
@@ -9779,6 +9780,8 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_jobs.conversation"
 depends_on = [
+    "mindroom.reply_lifecycle",
+    "mindroom.reply_scope",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.runtime_context",
@@ -9787,6 +9790,7 @@ depends_on = [
 visibility = [
     "mindroom.custom_tools.job",
     "mindroom.orchestration.tool_job_runtime",
+    "mindroom.response_runner",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.follow_ups",
     "mindroom.tool_jobs.notices",

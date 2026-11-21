@@ -466,6 +466,7 @@ class RealtimeVoiceBridge:
         self._caller_presence_listener: Callable[[rtc.RemoteParticipant], None] | None = None
         self._caller_absent_timer: asyncio.TimerHandle | None = None
         self._roster_vacated = False
+        self._own_key_index: int | None = None
 
     def set_participant_identities(self, participant_identities: frozenset[str]) -> None:
         """Restrict SFU subscriptions and published output to the Matrix roster."""
@@ -508,6 +509,15 @@ class RealtimeVoiceBridge:
             )
         room = rtc.Room()
         self._room = room
+        if self._e2ee_enabled:
+            # LiveKit starts every new sender (a full reconnect republishes ours) on key index 0 and
+            # enables it before this event reaches Python. Moving it here lets callers decode it;
+            # set_frame_key keeps our slot 0 on the active key, so frames sent before the event
+            # cannot use a retired key that a departed device still holds. A track first published
+            # during a full reconnect gets no publish event, so reconnecting re-applies the index too.
+            room.on("local_track_published", self._apply_own_key_index)
+            room.on("local_track_republished", self._apply_own_key_index)
+            room.on("reconnected", self._apply_own_key_index)
         connect_task = asyncio.create_task(
             room.connect(grant.url, grant.jwt, options),
             name="matrix_rtc_livekit_connect",
@@ -541,7 +551,24 @@ class RealtimeVoiceBridge:
         """Install a media frame key for one participant (or ourselves)."""
         if self._room is None or not self._e2ee_enabled:
             return
-        self._room.e2ee_manager.key_provider.set_key(participant_identity, key, key_index)
+        key_provider = self._room.e2ee_manager.key_provider
+        own_key = participant_identity == self._local_identity
+        if own_key and key_index != 0:
+            # New senders start on slot 0: give it the active key, never the retired one.
+            key_provider.set_key(participant_identity, key, 0)
+        key_provider.set_key(participant_identity, key, key_index)
+        if own_key:
+            # set_key only stores the key: our senders keep encrypting with their old index until told.
+            self._own_key_index = key_index
+            self._apply_own_key_index()
+
+    def _apply_own_key_index(self, *_event_args: object) -> None:
+        """Encrypt our outgoing tracks with the own key index the call session last activated."""
+        if self._room is None or self._own_key_index is None:
+            return
+        for cryptor in self._room.e2ee_manager.frame_cryptors():
+            if cryptor.participant_identity == self._local_identity:
+                cryptor.set_key_index(self._own_key_index)
 
     async def start_agent(self, options: CallVoiceAgentOptions) -> None:
         """Start the realtime agent session on the connected room."""
