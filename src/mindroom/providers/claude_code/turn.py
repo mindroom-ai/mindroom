@@ -48,8 +48,13 @@ if TYPE_CHECKING:
 
 __all__ = ["Outrun", "read_step"]
 
-# The counters of Claude's usage, which a turn's result reports summed over its model messages.
-_COUNTERS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+# The counters of Claude's usage, each with its name in the ledger Claude Code keeps of all a process used.
+_COUNTERS = {
+    "input_tokens": "inputTokens",
+    "cache_creation_input_tokens": "cacheCreationInputTokens",
+    "cache_read_input_tokens": "cacheReadInputTokens",
+    "output_tokens": "outputTokens",
+}
 
 
 class Outrun(ProviderUnavailable):
@@ -137,9 +142,13 @@ class _Step:
             failure = ProviderError(msg, provider=provider)
         if failure is not None:
             raise failure
-        # What the turn used beyond its model messages, such as a request Claude Code made for itself.
-        total = result.usage or {}
-        extra = {key: max(0, (total.get(key) or 0) - session.counted.get(key, 0)) for key in _COUNTERS}
+        # What the turn used beyond its model messages, such as a request Claude Code made for itself with another
+        # model: the ledger grew by more than the messages counted.
+        models = (result.model_usage or {}).values()
+        ledger = {counter: sum(model.get(key) or 0 for model in models) for counter, key in _COUNTERS.items()}
+        before, counted = session.ledger, session.counted
+        extra = {key: max(0, used - before.get(key, 0) - counted.get(key, 0)) for key, used in ledger.items()}
+        session.ledger = ledger
         if any(extra.values()):
             self.usage = add_usage(replace(_metrics(extra), context=None), self.usage)
         self.stop_reason = stop_reason_of(result.stop_reason) or "end"
@@ -194,8 +203,9 @@ class _Step:
             elif isinstance(block, ThinkingBlock) and block.thinking:
                 events += self._think(block.thinking)
         if self.calls and self.streaming is None:
-            # No end of a model message follows a call that did not stream, so the step ends with it.
-            self.stop_reason = "tool_use"
+            # No end of a model message follows calls that did not stream, so which call is its last is not known.
+            msg = "Claude Code did not stream the model message that called MindRoom's tools."
+            raise ProviderUnavailable(msg, provider=provider)
         return events
 
 
@@ -204,8 +214,12 @@ def _tool_call(block: ToolUseBlock, session: LiveSession, provider: str) -> dict
     short = block.name.removeprefix(TOOL_PREFIX)
     name = session.bridge.names.get(short) if block.name.startswith(TOOL_PREFIX) else None
     # Claude Code would answer a call MindRoom cannot run itself, and the model would go on.
-    if name is None or not session.bridge.made(block.id, short, block.input):
-        msg = f"Claude called {block.name} ({block.id}), which is not one new call of a MindRoom tool."
+    if name is None:
+        # The model may not name it again in a new process, which the retry of the request starts.
+        msg = f"Claude called {block.name}, which MindRoom did not offer."
+        raise ProviderUnavailable(msg, provider=provider)
+    if not session.bridge.made(block.id, short, block.input):
+        msg = f"Claude wrote the tool call {block.id} twice."
         raise ProviderError(msg, provider=provider)
     return {"id": block.id, "type": "function", "function": {"name": name, "arguments": json.dumps(block.input)}}
 

@@ -255,7 +255,7 @@ async def test_a_request_that_no_longer_matches_the_parked_turn_rebuilds_in_a_ne
     assert cli.events("tool_result") == []
     # The process that waited on those calls can never be continued, so it is closed at once.
     assert len(cli.events("exit")) == 1
-    assert [session.emitted.content for session in SESSIONS.resting.values() if session.emitted] == ["Rebuilt."]
+    assert [session.emitted[0] for session in SESSIONS.resting.values() if session.emitted] == ["Rebuilt."]
     rebuilt = cli.events("user")[1]["content"][0]["text"]
     assert rebuilt.startswith("<conversation-checkpoint>")
     assert '"output": "LILAC-HERON"' in rebuilt
@@ -690,7 +690,7 @@ async def test_a_new_process_past_the_limit_evicts_an_idle_one_before_a_parked_o
     await complete(cli.provider(execution_identity=elsewhere), ModelRequest(messages=[user("Another conversation")]))
     await _closed()
 
-    resting = sorted(session.emitted.content or "" for session in SESSIONS.resting.values())
+    resting = sorted(session.emitted[0] or "" for session in SESSIONS.resting.values())
     assert resting == ["Looking.", "New."]
     assert (len(SESSIONS.live), SESSIONS.starting) == (2, 0)
 
@@ -1104,21 +1104,22 @@ async def test_a_process_that_cannot_take_the_request_is_a_retryable_failure(
 
 
 @pytest.mark.asyncio
-async def test_a_tool_call_in_a_message_that_did_not_stream_ends_the_step(tmp_path: Path) -> None:
-    whole = {"tools": [call("toolu_a", "a")], "complete_only": True}
-    cli = fake_cli(tmp_path, {"turns": [[whole]]}, {"turns": [text_turn("Rebuilt.")]})
-    provider = cli.provider()
-    messages = [user("Look up a.")]
+async def test_tool_calls_in_a_message_that_did_not_stream_are_not_handed_over_in_part(tmp_path: Path) -> None:
+    # Each call arrives in a message of its own under one id, and nothing says which is the last.
+    whole = {"tools": [call("toolu_a", "a"), call("toolu_b", "b")], "complete_only": True}
+    cli = fake_cli(tmp_path, {"turns": [[whole]]})
+    events: list[StreamEvent] = []
 
-    # No end of a model message follows, so without the call the request would wait for ever.
-    asked = await asyncio.wait_for(complete(provider, ModelRequest(messages=messages, tools=[LOOKUP])), 10)
+    async def read() -> None:
+        async for event in cli.provider().stream(ModelRequest(messages=[user("Look up a and b.")], tools=[LOOKUP])):
+            events.append(event)  # noqa: PERF401
 
-    assert [made["id"] for made in asked.message.tool_calls or ()] == ["toolu_a"]
-    # That process ended its turn without the result, which a new one gets as history.
-    await _resting_process_breaks()
-    messages += [asked.message, result("toolu_a", "LILAC-HERON")]
-    assert (await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))).content == "Rebuilt."
-    assert "LILAC-HERON" in json.dumps(cli.events("user")[1]["content"])
+    with pytest.raises(ProviderUnavailable, match="did not stream"):
+        await asyncio.wait_for(read(), 10)
+    await _closed()
+
+    assert not any(isinstance(event, ToolCallReady | TurnCompleted) for event in events)
+    assert len(cli.events("exit")) == 1
 
 
 @pytest.mark.parametrize(
@@ -1171,8 +1172,11 @@ async def test_a_call_that_got_its_result_leaves_only_its_id_which_no_later_call
 @pytest.mark.asyncio
 async def test_an_answer_that_did_not_take_mindrooms_results_is_discarded_and_the_turn_rebuilt(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     how: str,
 ) -> None:
+    # The process that starts over takes the slot of the one it replaces, so one slot is enough.
+    monkeypatch.setattr(session_module, "_MAX_PROCESSES", 1)
     gate = tmp_path / "gate"
     turn = [
         {"tools": [{**call("toolu_a", "a"), how: True}], "abandon": how == "abandon"},
@@ -1222,17 +1226,19 @@ async def test_a_later_turn_of_a_process_must_start_with_exactly_mindrooms_tools
 
 
 @pytest.mark.parametrize(
-    "tools",
+    ("tools", "said", "retryable"),
     [
-        [{"id": "toolu_x", "raw_name": "Bash", "input": {"command": "id"}, "denied": True}],
-        [call("toolu_a", "a"), call("toolu_a", "b")],
+        ([{"id": "toolu_x", "raw_name": "Bash", "input": {"command": "id"}, "denied": True}], "Bash", True),
+        ([call("toolu_a", "a"), call("toolu_a", "b")], "toolu_a twice", False),
     ],
-    ids=["a tool MindRoom did not offer", "a call id the model used before"],
+    ids=["a tool MindRoom did not offer, which a new process may not name again", "a call id the model used before"],
 )
 @pytest.mark.asyncio
-async def test_a_call_that_is_not_one_new_call_of_a_mindroom_tool_fails_before_any_call_is_handed_over(
+async def test_a_call_mindroom_cannot_run_fails_before_any_call_is_handed_over(
     tmp_path: Path,
     tools: list[dict[str, Any]],
+    said: str,
+    retryable: bool,
 ) -> None:
     cli = fake_cli(tmp_path, {"turns": [[{"tools": tools}, {"text": "never"}]]})
     events: list[StreamEvent] = []
@@ -1241,11 +1247,11 @@ async def test_a_call_that_is_not_one_new_call_of_a_mindroom_tool_fails_before_a
         async for event in cli.provider().stream(ModelRequest(messages=[user("Hi")], tools=[LOOKUP])):
             events.append(event)  # noqa: PERF401
 
-    with pytest.raises(ProviderError, match="not one new call of a MindRoom tool") as raised:
+    with pytest.raises(ProviderError, match=said) as raised:
         await read()
     await _closed()
 
-    assert not raised.value.retryable
+    assert raised.value.retryable == retryable
     assert not any(isinstance(event, ToolCallReady | TurnCompleted) for event in events)
     assert len(cli.events("exit")) == 1
 
@@ -1313,7 +1319,11 @@ async def test_a_user_message_after_the_results_of_a_parked_turn_rebuilds_as_a_u
 
 
 @pytest.mark.asyncio
-async def test_a_conversation_that_starts_over_closes_its_idle_process_at_once(tmp_path: Path) -> None:
+async def test_a_conversation_that_starts_over_gives_the_slot_of_its_idle_process_to_the_new_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_module, "_MAX_PROCESSES", 1)
     cli = fake_cli(tmp_path, {"turns": [text_turn("One.")]}, {"turns": [text_turn("Two.")]})
     provider = cli.provider(execution_identity=CONVERSATION)
     await complete(provider, ModelRequest(messages=[user("Hi")]))
@@ -1321,8 +1331,27 @@ async def test_a_conversation_that_starts_over_closes_its_idle_process_at_once(t
     await complete(provider, ModelRequest(messages=[user("Something else, after a compaction")]))
     await _closed()
 
-    assert [session.emitted.content for session in SESSIONS.resting.values()] == ["Two."]
+    assert [session.emitted[0] for session in SESSIONS.resting.values()] == ["Two."]
     assert len(cli.events("exit")) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_request_that_may_call_no_tool_leaves_the_idle_process_of_its_conversation_alone(
+    tmp_path: Path,
+) -> None:
+    cli = fake_cli(tmp_path, {"turns": [text_turn("One."), text_turn("Two.")]}, {"turns": [text_turn("Respond.")]})
+    provider = cli.provider(execution_identity=CONVERSATION)
+    messages = [user("Hi")]
+    first = await complete(provider, ModelRequest(messages=messages))
+
+    # A decision about the conversation is asked of the same model, with other instructions and no tools.
+    judged = [Message(role="system", content="Should the agent reply?"), *messages, first.message, user("More?")]
+    decision = await complete(provider, ModelRequest(messages=judged, tool_choice="none"))
+    second = await complete(provider, ModelRequest(messages=[*messages, first.message, user("More?")]))
+
+    assert (decision.content, second.content) == ("Respond.", "Two.")
+    assert len(cli.events("spawn")) == 2
+    assert cli.events("user")[2]["content"] == [{"type": "text", "text": "More?"}]
 
 
 @pytest.mark.asyncio
@@ -1377,12 +1406,25 @@ async def test_a_preflight_closes_only_the_process_it_started(tmp_path: Path) ->
 # --- usage ------------------------------------------------------------------------------------------------------------
 
 
+def _ledger(**counters: int) -> dict[str, int]:
+    """Return one model's entry in the ledger a result carries."""
+    return {"inputTokens": 0, "cacheCreationInputTokens": 0, "cacheReadInputTokens": 0, "outputTokens": 0, **counters}
+
+
 @pytest.mark.asyncio
 async def test_what_a_turn_used_beyond_its_model_messages_is_added_once(tmp_path: Path) -> None:
     message = {"input_tokens": 3, "cache_creation_input_tokens": 40, "cache_read_input_tokens": 200, "output_tokens": 9}
-    # The whole turn used more input and output than its one model message, and reports fewer cache writes.
-    whole = {"input_tokens": 10, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 200, "output_tokens": 12}
-    cli = fake_cli(tmp_path, {"turns": [[{"text": "Hello.", "usage": message}, {"result": {"usage": whole}}]]})
+    # Claude Code also asked another model something for itself, which no model message of the turn shows.
+    ledger = {
+        "claude-invented-1": _ledger(
+            inputTokens=3,
+            cacheCreationInputTokens=40,
+            cacheReadInputTokens=200,
+            outputTokens=9,
+        ),
+        "claude-invented-small": _ledger(inputTokens=7, outputTokens=3),
+    }
+    cli = fake_cli(tmp_path, {"turns": [[{"text": "Hello.", "usage": message}, {"result": {"modelUsage": ledger}}]]})
 
     answer = await complete(cli.provider(), ModelRequest(messages=[user("Hi")]))
 
@@ -1398,9 +1440,10 @@ async def test_what_a_turn_used_beyond_its_model_messages_is_added_once(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_what_a_later_turn_of_a_process_used_is_not_measured_against_its_earlier_turns(tmp_path: Path) -> None:
-    whole = {"input_tokens": 10, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 5}
-    turns = [text_turn("One."), [{"text": "Two."}, {"result": {"usage": whole}}]]
+async def test_what_a_later_turn_used_is_what_the_ledger_of_its_process_grew_by(tmp_path: Path) -> None:
+    # The ledger counts both turns: 3 input tokens each for the model messages, and 7 more in the second turn.
+    ledger = {"claude-invented-1": _ledger(inputTokens=6, outputTokens=10), "small": _ledger(inputTokens=7)}
+    turns = [text_turn("One."), [{"text": "Two."}, {"result": {"modelUsage": ledger}}]]
     cli = fake_cli(tmp_path, {"turns": turns})
     provider = cli.provider(execution_identity=CONVERSATION)
     messages = [user("Hi")]
@@ -1408,8 +1451,8 @@ async def test_what_a_later_turn_of_a_process_used_is_not_measured_against_its_e
 
     second = await complete(provider, ModelRequest(messages=[*messages, first.message, user("More?")]))
 
-    # Each model message used 3 input tokens, and the second turn 10 in all.
     assert (first.usage.tokens.input_tokens, second.usage.tokens.input_tokens) == (3, 10)
+    assert (first.usage.tokens.output_tokens, second.usage.tokens.output_tokens) == (5, 5)
     assert len(cli.events("spawn")) == 1
 
 

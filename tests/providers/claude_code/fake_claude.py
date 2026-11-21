@@ -47,6 +47,13 @@ from typing import Any
 
 SESSION_ID = "00000000-0000-4000-8000-000000000000"
 DEFAULT_USAGE = {"input_tokens": 3, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 5}
+# The names of the same counters in the ledger a result carries, which sums every model's use since the process started.
+LEDGER_NAMES = {
+    "input_tokens": "inputTokens",
+    "cache_creation_input_tokens": "cacheCreationInputTokens",
+    "cache_read_input_tokens": "cacheReadInputTokens",
+    "output_tokens": "outputTokens",
+}
 
 
 class FakeClaude:
@@ -60,6 +67,7 @@ class FakeClaude:
         self.tools: list[str] | None = None
         self.results: dict[str, str] = {}
         self.usage = dict.fromkeys(DEFAULT_USAGE, 0)
+        self.ledger = dict.fromkeys(LEDGER_NAMES.values(), 0)
         self.messages = 0
         self.rpc_id = 10
         self.queued: list[dict[str, Any]] = []
@@ -242,6 +250,7 @@ class FakeClaude:
         usage = {**DEFAULT_USAGE, **step.get("usage", {})}
         for key, value in usage.items():
             self.usage[key] += value
+            self.ledger[LEDGER_NAMES[key]] += value
         text = self.text_of(step.get("text", ""))
         message = {
             "id": f"msg_{self.messages:04d}",
@@ -359,6 +368,7 @@ class FakeClaude:
                 "num_turns": self.messages,
                 "stop_reason": "end_turn",
                 "usage": self.usage,
+                "modelUsage": {"claude-invented-1": self.ledger},
                 "result": text,
                 **result,
             },

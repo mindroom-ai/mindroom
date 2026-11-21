@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import ProviderError
@@ -166,16 +165,9 @@ def rebuild_input(messages: Sequence[Message], provider: str) -> tuple[str, list
     return system_text(messages), _merged(blocks)
 
 
-@dataclass(frozen=True, slots=True)
-class Emitted:
-    """The answer a live Claude Code process gave last: its text, and the tool calls it now waits on, in order.
-
-    A call is its id, its tool's name, and its arguments in one spelling; a request continues the process only when
-    the assistant message it holds is this answer.
-    """
-
-    content: str | None
-    calls: tuple[tuple[str, str, str], ...]
+# The answer a live Claude Code process gave last: its text, and the tool calls it now waits on, in order. A call is
+# its id, its tool's name, and its arguments in one spelling.
+type Emitted = tuple[str | None, tuple[tuple[str, str, str], ...]]
 
 
 def emitted(content: str | None, tool_calls: Sequence[dict[str, Any]]) -> Emitted:
@@ -184,7 +176,7 @@ def emitted(content: str | None, tool_calls: Sequence[dict[str, Any]]) -> Emitte
         (call["id"], call["function"]["name"], canonical_arguments(call["function"].get("arguments")))
         for call in tool_calls
     )
-    return Emitted(content=content or None, calls=tuple(calls))
+    return content or None, tuple(calls)
 
 
 # What continues a live process: each waiting call's MCP result, or the user blocks of its next turn.
@@ -217,7 +209,7 @@ def decide(answer: Emitted, tail: Sequence[Message], provider: str) -> _Resume |
     same = isinstance(answered.content, str | None) and emitted(answered.content, answered.tool_calls or ()) == answer
     if not same or any(message.files or message.audio or message.videos for message in rest):
         return None
-    call_ids = [call[0] for call in answer.calls]
+    call_ids = [call[0] for call in answer[1]]
     if not call_ids:
         blocks = _merged([block for message in rest for block in _user_blocks(message, provider)])
         return ({}, blocks) if blocks and all(message.role == "user" for message in rest) else None

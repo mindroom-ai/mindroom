@@ -47,12 +47,11 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ToolSpec
     from mindroom.providers.claude_code.prompt import Emitted
 
-__all__ = ["NOT_SIGNED_IN", "SERVER_NAME", "SESSIONS", "LiveSession", "RestingKey", "start"]
+__all__ = ["NOT_SIGNED_IN", "SERVER_NAME", "SESSIONS", "LiveSession", "start"]
 
 logger = get_logger(__name__)
 
-# The oldest binary this route was run against. Older ones can reach tools beyond ``--tools`` (fixed in 2.1.295), and
-# before 2.1.248 read a user's ``@path`` or ``/command`` as a Claude Code command.
+# The oldest binary this route was run against; before 2.1.295 the model could reach tools beyond ``--tools``.
 _MIN_VERSION = (2, 1, 328)
 # The request metadata Claude Code sends with an MCP tool call: the id of the ``tool_use`` block that made the call.
 _TOOL_USE_ID_META = "claudecode/toolUseId"
@@ -118,9 +117,8 @@ class _Call:
 class _ToolBridge:
     """The tool calls of one Claude Code process, by call id: each waits for the result MindRoom's loop produces.
 
-    ``calls`` holds a call until its result was handed to Claude Code, ``unconfirmed`` its id until Claude Code said
-    that it took the result, and ``spent`` its id for good. ``failure`` says why the process can no longer be
-    trusted, such as a call the model did not write.
+    A call is in ``calls`` until Claude Code was handed its result, then its id is ``unconfirmed`` until Claude Code
+    said it took the result, and ``spent`` for good. ``failure`` says why the process can no longer be trusted.
     """
 
     names: dict[str, str]
@@ -231,8 +229,8 @@ class LiveSession:
     """One Claude Code process and what it last answered with.
 
     ``inventoried`` says the turn it runs started with exactly MindRoom's tools, before which none of its output
-    counts. ``counted`` sums the usage its model messages reported in that turn, and ``rejected`` is the plan limit
-    it last reported.
+    counts. ``counted`` sums the usage its model messages reported in that turn, ``ledger`` what Claude Code said the
+    process had used by the end of its last turn, and ``rejected`` is the plan limit it last reported.
     """
 
     client: ClaudeSDKClient
@@ -242,6 +240,7 @@ class LiveSession:
     provider: str
     inventoried: bool = False
     counted: dict[str, int] = field(default_factory=dict)
+    ledger: dict[str, int] = field(default_factory=dict)
     rejected: RateLimitInfo | None = None
     emitted: Emitted | None = None
     rested_at: float = 0.0
@@ -251,11 +250,7 @@ class LiveSession:
         self.rejected = event.rate_limit_info if event.rate_limit_info.status == "rejected" else None
 
     def broken(self) -> str | None:
-        """Return why the resting process cannot be continued, or None.
-
-        It cannot once its tool server failed, and once it sent anything but notices while it rested: it exited, or
-        it answered a tool call itself and went on without MindRoom's result.
-        """
+        """Return why the resting process cannot be continued: its tool server failed, or it did not rest."""
         bridge = self.bridge
         while bridge.failure is None and not bridge.messages.empty():
             message = bridge.messages.get_nowait()
@@ -464,7 +459,7 @@ async def _close(session: LiveSession) -> None:
 
 
 # What a resting process is kept under: its conversation, the request it answered, and the calls it waits on.
-type RestingKey = tuple[str, str, tuple[str, ...]]
+type _RestingKey = tuple[str, str, tuple[str, ...]]
 
 
 class _SessionRegistry:
@@ -475,7 +470,7 @@ class _SessionRegistry:
 
     def __init__(self) -> None:
         self.live: set[LiveSession] = set()
-        self.resting: dict[RestingKey, LiveSession] = {}
+        self.resting: dict[_RestingKey, LiveSession] = {}
         self.starting = 0
         self._sweep: asyncio.Task[None] | None = None
 
@@ -505,7 +500,7 @@ class _SessionRegistry:
 
         return create_background_task(run(), name="claude_code_close", owner=self, context=Context())
 
-    def rest(self, key: RestingKey, session: LiveSession) -> None:
+    def rest(self, key: _RestingKey, session: LiveSession) -> None:
         """Keep ``session`` for the request that follows the answer it just gave."""
         if (replaced := self.resting.pop(key, None)) is not None:
             self.retire(replaced)
@@ -514,11 +509,10 @@ class _SessionRegistry:
         if self._sweep is None or self._sweep.done():
             self._sweep = create_background_task(self._sweep_expired(), name="claude_code_sweep", context=Context())
 
-    def retire_superseded(self, conversation: str, call_ids: set[str]) -> None:
-        """Close what a request that starts over supersedes: an idle process, or one that waits on ``call_ids``."""
-        for key in list(self.resting):
-            if key[0] == conversation and (not key[2] or call_ids.intersection(key[2])):
-                self.retire(self.resting.pop(key))
+    def superseded(self, conversation: str, call_ids: set[str]) -> list[LiveSession]:
+        """Take what a request that starts over supersedes: an idle process, or one that waits on ``call_ids``."""
+        keys = [key for key in self.resting if key[0] == conversation and (not key[2] or call_ids.intersection(key[2]))]
+        return [self.resting.pop(key) for key in keys]
 
     async def close_expired(self) -> None:
         """Close each resting process past its time to live, and wait until they closed."""
