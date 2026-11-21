@@ -751,6 +751,9 @@ def _layer_without_markers(layer: Mapping[str, Any], fallback: str | None) -> tu
     # A warm-up frame's canonical body keeps its markers, so the frame does too.
     if calls is None or not isinstance(body, str) or not isinstance(html, str) or STREAM_VISIBLE_BODY_KEY in layer:
         return None
+    if not message_tool_trace(layer):
+        # Readers take a trace with a malformed entry for none, so its marker lines are text to them and stay.
+        return None
     markers = [_marker_texts(index, event) for index, event in calls.items()]
     index_of_line = {marker_line: index for index, (marker_line, _block) in zip(calls, markers, strict=True)}
     marker_blocks = {marker_block for _line, marker_block in markers}

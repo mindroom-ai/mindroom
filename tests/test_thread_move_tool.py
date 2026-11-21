@@ -718,7 +718,7 @@ def _real_sends(move: _Move) -> tuple[AsyncMock, AsyncMock]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("events", [[_SHELL_CALL], [None, _SHELL_CALL], ["shell"]])
+@pytest.mark.parametrize("events", [[_SHELL_CALL], [None, _SHELL_CALL], ["shell"], [{"tool_name": "shell"}]])
 async def test_move_thread_sends_each_copy_of_a_reply_with_tool_calls_whole(tmp_path: Path, events: list[Any]) -> None:
     """A copy goes through the real send: its markers leave its text there, or stay when its trace names no call."""
     move = _move(tmp_path)

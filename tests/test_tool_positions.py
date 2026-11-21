@@ -246,9 +246,22 @@ async def test_an_edit_bound_to_its_target_when_its_row_is_claimed_sends_no_mark
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("events", [[None], [None, _SHELL], ["shell"], [_SHELL, 7]])
+@pytest.mark.parametrize(
+    "events",
+    [
+        [None],
+        [None, _SHELL],
+        ["shell"],
+        [_SHELL, 7],
+        [{"tool_name": "shell"}],
+        [_SHELL, {"type": "tool_call_completed"}],
+    ],
+)
 async def test_a_reply_whose_trace_has_an_entry_that_is_no_call_is_sent_as_it_is(events: list[Any]) -> None:
-    """Marker [n] names entry n, so a list with a broken entry is sent on untouched, never filtered and renumbered."""
+    """Marker [n] names entry n, so a list with a broken entry is sent on untouched, never filtered and renumbered.
+
+    A reader takes such a trace for none, so its marker lines are text to it, which must stay in the text.
+    """
     index = events.index(_SHELL) + 1 if _SHELL in events else 1
     content = _marked(f"Before.\n\n🔧 `shell` [{index}]\n\nAfter.", events)
     client = _client()
