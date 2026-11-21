@@ -410,6 +410,26 @@ async def test_a_lobby_lost_before_a_pass_read_it_is_backfilled_once_it_is_stewa
 
 
 @pytest.mark.asyncio
+async def test_a_settled_lobby_seen_lost_is_read_again_once_it_is_stewarded_again(coordination: Coordination) -> None:
+    """Who joins a settled lobby while another bot stewards it is this bot's to onboard when it takes the lobby back."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    set_lobby_members(lifecycle, "@alice:localhost")
+    await lifecycle._reconcile()
+    assert lifecycle._settled()
+    lifecycle.is_steward = lambda _room_id: False
+    lifecycle.schedule_reconciliation()
+    set_lobby_members(lifecycle, "@alice:localhost", "@bob:localhost")
+    lifecycle.is_steward = lambda _room_id: True
+
+    await lifecycle._reconcile()
+
+    onboarded = [attempt.args[0] for attempt in coordination.owner.ensure.await_args_list]
+    assert onboarded == ["@alice:localhost", "@bob:localhost"]
+    assert lifecycle._settled()
+
+
+@pytest.mark.asyncio
 async def test_claimed_baseline_join_onboards_and_retries_without_stewardship(coordination: Coordination) -> None:
     """The bot that holds a join's claim onboards it after losing the room, and its own pass retries a failure."""
     lifecycle = coordination.lifecycle

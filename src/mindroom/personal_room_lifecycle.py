@@ -219,9 +219,12 @@ class PersonalRoomLifecycle:
             # A reload turned the feature off, which ends every trigger still owed a retry.
             self._retry_candidates.clear()
             return
+        stewarded = self._stewarded_onboarding_rooms()
+        # A settled room seen while another bot stewards it is read again on takeover, as who is in it may change.
+        self._reconciled_rooms &= stewarded
         if (
             self._settled()
-            or not (self._stewarded_onboarding_rooms() or self._retry_candidates)
+            or not (stewarded or self._retry_candidates)
             or self._reconciliation_task is not None
             or monotonic() < self._next_reconciliation_at
         ):
