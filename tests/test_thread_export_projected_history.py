@@ -366,7 +366,6 @@ async def test_an_export_reads_an_agents_reply_with_tool_calls_as_it_was_built(r
         config=Config(),
         store=router,
         self_sender=ROUTER,
-        had_tool_markers=lambda sender: sender == HELPER,
     )
 
     assert bodies(await export(reader)) == ["root", "Looked.", "Looked."]

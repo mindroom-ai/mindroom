@@ -75,6 +75,7 @@ from mindroom.matrix.legacy_media_edits import readable_legacy_file_edit
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar, without_sidecar_reference
 from mindroom.matrix.transport_progress import is_transport_progress_revision, is_unfinished_reply
+from mindroom.matrix_identifiers import has_agent_username
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.tool_system.events import tool_markers_in_text
 
@@ -282,6 +283,9 @@ def _projected_from_event(room_id: str, event: nio.Event, *, self_sender: str) -
     """
     content = event.source.get("content")
     content = content if isinstance(content, dict) else {}
+    if has_agent_username(event.sender):
+        # A fetch stores what sync stores: an agent's reply with its tool markers in its text.
+        content = tool_markers_in_text(content)
     redacts = _redaction_target(event)
     if redacts is not None:
         return ProjectedEvent(
@@ -468,7 +472,7 @@ def _project_room_page(
     room_id: str,
     page: Sequence[nio.BaseEvent],
     *,
-    project: Callable[[str, nio.Event], ProjectedEvent | None],
+    self_sender: str,
     unreadable: _UnreadableHistory,
 ) -> _ProjectedRoomPage:
     """Project one fetched page without retaining any preceding page."""
@@ -476,7 +480,7 @@ def _project_room_page(
     logical_messages = 0
     for event in page:
         readable = readable_event(client, event, unreadable)
-        projected = None if readable is None else project(room_id, readable)
+        projected = None if readable is None else _projected_from_event(room_id, readable, self_sender=self_sender)
         if projected is None:
             continue
         events.append(projected)
@@ -572,9 +576,6 @@ class ConversationHydrator:
     # bounds never once used them and every thread the bot had answered in was
     # unexportable until a rejoin moved the membership epoch.
     require_complete: bool = False
-    # Whose replies reached Matrix without their tool markers: theirs are stored with them in their text, as sync
-    # stores them. Another server's agent is one, so this says nothing about whom this runtime manages.
-    had_tool_markers: Callable[[str], bool] = lambda _sender: False
     _in_flight: dict[tuple[str, str | None], asyncio.Task[None]] = field(
         default_factory=dict,
         init=False,
@@ -595,13 +596,6 @@ class ConversationHydrator:
         await asyncio.gather(*tasks, return_exceptions=True)
         self._in_flight.clear()
         self._recoveries.clear()
-
-    def _projected(self, room_id: str, event: nio.Event) -> ProjectedEvent | None:
-        """Project one fetched event, an agent's reply with its tool markers in its text before anything reads it."""
-        projected = _projected_from_event(room_id, event, self_sender=self.self_sender)
-        if projected is None or not self.had_tool_markers(projected.sender):
-            return projected
-        return replace(projected, content=tool_markers_in_text(projected.content))
 
     def _client(self) -> nio.AsyncClient:
         """Return the Matrix client, which only exists once the bot has logged in."""
@@ -973,7 +967,7 @@ class ConversationHydrator:
                 client,
                 recovery.room_id,
                 page,
-                project=self._projected,
+                self_sender=self.self_sender,
                 unreadable=unreadable,
             )
             logical += projected_page.logical_messages
@@ -1051,7 +1045,11 @@ class ConversationHydrator:
         else:
             msg = f"Could not fetch thread root {thread_id!r}: {root}"
             raise ConversationReadError(msg)
-        root_projected = None if readable_root is None else self._projected(room_id, readable_root)
+        root_projected = (
+            None
+            if readable_root is None
+            else _projected_from_event(room_id, readable_root, self_sender=self.self_sender)
+        )
         if root_projected is not None:
             events.append(root_projected)
         relations = await self._fetch_relations(
@@ -1344,7 +1342,7 @@ class ConversationHydrator:
                         # conversation.
                         complete = False
                     else:
-                        projected = self._projected(room_id, readable)
+                        projected = _projected_from_event(room_id, readable, self_sender=self.self_sender)
                         if projected is not None:
                             events.append(projected)
                             if _is_logical_message(projected):
@@ -1433,7 +1431,7 @@ class ConversationHydrator:
                 client,
                 room_id,
                 page,
-                project=self._projected,
+                self_sender=self.self_sender,
                 unreadable=unreadable,
             )
             events.extend(projected_page.events)
@@ -1508,7 +1506,7 @@ class ConversationHydrator:
                 logical_event_id=request.logical_event_id,
             )
             return None
-        projected = self._projected(request.room_id, readable_original)
+        projected = _projected_from_event(request.room_id, readable_original, self_sender=self.self_sender)
         if projected is None or projected.redacts_event_id is not None:
             # The whole logical message is gone, not just the revision that was
             # on screen, so there is no revision left to reduce to. Dropping the

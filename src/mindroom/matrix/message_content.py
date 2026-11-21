@@ -25,10 +25,11 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.media import decrypt_media_bytes, download_mxc_bytes
 from mindroom.matrix.sidecar_content import sidecar_content_to_resolve, sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
+from mindroom.matrix_identifiers import has_agent_username
 from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Container
+    from collections.abc import Collection
 
 logger = get_logger(__name__)
 
@@ -137,15 +138,13 @@ def _with_event_marker(
 async def _resolve_event_content(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None,
-    agent_sender_ids: Container[str],
 ) -> tuple[dict[str, Any], bool]:
     """Return one event's canonical content plus whether resolving it changed anything."""
     preview_content = _normalized_content_dict(event_source.get("content", {}))
     resolved_content = await _resolve_canonical_content(preview_content, client)
     if resolved_content is not preview_content:
         resolved_content = _with_event_marker(_with_event_relation(resolved_content, preview_content), preview_content)
-    if isinstance(sender := event_source.get("sender"), str) and sender in agent_sender_ids:
-        # An agent's fetched reply is read with its tool markers in its text, as a synced one is.
+    if has_agent_username(event_source.get("sender")):
         resolved_content = tool_markers_in_text(resolved_content)
     return resolved_content, resolved_content is not preview_content
 
@@ -205,7 +204,6 @@ async def extract_and_resolve_message(
     client: nio.AsyncClient | None = None,
     *,
     trusted_sender_ids: Collection[str] = (),
-    agent_sender_ids: Container[str] = (),
 ) -> dict[str, Any]:
     """Extract message data and resolve large message content if needed.
 
@@ -216,7 +214,6 @@ async def extract_and_resolve_message(
         event: The Matrix event to extract data from
         client: Optional Matrix client for downloading attachments
         trusted_sender_ids: Exact trusted internal sender IDs allowed to override visible body
-        agent_sender_ids: The router, agents and teams, whose replies are read with their tool markers in their text
 
     Returns:
         Dict with sender, body, timestamp, event_id, and content fields.
@@ -224,7 +221,7 @@ async def extract_and_resolve_message(
         the full text from the attachment.
 
     """
-    resolved_content, _ = await _resolve_event_content(event.source, client, agent_sender_ids)
+    resolved_content, _ = await _resolve_event_content(event.source, client)
     resolved_body = visible_body_from_content(
         resolved_content,
         event.body,
@@ -259,10 +256,9 @@ async def extract_edit_body(
     client: nio.AsyncClient | None = None,
     *,
     trusted_sender_ids: Collection[str] = (),
-    agent_sender_ids: Container[str] = (),
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
-    resolved_content, _ = await _resolve_event_content(event_source, client, agent_sender_ids)
+    resolved_content, _ = await _resolve_event_content(event_source, client)
     new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
     body = visible_body_from_content(
         new_content,
@@ -280,10 +276,9 @@ async def extract_edit_body(
 async def resolve_event_source_content(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None = None,
-    agent_sender_ids: Container[str] = (),
 ) -> dict[str, Any]:
     """Return an event source with canonical v2 sidecar content hydrated when available."""
-    resolved_content, content_changed = await _resolve_event_content(event_source, client, agent_sender_ids)
+    resolved_content, content_changed = await _resolve_event_content(event_source, client)
     if not content_changed:
         return event_source
 

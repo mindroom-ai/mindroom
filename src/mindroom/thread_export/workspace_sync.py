@@ -14,7 +14,6 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.background_tasks import SupervisedLoop
-from mindroom.entity_resolution import tool_marker_senders
 from mindroom.logging_config import get_logger
 from mindroom.private_storage.private_instance_identity import private_instances_for_agent
 from mindroom.requester_identity import is_access_checked_requester_id
@@ -171,7 +170,6 @@ class WorkspaceThreadExportRunner:
                     group.rooms,
                     None,
                     config,
-                    self._deps.runtime_paths,
                     entity_name=group.entity_name,
                     membership_index=self._deps.agent_reply_memberships,
                 )
@@ -311,7 +309,6 @@ class WorkspaceThreadExportRunner:
                     tuple(rooms),
                     agent_targets,
                     config,
-                    runtime_paths,
                     entity_name=agent_name,
                     membership_index=self._deps.agent_reply_memberships,
                     exported=self._exported.setdefault(agent_name, {}),
@@ -357,7 +354,6 @@ def _source_for_bot(
     rooms: tuple[ThreadExportRoom, ...],
     targets: tuple[ThreadExportTarget, ...] | None,
     config: Config,
-    runtime_paths: RuntimePaths,
     *,
     entity_name: str,
     membership_index: AgentReplyMembershipIndex,
@@ -373,7 +369,6 @@ def _source_for_bot(
             config=config,
             store=bot.journal_principal(),
             self_sender=bot.matrix_id.full_id,
-            had_tool_markers=lambda sender: sender in tool_marker_senders(config, runtime_paths),
         ),
         rooms=rooms,
         entity_name=entity_name,

@@ -40,7 +40,6 @@ from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY, MatrixMe
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.requester_identity import mindroom_user_id
 from mindroom.session_ids import create_session_id
 from mindroom.teams.members import _as_member
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
@@ -2533,16 +2532,11 @@ def _reply_with_a_separator_after_its_call() -> tuple[dict[str, object], dict[st
 
 @pytest.mark.asyncio
 async def test_matrix_message_read_room_puts_tool_markers_back_in_an_agents_reply_and_in_no_other_message() -> None:
-    """A room read asks the homeserver, which holds a reply without its marker lines.
-
-    A person may sign in to the internal user's account, so what it sent is read as a person's message is.
-    """
+    """A room read asks the homeserver, which holds a reply without its marker lines."""
     marked, wire = _reply_with_a_separator_after_its_call()
     tool = MatrixMessageTools()
-    ctx = _make_context(thread_id=None, mindroom_user=MindRoomUserConfig())
-    internal_user = mindroom_user_id(ctx.config, ctx.runtime_paths)
-    assert internal_user in trusted_visible_sender_ids(ctx.config, ctx.runtime_paths)
-    senders = ["@mindroom_general:localhost", internal_user, "@alice:localhost"]
+    ctx = _make_context(thread_id=None)
+    senders = ["@mindroom_general:localhost", "@alice:localhost"]
 
     async def read(content: dict[str, object]) -> list[dict[str, Any]]:
         events = [
@@ -2565,8 +2559,8 @@ async def test_matrix_message_read_room_puts_tool_markers_back_in_an_agents_repl
     as_built, as_held = await read(marked), await read(wire)
 
     assert as_held[0] == as_built[0]
-    assert [message["body"] for message in as_held] == ["After.", wire["body"], wire["body"]]
-    assert [message["content"]["io.mindroom.tool_trace"]["version"] for message in as_held] == [2, 3, 3]
+    assert [message["body"] for message in as_held] == ["After.", wire["body"]]
+    assert [message["content"]["io.mindroom.tool_trace"]["version"] for message in as_held] == [2, 3]
 
 
 @pytest.mark.asyncio
@@ -2592,7 +2586,6 @@ async def test_matrix_message_read_thread_is_the_same_for_a_reply_stored_as_matr
             },
             self_sender="@mindroom_other:localhost",
             provenance=nio.TimelineEventProvenance.LIVE,
-            sender_is_managed=lambda _sender: True,
         )
         assert views is not None
         assert views[1] is not None

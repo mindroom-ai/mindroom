@@ -18,7 +18,6 @@ from mindroom.event_journal import EventJournalStore
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
-from mindroom.requester_identity import mindroom_user_id
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_export.models import ThreadExportAccumulator, ThreadExportRoom, ThreadExportTarget
@@ -406,45 +405,6 @@ async def test_each_agent_source_is_bound_only_to_its_own_workspace(tmp_path: Pa
             (runtime_paths.storage_root / "agents" / "other" / "workspace" / _WORKSPACE_EXPORT_DIRNAME,),
         ),
     ]
-
-
-async def test_an_export_takes_the_internal_user_for_a_person_as_a_turn_does(tmp_path: Path) -> None:
-    """An export fills the projection that turns read, so both put tool markers back for the same senders.
-
-    Those are the router and the agents; a person may sign in to the internal user's account.
-    """
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    rooms=["!external:localhost"],
-                    thread_exports=AgentThreadExportConfig(),
-                ),
-            },
-            mindroom_user={"username": "mindroom_user"},
-        ),
-        test_runtime_paths(tmp_path),
-    )
-    internal_user = mindroom_user_id(config, runtime_paths_for(config))
-    assert internal_user == "@mindroom_user:localhost"
-    code = _FakeBot("@mindroom_code:localhost", rooms=["!external:localhost"])
-    runner = _runner(config, _bots(_FakeBot("@mindroom_router:localhost"), code))
-    export = _export_mock()
-
-    with patch(EXPORT_PATH, new=export):
-        runner.queue_full_pass()
-        await runner._run_pass_once()
-
-    call = export.await_args
-    assert call is not None
-    (source,) = call.kwargs["sources"]
-    had_tool_markers = source.reader.reader.hydrator.had_tool_markers
-    senders = ["@mindroom_code:localhost", "@mindroom_router:localhost", internal_user, "@alice:localhost"]
-    assert [had_tool_markers(sender) for sender in senders] == [True, True, False, False]
-    # An agent that has left the config and another server's sent their replies without markers too.
-    assert had_tool_markers("@mindroom_retired:localhost")
-    assert had_tool_markers("@mindroom_code:elsewhere.example")
 
 
 async def test_invited_rooms_read_through_the_invited_entity_bot(tmp_path: Path) -> None:

@@ -14,7 +14,6 @@ from mindroom.constants import ACTING_REQUESTER_KEY
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
-from mindroom.entity_resolution import tool_marker_senders
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.client_room_admin import room_admin_power_user
@@ -23,6 +22,7 @@ from mindroom.matrix.thread_mutation_impact import (
     event_thread_membership_known,
     redaction_thread_membership_known,
 )
+from mindroom.matrix_identifiers import has_agent_username
 from mindroom.requester_identity import (
     equivalent_requester_ids,
     is_access_checked_requester_id,
@@ -32,8 +32,6 @@ from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
-    from collections.abc import Container
-
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
@@ -348,7 +346,6 @@ class MatrixApiTools(Toolkit):
     def _normalize_search_event_payload(
         cls,
         raw_event: object,
-        agents: Container[str],
     ) -> dict[str, object]:
         raw_event_dict = cls._copy_string_keyed_dict(raw_event) or {}
         event_id = raw_event_dict.get("event_id")
@@ -357,8 +354,7 @@ class MatrixApiTools(Toolkit):
         event_type = raw_event_dict.get("type")
         content = raw_event_dict.get("content")
         normalized_content = cls._copy_string_keyed_dict(content) or {}
-        if isinstance(sender, str) and sender in agents:
-            # An agent's reply is read with its tool markers in its text, which Matrix holds without them.
+        if has_agent_username(sender):
             normalized_content = tool_markers_in_text(normalized_content)
         origin_server_ts = raw_event_dict.get("origin_server_ts")
         return {
@@ -374,7 +370,6 @@ class MatrixApiTools(Toolkit):
     def _normalize_search_context_payload(
         cls,
         raw_context: object,
-        agents: Container[str],
     ) -> dict[str, object] | None:
         context_dict = cls._copy_string_keyed_dict(raw_context)
         if context_dict is None:
@@ -384,12 +379,12 @@ class MatrixApiTools(Toolkit):
         events_after = context_dict.get("events_after")
         normalized_context: dict[str, object] = {
             "events_before": (
-                [cls._normalize_search_event_payload(event, agents) for event in events_before]
+                [cls._normalize_search_event_payload(event) for event in events_before]
                 if isinstance(events_before, list)
                 else []
             ),
             "events_after": (
-                [cls._normalize_search_event_payload(event, agents) for event in events_after]
+                [cls._normalize_search_event_payload(event) for event in events_after]
                 if isinstance(events_after, list)
                 else []
             ),
@@ -1251,16 +1246,15 @@ class MatrixApiTools(Toolkit):
         if isinstance(response, _MatrixSearchResponse):
             normalized_results: list[dict[str, object]] = []
             include_context = event_context is not None
-            agents = tool_marker_senders(context.config, context.runtime_paths)
             for raw_result in response.results:
-                event_payload = self._normalize_search_event_payload(raw_result.get("result"), agents)
+                event_payload = self._normalize_search_event_payload(raw_result.get("result"))
                 rank = raw_result.get("rank")
                 normalized_result: dict[str, object] = {
                     "rank": float(rank) if isinstance(rank, (int, float)) else 0.0,
                     **event_payload,
                 }
                 if include_context:
-                    context_payload = self._normalize_search_context_payload(raw_result.get("context"), agents)
+                    context_payload = self._normalize_search_context_payload(raw_result.get("context"))
                     if context_payload is not None:
                         normalized_result["context"] = context_payload
                 normalized_results.append(normalized_result)

@@ -67,7 +67,7 @@ from tests.runtime_fakes import ready_runtime
 from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable
+    from collections.abc import AsyncGenerator
     from pathlib import Path
 
 
@@ -320,7 +320,6 @@ class TestAgentBot(AgentBotTestBase):
             after_admission: object,
             on_decryption_failure: object,
             sender_is_managed: object,
-            had_tool_markers: Callable[[str], bool],
         ) -> None:
             assert after_sync == bot._on_ingestion_frame_completion
             assert after_ack == bot._ingestion_admission_progress.set
@@ -329,12 +328,6 @@ class TestAgentBot(AgentBotTestBase):
             assert after_admission == bot._after_ingestion_admission
             assert on_decryption_failure == bot._decryption_diagnostics.schedule
             assert sender_is_managed == bot._ingress_validator.sender_is_trusted_for_ingress_metadata
-            # Whose synced replies get their tool markers back is wider than whom the bot trusts.
-            elsewhere = "@mindroom_code:elsewhere.example"
-            assert had_tool_markers(elsewhere)
-            assert not bot._ingress_validator.sender_is_trusted_for_ingress_metadata(elsewhere)
-            assert had_tool_markers(bot.matrix_id.full_id)
-            assert not had_tool_markers("@alice:localhost")
             pump_calls.append(
                 (
                     session,

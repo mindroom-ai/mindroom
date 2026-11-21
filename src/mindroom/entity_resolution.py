@@ -10,7 +10,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID, managed_account_key, matrix_account_user_id
 from mindroom.matrix.invited_rooms_store import should_persist_invited_rooms
-from mindroom.matrix_identifiers import agent_username_localpart, has_agent_username, managed_room_key_for_alias
+from mindroom.matrix_identifiers import agent_username_localpart, managed_room_key_for_alias
 from mindroom.requester_identity import (
     INTERNAL_USER_ENTITY_NAME,
     IdentityMemo,
@@ -258,9 +258,9 @@ class EntityIdentityRegistry:
         """Return whether a Matrix user ID belongs to a current configured entity."""
         return self.current_entity_name_for_user_id(user_id, include_router=include_router) is not None
 
-    @cached_property
-    def managed_user_ids(self) -> frozenset[str]:
-        """Return the current Matrix IDs of the configured entities: the router, the agents and the teams."""
+    @property
+    def _internal_sender_ids(self) -> frozenset[str]:
+        """Return current Matrix IDs trusted as managed internal senders."""
         return frozenset(matrix_id.full_id for matrix_id in self.current_ids.values())
 
 
@@ -389,43 +389,10 @@ def _validate_internal_user_id_is_unique(
 
 def current_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
     """Return current runtime-owned Matrix IDs trusted as internal senders."""
-    sender_ids = set(entity_identity_registry(config, runtime_paths).managed_user_ids)
+    sender_ids = set(entity_identity_registry(config, runtime_paths)._internal_sender_ids)
     if internal_user_id := mindroom_user_id(config, runtime_paths):
         sender_ids.add(internal_user_id)
     return frozenset(sender_ids)
-
-
-@dataclass(frozen=True, slots=True)
-class ToolMarkerSenders:
-    """The accounts whose replies reached Matrix without their tool markers, for ``tool_markers_in_text`` to read.
-
-    ``entities`` are this runtime's router, agents and teams. Any other account named as an agent is one too: another
-    server's MindRoom, or an agent that has left the config. Its markers go back as the text they were, which says
-    nothing about who it is: a trace in a message is read the same from any sender, as it always was.
-    ``person_accounts`` are named so and are no agent's: a person may sign in to the internal user's.
-    """
-
-    entities: frozenset[str]
-    person_accounts: frozenset[str] = frozenset()
-
-    def __contains__(self, sender: object) -> bool:
-        """Return whether ``sender`` is one of them; a sender that is no Matrix ID is none."""
-        if not isinstance(sender, str):
-            return False
-        return sender in self.entities or (has_agent_username(sender) and sender not in self.person_accounts)
-
-
-def tool_marker_senders(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    entities: Iterable[str] | None = None,
-) -> ToolMarkerSenders:
-    """Return whose replies are read with their tool markers in their text; ``entities`` default to the registry's."""
-    internal_user_id = mindroom_user_id(config, runtime_paths)
-    return ToolMarkerSenders(
-        entity_identity_registry(config, runtime_paths).managed_user_ids if entities is None else frozenset(entities),
-        frozenset({internal_user_id} if internal_user_id else ()),
-    )
 
 
 def persisted_bot_user_ids(runtime_paths: RuntimePaths) -> frozenset[str]:

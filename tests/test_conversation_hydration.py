@@ -26,7 +26,6 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
-from mindroom.entity_resolution import ToolMarkerSenders
 from mindroom.event_journal import EventClass, EventKind, HistoryRecoveryState, HydrationPolicy, ProjectedEvent, reads
 from mindroom.execution_preparation import _get_unseen_messages_for_sender
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
@@ -3358,10 +3357,6 @@ class TestEncryptedRelations:
 AGENT = "@mindroom_other:example.org"
 
 
-def _is_agent(sender: str) -> bool:
-    return sender == AGENT
-
-
 def _reply_with_calls(body: str, calls: int) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return a reply as the backend builds it, its tool markers in its text, and as Matrix holds it, without them."""
     built = {
@@ -3398,7 +3393,7 @@ class TestRepliesWithToolCalls:
             olm=object(),
         )
 
-        assert await hydrator(alice, client, had_tool_markers=_is_agent).refresh((await refreshes(alice))[0])
+        assert await hydrator(alice, client).refresh((await refreshes(alice))[0])
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
         read_as = built if sender == AGENT else held
@@ -3415,45 +3410,12 @@ class TestRepliesWithToolCalls:
         ]
         client = FakeClient(events={"$root": raw("$root", "root")}, relations={"$root": replies})
 
-        await hydrator(alice, client, had_tool_markers=_is_agent).ensure_hydrated(room_id=ROOM, thread_id="$root")
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=50)
         held = {m.logical_event_id: m.content for m in page.messages}
         for ts, case in enumerate(_SENT_CASES, start=2):
             assert held[f"$reply{ts}"] == {**_sent(case), **thread}
-
-    async def test_a_hydrated_thread_holds_the_reply_of_an_agent_this_runtime_does_not_run_as_it_was_written(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Another server's agent and one that left the config sent their replies without markers too.
-
-        A reply of calls alone would otherwise be a row without text, which no judge and no summary can read.
-        """
-        internal_user = "@mindroom_user:example.org"
-        senders = ToolMarkerSenders(frozenset({AGENT}), frozenset({internal_user}))
-        thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}}
-        case = next(case for case in _SENT_CASES if case["name"] == "a reply of calls alone")
-        written = {
-            "@mindroom_code:elsewhere.example": _sent(case),
-            "@mindroom_retired:example.org": _sent(case),
-            internal_user: _wire(case),
-            ALICE: _wire(case),
-        }
-        replies = [
-            {**raw(f"$reply{ts}", "", sender=sender, ts=ts), "content": {**_wire(case), **thread}}
-            for ts, sender in enumerate(written, start=2)
-        ]
-        client = FakeClient(events={"$root": raw("$root", "root")}, relations={"$root": replies})
-
-        await hydrator(alice, client, had_tool_markers=senders.__contains__).ensure_hydrated(
-            room_id=ROOM,
-            thread_id="$root",
-        )
-
-        page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=50)
-        held = {m.sender: m.content for m in page.messages if m.logical_event_id != "$root"}
-        assert held == {sender: {**content, **thread} for sender, content in written.items()}
 
     async def test_a_hydrated_thread_fills_its_pages_as_a_synced_one_does(
         self,
@@ -3473,7 +3435,7 @@ class TestRepliesWithToolCalls:
                 {**raw(f"$reply{ts}", "", sender=AGENT, ts=ts), "content": {**content, **thread}} for ts in (2, 3)
             ]
             client = FakeClient(events={"$root": raw("$root", "root")}, relations={"$root": replies})
-            await hydrator(store, client, had_tool_markers=_is_agent).ensure_hydrated(room_id=ROOM, thread_id="$root")
+            await hydrator(store, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
             page = await store.read_conversation(room_id=ROOM, thread_id="$root", limit=50)
             return [m.content["body"] for m in page.messages], page.next_cursor is None
 

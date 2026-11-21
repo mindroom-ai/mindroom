@@ -357,14 +357,10 @@ def write_owner_roster(paths: RuntimePaths) -> None:
     roster_path.write_text(PersonalAgentRoster(entries=[entry]).model_dump_json(), encoding="utf-8")
 
 
-def owner_config(paths: RuntimePaths, **settings: object) -> Config:
-    """Alice's personal agent, made from a template that gives it `matrix_user`, with its Matrix account recorded.
-
-    Any other top-level ``settings`` are the config's too.
-    """
+def owner_config(paths: RuntimePaths) -> Config:
+    """Alice's personal agent, made from a template that gives it `matrix_user`, with its Matrix account recorded."""
     write_owner_roster(paths)
     data = {
-        **settings,
         "models": {"default": {"provider": "openai", "id": "m"}},
         "personal_agents": {
             "mind": {

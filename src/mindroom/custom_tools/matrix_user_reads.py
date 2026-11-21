@@ -35,10 +35,11 @@ from mindroom.matrix.media import (
     parse_matrix_media_event_source,
 )
 from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
+from mindroom.matrix_identifiers import has_agent_username
 from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
-    from collections.abc import Container, Mapping
+    from collections.abc import Mapping
     from pathlib import Path
 
     import nio
@@ -595,7 +596,6 @@ def _message_columns(
     message: dict[str, Any],
     edits: list[dict[str, Any]],
     reactions: dict[str, set[str]],
-    agents: Container[str],
     *,
     edited: str = "[edited]",
     thread_page: bool = False,
@@ -611,8 +611,7 @@ def _message_columns(
         default=None,
     )
     content = _content(message) if latest is None else _mapping(_content(latest).get("m.new_content"))
-    # An agent's reply is read with its tool markers in its text, as it was before they left it on the way to Matrix.
-    if isinstance(sender := message.get("sender"), str) and sender in agents:
+    if has_agent_username(message.get("sender")):
         content = tool_markers_in_text(content)
     text, file_note = _said(message, content)
     notes = [
@@ -630,7 +629,7 @@ def _message_columns(
     )
 
 
-def _message_lines(events: list[dict[str, Any]], agents: Container[str], *, thread_page: bool = False) -> list[str]:
+def _message_lines(events: list[dict[str, Any]], *, thread_page: bool = False) -> list[str]:
     """Return a line for each message among ``events``, in their order, with the edits and reactions among them.
 
     A run of messages that cannot be read is one line that counts them. On a ``thread_page``, a page of one thread, a
@@ -660,7 +659,6 @@ def _message_lines(events: list[dict[str, Any]], agents: Container[str], *, thre
                     message,
                     edits.get(message["event_id"], []),
                     reactions.get(message["event_id"], {}),
-                    agents,
                     thread_page=thread_page,
                 ),
             )
@@ -685,7 +683,6 @@ def _page_query(parameters: dict[str, object], page_token: str | None) -> str:
 async def read_messages(
     client: nio.AsyncClient,
     room_id: str,
-    agents: Container[str],
     *,
     event_id: str | None,
     thread_id: str | None,
@@ -701,20 +698,18 @@ async def read_messages(
     room = quote(room_id, safe="")
     count = _clamped(limit, _MESSAGES_LIMIT, _MAX_MESSAGES_LIMIT)
     if thread_id is not None:
-        return await _thread(client, room, quote(thread_id, safe=""), agents, page_token=page_token, count=count)
+        return await _thread(client, room, quote(thread_id, safe=""), page_token=page_token, count=count)
     if event_id is not None:
-        around = await _around(client, room, quote(event_id, safe=""), count=count)
-        return _messages_page(_message_lines(around, agents))
+        return await _around(client, room, quote(event_id, safe=""), count=count)
     parameters = _page_query({"dir": "b", "limit": count, "filter": _MESSAGES_FILTER}, page_token)
     page = await matrix_json(client, "GET", f"/rooms/{room}/messages?{parameters}")
-    return _messages_page(_message_lines(json_objects(page, "chunk")[::-1], agents), page.get("end"))
+    return _messages_page(_message_lines(json_objects(page, "chunk")[::-1]), page.get("end"))
 
 
 async def _thread(
     client: nio.AsyncClient,
     room: str,
     thread: str,
-    agents: Container[str],
     *,
     page_token: str | None,
     count: int,
@@ -723,11 +718,11 @@ async def _thread(
     root = [] if page_token else [await matrix_json(client, "GET", f"/rooms/{room}/event/{thread}")]
     parameters = _page_query({"dir": "b", "limit": count}, page_token)
     replies = await matrix_json(client, "GET", f"/rooms/{room}/relations/{thread}/m.thread?{parameters}", version="v1")
-    lines = _message_lines([*root, *json_objects(replies, "chunk")[::-1]], agents, thread_page=True)
+    lines = _message_lines([*root, *json_objects(replies, "chunk")[::-1]], thread_page=True)
     return _messages_page(lines, replies.get("next_batch"))
 
 
-async def _around(client: nio.AsyncClient, room: str, event: str, *, count: int) -> list[dict[str, Any]]:
+async def _around(client: nio.AsyncClient, room: str, event: str, *, count: int) -> dict[str, object]:
     """Return an event with up to ``count // 2`` events on each side, even from a homeserver that sends more."""
     side = count // 2
     parameters = urlencode({"limit": side * 2, "filter": _MESSAGES_FILTER})
@@ -735,13 +730,12 @@ async def _around(client: nio.AsyncClient, room: str, event: str, *, count: int)
     # The events before come newest first.
     before = json_objects(context, "events_before")[:side][::-1]
     after = json_objects(context, "events_after")[:side]
-    return [*before, _mapping(context.get("event")), *after]
+    return _messages_page(_message_lines([*before, _mapping(context.get("event")), *after]))
 
 
 async def search_messages(
     client: nio.AsyncClient,
     query: str,
-    agents: Container[str],
     *,
     room_id: str | None,
     page_token: str | None,
@@ -770,7 +764,7 @@ async def search_messages(
         if _relation(event).get("rel_type") != _EDIT:
             if _is_message(event):
                 # The message itself, with the homeserver's latest edit of it, replaces the line of an edit found.
-                lines[event["event_id"], event.get("sender")] = _line(room, *_message_columns(event, [], {}, agents))
+                lines[event["event_id"], event.get("sender")] = _line(room, *_message_columns(event, [], {}))
             continue
         # The edit's sender need not be the message's author, so the edit is shown as its sender's, not the message.
         original = _relation(event).get("event_id")
@@ -778,7 +772,7 @@ async def search_messages(
         message = {"event_id": original, **{field: event.get(field) for field in fields}}
         shown = (original, event.get("sender"))
         if isinstance(original, str) and shown not in lines and _is_message(message) and _replaces(event, message):
-            lines[shown] = _line(room, *_message_columns(message, [event], {}, agents, edited="[edit]"))
+            lines[shown] = _line(room, *_message_columns(message, [event], {}, edited="[edit]"))
     return _messages_page(list(lines.values()), found.get("next_batch"))
 
 

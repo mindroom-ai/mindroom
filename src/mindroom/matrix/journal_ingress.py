@@ -28,6 +28,7 @@ from mindroom.matrix.media import (
     parse_matrix_media_event_source,
 )
 from mindroom.matrix.transport_progress import is_transport_progress_revision, is_unfinished_reply
+from mindroom.matrix_identifiers import has_agent_username
 from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
@@ -319,18 +320,10 @@ def ingestion_timeline_views(
     expected_event_id: str | None = None,
     security_metadata: Mapping[str, object] | None = None,
     sender_is_managed: Callable[[str], bool] = lambda _sender: False,
-    had_tool_markers: Callable[[str], bool] | None = None,
 ) -> tuple[InboundEvent, ProjectedEvent | None] | None:
-    """Classify one durable timeline input, or return its compatibility fate.
-
-    ``had_tool_markers`` says whose text lost its tool markers on its way to Matrix, which is no word on whom this
-    runtime manages: another server's agent is one. Without it, they are the senders it manages.
-    """
+    """Classify one durable timeline input, or return its compatibility fate."""
     message = "Unsupported ingestion event"
-    if isinstance(content := source.get("content"), dict) and (had_tool_markers or sender_is_managed)(
-        str(source.get("sender")),
-    ):
-        # A turn and the projection read an agent's synced reply with its tool markers in its text.
+    if isinstance(content := source.get("content"), dict) and has_agent_username(source.get("sender")):
         source = {**source, "content": tool_markers_in_text(cast("dict[str, object]", content))}
     parsed = parse_matrix_media_event_source(source) if is_encrypted_media_event_source(source) else None
     if not isinstance(parsed, MATRIX_MEDIA_EVENT_TYPES):

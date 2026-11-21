@@ -26,7 +26,6 @@ from mindroom.custom_tools.matrix_user_reads import (
     search_messages,
 )
 from mindroom.custom_tools.matrix_user_writes import MatrixUserWrite, write_as_person
-from mindroom.entity_resolution import prepared_entity_names_by_user_id, tool_marker_senders
 from mindroom.matrix.user_masquerade import create_user_masquerade_client, user_appservice_token
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import (
@@ -104,14 +103,11 @@ class MatrixUserTools(Toolkit):
         """Return the result as ``custom_tool_payload`` shapes it, with its text as written, not as costly escapes."""
         return json.dumps({"status": status, "tool": "matrix_user", **fields}, sort_keys=True, ensure_ascii=False)
 
-    def _config(self) -> Config:
-        """Return the config that decides this call: its chat turn's, or the build's for a call without a turn."""
-        context = get_tool_runtime_context()
-        return context.current_config if context is not None else self._runtime_config
-
     def _actor(self) -> MatrixUserActor:
         """Return whom this call acts as, raising ``MatrixUserRefused`` when it may act as nobody."""
-        actor = matrix_user_actor(self._config(), self._runtime_paths)
+        context = get_tool_runtime_context()
+        config = context.current_config if context is not None else self._runtime_config
+        actor = matrix_user_actor(config, self._runtime_paths)
         # An agent's build, a team member's, and the MCP gateway's each build the toolkit for the agent its calls run as.
         if actor.agent_name != self._agent_name:
             raise MatrixUserRefused(_NOT_THIS_AGENT)
@@ -191,30 +187,21 @@ class MatrixUserTools(Toolkit):
             room_id = await room_named(client, room_id, self._runtime_paths)
         if action == "room":
             return await read_room(client, str(room_id), limit=limit)
-        if action == "mark_read":
-            return await mark_read(client, str(room_id), event_id=event_id)
-        if action == "download":
-            return await self._download(client, require_tool_runtime_context(), str(room_id), str(event_id))
-        # The router, the agents and the teams that have a Matrix account, which a new one gets after it is configured:
-        # their replies are read with their tool markers in their text, and so are those of any other agent.
-        config = self._config()
-        agents = tool_marker_senders(
-            config,
-            self._runtime_paths,
-            prepared_entity_names_by_user_id(config, self._runtime_paths),
-        )
         if action == "messages":
             return await read_messages(
                 client,
                 str(room_id),
-                agents,
                 event_id=event_id,
                 thread_id=thread_id,
                 page_token=page_token,
                 limit=limit,
             )
+        if action == "mark_read":
+            return await mark_read(client, str(room_id), event_id=event_id)
+        if action == "download":
+            return await self._download(client, require_tool_runtime_context(), str(room_id), str(event_id))
         # The only action left: search.
-        return await search_messages(client, str(query), agents, room_id=room_id, page_token=page_token, limit=limit)
+        return await search_messages(client, str(query), room_id=room_id, page_token=page_token, limit=limit)
 
     async def _write(
         self,

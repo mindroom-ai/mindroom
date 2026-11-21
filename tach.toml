@@ -634,6 +634,7 @@ depends_on = [
     "mindroom.matrix.agent_authored",
     "mindroom.matrix.transport_progress",
     "mindroom.tool_system.events",
+    "mindroom.matrix_identifiers",
 ]
 visibility = [
     "mindroom.journal_dispatch",
@@ -690,6 +691,7 @@ depends_on = [
     "mindroom.matrix.sidecar_content",
     "mindroom.matrix.transport_progress",
     "mindroom.tool_system.events",
+    "mindroom.matrix_identifiers",
 ]
 visibility = [
     "mindroom.bot",
@@ -2614,7 +2616,6 @@ depends_on = [
     "mindroom.custom_tools.matrix_user_authority",
     "mindroom.custom_tools.matrix_user_reads",
     "mindroom.custom_tools.matrix_user_writes",
-    "mindroom.entity_resolution",
     "mindroom.matrix.user_masquerade",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.runtime_context",
@@ -2628,6 +2629,7 @@ depends_on = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.visible_body",
     "mindroom.tool_system.events",
+    "mindroom.matrix_identifiers",
 ]
 visibility = ["mindroom.custom_tools.matrix_user", "mindroom.custom_tools.matrix_user_writes"]
 
@@ -2694,7 +2696,6 @@ depends_on = [
     "mindroom.contacts.policy",
     "mindroom.contacts.turns",
     "mindroom.custom_tools.attachments",
-    "mindroom.entity_resolution",
     "mindroom.interactive",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_visible_messages",
@@ -4186,8 +4187,8 @@ depends_on = [
     "mindroom.matrix.reserved_content",
     "mindroom.matrix.thread_mutation_impact",
     "mindroom.tool_system.authoring",
-    "mindroom.entity_resolution",
     "mindroom.tool_system.events",
+    "mindroom.matrix_identifiers",
 ]
 
 [[modules]]
@@ -4741,6 +4742,7 @@ depends_on = [
     "mindroom.matrix.sidecar_content",
     "mindroom.matrix.visible_body",
     "mindroom.tool_system.events",
+    "mindroom.matrix_identifiers",
 ]
 
 [[modules]]
@@ -4873,7 +4875,6 @@ depends_on = [
     "mindroom.thread_export.service",
     "mindroom.thread_export.storage",
     "mindroom.tool_system.worker_routing",
-    "mindroom.entity_resolution",
 ]
 visibility = ["mindroom.orchestrator"]
 

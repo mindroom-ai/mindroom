@@ -48,8 +48,6 @@ from mindroom.thread_export.storage import exported_content
 from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     import nio
 
     from mindroom.config.main import Config
@@ -109,7 +107,6 @@ def export_conversation_reader(
     config: Config,
     store: ExportProjectionView,
     self_sender: str,
-    had_tool_markers: Callable[[str], bool] = lambda _sender: False,
 ) -> ProjectedThreadReader:
     """Return an export reader borrowing the running owner's client and principal.
 
@@ -125,7 +122,6 @@ def export_conversation_reader(
                 store=store,
                 runtime=_ExportClientRuntime(client=client, config=config),
                 self_sender=self_sender,
-                had_tool_markers=had_tool_markers,
                 # The three ceilings and the name they go by. The name is what
                 # a walk writes into the marker, so these must be changed
                 # together: a policy is the whole set, and recording one of

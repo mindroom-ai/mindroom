@@ -54,9 +54,10 @@ def unnamespaced_agent_name_from_username_localpart(username_localpart: str) -> 
 
 
 def has_agent_username(user_id: object) -> bool:
-    """Return whether a Matrix user ID has the username MindRoom gives its agents, on whichever homeserver.
+    """Return whether a Matrix user ID has the username prefix MindRoom gives its agents, on any homeserver.
 
-    MindRoom takes the tool markers out of what such an account sends, and MindRoom Chat puts them back for it.
+    A send takes the tool markers out of such an account's text, and every read, here and in MindRoom Chat, puts them
+    back for it and for no other. Anyone can register the name elsewhere, so it trusts the account with nothing.
     """
     return isinstance(user_id, str) and user_id.lower().startswith(f"@{_AGENT_USERNAME_PREFIX}")
 

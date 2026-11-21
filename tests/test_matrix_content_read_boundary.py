@@ -18,7 +18,7 @@ _RAW_READERS = {
     "attachments/storage.py": "reads the attachment IDs, media kind and file name of a media thread root",
     "bot_room_lifecycle.py": "looks for the router's own welcome, which has no tool calls",
     "custom_tools/chat_ui.py": "reads a canvas's metadata and the state a person's Chat shared",
-    "custom_tools/matrix_conversation_operations.py": "hands its page and the agents to resolve_latest_visible_messages",
+    "custom_tools/matrix_conversation_operations.py": "hands its page to resolve_latest_visible_messages",
     "matrix/client_delivery.py": "the write boundary: its request sends content and answers with an event ID",
     "matrix/history_visibility.py": "walks membership events",
     "matrix/relation_lookup.py": "reads an event's relations",

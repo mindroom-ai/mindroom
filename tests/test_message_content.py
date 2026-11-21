@@ -46,7 +46,7 @@ from tests.matrix_state_helpers import save_matrix_state
 
 
 def _trusted_entity_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
-    return entity_identity_registry(config, runtime_paths).managed_user_ids
+    return entity_identity_registry(config, runtime_paths)._internal_sender_ids
 
 
 def _make_message_event(

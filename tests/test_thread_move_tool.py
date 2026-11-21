@@ -795,18 +795,24 @@ async def test_move_thread_sends_each_copy_of_a_reply_with_tool_calls_whole(tmp_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("held_without_markers", [False, True])
-async def test_move_thread_relays_the_reply_of_an_agent_that_is_no_longer_configured(
+@pytest.mark.parametrize(
+    ("sender", "held_without_markers"),
+    [("@mindroom_gone:localhost", False), ("@helper:localhost", True), ("code", True)],
+)
+async def test_move_thread_copies_the_calls_of_a_reply_a_read_put_back_in_its_text_and_of_no_other(
     tmp_path: Path,
+    sender: str,
     held_without_markers: bool,
 ) -> None:
-    """An agent taken out of the config is no entity any more, so the router relays what it said.
+    """An agent taken out of the config is no entity any more, so the router relays what it said, calls and all.
 
-    Its reply from before markers left the text keeps its calls, as it always did. Its reply that Matrix holds
-    without its markers is read as anyone's message, whose positions nobody vouches for, so the copy shows no call.
+    Every read puts its markers back, by its username. A row that still holds a version-3 trace is one no read
+    restored: an account with another username wrote it, an entity among them. Nothing vouches for where it puts
+    its calls, so no copy carries it.
     """
     move = _move(tmp_path)
-    gone = "@mindroom_gone:localhost"
+    sender = move.ids.get(sender, sender)
+    said_by = "" if sender in move.ids.values() else f"{sender}: "
     reply = "Checking.\n\n🔧 `shell` [1]\n\nDone."
     built = {
         "msgtype": "m.text",
@@ -818,7 +824,7 @@ async def test_move_thread_relays_the_reply_of_an_agent_that_is_no_longer_config
     held = tool_markers_out_of_text(built)
     assert held["body"] == "Checking.\n\nDone."
     history = _thread(move)
-    history[2] = _message(gone, held if held_without_markers else built, "$gone:localhost")
+    history[2] = _message(sender, held if held_without_markers else built, "$reply:localhost")
     client, send = _real_sends()
 
     with _matrix(move, history, send=send) as mocks:
@@ -827,9 +833,9 @@ async def test_move_thread_relays_the_reply_of_an_agent_that_is_no_longer_config
     assert payload["status"] == "ok"
     planned = mocks.send.await_args_list[2].args[2]
     sent = client.room_send.await_args_list[2].kwargs["content"]
-    assert planned["body"] == f"{gone}: {held['body'] if held_without_markers else reply}"
+    assert planned["body"] == f"{said_by}{held['body'] if held_without_markers else reply}"
     assert (TOOL_TRACE_CONTENT_KEY in planned) is not held_without_markers
-    assert sent["body"] == f"{gone}: Checking.\n\nDone."
+    assert sent["body"] == f"{said_by}Checking.\n\nDone."
     assert tool_markers_in_text(sent) == planned
 
 
