@@ -5348,6 +5348,7 @@ depends_on = [
     "mindroom.matrix.provisioning_env",
     "mindroom.matrix.state",
     "mindroom.matrix.users",
+    "mindroom.providers.claude_code",
     "mindroom.providers.credentials",
     "mindroom.providers.key_checks",
     "mindroom.providers.names",

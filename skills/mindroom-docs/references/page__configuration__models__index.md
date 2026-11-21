@@ -430,13 +430,16 @@ MindRoom never reads Claude Code's credentials and takes no API key, token, endp
 The provider supports text and image input; the model is told when an audio, video, or file attachment was left out.
 A [`reasoning`](#reasoning-levels) block is not supported; set `effort`.
 These conversations do not appear in Claude Code's own session history.
+MindRoom runs at most 8 Claude Code processes at a time; while all 8 are answering, another reply is retried and fails if none finishes meanwhile.
+[`mindroom doctor`](https://docs.mindroom.chat/cli/#doctor) starts Claude Code without sending it a prompt and reports the first three cases below.
 
 A reply fails with a message that names the fix in these cases:
 
 - Claude Code is not installed, or is older than 2.1.248: install it or run `claude update`.
-- Claude Code is not signed in to a subscription: run `claude auth login` as the user that runs MindRoom.
-- MindRoom's process environment holds an Anthropic credential such as `ANTHROPIC_API_KEY`, which Claude Code would use, and bill, instead of the subscription: remove it from that environment.
-  A key in the `.env` beside `config.yaml` is fine, since only MindRoom's own `anthropic` models read it there.
+- Claude Code is not signed in to a Pro, Max, Team, or Enterprise plan: run `claude auth login` as the user that runs MindRoom.
+- MindRoom's process environment sets a variable that Claude Code would use in place of the subscription sign-in, or to send it somewhere else: remove it from that environment.
+  These are `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` (unless it is `https://api.anthropic.com`), `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_UNIX_SOCKET`, `CLAUDE_CODE_API_BASE_URL`, `CLAUDE_CODE_CUSTOM_OAUTH_URL`, the `CLAUDE_CODE_OAUTH_*` token variables, and the `CLAUDE_CODE_USE_*` variables that select Bedrock, Vertex AI, Foundry, or a gateway.
+  The same variables in the `.env` beside `config.yaml` are fine, since only MindRoom's own `anthropic` models read them there.
 - The plan's usage limit is reached: the message gives the time the limit resets.
 
 ## OpenRouter Provider Routing

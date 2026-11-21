@@ -597,11 +597,52 @@ def _check_single_provider(provider: str, config: Config, runtime_paths: Runtime
     if provider == "ollama":
         return _check_ollama_models(config, runtime_paths)
 
+    if provider == "claude_code":
+        return _check_claude_code(config, runtime_paths)
+
     env_key = env_key_for_provider(provider)
     if not env_key:
         return 0, 0, 0
 
     return _check_shared_key(provider, env_key, config, runtime_paths)
+
+
+def _check_claude_code(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+    """Check each Claude Code executable the ``claude_code`` models run. Returns (passed, failed, warnings).
+
+    Claude Code is started as a request would start it and closed without a prompt, so the check spends nothing of
+    the subscription and reads no credential. Its directory is a temporary one, apart from a running MindRoom's.
+    """
+    from mindroom.providers.claude_code.adapter import build_provider  # noqa: PLC0415 - loads the provider families
+
+    passed = failed = warnings = 0
+    checked: set[str | None] = set()
+    for model_config in config.models.values():
+        if provider_route(model_config.provider) != "claude_code":
+            continue
+        try:
+            provider = build_provider(model_config, runtime_paths, execution_identity=None)
+            if provider.cli_path in checked:
+                continue
+            checked.add(provider.cli_path)
+            with tempfile.TemporaryDirectory() as directory:
+                asyncio.run(provider.preflight(Path(directory)))
+        except ProviderError as exc:
+            # A process that did not start may start the next time; every other refusal needs the user.
+            valid, detail = (None if exc.retryable else False), str(exc)
+        except ImportError as exc:
+            valid, detail = None, str(exc)
+        else:
+            valid, detail = True, ""
+        p, f, w = _print_validation(
+            valid,
+            detail,
+            "claude_code: Claude Code is signed in to a Claude subscription",
+            "claude_code: Claude Code cannot answer",
+            "claude_code: could not check Claude Code",
+        )
+        passed, failed, warnings = passed + p, failed + f, warnings + w
+    return passed, failed, warnings
 
 
 def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
