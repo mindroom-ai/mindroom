@@ -1964,7 +1964,10 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         fitted = fit_reasoning_to_ordinary_event(
             client,
             _ROOM_ID,
-            {**content, "io.mindroom.reasoning": {"text": lead + "b" * 100_000, "duration_ms": 9, "segments": segments}},
+            {
+                **content,
+                "io.mindroom.reasoning": {"text": lead + "b" * 100_000, "duration_ms": 9, "segments": segments},
+            },
             room_encrypted=False,
             size_limit=size_limit,
         )

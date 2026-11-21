@@ -1106,7 +1106,8 @@ async def test_resume_call_that_is_delivered_again_returns_the_job_it_started(st
 
 @pytest.mark.asyncio
 async def test_resume_waits_until_the_runs_last_job_has_ended(
-    stack: WorkflowStack, monkeypatch: pytest.MonkeyPatch,
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A job that still has the run's last report to deliver keeps the run: a resume now would take that report away."""
     handle = await _started(stack)

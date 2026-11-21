@@ -9910,7 +9910,9 @@ background_tool_jobs:
 A run is a background job, so `start_workflow` needs `background_tool_jobs.enabled: true` and `workflow` must not be in `background_tool_jobs.exclude_toolkits`.
 Otherwise a call from the agent's own reply fails with `Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow.`
 An operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rule for `start_workflow` asks before anything starts, as for any other call.
-A plugin's `tool:before_call` or `tool:environment` hook that declines `start_workflow` also starts nothing, and `tool:after_call` hooks receive the run's report when it ends.
+A plugin's `tool:before_call` or `tool:environment` hook that declines `start_workflow` or `resume_workflow` also starts nothing, and `tool:after_call` hooks receive the run's report when it ends.
+A restart of MindRoom while the run is unfinished is the exception: the continued job delivers the report to the conversation, and the `tool:after_call` hooks of the call that started it do not run.
+Do not rely on an after-call hook running exactly once for a workflow call.
 
 ## Functions
 
