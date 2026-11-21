@@ -128,7 +128,8 @@ ssh -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519_mind
 
 Connect from a device signed in as the configured tailnet login, using port `22`, not the internal `2222`.
 Use a client timeout long enough for startup; the gateway may report `MindRoom: waking worker` while it waits.
-Active sessions normally keep the worker from idling out.
+Active sessions normally keep the worker from idling out. With idle cleanup enabled, set the worker idle timeout to at least 150 seconds (the default is 1,800 seconds).
+The gateway waits 75 seconds before counting a connection and reports every 30 seconds; leave extra time for slow startup or delayed reports.
 Password authentication and forwarding are disabled; do not use clients that forward credentials or trust and execute code from the worker.
 
 ## Revoke access
