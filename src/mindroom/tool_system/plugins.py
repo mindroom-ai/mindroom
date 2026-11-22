@@ -600,15 +600,21 @@ def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
 
 
 def worker_preload_plugin_paths(config: Config, runtime_paths: RuntimePaths) -> tuple[str, ...]:
-    """Return the configured paths of ``config``'s enabled plugins whose manifests set ``worker_preload``."""
+    """Return the configured paths of ``config``'s leading enabled plugins whose manifests set ``worker_preload``.
+
+    Plugins import in config order, so one that follows an enabled plugin that does not opt in is not preloaded.
+    """
     opted: list[str] = []
     for entry in config.plugins:
+        if not entry.enabled:
+            continue
         try:
             root = plugin_imports._resolve_plugin_root(entry.path, runtime_paths)
-            if entry.enabled and plugin_imports._load_plugin_base(root).worker_preload:
-                opted.append(entry.path)
-        except Exception:  # noqa: S112 - the load that follows reports a plugin that does not resolve.
-            continue
+            if not plugin_imports._load_plugin_base(root).worker_preload:
+                break
+        except Exception:  # The load that follows reports a plugin that does not resolve.
+            break
+        opted.append(entry.path)
     return tuple(opted)
 
 
