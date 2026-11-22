@@ -98,7 +98,7 @@ import threading
 from mindroom.api import sandbox_runner
 from agno.utils.schema import identity_injected_types
 
-def ready(socket_path, handler):
+def ready(socket_path, handler, **_kwargs):
     before = set(sys.modules)
     identity_injected_types()
     print(json.dumps({
