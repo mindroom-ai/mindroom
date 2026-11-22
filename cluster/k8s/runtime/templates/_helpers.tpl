@@ -648,6 +648,19 @@ matchLabels:
 {{- end -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.tailnetSshName" -}}
+{{- /* Leave room for policy suffixes within 63 characters. */ -}}
+{{- printf "%s-tailnet-ssh" (include "mindroom-runtime.fullname" . | trunc 43 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.tailnetSshTokenSecretKeyRef" -}}
+{{- if .Values.tailnetSsh.existingSecret -}}
+{{- dict "name" .Values.tailnetSsh.existingSecret "key" .Values.tailnetSsh.key | toJson -}}
+{{- else -}}
+{{- dict "name" (include "mindroom-runtime.tailnetSshName" .) "key" "token" | toJson -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.tailnetSshReleaseId" -}}
 {{- printf "%s/%s" .Release.Namespace .Release.Name | sha256sum | trunc 32 -}}
 {{- end -}}

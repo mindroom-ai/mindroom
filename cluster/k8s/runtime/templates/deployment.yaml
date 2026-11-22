@@ -385,9 +385,7 @@ spec:
               value: {{ .Values.tailnetSsh.port | quote }}
             - name: MINDROOM_TAILNET_SSH_GATEWAY_TOKEN
               valueFrom:
-                secretKeyRef:
-                  name: {{ printf "%s-tailnet-ssh" (include "mindroom-runtime.fullname" . | trunc 43 | trimSuffix "-") }}
-                  key: token
+                secretKeyRef: {{ include "mindroom-runtime.tailnetSshTokenSecretKeyRef" . }}
             {{- end }}
             {{- if .Values.workers.kubernetes.nodeName }}
             - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME

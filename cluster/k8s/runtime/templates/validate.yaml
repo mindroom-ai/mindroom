@@ -442,6 +442,23 @@
 {{- fail "egressBroker.port must differ from runtime.apiPort and scriptGateway.port" -}}
 {{- end -}}
 {{- end -}}
+{{- if .Values.tailnetSsh.existingSecret -}}
+{{- if not .Values.tailnetSsh.enabled -}}
+{{- fail "tailnetSsh.existingSecret cannot be set when tailnetSsh.enabled=false" -}}
+{{- end -}}
+{{- if not .Values.tailnetSsh.key -}}
+{{- fail "tailnetSsh.key is required when tailnetSsh.existingSecret is set" -}}
+{{- end -}}
+{{- $generatedTokenSecretName := include "mindroom-runtime.tailnetSshName" . -}}
+{{- if eq .Values.tailnetSsh.existingSecret $generatedTokenSecretName -}}
+{{- fail (printf "tailnetSsh.existingSecret must name a Secret the chart does not manage, not %s, which the chart stops rendering when tailnetSsh.existingSecret is set" $generatedTokenSecretName) -}}
+{{- end -}}
+{{- range include "mindroom-runtime.envList" (list $ .Values.env.extra "env.extra") | fromJsonArray -}}
+{{- if eq (default "" .name) "MINDROOM_TAILNET_SSH_GATEWAY_TOKEN" -}}
+{{- fail "tailnetSsh.existingSecret and env.extra both set MINDROOM_TAILNET_SSH_GATEWAY_TOKEN; remove one of them" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.tailnetSsh.enabled -}}
 {{- if or (not (kindIs "string" .Values.tailnetSsh.authKeySecret)) (not (trim .Values.tailnetSsh.authKeySecret)) -}}
 {{- fail "tailnetSsh.enabled requires tailnetSsh.authKeySecret" -}}

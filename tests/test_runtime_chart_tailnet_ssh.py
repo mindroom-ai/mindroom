@@ -212,6 +212,17 @@ def test_gateway_env_points_at_primary() -> None:
     ]
 
 
+@pytest.mark.parametrize(("key_args", "key"), [((), "token"), (("tailnetSsh.key=listener-token",), "listener-token")])
+def test_existing_listener_token_secret_replaces_generated_token(key_args: tuple[str, ...], key: str) -> None:
+    """Both deployments read the same operator-managed token, with no generated token Secret."""
+    docs = _render(*ENABLED, "tailnetSsh.existingSecret=operator-listener", *key_args)
+
+    assert all(doc["kind"] != "Secret" or doc["metadata"]["name"] != NAME for doc in docs)
+    expected = {"secretKeyRef": {"name": "operator-listener", "key": key}}
+    assert _env_by_name(_primary(docs))["MINDROOM_TAILNET_SSH_GATEWAY_TOKEN"]["valueFrom"] == expected
+    assert _gateway_env(docs)["TAILNET_SSH_GATEWAY_TOKEN"]["valueFrom"] == expected
+
+
 def test_login_server_tags_and_proxy_are_optional_env() -> None:
     """Headscale, tags, and a proxy each add their variable only when set."""
     docs = _render(
@@ -380,6 +391,36 @@ def test_enabled_requires_a_nonblank_auth_key_secret(secret: tuple[str, ...]) ->
     completed = _run_helm_template(RUNTIME_CHART, *values, release_name=RELEASE)
     assert completed.returncode != 0
     assert "tailnetSsh.enabled requires tailnetSsh.authKeySecret" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("set_args", "error"),
+    [
+        (("tailnetSsh.enabled=false",), "tailnetSsh.existingSecret cannot be set when tailnetSsh.enabled=false"),
+        (("tailnetSsh.key=",), "tailnetSsh.key is required when tailnetSsh.existingSecret is set"),
+        (
+            (f"tailnetSsh.existingSecret={NAME}",),
+            f"tailnetSsh.existingSecret must name a Secret the chart does not manage, not {NAME}",
+        ),
+        (
+            ("env.extra[0].name=MINDROOM_TAILNET_SSH_GATEWAY_TOKEN", "env.extra[0].value=duplicate"),
+            "tailnetSsh.existingSecret and env.extra both set MINDROOM_TAILNET_SSH_GATEWAY_TOKEN; remove one of them",
+        ),
+    ],
+)
+def test_rejects_conflicting_existing_listener_token_secret(set_args: tuple[str, ...], error: str) -> None:
+    """An existing token Secret must be the only token source and used with the gateway enabled."""
+    completed = _run_helm_template(
+        RUNTIME_CHART,
+        *BASE_VALUES,
+        *ENABLED,
+        "tailnetSsh.existingSecret=operator-listener",
+        *set_args,
+        release_name=RELEASE,
+    )
+
+    assert completed.returncode != 0
+    assert error in completed.stderr
 
 
 def test_worker_egress_policy_and_squid_are_unchanged() -> None:

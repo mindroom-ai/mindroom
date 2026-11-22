@@ -747,7 +747,8 @@ Connecting accounts also needs the providers' [OAuth clients](../../../docs/oaut
 ## Tailnet SSH
 
 Enable `tailnetSsh.enabled` with the Kubernetes worker backend and set `tailnetSsh.authKeySecret` to a release Secret containing `auth-key`.
-See [Kubernetes Tailnet SSH](../../../docs/tailnet-ssh.md#kubernetes) for setup, release-scoped network policies, the worker upgrade note, and the GitOps token caveat, and [values.yaml](values.yaml) for all chart settings.
+For GitOps or `helm template`, set `tailnetSsh.existingSecret` to a Secret holding the shared listener token (`tailnetSsh.key` defaults to `token`) so offline renders do not rotate it.
+See [Kubernetes Tailnet SSH](../../../docs/tailnet-ssh.md#kubernetes) for setup, release-scoped network policies, and upgrade notes, and [values.yaml](values.yaml) for all chart settings.
 
 ## Matrix Managed Account Authentication
 

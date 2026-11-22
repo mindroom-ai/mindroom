@@ -113,6 +113,11 @@ tailnetSsh:
   image: {repository: ghcr.io/mindroom-ai/mindroom-tailnet-gateway, tag: ""}
   persistence: {size: 1Gi, storageClassName: ""}
   authKeySecret: ""            # required when enabled; Secret with key `auth-key`
+  # Existing Secret holding the shared listener token instead of the generated one.
+  # Use it with helm template and GitOps tools, where the generated token changes on every offline render.
+  existingSecret: ""
+  # Key in existingSecret that holds the listener token.
+  key: token
   loginServer: ""              # Headscale
   tags: []                     # optional advertised node tags
   httpsProxy: ""               # an HTTP CONNECT proxy for the gateway's only internet egress

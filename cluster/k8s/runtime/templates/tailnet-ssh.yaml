@@ -1,9 +1,7 @@
 {{- if .Values.tailnetSsh.enabled }}
 {{- $ssh := .Values.tailnetSsh -}}
-{{- /* Leave room for policy suffixes within 63 characters. */ -}}
-{{- $name := printf "%s-tailnet-ssh" (include "mindroom-runtime.fullname" . | trunc 43 | trimSuffix "-") -}}
+{{- $name := include "mindroom-runtime.tailnetSshName" . -}}
 {{- $workerNamespace := include "mindroom-runtime.workerNamespace" . -}}
-{{- $existing := lookup "v1" "Secret" .Release.Namespace $name -}}
 {{- $gatewayLabels := merge (dict "app.kubernetes.io/component" "tailnet-ssh") (pick (include "mindroom-runtime.labels" . | fromYaml) "app.kubernetes.io/name" "app.kubernetes.io/instance") -}}
 {{- $releaseId := include "mindroom-runtime.tailnetSshReleaseId" . -}}
 {{- $workerLabels := merge (dict "mindroom.ai/tailnet-ssh" "true" "mindroom.ai/tailnet-ssh-release" $releaseId) (include "mindroom-runtime.workerPodLabels" . | fromYaml) -}}
@@ -14,6 +12,8 @@
 {{- $crossNamespaceGateway := merge (dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" .Release.Namespace))) $gateway -}}
 {{- $primaryPort := list (dict "protocol" "TCP" "port" (int $ssh.port)) -}}
 {{- $workerPort := list (dict "protocol" "TCP" "port" 2222) -}}
+{{- if not $ssh.existingSecret -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name -}}
 # Shared by the primary and the gateway, never a worker.
 apiVersion: v1
 kind: Secret
@@ -24,6 +24,7 @@ type: Opaque
 data:
   token: {{ get ($existing.data | default dict) "token" | default (randAlphaNum 48 | b64enc) | quote }}
 ---
+{{- end }}
 {{ include "mindroom-runtime.persistentVolumeClaim" (list . $name (merge (dict "accessModes" (list "ReadWriteOnce")) $ssh.persistence)) }}
 ---
 apiVersion: v1
@@ -70,7 +71,9 @@ spec:
           image: {{ printf "%s:%s" $ssh.image.repository ($ssh.image.tag | default (.Values.image.tag | default .Chart.AppVersion)) | quote }}
           env:
             - {name: TAILNET_SSH_PRIMARY_URL, value: {{ printf "http://%s.%s.svc.cluster.local:%v" $name .Release.Namespace $ssh.port | quote }}}
-            - {name: TAILNET_SSH_GATEWAY_TOKEN, valueFrom: {secretKeyRef: {name: {{ $name }}, key: token}}}
+            - name: TAILNET_SSH_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef: {{ include "mindroom-runtime.tailnetSshTokenSecretKeyRef" . }}
             - {name: TAILNET_SSH_AUTH_KEY, valueFrom: {secretKeyRef: {name: {{ $ssh.authKeySecret | trim | quote }}, key: auth-key}}}
             {{- range $key, $value := dict "TAILNET_SSH_LOGIN_SERVER" $ssh.loginServer "TAILNET_SSH_TAGS" (join "," $ssh.tags) "HTTPS_PROXY" $ssh.httpsProxy }}
             {{- with $value }}

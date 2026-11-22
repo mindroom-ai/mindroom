@@ -115,8 +115,11 @@ tailnetSsh:
 Use a cluster that enforces NetworkPolicies and keep both ingress policies shown above, or equivalent isolation, so unrelated pods cannot reach the private listener or worker sshd.
 Each release's SSH policies admit only its own gateway and workers, even when releases share a worker namespace.
 On upgrade to release-scoped policies, recycle existing SSH-enabled workers if they have not picked up the new pod label and SSH is unavailable.
-The chart creates the shared listener token and a PVC for node state; keep both across restarts.
-Offline Helm renders can generate a new token; keep the Secret stable or restart both the primary and gateway after it changes.
+The chart creates a PVC for node state and, by default, a Secret for the shared listener token; keep both across restarts.
+Offline Helm renders regenerate the token, so GitOps and `helm template` users should set `tailnetSsh.existingSecret` to an operator-managed Secret in the release namespace.
+Both the primary and gateway read the `token` key by default; set `tailnetSsh.key` if your Secret uses a different key.
+To keep your current token when switching, copy it from the chart-managed Secret into the new Secret first.
+If you rotate the token, restart both the primary and gateway so they read the same value.
 `tailnetSsh.port` defaults to `8769` and must differ from `runtime.apiPort`, `scriptGateway.port`, and `egressBroker.port`.
 The gateway policy allows DNS, internal endpoints, and outbound TCP 443 to public IPv4 by default; use `tailnetSsh.extraEgress` to admit private Headscale or relay endpoints, or the proxy if you set `tailnetSsh.httpsProxy`.
 
