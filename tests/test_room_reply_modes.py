@@ -51,6 +51,7 @@ from mindroom.room_settings import (
     _drop_legacy_override,
     observe_room_settings_event,
     refresh_room_setting,
+    refresh_room_settings,
     resolve_room_setting,
     seed_room_settings,
     write_room_setting,
@@ -447,6 +448,44 @@ async def test_a_turn_that_finds_no_setting_decides_by_that_whatever_arrives_mea
     assert read == SettingRead(ok=True, value=None)
     assert config.get_room_reply_mode(runtime_paths, ROOM_ID, read) == "auto"
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
+
+
+@pytest.mark.asyncio
+async def test_a_bots_read_that_ends_last_does_not_decide_another_bots_turn(tmp_path: Path) -> None:
+    """A bot reads `auto` and still waits for the room's model when a moderator switches the room to `mentions`.
+
+    Another bot then reads `mentions` before its event, and its turn decides by that though the first read ends last.
+    """
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    homeserver = _Homeserver()
+    homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] = {"value": "auto"}
+    slow, policy = homeserver.client(), _policy_for(config, "general")
+    client = policy.deps.runtime.client = homeserver.client()
+    read, model_read = slow.room_get_state_event.side_effect, asyncio.Event()
+
+    async def read_with_the_model_held(room_id: str, event_type: str, state_key: str = "") -> object:
+        if state_key == "model":
+            await model_read.wait()
+        return await read(room_id, event_type, state_key)
+
+    slow.room_get_state_event.side_effect = read_with_the_model_held
+    slow_read = await _started(refresh_room_settings(slow, runtime_paths, ROOM_ID, put_state=None))
+    homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] = {"value": "mentions"}
+    observe_room_settings_event(runtime_paths, ROOM_ID, _setting_event({"value": "mentions"}))
+    assert (await refresh_room_settings(client, runtime_paths, ROOM_ID, put_state=None)).value == "mentions"
+    model_read.set()
+    assert (await slow_read).value == "auto"
+    reads = client.room_get_state_event.await_count
+
+    plan = await policy.plan_turn(
+        _room_with_members(SENDER, _entity_id(config, "general").full_id, room_id=ROOM_ID),
+        _dispatch(_context(), agent_name="general", room_id=ROOM_ID),
+        has_active_response_for_target=lambda _target: False,
+    )
+
+    assert plan.kind == "ignore"
+    assert client.room_get_state_event.await_count == reads
 
 
 @pytest.mark.asyncio

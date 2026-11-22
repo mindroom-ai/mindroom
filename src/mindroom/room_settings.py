@@ -118,8 +118,8 @@ _NEVER_READ = _Copy(None, 0, _UNCONFIRMED)
 _writes: WeakValueDictionary[_Key, asyncio.Lock] = WeakValueDictionary()
 # Each model setting that names no configured model, which is logged once.
 _stale_models_logged: set[_Key] = set()
-# What the read before a room's latest event found its reply mode to be, which a turn decides by.
-_event_reply_modes: dict[tuple[Path, str], SettingRead[RoomReplyMode]] = {}
+# The number at which each room's last read before an event failed to read its reply mode.
+_event_reads_failed: dict[tuple[Path, str], int] = {}
 # What a runtime has tell a room's steward that a read found the room's `thread_mode` changed.
 _thread_mode_changed: dict[Path, Callable[[str], object]] = {}
 
@@ -370,21 +370,26 @@ async def refresh_room_settings(
     Every event of a room that uses a setting is dispatched after this, so nothing it decides by the runtime's copy,
     such as its conversation, an edit's scope or its model, is decided before the room was read: not after a restart,
     when the runtime has no copy, and not by a copy no read confirmed recently. Each read gives up after a few
-    seconds, and the event then goes on by what the runtime knew. Its turn decides by the reply mode found here and
-    reads nothing, so a room that does not answer costs an event that one wait.
+    seconds, and the event then goes on by what the runtime knew. Its turn does not wait for such a room again.
     """
     reply_mode, _model, _thread_mode = await asyncio.gather(
         refresh_room_setting(REPLY_MODE, client, runtime_paths, room_id, put_state=put_state),
         refresh_room_setting(MODEL, client, runtime_paths, room_id, put_state=put_state),
         refresh_room_setting(THREAD_MODE, client, runtime_paths, room_id, put_state=put_state),
     )
-    _event_reply_modes[runtime_paths.storage_root, room_id] = reply_mode
+    if not reply_mode.ok:
+        _event_reads_failed[runtime_paths.storage_root, room_id] = next(_order)
     return reply_mode
 
 
-def event_reply_mode(runtime_paths: RuntimePaths, room_id: str) -> SettingRead[RoomReplyMode] | None:
-    """Return what the read before the room's latest event found its reply mode to be, None when none was made."""
-    return _event_reply_modes.get((runtime_paths.storage_root, room_id))
+def event_read_failed(runtime_paths: RuntimePaths, room_id: str) -> bool:
+    """Return whether the read before the room's latest event failed and the copy holds no newer reply mode.
+
+    The turn of such an event decides by the copy and does not wait for the room again. Any other turn reads the
+    reply mode, which costs nothing while the copy is confirmed, so it never decides by a result older than the copy.
+    """
+    failed = _event_reads_failed.get((runtime_paths.storage_root, room_id), 0)
+    return _known.get(_key(REPLY_MODE, runtime_paths, room_id), _NEVER_READ).order < failed
 
 
 async def write_room_setting[T: str](
