@@ -743,6 +743,37 @@ async def test_non_200_binding_read_in_accounts_retries_without_writing(
 
 
 @pytest.mark.asyncio
+async def test_forbidden_binding_read_in_accounts_writes_the_steward_roster(room_state: RoomState) -> None:
+    """A 403 binding GET leaves no bound writer, so the steward writes its own roster as on main."""
+    config, paths, ids, _, _ = room_state
+    steward_id, bound_id = ids[ROUTER_AGENT_NAME].full_id, ids["agent1"].full_id
+    joined = {identity.full_id: {} for identity in ids.values()}
+    puts: list[str] = []
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        if request.method == "PUT":
+            puts.append(request.path)
+            return web.json_response({"event_id": "$put"})
+        if request.path.endswith("/joined_members"):
+            return web.json_response({"joined": joined})
+        if ROUTER_EVENT_TYPE in request.path:
+            return _error_http_response("forbidden_403")
+        return web.json_response({"errcode": "M_NOT_FOUND", "error": "Not found"}, status=404)
+
+    async with _http_state_clients(handle, steward_id, bound_id) as (steward, bound):
+        result = await reconcile_room_accounts(
+            steward,
+            config,
+            paths,
+            ROOM_ID,
+            get_alternate_clients=lambda: {bound_id: bound},
+        )
+    assert result is True
+    assert len(puts) == 1
+    assert puts[0].endswith(f"/{steward_id}")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("response_kind", "expected_done", "expected_level"),
     [
