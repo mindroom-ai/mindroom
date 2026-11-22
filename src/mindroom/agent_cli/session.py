@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     from mindroom.agent_cli.protocol import AgentCliOperation
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -191,8 +193,26 @@ class CliOperationOwner(Protocol):
         """Read metadata, or enqueue one owned operation from the shell command that opened ``window``."""
         ...
 
-    async def get_call(self, call_id: str) -> dict[str, object]:
-        """Read one exact-owner receipt."""
+    async def get_call(
+        self,
+        call_id: str,
+        *,
+        wait: float = 0.0,
+        after_progress: int | None = None,
+    ) -> dict[str, object]:
+        """Read one exact-owner receipt, optionally long-polling for settlement or progress."""
+        ...
+
+    async def cancel_call(self, call_id: str) -> dict[str, object]:
+        """Idempotently cancel one exact-owner call without requiring a free capacity slot."""
+        ...
+
+    def stream_call(self, call_id: str) -> AsyncGenerator[dict[str, object]]:
+        """Return the frames of one exact-owner streamed call for its only reader, ending with its receipt."""
+        ...
+
+    async def write_stdin(self, call_id: str, seq: int, data: str, *, eof: bool) -> bool:
+        """Write one numbered base64 chunk to the stdin of a streamed call's command; False once it takes no more."""
         ...
 
 

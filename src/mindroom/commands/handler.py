@@ -544,6 +544,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             room_id=room.room_id,
             requester_user_id=requester_user_id,
             sender_user_id=_room_admin_sender(context, event, requester_user_id),
+            put_state=context.room_state_response,
         )
 
     elif command.type == CommandType.THREAD_MODE:
@@ -555,7 +556,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             room_id=room.room_id,
             requester_user_id=requester_user_id,
             sender_user_id=_room_admin_sender(context, event, requester_user_id),
-            put_state=context.put_room_state,
+            put_state=context.room_state_response,
         )
 
     elif command.type == CommandType.REPLY_MODE:

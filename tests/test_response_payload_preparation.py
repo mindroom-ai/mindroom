@@ -392,7 +392,7 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
 
     async def spy_prepare(request: ResponseRequest) -> ResponseRequest:
         prepare_calls.append(request)
-        lock_held_at_prepare.append(coordinator.has_active_response_for_target(target))
+        lock_held_at_prepare.append(coordinator.lifecycle_coordinator.has_active_response_for_target(target))
         return await real_prepare(request)
 
     delivered = FinalDeliveryOutcome(

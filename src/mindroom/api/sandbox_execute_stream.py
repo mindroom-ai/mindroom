@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.api import sandbox_request_cancellation
 from mindroom.background_tasks import create_background_task
@@ -44,16 +44,27 @@ class _LatestProgress:
         return text
 
 
+def _queued(frames: asyncio.Queue[bytes] | None) -> list[bytes]:
+    """Return the lines a call queued that were not sent yet."""
+    lines = []
+    while frames is not None and not frames.empty():
+        lines.append(frames.get_nowait())
+    return lines
+
+
 async def stream_execution(
     request_id: str,
     execute: Callable[[], Awaitable[BaseModel]],
     *,
     keepalive_seconds: float,
     failure: Callable[[Exception], BaseModel],
+    frames: asyncio.Queue[bytes] | None = None,
 ) -> AsyncIterator[bytes]:
     """Run ``execute`` as the request ``request_id``, streaming its progress and a keep-alive whenever it is quiet.
 
-    ``failure`` turns an error raised after the stream started into the result line.
+    ``failure`` turns an error raised after the stream started into the result line. A call that streams its
+    command's output puts each line into ``frames``, which are sent in order before the result line; the queue is
+    short, so the call waits while the primary reads slowly.
     """
     progress = _LatestProgress(asyncio.get_running_loop())
 
@@ -67,19 +78,25 @@ async def stream_execution(
     call = create_background_task(run(), name="sandbox-execute")
     try:
         while True:
-            changed = asyncio.ensure_future(progress.changed.wait())
+            waits = [call, asyncio.ensure_future(progress.changed.wait())]
+            if frames is not None:
+                waits.append(asyncio.ensure_future(frames.get()))
             try:
-                await asyncio.wait({call, changed}, timeout=keepalive_seconds, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(waits, timeout=keepalive_seconds, return_when=asyncio.FIRST_COMPLETED)
             finally:
-                changed.cancel()
+                for wait in waits[1:]:
+                    wait.cancel()
             text = progress.take()
-            if text is not None:
-                yield json.dumps({"progress": text}).encode() + b"\n"
-            if call.done():
-                yield call.result().model_dump_json().encode() + b"\n"
+            lines = [] if text is None else [json.dumps({"progress": text}).encode() + b"\n"]
+            lines += [cast("bytes", wait.result()) for wait in waits[2:] if wait in done]
+            # The result follows the last line the call queued before it.
+            finished = call.done() and not lines
+            if finished:
+                lines = [*_queued(frames), call.result().model_dump_json().encode() + b"\n"]
+            for line in lines or [_KEEPALIVE_LINE]:
+                yield line
+            if finished:
                 return
-            if text is None:
-                yield _KEEPALIVE_LINE
     finally:
         if not call.done():
             # The primary hung up. Stopping is synchronous, so a repeated cancellation cannot skip it.

@@ -91,7 +91,6 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
-    from mindroom.response_lifecycle import ResponseLifecycleReservation
     from mindroom.response_runner import ResponseRunner
 
 ALICE = "@alice:example.test"
@@ -762,17 +761,11 @@ async def test_fold_queues_between_replies_without_claiming_unmentioned_messages
             await _dispatch_message(target, room, unmentioned)
             await asyncio.wait_for(target._coalescing_gate.drain_all(), 30)
         coordinator = target._response_runner.lifecycle_coordinator
-        acquire = coordinator._acquire_response_turn_lock
-        later_waiting = asyncio.Event()
-
-        async def mark_lock_wait(lock: asyncio.Lock, reservation: ResponseLifecycleReservation | None) -> None:
-            later_waiting.set()
-            await acquire(lock, reservation)
-
-        monkeypatch.setattr(coordinator, "_acquire_response_turn_lock", mark_lock_wait)
         await _dispatch_message(target, room, _addressed(target, "later question", "$later"))
-        await asyncio.wait_for(later_waiting.wait(), 30)
-        assert coordinator.has_active_response_for_target(_target())
+        async with asyncio.timeout(30):  # The later reply begins its turn and queues for the lock behind the fold.
+            while not coordinator.has_active_response_for_target(_target()):
+                await asyncio.sleep(0)
+        assert coordinator._conversation_for(_target()).lock.locked()
         if addressed_first:
             await _dispatch_message(target, room, unmentioned)
             assert target._coalescing_gate.has_pending_source_event("$unmentioned")
@@ -801,7 +794,7 @@ async def test_compaction_waits_for_paused_approval(
     coordinator = target._response_runner.lifecycle_coordinator
     await _hydrate(target)
     hold = PausedReply(target.journal_principal().principal_id, "approval", ROOM, THREAD)
-    lock = coordinator._response_lifecycle_lock(_target())
+    lock = coordinator._conversation_for(_target()).lock
     gate = target.orchestrator.response_admission_gate
     if pause_while_waiting:
         await lock.acquire()  # A reply has the lock, but has not paused yet.
@@ -1164,7 +1157,7 @@ async def _hydrate(bot: AgentBot, *, thread_id: str | None = THREAD) -> None:
 async def _start_fold(bot: AgentBot) -> asyncio.Task[None]:
     assert await bot._journal_dispatcher.drain_once() == 1
     [fold] = [
-        task for task in bot._response_runner.inbox._inbox_response_tasks if task.get_name().startswith("compact:")
+        task for task in bot._response_runner.inbox._inbox_response_tasks if task.get_name().startswith("compaction:")
     ]
     return fold
 
@@ -1229,7 +1222,7 @@ async def test_cancelled_flag_probe_keeps_ownership_until_store_open_finishes(
         done, _ = await asyncio.wait({fold}, timeout=0.05)
         assert not done
         assert runner.inbox.has_live_inbox_response(_ROW_ID)
-        assert runner.lifecycle_coordinator._response_lifecycle_lock(_target()).locked()
+        assert runner.lifecycle_coordinator._conversation_for(_target()).lock.locked()
         assert not target.orchestrator.response_admission_gate.close_if_idle()
     finally:
         finish.set()

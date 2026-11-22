@@ -1823,7 +1823,7 @@ async def test_an_approval_resume_answers_its_original_requester_s_steer(
     lifecycle = runner.lifecycle_coordinator
     notices: list[QueuedHumanNoticeReservation] = []
 
-    async def resume(_target: MessageTarget) -> CompletedApprovalRun | PausedAttempt:
+    async def resume() -> CompletedApprovalRun | PausedAttempt:
         notice = lifecycle.reserve_waiting_human_message(
             target=target,
             response_envelope=steer_envelope,

@@ -1101,6 +1101,125 @@ def test_kubernetes_worker_tmp_size_limit_also_sizes_container_ephemeral_storage
     assert resources["limits"] == {"memory": "1Gi", "cpu": "500m", "ephemeral-storage": "8Gi"}
 
 
+def test_kubernetes_worker_exposes_container_resource_limits_via_downward_api(tmp_path: Path) -> None:
+    """Worker containers carry only the two Kubernetes downward-API limit refs; startup manifests carry none of the seven."""
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=resolve_primary_runtime_paths(
+            config_path=Path("config.yaml"),
+            storage_path=tmp_path / "mindroom-test-storage",
+            process_env={
+                "MINDROOM_KUBERNETES_POD_CPU_LIMIT": "2",
+                "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES": "4294967296",
+            },
+        ),
+    )
+
+    backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    env = apps_api.created_bodies[0]["spec"]["template"]["spec"]["containers"][0]["env"]
+    env_names = [entry["name"] for entry in env]
+    assert len(env_names) == len(set(env_names))
+    env_by_name = {entry["name"]: entry for entry in env}
+    assert env_by_name["MINDROOM_KUBERNETES_POD_CPU_LIMIT"] == {
+        "name": "MINDROOM_KUBERNETES_POD_CPU_LIMIT",
+        "valueFrom": {
+            "resourceFieldRef": {
+                "containerName": "sandbox-runner",
+                "resource": "limits.cpu",
+                "divisor": "1",
+            },
+        },
+    }
+    assert env_by_name["MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES"] == {
+        "name": "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES",
+        "valueFrom": {
+            "resourceFieldRef": {
+                "containerName": "sandbox-runner",
+                "resource": "limits.memory",
+                "divisor": "1",
+            },
+        },
+    }
+    tool_limit_names = (
+        "MINDROOM_WORKER_CPUS",
+        "MINDROOM_WORKER_MEMORY_BYTES",
+        "OMP_NUM_THREADS",
+        "PYTHON_CPU_COUNT",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS",
+    )
+    for name in tool_limit_names:
+        assert name not in env_by_name
+    committed_runtime = deserialize_runtime_paths(
+        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
+    )
+    all_seven = (
+        "MINDROOM_KUBERNETES_POD_CPU_LIMIT",
+        "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES",
+        *tool_limit_names,
+    )
+    for name in all_seven:
+        assert name not in committed_runtime.process_env
+        assert name not in committed_runtime.env_file_values
+
+
+def test_kubernetes_worker_extra_env_overrides_downward_api_resource_limits(tmp_path: Path) -> None:
+    """Operator extra-env may pass tool limit overrides alongside the two Kubernetes downward-API markers."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    default_backend, default_apps_api, _ = _backend(runtime_paths=runtime_paths)
+    default_backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    override_backend, override_apps_api, _ = _backend(
+        runtime_paths=runtime_paths,
+        extra_env={
+            "MINDROOM_KUBERNETES_POD_CPU_LIMIT": "99",
+            "MINDROOM_WORKER_CPUS": "2",
+            "OMP_NUM_THREADS": "2",
+        },
+    )
+    override_backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    env = override_apps_api.created_bodies[0]["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert [entry for entry in env if entry["name"] == "MINDROOM_KUBERNETES_POD_CPU_LIMIT"] == [
+        {
+            "name": "MINDROOM_KUBERNETES_POD_CPU_LIMIT",
+            "valueFrom": {
+                "resourceFieldRef": {
+                    "containerName": "sandbox-runner",
+                    "resource": "limits.cpu",
+                    "divisor": "1",
+                },
+            },
+        },
+    ]
+    assert [entry for entry in env if entry["name"] == "MINDROOM_WORKER_CPUS"] == [
+        {"name": "MINDROOM_WORKER_CPUS", "value": "2"},
+    ]
+    assert [entry for entry in env if entry["name"] == "OMP_NUM_THREADS"] == [
+        {"name": "OMP_NUM_THREADS", "value": "2"},
+    ]
+    env_by_name = {entry["name"]: entry for entry in env}
+    assert env_by_name["MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES"] == {
+        "name": "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES",
+        "valueFrom": {
+            "resourceFieldRef": {
+                "containerName": "sandbox-runner",
+                "resource": "limits.memory",
+                "divisor": "1",
+            },
+        },
+    }
+    assert "MINDROOM_WORKER_MEMORY_BYTES" not in env_by_name
+    assert "PYTHON_CPU_COUNT" not in env_by_name
+    assert "PYTEST_XDIST_AUTO_NUM_WORKERS" not in env_by_name
+    assert (
+        override_apps_api.created_bodies[0]["metadata"]["annotations"][ANNOTATION_TEMPLATE_HASH]
+        != default_apps_api.created_bodies[0]["metadata"]["annotations"][ANNOTATION_TEMPLATE_HASH]
+    )
+
+
 def test_kubernetes_worker_localhost_seccomp_applies_only_to_main_container(tmp_path: Path) -> None:
     """A browser-compatible Localhost profile must not broaden pod-level or helper-container policy."""
     profile: _WorkerSeccompProfile = {"type": "Localhost", "localhostProfile": "profiles/worker-computer.json"}

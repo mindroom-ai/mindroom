@@ -86,6 +86,8 @@ class EventKind(StrEnum):
 # for every readable kind alike, so a pending reaction or approval can sit
 # in a thread and be mistaken for an unanswered turn.
 TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.SCHEDULE_TRIGGER, EventKind.ROUTE})
+# Runtime sources admitted by MindRoom itself rather than Matrix sync; nothing for Matrix ingress to parse.
+RUNTIME_SOURCE_KINDS = frozenset({EventKind.JOB_FOLLOW_UP, EventKind.COMPACTION})
 
 
 class SemanticConsumer(StrEnum):

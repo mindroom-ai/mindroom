@@ -70,7 +70,7 @@ from mindroom.timing import (
 )
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from mindroom.turns.facts import command_for, is_voice_echo
-from mindroom.turns.queued_notice import mark_waiting_for_approval, queued_notice_reservation_if_busy
+from mindroom.turns.queued_notice import mark_waiting_for_approval
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -241,10 +241,9 @@ class TurnIngress:
         # response short or show that it waits for this agent.
         may_be_for_me = not self.deps.turn_policy.not_for_this_agent(room, event.source, target, envelope)
         if may_be_for_me:
-            ticket.notice = queued_notice_reservation_if_busy(
-                self.deps.response_runner,
+            ticket.notice = self.deps.response_runner.lifecycle_coordinator.reserve_waiting_human_message(
                 target=target,
-                envelope=envelope,
+                response_envelope=envelope,
                 mentions_nobody=self._mentions_another_participant(room, event.source) is None,
                 mode=mid_turn_mode(event.source.get("content")),
             )
@@ -441,12 +440,12 @@ class TurnIngress:
             return
         mentions_nobody = event.for_another_participant is None
         # A replay its sender edits again carries something new.
-        self.deps.response_runner.note_edited_source(event.event_id)
+        conversations = self.deps.response_runner.lifecycle_coordinator
+        conversations.note_edited_source(event.event_id)
         if pending_event.notice is None:
-            pending_event.notice = queued_notice_reservation_if_busy(
-                self.deps.response_runner,
+            pending_event.notice = conversations.reserve_waiting_human_message(
                 target=target,
-                envelope=envelope,
+                response_envelope=envelope,
                 mentions_nobody=mentions_nobody,
                 # The gate kept the mode the message was sent with on its edited content.
                 mode=mid_turn_mode(event.source.get("content")),

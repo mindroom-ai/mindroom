@@ -484,7 +484,7 @@ How it works:
 - Every other entity keeps its own thread override or room-level model
 - Model names come from the `models:` section of config.yaml; `/model list` shows each model's reasoning levels
 - The override is scoped to one thread and survives restarts; other threads and rooms are unaffected
-- Use `/room_model` for a runtime room default, or `room_models` in config.yaml for an authored room default"""
+- Use `/room_model` for a room default set in the room, or `room_models` in config.yaml for an authored room default"""
 
     if topic in {"room_model", "room-model", "roommodel"}:
         return """**Room Model Command**
@@ -495,13 +495,14 @@ Usage: `/room_model [name|name@level|list|reset]` - Show or switch the default m
 - `/room_model` or `/room_model list` - Show the current room override and available models
 - `/room_model opus` - Make `opus` the default for every agent, team, and the router in this room
 - `/room_model sol@high` - Make `sol` at its `high` reasoning level the room default
-- `/room_model reset` - Remove the runtime override so the room default returns to configured room or entity models
+- `/room_model reset` - Remove the override so the room default returns to configured room or entity models
 
 How it works:
-- The override applies from the next model run and survives restarts without changing config.yaml
+- The override is the room's `model` setting, which a client's room settings can change too
+- It applies from the next model run and survives restarts without changing config.yaml
 - Thread overrides take precedence over this room default
-- The runtime room override takes precedence over `room_models` in config.yaml
-- Only Matrix room admins can set or reset the override"""
+- The override takes precedence over `room_models` in config.yaml
+- Only Matrix room admins can set or reset the override with this command"""
 
     if topic in {"encrypt", "e2ee", "encryption"}:
         return """**Encryption Commands**
@@ -533,8 +534,8 @@ Usage: `/thread_mode [room|thread|reset|show]` - Show or switch the thread mode 
 
 How it works:
 - The override applies to future agent replies in the current Matrix room
-- The override is stored in MindRoom runtime state, not config.yaml
-- Only Matrix room admins can set or reset the override"""
+- The override is the room's `thread_mode` setting, which a client's room settings can change too, not config.yaml
+- Only Matrix room admins can set or reset the override with this command"""
 
     if topic in {"reply_mode", "reply-mode", "replymode"}:
         return """**Reply Mode Command**
@@ -549,8 +550,8 @@ Usage: `/reply_mode [auto|mentions|reset|show]` - Show or switch whether agents 
 
 How it works:
 - The override applies to future messages in the current Matrix room
-- The override is stored in MindRoom runtime state, not config.yaml, and takes precedence over config.yaml
-- Only Matrix room admins can set or reset the override"""
+- The override is the room's `reply_mode` setting, which a client's room settings can change too, and takes precedence over config.yaml
+- Only Matrix room admins can set or reset the override with this command"""
 
     if topic in {"auto_approve", "auto-approve", "autoapprove"}:
         return """**Auto-Approve Command**

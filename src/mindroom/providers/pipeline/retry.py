@@ -144,10 +144,35 @@ def retrying_stream(
 ) -> AsyncIterator[StreamEvent]:
     """Stream ``request``, reissuing it after a retryable failure that came before the attempt committed.
 
-    A request whose caller retries it itself passes through unchanged, without the idle limit.
+    A request whose caller retries it itself passes through unchanged, without the idle limit. On a route with
+    ``sticky_replay_recovery``, a failure the transient retries did not resolve is resent without provider-encrypted
+    replay state, once: a failure of that resend, which ``attempts`` marks and keeps without that state, gets only
+    the transient retries the request has left. So a rate limit that used them all up gets the one resend, and a
+    rejection on the first attempt leaves its resend every retry. The budget goes with the failure, so a stage that
+    rewrites a request already sent without that state, such as the media fallback, reissues it with what is left.
     """
     if request.overrides.caller_retries:
         return inner.stream(request)
-    reissue = partial(_reissue, request=request, budget=_RetryBudget(), model_id=inner.identity.id)
-    next_event = partial(_next_event, idle_timeout_seconds=idle_timeout_seconds, provider=inner.identity.provider)
+    identity, recover = inner.identity, inner.capabilities.sticky_replay_recovery
+    budget = request.retry_budget if isinstance(request.retry_budget, _RetryBudget) else _RetryBudget()
+    transient = partial(_reissue, request=request, budget=budget, model_id=identity.id)
+
+    def reissue(error: ProviderError) -> Retry | None:
+        error.retry_budget = budget
+        retry = transient(error)
+        if retry is not None or error.replay_stripped or recover is None:
+            return retry
+        if (recovered := recover(request, error)) is None:
+            return None
+        logger.warning(
+            "Retrying model request without provider-encrypted replay state",
+            provider=identity.provider,
+            model_id=identity.id,
+            error_type=type(error).__name__,
+            status_code=error.status_code,
+            error=redact_sensitive_text(str(error), max_length=500),
+        )
+        return Retry(recovered)
+
+    next_event = partial(_next_event, idle_timeout_seconds=idle_timeout_seconds, provider=identity.provider)
     return attempts(inner, request, reissue, next_event=next_event)

@@ -598,7 +598,7 @@ def _turn_ingress_journal_dispatcher(
             source_has_live_owner=lambda _event_id: False,
             turn_has_live_claim=bot._turn_store.has_live_turn_claim,
             replies_ended=lambda _reply_ids: None,
-            on_synthetic_work=AsyncMock(),
+            on_runtime_source=AsyncMock(),
             on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda _room_id: room,
@@ -750,7 +750,7 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
         source_has_live_owner=gate.has_pending_source_event,
         turn_has_live_claim=lambda _event_id: False,
         replies_ended=lambda _reply_ids: None,
-        on_synthetic_work=AsyncMock(),
+        on_runtime_source=AsyncMock(),
         on_job_cancel=AsyncMock(),
     )
     dispatcher = JournalDispatcher(
@@ -1372,8 +1372,8 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
     target = MessageTarget.resolve(room.room_id, "$thread", "$m0")
     runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = runner.lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    lifecycle_lock = lifecycle._conversation_for(target).lock
+    queued_signal = lifecycle._conversation_for(target)
     response_running = asyncio.Event()
     calls: list[PreparedTurn] = []
 

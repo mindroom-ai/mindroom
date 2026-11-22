@@ -417,6 +417,105 @@ def test_worker_script_endpoint_applies_workspace_environment_overlay(
     assert f"run_id={run_id}" in status.json()["output"]
 
 
+@pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
+@pytest.mark.usefixtures("script_supervisor")
+def test_worker_script_hook_sees_worker_resource_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    execution_mode: str,
+) -> None:
+    """Kubernetes pod limits beat conflicting primary/manifest values for background script hooks and scripts."""
+    run_id = f"script-{'8' * 32}"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: _WORKER_KEY,
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(tmp_path / "dedicated-worker"),
+            SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"]: execution_mode,
+            "MINDROOM_WORKER_CPUS": "12",
+            "MINDROOM_WORKER_MEMORY_BYTES": str(40 * 1024**3),
+        },
+    )
+    _use_fake_local_workers(monkeypatch)
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        sandbox_runner_app,
+        runtime_paths,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=_TOKEN,
+    )
+    prepared = prepare_worker_request(
+        worker_key=_WORKER_KEY,
+        base_dir=None,
+        runtime_paths=runtime_paths,
+        agent_policies={},
+        runner_token=_TOKEN,
+    )
+    client, workspace = TestClient(sandbox_runner_app), prepared.paths.workspace
+    monkeypatch.setenv("MINDROOM_KUBERNETES_POD_CPU_LIMIT", "4")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES", "8589934592")
+    for name in (
+        "MINDROOM_WORKER_CPUS",
+        "MINDROOM_WORKER_MEMORY_BYTES",
+        "OMP_NUM_THREADS",
+        "PYTHON_CPU_COUNT",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    hook_path = workspace / ".mindroom" / "worker-env.sh"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text(
+        'export HOOK_SEEN_CPUS="${MINDROOM_WORKER_CPUS:?}"\n'
+        'export HOOK_SEEN_MEM="${MINDROOM_WORKER_MEMORY_BYTES:?}"\n'
+        'export HOOK_SEEN_OMP="${OMP_NUM_THREADS:?}"\n'
+        "export OMP_NUM_THREADS=2\n",
+        encoding="utf-8",
+    )
+    response = client.post(
+        "/api/sandbox-runner/scripts/run",
+        headers=_HEADERS,
+        json=_run_payload(
+            workspace,
+            run_id=run_id,
+            source=(
+                "import os\n"
+                "for key in (\n"
+                '    "HOOK_SEEN_CPUS",'
+                '    "HOOK_SEEN_MEM",'
+                '    "HOOK_SEEN_OMP",'
+                '    "MINDROOM_WORKER_CPUS",'
+                '    "MINDROOM_WORKER_MEMORY_BYTES",'
+                '    "OMP_NUM_THREADS",'
+                '    "PYTHON_CPU_COUNT",'
+                '    "PYTEST_XDIST_AUTO_NUM_WORKERS",'
+                "):\n"
+                '    print(f"{key}={os.environ.get(key)}", flush=True)\n'
+            ),
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    status = _settled_status(client, run_id, worker_key=_WORKER_KEY)
+
+    assert status.json()["state"] == "exited"
+    assert status.json()["exit_code"] == 0
+    output = status.json()["output"]
+    assert "HOOK_SEEN_CPUS=4" in output
+    assert "HOOK_SEEN_MEM=8589934592" in output
+    assert "HOOK_SEEN_OMP=4" in output
+    assert "MINDROOM_WORKER_CPUS=4" in output
+    assert "MINDROOM_WORKER_MEMORY_BYTES=8589934592" in output
+    assert "OMP_NUM_THREADS=2" in output
+    assert "PYTHON_CPU_COUNT=4" in output
+    assert "PYTEST_XDIST_AUTO_NUM_WORKERS=4" in output
+
+
 @pytest.mark.usefixtures("script_supervisor")
 def test_private_worker_script_executes_in_canonical_requester_workspace(
     tmp_path: Path,

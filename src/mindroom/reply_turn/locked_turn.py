@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom import reply_lifecycle as rl
 from mindroom.ai_runtime import bind_mid_turn_conversation_context
-from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import memory_backend
@@ -42,6 +41,7 @@ from mindroom.reply_scope import current_span, release_decision, suppress_decisi
 from mindroom.reply_turn.request import (
     correlation_id_for_request,
     reply_authorization_entity_names,
+    requester_remains_authorized,
 )
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
@@ -282,19 +282,15 @@ class LockedTurns:
     ) -> bool:
         """Recheck one requester after serialized lifecycle admission."""
         requester_id = request.response_envelope.requester_id
-        entity_names = reply_authorization_entity_names(
-            self.deps.runtime.config,
-            self.deps.agent_name,
-            reply_entity_names,
-        )
-        if is_sender_allowed_for_entity_replies_in_room(
+        config = self.deps.runtime.config
+        if requester_remains_authorized(
             requester_id,
-            entity_names,
-            self.deps.runtime.config,
             request.room_id,
-            self.deps.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
-            require_resolved_membership=True,
+            owner_entity_name=self.deps.agent_name,
+            config=config,
+            runtime_paths=self.deps.runtime_paths,
+            membership_index=self.deps.runtime.agent_reply_memberships,
+            reply_entity_names=reply_entity_names,
         ):
             return True
         self.deps.logger.info(
@@ -302,7 +298,7 @@ class LockedTurns:
             source_event_id=request.response_envelope.source_event_id,
             requester_id=requester_id,
             room_id=request.room_id,
-            entity_names=entity_names,
+            entity_names=reply_authorization_entity_names(config, self.deps.agent_name, reply_entity_names),
         )
         return False
 

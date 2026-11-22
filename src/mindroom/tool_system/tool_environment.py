@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.constants import shell_extra_env_values
+from mindroom.runtime_env_policy import KUBERNETES_POD_LIMIT_ENV_NAMES
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping
@@ -48,7 +49,9 @@ class ToolEnvironment:
     @property
     def removed(self) -> frozenset[str]:
         """Return the variables kept from the command, even where its base environment would give them."""
-        return frozenset(name for name, value in self.values.items() if value is None)
+        return frozenset(
+            name for name, value in self.values.items() if value is None and name not in KUBERNETES_POD_LIMIT_ENV_NAMES
+        )
 
     def applied(self, env: Mapping[str, str], process_env: Mapping[str, str]) -> dict[str, str]:
         """Return ``env`` with the passed-through variables of ``process_env`` added, then the set and removed ones.
@@ -56,7 +59,8 @@ class ToolEnvironment:
         The ``git_config`` entries then go after the Git config of that result.
         """
         passed = shell_extra_env_values(extra_env_passthrough=",".join(self.pass_through), process_env=process_env)
-        merged = {**env, **passed, **self.values}
+        explicit = {name: value for name, value in self.values.items() if name not in KUBERNETES_POD_LIMIT_ENV_NAMES}
+        merged = {**env, **passed, **explicit}
         applied = {name: value for name, value in merged.items() if value is not None}
         if self.git_config:
             applied.update(git_config_env(applied, self.git_config))

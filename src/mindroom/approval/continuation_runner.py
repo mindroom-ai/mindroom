@@ -1414,7 +1414,7 @@ class ApprovalContinuationRunner:
         target = continuation_target(continuation)
         request = self.approval_response_request(continuation, target=target)
 
-        async def recover(_target: MessageTarget) -> bool:
+        async def recover() -> bool:
             # The orchestrator's recovery discards a paused reply with no answer itself.
             step = next_step(await self._facts(continuation, recover=True), OwnerUnavailable())
             return await self._run_step(continuation, step, target=target)

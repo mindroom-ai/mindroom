@@ -52,7 +52,7 @@ from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.runtime_context import get_call_progress_sink, note_call_refusal, tool_runtime_context
 from mindroom.tool_system.skills import Skill, SkillsToolkit
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
@@ -442,6 +442,136 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
     assert [child.task for child in children] == (["a task nobody approved"] if approved else [])
     # The requester's denial answers as a failed call.
     assert receipt["status"] == ("completed" if approved else "failed"), receipt
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_while_a_delegation_awaits_approval_is_deferred(tmp_path, monkeypatch) -> None:
+    """A cancel during a delegate call's approval wait only marks the call, so a sibling's approval still works."""
+    config = _delegation_config()
+    config.tool_approval.default = "require_approval"
+    paths = _runtime_paths(tmp_path)
+    ScriptedAgents({"code": ScriptedModel([answer("child done")])}).install(monkeypatch)
+    asking = asyncio.Event()
+    release = asyncio.Event()
+    asked: list[str] = []
+    interrupted: list[str] = []
+
+    async def decide(paused):
+        ids = [str(tool.tool_call_id) for tool in paused.tools]
+        asked.extend(ids)
+        if len(asked) == 1:
+            asking.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                interrupted.extend(ids)
+                raise
+        return tuple(apply_exact_approval_decisions(paused.requirements, answered_calls(ids, approved=True)))
+
+    catalog, _runtime, identity = await _delegation_catalog(
+        tmp_path,
+        config,
+        paths,
+        [_flagged("delegate", run_subagent, gate=ToolGate.DELEGATION)],
+        approval_handler=decide,
+    )
+    children = []
+
+    async def child_response(child, **kwargs):
+        children.append(child)
+        return await run_delegated_child_response(child, **kwargs)
+
+    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(identity, "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+        output_file_policy=_output_policy(catalog),
+    )
+
+    async def checkpoint(parent):
+        assert parent == "bash-parent"
+
+    monkeypatch.setattr(owner.checkpoint, "persist_approval", checkpoint)
+
+    def delegation(call_id, task: str) -> ToolCallOperation:
+        return ToolCallOperation(
+            operation="tools.call",
+            call_id=call_id,
+            toolkit="delegate",
+            function="run_subagent",
+            arguments={"agent_name": "code", "task": task},
+        )
+
+    first_id, second_id = uuid4(), uuid4()
+    async with asyncio.timeout(30), owner._window("bash-parent"):
+        await owner.operation(window="bash-parent", operation=delegation(first_id, "cancelled task"))
+        await asking.wait()
+        await owner.operation(window="bash-parent", operation=delegation(second_id, "sibling task"))
+        deferred = await owner.cancel_call(str(first_id))
+        assert deferred["status"] not in {"cancelled", "failed", "completed"}
+        release.set()
+    first = await owner.get_call(str(first_id))
+    second = await owner.get_call(str(second_id))
+
+    assert interrupted == []
+    assert first["status"] == "cancelled", first
+    assert second["status"] == "completed", second
+    assert asked == [str(first_id), str(second_id)]
+    assert [child.task for child in children] == ["sibling task"]
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_delegated_child_never_reports_on_its_delegate_call_receipt(tmp_path, monkeypatch) -> None:
+    """A child's worker progress and named-worker refusal belong to the child's calls, not to the delegate call."""
+    config = _delegation_config()
+    paths = _runtime_paths(tmp_path)
+    ScriptedAgents({"code": ScriptedModel([answer("child done")])}).install(monkeypatch)
+    catalog, _runtime, identity = await _delegation_catalog(
+        tmp_path,
+        config,
+        paths,
+        [_flagged("delegate", run_subagent, gate=ToolGate.DELEGATION)],
+    )
+    sinks = []
+
+    async def child_response(child, **kwargs):
+        sink = get_call_progress_sink()
+        sinks.append(sink)
+        if sink is not None:
+            sink("starting worker of the child...")
+        note_call_refusal()
+        # A reported progress message reaches its receipt on the next pass of the loop.
+        await asyncio.sleep(0)
+        return await run_delegated_child_response(child, **kwargs)
+
+    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(identity, "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+        output_file_policy=_output_policy(catalog),
+    )
+    call_id = uuid4()
+    async with owner._window("bash-parent"):
+        await owner.operation(
+            window="bash-parent",
+            operation=ToolCallOperation(
+                operation="tools.call",
+                call_id=call_id,
+                toolkit="delegate",
+                function="run_subagent",
+                arguments={"agent_name": "code", "task": "work"},
+            ),
+        )
+    receipt = await owner.get_call(str(call_id))
+
+    assert sinks == [None]
+    assert receipt["status"] == "completed", receipt
+    assert receipt["progress"] is None
+    assert receipt["error_kind"] is None
     await owner.close()
 
 
