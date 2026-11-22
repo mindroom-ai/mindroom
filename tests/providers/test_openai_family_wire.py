@@ -2375,6 +2375,74 @@ async def test_openrouter_responses_always_429_stops_at_single_stripped_attempt(
     assert "encrypted_content" not in json.dumps(json.loads(sent[-1].content)["input"])
 
 
+_STREAM_429 = {
+    "type": "error",
+    "sequence_number": 1,
+    "code": "429",
+    "message": _UPSTREAM_429_BODY["error"]["message"],
+    "param": None,
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transient",
+    [
+        _json_reply(_UPSTREAM_429_BODY, status=429),
+        _json_reply({"error": {"message": "overloaded"}}, status=503),
+        _responses_reply(_text_events("")[0], _STREAM_429),
+    ],
+    ids=["429", "503", "stream-429"],
+)
+async def test_openrouter_responses_stripped_resend_keeps_the_transient_retries_left(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transient: dict[str, Any],
+) -> None:
+    """A rejection on the first attempt used no transient retry, so the resend retries a transient failure, stripped."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        _json_reply(_STICKY_400_BODY, status=400),
+        transient,
+        transient,
+        _responses_reply(*_text_events("Recovered"), _completed()),
+    )
+
+    turn = await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert (turn.content, len(sent)) == ("Recovered", 4)
+    inputs = [json.dumps(json.loads(request.content)["input"]) for request in sent]
+    assert ["encrypted_content" in sent_input for sent_input in inputs] == [True, False, False, False]
+    assert inputs[1] == inputs[2] == inputs[3]
+    assert turn.message.provider_data["mindroom_encrypted_replay_reset"] == adapter.capabilities.replay_reset_scope
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_stripped_resend_shares_one_transient_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resend gets no budget of its own: retries spent before the rejection are gone, and nothing strips twice."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    rate_limited = _json_reply(_UPSTREAM_429_BODY, status=429)
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        rate_limited,
+        rate_limited,
+        _json_reply(_STICKY_400_BODY, status=400),
+        rate_limited,
+    )
+
+    with pytest.raises(RateLimited):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    # Two retries before the rejection leave the stripped resend two more: 3 encrypted sends, then 3 stripped.
+    assert retry_stage._MAX_TRANSIENT_RETRIES == 4
+    inputs = [json.dumps(json.loads(request.content)["input"]) for request in sent]
+    assert ["encrypted_content" in sent_input for sent_input in inputs] == [True, True, True, False, False, False]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("extra_override", "recovers"),

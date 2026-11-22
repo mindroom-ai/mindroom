@@ -145,9 +145,10 @@ def retrying_stream(
     """Stream ``request``, reissuing it after a retryable failure that came before the attempt committed.
 
     A request whose caller retries it itself passes through unchanged, without the idle limit. On a route with
-    ``sticky_replay_recovery``, a failure the transient retries did not resolve is resent once without
-    provider-encrypted replay state. That resend is final by design: its failure, which ``attempts`` marks so the
-    stages that rewrite the request keep that state out, gets no further retry here.
+    ``sticky_replay_recovery``, a failure the transient retries did not resolve is resent without provider-encrypted
+    replay state, once: a failure of that resend, which ``attempts`` marks and keeps without that state, gets only
+    the transient retries the request has left. So a rate limit that used them all up gets the one resend, and a
+    rejection on the first attempt leaves its resend every retry.
     """
     if request.overrides.caller_retries:
         return inner.stream(request)
@@ -155,10 +156,11 @@ def retrying_stream(
     transient = partial(_reissue, request=request, budget=_RetryBudget(), model_id=identity.id)
 
     def reissue(error: ProviderError) -> Retry | None:
-        if error.replay_stripped:
-            return None
-        if (retry := transient(error)) is not None or recover is None or (recovered := recover(request, error)) is None:
+        retry = transient(error)
+        if retry is not None or error.replay_stripped or recover is None:
             return retry
+        if (recovered := recover(request, error)) is None:
+            return None
         logger.warning(
             "Retrying model request without provider-encrypted replay state",
             provider=identity.provider,
