@@ -45,6 +45,7 @@ from tests.workflow_live.kill_after_write import (
 
 _TOPICS = ("tides", "harbors", "lighthouses", "currents", "anchors", "buoys")
 _DIAMOND = """\
+# {token}: the word this script's run is found by.
 from mindroom.workflow import agent, foreach, phase
 
 
@@ -105,7 +106,7 @@ def main() -> int:
     if deployment.give_workflow_toolkit() or "MINDROOM_WORKFLOW_FAULT_DIR" in backend.environment:
         backend.stop()
         backend.start()
-    source = _DIAMOND.format(topics="\\n".join(_TOPICS), sleep=args.sleep, report=report)
+    source = _DIAMOND.format(token=token, topics="\\n".join(_TOPICS), sleep=args.sleep, report=report)
     root = start_run(deployment, source, token, dev)
 
     def enough_done() -> bool:
