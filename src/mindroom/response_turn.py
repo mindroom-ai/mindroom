@@ -475,6 +475,7 @@ class TurnResume:
     attempt: CompletedAttempt | None = None
     continuation_count: int = 0
     prior_usage: tuple[RunMetrics, ...] = ()
+    prior_subagent_cost_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1144,7 +1145,12 @@ async def stream_response_turn[ChunkT](
 ) -> AsyncGenerator[ChunkT | FailedReply]:
     """Own the whole response while binding context only during pulls and close; a failed turn ends with its reply."""
     lifetime = CliTurnLifetime()
-    subagent_cost = SubagentCost() if sinks.subagent_cost is None else sinks.subagent_cost
+    resolved_resume = resume or TurnResume()
+    subagent_cost = (
+        SubagentCost(prior_usd=resolved_resume.prior_subagent_cost_usd)
+        if sinks.subagent_cost is None
+        else sinks.subagent_cost
+    )
 
     @contextmanager
     def bind() -> Iterator[None]:
@@ -1159,7 +1165,7 @@ async def stream_response_turn[ChunkT](
             sinks,
             continuation=continuation,
             cli_lifetime=lifetime,
-            resume=resume or TurnResume(),
+            resume=resolved_resume,
         ),
     )
     try:

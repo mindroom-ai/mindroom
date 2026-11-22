@@ -158,7 +158,7 @@ def _store(config: Config) -> ConversationStore:
 
 
 def _recover(config: Config, *, natively: bool = True) -> list[str]:
-    return recover_interrupted_turn(_store(config), _SESSION, _SCOPE, {_EVENT}, natively=natively)
+    return list(recover_interrupted_turn(_store(config), _SESSION, _SCOPE, {_EVENT}, natively=natively).run_ids)
 
 
 def _only_run(config: Config) -> AnyRunRecord:

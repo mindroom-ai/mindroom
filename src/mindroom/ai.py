@@ -1216,7 +1216,11 @@ async def ai_response(
     completed: list[CompletedAttempt] = []
     failed: list[HandledAttempt] = []
     sinks = sinks or TurnSinks()
-    subagent_cost = SubagentCost() if sinks.subagent_cost is None else sinks.subagent_cost
+    subagent_cost = (
+        SubagentCost(prior_usd=None if resume is None else resume.prior_subagent_cost_usd)
+        if sinks.subagent_cost is None
+        else sinks.subagent_cost
+    )
     reporting = replace(
         sinks,
         run_metadata_collector=None,

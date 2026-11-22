@@ -10430,6 +10430,7 @@ path = "mindroom.history.run_checkpoint"
 depends_on = [
     "mindroom.agent_loop",
     "mindroom.constants",
+    "mindroom.delegation.cost",
     "mindroom.history.run_visibility",
     "mindroom.llm",
     "mindroom.session_storage.store",

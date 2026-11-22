@@ -25,6 +25,7 @@ from mindroom.constants import (
     COMPACTIONS_CONTENT_KEY,
     CONTINUED_RUNS_METADATA_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     TURN_INTENT_RUN_METADATA_KEY,
@@ -105,6 +106,7 @@ from mindroom.response_turn import (
     PausedAttempt,
     ResponsePausedForApproval,
     ResponseTurnContext,
+    TurnResume,
     TurnSinks,
     collect_streamed_response_content,
 )
@@ -227,6 +229,12 @@ def _replaceable_placeholder(request: ResponseRequest) -> bool:
     A resumed reply shows its stopped attempt's work, which no failure may remove.
     """
     return _shows_placeholder(request) and _resumed_reply() is None
+
+
+def _turn_resume(request: ResponseRequest) -> TurnResume | None:
+    if not request.prior_usage and request.prior_subagent_cost_usd is None:
+        return None
+    return TurnResume(prior_usage=request.prior_usage, prior_subagent_cost_usd=request.prior_subagent_cost_usd)
 
 
 def _turn_run_metadata(request: ResponseRequest) -> dict[str, Any]:
@@ -861,6 +869,7 @@ class ResponseRunner:
             sources=ResponseSources((follow_up_id,), (follow_up_id,)),
             follow_up_key=key,
             user_id=key.requester_id,
+            matrix_run_metadata={MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: [follow_up_id]},
         )
 
     async def _generate_job_follow_up(self, request: ResponseRequest) -> SourceFate:
@@ -1154,7 +1163,7 @@ class ResponseRunner:
             return request
         recorded = await handle.runtime.interrupted_tool_calls(handle)
         restarts = await handle.runtime.restart_interruptions(handle)
-        recovered: list[str] = []
+        recovered = None
         if restarts and history_scope is not None:
             recovered = await self.deps.state_writer.recover_interrupted_turn(
                 execution_identity=execution_identity,
@@ -1165,8 +1174,16 @@ class ResponseRunner:
             )
         if recovered:
             # The turn's runs name the recovered runs they continue, so the message that answers the turn links them.
-            continued = {**(request.matrix_run_metadata or {}), CONTINUED_RUNS_METADATA_KEY: recovered}
-            request = replace(request, matrix_run_metadata=continued)
+            continued = {**(request.matrix_run_metadata or {}), CONTINUED_RUNS_METADATA_KEY: list(recovered.run_ids)}
+            prior_subagent_cost_usd = request.prior_subagent_cost_usd
+            if recovered.subagent_cost_usd is not None:
+                prior_subagent_cost_usd = (prior_subagent_cost_usd or 0.0) + recovered.subagent_cost_usd
+            request = replace(
+                request,
+                matrix_run_metadata=continued,
+                prior_usage=(*request.prior_usage, *recovered.prior_usage),
+                prior_subagent_cost_usd=prior_subagent_cost_usd,
+            )
         return self._with_recorded_interrupted_attempt(request, handle, recorded)
 
     def _with_recorded_interrupted_attempt(
@@ -1788,6 +1805,7 @@ class ResponseRunner:
                     compaction_lifecycle=compaction_lifecycle,
                 ),
                 sinks=sinks,
+                resume=_turn_resume(request),
             )
 
         # A configured team keeps the conversations it answers in its members' shared memory.
@@ -2424,7 +2442,13 @@ class ResponseRunner:
                 agent_user_id=self.deps.matrix_full_id,
             )
             ctx = replace(ctx, transient_enrichment_items=transient_items)
-            response_stream = stream_agent_response(ctx, self.deps.runtime_paths, self.deps.runtime.config, sinks=sinks)
+            response_stream = stream_agent_response(
+                ctx,
+                self.deps.runtime_paths,
+                self.deps.runtime.config,
+                sinks=sinks,
+                resume=_turn_resume(normalized_request),
+            )
             async with closing_async_stream(response_stream):
                 async for chunk in response_stream:
                     yield chunk

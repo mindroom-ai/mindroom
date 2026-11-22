@@ -10,15 +10,16 @@ tool, since its replay sends the prompt again; a run its user stopped, once a re
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, NamedTuple
 
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.agent_loop.tools import tool_result_message
 from mindroom.constants import CONTINUED_RUNS_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
+from mindroom.delegation.cost import stored_subagent_cost_usd, sum_subagent_cost_usd
 from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
 from mindroom.llm.messages import CUT_OFF_TEXT_KEY, Message
-from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.store import source_event_ids, write_with_session_state
 from mindroom.session_storage.summary_rows import folded_tool_call_ids
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.tools import PlannedCall
     from mindroom.history.types import HistoryScope
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.usage import RunMetrics
     from mindroom.run_storage import RunStorage
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
@@ -213,6 +215,40 @@ def recover_stopped_run(
     return True
 
 
+@dataclass(frozen=True)
+class RecoveredTurn:
+    """The unlinked attempts at a restart-interrupted turn, and the own usage and subagent cost they spent."""
+
+    run_ids: tuple[str, ...] = ()
+    prior_usage: tuple[RunMetrics, ...] = ()
+    subagent_cost_usd: float | None = None
+
+    def __bool__(self) -> bool:
+        """Return whether recovery found any unlinked attempts for this turn."""
+        return bool(self.run_ids)
+
+
+def _members_by_parent(runs: Sequence[AnyRunRecord]) -> dict[str, list[AnyRunRecord]]:
+    members: dict[str, list[AnyRunRecord]] = {}
+    for run in runs:
+        if run.parent_run_id is not None:
+            members.setdefault(run.parent_run_id, []).append(run)
+    return members
+
+
+def _attempt_own_usage(run: AnyRunRecord, member_runs: Sequence[AnyRunRecord]) -> RunMetrics | None:
+    """Return ``run``'s own usage, summing stored member runs for a team attempt within the leader's duration."""
+    if not isinstance(run, TeamRunRecord) or not member_runs:
+        return run.metrics
+    metrics = [part.metrics for part in (run, *member_runs) if part.metrics is not None]
+    if not metrics:
+        return None
+    total = sum(metrics[1:], metrics[0])
+    if len(metrics) > 1 and run.metrics is not None:
+        total.duration = run.metrics.duration
+    return total
+
+
 def recover_interrupted_turn(
     store: ConversationStore,
     session_id: str,
@@ -220,23 +256,28 @@ def recover_interrupted_turn(
     event_ids: Collection[str],
     *,
     natively: bool,
-) -> list[str]:
+) -> RecoveredTurn:
     """Recover the runs of ``scope`` cut short while they answered ``event_ids``; return the turn's unlinked attempts.
 
     A turn a restart interrupted is replayed, and its replay calls this before it loads history, so its request
     continues from the interrupted attempt's own messages. Without ``natively``, for a turn that keeps being
     interrupted, nothing is recovered and the runs recovered for it earlier leave history as failed runs, so its next
     attempt starts from the conversation before the turn. Either way, every attempt at the turn no answer links yet is
-    returned, whatever recovery did with it, so the turn's answer links it (``link_response_event``): a summary can
-    hold its work, from its own mid-turn fold or a later compaction, and redacting the answer removes that too.
+    returned along with each attempt's own metrics and stored subagent cost, whatever recovery did with it, so the
+    turn's answer links it (``link_response_event``) and reports the whole turn's cost: a summary can hold its work,
+    from its own mid-turn fold or a later compaction, and redacting the answer removes that too.
     """
     session = store.load_session(session_id)
     if session is None:
-        return []
+        return RecoveredTurn()
     loaded = {run.run_id for run in session.runs}
-    attempts: list[str] = []
     # The loaded session leaves out the runs a summary covers, so the turn's attempts are read from every stored run.
-    for run in store.list_runs(session_id):
+    all_runs = store.list_runs(session_id)
+    members_by_parent = _members_by_parent(all_runs)
+    attempts: list[str] = []
+    prior_usage: list[RunMetrics] = []
+    subagent_costs: list[float | None] = []
+    for run in all_runs:
         if run.parent_run_id is not None or not run_in_scope(run, scope):
             continue
         if not source_event_ids(run.metadata).intersection(event_ids):
@@ -247,7 +288,14 @@ def recover_interrupted_turn(
             store.save_interrupted_record(session, replace(run, status=RunStatus.error, error=_CRASH_LOOP_ERROR))
         if MATRIX_RESPONSE_EVENT_ID_METADATA_KEY not in (run.metadata or {}):
             attempts.append(run.run_id)
-    return attempts
+            if (usage := _attempt_own_usage(run, members_by_parent.get(run.run_id, ()))) is not None:
+                prior_usage.append(usage)
+            subagent_costs.append(stored_subagent_cost_usd(run.metadata))
+    return RecoveredTurn(
+        run_ids=tuple(attempts),
+        prior_usage=tuple(prior_usage),
+        subagent_cost_usd=sum_subagent_cost_usd(subagent_costs),
+    )
 
 
 def link_response_event(store: ConversationStore, session_id: str, run_id: str, response_event_id: str) -> None:
@@ -267,6 +315,7 @@ __all__ = [
     "INTERRUPTED_CALL_RESULT",
     "STOPPED_BY_USER_NOTE",
     "CheckpointHooks",
+    "RecoveredTurn",
     "checkpoint_hooks",
     "is_recovered_run",
     "link_response_event",

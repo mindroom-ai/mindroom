@@ -22,7 +22,12 @@ from mindroom.approval.tool_owners import (
     required_approval_tool_names,
     validate_approval_tool_owners,
 )
-from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, resumed_subagent_cost
+from mindroom.delegation.cost import (
+    SubagentCost,
+    continued_subagent_cost_usd,
+    receiving_subagent_cost,
+    resumed_subagent_cost,
+)
 from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream, resume_from_approval
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext
@@ -68,9 +73,11 @@ if TYPE_CHECKING:
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.knowledge.utils import KnowledgeAccessSupport
     from mindroom.llm.events import RunEvent
-    from mindroom.llm.runs import ToolExecution
+    from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.media_inputs import MediaInputs
     from mindroom.run_storage import RunStorage
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -443,9 +450,25 @@ class AgentApprovalExecution:
             self.runtime_paths,
             execution_identity,
         )
-        store, session, persisted = await run_session_storage_operation(
+
+        def _load_paused(
+            opened: ConversationStore,
+        ) -> tuple[ConversationStore, ConversationSession | None, AnyRunRecord | None, float | None]:
+            loaded_session = opened.load_session(continuation.session_id)
+            loaded_run = opened.get_run(continuation.run_id)
+            prior_subagents = (
+                continued_subagent_cost_usd(
+                    loaded_run.metadata,
+                    lambda run_id: None if (prior := opened.get_run(run_id)) is None else prior.metadata,
+                )
+                if loaded_run is not None
+                else None
+            )
+            return opened, loaded_session, loaded_run, prior_subagents
+
+        store, session, persisted, prior_subagent_usd = await run_session_storage_operation(
             storage_factory,
-            lambda opened: (opened, opened.load_session(continuation.session_id), opened.get_run(continuation.run_id)),
+            _load_paused,
         )
         set_consumption_storage(storage_factory)
         if (
@@ -509,7 +532,7 @@ class AgentApprovalExecution:
         )
         storage = scope_run_storage(scope_context)
         # The resumed turn goes on from what its subagents had cost before the pause.
-        subagent_cost = resumed_subagent_cost(persisted.metadata)
+        subagent_cost = resumed_subagent_cost(persisted.metadata, prior_usd=prior_subagent_usd)
         try:
             with helper_usage_context(scope_context):
                 if cli_call is not None:

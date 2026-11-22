@@ -93,7 +93,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord, TeamRunRecord
     from mindroom.llm.usage import RunMetrics
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.response_turn import TurnRunState
+    from mindroom.response_turn import TurnResume, TurnRunState
     from mindroom.run_storage import RunStorage
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.teams.members import BuiltTeam
@@ -755,6 +755,7 @@ async def team_response_stream(
     ctx: ResponseTurnContext,
     *,
     sinks: TurnSinks,
+    resume: TurnResume | None = None,
 ) -> AsyncIterator[TeamStreamChunk]:
     """Stream one team turn as a live document: a header, one section per member, and the leader's consensus.
 
@@ -780,6 +781,7 @@ async def team_response_stream(
         adapter,
         sinks,
         continuation=turn.initial_continuation(),
+        resume=resume,
     )
     # Close the driver generator deterministically when this wrapper unwinds so
     # its cleanup does not wait for event-loop async-generator finalization.
