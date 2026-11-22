@@ -43,7 +43,7 @@ That failure is delivered once, no report is, and `resume_workflow(run_id, rerun
 
 Each script edits the slot's `config.yaml` once: the Helper gets the `workflow` and `file` toolkits, and `defaults.allow_shell_without_worker: true` unless the config routes tools to workers.
 `agents_restart.py` also adds the agent `deckhand` to the lobby, which the Helper may not delegate to: a run runs it because its bot is in the room.
-`approval_restart.py` also adds a `tool_approval` rule that makes `save_file` ask for an approval, and approves the card itself with an `io.mindroom.tool_approval_response` event of the test account.
+`approval_restart.py` also adds a `tool_approval` rule, first in the list of rules, that makes `save_file` ask for an approval, and approves the card itself with an `io.mindroom.tool_approval_response` event of the test account.
 A running backend reloads a config edit some time later, so each script starts the backend again after an edit that changed the file, and only then sends its message.
 `agents_restart.py` also waits until the bot of `deckhand` has joined the lobby.
 Each script then asks the Helper to start a run from a file it saved in the Helper's workspace.
@@ -119,7 +119,12 @@ With `worker_tools` set, the scripts leave `allow_shell_without_worker` out, and
   The script now starts the backend again after the edit, and its third call runs a room agent.
   It has not been run since that change.
 - `approval_restart.py` and `diamond_restart.py` were added with the approval restore, the fan-out and the usage ledger.
-  Neither has been run yet.
+  Their first live runs failed in the scripts themselves.
+  `approval_restart.py` refused a config whose `tool_approval` section already had rules, after it had given the Helper its toolkits and before it started the backend again.
+  `diamond_restart.py` ran next, found the toolkits in the config, and so asked the Helper three seconds before the running backend reloaded that edit: the Helper had no `workflow` tool yet and started nothing.
+  It would not have found a run either way, because it looks for a run by a word that its script did not hold.
+- 2026-11-22 at `1beaf6aef`, local stack (slot 50), with both scripts fixed: both printed their expected lines.
+  The diamond run cost 0.0017 USD in all, and 0.0005 USD in the attempt after the restart.
 - Without the gateway lines above, the Docker stack refuses every run with `Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL.`: the stack's `MINDROOM_PUBLIC_URL` is a loopback address, which workers may not use.
 
 ## What to check besides the result line
