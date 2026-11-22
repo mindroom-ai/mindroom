@@ -167,6 +167,7 @@ def retrying_stream(
             "Retrying model request without provider-encrypted replay state",
             provider=identity.provider,
             model_id=identity.id,
+            error_type=type(error).__name__,
             status_code=error.status_code,
             error=redact_sensitive_text(str(error), max_length=500),
         )

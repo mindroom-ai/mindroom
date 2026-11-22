@@ -166,6 +166,17 @@ class ResponsesAdapter:
         )
         parts.flag(request.native_compaction.route if request.native_compaction is not None else None)
 
+    def _marked(self, failure: ProviderError) -> ProviderError:
+        """Mark OpenRouter's rejection of encrypted replay items, as an HTTP 400 or as a failed response's error."""
+        if (
+            self.wire.reset_scope is not None
+            and isinstance(failure, InvalidRequest)
+            and (failure.status_code == 400 or failure.provider_code == "400")
+            and _STICKY_PROVIDER_ERROR in str(failure).casefold()
+        ):
+            failure.code = ENCRYPTED_REPLAY_REJECTED
+        return failure
+
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         return responses_request_kwargs(
             model_id=self.identity.id,
@@ -212,18 +223,15 @@ class ResponsesAdapter:
                 async for event in events:
                     yield event
         except sdk_failures() as error:
-            failure = provider_error(error, provider=self.identity.provider)
-            if (
-                self.wire.reset_scope is not None
-                and isinstance(failure, InvalidRequest)
-                and (failure.status_code == 400 or failure.provider_code == "400")
-                and _STICKY_PROVIDER_ERROR in str(failure).casefold()
-            ):
-                failure.code = ENCRYPTED_REPLAY_REJECTED
+            failure = self._marked(provider_error(error, provider=self.identity.provider))
             # A request that continues a stored response sends only the messages after it.
             replay = request_replay(self.wire, request)
             failure.rejected_media = rejected_media(error, kwargs, replay.history[replay.sent_from :], chat=False)
             raise failure from error
+        except ProviderError as failure:
+            # A response that failed in its stream raises its own error (``ResponsesStream.add``).
+            self._marked(failure)
+            raise
         if not accumulator.ended:
             # The stream stopped before the response ended, so the turn did not finish.
             return

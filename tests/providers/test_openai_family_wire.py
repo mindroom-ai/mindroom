@@ -2082,6 +2082,41 @@ async def test_openrouter_responses_recovers_once_from_sticky_400_and_stores_new
 
 
 @pytest.mark.asyncio
+async def test_openrouter_responses_recovers_from_a_sticky_rejection_sent_as_a_stream_error(tmp_path: Path) -> None:
+    """A rejection that arrives as the stream's error event has no HTTP status, only the event's code."""
+    rejection = {
+        "type": "error",
+        "sequence_number": 1,
+        "code": "400",
+        "message": _STICKY_400_BODY["error"]["message"],
+        "param": None,
+    }
+    replies = [
+        _responses_reply(_text_events("")[0], rejection),
+        _responses_reply(*_text_events("Recovered"), _completed()),
+    ]
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(replies[len(sent) - 1])
+
+    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+    history = _encrypted_history(native)
+    history[-1] = replace(history[-1], images=[Image(id="att_photo", content=_PNG, mime_type="image/png")])
+
+    turn = await complete(pipeline_provider(adapter), ModelRequest(messages=history, native_compaction=native))
+
+    assert (turn.content, len(sent)) == ("Recovered", 2)
+    inputs = [json.dumps(json.loads(request.content)["input"]) for request in sent]
+    assert ["encrypted_content" in sent_input for sent_input in inputs] == [True, False]
+    assert all("input_image" in sent_input for sent_input in inputs)
+
+
+@pytest.mark.asyncio
 async def test_openrouter_responses_sticky_400_retries_at_most_once(tmp_path: Path) -> None:
     sent: list[httpx2.Request] = []
 
