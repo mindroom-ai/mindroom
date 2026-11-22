@@ -437,10 +437,10 @@ class LiveTurnTools(TurnToolBridge):
 
     @staticmethod
     def _cancel_outcome(call: _Call, *, never_ran: bool) -> str | None:
-        """Say what is known of a cancelled call's command: it never ran, or its exit confirmed that it stopped."""
+        """Say what is known of a cancelled call's command: it never ran, or its runner saw its processes gone."""
         if never_ran:
             return "never_ran"
-        return "stopped" if call.stream is not None and call.stream.ended.is_set() else None
+        return "stopped" if call.stream is not None and call.stream.stopped else None
 
     def _streamed_call(self, call_id: str) -> tuple[_Call, CallOutputStream]:
         self._check_live()
