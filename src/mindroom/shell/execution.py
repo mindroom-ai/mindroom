@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
+import errno
 import functools
 import itertools
 import os
@@ -224,6 +225,8 @@ class ShellRunResult:
     handle: str | None = None
     output_file_handled: bool = False
     execution_error: bool = False
+    launch_exit_code: int | None = None
+    launch_error: str | None = None
 
 
 def shell_call_timeout(timeout: float | None) -> float | None:
@@ -375,7 +378,13 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
     except Exception as exc:
         if capture is not None:
             capture.close()
-        return ShellRunResult(message=f"Error: {exc}", execution_error=True)
+        launch = _launch_failure(argv, cwd, exc) if isinstance(exc, OSError) else None
+        return ShellRunResult(
+            message=f"Error: {exc}",
+            execution_error=True,
+            launch_exit_code=launch[0] if launch is not None else None,
+            launch_error=launch[1] if launch is not None else None,
+        )
     # A busy command, such as a build, must not take the CPU from the process that runs MindRoom; processes the
     # command starts later inherit the priority.
     with contextlib.suppress(OSError):
@@ -806,6 +815,19 @@ def _idle_launcher() -> str | None:
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         if subprocess.run([chrt, "-i", "0", chrt, "-m"], capture_output=True, timeout=5, check=False).returncode == 0:
             return chrt
+    return None
+
+
+def _launch_failure(argv: list[str], cwd: str | None, exc: OSError) -> tuple[int, str] | None:
+    """Return ``(exit_code, detail)`` for a missing or non-executable binary, else None."""
+    if not argv or (cwd is not None and exc.filename == cwd and (exc.filename != argv[0] or not Path(cwd).is_dir())):
+        return None
+    program = argv[0]
+    if exc.errno == errno.ENOENT:
+        reason = "No such file or directory" if os.sep in program else "command not found"
+        return 127, f"{program}: {reason}"
+    if exc.errno in {errno.EACCES, errno.EISDIR, errno.ENOTDIR, errno.ENOEXEC}:
+        return 126, f"{program}: {exc.strerror or os.strerror(exc.errno)}"
     return None
 
 

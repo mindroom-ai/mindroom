@@ -1277,11 +1277,16 @@ async def test_named_shell_launch_errors_fail_the_tool_without_matching_command_
     )
     call = _offered_entrypoint(shell, "run_shell_command")
     command = ["definitely-not-a-binary-xyz", "arg"]
-    diagnostic = "Shell supervisor is unavailable" if supervised else "definitely-not-a-binary-xyz"
-    assert diagnostic in await call(command)
-    with pytest.raises(ValueError, match=diagnostic):
-        await call(command, worker="build")
-    if not supervised:
+    if supervised:
+        diagnostic = "Shell supervisor is unavailable"
+        assert diagnostic in await call(command)
+        with pytest.raises(ValueError, match=diagnostic):
+            await call(command, worker="build")
+    else:
+        assert "definitely-not-a-binary-xyz" in await call(command)
+        assert await call(command, worker="build") == (
+            "Could not start command (exit code 127): definitely-not-a-binary-xyz: command not found"
+        )
         assert await call(["printf", "Error: ordinary output"], worker="build") == "Error: ordinary output"
 
 

@@ -47,6 +47,8 @@ _WORKER_SIGNALS = tuple(
 # signal that killed it, then the streams it kept under their labels. A command that succeeds while printing exactly
 # these lines first reads as failed, which the shell result cannot tell apart.
 _FAILED_COMMAND = re.compile(r"Exit code (-?[1-9][0-9]*)(?:\n(?=(?:Output|Stderr):\n)|\Z)")
+# How a shell result reports a missing or non-executable binary (`format_shell_launch_failure`).
+_LAUNCH_FAILED = re.compile(r"Could not start command \(exit code (126|127)\): (.+)")
 # Parsed options the CLI handles itself instead of sending in the operation payload.
 _LOCAL_ARGUMENTS = frozenset(
     {"group", "action", "json", "json_argument", "json_file", "json_stdin", "call_id", "timeout"},
@@ -461,6 +463,9 @@ def _print_worker_result(args: argparse.Namespace, result: dict[str, object], *,
         return _EXIT_UNKNOWN
     if header == started_header:
         _note(f"mindroom-agent: started worker {args.name}")
+    if (launch_failed := _LAUNCH_FAILED.fullmatch(body)) is not None:
+        _note(f"mindroom-agent: {launch_failed[2]}")
+        return int(launch_failed[1])
     failed = _FAILED_COMMAND.match(body)
     # `format_shell_timeout` gives an exact line, then only output and stderr sections if present.
     first_line, newline, streams = body.partition("\n")
