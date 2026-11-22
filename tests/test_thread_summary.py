@@ -287,6 +287,8 @@ class _RoomState:
     reads: int = 0
     # The room's thread_summary_instructions setting: its content, a read failure, or None for M_NOT_FOUND.
     title_rules: dict[str, object] | Exception | nio.RoomGetStateEventError | None = None
+    # The room's thread_summary_model setting, served the same way.
+    title_model: dict[str, object] | Exception | nio.RoomGetStateEventError | None = None
 
     def serve(self, client: AsyncMock) -> None:
         client.room_get_state.side_effect = self.room_get_state
@@ -332,8 +334,8 @@ class _RoomState:
         state_key: str = "",
     ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
         if event_type == ROOM_SETTINGS_EVENT_TYPE:
-            assert state_key == "thread_summary_instructions"
-            rules = self.title_rules
+            settings = {"thread_summary_instructions": self.title_rules, "thread_summary_model": self.title_model}
+            rules = settings[state_key]
             if isinstance(rules, Exception):
                 raise rules
             if rules is None:
@@ -1142,6 +1144,47 @@ class TestMaybeGenerateThreadSummary:
             assert instructions.startswith(THREAD_SUMMARY_INSTRUCTIONS)
             assert "ROOM RULES:" in instructions
             assert "\n\nUse at most 4 words" in instructions
+
+    async def test_the_rooms_title_model_writes_every_automatic_title(self) -> None:
+        """The room's `thread_summary_model` setting titles each pass, over the model the config gives the room."""
+        self.room_state.title_model = {"value": " room_titles "}
+        configured = self._summarizer()
+        room_model = self._summarizer(
+            _title("Trip plan"),
+            _title("Trip answer"),
+            _title("Trip retitle"),
+            model_name="room_titles",
+        )
+        self._history(_make_thread_history(1))
+        config = _mock_config(first_threshold=2)
+        config.models["room_titles"] = ModelConfig(provider="openai", id="titles")
+        config.room_thread_summary_models[_ROOM] = "default"
+
+        await self._provisional(config=config)
+        self._history([*_make_thread_history(2), _make_summary_notice_message(_THREAD, message_count=0)])
+        await self._maybe_generate(config)
+        await self._maybe_generate(config, retitle=True)
+
+        assert (len(room_model.requests), len(configured.requests)) == (3, 0)
+
+    @pytest.mark.parametrize(
+        "setting",
+        [{"value": "gone"}, {}, nio.RoomGetStateEventError("forbidden", status_code="M_FORBIDDEN")],
+        ids=["unknown-model", "cleared", "unreadable"],
+    )
+    async def test_a_room_title_model_that_names_no_model_leaves_the_configured_one(
+        self,
+        setting: dict[str, object] | nio.RoomGetStateEventError,
+    ) -> None:
+        """A setting that names no configured model, is cleared, or cannot be read titles with the configured model."""
+        self.room_state.title_model = setting
+        model = self._summarizer(_title("Trip plan"))
+        self._history(_make_thread_history(1))
+
+        await self._provisional()
+
+        assert len(model.requests) == 1
+        assert _sent_summaries(self.client)[0]["summary"] == "Trip plan"
 
     @pytest.mark.parametrize(
         "rules",
