@@ -1299,9 +1299,10 @@ def _execute_request_forkserver(
 ) -> ExecuteResponse | None:
     """Dispatch one prepared request via the warm template; None means fall back to spawn-per-call.
 
-    The request runs in the template that preloaded plugins only when those are exactly the plugins of ``config`` that
-    opt in, as configured; any other request runs in the plain template, as without a preload. When the preloading
-    template is gone, which no request has reached then, the plain one runs the request in the time that is left.
+    The request runs in the template that preloaded plugins only when ``config``'s enabled plugins begin with exactly
+    those, as configured, so that every plugin still imports in config order; any other request runs in the plain
+    template, as without a preload. When the preloading template is gone or cannot be reached, which no request has
+    reached then, the plain one runs the request in the time that is left.
     """
     started_at = time.monotonic()
 
@@ -1322,10 +1323,11 @@ def _execute_request_forkserver(
     try:
         completed = None
         preloading = sandbox_forkserver.preloading_forkserver()
-        if preloading is not None and preloading.serves == worker_preload_plugin_paths(config, runtime_paths):
+        enabled = tuple(entry.path for entry in config.plugins if entry.enabled)
+        if preloading is not None and (serves := preloading.serves) and enabled[: len(serves)] == serves:
             try:
                 completed = execute(preloading)
-            except sandbox_forkserver.ForkserverStartupError as exc:
+            except (sandbox_forkserver.ForkserverStartupError, sandbox_forkserver.ForkserverUnreachableError) as exc:
                 sandbox_forkserver.abandon_preload(str(exc))
         if completed is None:
             completed = execute(sandbox_forkserver.get_sandbox_forkserver())
@@ -1696,6 +1698,9 @@ def _preload_template_plugins(spec: dict[str, Any]) -> str | None:
             process_env={},
         )
         config = Config(plugins=[PluginEntryConfig(path=path) for path in spec["plugins"]])
+        # The primary named these from its own copies; this worker's copies decide, before any of them is imported.
+        if worker_preload_plugin_paths(config, runtime_paths) != tuple(spec["plugins"]):
+            return "A plugin to preload is missing in this worker, or its manifest here does not set worker_preload."
         if not preload_plugins(config, runtime_paths):
             return "A plugin that sets worker_preload failed to import."
     except Exception as exc:  # Whatever a plugin's import raises, the runner gives the preload up.

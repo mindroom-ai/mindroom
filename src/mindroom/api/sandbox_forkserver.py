@@ -71,6 +71,10 @@ class ForkserverStartupError(ForkserverError):
     """The template process failed to start; callers should fall back to spawn-per-call."""
 
 
+class ForkserverUnreachableError(ForkserverError):
+    """Connecting to the template failed, so no part of the request was sent to it."""
+
+
 class ForkserverTimeoutError(ForkserverError):
     """One forkserver-dispatched request exceeded the sandbox subprocess timeout."""
 
@@ -438,8 +442,10 @@ class _SandboxForkserver:
             child.kill()
             _hang_up(conn)
 
+        connected = False
         try:
             conn.connect(template.socket_path)
+            connected = True
             # Armed before the envelope leaves: a stop accepted while the template warmed
             # up hangs up at once, so sending fails and the request never starts.
             bind_stop(stop)
@@ -451,7 +457,7 @@ class _SandboxForkserver:
                 raise ForkserverError(_STOPPED_BEFORE_DISPATCH) from exc
             self._discard(key, template)
             msg = f"Failed to reach the sandbox forkserver template: {exc}"
-            raise ForkserverError(msg) from exc
+            raise (ForkserverError if connected else ForkserverUnreachableError)(msg) from exc
 
     def _request(
         self,
