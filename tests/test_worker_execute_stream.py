@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from mindroom.tool_jobs.control import JobControl, job_control_context
+from mindroom.tool_system import worker_proxy_client
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.worker_proxy_client import (
     WorkerCallCancellation,
@@ -108,6 +109,7 @@ def _execute(
     seen: list[dict[str, Any]] | None = None,
     timeout: float = 7.0,
     cancellation: WorkerCallCancellation | None = None,
+    on_frame: Callable[[dict[str, object]], None] | None = None,
 ) -> object:
     return execute_worker_proxy_request(
         config=WorkerProxyClientConfig(
@@ -125,6 +127,7 @@ def _execute(
         worker_manager=manager or _Manager(),
         client_factory=_client(lines, [] if seen is None else seen),
         cancellation=cancellation,
+        on_frame=on_frame,
     )
 
 
@@ -191,6 +194,27 @@ def test_a_cancelled_call_stops_reading_at_the_next_frame() -> None:
     with pytest.raises(asyncio.CancelledError):
         _execute(lines, cancellation=cancellation)
     assert not read_after_cancel.is_set()
+
+
+@pytest.mark.parametrize("wait", [3.0, 0.0])
+def test_a_cancelled_streamed_command_is_read_for_its_exit_alone(monkeypatch: pytest.MonkeyPatch, wait: float) -> None:
+    """The exit that follows a stop says the command is gone; its output is dropped, and the wait for it is short."""
+    monkeypatch.setattr(worker_proxy_client, "STOP_CONFIRMATION_SECONDS", wait)
+    cancellation = WorkerCallCancellation()
+    frames: list[dict[str, object]] = []
+    read_after_exit = threading.Event()
+
+    def lines(_payload: dict[str, Any]) -> Iterator[str]:
+        cancellation.cancel()
+        yield json.dumps({"t": "out", "b": "bGF0ZQ=="})
+        yield json.dumps({"t": "exit", "cancelled": True})
+        read_after_exit.set()
+        yield _result("too late")
+
+    with pytest.raises(asyncio.CancelledError):
+        _execute(lines, cancellation=cancellation, on_frame=frames.append)
+    assert frames == ([{"t": "exit", "cancelled": True}] if wait else [])
+    assert not read_after_exit.is_set()
 
 
 def test_a_call_keeps_its_worker_from_idle_cleanup_while_it_runs() -> None:

@@ -194,6 +194,62 @@ async def test_cancel_route_cancels_running_call_without_cancelling_sibling(tmp_
 
 
 @pytest.mark.asyncio
+async def test_a_cancel_after_the_reader_left_still_waits_for_the_call_to_end(tmp_path: Path) -> None:
+    """A streamed call's reader that leaves cancels it; the CLI's cancel that follows answers once the call ended."""
+    outer_entered = asyncio.Event()
+    release_outer = asyncio.Event()
+    long_started = asyncio.Event()
+
+    async def run_shell_command(args: str) -> str:
+        if args == "outer":
+            outer_entered.set()
+            await release_outer.wait()
+            return "outer done"
+        long_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # As a worker's stop does, ending takes a moment.
+            await asyncio.sleep(0.2)
+            raise
+        return args
+
+    owner, token = await _make_owner(tmp_path, run_shell_command)
+    headers = {"Authorization": f"Bearer {token}", AGENT_CLI_WINDOW_HEADER: "outer-1"}
+    try:
+        async with response_cli_lifetime():
+            await capture_bash_batch(owner, ("outer-1", {"command": "outer"}))
+            bash_task = asyncio.create_task(
+                owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, "outer-1"),
+            )
+            async with (
+                asyncio.timeout(SETTLE_TIMEOUT_SECONDS),
+                httpx.AsyncClient(transport=httpx.ASGITransport(app=_make_app(owner)), base_url="http://test") as http,
+            ):
+                await outer_entered.wait()
+                call_id = str(uuid4())
+                operation = {
+                    "operation": "tools.call",
+                    "call_id": call_id,
+                    "toolkit": "shell",
+                    "function": "run_shell_command",
+                    "arguments": {"args": "long"},
+                    "stream": True,
+                }
+                assert (
+                    await http.post("/api/agent-cli/operations", headers=headers, json=operation)
+                ).status_code == 200
+                await long_started.wait()
+                await owner.stream_call(call_id).aclose()
+                first = await http.post(f"/api/agent-cli/calls/{call_id}/cancel", headers=headers)
+                assert first.json()["status"] == "cancelled"
+            release_outer.set()
+            await bash_task
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_cancel_before_dispatch_marks_call_terminal_cancelled_without_running(tmp_path: Path) -> None:
     """A cancel arriving while the call is still queued stops it before dispatch and settles it."""
     outer_entered = asyncio.Event()
