@@ -52,6 +52,47 @@ def test_invalid_schema_names_the_path_and_the_reason() -> None:
     assert str(whole.value).startswith("schema is not valid JSON Schema: schema: 'object' is not of type")
 
 
+@pytest.mark.parametrize(
+    ("reference", "why"),
+    [
+        ("#/$defs/missing", "does not resolve"),
+        ("https://example.com/schema.json", "is not inside the schema"),
+        ("file:///etc/passwd", "is not inside the schema"),
+        ("other.json#/$defs/answer", "is not inside the schema"),
+    ],
+)
+def test_schema_reaches_only_what_it_holds_itself(reference: str, why: str) -> None:
+    """A reference is followed inside the schema alone: one that leaves it, or names nothing in it, is refused."""
+    answer = {"$defs": {"answer": {"type": "boolean"}}}
+    check_schema({**answer, "$ref": "#/$defs/answer"})
+    # What a keyword takes as a value is no reference.
+    check_schema({"const": {"$ref": "https://example.com/schema.json"}})
+    for keyword in ("$ref", "$dynamicRef"):
+        with pytest.raises(SchemaError) as refused:
+            check_schema({**answer, "items": {keyword: reference}})
+        assert str(refused.value) == f"schema is not valid JSON Schema: reference {reference!r} {why}."
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [{"$ref": "https://example.com/schema.json"}, {"$ref": "#/$defs/typo"}, {"$ref": "#"}],
+)
+def test_schema_that_cannot_be_applied_is_an_error_and_opens_no_connection(
+    schema: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whatever a schema that got past its check does to the validator is a `SchemaError`, and nothing is fetched."""
+    opened: list[object] = []
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **_options: opened.append(args))
+    monkeypatch.setattr("socket.socket.connect", lambda *args: opened.append(args))
+
+    with pytest.raises(SchemaError) as broken:
+        validation_error({"ok": [True]}, schema)
+
+    assert str(broken.value).startswith("schema cannot be applied: ")
+    assert opened == []
+
+
 def test_prompt_ends_with_the_instruction_and_the_schema() -> None:
     """The agent is told to end with one fenced json block, and is shown the schema."""
     said = schema_prompt("Does it hold?", {"type": "boolean"})
@@ -243,6 +284,24 @@ async def test_run_that_ends_while_an_answer_is_wrong_starts_no_correction(stack
         engine_module.launch_child = original
 
     assert len(model.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_schema_that_cannot_be_applied_to_an_answer_ends_the_call_and_saves_its_cost(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call saved with a schema that cannot be applied ends on its first answer: nothing is left running."""
+    monkeypatch.setattr(agent_nodes, "check_schema", lambda _schema: None)
+    model = stack.child_script(answer(_GOOD, _TEN_CENTS), answer(_GOOD))
+
+    with pytest.raises(NodeFailed) as failed:
+        await stack.result("@0", "agent", {"prompt": "x", "schema": {"$ref": "#/$defs/typo"}})
+
+    assert failed.value.kind == "schema"
+    assert str(failed.value).startswith("schema cannot be applied: ")
+    assert (len(model.requests), stack.jobs.awaited_job_ids()) == (1, set())
+    assert stack.engine.run_usage(stack.run_id)["cost_usd"] == pytest.approx(0.1)
 
 
 async def _provider_fails() -> None:

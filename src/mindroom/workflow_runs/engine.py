@@ -1318,7 +1318,6 @@ class WorkflowEngine:
         made = bool(node.links.get("made")) or any(used.get("tool_calls") for used in usage.values())
         stopping = node.run_id in self._stopping
         outcome: _Outcome | str | WorkflowNode
-        outcome = _turn_outcome(node, kind, text, last=turn >= SCHEMA_TURNS, made=made, stopping=stopping)
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
         further = None
         try:
@@ -1329,6 +1328,7 @@ class WorkflowEngine:
                 attempt = run.attempt - (entry in cut) if cut else node.attempt
                 add = partial(self.store.add_usage, node.run_id, node.key, node.generation, entry, attempt, used)
                 await asyncio.to_thread(add)
+            outcome = _turn_outcome(node, kind, text, last=turn >= SCHEMA_TURNS, made=made, stopping=stopping)
             with suppress(SupersededAttemptError):
                 if isinstance(outcome, str):
                     correct = partial(self._correct, run, node, epoch, outcome, turn=turn + 1, made=made)
@@ -1926,9 +1926,15 @@ def _answer_outcome(node: WorkflowNode, text: str, *, last: bool, made: bool, st
     value = None
     try:
         value = extract_json(text)
-        wrong = validation_error(value, node.request["schema"])
     except SchemaError as exc:
-        wrong = str(exc)
+        wrong: str | None = str(exc)
+    else:
+        try:
+            wrong = validation_error(value, node.request["schema"])
+        except SchemaError as exc:
+            # The schema itself cannot be applied, which no further turn changes.
+            broken: _Outcome = WorkflowNodeState.FAILED, None, {"kind": "schema", "message": str(exc)}
+            return _unless_proven(node, made, broken, str(exc))
     if wrong is None:
         return WorkflowNodeState.COMPLETED, value, None
     if stopping:

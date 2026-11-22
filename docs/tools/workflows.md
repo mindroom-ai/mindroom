@@ -190,6 +190,8 @@ It needs no special tool, so it works with every model, in standard and in minim
 
 - The schema is checked first.
   One that is no valid JSON Schema fails the call with kind `schema` and `schema is not valid JSON Schema: <path>: <reason>.` before any agent starts.
+  A `$ref` or `$dynamicRef` must point inside the schema, as `#/$defs/name` does.
+  One that names a URL or a file, or nothing in the schema, fails the call the same way, and nothing is ever fetched.
 - The agent gets the prompt, then `End your answer with one fenced json block that matches this JSON Schema:` and the schema.
 - The value is the last fenced `json` block of the answer, or the whole answer when it has none.
 - An answer without a JSON value, or with one that does not match, is corrected by the same agent in a further turn: `Your answer did not match the schema: <error>. Reply with only the corrected fenced json block.`
