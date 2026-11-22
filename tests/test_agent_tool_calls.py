@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import threading
+import weakref
 from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - Agno resolves tool annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
@@ -506,6 +508,25 @@ async def test_closed_catalog_rejects_later_bindings(tmp_path: Path) -> None:
     await catalog.close()
     with pytest.raises(RuntimeError, match="closed"):
         await catalog.bind(ToolKey("existing", "action"))
+
+
+@pytest.mark.asyncio
+async def test_closed_catalog_is_freed_without_a_garbage_collection(tmp_path: Path) -> None:
+    """A closed catalog holds no reference cycle, so dropping it frees it and every function it bound at once."""
+
+    def action() -> str:
+        return "ok"
+
+    catalog = await _catalog(tmp_path, [_toolkit("existing", action)])
+    await catalog.bind(ToolKey("existing", "action"))
+    await catalog.close()
+    released = weakref.ref(catalog)
+    gc.disable()
+    try:
+        del catalog
+        assert released() is None
+    finally:
+        gc.enable()
 
 
 @pytest.mark.asyncio

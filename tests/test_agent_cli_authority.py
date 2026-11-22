@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import gc
+import weakref
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -157,6 +159,40 @@ async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_
     assert "turn stopped" not in receipt["outcome"]
     assert not owner.control_calls
     catalog.bind.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+async def test_a_closed_response_owner_is_freed_without_a_garbage_collection(tmp_path: Path) -> None:
+    """The owner's authorization holds no reference cycle, so once its response ends the owner and its catalog go."""
+    runtime = _runtime_context(tmp_path)
+    runtime = replace(runtime, orchestrator=ready_runtime(runtime.config, runtime.runtime_paths))
+    session = ConversationSession(session_id="session-1", kind="agent", owner_id="helper")
+    catalog = PreparedAgentToolCatalog(
+        run=RunContext(run_id="generation-1", user_id=runtime.requester_id, session=session),
+        runtime_context=runtime,
+        store=None,
+        middleware=(),
+        max_tool_calls_per_turn=None,
+    )
+    async with response_cli_lifetime() as lifetime:
+        owner = bind_response_owner(
+            catalog,
+            lifetime=lifetime,
+            response_context=_turn_context(),
+            context_documents={},
+            output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+            delegation_depth=0,
+            refresh_scheduler=None,
+            reload_ends_run=False,
+        )
+    released = weakref.ref(owner)
+    gc.disable()
+    try:
+        del owner
+        assert released() is None
+    finally:
+        gc.enable()
 
 
 @pytest.mark.parametrize(
