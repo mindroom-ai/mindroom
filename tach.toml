@@ -288,6 +288,9 @@ visibility = [
 [[interfaces]]
 from = ["mindroom.agent_cli.events"]
 expose = [
+    "CliCallCancelSignal",
+    "cli_call_cancel_scope",
+    "current_cli_call_cancel",
     "emit_cli_run_event",
     "emit_cli_suspension",
     "emit_cli_tool_event",
@@ -7478,7 +7481,7 @@ expose = [
     "detached_tool_scope",
     "emit_custom_event",
     "call_progress_sink_scope",
-    "get_call_dispatched_hook",
+    "note_call_refusal",
     "get_call_progress_sink",
     "get_worker_progress_pump",
     "get_tool_runtime_context",

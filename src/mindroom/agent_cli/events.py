@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.llm.events import ToolCallOrigin, ToolCompleted, ToolStarted
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     from mindroom.tool_system.agent_tool_calls import AgentToolCallStep
 
 __all__ = [
+    "CliCallCancelSignal",
+    "cli_call_cancel_scope",
+    "current_cli_call_cancel",
     "emit_cli_run_event",
     "emit_cli_suspension",
     "emit_cli_tool_event",
@@ -22,6 +27,39 @@ __all__ = [
 ]
 
 _SINK: ContextVar[Callable[[object], None] | None] = ContextVar("cli_tool_event_sink", default=None)
+_CALL_CANCEL: ContextVar[CliCallCancelSignal | None] = ContextVar("cli_call_cancel", default=None)
+
+
+@dataclass
+class CliCallCancelSignal:
+    """Route-originated cancel signal for one CLI call, shielding approval publication."""
+
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    in_approval: bool = False
+
+    @contextmanager
+    def approval_section(self) -> Iterator[None]:
+        """Shield approval work from direct task cancellation."""
+        self.in_approval = True
+        try:
+            yield
+        finally:
+            self.in_approval = False
+
+
+def current_cli_call_cancel() -> CliCallCancelSignal | None:
+    """Return the active CLI call's route-cancel signal, if any."""
+    return _CALL_CANCEL.get()
+
+
+@contextmanager
+def cli_call_cancel_scope(signal: CliCallCancelSignal) -> Iterator[None]:
+    """Bind one CLI call's route-cancel signal across execution."""
+    token = _CALL_CANCEL.set(signal)
+    try:
+        yield
+    finally:
+        _CALL_CANCEL.reset(token)
 
 
 @dataclass(frozen=True)

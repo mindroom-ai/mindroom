@@ -452,14 +452,8 @@ _WORKER_PROGRESS_PUMP: ContextVar[WorkerProgressPump | None] = ContextVar(
     "worker_progress_pump",
     default=None,
 )
-_CALL_PROGRESS_SINK: ContextVar[Callable[[str], None] | None] = ContextVar(
-    "call_progress_sink",
-    default=None,
-)
-_CALL_DISPATCHED_HOOK: ContextVar[Callable[[], None] | None] = ContextVar(
-    "call_dispatched_hook",
-    default=None,
-)
+_CALL_PROGRESS_SINK: ContextVar[Callable[[str], None] | None] = ContextVar("call_progress_sink", default=None)
+_CALL_REFUSAL_HOOK: ContextVar[Callable[[], None] | None] = ContextVar("call_refusal_hook", default=None)
 
 
 def get_tool_runtime_context() -> ToolRuntimeContext | None:
@@ -502,13 +496,14 @@ def get_worker_progress_pump() -> WorkerProgressPump | None:
 
 
 def get_call_progress_sink() -> Callable[[str], None] | None:
-    """Get the current per-call progress sink bound to one CLI call."""
+    """Return the active CLI call's progress sink, if any."""
     return _CALL_PROGRESS_SINK.get()
 
 
-def get_call_dispatched_hook() -> Callable[[], None] | None:
-    """Get the current per-call dispatch hook bound to one CLI call."""
-    return _CALL_DISPATCHED_HOOK.get()
+def note_call_refusal() -> None:
+    """Record a typed pre-execution named-worker refusal for the active CLI call."""
+    if (hook := _CALL_REFUSAL_HOOK.get()) is not None:
+        hook()
 
 
 def scope_hook_context_kwargs(
@@ -757,13 +752,13 @@ def worker_progress_pump_scope(
 def call_progress_sink_scope(
     sink: Callable[[str], None] | None,
     *,
-    on_dispatched: Callable[[], None] | None = None,
+    on_refused: Callable[[], None] | None = None,
 ) -> Iterator[None]:
-    """Bind per-call progress and dispatch hooks for the lifetime of one CLI tool call."""
+    """Bind per-call progress and refusal hooks for the lifetime of one CLI tool call."""
     progress_token = _CALL_PROGRESS_SINK.set(sink)
-    dispatched_token = _CALL_DISPATCHED_HOOK.set(on_dispatched)
+    refusal_token = _CALL_REFUSAL_HOOK.set(on_refused)
     try:
         yield
     finally:
-        _CALL_DISPATCHED_HOOK.reset(dispatched_token)
+        _CALL_REFUSAL_HOOK.reset(refusal_token)
         _CALL_PROGRESS_SINK.reset(progress_token)

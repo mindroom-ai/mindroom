@@ -102,7 +102,7 @@ class ToolCallReceipt(_Operation):
     parent_bash_call_id: str | None = Field(default=None, max_length=128)
     progress: str | None = Field(default=None, max_length=256)
     progress_revision: int = Field(default=0, ge=0)
-    dispatched: bool = False
+    error_kind: Literal["named_worker_refusal"] | None = None
     outcome: JsonValue = None
     attachments: list[dict[str, JsonValue]] = Field(default_factory=list)
 

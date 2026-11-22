@@ -84,7 +84,14 @@ async def get_call(
     if not math.isfinite(wait) or wait < 0 or (after_progress is not None and after_progress < 0):
         raise HTTPException(status_code=422, detail="Invalid Agent CLI wait duration")
     try:
-        return _response(await owner.get_call(str(UUID(call_id)), wait=wait, after_progress=after_progress))
+        return _response(
+            await owner.get_call(
+                str(UUID(call_id)),
+                wait=wait,
+                after_progress=after_progress,
+                is_disconnected=request.is_disconnected,
+            ),
+        )
     except (CliAuthenticationError, ValueError):
         raise HTTPException(status_code=401, detail="Agent CLI authority is unavailable") from None
 

@@ -34,10 +34,10 @@ from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
-    get_call_dispatched_hook,
     get_call_progress_sink,
     get_tool_runtime_context,
     get_worker_progress_pump,
+    note_call_refusal,
 )
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.tool_system.tool_function import ToolValue
@@ -66,7 +66,7 @@ from mindroom.workers.models import (
     normalize_sandbox_runner_api_root,
     worker_api_root,
 )
-from mindroom.workers.named import NamedWorkerCall, ensure_named_worker, named_worker_call
+from mindroom.workers.named import NamedWorkerCall, NamedWorkerError, ensure_named_worker, named_worker_call
 from mindroom.workers.placements import placement_for_session
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
@@ -939,7 +939,6 @@ def _call_proxy_sync(
                 else None
             ),
             cancellation=cancellation,
-            on_dispatch=get_call_dispatched_hook(),
         )
         # Deferred: it loads the attachment store and the provider registry, which the slim tool registry must not.
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
@@ -1049,25 +1048,27 @@ class WorkerStandIns:
                     return await cast("Callable[..., Awaitable[object]]", local)(*args, **kwargs)
                 return await _run_sync_tool_call(functools.partial(local, *args, **kwargs))
             cancellation = WorkerCallCancellation()
-            call = functools.partial(
-                _call_proxy_sync,
-                stand_ins=self,
-                function_name=function_name,
-                args=args,
-                kwargs=dict(kwargs),
-                function_entrypoint=local,
-                cancellation=cancellation,
-                # Read here, in the call's own context, which names the reply that owns the worker.
-                named=_named_worker_call(self, local, args, kwargs),
-            )
             try:
+                call = functools.partial(
+                    _call_proxy_sync,
+                    stand_ins=self,
+                    function_name=function_name,
+                    args=args,
+                    kwargs=dict(kwargs),
+                    function_entrypoint=local,
+                    cancellation=cancellation,
+                    # Read here, in the call's own context, which names the reply that owns the worker.
+                    named=_named_worker_call(self, local, args, kwargs),
+                )
                 return await run_blocking(call)
+            except NamedWorkerError:
+                note_call_refusal()
+                raise
             except asyncio.CancelledError:
                 # The blocking request keeps running after this await is cancelled; stop it at the worker too.
                 cancellation.cancel()
                 raise
 
-        proxy_entrypoint._mindroom_worker_proxy = True  # type: ignore[attr-defined]
         return proxy_entrypoint
 
 

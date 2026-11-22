@@ -41,7 +41,6 @@ _LONG_POLL_SECONDS = 25.0
 _CANCEL_TIMEOUT_SECONDS = 8.0
 _CANCEL_401_RETRY_DELAY_SECONDS = 0.5
 _EARLY_RETURN_THRESHOLD_SECONDS = 0.5
-_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _WORKER_SIGNALS = tuple(
     sig for name in ("SIGINT", "SIGTERM", "SIGHUP") if (sig := getattr(signal, name, None)) is not None
 )
@@ -225,11 +224,8 @@ def _wait(client: AgentCliClient, call_id: str, result: dict[str, object], timeo
 
 
 class _WorkerSignal(BaseException):
-    """Signal received while running a named-worker command."""
-
     def __init__(self, signum: int) -> None:
         self.signum = signum
-        super().__init__(signum)
 
 
 @contextmanager
@@ -254,15 +250,12 @@ def _worker_signal_handlers(is_cancelling: Callable[[], bool]) -> Iterator[None]
 
 def _silence_broken_stdout() -> None:
     """Redirect a broken stdout fd to ``/dev/null`` so CPython's shutdown flush does not exit 120."""
-    try:
-        fd = sys.stdout.fileno()
+    with suppress(OSError, ValueError, io.UnsupportedOperation):
         devnull = os.open(os.devnull, os.O_WRONLY)
         try:
-            os.dup2(devnull, fd)
+            os.dup2(devnull, sys.stdout.fileno())
         finally:
             os.close(devnull)
-    except (OSError, ValueError, io.UnsupportedOperation):
-        pass
 
 
 def _emit_progress(
@@ -282,24 +275,16 @@ def _emit_progress(
     return last_progress, next_revision
 
 
-def _receipt_poll_state(receipt: dict[str, object] | None) -> tuple[object, object, object] | None:
-    if not isinstance(receipt, dict):
-        return None
-    return (receipt.get("status"), receipt.get("progress"), receipt.get("progress_revision"))
+def _poll_key(receipt: dict[str, object] | None) -> tuple[object, object, object] | None:
+    return (
+        (receipt.get("status"), receipt.get("progress"), receipt.get("progress_revision"))
+        if isinstance(receipt, dict)
+        else None
+    )
 
 
-def _next_early_delay(
-    current: float,
-    result: dict[str, object],
-    prev_state: tuple[object, object, object] | None,
-    elapsed: float,
-) -> float:
-    """Back off when talking to an older server that ignores `?wait=` and returns unchanged status at once."""
-    if (
-        _exit_code(result) == 3
-        and _receipt_poll_state(result) == prev_state
-        and elapsed < _EARLY_RETURN_THRESHOLD_SECONDS
-    ):
+def _next_early_delay(current: float, result: dict[str, object], prev: object, elapsed: float) -> float:
+    if _exit_code(result) == 3 and _poll_key(result) == prev and elapsed < _EARLY_RETURN_THRESHOLD_SECONDS:
         return min(current * 1.5, 2.0) if current > 0 else 0.2
     return 0.0
 
@@ -329,7 +314,7 @@ def _settled(client: AgentCliClient, call_id: str, result: dict[str, object] | N
             raise read_error or AgentCliUnavailableError("Timed out waiting for a call receipt")
         http_timeout = min(remaining, _HTTP_TIMEOUT_SECONDS)
         wait = min(_LONG_POLL_SECONDS, max(0.0, http_timeout - 5.0))
-        prev_state = _receipt_poll_state(result)
+        prev_state = _poll_key(result)
         started_at = time.monotonic()
         try:
             result = client.receipt(call_id, timeout=http_timeout, wait=wait, after_progress=last_revision)
@@ -343,26 +328,16 @@ def _settled(client: AgentCliClient, call_id: str, result: dict[str, object] | N
     return result
 
 
-def _is_cancelled_before_dispatch(receipt: dict[str, object]) -> bool:
-    dispatched = receipt.get("dispatched")
-    if isinstance(dispatched, bool):
-        return not dispatched
-    outcome = receipt.get("outcome")
-    return isinstance(outcome, str) and outcome.startswith("Call cancelled before dispatch")
-
-
 def _request_cancel(client: AgentCliClient, call_id: str) -> dict[str, object] | None:
-    """Send cancel once, retrying once after ~0.5s on 401 in case cancel overtook submit."""
-    try:
-        return client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
-    except AgentCliUnavailableError as exc:
-        if exc.status_code != 401:
+    for attempt in range(2):
+        try:
+            return client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
+        except AgentCliUnavailableError as exc:
+            if exc.status_code != 401 or attempt == 1:
+                return None
+            time.sleep(_CANCEL_401_RETRY_DELAY_SECONDS)
+        except ValueError:
             return None
-    except ValueError:
-        return None
-    time.sleep(_CANCEL_401_RETRY_DELAY_SECONDS)
-    with suppress(AgentCliUnavailableError, ValueError):
-        return client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
     return None
 
 
@@ -380,27 +355,20 @@ def _cancel_worker_call(
     receipt = _request_cancel(client, call_id) if submitted and client is not None else None
     status = receipt.get("status") if isinstance(receipt, dict) else None
     if not is_sigpipe and isinstance(receipt, dict) and status == "completed":
-        with suppress(BrokenPipeError):
-            print(
-                f"mindroom-agent: {sig_name} received after command already finished (call {call_id})",
-                file=sys.stderr,
-                flush=True,
-            )
         try:
             return _print_worker_result(args, receipt, call_id=call_id)
         except BrokenPipeError:
             _silence_broken_stdout()
             return 128 + int(signal.SIGPIPE)
-    if isinstance(receipt, dict) and status == "cancelled" and not _is_cancelled_before_dispatch(receipt):
-        message = (
-            f"mindroom-agent: cancelled by {sig_name}; cancel requested; "
-            f"the command may still be running in worker {args.name} (call {call_id})"
-        )
-    elif not submitted or (isinstance(receipt, dict) and status in _TERMINAL_STATUSES):
+    if not submitted:
         message = f"mindroom-agent: cancelled by {sig_name} (call {call_id})"
+    elif isinstance(receipt, dict) and status == "failed" and receipt.get("error_kind") == "named_worker_refusal":
+        message = (
+            f"mindroom-agent: cancelled by {sig_name}; command never ran ({receipt.get('outcome')}) (call {call_id})"
+        )
     else:
         message = (
-            f"mindroom-agent: cancelled by {sig_name}; cancel could not be confirmed, "
+            f"mindroom-agent: cancelled by {sig_name}; "
             f"the command may still be running in worker {args.name} (call {call_id})"
         )
     with suppress(BrokenPipeError):
@@ -433,8 +401,8 @@ def _run_in_worker(args: argparse.Namespace) -> int:
     client: AgentCliClient | None = None
     submitting = False
     submitted = False
-    cancelling = False
-    with _worker_signal_handlers(lambda: cancelling):
+    ignore_signals = False
+    with _worker_signal_handlers(lambda: ignore_signals):
         try:
             client = AgentCliClient()
             # Sent once: a second submission after an unknown outcome could run the command twice.
@@ -454,12 +422,14 @@ def _run_in_worker(args: argparse.Namespace) -> int:
                 result = None
             submitted = True
             result = _settled(client, call_id, result)
+            # Once settled, ignore signals while flushing output so we print once and return the command's code.
+            ignore_signals = True
             return _print_worker_result(args, result, call_id=call_id)
         except _WorkerSignal as exc:
-            cancelling = True
+            ignore_signals = True
             return _cancel_worker_call(args, client, call_id, exc.signum, submitted=submitting)
         except BrokenPipeError:
-            cancelling = True
+            ignore_signals = True
             _silence_broken_stdout()
             return _cancel_worker_call(args, client, call_id, int(signal.SIGPIPE), submitted=submitting)
         except (AgentCliUnavailableError, ValueError) as exc:
@@ -493,15 +463,12 @@ def _print_worker_result(args: argparse.Namespace, result: dict[str, object], *,
     started_header = f"[worker: {args.name}, started]"
     status = result.get("status")
     if status != "completed" or header not in (f"[worker: {args.name}]", started_header):
-        # Reserve 125 for failures known to precede command execution; otherwise 255 with call id.
-        may_have_run = (status == "cancelled" and not _is_cancelled_before_dispatch(result)) or (
-            status == "failed" and result.get("dispatched") is True
-        )
-        if may_have_run:
-            print(f"mindroom-agent: {text} (call {call_id})", file=sys.stderr)
-            return _EXIT_UNKNOWN
-        print(f"mindroom-agent: {text}", file=sys.stderr)
-        return _EXIT_NOT_RUN
+        # Reserve 125 for typed named-worker refusals; everything else after submit is 255 with call id.
+        if status == "failed" and result.get("error_kind") == "named_worker_refusal":
+            print(f"mindroom-agent: {text}", file=sys.stderr)
+            return _EXIT_NOT_RUN
+        print(f"mindroom-agent: {text} (call {call_id})", file=sys.stderr)
+        return _EXIT_UNKNOWN
     if header == started_header:
         print(f"mindroom-agent: started worker {args.name}", file=sys.stderr)
     failed = _FAILED_COMMAND.match(body)

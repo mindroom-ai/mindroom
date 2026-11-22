@@ -539,7 +539,7 @@ def test_cli_workers_run_cancels_on_signal_and_exits_128_plus_signo(
 
         def cancel(self, call_id, *, timeout: float = 8.0):
             cancelled.append((call_id, timeout))
-            return {"status": "cancelled", "call_id": call_id, "dispatched": False}
+            return {"status": "cancelled", "call_id": call_id}
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     monkeypatch.setattr(signal, "signal", fake_signal)
@@ -552,7 +552,10 @@ def test_cli_workers_run_cancels_on_signal_and_exits_128_plus_signo(
     assert cancelled[0][1] <= 8.0
     output = capsys.readouterr()
     assert output.out == ""
-    assert output.err == f"mindroom-agent: cancelled by {sig_name} (call {call_id})\n"
+    assert (
+        output.err
+        == f"mindroom-agent: cancelled by {sig_name}; the command may still be running in worker fan3 (call {call_id})\n"
+    )
 
 
 def test_cli_workers_run_warns_when_signal_cancel_cannot_be_confirmed(
@@ -1026,7 +1029,6 @@ def test_cli_retries_cancel_once_after_401_and_reports_unconfirmed_remote_stop(
             return {
                 "status": "cancelled",
                 "call_id": call_id,
-                "dispatched": True,
                 "outcome": "Call interrupted after dispatch; effects may have occurred",
             }
 
@@ -1041,8 +1043,10 @@ def test_cli_retries_cancel_once_after_401_and_reports_unconfirmed_remote_stop(
     assert sleeps == [pytest.approx(0.5)]
     output = capsys.readouterr()
     assert output.out == ""
-    assert "cancel requested" in output.err
-    assert f"may still be running in worker fan3 (call {call_id})" in output.err
+    assert (
+        output.err
+        == f"mindroom-agent: cancelled by SIGTERM; the command may still be running in worker fan3 (call {call_id})\n"
+    )
 
 
 @pytest.mark.parametrize("case", ["final_write_epipe", "closed_during_wait_no_output"])
@@ -1068,7 +1072,7 @@ def test_real_pipe_subprocess_handles_closed_stdout_pipe(case: str) -> None:
                 release_poll.set()
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(b'{"status":"cancelled","dispatched":true}')
+                self.wfile.write(b'{"status":"cancelled"}')
                 return
             payload = json.loads(body)
             submitted.append(payload["call_id"])
@@ -1153,12 +1157,18 @@ def test_real_pipe_subprocess_handles_closed_stdout_pipe(case: str) -> None:
 @pytest.mark.parametrize(
     ("receipt", "expected_code"),
     [
-        ({"status": "cancelled", "dispatched": False, "outcome": "Call cancelled before dispatch"}, 125),
-        ({"status": "failed", "dispatched": False, "outcome": "Cannot start worker 'w': limit reached"}, 125),
+        (
+            {
+                "status": "failed",
+                "error_kind": "named_worker_refusal",
+                "outcome": "Cannot start worker 'w': limit reached",
+            },
+            125,
+        ),
+        ({"status": "cancelled", "outcome": "Call cancelled before dispatch"}, 255),
         (
             {
                 "status": "cancelled",
-                "dispatched": True,
                 "outcome": "Call interrupted after dispatch; effects may have occurred",
             },
             255,
@@ -1166,7 +1176,6 @@ def test_real_pipe_subprocess_handles_closed_stdout_pipe(case: str) -> None:
         (
             {
                 "status": "failed",
-                "dispatched": True,
                 "outcome": "Sandbox proxy stream ended without a result.",
             },
             255,
@@ -1632,9 +1641,8 @@ def test_cli_signal_after_command_finished_reports_finished_and_returns_command_
 
     assert main(["workers", "run", "w", "--", "sh", "-c", "exit 7"]) == 7
     output = capsys.readouterr()
-    assert "already finished" in output.err
-    assert f"(call {submitted[0]})" in output.err
-    assert "cancelled by" not in output.err
+    assert output.out == "Output:\ndone\n"
+    assert output.err == ""
 
 
 def test_cli_flag_before_workers_usage_error_writes_only_to_stderr(
@@ -1709,7 +1717,7 @@ def test_r2_cancel_messages_for_submitted_refused_and_completed(
                 "outcome": "[worker: fan3]\n" + format_shell_completion("finished ok", None, return_code=7),
             },
             7,
-            "finished ok\n",
+            "Output:\nfinished ok\n",
             "",
             "SIGTERM",
         ),
@@ -1816,7 +1824,7 @@ def test_r2_signal_during_final_flush_prints_output_once_and_returns_command_cod
     monkeypatch.setattr("mindroom.agent_cli.main.sys.stderr", CaptureStderr())
 
     assert main(["workers", "run", "w", "--", "sh", "-c", "echo final line; exit 9"]) == 9
-    assert "".join(written) == "final line\n"
+    assert "".join(written) == "Output:\nfinal line\n"
     assert "".join(stderr_chunks) == ""
     assert cancel_calls == []
 

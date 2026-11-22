@@ -560,20 +560,32 @@ def test_workers_run_recovers_after_a_lost_submission_response(
 
 
 @pytest.mark.parametrize(
-    "receipt",
+    ("receipt", "expected_code"),
     [
-        {"status": "failed", "outcome": "Cannot start worker 'w': 2 of the 2 named workers ..."},
-        {"status": "cancelled", "outcome": "Call cancelled before dispatch"},
-        # A shell that runs without workers answers without the worker's line, so nothing ran in a worker named so.
-        _completed("Error: `worker` and `resource_profile` need a shell that runs in a worker"),
-        _completed("[worker: other]\n" + format_shell_completion("ran elsewhere", None, return_code=0)),
+        (
+            {
+                "status": "failed",
+                "error_kind": "named_worker_refusal",
+                "outcome": "Cannot start worker 'w': 2 of the 2 named workers ...",
+            },
+            125,
+        ),
+        ({"status": "cancelled", "outcome": "Call cancelled before dispatch"}, 255),
+        # Non-refusal receipts after submission exit 255 rather than claiming the command never ran.
+        (_completed("Error: `worker` and `resource_profile` need a shell that runs in a worker"), 255),
+        (_completed("[worker: other]\n" + format_shell_completion("ran elsewhere", None, return_code=0)), 255),
     ],
 )
-def test_workers_run_exits_125_when_the_command_did_not_run_in_its_worker(receipt, capsys, monkeypatch) -> None:
-    """A refused, failed, or cancelled call prints its reason on stderr and never looks like the command's result."""
+def test_workers_run_exits_125_for_typed_refusals_and_255_otherwise(
+    receipt,
+    expected_code,
+    capsys,
+    monkeypatch,
+) -> None:
+    """A typed refusal exits 125; other non-command receipts after submit exit 255 and print their reason on stderr."""
     _worker_client(monkeypatch, receipt)
 
-    assert main(["workers", "run", "w", "--", "true"]) == 125
+    assert main(["workers", "run", "w", "--", "true"]) == expected_code
     output = capsys.readouterr()
     assert output.out == ""
     assert str(receipt["outcome"]) in output.err

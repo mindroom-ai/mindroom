@@ -427,7 +427,6 @@ def execute_worker_proxy_request(
     primary_built_service: Callable[[str], bool] | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
     cancellation: WorkerCallCancellation | None = None,
-    on_dispatch: Callable[[], None] | None = None,
 ) -> object:
     """Execute one tool call through the sandbox proxy or selected dedicated worker.
 
@@ -495,8 +494,6 @@ def execute_worker_proxy_request(
                 if worker_handle is not None
                 else nullcontext()
             )
-            if on_dispatch is not None:
-                on_dispatch()
             with (
                 in_flight,
                 client.stream("POST", execute_url, json=payload, headers=headers, timeout=timeout) as response,
