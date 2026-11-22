@@ -26,6 +26,7 @@ from mindroom.providers.openai.chat_wire import (
     chat_body_parts,
     chat_request_kwargs,
     chat_stop_reason,
+    wraps_openrouter_gemini_tool_results,
 )
 from mindroom.providers.openai.errors import provider_error, rejected_media, sdk_failures
 from mindroom.providers.openai.openrouter_cache import (
@@ -116,6 +117,9 @@ class ChatAdapter:
         # them and count only themselves: the tools, authored ones included, went with the request before them too.
         rendered = replace(request, messages=request.messages[start:]) if start else request
         body = sdk_request_body(self._request_kwargs(rendered), SDK_OPTION_KEYS)
+        if not start and wraps_openrouter_gemini_tool_results(self.wire, body, self.identity.id):
+            # Wrapping tool results changes the tokens Gemini sees vs pre-upgrade unwrapped requests.
+            parts.flag("openrouter_gemini_tool_results")
         chat_body_parts(body, rendered.messages, parts, static=not start)
 
     def takes_system_update(self, request: ModelRequest) -> bool:

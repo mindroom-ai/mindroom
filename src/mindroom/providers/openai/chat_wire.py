@@ -56,6 +56,7 @@ __all__ = [
     "deepseek_request_thinks",
     "function_definition",
     "sdk_call_kwargs",
+    "wraps_openrouter_gemini_tool_results",
 ]
 
 # The two SDK endpoints the OpenAI family calls: ``chat.completions.create`` and ``responses.create``.
@@ -135,7 +136,7 @@ def _wrap_gemini_tool_result(result: ToolResultView) -> str | list[Any]:
     fails, discarding all surrounding text. Sending a valid JSON object matches the native Gemini wire
     (``providers/gemini/wire.py``) and keeps every character intact. When the content is a list of content parts,
     OpenRouter concatenates text parts before parsing, so text parts are joined into one wrapped text part while
-    non-text parts stay untouched.
+    non-text parts and extra part metadata (such as authored ``cache_control``) stay intact.
     """
     content = result.content
     if isinstance(content, str):
@@ -151,15 +152,19 @@ def _wrap_gemini_tool_result(result: ToolResultView) -> str | list[Any]:
         return content
     joined = "\n".join(part["text"] for part in text_parts)
     wrapped = _gemini_tool_result_json(joined, is_error=result.is_error)
-    if not other_parts:
+    extra_fields = {key: value for part in text_parts for key, value in part.items() if key not in {"type", "text"}}
+    if not other_parts and not extra_fields:
         return wrapped
-    first = dict(text_parts[0]) if len(text_parts) == 1 else {"type": "text"}
-    first["text"] = wrapped
+    first: dict[str, Any] = {"type": "text", "text": wrapped, **extra_fields}
     return [first, *other_parts]
 
 
-def _wraps_openrouter_gemini_tool_results(wire: ChatWire, params: Mapping[str, Any], model_id: str) -> bool:
-    """Return whether OpenRouter routes this request through its Gemini ``functionResponse`` converter."""
+def wraps_openrouter_gemini_tool_results(wire: ChatWire, params: Mapping[str, Any], model_id: str) -> bool:
+    """Return whether OpenRouter routes this request's requested ``model`` through its Gemini converter.
+
+    Inspects the requested model (including authored ``request_params`` and ``extra_body`` overrides), not
+    server-selected fallback entries in OpenRouter's ``models`` list.
+    """
     if wire.route != "openrouter":
         return False
     extra_body = params.get("extra_body")
@@ -483,7 +488,7 @@ def chat_request_kwargs(
     if output_tool:
         params["tool_choice"] = {"type": "function", "function": {"name": STRUCTURED_OUTPUT_TOOL}}
     _add_route_params(params, model_id=model_id, settings=settings, wire=wire, tool_choice=tool_choice)
-    wrap_gemini_tool_results = _wraps_openrouter_gemini_tool_results(wire, params, model_id)
+    wrap_gemini_tool_results = wraps_openrouter_gemini_tool_results(wire, params, model_id)
     params = {
         "model": model_id,
         "messages": _chat_messages(messages, wire, provider, wrap_gemini_tool_results=wrap_gemini_tool_results),

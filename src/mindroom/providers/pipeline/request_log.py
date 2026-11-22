@@ -55,6 +55,51 @@ def _attribution(context: Mapping[str, Any]) -> dict[str, Any]:
     return {name: context[name] for name in REQUEST_ATTRIBUTION_FIELDS if name in context}
 
 
+_WRAPPED_TOOL_RESULT_KEYS = frozenset({"result", "error"})
+
+
+def _redact_wrapped_tool_text(text: str) -> str:
+    """Redact the decoded text inside a JSON-wrapped ``{"result": ...}`` / ``{"error": ...}`` tool string.
+
+    OpenRouter Gemini tool results travel as a JSON-encoded object string whose escaped quotes and newlines hide
+    credential patterns (such as ``"password": "..."``) from plain-text redaction; redacting the decoded string
+    before re-encoding preserves the wire shape in the log without leaking secrets.
+    """
+    if not text.startswith("{"):
+        return text
+    try:
+        decoded = json.loads(text)
+    except ValueError:
+        return text
+    if not isinstance(decoded, dict) or len(decoded) != 1:
+        return text
+    ((key, inner),) = decoded.items()
+    if key not in _WRAPPED_TOOL_RESULT_KEYS or not isinstance(inner, str):
+        return text
+    redacted = redact_sensitive_data(inner)
+    return json.dumps({key: redacted}, ensure_ascii=False)
+
+
+def _redact_wrapped_tool_results(body: Any) -> Any:  # noqa: ANN401 - json_safe request body
+    """Redact JSON-wrapped ``role: "tool"`` contents inside a detached ``json_safe`` body copy."""
+    if not isinstance(body, dict):
+        return body
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return body
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = _redact_wrapped_tool_text(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                    part["text"] = _redact_wrapped_tool_text(part["text"])
+    return body
+
+
 def _write_request_record(
     path: Path,
     body: Mapping[str, Any],
@@ -79,7 +124,7 @@ def _write_request_record(
             **context,
             "model_name": log.model_name,
             "model_id": model_id,
-            "body": json_safe(body),
+            "body": _redact_wrapped_tool_results(json_safe(body)),
             "deferred_tool_names": deferred_tool_names,
             "model_params": model_params,
         },
