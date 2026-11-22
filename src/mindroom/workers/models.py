@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from mindroom.workers.backend import WorkerBackend
 
 WorkerStatus = Literal["starting", "ready", "idle", "failed"]
-WorkerReadyPhase = Literal["cold_start", "waiting", "ready", "failed"]
+WorkerReadyPhase = Literal["cold_start", "waiting", "preparing", "ready", "failed"]
 ScriptResourceProfileName = Literal["small", "standard", "large"]
 SCRIPT_RESOURCE_PROFILE_NAMES: frozenset[ScriptResourceProfileName] = frozenset(get_args(ScriptResourceProfileName))
 # The port a worker's sshd listens on, and the label on a container whose launch passed the tailnet SSH rule.
@@ -55,6 +55,8 @@ class WorkerLaunchConfig:
     tool_validation_snapshot: Mapping[str, Mapping[str, object]] = field(compare=False, repr=False)
     grantable_credentials: frozenset[str] = field(compare=False)
     digest: str
+    # The configured paths of the enabled plugins whose manifests set ``worker_preload``.
+    worker_preload_plugins: tuple[str, ...] = field(default=(), compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +65,8 @@ class WorkerSpec:
 
     A dedicated backend provisions it from the applied launch it reads inside the worker's lock.
     ``mirror_grantable_credentials`` mirrors the launch's grantable credentials into the worker; scripts mirror none.
+    ``wait_for_setup`` is False for a caller that needs the worker to answer and not its tool runtime: one that only
+    shows the worker, or a streamed command. It says nothing about the worker, so it is left out of comparisons.
     """
 
     worker_key: str
@@ -70,6 +74,7 @@ class WorkerSpec:
     mirror_grantable_credentials: bool = True
     state_scope_worker_key: str | None = None
     resource_profile: ScriptResourceProfileName | None = None
+    wait_for_setup: bool = field(default=True, compare=False)
 
 
 @dataclass(frozen=True, slots=True)

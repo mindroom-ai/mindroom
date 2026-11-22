@@ -80,7 +80,9 @@ def worker_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dic
     def execute(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "sandbox.invalid"
         if request.url.path == "/healthz":
-            return httpx.Response(200, json=asyncio.run(sandbox_runner_app.healthz()))
+            # A runner that started no eager setup has no setup state to report.
+            runner = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+            return httpx.Response(200, json=asyncio.run(sandbox_runner_app.healthz(runner)))
         assert request.url.path.endswith("/execute")
         payload = json.loads(request.content)
         requests.append(payload)

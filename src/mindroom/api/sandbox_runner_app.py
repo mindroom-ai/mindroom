@@ -21,6 +21,7 @@ from mindroom.api.sandbox_runner import (
     app_runtime_paths,
     initialize_sandbox_runner_app,
     load_config_from_startup_runtime,
+    start_eager_worker_setup,
     startup_runner_token_from_env,
     validate_runner_token,
 )
@@ -83,10 +84,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         WorkerBrowserRuntime() if computer is None and dedicated_scope in {"shared", "user", "user_agent"} else None
     )
     app.state.worker_browser = browser
+    eager_setup = start_eager_worker_setup(app)
     try:
         await prepare_script_worker_before_serving(app)
         yield
     finally:
+        if eager_setup is not None:
+            eager_setup.cancel()
         await close_worker_terminals(app)
         await stop_worker_ssh(app)
         await close_worker_services(app)
@@ -130,13 +134,15 @@ app.include_router(worker_ssh_router)
 
 
 @app.get("/healthz")
-async def healthz() -> dict[str, str | int]:
-    """Return readiness plus the worker compatibility contract."""
+async def healthz(request: Request) -> dict[str, str | int]:
+    """Return readiness plus the worker compatibility contract, and the state of an eager setup when one started."""
     payload = worker_health_payload(mindroom_version=__version__)
+    setup = getattr(request.app.state, "worker_setup", None)
     return {
         "status": payload.status,
         "mindroom_version": payload.mindroom_version,
         "worker_protocol": payload.worker_protocol,
+        **({} if setup is None else {"setup": setup}),
     }
 
 

@@ -19202,7 +19202,8 @@ Other `mindroom` modules can change in any release.
   "lifecycle_module": "lifecycle.py",
   "origin_module": "origin.py",
   "skills": ["skills"],
-  "reserved_namespaces": ["com.example.my_plugin."]
+  "reserved_namespaces": ["com.example.my_plugin."],
+  "worker_preload": false
 }
 ```
 
@@ -19218,6 +19219,7 @@ Other `mindroom` modules can change in any release.
 | `origin_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served on the plugin's own hosts, and optionally `async def serves(label)`; see [Origins of your own](#origins-of-your-own) |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
 | `reserved_namespaces` | list of non-empty strings | no | Prefixes of the Matrix event types and content keys that only the plugin writes; see [Reserved namespaces](#reserved-namespaces) |
+| `worker_preload` | boolean | no | `true` imports the plugin once per Kubernetes worker instead of in every tool call; default `false`; see [Importing once per worker](#importing-once-per-worker) |
 
 Every declared module file and skill directory must exist.
 Unknown fields are ignored.
@@ -19745,6 +19747,27 @@ Call a sub-toolkit's functions through `toolkit_functions(toolkit)` from `mindro
 A function that runs in a worker is async, so await a function `inspect.iscoroutinefunction` reports and run any other off the event loop, for example with `asyncio.to_thread`.
 A tool that calls other tools this way must itself be async.
 Calling `toolkit.functions[name]` directly skips all of that: the validation, the output file, and the worker.
+
+### Importing once per worker
+
+A tool call that runs in a Kubernetes worker imports the configured plugins in a fresh process, so every call pays for those imports again.
+A plugin whose manifest sets `"worker_preload": true` is imported once when the worker starts, and the calls in that worker reuse it.
+Plugins import in the order of `plugins:`, so list the plugins that set it first: one that follows an enabled plugin without the setting is imported by each call.
+A plugin configured by a path under `~` is not imported once: a call can run with another home directory than the worker started with, so MindRoom imports that plugin, and every plugin listed after it, in each call.
+Setting it promises that the plugin's files and the packages it uses do not change while a worker runs, and that importing its tools, hooks, and OAuth modules:
+
+- Reads nothing a call sets: the import runs before any call, in the worker's own working directory and environment, without the call's `.mindroom/worker-env.sh` values or per-call environment.
+- Leaves no thread running and no file, socket, or database connection open, because every later call would share it.
+- Starts no other process, because MindRoom cannot be sure to end one that detached itself when it gives the import up.
+- Keeps no state that must differ between calls, such as a cache, a counter, or a seeded random generator other than Python's `random`.
+- Finishes within 60 seconds, for all the worker's plugins that set it together.
+
+MindRoom does not look for changes while a worker runs: the worker keeps the plugin, and the packages it imported, as they were when it started.
+An edited file or an upgraded package is certain to take effect only once the worker restarts, which happens after its idle timeout stopped it, after it was retired, or after a config change replaced it.
+A worker whose plugins break the second or fifth promise, or fail to import, logs the warning [`sandbox_forkserver_plugin_preload_failed`](https://docs.mindroom.chat/deployment/operational-log-events/#sandbox_forkserver_plugin_preload_failed) with the reason, and all its calls import their plugins themselves, as without the setting.
+So do the calls of a worker whose own copy of a plugin does not set `worker_preload`, or lacks the plugin.
+A call imports its plugins itself as well when its config does not begin with the plugins the worker imported, in the same order and under the same paths.
+Every other plugin, and every plugin in a Docker worker or the shared sandbox runner, is imported by each call.
 
 ## OAuth providers
 
@@ -23410,6 +23433,7 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 | `workers.kubernetes.storageSubpathPrefix` | `MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX` | `workers` | Storage directory for worker-local caches |
 | `workers.kubernetes.port` | `MINDROOM_KUBERNETES_WORKER_PORT` | `8766` | Internal Service and container port |
 | `workers.kubernetes.readyTimeoutSeconds` | `MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS` | `60` | How long the primary waits for a worker to become ready |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_SETUP_TIMEOUT_SECONDS` | `180` | How long a call then waits for a worker that just started to finish preparing itself, before it runs anyway |
 | `workers.kubernetes.idleTimeoutSeconds` | `MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS` | `1800` | Idle time before a worker may scale to zero |
 | `workers.cleanupIntervalSeconds` | `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` | Chart: `30`; otherwise `0` (no automatic cleanup) | How often idle-worker cleanup runs |
 | `workers.kubernetes.reconcilePodTemplates` | `MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES` | `true` | Recreate workers whose image, env, or resources changed |
@@ -23427,6 +23451,11 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 
 Changing the image, environment, resources, or RuntimeClass recreates scaled-down workers on the next cleanup pass and running workers on their next use, so no manual recycling is needed; finish active work before changing them.
 Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior.
+
+A worker that just started is ready as soon as it answers, and then prepares its Python environment, shell, and tool runtime in the background.
+The call that started it shows `worker <name>: preparing (<n>s)` while it waits for that, for at most the setup timeout; a preparation that fails or takes longer never fails the worker, and the call then prepares what is missing itself.
+A command that streams its output, as `workers run` does, and a viewer that only shows the worker do not wait for that: the worker launches such a command itself, without the tool runtime.
+The tool runtime imports the plugins that set [`worker_preload`](https://docs.mindroom.chat/plugins/#importing-once-per-worker) once for all the worker's calls.
 
 Each worker's `/tmp` is disk-backed, and exceeding its size limit evicts that worker pod rather than refusing writes.
 `MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT` (for example `4Gi`) also requests and limits the same amount of container `ephemeral-storage`, which clusters such as GKE Autopilot otherwise cap at 1 GiB.
@@ -26224,11 +26253,12 @@ A call to a ready worker logs nothing, and calls that wait for the same start sh
 | `scope` | The worker's [scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes): `shared`, `user`, `user_agent`, or `unscoped` for an agent without `worker_scope` |
 | `agent_name` | Agent the worker serves, as its worker key spells it, or `null` for a `user` worker, which serves every agent on that scope |
 | `outcome` | `ready`, `timeout` for a worker that did not become ready within the backend's ready timeout, or `error` |
-| `wait_ms` | Milliseconds from finding the worker not ready until it answered its health check, or until its start failed |
-| `pod_ready_ms` | Kubernetes only: milliseconds from the same point until Kubernetes reported the worker's pod ready, which covers applying or scaling up its Deployment, scheduling, image pull, and container start; the rest of `wait_ms` is the first health check through the worker's Service |
+| `wait_ms` | Milliseconds from finding the worker not ready until the call could run in it, or until its start failed |
+| `pod_ready_ms` | Kubernetes only: milliseconds from the same point until Kubernetes reported the worker's pod ready, which covers applying or scaling up its Deployment, scheduling, image pull, and container start |
+| `healthy_ms` | Kubernetes only: milliseconds from the same point until the worker answered its health check through its Service; the rest of `wait_ms` is the wait for the worker to [prepare itself](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings), at most the setup timeout |
 
 ```json
-{"worker": "3f9c2a7b1d4e8f60", "backend": "kubernetes", "kind": "tool", "scope": "user_agent", "agent_name": "code", "outcome": "ready", "wait_ms": 14211.6, "pod_ready_ms": 13190.2, "event": "worker_cold_start", "logger": "mindroom.workers.progress", "level": "info", "timestamp": "2026-01-01T12:00:14.211Z"}
+{"worker": "3f9c2a7b1d4e8f60", "backend": "kubernetes", "kind": "tool", "scope": "user_agent", "agent_name": "code", "outcome": "ready", "wait_ms": 31870.4, "pod_ready_ms": 13190.2, "healthy_ms": 14211.6, "event": "worker_cold_start", "logger": "mindroom.workers.progress", "level": "info", "timestamp": "2026-01-01T12:00:31.870Z"}
 ```
 
 ```text
@@ -26237,9 +26267,45 @@ alert on  count of logs where event = "worker_cold_start" and outcome != "ready"
 ```
 
 A high `pod_ready_ms` points at scheduling or image pulls: check for pending worker pods, node scale-up, and the worker image pull policy.
-A large gap between `pod_ready_ms` and `wait_ms` points at the worker's Service or a network policy between the primary and its workers.
+A large gap between `pod_ready_ms` and `healthy_ms` points at the worker's Service or a network policy between the primary and its workers.
+A large gap between `healthy_ms` and `wait_ms` is the worker creating its Python environment and starting its tool runtime: check the worker's CPU limit, its storage, and how many workers started at once; a gap as long as the setup timeout means the setup did not finish, and the worker's [`sandbox_worker_eager_setup_failed`](#sandbox_worker_eager_setup_failed) record names the reason.
 Many `tool` records for the same `worker` mean it is used less often than its idle timeout, such as [`workers.kubernetes.idleTimeoutSeconds`](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings), so it scales down between uses.
 A `timeout` means the worker did not become ready within [`workers.kubernetes.readyTimeoutSeconds`](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) or `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS`; the call that waited fails, and for a tool call a [`tool_call_failed`](#tool_call_failed) record carries the error.
+
+### `sandbox_worker_eager_setup_failed`
+
+Logged by a Kubernetes worker, in its own pod's log, when the setup it runs at startup fails or does not finish within 180 seconds.
+The worker stays up: its first call prepares what is missing and reports its own error, so that call is as slow as it was before workers prepared themselves.
+A worker that was to import plugins ahead of its calls gives that up too, and also logs [`sandbox_forkserver_plugin_preload_failed`](#sandbox_forkserver_plugin_preload_failed).
+
+| Field | Meaning |
+|-------|---------|
+| `error` | The failure's message, or its exception type when it has none, such as `TimeoutError` for a setup that outlasted its limit |
+
+```json
+{"error": "No space left on device", "event": "sandbox_worker_eager_setup_failed", "logger": "mindroom.api.sandbox_runner", "level": "warning", "timestamp": "2026-01-01T12:00:00.000Z"}
+```
+
+Alert on any record.
+Check the worker's storage and its CPU limit, and how many workers started at once.
+A worker image without `uv`, or whose Python lacks a bundled pip wheel, logs this whenever a worker has to create its Python environment, because only `uv` creates it within a time limit; the first call then creates it, as before.
+
+### `sandbox_forkserver_plugin_preload_failed`
+
+Logged by a Kubernetes worker, in its own pod's log, once, when it gives up importing the plugins that set [`worker_preload`](https://docs.mindroom.chat/plugins/#importing-once-per-worker) ahead of its calls.
+The import raised, took longer than 60 seconds, or left a thread or an open file behind, the worker's own copy of a plugin does not set `worker_preload`, the worker's setup failed or took too long, or the process that held the imported plugins ended later.
+Calls still work, and each imports its plugins itself until the worker restarts.
+
+| Field | Meaning |
+|-------|---------|
+| `error` | Why the worker gave the preload up, which for an import that raised is the exception |
+
+```json
+{"error": "ImportError: No module named 'missing'", "event": "sandbox_forkserver_plugin_preload_failed", "logger": "mindroom.api.sandbox_forkserver", "level": "warning", "timestamp": "2026-01-01T12:00:00.000Z"}
+```
+
+Alert on any record, since every tool call in that worker pays the plugin's import time again.
+Fix what `error` names, or remove `worker_preload` from the plugin's manifest.
 
 ### `oauth_credentials_refresh_failed`
 

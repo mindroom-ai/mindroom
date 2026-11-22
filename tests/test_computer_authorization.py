@@ -215,6 +215,8 @@ def test_computer_selects_exactly_one_browser_provider(tmp_path: Path, tools: li
             paths,
         )
         assert "user_agent" in target.spec.worker_key
+        # A viewer needs the worker to answer, not its tool runtime, so opening it never waits for the worker's setup.
+        assert target.spec.wait_for_setup is False
 
 
 @pytest.mark.parametrize(
