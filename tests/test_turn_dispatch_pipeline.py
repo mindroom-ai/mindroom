@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -103,7 +104,7 @@ from tests.threading_helpers import seed_hydrated_conversation, seed_thread_hist
 from tests.turn_dispatch_helpers import dispatch_test_turn, nothing_else_queued
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Sequence
+    from collections.abc import Awaitable, Iterator, Sequence
     from pathlib import Path
 
     from mindroom.reply_turn.request import ResponseRequest
@@ -134,6 +135,20 @@ async def _first_of(signal: Awaitable[object], handler: asyncio.Task[None]) -> N
         raise AssertionError(msg)
     finally:
         signal_task.cancel()
+
+
+@contextmanager
+def _running_reply(bot: Any, room_id: str, thread_id: str) -> Iterator[None]:  # noqa: ANN401
+    """Keep a reply running in one thread: its begun turn is what makes the conversation busy."""
+    conversations = bot._response_runner.lifecycle_coordinator
+    target = MessageTarget.resolve(room_id, thread_id, f"{thread_id}-running")
+    conversation = conversations._conversation_for(target)
+    conversation.begin_response_turn()
+    try:
+        assert conversations.has_active_response_for_target(target)
+        yield
+    finally:
+        conversation.finish_response_turn()
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -1540,6 +1555,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
+            _running_reply(bot, room.room_id, "$thread_root:localhost"),
             patch.object(
                 bot._response_runner.lifecycle_coordinator,
                 "reserve_waiting_human_message",
@@ -1556,6 +1572,10 @@ class TestAgentBot(AgentBotTestBase):
                 coalescing_thread_id="$thread_root:localhost",
             )
             await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
+            # The reply is still running in the relay's own thread when ingress decides.
+            assert bot._response_runner.lifecycle_coordinator.active_thread_ids_for_room(room.room_id) == {
+                "$thread_root:localhost",
+            }
 
         assert outcome is TurnDispatchOutcome.DEFERRED
         reserve_waiting_human_message.assert_not_called()
@@ -1820,6 +1840,7 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_voice_event",
                 new=AsyncMock(return_value=_VoiceNormalizationResult(event=prepared_event)),
             ),
+            _running_reply(bot, room.room_id, "$thread_root"),
             patch.object(
                 bot._response_runner.lifecycle_coordinator,
                 "reserve_waiting_human_message",
@@ -1837,6 +1858,10 @@ class TestAgentBot(AgentBotTestBase):
                 ticket=ticket,
             )
             await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
+            # The reply is still running in the voice message's own thread when ingress decides.
+            assert bot._response_runner.lifecycle_coordinator.active_thread_ids_for_room(room.room_id) == {
+                "$thread_root",
+            }
 
         reservation = reserve.return_value
         pending_event = admit.await_args.kwargs["ready_result"].pending_event
