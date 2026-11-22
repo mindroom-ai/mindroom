@@ -1165,7 +1165,7 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `await agents()` | An `AgentWorkspace` for each agent joined to the room that the caller may use there, in config order |
 | `await agent(agent_user_id)` | The `AgentWorkspace` of the agent whose Matrix user ID is `agent_user_id`, once the caller may use it there |
 | `await terminals(workspace, *, create=False)` | The agent's terminals for an `AgentWorkspace` that `agents()` or `agent()` returned, or `None` while its `terminal` is `none`; see [An agent's terminals](#an-agents-terminals) |
-| `modes()` | A `RoomModes` with the room's [thread mode](configuration/threads.md#thread_mode) override `thread` and [reply mode](configuration/threads.md#reply_mode) override `reply` (the room's `reply_mode` setting as the runtime last read it), each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
+| `modes()` | A `RoomModes` with the room's [thread mode](configuration/threads.md#thread_mode) override `thread` and [reply mode](configuration/threads.md#reply_mode) override `reply` (the room's `thread_mode` and `reply_mode` [settings](configuration/threads.md#room-settings) as the runtime last read them), each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
 | `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do |
 | `await history()` | A `RoomHistory` read at that moment: the room's history visibility and where the caller's view of its history begins |
 
@@ -1205,9 +1205,11 @@ The room's steward writes both modes, the reply mode first.
 When the room refuses the reply mode for lack of power, `set_modes()` answers 403 with `I need moderator rights in this room to change the reply mode.`.
 When the room does not take the reply mode for another reason, it answers 503 with `The room did not take its reply mode; nothing was changed.`.
 Both answers come before the thread mode is touched, so neither mode changes.
+A thread mode the room refuses for lack of power answers 403 with `I need moderator rights in this room to change the thread mode.`, and one it does not take for another reason 503 with `The room did not take its thread mode; try again.`; the thread mode stays as it was.
 As with `!thread_mode`, MindRoom then updates the room's [`io.mindroom.thread_mode`](configuration/threads.md#thread-mode-resolution) state, which clients choose the room's view by, before `set_modes()` returns.
-When the room refuses that update for lack of power, `set_modes()` answers 403 with `I need moderator rights in this room to change the thread mode.` and the thread mode stays as it was.
-When the update fails for another reason, as when the homeserver cannot be reached, `set_modes()` answers 503 with `The modes were saved, but the room's thread mode is not published yet; try again.`: the change stays saved, and calling it again retries the update.
+When the room refuses that update for lack of power, `set_modes()` answers 403 with `I need moderator rights in this room to show clients this room's thread mode.`
+When the update fails for another reason, as when the homeserver cannot be reached, it answers 503 with `The modes were saved, but the room's thread mode is not published yet; try again.`
+Either way the thread mode stays set, and calling `set_modes()` again retries the update.
 A reply mode given in the same call is already changed when the thread mode answers 403 or 503.
 
 ```python
@@ -2317,5 +2319,5 @@ Once read, whether a room is a direct message is kept for a few minutes, as runn
 MindRoom's environment lookups for the plugin, such as `runtime_paths.env_value`, read only a `.env` file in `tmp_dir`; plugin code that reads `os.environ` still sees the test's own environment.
 
 The kit does not run agent turns, models, conversation history, workers, tool approval, OAuth flows, MCP server tools, automations, the plugin's `lifespan`, the main app's middleware, such as its response security headers and request size limit, or more than one plugin at once.
-It fires no other built-in event, and hooks get no `matrix_admin` and cannot `put_room_state`; `RoomReader.set_modes` saves a thread mode but answers 503, as it cannot publish one.
+It fires no other built-in event, and hooks get no `matrix_admin` and cannot `put_room_state`; `RoomReader.set_modes` answers 503 and changes nothing, as the kit's rooms take no state writes.
 A call to the Matrix client other than its member and state reads raises `AttributeError` naming the call.

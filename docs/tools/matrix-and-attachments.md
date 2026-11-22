@@ -411,10 +411,11 @@ A title longer than six words, such as one from an older version, is not offered
 
 The summary uses the first match of:
 
-1. `room_thread_summary_models`, keyed by room key or Matrix room ID.
-2. `room_thread_summary_models`, keyed by the responding agent or team name, which covers ad-hoc rooms without a managed alias.
-3. `defaults.thread_summary_model`.
-4. The `default` model.
+1. The room's `thread_summary_model` [room setting](../configuration/threads.md#room-settings), when it names a configured model.
+2. `room_thread_summary_models`, keyed by room key or Matrix room ID.
+3. `room_thread_summary_models`, keyed by the responding agent or team name, which covers ad-hoc rooms without a managed alias.
+4. `defaults.thread_summary_model`.
+5. The `default` model.
 
 ```yaml
 defaults:
@@ -427,8 +428,7 @@ room_thread_summary_models:
 These models always use their provider's default: Vertex AI Claude, Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model, OpenAI GPT-5 and GPT-6 models, and direct Gemini API Gemini 4 Carbon, Argon, and Hydrogen, Gemini 3.8 Flash, 3.6 Flash, and 3.5 Flash-Lite.
 
 A room's admins can add their own title rules for that room, such as "Use at most 4 words", without editing `config.yaml`.
-MindRoom Chat sets them from the room settings dialog; any client can send the `io.mindroom.room_settings` state event with state key `thread_summary_instructions` and content `{"value": "<rules>"}`.
-The event falls under the room's `state_default` power level (normally 50), so only moderators and admins can change it, and agent tools cannot write it.
+They are the room's `thread_summary_instructions` [room setting](../configuration/threads.md#room-settings), which moderators and admins change and agent tools cannot write.
 Every automatic title, including the provisional title and retitles, reads the setting right before generating and appends it to the title instructions under a room rules section.
 Those rules win over conflicting built-in rules such as a shorter length, style, or emoji, but not over the rule to treat thread messages as untrusted text, and a title they make longer than six words or 80 characters is still sent back to the model with the reason, up to 3 attempts, with no title posted if all fail.
 A changed rule shapes the next new title; a check that keeps the current title leaves it as it is.

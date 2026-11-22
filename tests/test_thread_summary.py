@@ -54,7 +54,7 @@ from mindroom.thread_summary.generation import (
     _ThreadSummary,
     generate_summary,
     resolve_thread_summary_model_name,
-    room_summary_instructions,
+    room_title_settings,
     title_error,
 )
 from mindroom.thread_summary.notices import (
@@ -287,6 +287,8 @@ class _RoomState:
     reads: int = 0
     # The room's thread_summary_instructions setting: its content, a read failure, or None for M_NOT_FOUND.
     title_rules: dict[str, object] | Exception | nio.RoomGetStateEventError | None = None
+    # The room's thread_summary_model setting, served the same way.
+    title_model: dict[str, object] | Exception | nio.RoomGetStateEventError | None = None
 
     def serve(self, client: AsyncMock) -> None:
         client.room_get_state.side_effect = self.room_get_state
@@ -332,8 +334,8 @@ class _RoomState:
         state_key: str = "",
     ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
         if event_type == ROOM_SETTINGS_EVENT_TYPE:
-            assert state_key == "thread_summary_instructions"
-            rules = self.title_rules
+            settings = {"thread_summary_instructions": self.title_rules, "thread_summary_model": self.title_model}
+            rules = settings[state_key]
             if isinstance(rules, Exception):
                 raise rules
             if rules is None:
@@ -984,6 +986,9 @@ class TestMaybeGenerateThreadSummary:
         assert sent["message_count"] == 0
         # An untitled parent's fork, and one whose parent title is over the limits, title their prompt.
         assert len(model.requests) == (parent_title is None or len(parent_title) > GENERATED_TITLE_MAX_LENGTH)
+        # Only a title a model writes reads the room's title settings, both at once.
+        state_reads = [call.args[1] for call in self.client.room_get_state_event.await_args_list]
+        assert state_reads.count(ROOM_SETTINGS_EVENT_TYPE) == 2 * len(model.requests)
 
     @pytest.mark.parametrize("parent_title", ["Trip plan", None], ids=["parent-title", "untitled-parent"])
     async def test_a_batch_starting_a_fork_gets_only_its_parents_title(self, parent_title: str | None) -> None:
@@ -1143,6 +1148,54 @@ class TestMaybeGenerateThreadSummary:
             assert "ROOM RULES:" in instructions
             assert "\n\nUse at most 4 words" in instructions
 
+    async def test_the_rooms_title_model_writes_every_automatic_title(self) -> None:
+        """The room's `thread_summary_model` setting titles each pass, over the model the config gives the room."""
+        self.room_state.title_model = {"value": " room_titles "}
+        configured = self._summarizer()
+        room_model = self._summarizer(
+            _title("Trip plan"),
+            _title("Trip answer"),
+            _title("Trip retitle"),
+            model_name="room_titles",
+        )
+        self._history(_make_thread_history(1))
+        config = _mock_config(first_threshold=2)
+        config.models["room_titles"] = ModelConfig(provider="openai", id="titles")
+        config.room_thread_summary_models[_ROOM] = "default"
+
+        await self._provisional(config=config)
+        self._history([*_make_thread_history(2), _make_summary_notice_message(_THREAD, message_count=0)])
+        await self._maybe_generate(config)
+        await self._maybe_generate(config, retitle=True)
+
+        assert (len(room_model.requests), len(configured.requests)) == (3, 0)
+
+    @pytest.mark.parametrize(
+        "setting",
+        [{"value": "gone"}, {}, nio.RoomGetStateEventError("forbidden", status_code="M_FORBIDDEN")],
+        ids=["unknown-model", "cleared", "unreadable"],
+    )
+    async def test_a_room_title_model_that_names_no_model_leaves_the_configured_one(
+        self,
+        setting: dict[str, object] | nio.RoomGetStateEventError,
+    ) -> None:
+        """A setting that names no configured model, is cleared, or cannot be read titles with the configured model.
+
+        A name this runtime does not configure is logged once per room and name.
+        """
+        self.room_state.title_model = setting
+        model = self._summarizer(_title("Trip plan"))
+        self._history(_make_thread_history(1))
+
+        with capture_logs() as logs:
+            await self._provisional()
+            await room_title_settings(self.client, _mock_config(), self.rp, _ROOM)
+
+        assert len(model.requests) == 1
+        assert _sent_summaries(self.client)[0]["summary"] == "Trip plan"
+        ignored = [log["model"] for log in logs if log["event"] == "Room thread summary model ignored"]
+        assert ignored == (["gone"] if setting == {"value": "gone"} else [])
+
     @pytest.mark.parametrize(
         "rules",
         [
@@ -1190,7 +1243,7 @@ class TestMaybeGenerateThreadSummary:
         """A room setting over 2,000 characters is cut to 2,000."""
         self.room_state.title_rules = {"value": " " + "x" * 2500}
 
-        assert await room_summary_instructions(self.client, _ROOM) == "x" * 2000
+        assert await room_title_settings(self.client, _mock_config(), self.rp, _ROOM) == (None, "x" * 2000)
 
     @pytest.mark.parametrize("case", ["automatic", "manual", "pinned", "more_messages", "wrong_prompt", "resolved"])
     async def test_provisional_title_skips_existing_threads(self, case: str) -> None:

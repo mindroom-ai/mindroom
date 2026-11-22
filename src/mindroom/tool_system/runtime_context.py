@@ -454,6 +454,10 @@ _WORKER_PROGRESS_PUMP: ContextVar[WorkerProgressPump | None] = ContextVar(
 )
 _CALL_PROGRESS_SINK: ContextVar[Callable[[str], None] | None] = ContextVar("call_progress_sink", default=None)
 _CALL_REFUSAL_HOOK: ContextVar[Callable[[], None] | None] = ContextVar("call_refusal_hook", default=None)
+_CALL_CANCEL_NEVER_RAN_HOOK: ContextVar[Callable[[], None] | None] = ContextVar(
+    "call_cancel_never_ran_hook",
+    default=None,
+)
 
 
 def get_tool_runtime_context() -> ToolRuntimeContext | None:
@@ -503,6 +507,12 @@ def get_call_progress_sink() -> Callable[[str], None] | None:
 def note_call_refusal() -> None:
     """Record a typed pre-execution named-worker refusal for the active CLI call."""
     if (hook := _CALL_REFUSAL_HOOK.get()) is not None:
+        hook()
+
+
+def note_call_cancelled_never_ran() -> None:
+    """Record that the active CLI call was cancelled before dispatch to the worker."""
+    if (hook := _CALL_CANCEL_NEVER_RAN_HOOK.get()) is not None:
         hook()
 
 
@@ -753,12 +763,15 @@ def call_progress_sink_scope(
     sink: Callable[[str], None] | None,
     *,
     on_refused: Callable[[], None] | None = None,
+    on_cancelled_never_ran: Callable[[], None] | None = None,
 ) -> Iterator[None]:
-    """Bind per-call progress and refusal hooks for the lifetime of one CLI tool call."""
+    """Bind per-call progress, refusal, and cancel hooks for the lifetime of one CLI tool call."""
     progress_token = _CALL_PROGRESS_SINK.set(sink)
     refusal_token = _CALL_REFUSAL_HOOK.set(on_refused)
+    cancel_token = _CALL_CANCEL_NEVER_RAN_HOOK.set(on_cancelled_never_ran)
     try:
         yield
     finally:
+        _CALL_CANCEL_NEVER_RAN_HOOK.reset(cancel_token)
         _CALL_REFUSAL_HOOK.reset(refusal_token)
         _CALL_PROGRESS_SINK.reset(progress_token)

@@ -390,7 +390,11 @@ class LiveTurnTools(TurnToolBridge):
             first, call.cancel_requested = not call.cancel_requested, True
             if call.receipt.status == "queued":
                 call.receipt = call.receipt.model_copy(
-                    update={"status": "cancelled", "outcome": "Call cancelled before dispatch"},
+                    update={
+                        "status": "cancelled",
+                        "cancel_outcome": "never_ran",
+                        "outcome": "Call cancelled before dispatch",
+                    },
                 )
                 call.notify()
             # Only the request that cancels the task waits for it, so repeats hold no waiters.
@@ -848,6 +852,7 @@ class LiveTurnTools(TurnToolBridge):
         call.receipt = call.receipt.model_copy(update={"status": "running"})
         started = False
         refused = False
+        cancelled_never_ran = False
         status = "failed"
         result: object = "Tool did not return a terminal execution"
         media_results: list[ToolValue] = []
@@ -867,9 +872,14 @@ class LiveTurnTools(TurnToolBridge):
                 nonlocal refused
                 refused = True
 
+            def mark_cancelled_never_ran() -> None:
+                nonlocal cancelled_never_ran
+                cancelled_never_ran = True
+
             with call_progress_sink_scope(
                 self._progress_reporter(call, asyncio.get_running_loop()),
                 on_refused=mark_refused,
+                on_cancelled_never_ran=mark_cancelled_never_ran,
             ):
                 events = self._execute(
                     binding,
@@ -926,6 +936,9 @@ class LiveTurnTools(TurnToolBridge):
                     | {
                         "status": status,
                         "error_kind": error_kind,
+                        "cancel_outcome": "never_ran"
+                        if status == "cancelled" and (cancelled_never_ran or not started)
+                        else None,
                         "outcome": result,
                         "attachments": attachments,
                     },

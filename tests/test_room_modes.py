@@ -1,8 +1,8 @@
 """Plugin routes and chat commands change a room's thread and reply modes along one path.
 
 A route changes them only for a room admin, and a thread mode change republishes `io.mindroom.thread_mode`, the state
-clients choose a room's view by, so the stored override and the published state agree. The reply mode override is the
-room's `reply_mode` setting in `io.mindroom.room_settings` state.
+clients choose a room's view by, so the override and the published state agree. Each override is the room's setting of
+its name, `thread_mode` or `reply_mode`, in `io.mindroom.room_settings` state.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated, Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, call
 from urllib.parse import quote
 
 import nio
@@ -26,8 +26,13 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.plugin_http import RoomModes, RoomReader, require_room_reader
-from mindroom.room_reply_modes import resolve_room_reply_mode_override, write_room_reply_mode
-from mindroom.room_thread_modes import resolve_room_thread_mode_override, set_room_thread_mode_override
+from mindroom.room_settings import (
+    REPLY_MODE,
+    THREAD_MODE,
+    on_thread_mode_change,
+    resolve_room_setting,
+    write_room_setting,
+)
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import entity_ids
 
@@ -37,12 +42,14 @@ if TYPE_CHECKING:
 
     from mindroom.config.agent import RoomReplyMode
     from mindroom.constants import RuntimePaths
+    from mindroom.room_settings import RoomThreadMode
 
 ROOM_ID = "!room:localhost"
 ALICE = "@alice:localhost"
 BOB = "@bob:localhost"
-THREAD_MODE = "io.mindroom.thread_mode"
+THREAD_MODE_EVENT = "io.mindroom.thread_mode"
 REPLY_SETTING = ("io.mindroom.room_settings", "reply_mode")
+THREAD_SETTING = ("io.mindroom.room_settings", "thread_mode")
 
 
 @dataclass
@@ -74,21 +81,25 @@ class _Room:
             room_id=ROOM_ID,
             requester_user_id=ALICE,
             sender_user_id=ALICE,
-            put_state=put_state,
+            put_state=put_state or self.client.room_put_state,
         )
 
     def stored(self) -> tuple[str | None, str | None]:
         return (
-            resolve_room_thread_mode_override(self.paths, ROOM_ID),
-            resolve_room_reply_mode_override(self.paths, ROOM_ID),
+            resolve_room_setting(THREAD_MODE, self.paths, ROOM_ID),
+            resolve_room_setting(REPLY_MODE, self.paths, ROOM_ID),
         )
 
     def published(self) -> dict[str, Any] | None:
-        return self.events.get((THREAD_MODE, ""))
+        return self.events.get((THREAD_MODE_EVENT, ""))
 
     async def set_reply_setting(self, mode: RoomReplyMode) -> None:
         """A room admin sets the room's reply mode setting, which the runtime then knows."""
-        assert await write_room_reply_mode(self.client, self.paths, ROOM_ID, mode)
+        assert await write_room_setting(REPLY_MODE, self.client, self.paths, ROOM_ID, mode)
+
+    async def set_thread_setting(self, mode: RoomThreadMode) -> None:
+        """A room admin sets the room's thread mode setting, which the runtime then knows."""
+        assert await write_room_setting(THREAD_MODE, self.client, self.paths, ROOM_ID, mode)
 
 
 @pytest.fixture
@@ -159,7 +170,7 @@ async def test_modes_give_each_override_and_the_reply_mode_in_effect(room: _Room
     assert reader.modes() == RoomModes(thread=None, reply=None, reply_in_effect="auto")
     room.config.rooms[ROOM_ID] = RoomConfig(reply_mode="mentions")
     assert reader.modes() == RoomModes(thread=None, reply=None, reply_in_effect="mentions")
-    set_room_thread_mode_override(room.paths, room_id=ROOM_ID, mode="room")
+    await room.set_thread_setting("room")
     await room.set_reply_setting("auto")
     assert reader.modes() == RoomModes(thread="room", reply="auto", reply_in_effect="auto")
 
@@ -180,7 +191,7 @@ async def test_an_admin_sets_and_clears_the_thread_mode_and_the_router_publishes
 @pytest.mark.asyncio
 async def test_an_admin_sets_and_clears_the_reply_mode_and_the_thread_mode_stays(room: _Room) -> None:
     """A reply mode change sets the room's reply mode setting, keeps the thread mode override and publishes no view."""
-    set_room_thread_mode_override(room.paths, room_id=ROOM_ID, mode="room")
+    await room.set_thread_setting("room")
     reader = await room.reader()
     await reader.set_modes(reply="mentions")
     assert reader.modes() == RoomModes(thread="room", reply="mentions", reply_in_effect="mentions")
@@ -199,6 +210,7 @@ async def test_one_call_changes_both_modes(room: _Room) -> None:
     assert room.stored() == ("room", "mentions")
     assert room.published() == {"mode": "room"}
     assert room.events[REPLY_SETTING] == {"value": "mentions"}
+    assert room.events[THREAD_SETTING] == {"value": "room"}
 
 
 @pytest.mark.asyncio
@@ -259,35 +271,61 @@ async def test_an_agent_publishes_the_thread_mode_while_the_router_is_stopped(ro
 
 
 @pytest.mark.asyncio
-async def test_a_change_the_steward_cannot_publish_is_saved_and_answers_503(room: _Room) -> None:
-    """When the state write fails for another reason than power, the thread mode stays saved and the route says so."""
-    room.client.room_put_state.side_effect = None
-    room.client.room_put_state.return_value = nio.RoomPutStateError("down", "M_UNKNOWN")
+@pytest.mark.parametrize(
+    ("status_code", "expected"),
+    [
+        ("M_UNKNOWN", (503, "The modes were saved, but the room's thread mode is not published yet; try again.")),
+        ("M_FORBIDDEN", (403, "I need moderator rights in this room to show clients this room's thread mode.")),
+    ],
+)
+async def test_a_thread_mode_the_steward_cannot_publish_stays_set(
+    room: _Room,
+    status_code: str,
+    expected: tuple[int, str],
+) -> None:
+    """When the room takes the setting and refuses the mode clients read, the setting stays and the route says so.
+
+    A publication that failed for now is left to the room's steward to retry; one the room refuses is not.
+    """
+    retry = Mock()
+    on_thread_mode_change(room.paths, retry)
+    write = room.client.room_put_state.side_effect
+
+    async def settings_only(room_id: str, event_type: str, content: dict[str, Any], state_key: str = "") -> object:
+        if event_type == THREAD_MODE_EVENT:
+            return nio.RoomPutStateError("refused", status_code)
+        return await write(room_id, event_type, content, state_key)
+
+    room.client.room_put_state.side_effect = settings_only
     reader = await room.reader()
     with pytest.raises(HTTPException) as unpublished:
         await reader.set_modes(thread="room")
-    assert (unpublished.value.status_code, unpublished.value.detail) == (
-        503,
-        "The modes were saved, but the room's thread mode is not published yet; try again.",
-    )
+    assert (unpublished.value.status_code, unpublished.value.detail) == expected
     assert room.stored() == ("room", None)
+    assert room.events[THREAD_SETTING] == {"value": "room"}
     assert room.published() is None
+    assert retry.call_args_list == ([call(ROOM_ID)] if status_code == "M_UNKNOWN" else [])
 
 
 @pytest.mark.asyncio
-async def test_a_reply_mode_the_room_does_not_take_changes_nothing(room: _Room) -> None:
-    """When the reply mode write fails for another reason than power, the route answers 503 before the thread mode."""
+@pytest.mark.parametrize(
+    ("modes", "detail"),
+    [
+        ({"thread": "room", "reply": "mentions"}, "The room did not take its reply mode; nothing was changed."),
+        ({"thread": "room"}, "The room did not take its thread mode; try again."),
+    ],
+)
+async def test_a_mode_the_room_does_not_take_changes_nothing(room: _Room, modes: dict[str, Any], detail: str) -> None:
+    """When a setting write fails for another reason than power, the route answers 503; the reply mode comes first."""
     room.client.room_put_state.side_effect = None
     room.client.room_put_state.return_value = nio.RoomPutStateError("down", "M_UNKNOWN")
     reader = await room.reader()
     with pytest.raises(HTTPException) as refused:
-        await reader.set_modes(thread="room", reply="mentions")
-    assert (refused.value.status_code, refused.value.detail) == (
-        503,
-        "The room did not take its reply mode; nothing was changed.",
-    )
+        await reader.set_modes(**modes)
+    assert (refused.value.status_code, refused.value.detail) == (503, detail)
     assert room.stored() == (None, None)
     assert REPLY_SETTING not in room.events
+    assert room.published() is None
 
 
 @pytest.mark.asyncio
@@ -309,7 +347,7 @@ def test_a_route_returns_the_modes_as_its_typed_response(room: _Room) -> None:
     async def modes(reader: Annotated[RoomReader, Depends(require_room_reader)]) -> RoomModes:
         return reader.modes()
 
-    set_room_thread_mode_override(room.paths, room_id=ROOM_ID, mode="room")
+    asyncio.run(room.set_thread_setting("room"))
     token = client_session_store(room.app).create(BOB).token
     response = TestClient(room.app).get(
         f"/rooms/{quote(ROOM_ID, safe='')}/modes",
@@ -339,7 +377,7 @@ async def test_a_route_and_a_command_at_once_leave_the_override_and_published_st
     command: str,
 ) -> None:
     """Whichever change lands last, the published mode is the stored override, else the agents' configured mode."""
-    set_room_thread_mode_override(room.paths, room_id=ROOM_ID, mode="thread")
+    await room.set_thread_setting("thread")
     reader = await room.reader()
     await asyncio.gather(
         reader.set_modes(thread=route_mode),  # type: ignore[arg-type]

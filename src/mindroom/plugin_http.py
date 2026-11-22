@@ -40,6 +40,7 @@ from mindroom.hooks.types import format_hook_source
 from mindroom.matrix.history_visibility import RoomHistory
 from mindroom.matrix.reserved_content import MINDROOM_RESERVED_PREFIXES, reserved_content_keys
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
+from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.providers import OAuthProviderError
 from mindroom.oauth.service import current_oauth_access_token, oauth_provider_service_account_configured
@@ -49,15 +50,18 @@ from mindroom.plugin_worker_relay import WorkerRelay, open_worker_relay
 from mindroom.requester_identity import is_access_checked_requester_id, resolve_human_requester_alias
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.room_agent_access import AgentWorkspace, room_agent_workspaces, room_execution_identity
-from mindroom.room_modes import change_room_thread_mode
-from mindroom.room_reply_modes import resolve_room_reply_mode_override, write_room_reply_mode
-from mindroom.room_steward import joined_bot, room_poster, room_steward
-from mindroom.room_thread_modes import (
+from mindroom.room_settings import (
+    REPLY_MODE,
+    THREAD_MODE,
+    RoomSetting,
     RoomThreadMode,
-    resolve_room_thread_mode_override,
+    request_thread_mode_republish,
+    resolve_room_setting,
+    write_room_setting,
 )
+from mindroom.room_steward import joined_bot, room_poster, room_steward
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
-from mindroom.steward_duties import moderator_rights_message, put_room_state_as_steward
+from mindroom.steward_duties import moderator_rights_message
 from mindroom.terminal.client import WorkerTerminals
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
@@ -276,7 +280,7 @@ class RoomModes:
     """A room's thread and reply mode overrides, and the reply mode it uses."""
 
     thread: RoomThreadMode | None
-    """The room's thread mode override, None while each agent uses its configured mode."""
+    """The room's thread mode override, its ``thread_mode`` room setting as the runtime last read it; None while unset."""
     reply: RoomReplyMode | None
     """The room's reply mode override, its ``reply_mode`` room setting as the runtime last read it; None while unset."""
     reply_in_effect: RoomReplyMode
@@ -324,8 +328,8 @@ class RoomReader:
         steward = self._steward()
         paths = steward.runtime_paths
         return RoomModes(
-            resolve_room_thread_mode_override(paths, self._room_id),
-            resolve_room_reply_mode_override(paths, self._room_id),
+            resolve_room_setting(THREAD_MODE, paths, self._room_id),
+            resolve_room_setting(REPLY_MODE, paths, self._room_id),
             steward.config.get_room_reply_mode(paths, self._room_id),
         )
 
@@ -339,31 +343,39 @@ class RoomReader:
 
         Before anything is written it answers 403 unless the caller holds room admin power by a ``power()`` read, 503
         when that read fails, and 503 unless a running agent is in the room: its steward writes both modes.
-        A mode the room refuses for lack of power answers 403 with what the steward needs. A reply mode the room does
-        not take answers before the thread mode changes, with 503 when power is not the reason; a thread mode change
-        that cannot be published otherwise stays saved and answers 503.
+        Each is the room's setting of that name. A mode the room refuses for lack of power answers 403 with what the
+        steward needs, and one it does not take for another reason 503; the reply mode is written first, so its answer
+        comes before the thread mode changes. A thread mode the room took that cannot be published to clients stays set
+        and answers 403 or 503 the same way.
         """
         if not (await self.power()).is_admin(self.user.user_id):
             raise HTTPException(403, "Only room admins change the room's modes.")
         steward = self._steward()
         client = cast("nio.AsyncClient", steward.client)
-        if reply is not ...:
-            taken = await write_room_reply_mode(client, steward.runtime_paths, self._room_id, reply)
+        paths = steward.runtime_paths
+
+        async def write[T: str](
+            setting: RoomSetting[T],
+            value: T | None | EllipsisType,
+            name: str,
+            untaken: str,
+        ) -> None:
+            if value is ...:
+                return
+            taken = await write_room_setting(setting, client, paths, self._room_id, value)
             if taken is None:
-                raise HTTPException(403, moderator_rights_message("change the reply mode"))
+                raise HTTPException(403, moderator_rights_message(f"change the {name}"))
             if not taken:
-                raise HTTPException(503, "The room did not take its reply mode; nothing was changed.")
-        published = thread is ... or await change_room_thread_mode(
-            client,
-            steward.config,
-            steward.runtime_paths,
-            self._room_id,
-            thread,
-            put_state=partial(put_room_state_as_steward, lambda _room_id: steward),
-        )
+                raise HTTPException(503, untaken)
+
+        await write(REPLY_MODE, reply, "reply mode", "The room did not take its reply mode; nothing was changed.")
+        await write(THREAD_MODE, thread, "thread mode", "The room did not take its thread mode; try again.")
+        published = thread is ... or await reconcile_room_thread_mode(client, steward.config, paths, self._room_id)
         if published is None:
-            raise HTTPException(403, moderator_rights_message("change the thread mode"))
+            raise HTTPException(403, moderator_rights_message("show clients this room's thread mode"))
         if not published:
+            # Nothing else republishes a mode whose change the steward's sync does not show: the steward retries.
+            request_thread_mode_republish(paths, self._room_id)
             raise HTTPException(
                 503,
                 "The modes were saved, but the room's thread mode is not published yet; try again.",

@@ -27,10 +27,10 @@ from mindroom.model_catalog_receiver import (
     _Receiver,
     register_model_catalog_receiver,
 )
-from mindroom.room_model_overrides import set_room_model_override
 from mindroom.room_steward import room_poster
 from mindroom.thread_models import set_thread_model_override
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.room_settings_helpers import set_room_model_override
 from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_client, picker_setup, root_event
 from tests.test_olm_to_device import olm_transport
 

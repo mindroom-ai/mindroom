@@ -33,7 +33,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
-from mindroom.room_reply_modes import observe_room_settings_event
+from mindroom.room_settings import observe_room_settings_event
 from tests.authorization_helpers import (
     isolated_membership_index,
     make_test_command_handler_context,
