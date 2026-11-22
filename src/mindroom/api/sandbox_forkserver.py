@@ -227,6 +227,7 @@ class _SandboxForkserver:
         self._failed_fingerprints: dict[str, tuple[str, float]] = {}
         self._template_preload = template_preload
         self._may_spawn = True
+        self._closed = False
         # The plugin paths a request must opt in to, exactly, to run in a preloading manager's template: None until
         # the worker's setup succeeded, so that no request waits for a preload or runs beside a failed setup.
         self.serves: tuple[str, ...] | None = None
@@ -275,7 +276,9 @@ class _SandboxForkserver:
             templates = list(self._templates.values())
             self._templates.clear()
             self._failed_fingerprints.clear()
-            self._may_spawn = self._template_preload is None
+            # A preloading manager that shut down starts no template again and keeps none that is starting now.
+            self._closed = self._template_preload is not None
+            self._may_spawn = not self._closed
         for template in templates:
             _terminate_template(template)
 
@@ -325,15 +328,7 @@ class _SandboxForkserver:
             self._discard(key, template)
             template = None
         if template is None:
-            # Under the lock that shutting down takes, so that no template starts beside or after a shutdown's last.
-            with self._lock:
-                if not self._may_spawn:
-                    msg = "The template that preloaded plugins ended, and a preload is tried once."
-                    raise ForkserverStartupError(msg)
-                # A preloading manager starts one template in its life: no preload runs twice or under a request.
-                self._may_spawn = self._template_preload is None
-                template = self._spawn_template(key=key, fingerprint=fingerprint, template_env=template_env)
-                self._templates[key] = template
+            template = self._launch_template(key, fingerprint, template_env)
         try:
             self._wait_template_ready(key=key, template=template, deadline=deadline)
         except ForkserverStartupError as exc:
@@ -345,6 +340,22 @@ class _SandboxForkserver:
             logger.warning("sandbox_forkserver_template_startup_failed", error=str(exc))
             raise
         return template
+
+    def _launch_template(self, key: str, fingerprint: str, template_env: dict[str, str] | None) -> _Template:
+        """Start a template outside the manager's lock, which another template's request or a shutdown may need."""
+        msg = "The template that preloaded plugins ended, and a preload is tried once."
+        with self._lock:
+            if not self._may_spawn:
+                raise ForkserverStartupError(msg)
+            # A preloading manager starts one template in its life: no preload runs twice or under a request.
+            self._may_spawn = self._template_preload is None
+        template = self._spawn_template(key=key, fingerprint=fingerprint, template_env=template_env)
+        with self._lock:
+            if not self._closed:
+                self._templates[key] = template
+                return template
+        _terminate_template(template)
+        raise ForkserverStartupError(msg)
 
     def _discard(self, key: str, template: _Template) -> None:
         with self._lock:
