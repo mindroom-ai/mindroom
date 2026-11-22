@@ -41,8 +41,8 @@ The `io.mindroom.accounts` state event uses the publisher's own user ID as its s
 
 For a state key that starts with `@`, Matrix requires the key to match the sender's user ID, but a permitted sender can also use a key without that prefix.
 MindRoom Chat trusts only a roster whose sender and state key both match the account named in a trusted `io.mindroom.router` binding.
-If no bound account is eligible, or if the bound writer's member read or roster write is forbidden, the steward falls back to using its own key.
-That fallback does not change which roster Chat trusts.
+When no bound account is eligible, the steward publishes under its own key.
+If the selected writer's member read or roster write is forbidden, reconciliation stops without retrying or writing under another key.
 Each MindRoom installation in a room has its own steward, which reconciles only its own accounts.
 The publisher can send the event only where the room's power levels allow it, which the rooms MindRoom creates do; managed rooms regain that power level at every startup, personal rooms regain it at startup while their owner is still in an onboarding room, other rooms keep the power levels they were created with, and a client that creates rooms should give the type power level 0 too.
 

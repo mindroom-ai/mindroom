@@ -10,8 +10,8 @@ BACKGROUND_JOBS_EVENT_TYPE = "io.mindroom.background_jobs"
 MINDROOM_SERVER_EVENT_TYPE = "io.mindroom.server"
 # The room's steward publishes its open `!auto_approve` windows as state keyed by its own user ID, for a client indicator.
 AUTO_APPROVE_WINDOWS_EVENT_TYPE = "io.mindroom.auto_approve"
-# The steward triggers reconciliation, and the bound account normally publishes the roster under its own user ID.
-# Chat requires both sender and state key to match the bound ID, so a steward fallback at another key is not trusted.
+# The steward triggers reconciliation, and the bound account publishes the roster under its own user ID when eligible.
+# Otherwise the steward publishes under its own user ID; Chat trusts only a sender and state key matching the binding.
 MINDROOM_ACCOUNTS_EVENT_TYPE = "io.mindroom.accounts"
 # The room's steward names itself under the name today's clients read, state key "", content `{"user_id": ...}`. It
 # keeps the default state level, so MindRoom Chat trusts a binding only ordinary members cannot write, and folds only
