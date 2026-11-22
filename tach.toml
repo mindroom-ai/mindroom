@@ -3471,7 +3471,6 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.memory",
     "mindroom.reply_lifecycle",
-    "mindroom.room_settings",
     "mindroom.teams",
     "mindroom.user_turn_time",
 ]
@@ -3483,7 +3482,6 @@ expose = [
     "interrupted_attempt_model_prompt",
     "matrix_message_target_item",
     "prepare_memory_and_model_context",
-    "room_instructions_item",
     "thread_fork_item",
     "with_matrix_message_target",
     "with_silent_schedule_delivery",
@@ -4941,6 +4939,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.room_settings"
 depends_on = [
+    "mindroom.hooks.types",
     "mindroom.legacy_room_settings",
 ]
 
@@ -5033,6 +5032,7 @@ depends_on = [
     "mindroom.tool_system.tool_function",
     "mindroom.matrix_rtc.voice_agent",
     "mindroom.response_turn",
+    "mindroom.room_settings",
     "mindroom.session_storage.types",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_system.agent_tools",
@@ -6365,6 +6365,7 @@ depends_on = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.thread_history_result",
     "mindroom.reply_turn.request",
+    "mindroom.room_settings",
 ]
 visibility = [
     "mindroom.bot",

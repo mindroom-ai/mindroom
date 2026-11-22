@@ -17,14 +17,11 @@ from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.thread_forks import fork_reference
 from mindroom.memory import strip_user_turn_time_prefix
-from mindroom.room_settings import read_room_text_setting
 from mindroom.teams.presentation import strip_team_display
 from mindroom.user_turn_time import prefix_user_turn_time
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    import nio
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
@@ -110,24 +107,6 @@ def matrix_message_target_item(
         key=MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
         minimal_required=True,
         text=text,
-        cache_policy="stable",
-        persist=False,
-    )
-
-
-async def room_instructions_item(
-    client: nio.AsyncClient,
-    room_id: str,
-    config: Config,
-) -> EnrichmentItem | None:
-    """Build transient room-moderator instructions when the room sets ``agent_instructions``."""
-    instructions = await read_room_text_setting(client, room_id, "agent_instructions")
-    if instructions is None:
-        return None
-    return EnrichmentItem(
-        key="room_instructions",
-        minimal_required=True,
-        text=config.render_prompt("ROOM_INSTRUCTIONS_TEMPLATE", instructions=instructions),
         cache_policy="stable",
         persist=False,
     )

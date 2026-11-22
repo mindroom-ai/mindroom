@@ -80,7 +80,6 @@ from mindroom.reply_turn.enrichment import (
     interrupted_attempt_model_prompt,
     matrix_message_target_item,
     prepare_memory_and_model_context,
-    room_instructions_item,
     thread_fork_item,
     with_matrix_message_target,
     with_silent_schedule_delivery,
@@ -173,7 +172,6 @@ if TYPE_CHECKING:
     from mindroom.streaming import StreamInputChunk
     from mindroom.tool_jobs.conversation import ConversationKey
     from mindroom.tool_system.events import ToolTraceEntry
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
 
@@ -903,18 +901,6 @@ class ResponseRunner:
             raise
         except Exception as exc:
             raise _PostLockRequestPreparationError from exc
-
-    async def _with_room_enrichment(
-        self,
-        items: Sequence[EnrichmentItem],
-        tool_context: ToolRuntimeContext,
-    ) -> tuple[EnrichmentItem, ...]:
-        """Append the room tree note and `agent_instructions` setting concurrently."""
-        enriched, instructions_item = await asyncio.gather(
-            with_room_tree(items, tool_context),
-            room_instructions_item(tool_context.client, tool_context.room_id, tool_context.config),
-        )
-        return (*enriched, instructions_item) if instructions_item is not None else enriched
 
     def _turn_context(
         self,
@@ -1675,7 +1661,7 @@ class ResponseRunner:
         )
         team_turn_ctx = replace(
             team_turn_ctx,
-            transient_enrichment_items=await self._with_room_enrichment(
+            transient_enrichment_items=await with_room_tree(
                 team_turn_ctx.transient_enrichment_items,
                 runtime.tool_context,
             ),
@@ -2317,10 +2303,7 @@ class ResponseRunner:
             )
             ctx = replace(
                 ctx,
-                transient_enrichment_items=await self._with_room_enrichment(
-                    ctx.transient_enrichment_items,
-                    runtime.tool_context,
-                ),
+                transient_enrichment_items=await with_room_tree(ctx.transient_enrichment_items, runtime.tool_context),
             )
             transient_items = await with_room_activity_note(
                 ctx,

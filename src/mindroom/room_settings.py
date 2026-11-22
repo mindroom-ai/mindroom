@@ -36,7 +36,9 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.hooks.types import EnrichmentItem
 
 logger = get_logger(__name__)
 
@@ -197,7 +199,13 @@ async def state_event_content(response: object) -> dict[str, Any] | None:
     return content if isinstance(content, dict) else None
 
 
-async def read_room_text_setting(client: nio.AsyncClient, room_id: str, key: str) -> str | None:
+async def read_room_text_setting(
+    client: nio.AsyncClient,
+    room_id: str,
+    key: str,
+    *,
+    max_length: int | None = None,
+) -> str | None:
     """Read one free-text ``io.mindroom.room_settings`` key from the room; unset or unreadable is None."""
     import nio  # noqa: PLC0415 - config reads the copy above without loading the Matrix client
 
@@ -212,10 +220,37 @@ async def read_room_text_setting(client: nio.AsyncClient, room_id: str, key: str
         if not isinstance(value, str):
             return None
         stripped = value.strip()
-        return stripped[:ROOM_TEXT_SETTING_MAX_LENGTH] if stripped else None
+        if not stripped:
+            return None
+        return stripped[:max_length] if max_length is not None else stripped
     if not isinstance(response, nio.RoomGetStateEventError) or response.status_code != "M_NOT_FOUND":
         logger.warning("room_setting_read_failed", room_id=room_id, setting=key, error=str(response))
     return None
+
+
+async def room_instructions_item(
+    client: nio.AsyncClient,
+    room_id: str,
+    config: Config,
+) -> EnrichmentItem | None:
+    """Build system room-moderator instructions when the room sets ``agent_instructions``."""
+    from mindroom.hooks.types import EnrichmentItem  # noqa: PLC0415 - config imports this module directly
+
+    instructions = await read_room_text_setting(
+        client,
+        room_id,
+        "agent_instructions",
+        max_length=ROOM_TEXT_SETTING_MAX_LENGTH,
+    )
+    if instructions is None:
+        return None
+    return EnrichmentItem(
+        key="room_instructions",
+        minimal_required=True,
+        text=config.render_prompt("ROOM_INSTRUCTIONS_TEMPLATE", instructions=instructions),
+        cache_policy="stable",
+        persist=False,
+    )
 
 
 def on_thread_mode_change(runtime_paths: RuntimePaths, changed: Callable[[str], object]) -> None:

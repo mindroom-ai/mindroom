@@ -13,6 +13,7 @@ step rather than as a closure back into turn dispatch.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -25,6 +26,7 @@ from mindroom.inbound_turn_normalizer import (
 )
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.reply_turn.request import correlation_id_for_request
+from mindroom.room_settings import room_instructions_item
 from mindroom.timing import elapsed_ms_between, emit_elapsed_timing
 
 if TYPE_CHECKING:
@@ -165,18 +167,29 @@ class ResponsePayloadPreparer:
         *,
         target_member_names: tuple[str, ...] | None,
     ) -> ResponseRequest:
-        """Return ``request`` with what its ``system:enrich`` hooks add, ahead of its own system enrichment.
+        """Return ``request`` with what its ``system:enrich`` hooks and the room's ``agent_instructions`` add.
 
         ``target_member_names`` names a team turn's members and is None for an agent turn.
         """
-        items = await self.ingress_hook_runner.apply_system_enrichment(
+        hook_coro = self.ingress_hook_runner.apply_system_enrichment(
             request.response_envelope,
             correlation_id=correlation_id_for_request(request),
             target_entity_name=self.agent_name,
             target_member_names=target_member_names,
             turn_id=request.turn_id,
         )
-        return replace(request, system_enrichment_items=(*items, *request.system_enrichment_items))
+        runtime = self.ingress_hook_runner.hook_context.runtime
+        if runtime.client is not None:
+            items, instructions_item = await asyncio.gather(
+                hook_coro,
+                room_instructions_item(runtime.client, request.room_id, runtime.config),
+            )
+        else:
+            items, instructions_item = await hook_coro, None
+        filtered = tuple(item for item in (*items, *request.system_enrichment_items) if item.key != "room_instructions")
+        if instructions_item is not None:
+            filtered = (*filtered, instructions_item)
+        return replace(request, system_enrichment_items=filtered)
 
     async def _build_payload(
         self,

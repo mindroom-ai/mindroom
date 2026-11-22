@@ -1,8 +1,10 @@
-"""Room-level `agent_instructions` setting: shared text reader, prompt rendering, and agent/team turn injection."""
+"""Room-level `agent_instructions` setting: reader, system enrichment, reset/edit, teams, minimal mode, and voice calls."""
 
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,17 +14,30 @@ from pydantic import ValidationError
 from structlog.testing import capture_logs
 
 from mindroom import room_settings
+from mindroom.agent_cli.minimal_agent import minimal_turn
+from mindroom.agent_loop.build import AgentBuild, AgentSurface
+from mindroom.agent_loop.prompt import PromptSpec
+from mindroom.agent_loop.spec import AgentSpec
+from mindroom.ai import TurnResult
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.hooks import EnrichmentItem
+from mindroom.llm.provider import ModelRequest
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
+from mindroom.matrix_rtc.call_tools import build_call_tools
 from mindroom.prompts import ROOM_INSTRUCTIONS_TEMPLATE
-from mindroom.reply_turn.enrichment import room_instructions_item
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
-from mindroom.room_settings import ROOM_TEXT_SETTING_MAX_LENGTH, read_room_text_setting
+from mindroom.room_settings import (
+    ROOM_TEXT_SETTING_MAX_LENGTH,
+    read_room_text_setting,
+    room_instructions_item,
+)
+from mindroom.teams.spec import TeamMode
 from mindroom.thread_summary.generation import room_title_settings
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.bot_helpers import (
     _hook_envelope,
     _make_matrix_client_mock,
@@ -36,18 +51,28 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     delivered_matrix_side_effect,
+    install_model_providers,
+    make_conversation_reader_mock,
+    make_relation_lookup,
     patch_response_runner_module,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
 )
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
+from tests.history_helpers import replay_settings
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import streamed_answer
-from tests.team_turn_helpers import scripted_team_stream
+from tests.team_turn_helpers import authored_team_config, build_team_turn, scripted_team_stream
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
+
+    from mindroom.llm.messages import Message
+    from mindroom.message_target import MessageTarget
+    from mindroom.response_turn import ResponseTurnContext
 
 _ROOM = "!test:localhost"
 
@@ -72,19 +97,29 @@ def _client_with_state(
     return client
 
 
+def _all_request_text(messages: tuple[Message, ...] | list[Message]) -> str:
+    return "\n".join(msg.get_content_string() for msg in messages)
+
+
+def _system_request_text(messages: tuple[Message, ...] | list[Message]) -> str:
+    return "\n".join(msg.get_content_string() for msg in messages if msg.role == "system")
+
+
 @pytest.mark.asyncio
-async def test_read_room_text_setting_strips_and_caps_at_2000_chars() -> None:
-    """Valid text is stripped and capped at ``ROOM_TEXT_SETTING_MAX_LENGTH`` characters."""
+async def test_read_room_text_setting_strips_and_only_caps_when_max_length_is_given() -> None:
+    """Valid text is stripped; only callers passing ``max_length`` cap the length."""
     assert ROOM_TEXT_SETTING_MAX_LENGTH == 2000
+    long_value = "x" * 2500
     client = _client_with_state(
         {
             (ROOM_SETTINGS_EVENT_TYPE, "agent_instructions"): {"value": "  Keep answers short.  "},
-            (ROOM_SETTINGS_EVENT_TYPE, "long"): {"value": "  " + "x" * 2500 + "  "},
+            (ROOM_SETTINGS_EVENT_TYPE, "long"): {"value": f"  {long_value}  "},
         },
     )
 
     assert await read_room_text_setting(client, _ROOM, "agent_instructions") == "Keep answers short."
-    assert await read_room_text_setting(client, _ROOM, "long") == "x" * 2000
+    assert await read_room_text_setting(client, _ROOM, "long") == long_value
+    assert await read_room_text_setting(client, _ROOM, "long", max_length=ROOM_TEXT_SETTING_MAX_LENGTH) == "x" * 2000
 
 
 @pytest.mark.asyncio
@@ -161,10 +196,10 @@ async def test_read_room_text_setting_times_out_cleanly(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
-async def test_room_instructions_item_renders_default_and_overridden_prompt() -> None:
-    """The enrichment item uses `ROOM_INSTRUCTIONS_TEMPLATE` and honors config prompt overrides."""
+async def test_room_instructions_item_renders_default_overridden_and_capped_prompt() -> None:
+    """The enrichment item uses `ROOM_INSTRUCTIONS_TEMPLATE`, caps at 2000 chars, and honors overrides."""
     client = _client_with_state(
-        {(ROOM_SETTINGS_EVENT_TYPE, "agent_instructions"): {"value": "  This room is about the Q3 launch.  "}},
+        {(ROOM_SETTINGS_EVENT_TYPE, "agent_instructions"): {"value": "  " + "a" * 2100 + "  "}},
     )
     default_config = Config()
 
@@ -172,7 +207,7 @@ async def test_room_instructions_item_renders_default_and_overridden_prompt() ->
 
     assert item == EnrichmentItem(
         key="room_instructions",
-        text=ROOM_INSTRUCTIONS_TEMPLATE.format(instructions="This room is about the Q3 launch."),
+        text=ROOM_INSTRUCTIONS_TEMPLATE.format(instructions="a" * 2000),
         cache_policy="stable",
         persist=False,
         minimal_required=True,
@@ -181,7 +216,7 @@ async def test_room_instructions_item_renders_default_and_overridden_prompt() ->
     custom_config = Config(prompts={"ROOM_INSTRUCTIONS_TEMPLATE": "<room>{instructions}</room>"})
     custom_item = await room_instructions_item(client, _ROOM, custom_config)
     assert custom_item is not None
-    assert custom_item.text == "<room>This room is about the Q3 launch.</room>"
+    assert custom_item.text == f"<room>{'a' * 2000}</room>"
 
 
 def test_room_instructions_template_rejects_unsupported_placeholder() -> None:
@@ -190,31 +225,54 @@ def test_room_instructions_template_rejects_unsupported_placeholder() -> None:
         Config.model_validate({"prompts": {"ROOM_INSTRUCTIONS_TEMPLATE": "{instructions} {room_id}"}})
 
 
+def test_minimal_mode_includes_room_instructions_in_system_messages() -> None:
+    """Minimal mode includes ``minimal_required=True`` system enrichment directly in system messages."""
+    build = _fake_voice_build(turn_context="Date: today")
+    item = EnrichmentItem(
+        key="room_instructions",
+        text=ROOM_INSTRUCTIONS_TEMPLATE.format(instructions="Keep replies concise."),
+        cache_policy="stable",
+        persist=False,
+        minimal_required=True,
+    )
+
+    minimal = minimal_turn(
+        build,
+        session_preamble="",
+        transient_memory="",
+        system_enrichment=(item,),
+        transient_enrichment=(),
+    )
+
+    assert "Keep replies concise." in _system_request_text(minimal.system_messages)
+
+
 @pytest.mark.asyncio
-async def test_room_title_settings_still_work_with_shared_helper(tmp_path: Path) -> None:
-    """Title model and capped title rules continue to read through the shared helper."""
+async def test_room_title_settings_caps_only_instructions_not_model_name(tmp_path: Path) -> None:
+    """Title rules are capped at 2000 chars while ``thread_summary_model`` is not truncated."""
+    long_model_name = "m" * 2100
     client = _client_with_state(
         {
-            (ROOM_SETTINGS_EVENT_TYPE, "thread_summary_model"): {"value": " room_titles "},
+            (ROOM_SETTINGS_EVENT_TYPE, "thread_summary_model"): {"value": f" {long_model_name} "},
             (ROOM_SETTINGS_EVENT_TYPE, "thread_summary_instructions"): {"value": " " + "y" * 2200},
         },
     )
     config = Config(
         models={
             "default": ModelConfig(provider="openai", id="gpt"),
-            "room_titles": ModelConfig(provider="openai", id="titles"),
+            long_model_name: ModelConfig(provider="openai", id="titles"),
         },
     )
 
     model_name, instructions = await room_title_settings(client, config, test_runtime_paths(tmp_path), _ROOM)
 
-    assert model_name == "room_titles"
+    assert model_name == long_model_name
     assert instructions == "y" * 2000
 
 
 @pytest.mark.asyncio
-async def test_agent_reply_turn_injects_room_instructions_without_matrix_message_tool(tmp_path: Path) -> None:
-    """An agent turn receives `room_instructions` even when `matrix_message` is not offered."""
+async def test_agent_reply_turn_injects_room_instructions_as_system_enrichment(tmp_path: Path) -> None:
+    """An agent turn receives `room_instructions` in ``system_enrichment_items``, not transient items."""
     agent_user = make_mock_agent_user()
     config = _runtime_bound_config(
         Config(
@@ -258,7 +316,9 @@ async def test_agent_reply_turn_injects_room_instructions_without_matrix_message
             ),
         )
 
-    [item] = [item for item in mock_ai.call_args.args[0].transient_enrichment_items if item.key == "room_instructions"]
+    turn_ctx = mock_ai.call_args.args[0]
+    assert not [item for item in turn_ctx.transient_enrichment_items if item.key == "room_instructions"]
+    [item] = [item for item in turn_ctx.system_enrichment_items if item.key == "room_instructions"]
     assert item.cache_policy == "stable"
     assert item.persist is False
     assert item.minimal_required is True
@@ -311,15 +371,85 @@ async def test_agent_reply_turn_survives_room_instructions_read_error(tmp_path: 
             ),
         )
 
-    assert not [
-        item for item in mock_ai.call_args.args[0].transient_enrichment_items if item.key == "room_instructions"
-    ]
+    turn_ctx = mock_ai.call_args.args[0]
+    assert not [item for item in turn_ctx.system_enrichment_items if item.key == "room_instructions"]
+    assert not [item for item in turn_ctx.transient_enrichment_items if item.key == "room_instructions"]
     assert any(log.get("event") == "room_setting_read_failed" for log in logs)
 
 
 @pytest.mark.asyncio
-async def test_team_reply_turn_injects_room_instructions(tmp_path: Path) -> None:
-    """A team turn takes its own enrichment path in ResponseRunner and also receives `room_instructions`."""
+async def test_room_instructions_clear_and_edit_are_authoritative_across_same_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Set -> reply -> clear -> reply -> edit -> reply in one thread/session never replays stale instructions."""
+    agent_user = make_mock_agent_user()
+    config = _runtime_bound_config(
+        Config(
+            agents={"calculator": AgentConfig(display_name="Calculator", rooms=[_ROOM], tools=[])},
+            defaults={"show_stop_button": False},
+        ),
+        tmp_path,
+    )
+    bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
+    install_direct_response_admission(bot)
+    state: dict[tuple[str, str], dict[str, object] | Exception | nio.RoomGetStateEventError] = {
+        (ROOM_SETTINGS_EVENT_TYPE, "agent_instructions"): {"value": "FIRST_ROOM_RULE_XYZ"},
+    }
+    bot.client = _client_with_state(state)
+    unique_room_send_responses(bot.client, prefix="$response")
+    _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+    model = ScriptedModel([answer("First reply"), answer("Second reply"), answer("Third reply")])
+    install_model_providers(monkeypatch, {"default": model})
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    async def send_turn(event_id: str, prompt: str) -> None:
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            should_use_streaming=AsyncMock(return_value=False),
+        ):
+            await runner.generate_response(
+                _response_request(
+                    room_id=_ROOM,
+                    thread_id="$thread1",
+                    prompt=prompt,
+                    reply_to_event_id=event_id,
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id=_ROOM,
+                        thread_id="$thread1",
+                        reply_to_event_id=event_id,
+                        prompt=prompt,
+                        user_id="@user:localhost",
+                    ),
+                ),
+            )
+
+    await send_turn("$ev1", "First question")
+
+    state[(ROOM_SETTINGS_EVENT_TYPE, "agent_instructions")] = {}
+    await send_turn("$ev2", "Second question")
+
+    state[(ROOM_SETTINGS_EVENT_TYPE, "agent_instructions")] = {"value": "SECOND_ROOM_RULE_ABC"}
+    await send_turn("$ev3", "Third question")
+
+    assert len(model.requests) == 3
+    # Turn 1: instructions appear only in system prompt, never in user/history messages.
+    assert "FIRST_ROOM_RULE_XYZ" in _system_request_text(model.requests[0].messages)
+    assert "FIRST_ROOM_RULE_XYZ" not in _all_request_text(
+        [m for m in model.requests[0].messages if m.role != "system"],
+    )
+    # Turn 2 after clearing: old instructions appear nowhere in the request (system OR replayed history).
+    assert "FIRST_ROOM_RULE_XYZ" not in _all_request_text(model.requests[1].messages)
+    # Turn 3 after editing: only the new instructions appear in system prompt, old rule nowhere.
+    assert "SECOND_ROOM_RULE_ABC" in _system_request_text(model.requests[2].messages)
+    assert "FIRST_ROOM_RULE_XYZ" not in _all_request_text(model.requests[2].messages)
+
+
+@pytest.mark.asyncio
+async def test_team_reply_turn_injects_room_instructions_into_system_enrichment(tmp_path: Path) -> None:
+    """A team turn receives `room_instructions` in ``system_enrichment_items`` via the shared preparer."""
     agent_user = make_mock_agent_user()
     config = _runtime_bound_config(
         Config(
@@ -367,8 +497,187 @@ async def test_team_reply_turn_injects_room_instructions(tmp_path: Path) -> None
         )
 
     _spec, ctx = team_stream.call_args.args
-    [item] = [item for item in ctx.transient_enrichment_items if item.key == "room_instructions"]
+    assert not [item for item in ctx.transient_enrichment_items if item.key == "room_instructions"]
+    [item] = [item for item in ctx.system_enrichment_items if item.key == "room_instructions"]
     assert item.cache_policy == "stable"
     assert item.persist is False
     assert item.minimal_required is True
     assert "Team room rule: cite ticket IDs." in item.text
+
+
+@pytest.mark.asyncio
+async def test_team_leader_and_members_all_receive_room_instructions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Team system enrichment reaches both the leader and every delegated member without extra reads."""
+    authored = authored_team_config(
+        {
+            "writer": {"display_name": "Writer", "role": "Writes.", "model": "writer-model", "tools": []},
+            "checker": {"display_name": "Checker", "role": "Checks.", "model": "checker-model", "tools": []},
+        },
+        teams={
+            "squad": {
+                "display_name": "Squad",
+                "role": "Answers.",
+                "agents": ["writer", "checker"],
+                "mode": "collaborate",
+            },
+        },
+        models=("default", "writer-model", "checker-model"),
+    )
+    team = build_team_turn(
+        tmp_path,
+        monkeypatch,
+        authored,
+        members=("writer", "checker"),
+        team_name="squad",
+        mode=TeamMode.COLLABORATE,
+        scripts={
+            "default": [
+                calls(tool_call("delegate_task_to_members", "call-all", task="Answer concisely"), metrics=usage(40, 4)),
+                answer("Consensus.", usage(50, 5)),
+            ],
+            "writer-model": [answer("Writer reply.")],
+            "checker-model": [answer("Checker reply.")],
+        },
+    )
+    client = _client_with_state(
+        {(ROOM_SETTINGS_EVENT_TYPE, "agent_instructions"): {"value": "TEAM_MEMBER_RULE_999"}},
+    )
+    item = await room_instructions_item(client, _ROOM, team.config)
+    assert item is not None
+
+    await team.stream(
+        mode=TeamMode.COLLABORATE,
+        ctx=team.ctx(system_enrichment_items=(item,)),
+        show_tool_calls=False,
+    )
+
+    assert client.room_get_state_event.await_count == 1
+    assert "TEAM_MEMBER_RULE_999" in _system_request_text(team.models["default"].requests[0].messages)
+    assert "TEAM_MEMBER_RULE_999" in _system_request_text(team.models["writer-model"].requests[0].messages)
+    assert "TEAM_MEMBER_RULE_999" in _system_request_text(team.models["checker-model"].requests[0].messages)
+
+
+@asynccontextmanager
+async def _authorized_call_operation() -> AsyncIterator[bool]:
+    yield True
+
+
+def _fake_voice_build(role: str = "Voice helper.", *, turn_context: str | None = None) -> AgentBuild:
+    return AgentBuild(
+        spec=AgentSpec(id="general", name="General", model=ScriptedModel([]), system_messages=(), toolkits=()),
+        prompt=PromptSpec(role=role, instructions=(), turn_context=turn_context),
+        request_template=ModelRequest(messages=()),
+        history_settings=replay_settings(),
+        surface=AgentSurface(
+            mode="standard",
+            cli_shell=False,
+            deferred=(),
+            context_documents=(),
+            context_files=(),
+            knowledge_sources=(),
+            output_file_policy=None,
+            identity="General",
+        ),
+        tool_policy=(),
+        tool_jobs=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_voice_calls_inject_room_instructions_across_cascaded_live_and_realtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cascaded/live responders, live session prompts, and realtime prompts all receive room instructions."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        Config(agents={"general": AgentConfig(display_name="General", rooms=[_ROOM], tools=[])}),
+        tmp_path,
+    )
+    state: dict[tuple[str, str], dict[str, object] | Exception | nio.RoomGetStateEventError] = {
+        (ROOM_SETTINGS_EVENT_TYPE, "agent_instructions"): {"value": "VOICE_ROOM_RULE_777"},
+    }
+    client = _client_with_state(state)
+    orchestrator = SimpleNamespace(knowledge_refresh_scheduler=None, budgets=None)
+
+    class ToolSupport:
+        def build_context(self, target: MessageTarget, **_kwargs: object) -> ToolRuntimeContext:
+            return ToolRuntimeContext(
+                agent_name="general",
+                target=target,
+                requester_id="@caller:localhost",
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths,
+                plugins=config_plugins(config, runtime_paths),
+                conversation_reader=make_conversation_reader_mock(),
+                relations=make_relation_lookup(),
+                orchestrator=orchestrator,  # type: ignore[arg-type]
+            )
+
+    ai_calls: list[ResponseTurnContext] = []
+
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        ai_calls.append(turn)
+        return TurnResult("Spoken reply")
+
+    async def fake_resolve_knowledge(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(knowledge=None, unavailable={})
+
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        fake_resolve_knowledge,
+    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_fake_voice_build()))
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+
+    # 1 & 2. Cascaded / Live responder + Live session prompt
+    live_tooling = await build_call_tools(
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=ToolSupport(),  # type: ignore[arg-type]
+        room_id=_ROOM,
+        requester_id="@caller:localhost",
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+        voice_instructions="Speak briefly.",
+    )
+    assert live_tooling.get_system_prompt is not None
+    assert live_tooling.responder is not None
+    assert live_tooling.finalize_spoken_response is not None
+
+    live_prompt = await live_tooling.get_system_prompt()
+    assert "VOICE_ROOM_RULE_777" in live_prompt
+
+    first = await live_tooling.responder("Hello on call", None)
+    live_tooling.finalize_spoken_response(first.turn_id, first.text, False)
+    assert [item.key for item in ai_calls[0].system_enrichment_items] == ["voice_call", "room_instructions"]
+    assert "VOICE_ROOM_RULE_777" in ai_calls[0].system_enrichment_items[1].text
+
+    # Clearing mid-call drops room_instructions on the next spoken turn.
+    state[(ROOM_SETTINGS_EVENT_TYPE, "agent_instructions")] = {}
+    second = await live_tooling.responder("Second turn", None)
+    live_tooling.finalize_spoken_response(second.turn_id, second.text, False)
+    assert [item.key for item in ai_calls[1].system_enrichment_items] == ["voice_call"]
+    assert live_tooling.close is not None
+    await live_tooling.close()
+
+    # 3. Realtime voice session prompt
+    state[(ROOM_SETTINGS_EVENT_TYPE, "agent_instructions")] = {"value": "REALTIME_ROOM_RULE_888"}
+    realtime_tooling = await build_call_tools(
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=ToolSupport(),  # type: ignore[arg-type]
+        room_id=_ROOM,
+        requester_id="@caller:localhost",
+        authorize_operation=_authorized_call_operation,
+        enable_responder=False,
+    )
+    assert "REALTIME_ROOM_RULE_888" in realtime_tooling.instructions
+    assert realtime_tooling.close is not None
+    await realtime_tooling.close()

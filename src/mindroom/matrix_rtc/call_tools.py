@@ -40,7 +40,7 @@ from mindroom.history.interrupted_replay import (
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
-from mindroom.hooks import EnrichmentItem
+from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access_async
 from mindroom.llm.messages import ModelProvenance, system_text
 from mindroom.llm.runs import RunStatus
@@ -50,6 +50,7 @@ from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.message_target import MessageTarget
 from mindroom.providers.names import ROUTE_PROVIDERS
 from mindroom.providers.registry import model_token_counter
+from mindroom.room_settings import room_instructions_item
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -378,16 +379,20 @@ class _CallAgentCache:
         scheduler = (
             self.context.orchestrator.knowledge_refresh_scheduler if self.context.orchestrator is not None else None
         )
-        resolution = await resolve_agent_knowledge_access_async(
-            self.agent_name,
-            self.config,
-            self.runtime_paths,
-            refresh_scheduler=scheduler,
-            execution_identity=self.context.execution_identity,
+        resolution, instructions_item = await asyncio.gather(
+            resolve_agent_knowledge_access_async(
+                self.agent_name,
+                self.config,
+                self.runtime_paths,
+                refresh_scheduler=scheduler,
+                execution_identity=self.context.execution_identity,
+            ),
+            room_instructions_item(self.context.client, self.context.room_id, self.config),
         )
+        room_enrichment = render_system_enrichment_block((instructions_item,)) if instructions_item is not None else ""
 
         async def render(build: AgentBuild) -> str:
-            return _call_instructions(build)
+            return _call_instructions(build, room_enrichment)
 
         return await self.run(
             knowledge=resolution.knowledge,
@@ -575,12 +580,15 @@ async def build_call_tools(
         )
 
     refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
-    knowledge_resolution = await resolve_agent_knowledge_access_async(
-        agent_name,
-        config,
-        runtime_paths,
-        refresh_scheduler=refresh_scheduler,
-        execution_identity=execution_identity,
+    knowledge_resolution, instructions_item = await asyncio.gather(
+        resolve_agent_knowledge_access_async(
+            agent_name,
+            config,
+            runtime_paths,
+            refresh_scheduler=refresh_scheduler,
+            execution_identity=execution_identity,
+        ),
+        room_instructions_item(context.client, room_id, config),
     )
     build = _spoken(
         # Finished before a cancellation goes on, as the live agent cache does, so no build outlives the call.
@@ -634,10 +642,11 @@ async def build_call_tools(
                     connect=functools.partial(connections.connect, toolkit),
                 ),
             )
+    room_enrichment = render_system_enrichment_block((instructions_item,)) if instructions_item is not None else ""
     logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
     return CallAgentTooling(
         tools=tuple(tools),
-        instructions=_call_instructions(build),
+        instructions=_call_instructions(build, room_enrichment),
         execution_identity=execution_identity,
         close=connections.close,
     )
@@ -753,16 +762,22 @@ async def _run_authorized_call_agent(
         refresh_scheduler = (
             context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
         )
-        knowledge_resolution = await resolve_agent_knowledge_access_async(
-            agent_name,
-            config,
-            runtime_paths,
-            refresh_scheduler=refresh_scheduler,
-            execution_identity=context.execution_identity,
+        knowledge_resolution, instructions_item = await asyncio.gather(
+            resolve_agent_knowledge_access_async(
+                agent_name,
+                config,
+                runtime_paths,
+                refresh_scheduler=refresh_scheduler,
+                execution_identity=context.execution_identity,
+            ),
+            room_instructions_item(context.client, room_id, config),
         )
         transient_enrichment_items = append_knowledge_availability_enrichment(
             (),
             knowledge_resolution.unavailable,
+        )
+        system_enrichment_items = (
+            (*voice_enrichment_items, instructions_item) if instructions_item is not None else voice_enrichment_items
         )
         turn = ResponseTurnContext(
             entity_label=agent_name,
@@ -776,7 +791,7 @@ async def _run_authorized_call_agent(
             matrix_run_metadata=None,
             active_model_name=active_model_name,
             transient_enrichment_items=transient_enrichment_items,
-            system_enrichment_items=voice_enrichment_items,
+            system_enrichment_items=system_enrichment_items,
             inline_tools=True,
             prompt=transcript,
             show_tool_calls=False,
@@ -862,9 +877,9 @@ def _spoken(build: AgentBuild) -> AgentBuild:
     return replace(build, prompt=replace(build.prompt, markdown=False))
 
 
-def _call_instructions(build: AgentBuild) -> str:
+def _call_instructions(build: AgentBuild, system_enrichment: str = "") -> str:
     """Return the system prompt a turn of the call's agent starts from, without the turn's own context."""
-    content = system_text(prompt_for_turn(build))
+    content = system_text(prompt_for_turn(build, system_enrichment))
     if not content.strip():
         msg = "Agent produced an empty system prompt for its voice session"
         raise ValueError(msg)

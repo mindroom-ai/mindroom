@@ -16,7 +16,7 @@ from mindroom.helper_usage import record_system_usage
 from mindroom.llm.provider import RequestOverrides
 from mindroom.logging_config import get_logger
 from mindroom.providers import registry as provider_registry
-from mindroom.room_settings import read_room_text_setting
+from mindroom.room_settings import ROOM_TEXT_SETTING_MAX_LENGTH, read_room_text_setting
 from mindroom.thread_summary.notices import normalize_thread_summary_text
 from mindroom.thread_tags import AUTOMATIC_THREAD_TAG_EXCLUSIONS, coerce_tag_name
 from mindroom.timing import timed
@@ -193,7 +193,12 @@ async def room_title_settings(
     """
     model_name, instructions = await asyncio.gather(
         read_room_text_setting(client, room_id, "thread_summary_model"),
-        read_room_text_setting(client, room_id, "thread_summary_instructions"),
+        read_room_text_setting(
+            client,
+            room_id,
+            "thread_summary_instructions",
+            max_length=ROOM_TEXT_SETTING_MAX_LENGTH,
+        ),
     )
     if model_name is not None and model_name not in config.models:
         if (seen := (runtime_paths.storage_root, room_id, model_name)) not in _unknown_room_models_logged:
