@@ -63,6 +63,7 @@ _OPTIONS = (
 _NARROWING = frozenset({"tools", "skills", "knowledge"})
 _NOT_READABLE_YET = "The agent of this call cannot be read yet. Try again in a moment."
 _NARROWS_WITH_SYSTEM = "tools, skills and knowledge narrow a copy only together with system=."
+_SCHEMA_WITH_OUTPUT_PATH = "schema and output_path cannot be used together: return the value and write it."
 _INTERRUPTED = "The agent was stopped before it started a tool call. A resume runs it again."
 _NO_ANSWER = "The agent's turn left no record of how it ended."
 _NODE_ENDED = "The call ended before its agent started."
@@ -108,6 +109,9 @@ def _first_prompt(node: WorkflowNode) -> str:
     prompt, schema = str(node.request.get("prompt")), node.request.get("schema")
     if schema is None:
         return prompt
+    if node.request.get("output_path") is not None:
+        # The file would hold each turn's answer before it is checked, and a call that wrote one is not run again.
+        raise AgentNodeError(_SCHEMA_WITH_OUTPUT_PATH, kind="schema")
     try:
         check_schema(schema)
     except SchemaError as exc:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from contextlib import closing
 from typing import TYPE_CHECKING
@@ -11,6 +12,7 @@ import pytest_asyncio
 
 from mindroom.config.models import ModelPricing
 from mindroom.delegation.background import delegation_child
+from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.agent_nodes import turn_job_id
@@ -24,7 +26,7 @@ from mindroom.workflow_runs.structured import (
     schema_prompt,
     validation_error,
 )
-from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.workflow_helpers import NodeFailed, WorkflowStack, workflow_stack
 
 if TYPE_CHECKING:
@@ -241,3 +243,61 @@ async def test_run_that_ends_while_an_answer_is_wrong_starts_no_correction(stack
         engine_module.launch_child = original
 
     assert len(model.requests) == 1
+
+
+async def _provider_fails() -> None:
+    msg = "provider 500"
+    raise RuntimeError(msg)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ends", ["fails", "is cancelled", "times out", "never starts"])
+async def test_correction_that_ends_without_an_answer_keeps_what_the_first_turn_did(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+    ends: str,
+) -> None:
+    """No end of a further turn proves that the first turn's tool call did nothing: a resume does not repeat it."""
+    gate = asyncio.Event()
+    wrote, again = calls(tool_call("append", "c1", line="a")), calls(tool_call("append", "c2", line="b"))
+    further = [Await(_provider_fails)] if ends == "fails" else [Await(gate.wait), *answer(_GOOD)]
+    model = stack.child_script(wrote, answer("no json here"), further, again, answer(_GOOD))
+    second = turn_job_id(stack.store.get_run(stack.run_id), "@0", 1, 2)
+    start = stack.jobs.start
+
+    async def stopped(job_id: str, **options: object) -> object:
+        if job_id == second and ends == "never starts":
+            # As a primary that stops between saving the further turn's handle and starting its job.
+            msg = "the primary stopped"
+            raise RuntimeError(msg)
+        return await start(job_id, **options)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(stack.jobs, "start", stopped)
+    await stack.submit("@0", "agent", _ASK, {"timeout": 2.0} if ends == "times out" else {})
+    await stack.until(lambda: stack.store.get_node(stack.run_id, "@0").links.get("turn") == 2)
+    if ends == "is cancelled":
+        await stack.until(lambda: len(model.requests) == 3)
+        await stack.jobs.request_cancel(second)
+    # The wait for the node's agent has ended: with the node's end, or with the primary's.
+    await stack.until(lambda: not stack.engine._tasks.get(stack.run_id))
+    await stack.end_attempt(ScriptRunState.FAILED)
+    await stack.resume(stack.run_id)
+
+    with pytest.raises(NodeFailed) as failed:
+        await stack.result("@0", "agent", _ASK)
+
+    assert failed.value.kind == "indeterminate"
+    assert stack.counting_tool.lines == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_schema_and_output_path_are_refused_together(stack: WorkflowStack) -> None:
+    """A file would hold an answer before it is checked, so a call that names both starts no agent and writes none."""
+    model = stack.child_script(answer("not what the schema asks for"))
+
+    with pytest.raises(NodeFailed) as failed:
+        await stack.result("@0", "agent", {**_ASK, "output_path": "answer.txt"})
+
+    assert (failed.value.kind, model.requests) == ("schema", [])
+    assert str(failed.value) == "schema and output_path cannot be used together: return the value and write it."
+    assert list(stack.tmp_path.rglob("answer.txt")) == []

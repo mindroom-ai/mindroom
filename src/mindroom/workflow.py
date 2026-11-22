@@ -303,7 +303,8 @@ def agent(
     """Run one agent turn and return its answer.
 
     Returns text, or parsed JSON matching `schema` (a JSON Schema dict).
-    With `schema` the agent is asked again, up to 5 turns, until its answer matches; then AgentError(kind="schema").
+    With `schema` the agent is asked again, up to 5 turns, until its answer matches; then AgentError(kind="schema"),
+    or kind "indeterminate" when one of its turns started a tool call. `schema` excludes `output_path`.
     The agent is a fresh copy of the workflow's owner with all its tools, unless `agent` names another configured agent.
     `system`, `tools`, `skills`, `knowledge` or `profile` (a `subagents/<profile>.md` file) shape a copy of the owner.
     `model` is any configured model name, such as "haiku" or "opus@high".

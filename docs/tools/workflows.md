@@ -138,7 +138,7 @@ The options are those of `run_subagent` under shorter names.
 | `system`, `tools`, `skills`, `knowledge`, `profile` | Shape a copy of the run's agent, as the same arguments of `run_subagent` do. `tools`, `skills` and `knowledge` narrow the copy only together with `system`, and an empty list gives it none |
 | `minimal` | Run the turn in minimal mode |
 | `timeout` | Seconds of work, after which the turn is cancelled and the call raises with kind `timeout`. Time spent waiting for an approval does not count, and the work before an approval or a restart does. The turn is stopped on time also between two attempts of the run; the time MindRoom itself is down counts as work |
-| `output_path` | Also write the answer to this workspace file |
+| `output_path` | Also write the answer to this workspace file; not together with `schema` |
 | `dedicated_worker`, `resource_profile` | Those of `run_subagent` |
 
 A run may name itself, every agent in its agent's `delegate_to`, and every other agent whose bot is in the run's room and that may reply to the requester there.
@@ -196,6 +196,9 @@ It needs no special tool, so it works with every model, in standard and in minim
   The agent keeps its conversation, each turn is a job and a [cost](#cost) entry of its own, and the turns share the call's `timeout`.
 - After 5 turns the call raises `AgentError` with kind `schema`: `Agent '<name>' did not return JSON matching the schema after 5 attempts. Last error: <error>.`
   A resume runs it again, unless one of its turns started a tool call: then the call is `indeterminate`, as any call that may have written.
+  The same holds when a further turn fails, is cancelled, times out or is cut off by a restart: what an earlier turn did still counts.
+- `schema` and `output_path` cannot be used together, since the file would hold an answer before it is checked.
+  Such a call fails with kind `schema` before any agent starts; return the value and write it from the script.
 - The schema is part of what the call is, so a resume with another schema runs the call again.
 
 ## Questions

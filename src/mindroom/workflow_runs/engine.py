@@ -1316,12 +1316,9 @@ class WorkflowEngine:
         turn = int(node.links.get("turn", 1))
         usage = {turn if key == 1 else key: used for key, used in usage.items()}
         made = bool(node.links.get("made")) or any(used.get("tool_calls") for used in usage.values())
-        outcome: _Outcome | str | WorkflowNode = WorkflowNodeState.FAILED, None, {"kind": kind, "message": text}
-        if kind == "completed":
-            stopping = node.run_id in self._stopping
-            outcome = _answer_outcome(node, text, last=turn >= SCHEMA_TURNS, made=made, stopping=stopping)
-        elif kind in ("cancelled", "indeterminate"):
-            outcome = _indeterminate(node) if kind == "indeterminate" else (WorkflowNodeState.CANCELLED, *outcome[1:])
+        stopping = node.run_id in self._stopping
+        outcome: _Outcome | str | WorkflowNode
+        outcome = _turn_outcome(node, kind, text, last=turn >= SCHEMA_TURNS, made=made, stopping=stopping)
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
         further = None
         try:
@@ -1893,6 +1890,28 @@ def _indeterminate(node: WorkflowNode, said: object = None) -> _Outcome:
 def _unless_proven(node: WorkflowNode, started: bool | None, safe: _Outcome, said: object = None) -> _Outcome:
     """Return how a node that ended without a result ends: as *safe* to run again only if its record proves that."""
     return _indeterminate(node, said) if may_have_written(started) else safe
+
+
+def _turn_outcome(
+    node: WorkflowNode,
+    kind: str,
+    text: str,
+    *,
+    last: bool,
+    made: bool,
+    stopping: bool,
+) -> _Outcome | str:
+    """Return how an agent's call ends on the end of one of its turns, or what a further turn tells the agent.
+
+    A turn that did not complete ends the call. Whatever ended it proves nothing of a tool call that an earlier
+    turn of the call made, so such a call is not run again unasked.
+    """
+    if kind == "completed":
+        return _answer_outcome(node, text, last=last, made=made, stopping=stopping)
+    if kind == "indeterminate" or node.links.get("made"):
+        return _indeterminate(node, None if kind == "indeterminate" else text)
+    state = WorkflowNodeState.CANCELLED if kind == "cancelled" else WorkflowNodeState.FAILED
+    return state, None, {"kind": kind, "message": text}
 
 
 def _answer_outcome(node: WorkflowNode, text: str, *, last: bool, made: bool, stopping: bool) -> _Outcome | str:
