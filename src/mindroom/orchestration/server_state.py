@@ -9,6 +9,7 @@ import nio
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import MINDROOM_SERVER_EVENT_TYPE
+from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.matrix_openid import openid_audience
 from mindroom.orchestration.computer_runtime import worker_computer_provider
 
@@ -60,7 +61,7 @@ async def publish_server_state(client: nio.AsyncClient, room_id: str, content: d
         async with asyncio.timeout(_PUBLISH_TIMEOUT_SECONDS):
             current = await client.room_get_state_event(room_id, MINDROOM_SERVER_EVENT_TYPE, user_id)
             published = current.content if isinstance(current, nio.RoomGetStateEventResponse) else None
-            absent = isinstance(current, nio.RoomGetStateEventError) and current.status_code == "M_NOT_FOUND"
+            absent = isinstance(current, nio.RoomGetStateEventError) and state_failure(current) is StateFailure.MISSING
             # Only a confirmed state skips the write; after a failed read the write still clears a stale address.
             if published == content or (absent and not content):
                 return
@@ -70,7 +71,7 @@ async def publish_server_state(client: nio.AsyncClient, room_id: str, content: d
         return
     if isinstance(response, nio.RoomPutStateResponse):
         return
-    if isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN":
+    if isinstance(response, nio.RoomPutStateError) and state_failure(response) is StateFailure.REFUSED:
         # Rooms MindRoom does not manage, such as rooms people create and invite agents to, keep the default state
         # power level for this type, so an entity without state rights is refused on every join and restart.
         logger.debug("MindRoom server state is not permitted in this room", room_id=room_id)

@@ -2329,10 +2329,26 @@ async def test_get_thread_tag_content_raises_on_other_errors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_thread_tag_content_raises_on_503_m_not_found() -> None:
+    """A 503 whose body says M_NOT_FOUND raises ThreadTagsError instead of returning None."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        "unavailable",
+        status_code="M_NOT_FOUND",
+        room_id="!room:localhost",
+        http_status=503,
+    )
+
+    with pytest.raises(ThreadTagsError, match="unavailable"):
+        await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed")
+
+
+@pytest.mark.asyncio
 async def test_get_thread_tag_content_raises_on_a_server_error_body() -> None:
     """A non-404 error body, which nio passes through as content, fails the read with its status."""
     answers = {
         '["$root","snoozed"]': (500, {"errcode": "M_UNKNOWN", "error": "boom"}),
+        '["$proxy","snoozed"]': (503, {"errcode": "M_NOT_FOUND", "error": "upstream down"}),
         '["$gone","snoozed"]': (404, {"errcode": "M_NOT_FOUND", "error": "Event not found."}),
         '["$set","snoozed"]': (200, _tag_record_content()),
     }
@@ -2347,8 +2363,10 @@ async def test_get_thread_tag_content_raises_on_a_server_error_body() -> None:
         client = MindRoomAsyncClient(str(server.make_url("")), "@bot:localhost")
         client.access_token = "token"  # noqa: S105
         try:
-            with pytest.raises(ThreadTagsError, match="HTTP 500"):
+            with pytest.raises(ThreadTagsError, match="M_UNKNOWN boom"):
                 await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed")
+            with pytest.raises(ThreadTagsError, match="upstream down"):
+                await get_thread_tag_content(client, "!room:localhost", "$proxy", "snoozed")
             assert await get_thread_tag_content(client, "!room:localhost", "$gone", "snoozed") is None
             assert await get_thread_tag_content(client, "!room:localhost", "$set", "snoozed") == _tag_record_content()
         finally:

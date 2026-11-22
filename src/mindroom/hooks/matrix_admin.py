@@ -22,6 +22,7 @@ from mindroom.matrix.invited_rooms_store import (
     remember_invited_room,
     should_persist_invited_rooms,
 )
+from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 
 if TYPE_CHECKING:
@@ -110,7 +111,7 @@ class _BoundHookMatrixAdmin:
         response = await self.client.room_get_state_event(room_id, event_type, state_key)
         if isinstance(response, nio.RoomGetStateEventResponse) and isinstance(response.content, dict):
             return True, response.content
-        if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+        if isinstance(response, nio.RoomGetStateEventError) and state_failure(response) is StateFailure.MISSING:
             return True, None
         return False, None
 

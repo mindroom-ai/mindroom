@@ -16,6 +16,7 @@ from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_name
 from mindroom.matrix.media import MatrixMediaUpstreamError, fetch_matrix_thumbnail, matrix_profile_avatar_uri
 from mindroom.matrix.rooms import filter_non_dm_rooms
 from mindroom.matrix.state import resolve_room_aliases
+from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.matrix.users import create_agent_http_client
 from mindroom.room_steward import room_steward
 
@@ -181,7 +182,10 @@ async def get_room_avatar(room_id: str, request: Request) -> Response:
     try:
         async with asyncio.timeout(5):
             state = await client.room_get_state_event(resolved_room_id, "m.room.avatar")
-            if isinstance(state, nio.RoomGetStateEventError) and state.status_code in {"M_NOT_FOUND", "M_FORBIDDEN"}:
+            if isinstance(state, nio.RoomGetStateEventError) and state_failure(state) in {
+                StateFailure.MISSING,
+                StateFailure.REFUSED,
+            }:
                 raise HTTPException(404, "Room avatar is not available", headers=_AVATAR_HEADERS)
             if not isinstance(state, nio.RoomGetStateEventResponse) or not isinstance(state.content, dict):
                 raise HTTPException(502, "Room avatar is temporarily unavailable", headers=_AVATAR_HEADERS)

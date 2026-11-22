@@ -18,6 +18,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.client_room_admin import room_admin_power_user
 from mindroom.matrix.reserved_content import MINDROOM_RESERVED_PREFIXES, reserved_content_keys
+from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.matrix.thread_mutation_impact import (
     event_thread_membership_known,
     redaction_thread_membership_known,
@@ -830,7 +831,7 @@ class MatrixApiTools(Toolkit):
         except Exception as exc:
             response = exc
 
-        if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+        if isinstance(response, nio.RoomGetStateEventError) and state_failure(response) is StateFailure.MISSING:
             return self._payload(
                 "ok",
                 action="get_state",

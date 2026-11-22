@@ -13,6 +13,7 @@ from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_state_event
+from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.providers import registry as provider_registry
 
 if TYPE_CHECKING:
@@ -152,7 +153,7 @@ async def ensure_room_has_topic(
         if isinstance(response, nio.RoomGetStateEventResponse):
             if response.content.get("topic"):
                 return True
-        elif response.status_code != "M_NOT_FOUND":
+        elif state_failure(response) is not StateFailure.MISSING:
             logger.warning("room_topic_recheck_failed", room_id=room_id, error=str(response))
             return False
 
