@@ -902,6 +902,10 @@ class WorkflowEngine:
         except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
             outcome = WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(exc)}
         async with self._condition(run.run_id):
+            now = await asyncio.to_thread(self.store.get_run, run.run_id)
+            if now.epoch != run.epoch or run.run_id in self._stopping:
+                # The run ended while the gate was open: its end settled the call, and nothing of it starts now.
+                return
             if outcome[0] is WorkflowNodeState.COMPLETED:
                 places = self._places.setdefault(run.run_id, _Places(max(1, run.max_concurrent)))
                 start = partial(self._dispatch_agent, run, node, timeout=None, queued=True)

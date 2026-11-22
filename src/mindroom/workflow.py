@@ -51,6 +51,7 @@ __all__ = [
 _NODE_WAIT_SECONDS = 25
 _HTTP_TIMEOUT_SECONDS = 40.0
 _RETRY_SECONDS = 1.0
+_MAX_SERVER_FAULTS = 5
 _SUPERSEDED_EXIT_CODE = 3
 _ERROR_BYTES = 4096
 _SETTLED_STATES = frozenset({"completed", "failed", "cancelled", "indeterminate"})
@@ -166,6 +167,7 @@ class _Gateway:
     def _request(self, method: str, route: str, body: dict[str, object] | None = None) -> object:
         data = None if body is None else json.dumps(body, allow_nan=False, separators=(",", ":")).encode()
         headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
+        faults = 0
         while True:
             request = urllib.request.Request(  # noqa: S310 - the launcher sets the gateway URL.
                 f"{self._base}/{route}",
@@ -177,7 +179,9 @@ class _Gateway:
                 with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:  # noqa: S310
                     return json.loads(response.read())
             except urllib.error.HTTPError as exc:
-                if exc.code < http.client.INTERNAL_SERVER_ERROR:
+                # A plain 500 that repeats is a fault of MindRoom, not a restart: any other 5xx says to try again.
+                faults = faults + 1 if exc.code == http.client.INTERNAL_SERVER_ERROR else 0
+                if exc.code < http.client.INTERNAL_SERVER_ERROR or faults > _MAX_SERVER_FAULTS:
                     raise _refusal(exc, sent_bytes=len(data or b"")) from None
             except (urllib.error.URLError, OSError, http.client.HTTPException):
                 pass
@@ -207,7 +211,7 @@ class _Gateway:
 
 
 def _refusal(exc: urllib.error.HTTPError, *, sent_bytes: int) -> BaseException:
-    """Turn a 4xx answer into what the script should see; a superseded attempt must stop acting."""
+    """Turn a refusal into what the script should see; a superseded attempt must stop acting."""
     if exc.code == http.client.CONFLICT:
         return SystemExit(_SUPERSEDED_EXIT_CODE)
     try:

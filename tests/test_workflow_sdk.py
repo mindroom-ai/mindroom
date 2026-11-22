@@ -283,6 +283,28 @@ def test_oversized_request_says_to_use_a_file(gateway: FakeWorkflowGateway, sdk:
 
 
 @pytest.mark.usefixtures("in_main")
+def test_server_fault_that_repeats_ends_the_call_and_a_try_again_never_does(
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 500 that repeats is a fault the script gets as an error; a 503 says try again, however often it comes."""
+    waits: list[int] = []
+
+    def wait(_seconds: float) -> None:
+        waits.append(gateway.refuse[0] if gateway.refuse else 0)
+        if len(waits) == 40:
+            gateway.refuse = (500, {"detail": "boom"})
+
+    monkeypatch.setattr(sdk.time, "sleep", wait)
+    gateway.refuse = (503, {"detail": "not ready"})
+
+    with pytest.raises(sdk.WorkflowError, match=r"\(500\): boom"):
+        sdk.tool("files", "read", path="a.txt")
+    assert waits == [503] * 40 + [500] * 5
+
+
+@pytest.mark.usefixtures("in_main")
 def test_poll_survives_a_gateway_restart(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
     """A gateway that drops connections looks like a transport error, and the SDK keeps polling."""
 

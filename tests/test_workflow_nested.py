@@ -9,6 +9,7 @@ import asyncio
 import sqlite3
 from contextlib import closing
 from dataclasses import asdict
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -19,7 +20,7 @@ from mindroom.config.models import ModelPricing
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id
 from mindroom.delegation.state import SubagentPersona
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError, ScriptToolBroker
-from mindroom.script_runs.models import ScriptRunState
+from mindroom.script_runs.models import ScriptCallState, ScriptRunState
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
@@ -904,3 +905,24 @@ async def test_empty_report_of_a_run_that_another_call_resumed_since_is_still_th
 
     assert await stack.result("@0", "agent", _PROMPT) == "done"
     assert "<start_workflow_result>\n\n</start_workflow_result>" in _sent(model)
+
+
+@pytest.mark.asyncio
+async def test_gate_that_answers_just_after_its_run_ended_queues_no_agent(gated: WorkflowStack) -> None:
+    """A call the broker lets pass when its run has ended is not queued: the ended run keeps no place for it."""
+    await gated.start()
+    gated.resolver.hold_approvals = asyncio.Event()
+    await gated.submit("@0", "tool", _delegate(agent_name="helper"))
+    await gated.until(lambda: gated.resolver.asks == ["delegate.run_subagent"])
+    run, node = gated.store.get_run(gated.run_id), gated.store.get_node(gated.run_id, "@0")
+    await gated.engine.cancel(run.run_id, reason="Stopped.")
+    assert node is not None
+    assert run.run_id not in gated.engine._places
+
+    async def passed() -> Any:  # noqa: ANN401
+        return SimpleNamespace(state=ScriptCallState.COMPLETED, grant=None, result=None, metadata=None)
+
+    await gated.engine._start_gated(run, node, passed)
+
+    assert run.run_id not in gated.engine._places
+    assert _agent_jobs(gated) == 0
