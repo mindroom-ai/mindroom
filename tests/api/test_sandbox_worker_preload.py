@@ -640,6 +640,36 @@ def test_only_the_opt_in_plugins_that_lead_the_plugin_list_are_preloaded(tmp_pat
     assert preloaded(missing, first) == ()
 
 
+def test_only_plugins_configured_by_an_absolute_path_or_as_a_package_are_preloaded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A path under ``~`` or beside the config can name another directory in a call than when the worker started."""
+    runtime_paths = _runtime(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    absolute = _write_plugin(tmp_path, "absolute", worker_preload=True)
+    _write_plugin(home / "plugins", "under_home", worker_preload=True)
+    _write_plugin(tmp_path, "beside_config", worker_preload=True)
+    _write_plugin(tmp_path / "packages", "packaged", worker_preload=True)
+    (tmp_path / "packages" / "packaged" / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path / "packages"))
+    under_home = PluginEntryConfig(path="~/plugins/under_home")
+    beside_config = PluginEntryConfig(path="./beside_config")
+    packaged = PluginEntryConfig(path="python:packaged")
+
+    def preloaded(*plugins: PluginEntryConfig) -> tuple[str, ...]:
+        return worker_preload_plugin_paths(Config(plugins=list(plugins)), runtime_paths)
+
+    # Each of them resolves and opts in, so only how it is configured keeps it out.
+    for entry in (under_home, beside_config, packaged):
+        root = plugin_imports._resolve_plugin_root(entry.path, runtime_paths)
+        assert plugin_imports._load_plugin_base(root).worker_preload is True
+    assert preloaded(absolute, packaged) == (absolute.path, "python:packaged")
+    assert preloaded(under_home, absolute) == ()
+    assert preloaded(absolute, beside_config, packaged) == (absolute.path,)
+
+
 def test_worker_preload_in_a_manifest_must_be_a_boolean(tmp_path: Path) -> None:
     """The opt-in is a promise, so a manifest must state it as true or false."""
     plain = _write_plugin(tmp_path, "plain")
@@ -861,6 +891,34 @@ def test_a_call_that_arrives_during_the_setup_leaves_the_health_check_answering(
     assert health["status"] == "ok"
     assert answered_in < 1.5
     assert answers[0]["ok"] is True, answers
+
+
+def test_a_worker_that_shuts_down_during_its_setup_ends_the_preload_at_once(
+    manager: _SandboxForkserver,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A worker told to stop does not wait for a preload to finish or to run into its time limit."""
+    hangs = _write_hanging_plugin(tmp_path)
+    app, _worker_root = _dedicated_worker_app(monkeypatch, tmp_path, eager_setup_plugins=[hangs.path])
+    monkeypatch.setattr(sandbox_runner_module, "_PRELOAD_BUDGET_SECONDS", 20.0)
+    warnings: list[str] = []
+    monkeypatch.setattr(sandbox_forkserver_module.logger, "warning", lambda event, **_fields: warnings.append(event))
+
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 60
+        while not _started_processes(tmp_path):
+            assert time.monotonic() < deadline, client.get("/healthz").json()
+            time.sleep(0.1)
+        stopped_at = time.monotonic()
+
+    # Leaving the block stops the worker, which waits for the thread its setup runs in.
+    assert time.monotonic() - stopped_at < 10
+    assert manager.spawned[0].process.poll() is not None
+    assert not any(_runs(pid) for pid in _started_processes(tmp_path))
+    # Only the preloading template ever started, and stopping is no failed preload.
+    assert len(manager.spawned) == 1
+    assert "sandbox_forkserver_plugin_preload_failed" not in warnings
 
 
 def test_a_failed_eager_setup_leaves_the_worker_healthy_and_its_first_call_reports_the_real_error(

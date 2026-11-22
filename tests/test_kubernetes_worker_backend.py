@@ -6656,6 +6656,50 @@ def test_kubernetes_backend_ends_the_wait_for_a_worker_setup_with_its_budget(mon
     assert [timeout for _answered_at, timeout in reads[1:]] == [pytest.approx(1.5), pytest.approx(0.1)]
 
 
+def test_kubernetes_backend_does_not_wait_for_the_setup_when_the_caller_only_shows_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opening a Computer needs a worker that answers, not its tool runtime, so it goes on at once, as before."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch)
+    _answer_worker_setup(backend, lambda: "preparing")
+    events: list[WorkerReadyProgress] = []
+    spec = replace(_spec(_TEST_SCOPED_WORKER_KEY_A), wait_for_setup=False)
+
+    handle = backend.ensure_worker(spec, now=10.0, progress_sink=events.append)
+
+    assert handle.status == "ready"
+    assert clock.monotonic() == 0.0
+    assert "preparing" not in [event.phase for event in events]
+
+
+def test_kubernetes_backend_marks_a_worker_healthy_when_it_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``healthy_ms`` ends with the worker's answer, not with what the primary records about the worker afterwards."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch)
+    answered_at: list[float] = []
+
+    def setup() -> str:
+        answered_at.append(clock.monotonic())
+        return "ready"
+
+    _answer_worker_setup(backend, setup)
+    patch_deployment = backend._resources.patch_deployment
+
+    def slow_patch_deployment(*args: object, **kwargs: object) -> object:
+        clock.advance_to(clock.monotonic() + 5.0)
+        return patch_deployment(*args, **kwargs)
+
+    backend._resources.patch_deployment = slow_patch_deployment
+
+    with capture_logs() as logs:
+        backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    (cold_start,) = _cold_start_records(logs)
+    assert cold_start["healthy_ms"] == pytest.approx(answered_at[0] * 1000.0)
+    assert cold_start["wait_ms"] >= cold_start["healthy_ms"] + 5000.0
+
+
 def test_kubernetes_backend_reads_the_setup_timeout() -> None:
     """The setup budget defaults to 180 s and follows ``MINDROOM_KUBERNETES_WORKER_SETUP_TIMEOUT_SECONDS``."""
     base_env = {
