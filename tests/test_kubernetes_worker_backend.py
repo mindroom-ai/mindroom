@@ -34,6 +34,7 @@ from mindroom.constants import (
     resolve_primary_runtime_paths,
     sandbox_startup_manifest_path,
     startup_manifest_sha256,
+    write_startup_manifest,
 )
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
@@ -6264,9 +6265,8 @@ def test_kubernetes_worker_health_read_waits_for_a_successful_answer(monkeypatch
     urls: list[str] = []
 
     class _HealthClient:
-        def __init__(self, *, timeout: httpx.Timeout) -> None:
-            assert timeout.connect is not None
-            assert timeout.connect > 0
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout > 0
 
         def __enter__(self) -> Self:
             return self
@@ -6274,7 +6274,8 @@ def test_kubernetes_worker_health_read_waits_for_a_successful_answer(monkeypatch
         def __exit__(self, *_args: object) -> None:
             return None
 
-        def get(self, url: str) -> httpx.Response:
+        def get(self, url: str, *, timeout: httpx.Timeout) -> httpx.Response:
+            assert timeout.connect is not None
             urls.append(url)
             answer = answers.pop(0)
             if isinstance(answer, httpx.HTTPError):
@@ -6294,61 +6295,13 @@ def test_kubernetes_worker_health_read_waits_for_a_successful_answer(monkeypatch
     assert urls == ["http://mindroom-worker-abc.chat.svc.cluster.local:8766/healthz"] * 3
 
 
-def test_kubernetes_worker_health_read_uses_short_connect_timeout_and_fast_retry(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Post-ready health checks use a short connect timeout and fast retries when a new Service refuses connections."""
-    backend, _apps_api, _core_api = _backend()
-    seen_timeouts: list[object] = []
-    sleeps: list[float] = []
-    attempts = 0
-
-    class _RefusingFirstClient:
-        def __init__(self, *, timeout: object) -> None:
-            seen_timeouts.append(timeout)
-
-        def __enter__(self) -> Self:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        def get(self, _url: str) -> httpx.Response:
-            nonlocal attempts
-            attempts += 1
-            if attempts <= 3:
-                msg = "connection refused"
-                raise httpx.ConnectError(msg)
-            return httpx.Response(200, json={"status": "ok"})
-
-    monkeypatch.setattr(kubernetes_resources_module.httpx, "Client", _RefusingFirstClient)
-    monkeypatch.setattr(kubernetes_resources_module.time, "sleep", sleeps.append)
-
-    response = kubernetes_resources_module.KubernetesResourceManager.read_worker_health(
-        backend._resources,
-        "mindroom-worker-abc",
-        timeout_seconds=30.0,
-    )
-
-    assert response.status_code == 200
-    assert attempts == 4
-    assert len(seen_timeouts) == 1
-    timeout = seen_timeouts[0]
-    assert isinstance(timeout, httpx.Timeout)
-    assert timeout.connect == pytest.approx(0.5)
-    assert timeout.read == pytest.approx(5.0)
-    assert len(sleeps) == 3
-    assert all(0 < delay <= 0.25 for delay in sleeps), sleeps
-
-
 def test_kubernetes_worker_health_read_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     """A worker that never answers its health check fails the read instead of handing out its endpoint."""
     backend, _apps_api, _core_api = _backend()
 
     class _UnreachableClient:
-        def __init__(self, *, timeout: httpx.Timeout) -> None:
-            assert timeout.connect is not None
-            assert timeout.connect > 0
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout > 0
 
         def __enter__(self) -> Self:
             return self
@@ -6356,7 +6309,7 @@ def test_kubernetes_worker_health_read_times_out(monkeypatch: pytest.MonkeyPatch
         def __exit__(self, *_args: object) -> None:
             return None
 
-        def get(self, _url: str) -> httpx.Response:
+        def get(self, _url: str, *, timeout: httpx.Timeout) -> httpx.Response:
             message = "connection refused"
             raise httpx.ConnectError(message)
 
@@ -6369,6 +6322,155 @@ def test_kubernetes_worker_health_read_times_out(monkeypatch: pytest.MonkeyPatch
             "mindroom-worker-abc",
             timeout_seconds=0.01,
         )
+
+
+def test_kubernetes_worker_health_read_allows_a_slower_handshake_on_each_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first try gives up connecting after 0.5 s; later ones wait longer, so a 0.8 s handshake still answers."""
+    backend, _apps_api, _core_api = _backend()
+    connect_timeouts: list[float] = []
+    handshake_seconds = [0.8]
+
+    class _SlowHandshakeClient:
+        def __init__(self, *, timeout: float | httpx.Timeout) -> None:
+            self.timeout = httpx.Timeout(timeout)
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str, *, timeout: httpx.Timeout | None = None) -> httpx.Response:
+            connect = (timeout or self.timeout).connect
+            assert connect is not None
+            connect_timeouts.append(connect)
+            if connect < handshake_seconds[0]:
+                message = "handshake timed out"
+                raise httpx.ConnectTimeout(message)
+            return httpx.Response(200, json={"status": "ok"})
+
+    monkeypatch.setattr(kubernetes_resources_module.httpx, "Client", _SlowHandshakeClient)
+    monkeypatch.setattr(kubernetes_resources_module.time, "sleep", lambda _seconds: None)
+    read_health = kubernetes_resources_module.KubernetesResourceManager.read_worker_health
+
+    assert read_health(backend._resources, "mindroom-worker-abc", timeout_seconds=60.0).status_code == 200
+    assert connect_timeouts == [0.5, 1.0]
+
+    # The handshake never gets longer than a whole answer may take, as before.
+    connect_timeouts.clear()
+    handshake_seconds[0] = 5.0
+    assert read_health(backend._resources, "mindroom-worker-abc", timeout_seconds=60.0).status_code == 200
+    assert connect_timeouts == [0.5, 1.0, 2.0, 4.0, 5.0]
+
+
+def _answer_worker_setup(backend: KubernetesWorkerBackend, setup: Callable[[], str | None]) -> None:
+    """Answer each health read with a ready worker whose eager setup is in the state ``setup()`` returns."""
+
+    def _read(_self: object, _worker_id: str, *, timeout_seconds: float) -> httpx.Response:
+        assert timeout_seconds > 0
+        state = setup()
+        payload = {"status": "ok", "mindroom_version": "test", "worker_protocol": WORKER_PROTOCOL_VERSION}
+        return httpx.Response(200, json=payload if state is None else {**payload, "setup": state})
+
+    backend._resources.read_worker_health = MethodType(_read, backend._resources)
+
+
+def _run_on_one_clock(monkeypatch: pytest.MonkeyPatch) -> _ControlledMonotonicClock:
+    """Make the setup wait and its progress reports read one clock, which a sleep advances at once."""
+    clock = _ControlledMonotonicClock()
+    monkeypatch.setattr(progress_module, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(
+        kubernetes_backend_module,
+        "time",
+        SimpleNamespace(
+            time=time.time,
+            monotonic=clock.monotonic,
+            sleep=lambda seconds: clock.advance_to(clock.monotonic() + seconds),
+        ),
+    )
+    return clock
+
+
+def test_kubernetes_backend_waits_for_a_slow_worker_setup_as_progress_and_never_fails_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A setup far longer than the ready timeout is reported as ``preparing``, and the worker stays ready."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch)
+    # Slower than the 5 s ready timeout of this backend and the 60 s default: a burst of 32 workers took 70 to 88 s.
+    _answer_worker_setup(backend, lambda: "preparing" if clock.monotonic() < 88.0 else "ready")
+    events: list[WorkerReadyProgress] = []
+
+    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0, progress_sink=events.append)
+
+    assert handle.status == "ready"
+    assert handle.failure_count == 0
+    phases = [event.phase for event in events]
+    assert phases[0] == "cold_start"
+    assert phases[-1] == "ready"
+    assert set(phases[1:-1]) == {"preparing"}
+    assert len(phases[1:-1]) == 17
+    assert events[-1].elapsed_seconds >= 88.0
+    assert backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=11.0).status == "ready"
+
+
+@pytest.mark.parametrize("setup", ["preparing", "failed", None], ids=["never-finishes", "failed", "not-reported"])
+def test_kubernetes_backend_runs_the_call_whatever_the_worker_setup_does(
+    monkeypatch: pytest.MonkeyPatch,
+    setup: str | None,
+) -> None:
+    """A setup that outlasts its budget or fails, or a worker reporting none, leaves a ready worker for the call."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch)
+    _answer_worker_setup(backend, lambda: setup)
+
+    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert handle.status == "ready"
+    assert handle.failure_count == 0
+    # Only a setup that keeps running is waited for, and only for the setup budget.
+    assert clock.monotonic() == pytest.approx(180.0 if setup == "preparing" else 0.0)
+
+
+def test_kubernetes_backend_reads_the_setup_timeout() -> None:
+    """The setup budget defaults to 180 s and follows ``MINDROOM_KUBERNETES_WORKER_SETUP_TIMEOUT_SECONDS``."""
+    base_env = {
+        "MINDROOM_KUBERNETES_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "mindroom-storage",
+    }
+
+    def config(env: dict[str, str]) -> KubernetesWorkerBackendConfig:
+        runtime_paths = resolve_primary_runtime_paths(
+            config_path=Path("config.yaml"),
+            storage_path=_default_storage_root(),
+            process_env={**base_env, **env},
+        )
+        return KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert config({}).setup_timeout_seconds == 180.0
+    assert config({"MINDROOM_KUBERNETES_WORKER_SETUP_TIMEOUT_SECONDS": "45"}).setup_timeout_seconds == 45.0
+
+
+def test_kubernetes_startup_manifest_asks_for_eager_setup_and_lists_enabled_plugins() -> None:
+    """Only the Kubernetes backend's manifest asks its workers to prepare eagerly, naming the plugins to consider."""
+    applied_config = Config(
+        plugins=[
+            {"path": "./plugins/enabled"},
+            {"path": "./plugins/disabled", "enabled": False},
+        ],
+    )
+    backend, _apps_api, _core_api = _backend(applied_config=applied_config)
+
+    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    state_root = backend.storage_root / str(handle.debug_metadata["state_subpath"])
+    manifest = json.loads(sandbox_startup_manifest_path(state_root).read_text(encoding="utf-8"))
+    assert manifest["eager_setup_plugins"] == ["./plugins/enabled"]
+    # A manifest written without the list, as the Docker backend writes it, leaves the worker preparing lazily.
+    other_manifest = write_startup_manifest(Path(tempfile.mkdtemp()), backend.runtime_paths, public_runtime=True)
+    assert "eager_setup_plugins" not in json.loads(other_manifest.read_text(encoding="utf-8"))
 
 
 def test_kubernetes_backend_progress_respects_real_elapsed_time(
