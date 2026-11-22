@@ -41,6 +41,8 @@ def build_request_execution_env(
     Raises :class:`sandbox_exec.WorkspaceEnvHookError` when the workspace hook
     exists but fails to source.
     """
+    if prepared is not None:
+        execution_env.update(sandbox_exec.worker_resource_limit_env())
     if request_workspace is None:
         execution_env.update(_worker_owned_env(prepared))
         return {}
@@ -127,8 +129,5 @@ def _workspace_env_overlay_base_env(
     # these via worker_subprocess_env / generic_subprocess_env).
     if prepared is None:
         for key, value in sandbox_exec.generic_subprocess_env().items():
-            base_env.setdefault(key, value)
-    else:
-        for key, value in sandbox_exec.worker_resource_limit_env().items():
             base_env.setdefault(key, value)
     return base_env

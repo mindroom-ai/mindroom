@@ -117,13 +117,15 @@ LABEL_WORKER_ID = "mindroom.ai/worker-id"
 # limit, instead of the node running out of ephemeral storage.
 _WORKER_TMP_SIZE_LIMIT = "1Gi"
 _CONTAINER_NAME = SANDBOX_RUNNER_CONTAINER_NAME
-# Container resource limits exposed via the downward API; without a configured limit,
-# Kubernetes reports the node's allocatable resource, which is acceptable.
-# Tool thread vars (OMP_NUM_THREADS, PYTHON_CPU_COUNT, PYTEST_XDIST_AUTO_NUM_WORKERS) are
-# derived only for tool subprocesses so the runner keeps its default thread pool budget.
+# Container resource limits exposed via the downward API under Kubernetes-only names
+# (already excluded from startup manifests, isolated env, and extra_env); without a
+# configured limit, Kubernetes reports the node's allocatable resource, which is acceptable.
+# Tool vars (MINDROOM_WORKER_CPUS, MINDROOM_WORKER_MEMORY_BYTES, OMP_NUM_THREADS,
+# PYTHON_CPU_COUNT, PYTEST_XDIST_AUTO_NUM_WORKERS) are derived only for worker subprocesses
+# and hooks so the runner process keeps its own default thread pool budget.
 _WORKER_RESOURCE_LIMIT_ENV_SPECS: tuple[tuple[str, str, str], ...] = (
-    ("MINDROOM_WORKER_CPUS", "limits.cpu", "1"),
-    ("MINDROOM_WORKER_MEMORY_BYTES", "limits.memory", "1"),
+    (KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_limit"], "limits.cpu", "1"),
+    (KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["memory_limit"], "limits.memory", "1"),
 )
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"
@@ -1428,7 +1430,6 @@ class KubernetesResourceManager:
                     },
                 }
                 for name, resource, divisor in _WORKER_RESOURCE_LIMIT_ENV_SPECS
-                if name not in extra_env
             ),
         ]
         for name, value in sorted(extra_env.items()):
