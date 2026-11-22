@@ -724,6 +724,8 @@ def _error_http_response(kind: str) -> web.StreamResponse:
         return web.Response(text="<html>503 Service Unavailable</html>", status=503, content_type="text/html")
     if kind == "forbidden_403":
         return web.json_response({"errcode": "M_FORBIDDEN", "error": "Forbidden"}, status=403)
+    if kind == "html_403":
+        return web.Response(text="<html>403 Forbidden</html>", status=403, content_type="text/html")
     if kind == "not_found_503":
         return web.json_response({"errcode": "M_NOT_FOUND", "error": "Not found"}, status=503)
     if kind == "forbidden_503":
@@ -807,6 +809,7 @@ async def test_forbidden_binding_read_in_accounts_writes_the_steward_roster(room
         ("not_found_503", False, "warning"),
         ("forbidden_503", False, "warning"),
         ("forbidden_403", True, "debug"),
+        ("html_403", True, "debug"),
     ],
 )
 async def test_non_200_binding_read_in_claim_path_never_claims(
@@ -842,6 +845,8 @@ async def test_non_200_binding_read_in_claim_path_never_claims(
     [
         ("bound", "forbidden_403", True, "debug"),
         ("steward", "forbidden_403", True, "debug"),
+        ("bound", "html_403", True, "debug"),
+        ("steward", "html_403", True, "debug"),
         ("bound", "json_503", False, "warning"),
         ("steward", "json_503", False, "warning"),
         ("bound", "not_found_503", False, "warning"),
