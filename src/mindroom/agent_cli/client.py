@@ -129,7 +129,7 @@ class AgentCliClient:
         )
 
     def stdin(self, call_id: str, seq: int, data: bytes, *, eof: bool) -> dict[str, object]:
-        """Write chunk ``seq`` to the stdin of a streamed call's command; repeating a chunk writes it once."""
+        """Write chunk ``seq`` to a streamed command's stdin, once however often it is sent; ValueError refuses it."""
         chunk = {"seq": seq, "b": base64.b64encode(data).decode("ascii"), "eof": eof}
         route, body = f"/api/agent-cli/calls/{UUID(call_id)}/stdin", canonical_json(chunk).encode("utf-8")
         try:
@@ -142,9 +142,10 @@ class AgentCliClient:
             msg = f"Agent CLI transport outcome is unknown; check that this shell can reach {self._url}"
             raise AgentCliUnavailableError(msg) from exc
         if response.status != HTTPStatus.OK:
-            refused = HTTPStatus.BAD_REQUEST <= response.status < HTTPStatus.INTERNAL_SERVER_ERROR
-            msg = "Agent CLI request was rejected"
-            raise (ValueError if refused else AgentCliUnavailableError)(msg)
+            # A 408, 429 or 5xx passes, so the chunk is sent again; any other answer is the same next time.
+            passing = response.status in {408, 429} or response.status >= HTTPStatus.INTERNAL_SERVER_ERROR
+            msg = f"HTTP {response.status}"
+            raise (AgentCliUnavailableError if passing else ValueError)(msg)
         return _envelope(payload)
 
     def _headers(self) -> dict[str, str]:

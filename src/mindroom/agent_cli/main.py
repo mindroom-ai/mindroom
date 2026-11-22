@@ -38,7 +38,8 @@ _OUTPUT_UNREACHABLE_SECONDS = 60
 # What a command whose reader left exits with when SIGPIPE ends it, which is how `workers run` exits then.
 _EXIT_STDOUT_CLOSED = 128 + signal.SIGPIPE
 _CANCEL_TIMEOUT_SECONDS = 8.0
-# The most bytes of stdin sent to the command at once, and how long until a chunk it has not taken is sent again.
+# The most bytes of stdin sent to the command at once, and the longest wait until a chunk it has not taken is sent
+# again.
 _STDIN_CHUNK_BYTES = 32 * 1024
 _STDIN_RETRY_SECONDS = 1.0
 _WORKER_SIGNALS = tuple(
@@ -350,11 +351,12 @@ def _discard_stdout() -> None:
         os.close(nowhere)
 
 
-def _forward_stdin(client: AgentCliClient, call_id: str, done: threading.Event) -> None:
+def _forward_stdin(client: AgentCliClient, call_id: str, done: threading.Event, stderr: _WorkerStderr) -> None:
     """Send the CLI's stdin to the command in order as it arrives, then its end; a terminal sends its end at once.
 
     Each chunk is answered once the command took it, so a command that reads slowly slows this down. It runs in a
-    daemon thread until ``done``: a command that ends without reading its stdin does not wait for it.
+    daemon thread until ``done``: a command that ends without reading its stdin does not wait for it. A chunk that
+    is refused for good is reported, and the command, which would wait for it, is cancelled.
     """
     seq = 0
     while True:
@@ -363,17 +365,21 @@ def _forward_stdin(client: AgentCliClient, call_id: str, done: threading.Event) 
             data = os.read(sys.stdin.fileno(), _STDIN_CHUNK_BYTES) if piped else b""
         except (OSError, ValueError):
             data = b""
-        taking_more = None
+        taking_more, delay = None, _STDIN_RETRY_SECONDS / 4
         while taking_more is None:
             if done.is_set():
                 return
             try:
                 taking_more = bool(client.stdin(call_id, seq, data, eof=not data).get("open"))
-            except (AgentCliRefusedError, ValueError):
+            except ValueError as exc:
+                stderr.note(f"mindroom-agent: the command's stdin was refused ({exc}); cancelling the command")
+                with suppress(AgentCliUnavailableError, ValueError):
+                    client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
                 return
             except AgentCliUnavailableError:
                 # The command has not read yet, or the answer was lost: the same chunk again is written once.
-                done.wait(_STDIN_RETRY_SECONDS)
+                done.wait(delay)
+                delay = min(2 * delay, _STDIN_RETRY_SECONDS)
         if not data or not taking_more:
             return
         seq += 1
@@ -443,7 +449,7 @@ def _relay_frames(
         elif kind == "started":
             if frame.get("header") == f"[worker: {worker}, started]":
                 stderr.note(f"mindroom-agent: started worker {worker}")
-            threading.Thread(target=_forward_stdin, args=(client, call_id, done), daemon=True).start()
+            threading.Thread(target=_forward_stdin, args=(client, call_id, done, stderr), daemon=True).start()
         elif kind == "exit":
             ended.update(frame)
     if ended:
