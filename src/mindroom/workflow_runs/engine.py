@@ -129,6 +129,7 @@ _BUDGET_QUESTION = "This run has spent ${spent:.2f} of its ${limit:.2f} limit. C
 _BUDGET_CONTINUE = "Continue with ${amount:.2f} more"
 _BUDGET_STOP = "Stop"
 _OVER_BUDGET = "Stopped at the run's cost limit."
+_HELD = "The run waits at its cost limit. Try again in a moment."
 _NO_SESSIONS = 'A workflow script cannot call delegate.{function} yet. Start a fresh agent with agent() or tool("delegate", "run_subagent", ...).'
 _FILTERED_TURN = "A turn that is limited to some of its agent's tools cannot start or resume a workflow."
 # The node of the script's tool call that the current task runs, for a call of the `workflow` toolkit made in it.
@@ -862,7 +863,9 @@ class WorkflowEngine:
         async with (condition := self._condition(run_id)):
             run, node = self.store.get_run(run_id), self.store.get_node(run_id, key)
             waits = node is not None and (node.state, node.waiting_on) == (WorkflowNodeState.WAITING, "user")
-            if run.state in TERMINAL_RUN_STATES or node is None or node.generation != generation or not waits:
+            # An answer is an act of the run, to a card somebody was shown: both are checked as they are now.
+            asked = waits and "event_id" in node.links and isinstance(self.authorize(run), tuple)
+            if run.state in TERMINAL_RUN_STATES or node is None or node.generation != generation or not asked:
                 return False
             settle = partial(self.store.settle_node, run_id, key, generation, run.epoch)
             if not await asyncio.to_thread(partial(settle, state=WorkflowNodeState.COMPLETED, result=answer)):
@@ -928,7 +931,8 @@ class WorkflowEngine:
                 try:
                     async with self._condition(run_id):
                         places = self._places.get(run_id)
-                        if places is not None and places.held:
+                        # Read from what the run spent: a resume starts without what an earlier primary remembered.
+                        if places is not None and await self._over_budget(self.store.get_run(run_id)):
                             # The run reached its cost limit since this call got its place: it waits again, first.
                             places.working.discard(key)
                             places.queued.appendleft((key, start))
@@ -1363,10 +1367,13 @@ class WorkflowEngine:
         One that may not start is the node's end, which is returned. While that cannot be decided the turn waits,
         or raises `AgentNotReadyError` without *block*.
         """
-        handle = cast("DispatchHandle", node.handle)
+        handle, queued = cast("DispatchHandle", node.handle), False
         while True:
             left = None if handle.work_until is None else max(0.0, handle.work_until - time.time())
             try:
+                if await self._hold_turn(node, epoch, locked=not block, shown=queued):
+                    queued = True
+                    raise AgentNotReadyError(_HELD)  # noqa: TRY301
                 access, runtime = self.authorize(run), self.agents()
                 if access is None:
                     raise AgentNotReadyError(_OWNER_NOT_READY)  # noqa: TRY301
@@ -1381,6 +1388,22 @@ class WorkflowEngine:
             except AgentNodeError as exc:
                 refused: _Outcome = WorkflowNodeState.FAILED, None, {"kind": exc.kind, "message": str(exc)}
                 return _unless_proven(node, made, refused)
+
+    async def _hold_turn(self, node: WorkflowNode, epoch: int, *, locked: bool, shown: bool) -> bool:
+        """Return whether the run's cost limit holds a further turn of *node* now: it is new spending, as a call is.
+
+        The node then shows as queued, once, so its run waits when nothing else of it works. *locked* says that
+        the caller holds the run's lock.
+        """
+        if locked:
+            return await self._over_budget(self.store.get_run(node.run_id))
+        async with self._condition(node.run_id):
+            held = await self._over_budget(self.store.get_run(node.run_id))
+            if held and not shown:
+                stamp = partial(self.store.update_node, node.run_id, node.key, node.generation, epoch)
+                await asyncio.to_thread(partial(stamp, state=WorkflowNodeState.QUEUED))
+                await self._restate(node.run_id)
+            return held
 
     async def _node_waits(self, node: WorkflowNode, epoch: int, on: str | None, left: float | None = None) -> None:
         """Show a node as waiting for a person, for what *on* says, or as running again with None; its run follows.

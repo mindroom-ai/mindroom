@@ -222,7 +222,8 @@ The run shows `waiting` once nothing else of it works, and that time is not char
 - `!answer q3fa91c 2` answers with an option's number or its text, and `!answer q3fa91c after lunch` with free text.
   Without the ID, `!answer` answers the requester's only open question in the thread; with several open it lists them and answers none.
 - MindRoom Chat answers with the event `io.mindroom.workflow_answer`, `{"run", "node", "option"}` or `{"run", "node", "text"}`, sent in the run's thread as a reply to the card.
-- An answer counts only from the run's requester, in the run's room and thread, for the card as it is now.
+- An answer counts only from the run's requester, in the run's room and thread, for the card as it is now, and only while the requester still has access to the run's agent there.
+  A question whose card could not be posted yet takes no answer.
   Any other answer event changes nothing and gets `io.mindroom.workflow_answer_rejected` with `{"run", "node", "reason"}` as a reply: `not_for_you`, `wrong_place`, `no_longer_open`, `already_answered` or `not_an_option`.
 - The ID is `q` and six hex characters made from the run, the call and how often the call was asked, so two runs in one thread never share one, and neither do a question and the question that replaced it.
 - The question waits as long as it takes.
@@ -289,6 +290,8 @@ Nothing caps what a run costs unless its start names a limit: `start_workflow(..
   A saved answer that a resume reuses costs nothing and does not move the limit; a call that runs again does.
 - A turn on a model without a price adds nothing to `cost_usd`, so a limit cannot hold a run of unpriced models.
 - The limit is checked when a call would start and when an agent's turn ended, so the run can pass it by what the calls that were running cost.
+  A further turn of a [`schema`](#structured-output) call is new spending too: at the limit it waits as `queued` until the requester continues.
+  The check reads what the run has spent, so it holds after a resume and after a restart of MindRoom.
 
 A run is marked `large` once it has more than 25 agent calls, or once its projected cost passes the `large_run_notice_usd` of the agent's `workflow` tool entry (10 by default, 0 turns the cost test off).
 The mark is advisory: the run's log says `Large run: <n> agents, about $<projected> projected.`, its card is edited at once, and nothing is paused.

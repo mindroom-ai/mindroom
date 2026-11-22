@@ -225,6 +225,45 @@ async def test_answer_event_answers_the_card_and_a_rejected_one_gets_the_rejecti
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("access", ["revoked", "pending"])
+async def test_answer_counts_only_while_the_requester_has_access(stack: WorkflowStack, access: str) -> None:
+    """An answer is an act of the run: without its owner's access as it is now, no event and no `!answer` settles it."""
+    card = await _ask(stack)
+    qid = question_id(stack.run_id, 1, 1)
+    room = nio.MatrixRoom(_ROOM, "@mindroom_watcher:example.test")
+    handle = {"agent_name": stack.context.agent_name, "engine": lambda: stack.engine}
+    stack.access = access  # type: ignore[assignment]
+
+    assert await handle_workflow_answer(room, _answer_event(card, {"option": "Yes"}), **handle) == "no_longer_open"
+    here = {"room_id": _ROOM, "thread_id": _THREAD, "sender": _ALICE}
+    assert await answer_command(stack.engine, text="1", **here) == f"Question {qid} is no longer open."
+
+    assert _node_state(stack) == (WorkflowNodeState.WAITING, "user")
+    assert [kind for _, kind, _ in _room(stack).events] == ["m.room.message"]
+    stack.access = None
+    assert await _answer(stack, card, option="Yes") == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_question_whose_card_was_not_posted_takes_no_answer(stack: WorkflowStack) -> None:
+    """Nobody was shown a question without a card: an answer that names no card settles nothing, nor does `!answer`."""
+    _room(stack).refuse_sends = True
+    with pytest.raises(Exception, match="could not be posted"):
+        await stack.submit("@0", "ask", _DEPLOY)
+    _room(stack).refuse_sends = False
+    node = stack.store.get_node(stack.run_id, "@0")
+    assert node is not None
+    here = {"sender": _ALICE, "room_id": _ROOM, "thread_id": _THREAD}
+    card = {"run_id": stack.run_id, "node_id": f"n{node.seq}", "card_event_id": None, **here}
+
+    assert await _answer(stack, card, option="Yes") == "no_longer_open"
+    assert await answer_command(stack.engine, text="1", **here) == "No open question for you in this thread."
+    assert not await stack.engine.answer(stack.run_id, "@0", node.generation, "Yes")
+
+    assert _node_state(stack) == (WorkflowNodeState.WAITING, "user")
+
+
+@pytest.mark.asyncio
 async def test_answer_command_answers_by_id_by_number_and_alone(stack: WorkflowStack) -> None:
     """`!answer` takes an option's number or its text, for the question it names or the only one that is open."""
     await _ask(stack)

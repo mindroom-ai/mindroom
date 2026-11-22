@@ -18,7 +18,7 @@ from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.engine import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.fakes.scripted_model import Await, answer, usage
-from tests.workflow_helpers import CallFailed, WorkflowStack, workflow_stack
+from tests.workflow_helpers import CallFailed, WorkflowStack, tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -43,7 +43,7 @@ def _turn(amount: float = 0.6) -> list[Any]:
 async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
     """The harness with a room, the real job runtime and scripted agents on a priced model; no run is started."""
     options = {"extra_tools": ("workflow",), "require_approval": (), "pricing": ModelPricing(input=1, output=2)}
-    with workflow_stack(tmp_path, **options) as stack:
+    with workflow_stack(tmp_path, other_agents=("helper",), delegate_to=("helper",), **options) as stack:
         monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.05)
         monkeypatch.setattr(agent_nodes, "RECHECK_SECONDS", 0.05)
         monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: True)
@@ -162,6 +162,45 @@ async def test_continue_adds_the_limit_and_releases_queued_nodes(stack: Workflow
     assert _questions(stack)[-1]["options"] == [_CONTINUE, _STOP]
     assert (_states(stack)["$budget:1"], _states(stack)["$budget:2"]) == ("completed", "waiting")
     assert await _agent(stack, 4) == "queued"
+
+
+@pytest.mark.asyncio
+async def test_further_turn_of_an_agent_waits_at_the_limit_as_a_new_call_does(stack: WorkflowStack) -> None:
+    """A turn that corrects an answer is new spending: at the limit it starts only once the requester continues."""
+    await stack.start(max_cost_usd=0.5, max_concurrent=1)
+    good = '```json\n{"ok": true}\n```'
+    model = stack.child_script(answer("no json here", _usd(0.6)), answer(good, _usd(0.1)))
+    ask = {"prompt": "Does it hold?", "schema": {"type": "object", "required": ["ok"]}}
+
+    await stack.submit("@0", "agent", ask)
+    await stack.until(lambda: "$budget:1" in _states(stack))
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.WAITING)
+
+    assert (len(model.requests), _states(stack)["@0"]) == (1, "queued")
+    assert stack.engine.run_usage(stack.run_id)["cost_usd"] == pytest.approx(0.6)
+    assert await _answer(stack, "$budget:1", "Continue with $0.50 more")
+    assert await stack.result("@0", "agent", ask) == {"ok": True}
+    assert len(model.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_that_a_tool_call_starts_after_a_resume_waits_at_the_limit(stack: WorkflowStack) -> None:
+    """The limit is read from what the run spent, not from what this primary remembers: a resume keeps it."""
+    await stack.start(**_LIMIT)
+    model = stack.child_script(_turn(1.2), _turn())
+    assert await stack.result("@0", "agent", {"prompt": "Look into part 0."}) == "done"
+    await stack.until(lambda: "$budget:1" in _states(stack))
+    await stack.end_attempt(ScriptRunState.FAILED)
+    await stack.resume(stack.run_id)
+    assert (await stack.submit("@0", "agent", {"prompt": "Look into part 0."})).cached
+
+    delegated = tool_args("delegate", "run_subagent", task="Look into part 1.")
+    assert (await stack.submit("@1", "tool", delegated)).state == "queued"
+    await asyncio.sleep(0.3)
+
+    assert (len(model.requests), _states(stack)["@1"]) == (1, "queued")
+    assert stack.engine.run_usage(stack.run_id)["cost_usd"] == pytest.approx(1.2)
+    assert _questions(stack)[-1]["status"] == "open"
 
 
 @pytest.mark.asyncio

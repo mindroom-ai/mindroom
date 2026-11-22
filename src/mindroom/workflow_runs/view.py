@@ -180,7 +180,7 @@ class RunViews:
             return
         run, nodes, usage, graph = built
         agents = sum(node.kind in _AGENT_KINDS for node in nodes)
-        access = self.engine.owner_access(run)
+        access = self.engine.authorize(run)
         notice = (access[1] if isinstance(access, tuple) else WorkflowLimits()).large_run_notice_usd
         large = run.large or agents > _LARGE_RUN_AGENTS or 0 < notice < usage["projected_cost_usd"]
         if large and not run.large:
@@ -191,8 +191,8 @@ class RunViews:
             self._live.pop(run_id, None)
         else:
             self._live[run_id] = time.monotonic()
-        if (bot := self.bot(run)) is None:
-            # Nobody can post for the run now: its next view tries again.
+        if not isinstance(access, tuple) or (bot := self.bot(run)) is None:
+            # The run may not act now, or nobody can post for it: its next view tries again.
             return
         account, client = bot
         if self.live_frames():

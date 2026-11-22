@@ -510,7 +510,7 @@ async def handle_workflow_control(
         run = workflows.store.get_run(str(content.get("run")))
         if (run.agent_name, run.owner_user_id, run.room_id, run.thread_root_event_id) != where:
             return False
-        access = workflows.owner_access(run)
+        access = workflows.authorize(run)
         if not isinstance(access, tuple) or (jobs := get_background_runtime(access[0].runtime_paths)) is None:
             return False
         context, limits = access

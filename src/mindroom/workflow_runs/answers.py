@@ -31,9 +31,9 @@ _ANSWER = re.compile(r"(?:(q[0-9a-f]{6})\s+)?(.+)", re.DOTALL)
 
 
 def _open(node: WorkflowNode | None) -> bool:
-    return (
-        node is not None and node.kind == "ask" and (node.state, node.waiting_on) == (WorkflowNodeState.WAITING, "user")
-    )
+    """Return whether *node* is a question that waits and that somebody was shown: one whose card was posted."""
+    waits = node is not None and (node.state, node.waiting_on) == (WorkflowNodeState.WAITING, "user")
+    return waits and node.kind == "ask" and "event_id" in node.links
 
 
 async def answer_question(

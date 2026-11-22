@@ -141,6 +141,25 @@ async def test_card_is_posted_once_across_a_restart(stack: WorkflowStack) -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("access", ["revoked", "pending"])
+async def test_run_without_its_owners_access_is_shown_nothing(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+    access: str,
+) -> None:
+    """A card and a frame are acts of the run: while its owner's access is gone or unknown, none is sent."""
+    queued = _frames(stack, monkeypatch)
+    stack.access = access  # type: ignore[assignment]
+
+    await stack.views.show(stack.run_id)
+
+    assert (_cards(stack), queued) == ([], [])
+    stack.access = None
+    assert (await _shown(stack))["status"] == "running"
+    assert len(queued) == 1
+
+
+@pytest.mark.asyncio
 async def test_run_whose_start_was_refused_gets_no_card(stack: WorkflowStack) -> None:
     """A run that never got an attempt is shown nowhere: its call's failure says why."""
     refused = stack.reserve(title="Never started")
