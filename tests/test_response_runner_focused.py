@@ -254,7 +254,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.judgment.state import JudgmentRequest
     from mindroom.reply_scope import ReplyRuntime, SpanHandle
-    from mindroom.response_lifecycle import ResponseLifecycle, _QueuedMessageState
+    from mindroom.response_lifecycle import ResponseLifecycle, _Conversation
     from mindroom.response_runner import ResponseRunner
     from mindroom.response_sources import SourceFate
     from mindroom.streaming import ProgressPublisher
@@ -2608,19 +2608,19 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
     )
     await asyncio.wait_for(follow_up_started.wait(), timeout=1.0)
     lifecycle = runner.lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal = lifecycle._conversation_for(target)
     resume_entered = asyncio.Event()
     begin_response_turn_notice = lifecycle._begin_response_turn_notice
     run_approval_continuation = AsyncMock(return_value=False)
 
     def observe_response_turn_start(
         *,
-        queued_signal: _QueuedMessageState,
+        conversation: _Conversation,
         response_envelope: MessageEnvelope,
         signal_queued_message: bool,
     ) -> str | None:
         notice = begin_response_turn_notice(
-            queued_signal=queued_signal,
+            conversation=conversation,
             response_envelope=response_envelope,
             signal_queued_message=signal_queued_message,
         )
@@ -6200,7 +6200,7 @@ async def test_response_lifecycle_reservation_is_not_its_own_queued_human_turn()
     observed_active_turns: list[int] = []
 
     async def locked_operation() -> str:
-        queued_signal = coordinator._get_or_create_queued_signal(envelope.target)
+        queued_signal = coordinator._conversation_for(envelope.target)
         observed_pending.append(queued_signal.pending_human_messages)
         observed_active_turns.append(queued_signal._active_response_turns)
         return "interactive"
@@ -6243,7 +6243,7 @@ async def test_queued_lifecycle_reservation_preserves_notice_for_older_active_re
     )
     await first_entered.wait()
     reservation = await coordinator.reserve_response_lifecycle(second_envelope)
-    queued_signal = coordinator._get_or_create_queued_signal(second_envelope.target)
+    queued_signal = coordinator._conversation_for(second_envelope.target)
     assert {message.event_id for message in queued_signal.pending_message_snapshot()} == {"$second"}
 
     with response_lifecycle_reservation_context(reservation):
@@ -6267,7 +6267,7 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
     """Cancelling a queued reservation removes it without stealing the released lock."""
     coordinator = ResponseLifecycleCoordinator()
     envelope = _queued_envelope("$interactive")
-    queued_signal = coordinator._get_or_create_queued_signal(envelope.target)
+    queued_signal = coordinator._conversation_for(envelope.target)
     lifecycle_lock = queued_signal.lock
     # The running reply this reservation queues behind.
     queued_signal.begin_response_turn()
@@ -6320,7 +6320,7 @@ async def test_a_cancelled_unreserved_response_frees_its_lock_before_it_returns(
     """A reply that reserved no early place gives its lock back where it is cancelled, not in a later task."""
     coordinator = ResponseLifecycleCoordinator()
     envelope = _queued_envelope("$direct")
-    conversation = coordinator._get_or_create_queued_signal(envelope.target)
+    conversation = coordinator._conversation_for(envelope.target)
     response = coordinator.run_locked_response(
         target=envelope.target,
         response_envelope=envelope,
@@ -6422,7 +6422,7 @@ async def test_response_lifecycle_reservation_surfaces_lock_acquire_failure() ->
     """A failed acquire task must wake reservation startup and remain observable."""
     coordinator = ResponseLifecycleCoordinator()
     envelope = _queued_envelope("$interactive")
-    lifecycle_lock = coordinator._get_or_create_queued_signal(envelope.target).lock
+    lifecycle_lock = coordinator._conversation_for(envelope.target).lock
 
     async def fail_acquire() -> bool:
         msg = "lock acquire failed"
@@ -6452,7 +6452,7 @@ async def test_a_reservation_released_unused_leaves_no_unretrieved_lock_acquire_
         msg = "lock acquire failed"
         raise RuntimeError(msg)
 
-    coordinator._get_or_create_queued_signal(envelope.target).lock.acquire = fail_acquire  # type: ignore[method-assign]
+    coordinator._conversation_for(envelope.target).lock.acquire = fail_acquire  # type: ignore[method-assign]
     reservation = await coordinator.reserve_response_lifecycle(envelope)
     await reservation.release()
     del reservation
@@ -6537,9 +6537,7 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
         response_envelope=second_envelope,
     )
     assert reservation is not None
-    queued_signal = coordinator._thread_queued_signals[
-        ResponseLifecycleKey(room_id="!room:localhost", thread_id="$thread")
-    ]
+    queued_signal = coordinator._conversations[ResponseLifecycleKey(room_id="!room:localhost", thread_id="$thread")]
     assert queued_signal.pending_human_messages == 1
     # A duplicate reservation for the same queued event must not double-register.
     assert (
@@ -6617,9 +6615,7 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
     queued_two = run_queued()
     for _ in range(10):
         await asyncio.sleep(0)
-    queued_signal = coordinator._thread_queued_signals[
-        ResponseLifecycleKey(room_id="!room:localhost", thread_id="$thread")
-    ]
+    queued_signal = coordinator._conversations[ResponseLifecycleKey(room_id="!room:localhost", thread_id="$thread")]
     assert queued_signal.pending_human_messages == 1
 
     gate.set()

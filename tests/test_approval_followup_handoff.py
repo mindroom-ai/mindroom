@@ -216,7 +216,7 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
             batch_started.set()
             await release_batch.wait()
             return _pause("call-2")
-        assert lifecycle._get_or_create_queued_signal(target).has_pending_human_messages()
+        assert lifecycle._conversation_for(target).has_pending_human_messages()
         order.append("original handoff")
         return CompletedApprovalRun(
             response_text="A newer message arrived. One report is read; one remains. I will resume after your update.",
@@ -259,7 +259,7 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
                 _run_follow_up(runner, target, follow_up_dispatched, order),
             )
             await asyncio.wait_for(follow_up_dispatched.wait(), timeout=5)
-            assert lifecycle._get_or_create_queued_signal(target).has_pending_human_messages()
+            assert lifecycle._conversation_for(target).has_pending_human_messages()
             release_batch.set()
             await asyncio.wait_for(asyncio.gather(original, follow_up), timeout=5)
         finally:
@@ -338,7 +338,7 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
             await asyncio.wait_for(batch_started.wait(), timeout=5)
             follow_up = asyncio.create_task(_run_follow_up(runner, target, follow_up_dispatched, order))
             await asyncio.wait_for(follow_up_dispatched.wait(), timeout=5)
-            assert runner.lifecycle_coordinator._get_or_create_queued_signal(target).has_pending_human_messages()
+            assert runner.lifecycle_coordinator._conversation_for(target).has_pending_human_messages()
             release_batch.set()
             await asyncio.wait_for(asyncio.gather(original, follow_up), timeout=5)
         finally:

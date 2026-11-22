@@ -79,7 +79,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import RoomReplyMode
     from mindroom.constants import RuntimePaths
     from mindroom.judgment.state import JudgmentRequest
-    from mindroom.response_lifecycle import _QueuedMessageState
+    from mindroom.response_lifecycle import _Conversation
     from mindroom.turn_policy import TurnPolicy
 
 ROOM_ID = "!test:localhost"
@@ -1448,7 +1448,7 @@ async def _general_answering_in_its_thread(
     *,
     voice: bool = False,
     **agents: AgentConfig,
-) -> AsyncIterator[tuple[AgentBot, nio.MatrixRoom, RuntimePaths, _QueuedMessageState]]:
+) -> AsyncIterator[tuple[AgentBot, nio.MatrixRoom, RuntimePaths, _Conversation]]:
     """Run general's response in THREAD_ID, held by an approval, while the body sends messages to general's ingress.
 
     Yield general's bot, the room, the runtime paths, and the running response's queue of waiting messages. A message
@@ -1467,7 +1467,7 @@ async def _general_answering_in_its_thread(
     room = nio.MatrixRoom(ROOM_ID, bot.client.user_id)
     for member in (SENDER, *(current_entity_id(name, paths).full_id for name in config.agents)):
         room.add_member(member, member, None)
-    running = bot._response_runner.lifecycle_coordinator._get_or_create_queued_signal(
+    running = bot._response_runner.lifecycle_coordinator._conversation_for(
         MessageTarget.resolve(ROOM_ID, THREAD_ID, "$running"),
     )
     running.begin_response_turn()

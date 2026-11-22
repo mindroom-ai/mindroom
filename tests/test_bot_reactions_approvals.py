@@ -1688,7 +1688,7 @@ class TestAgentBot(AgentBotTestBase):
 
         conversation = unwrap_extracted_collaborator(
             bot._response_runner,
-        ).lifecycle_coordinator._get_or_create_queued_signal(target)
+        ).lifecycle_coordinator._conversation_for(target)
         lifecycle_lock = conversation.lock
         lock_owned_by_test = False
         if failure_stage == "acquire":
@@ -1760,7 +1760,7 @@ class TestAgentBot(AgentBotTestBase):
             unwrap_extracted_collaborator(
                 bot._response_runner,
             )
-            .lifecycle_coordinator._get_or_create_queued_signal(target)
+            .lifecycle_coordinator._conversation_for(target)
             .lock
         )
         acquire_lifecycle_lock = lifecycle_lock.acquire

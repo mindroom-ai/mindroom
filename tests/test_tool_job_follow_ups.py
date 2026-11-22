@@ -19,7 +19,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
-from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
+from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _Conversation
 from mindroom.response_sources import Owned, ResponseSources, Unclaimed, UnclaimedReason
 from mindroom.response_turn import (
     AttemptResolved,
@@ -671,7 +671,7 @@ def _wait_for_next_turn(runner: ResponseRunner, key: ConversationKey, *, request
     """Leave a message of ``requester_id`` waiting in ``key``'s conversation, as one that arrived while a reply ran."""
     lifecycle = runner.lifecycle_coordinator
     target = _target(thread_id=key.thread_id, reply_to_event_id="$waiting")
-    signal = lifecycle._get_or_create_queued_signal(target)
+    signal = lifecycle._conversation_for(target)
     signal.begin_response_turn()
     envelope = replace(
         _envelope(target, source_event_id="$waiting"),
@@ -1087,7 +1087,7 @@ async def test_an_interrupted_job_gets_a_follow_up_saying_it_may_have_partly_run
 async def test_only_a_human_message_releases_a_running_wait(turn: str) -> None:
     """A follow-up or a scheduled turn queued behind a running reply leaves its tool waits alone."""
     coordinator = ResponseLifecycleCoordinator()
-    queued = _QueuedMessageState()
+    queued = _Conversation()
     queued.begin_response_turn()
     key = ConversationKey("general", "!room:localhost", "$thread", "@user:localhost", silent=False)
     envelope = (
@@ -1096,7 +1096,7 @@ async def test_only_a_human_message_releases_a_running_wait(turn: str) -> None:
         else _envelope(_target(thread_id="$thread"))
     )
     notice = coordinator._begin_response_turn_notice(
-        queued_signal=queued,
+        conversation=queued,
         response_envelope=envelope,
         # A scheduled turn is no human message for the running reply to hear about.
         signal_queued_message=turn == "follow_up",

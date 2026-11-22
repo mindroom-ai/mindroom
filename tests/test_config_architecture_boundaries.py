@@ -235,12 +235,12 @@ def test_response_runner_delegates_lifecycle_coordination() -> None:
     """ResponseRunner should delegate lock and queued-turn state to response_lifecycle."""
     tree = ast.parse(RESPONSE_RUNNER_MODULE.read_text(encoding="utf-8"))
     forbidden_names = {
-        "_QueuedMessageState",
-        "_get_or_create_queued_signal",
+        "_Conversation",
+        "_conversation_for",
         "_response_lifecycle_lock",
         "_response_lifecycle_locks",
         "_should_signal_queued_message",
-        "_thread_queued_signals",
+        "_conversations",
     }
     found: list[str] = []
     for node in ast.walk(tree):

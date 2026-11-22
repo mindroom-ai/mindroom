@@ -123,7 +123,7 @@ from mindroom.mid_turn import MidTurnGate, MidTurnMode
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
-from mindroom.response_lifecycle import QueuedHumanNoticeReservation, _QueuedMessageState
+from mindroom.response_lifecycle import QueuedHumanNoticeReservation, _Conversation
 from mindroom.response_payload_preparation import (
     _STEER_CONTINUATION_LINE,
     DispatchPayloadInputs,
@@ -7562,7 +7562,7 @@ async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
         await gate.drain_all()
 
 
-async def _wraps_up_after_tool_batch(queue: _QueuedMessageState) -> bool:
+async def _wraps_up_after_tool_batch(queue: _Conversation) -> bool:
     """Run the judgment a reply makes over ``queue`` after a tool batch, and return whether the reply wraps up."""
     notice = "WRAP UP"
     messages = [
@@ -7605,7 +7605,7 @@ async def test_a_message_the_running_reply_stopped_for_is_answered_without_parti
     room = _room_with_members(config, "general", "research")
     room.add_member("@other:localhost", "Other", None)
     event_id = "$correction:localhost"
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     if judgment != "no_mid_turn":
 
         async def evaluate(_request: JudgmentRequest) -> bool | None:
@@ -7697,7 +7697,7 @@ async def test_a_correction_queued_behind_a_remark_that_waited_is_still_answered
     async def evaluate(_request: JudgmentRequest) -> bool | None:
         return verdicts.pop(0)
 
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.mid_turn_gate = MidTurnGate(
         active_text="Write the long report",
         evaluate=evaluate,
@@ -8217,7 +8217,7 @@ async def test_requester_steer_after_final_text_dispatches_once_with_bypass(
     config.agents["general"].participation = ParticipationConfig(debounce_seconds=30)
     harness = _build_harness(config, tmp_path, thread_history=_follow_up_history(config))
     room = _room_with_members(config, "general", "research")
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     event_id, body = "$steer:localhost", "Also print the date"
     if admission != "idle_steer":
         queue.bind_active_requester(_SENDER)
@@ -8268,7 +8268,7 @@ async def test_edited_steer_behind_another_requester_keeps_its_followup_mark(con
     harness = _build_harness(config, tmp_path, thread_history=_follow_up_history(config))
     room = _room_with_members(config, "general", "research")
     room.add_member("@other:localhost", "Other", None)
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.bind_active_requester(_SENDER)
     messages = (
         ("$remark:localhost", "@other:localhost", "Nice weather today", MidTurnMode.AUTO),

@@ -1132,11 +1132,8 @@ class TestAgentBot(AgentBotTestBase):
         ).with_thread_root("$root_b")
 
         lifecycle = ResponseLifecycleCoordinator()
-        assert lifecycle._get_or_create_queued_signal(first).lock is lifecycle._get_or_create_queued_signal(first).lock
-        assert (
-            lifecycle._get_or_create_queued_signal(first).lock
-            is not lifecycle._get_or_create_queued_signal(second).lock
-        )
+        assert lifecycle._conversation_for(first).lock is lifecycle._conversation_for(first).lock
+        assert lifecycle._conversation_for(first).lock is not lifecycle._conversation_for(second).lock
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

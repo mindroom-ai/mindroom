@@ -50,7 +50,7 @@ from mindroom.mid_turn import (
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.redaction import redact_sensitive_text
-from mindroom.response_lifecycle import QueuedHumanNoticeReservation, ResponseLifecycleCoordinator, _QueuedMessageState
+from mindroom.response_lifecycle import QueuedHumanNoticeReservation, ResponseLifecycleCoordinator, _Conversation
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.conversation import ConversationKey
@@ -296,7 +296,7 @@ def test_mid_turn_mode_reads_known_values_and_rejects_malformed_content(
 
 def test_queued_snapshot_keeps_text_until_exact_event_is_consumed() -> None:
     """The judge needs a stable snapshot without taking ownership of queued dispatch."""
-    state = _QueuedMessageState()
+    state = _Conversation()
     assert state.add_waiting_human_message("$first", text="First")
     assert not state.add_waiting_human_message("$first", text="Duplicate")
     assert state.add_waiting_human_message("$second", text="Second")
@@ -319,7 +319,7 @@ def test_defer_reaction_rejects_invalid_keys(reaction: object) -> None:
 @pytest.mark.parametrize("outcome", ["finish", "wrap_up", "error", "queue_changed", "cancel", "reaction_error"])
 async def test_defer_reaction_requires_accepted_current_decision(outcome: str) -> None:
     """Never acknowledge a failed, cancelled, negative, or superseded judgment."""
-    state = _QueuedMessageState()
+    state = _Conversation()
     state.add_waiting_human_message("$first", text="Thanks")
     acknowledgements: list[str] = []
 
@@ -366,7 +366,7 @@ async def test_queue_change_during_reaction_still_requests_wrap_up(
     change: Literal["correction", "handoff"],
 ) -> None:
     """A correction or a concurrent handoff while Matrix acknowledges any reaction must still cause handoff."""
-    state = _QueuedMessageState()
+    state = _Conversation()
     for index, text in enumerate(queued):
         state.add_waiting_human_message(f"$queued{index}", text=text)
     acknowledgements: list[str] = []
@@ -395,7 +395,7 @@ async def test_queue_change_during_reaction_still_requests_wrap_up(
 @pytest.mark.asyncio
 async def test_a_wait_judges_again_a_queue_that_changed_during_its_defer_reaction() -> None:
     """A message that arrives while Matrix acknowledges another is judged with it, so one that can wait ends no wait."""
-    state = _QueuedMessageState()
+    state = _Conversation()
     judged: list[tuple[str | None, ...]] = []
 
     async def evaluate(_request: JudgmentRequest) -> bool | None:
@@ -420,7 +420,7 @@ async def test_a_wait_judges_again_a_queue_that_changed_during_its_defer_reactio
 @pytest.mark.asyncio
 async def test_a_wait_judges_again_a_queue_that_lost_a_message_during_its_judgment() -> None:
     """A decision counts only for the queue it judged, so a queue that shrank meanwhile is judged again at once."""
-    state = _QueuedMessageState()
+    state = _Conversation()
     judged: list[tuple[str | None, ...]] = []
 
     async def evaluate(_request: JudgmentRequest) -> bool | None:
@@ -453,7 +453,7 @@ async def test_queued_message_freezes_visible_progress_at_admission() -> None:
         return True
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
-    state = _QueuedMessageState(mid_turn_gate=gate)
+    state = _Conversation(mid_turn_gate=gate)
     read = ToolTraceEntry(
         type="tool_call_completed",
         tool_name="read_file",
@@ -499,7 +499,7 @@ async def test_visible_progress_keeps_untraced_markers_and_multiline_tool_output
     for text, trace in ((example, ()), ("Reading.\n\n🔧 `shell` [1]\n\nDone.", (shell,))):
         gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, conversation_context=())
         gate.record_visible_response(text, trace)
-        state = _QueuedMessageState(mid_turn_gate=gate)
+        state = _Conversation(mid_turn_gate=gate)
         state.add_waiting_human_message("$queued", text="Thanks")
         assert await gate.decide(state.pending_message_snapshot(), current=lambda: True) is MidTurnOutcome.WAIT
     assert example in evidence[0]
@@ -521,7 +521,7 @@ async def test_unknown_or_unsafe_visible_progress_keeps_wrap_up(progress: str | 
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
     gate.visible_response_text = progress
-    state = _QueuedMessageState(mid_turn_gate=gate)
+    state = _Conversation(mid_turn_gate=gate)
     state.add_waiting_human_message("$queued", text="Thanks")
     assert await gate.decide(state.pending_message_snapshot(), current=lambda: True) is MidTurnOutcome.PAUSE
 
@@ -626,7 +626,7 @@ async def test_real_tool_loop_judges_before_next_provider_request(
     terminal: bool,
 ) -> None:
     """Both provider paths must receive a notice only when the judge requests wrap-up."""
-    state = _QueuedMessageState()
+    state = _Conversation()
     evidence: list[dict] = []
 
     def queue_followup() -> str:
@@ -664,7 +664,7 @@ async def test_pending_approval_is_not_judged_as_completed_work(*, mixed: bool) 
     """Unresolved tool calls must not become evidence of completed actions."""
     executed: list[str] = []
     judgments: list[JudgmentRequest] = []
-    state = _QueuedMessageState()
+    state = _Conversation()
     state.add_waiting_human_message("$queued", text="Thanks")
 
     def approved_action() -> str:
@@ -694,7 +694,7 @@ async def test_pending_approval_is_not_judged_as_completed_work(*, mixed: bool) 
 @pytest.mark.parametrize("remove", [False, True])
 async def test_queue_change_during_judgment_cannot_approve_unseen_input(*, remove: bool) -> None:
     """Only the exact judged queue can finish; a cancelled queue needs no notice."""
-    state = _QueuedMessageState()
+    state = _Conversation()
     state.add_waiting_human_message("$first", text="Thanks")
 
     async def evaluate(_request: JudgmentRequest) -> bool | None:
@@ -713,7 +713,7 @@ async def test_queue_change_during_judgment_cannot_approve_unseen_input(*, remov
 @pytest.mark.asyncio
 async def test_wrap_up_remains_settled_after_later_queue_changes() -> None:
     """Once told to wrap up, later acknowledgements must not reverse the handoff."""
-    state = _QueuedMessageState()
+    state = _Conversation()
     state.add_waiting_human_message("$first", text="Change the task")
     judged: list[JudgmentRequest] = []
 
@@ -733,7 +733,7 @@ async def test_wrap_up_remains_settled_after_later_queue_changes() -> None:
 @pytest.mark.asyncio
 async def test_resumed_tools_do_not_expose_invisible_execution_details() -> None:
     """Approval results do not add model-private execution details to visible context."""
-    state = _QueuedMessageState()
+    state = _Conversation()
     state.add_waiting_human_message("$queued", text="Thanks")
     evidence: list[str] = []
 
@@ -810,7 +810,7 @@ async def test_configured_backends_control_resumed_turns(
         has_media=False,
     )
     assert gate is not None
-    state = _QueuedMessageState()
+    state = _Conversation()
     state.add_waiting_human_message("$new", text="Thanks")
     resumed = _ResumedRequests()
     with queued_message_signal_context(state, mid_turn_gate=gate):
@@ -822,7 +822,7 @@ async def test_configured_backends_control_resumed_turns(
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, cancel: bool) -> None:
     """Adding a judgment must not discard the stored results of executed tools."""
-    state = _QueuedMessageState()
+    state = _Conversation()
     entered = asyncio.Event()
     stored: list[RunRecord] = []
 
@@ -869,7 +869,7 @@ async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, ca
 @pytest.mark.parametrize("media", [False, True])
 async def test_batch_with_paused_delegation_follows_the_judgment(*, interrupt: bool, media: bool) -> None:
     """A delegation paused beside other calls must not request a wrap-up the judge did not ask for."""
-    state = _QueuedMessageState()
+    state = _Conversation()
     judgments: list[JudgmentRequest] = []
 
     def work() -> ToolResult:
@@ -915,7 +915,7 @@ async def test_a_failing_judge_or_defer_reaction_costs_no_reply(*, failure: str,
     The judgment runs after a completed tool batch, or, when the batch paused for a delegation, once the resume
     completes it.
     """
-    state = _QueuedMessageState()
+    state = _Conversation()
     reactions: list[str] = []
     judgments: list[JudgmentRequest] = []
 
@@ -1214,7 +1214,7 @@ async def test_long_background_reaches_the_judge_as_its_start_and_end() -> None:
             JudgmentMessage("assistant", "Report start. " + "x" * 80_000 + " Report end."),
         ),
     )
-    state = _QueuedMessageState(mid_turn_gate=gate)
+    state = _Conversation(mid_turn_gate=gate)
     gate.record_visible_response("Progress start. " + "z" * 50_000 + " Progress end.", ())
     queued = "Is this still running? " + "q" * 3_000
     state.add_waiting_human_message("$queued", text=queued)
@@ -1292,7 +1292,7 @@ async def test_megabyte_texts_cost_only_what_the_judge_sees(*, reply: bool) -> N
         evaluate=evaluate,
         conversation_context=() if reply else tuple(JudgmentMessage("user", body) for _ in range(7)),
     )
-    state = _QueuedMessageState(mid_turn_gate=gate)
+    state = _Conversation(mid_turn_gate=gate)
     gate.record_visible_response(body if reply else "", ())
     state.add_waiting_human_message("$queued", text="Thanks")
     with cpu_budget(0.25):
@@ -1585,7 +1585,7 @@ async def test_report_stop_preserves_as_read_one_sender_and_previously_deferred_
     A message appended during the judgment, which the judge never read, and one edited after it, are not marked.
     """
     published: list[tuple[QueuedMessage, ...]] = []
-    queue = _QueuedMessageState()
+    queue = _Conversation()
 
     def on_stop(judged: tuple[QueuedMessage, ...]) -> None:
         published.append(judged)
@@ -1616,7 +1616,7 @@ async def test_report_stop_preserves_as_read_one_sender_and_previously_deferred_
     assert queue.stopped_reply_event_ids == {"$stop"}
 
 
-async def _wraps_up_after_tool_batch(queue: _QueuedMessageState) -> bool:
+async def _wraps_up_after_tool_batch(queue: _Conversation) -> bool:
     """Run the judgment a reply makes over ``queue`` after a tool batch, and return whether the reply wraps up."""
     messages = _resumed_messages()
     with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
@@ -1629,7 +1629,7 @@ async def test_a_later_verdict_that_lets_the_queue_wait_leaves_no_mark() -> None
     """A stop verdict the reply did not act on, because a newer message made the queue wait, marks nothing."""
     calls: list[int] = []
     judged_again = asyncio.Event()
-    queue = _QueuedMessageState()
+    queue = _Conversation()
 
     async def evaluate(_request: JudgmentRequest) -> bool | None:
         calls.append(len(calls))
@@ -1671,7 +1671,7 @@ async def test_another_persons_message_during_a_job_wait_judgment_keeps_the_corr
     someone else is not counted.
     """
     calls: list[int] = []
-    queue = _QueuedMessageState()
+    queue = _Conversation()
 
     async def evaluate(_request: JudgmentRequest) -> bool | None:
         calls.append(len(calls))
@@ -1706,7 +1706,7 @@ async def test_only_messages_the_judge_did_not_let_wait_count_as_stopping_the_re
     async def evaluate(_request: JudgmentRequest) -> bool | None:
         return verdicts.pop(0)
 
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.mid_turn_gate = MidTurnGate(
         active_text="Do the task",
         evaluate=evaluate,
@@ -1744,7 +1744,7 @@ async def test_an_edit_counts_only_with_a_verdict_on_its_new_text(edit: str) -> 
     async def evaluate(_request: JudgmentRequest) -> bool | None:
         return verdicts.pop(0)
 
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.mid_turn_gate = MidTurnGate(
         active_text="Do the task",
         evaluate=evaluate,
@@ -1772,7 +1772,7 @@ async def test_an_edit_after_release_drops_the_kept_verdict() -> None:
     async def evaluate(_request: JudgmentRequest) -> bool | None:
         return False
 
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.mid_turn_gate = MidTurnGate(
         active_text="Do the task",
         evaluate=evaluate,
@@ -1796,7 +1796,7 @@ async def test_one_verdict_for_several_peoples_new_messages_marks_none() -> None
     async def evaluate(_request: JudgmentRequest) -> bool | None:
         return False
 
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.mid_turn_gate = MidTurnGate(
         active_text="Do the task",
         evaluate=evaluate,
@@ -1949,7 +1949,7 @@ _QUESTION = "What is the capital of France?"
 
 def _message_waiting() -> bool:
     """Return whether a tool wait of the reply listens for a newer message now."""
-    return any(task.get_coro().__qualname__ == "_QueuedMessageState.wait" for task in asyncio.all_tasks())
+    return any(task.get_coro().__qualname__ == "_Conversation.wait" for task in asyncio.all_tasks())
 
 
 async def _until(condition: Callable[[], bool]) -> None:
@@ -1976,7 +1976,7 @@ class _JobReply:
         register_background_runtime(self.paths, runtime)
         self.lifecycle = ResponseLifecycleCoordinator()
         self.target = MessageTarget.resolve("!room:localhost", "$thread", "$active")
-        self.queue = self.lifecycle._get_or_create_queued_signal(self.target)
+        self.queue = self.lifecycle._conversation_for(self.target)
         self.job_done = asyncio.Event()
 
     async def start_job(self) -> None:
@@ -2312,7 +2312,7 @@ def _acknowledgements(
 @pytest.mark.asyncio
 async def test_queue_is_absent_from_judgment_notice_pause_and_wait_release() -> None:
     """A Queue message is never judged, gives no notice or pause, and leaves even a reply only waiting on jobs waiting."""
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.bind_active_requester(_REQUESTER)
     judged: list[JudgmentRequest] = []
 
@@ -2360,7 +2360,7 @@ async def test_queue_is_absent_from_judgment_notice_pause_and_wait_release() -> 
 @pytest.mark.parametrize("fails", [False, True], ids=["delivered", "delivery_error"])
 async def test_queue_defer_reaction_is_attempted_once(*, fails: bool) -> None:
     """The configured defer reaction goes once onto a Queue message, however often the queue is looked at."""
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.bind_active_requester(_REQUESTER)
     reactions: list[tuple[str, str]] = []
     second_attempted = asyncio.Event()
@@ -2406,7 +2406,7 @@ async def test_requester_steer_releases_wait_during_an_unresolved_auto_judgment(
 
     The obsolete judgment is cancelled and drained before the wait returns, so it can publish no mark afterwards.
     """
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.bind_active_requester(_REQUESTER)
     judging, answer_judgment, judgment_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
@@ -2438,7 +2438,7 @@ async def test_requester_steer_releases_wait_during_an_unresolved_auto_judgment(
     await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
     assert not answer_judgment.is_set()
     assert judgment_cancelled.is_set()
-    assert [task for task in asyncio.all_tasks() if "_QueuedMessageState" in task.get_coro().__qualname__] == []
+    assert [task for task in asyncio.all_tasks() if "_Conversation" in task.get_coro().__qualname__] == []
     answer_judgment.set()
     gate.report_stop()
     assert queue.stopped_reply_event_ids == set()
@@ -2452,7 +2452,7 @@ async def test_a_judgment_that_absorbs_its_steer_cancellation_leaves_no_evidence
 
     An HTTP client whose own timeout fires with the cancellation can take it for that timeout and still answer.
     """
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.bind_active_requester(_REQUESTER)
     judging, absorbed = asyncio.Event(), asyncio.Event()
     judgments = 0
@@ -2482,7 +2482,7 @@ async def test_a_judgment_that_absorbs_its_steer_cancellation_leaves_no_evidence
     queue.add_waiting_human_message("$alice-steer", text="Use mine", requester_id=_REQUESTER, mode=MidTurnMode.STEER)
     await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
     assert absorbed.is_set()
-    assert [task for task in asyncio.all_tasks() if "_QueuedMessageState" in task.get_coro().__qualname__] == []
+    assert [task for task in asyncio.all_tasks() if "_Conversation" in task.get_coro().__qualname__] == []
     gate.report_stop()
     assert queue.stopped_reply_event_ids == set()
     steer = QueuedHumanNoticeReservation(queue, "$alice-steer")
@@ -2497,7 +2497,7 @@ async def test_a_judgment_that_absorbs_its_steer_cancellation_leaves_no_evidence
 @pytest.mark.asyncio
 async def test_other_requesters_steer_uses_auto_wait_policy() -> None:
     """Another person's Steer is weighed as Auto: a judge that lets it wait leaves the wait blocked, with no bypass."""
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.bind_active_requester(_REQUESTER)
     judged: list[JudgmentRequest] = []
 
@@ -2534,7 +2534,7 @@ async def test_other_requesters_steer_uses_auto_wait_policy() -> None:
 
 def test_binding_a_requester_latches_only_their_waiting_steers() -> None:
     """A reply that takes the lock, like an approval resuming, makes its requester's waiting Steers direct ones."""
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.add_waiting_human_message("$mine", text="Use X", requester_id=_REQUESTER, mode=MidTurnMode.STEER)
     queue.add_waiting_human_message("$theirs", text="Use Y", requester_id=_OTHER, mode=MidTurnMode.STEER)
     queue.add_waiting_human_message("$auto", text="Use Z", requester_id=_REQUESTER)
@@ -2549,7 +2549,7 @@ def test_binding_a_requester_latches_only_their_waiting_steers() -> None:
     assert QueuedHumanNoticeReservation(queue, "$mine").stopped_reply
 
 
-async def _steers_after_tool_batch(queue: _QueuedMessageState) -> tuple[bool | None, list[Message]]:
+async def _steers_after_tool_batch(queue: _Conversation) -> tuple[bool | None, list[Message]]:
     """Run a reply-owning run's after-batch hook over ``queue``; return whether it ends the run, and the messages."""
     messages = _resumed_messages()
     with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
@@ -2565,7 +2565,7 @@ async def test_requester_steer_returns_batch_stop_without_notice_or_queue_consum
     The run stores its tool calls and results as any finished run does, its results keep their own outcomes, and the
     Steer stays queued with its bypass for the reply that follows.
     """
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.bind_active_requester(_REQUESTER)
     judged: list[JudgmentRequest] = []
 
@@ -2623,7 +2623,7 @@ async def test_only_the_reply_its_owner_ended_reads_the_follow_up_end_reason() -
     A delegated child's batch leaves the Steer to its owner and sets nothing; the owner's batch sets it; the next
     reply starts without it.
     """
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.bind_active_requester(_REQUESTER)
 
     def work() -> str:
@@ -2679,7 +2679,7 @@ async def test_only_explicit_current_negative_verdict_ends_run(case: str, ends: 
     A verdict on a message edited or removed during the judgment is obsolete, and a message appended meanwhile does
     not cost the judged correction its count. Without a verdict, the run gets the pause notice and no bypass.
     """
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.bind_active_requester(_REQUESTER)
     judgments: list[JudgmentRequest] = []
 
@@ -2724,7 +2724,7 @@ async def test_unresolved_batch_is_not_steered_before_resume(pause: str, reason:
 
     The owner stays paused with the message still queued, and the resumed batch ends the run before another request.
     """
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.bind_active_requester(_REQUESTER)
     judgments: list[JudgmentRequest] = []
 
@@ -2801,7 +2801,7 @@ async def test_owner_ends_at_its_batch_for_a_verdict_its_child_paused_for(
     cached verdict without another judgment, notice, or request, and the correction keeps its mark. A message
     appended meanwhile leaves the verdict standing; an edit or a deletion takes it away, so the parent goes on.
     """
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.bind_active_requester(_REQUESTER)
     judgments: list[JudgmentRequest] = []
 

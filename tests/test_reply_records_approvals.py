@@ -425,7 +425,7 @@ async def test_a_message_sent_while_an_approval_waits_is_answered_once_after_it_
             assert _reactions(bot) == [{"rel_type": "m.annotation", "event_id": "$followup", "key": "⏳"}]
             # The follow-up waits behind the approval: no second turn runs beside the paused one.
             runner = unwrap_extracted_collaborator(bot._response_runner)
-            assert runner.lifecycle_coordinator._get_or_create_queued_signal(_target()).has_pending_human_messages()
+            assert runner.lifecycle_coordinator._conversation_for(_target()).has_pending_human_messages()
             model.assert_not_awaited()
             assert runner.lifecycle_coordinator.approval_holds(_target().room_id, _target().resolved_thread_id)
 

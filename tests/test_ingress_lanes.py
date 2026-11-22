@@ -1372,8 +1372,8 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
     target = MessageTarget.resolve(room.room_id, "$thread", "$m0")
     runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = runner.lifecycle_coordinator
-    lifecycle_lock = lifecycle._get_or_create_queued_signal(target).lock
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    lifecycle_lock = lifecycle._conversation_for(target).lock
+    queued_signal = lifecycle._conversation_for(target)
     response_running = asyncio.Event()
     calls: list[PreparedTurn] = []
 

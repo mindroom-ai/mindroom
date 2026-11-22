@@ -714,7 +714,7 @@ async def test_setup_failure_after_the_placeholder_shows_the_dispatch_error(tmp_
     """
     bot = await _streaming_bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    conversation = runner.lifecycle_coordinator._get_or_create_queued_signal(_target()).lock
+    conversation = runner.lifecycle_coordinator._conversation_for(_target()).lock
     held_at_exit: list[bool] = []
     exit_span = runner._exit_span_on_error
 
