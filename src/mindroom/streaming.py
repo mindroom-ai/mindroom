@@ -49,6 +49,7 @@ from mindroom.tool_system.events import (
     FailedReply,
     StreamingToolTracker,
     StructuredStreamChunk,
+    append_stream_text,
     complete_pending_tool_block,
     remap_visible_tool_marker_indices,
     serialize_tool_trace,
@@ -652,6 +653,8 @@ class StreamingResponse:
     # Frames start once the reply's event shows this stream: its adopted placeholder or its first progress write.
     _shows_stream: bool = field(default=False, init=False, repr=False)
     _transport_ended: bool = field(default=False, init=False, repr=False)
+    _has_hidden_tool_calls: bool = field(default=False, init=False, repr=False)
+    _separate_next_text: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Derive Matrix delivery fields from the canonical target."""
@@ -701,11 +704,8 @@ class StreamingResponse:
         return len(self.tool_trace) if self.show_tool_calls else 0
 
     def has_progress(self) -> bool:
-        """Return whether the reply produced any text or tool call yet, a resumed attempt's included.
-
-        A hidden tool call leaves its gap in the text (``_ensure_hidden_tool_gap``).
-        """
-        return bool(self.accumulated_text or self.tool_trace)
+        """Return whether the reply produced any text or tool call yet, a resumed attempt's included."""
+        return bool(self.accumulated_text or self.tool_trace or self._has_hidden_tool_calls)
 
     @property
     def live_active(self) -> bool:
@@ -763,8 +763,11 @@ class StreamingResponse:
 
     def _append_incremental_text(self, new_chunk: str) -> None:
         """Append additive streaming text regardless of snapshot replacement mode."""
-        self.accumulated_text += new_chunk
-        self.chars_since_last_update += len(new_chunk)
+        updated = append_stream_text(self.accumulated_text, new_chunk, separate=self._separate_next_text)
+        if new_chunk.strip("\r\n"):
+            self._separate_next_text = False
+        self.chars_since_last_update += len(updated) - len(self.accumulated_text)
+        self.accumulated_text = updated
         self.last_delta_at = time.time()
 
     def _mark_nonadditive_text_mutation(self) -> None:
@@ -773,9 +776,10 @@ class StreamingResponse:
         self.last_delta_at = time.time()
 
     def _ensure_hidden_tool_gap(self) -> None:
-        """Insert a single placeholder gap for hidden tool calls."""
-        if not self.accumulated_text.endswith("\n\n"):
-            self._append_incremental_text("\n\n")
+        """Record hidden tool progress and separate any later text from what came before it."""
+        self._has_hidden_tool_calls = True
+        if self.accumulated_text:
+            self._separate_next_text = True
 
     def _current_update_interval(self, current_time: float) -> float:
         """Return the current throttling interval.

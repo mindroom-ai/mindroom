@@ -214,7 +214,7 @@ def test_markers_and_tools_line_up() -> None:
 
     docs = _run_docs(snapshot, previews=True)
 
-    assert docs.md == "Intro\n\n🔧 `web_search` [1]\n\nMiddle\n\n🔧 `read_file` [2] ⏳\n\n"
+    assert docs.md == "Intro\n\n🔧 `web_search` [1]\n\nMiddle\n\n🔧 `read_file` [2] ⏳"
     assert tool_markers_match_trace(docs.md, [search, read])
     assert docs.tools == (
         {
@@ -241,7 +241,7 @@ def test_a_text_cut_drops_the_oldest_text_and_keeps_every_tool_call() -> None:
 
     docs = _run_docs(snapshot, previews=True, text_cut=8)
 
-    assert docs.md == "\n\n🔧 `read_file` [1]\n\ni"
+    assert docs.md == "🔧 `read_file` [1]\n\ni"
     assert tool_markers_match_trace(docs.md, [entry])
 
 

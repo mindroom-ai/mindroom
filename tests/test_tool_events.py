@@ -107,8 +107,7 @@ def test_format_tool_started_uses_plain_marker_and_truncates() -> None:
         tool_index=1,
     )
 
-    assert text.startswith("\n\n🔧 `save_file` [1]")
-    assert text.endswith("\n\n")
+    assert text == "🔧 `save_file` [1] ⏳"
     assert "🔧" in text
     assert "`save_file`" in text
     assert "[1]" in text
@@ -125,8 +124,7 @@ def test_format_tool_combined_with_result() -> None:
     """Combined formatting should produce a completed plain marker and trace metadata."""
     text, trace = format_tool_combined("run_shell_command", {"cmd": "pwd"}, "/app", tool_index=2)
 
-    assert text.startswith("\n\n🔧 `run_shell_command` [2]")
-    assert text.endswith("\n\n")
+    assert text == "🔧 `run_shell_command` [2]"
     assert "<validation>" not in text
     assert "`run_shell_command`" in text
     assert "[2]" in text
@@ -179,8 +177,7 @@ def test_format_tool_combined_truncates_long_result() -> None:
     """Combined formatting should truncate long results."""
     text, trace = format_tool_combined("run_shell_command", {}, "done " + ("y" * 5000))
 
-    assert text.startswith("\n\n🔧 `run_shell_command`")
-    assert text.endswith("\n\n")
+    assert text == "🔧 `run_shell_command`"
     assert trace.type == "tool_call_completed"
     assert trace.result_preview is not None
     assert trace.truncated is True
@@ -285,7 +282,7 @@ def test_format_tool_combined_with_none_result() -> None:
     """Combined formatting should handle missing results."""
     text, trace = format_tool_combined("save_file", {}, None, tool_index=1)
 
-    assert text == "\n\n🔧 `save_file` [1]\n\n"
+    assert text == "🔧 `save_file` [1]"
     assert trace.type == "tool_call_completed"
     assert trace.tool_name == "save_file"
     assert trace.result_preview is None
@@ -296,7 +293,7 @@ def test_format_tool_combined_with_empty_string_result() -> None:
     """Combined formatting should treat empty results as no-result."""
     text, trace = format_tool_combined("save_file", {"file": "a.py"}, "", tool_index=1)
 
-    assert text == "\n\n🔧 `save_file` [1]\n\n"
+    assert text == "🔧 `save_file` [1]"
     assert trace.type == "tool_call_completed"
     assert trace.result_preview is None
     assert trace.truncated is False
@@ -546,7 +543,7 @@ def test_build_tool_trace_content_redacts_raw_trace_entries() -> None:
 def test_format_tool_started_with_empty_args() -> None:
     """Tool start formatting should handle empty argument maps."""
     text, trace = _format_tool_started("save_file", {}, tool_index=1)
-    assert text == "\n\n🔧 `save_file` [1] ⏳\n\n"
+    assert text == "🔧 `save_file` [1] ⏳"
     assert trace.type == "tool_call_started"
     assert trace.tool_name == "save_file"
     assert trace.args_preview is None

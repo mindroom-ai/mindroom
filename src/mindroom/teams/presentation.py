@@ -261,7 +261,7 @@ class TeamStreamPresentation:
         """Append to a slot; text after a hidden tool call in that slot starts a paragraph of its own."""
         separate = separate or member_id in self.separate_next_slots
         self._set_slot_text(member_id, append_stream_text(self._slot_text(member_id), content, separate=separate))
-        if content:
+        if content and str(content).strip("\r\n"):
             self.separate_next_slots.discard(member_id)
 
     def _slot_text(self, member_id: str | None) -> str:
@@ -298,7 +298,7 @@ class TeamStreamPresentation:
             return
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
-            self._set_slot_text(member_id, self._slot_text(member_id) + marker)
+            self._set_slot_text(member_id, append_stream_text(self._slot_text(member_id), marker))
         elif self._slot_text(member_id):
             self.separate_next_slots.add(member_id)
         self._align_tool_trace_with_document()

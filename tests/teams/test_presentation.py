@@ -306,7 +306,7 @@ def test_members_with_the_same_display_name_keep_their_own_slots() -> None:
 
     assert presentation.per_member == {
         "member_a": "First answer.",
-        "member_b": "Second answer.\n\n🔧 `inspect` [1] ⏳\n\n",
+        "member_b": "Second answer.\n\n🔧 `inspect` [1] ⏳",
     }
     assert presentation.tool_trace[0].member_id == "member_b"
     assert presentation.render_body(finished=True).count("**Same**:") == 2
@@ -342,7 +342,7 @@ def test_a_pause_renumbers_interleaved_member_calls_in_document_order() -> None:
         member_id="second",
     )
     assert [entry.type for entry in presentation.tool_trace] == ["tool_call_started", "tool_call_completed"]
-    assert "🔧 `inspect_second` [2]\n\n" in presentation.per_member["second"]
+    assert presentation.per_member["second"] == "🔧 `inspect_second` [2]"
 
 
 def _paused_on_inspect(member_id: str, display_name: str) -> PausedAttempt:

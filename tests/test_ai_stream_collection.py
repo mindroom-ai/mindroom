@@ -141,7 +141,7 @@ async def test_collect_streamed_response_resumes_pending_tool_by_exact_id() -> N
         ),
     )
 
-    assert body == ("Before approval.\n\n🔧 `inspect` [1]\nAfter approval.\n\n🔧 `inspect` [2] ⏳\n\n")
+    assert body == ("Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval.\n\n🔧 `inspect` [2] ⏳")
     assert [entry.type for entry in trace] == ["tool_call_completed", "tool_call_started"]
     assert [entry.tool_call_id for entry in trace] == ["call-1", "call-2"]
     assert trace[0].result_preview == "details"

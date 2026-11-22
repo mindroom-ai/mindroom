@@ -18,6 +18,7 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom import interactive
+from mindroom.ai import collect_streamed_response_content
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
@@ -34,11 +35,12 @@ from mindroom.history.interrupted_replay import (
     _render_interrupted_replay_content,
 )
 from mindroom.hooks import MessageEnvelope
-from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRequirement, ToolExecution
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import calculate_event_size
+from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.inbox import InboxResponses
@@ -67,10 +69,13 @@ from mindroom.streaming import (
 from mindroom.streaming import _consume_streaming_chunks as _consume_streaming_chunks_impl
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.events import (
+    CollectedStreamPresentation,
     StructuredStreamChunk,
     ToolTraceEntry,
+    build_tool_trace_content,
     format_tool_started_event,
     tool_markers_in_text,
+    tool_markers_out_of_text,
 )
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
@@ -967,7 +972,7 @@ class TestStreamingBehavior:
 
         hidden_bodies = await run_case(show_tool_calls=False)
         assert hidden_bodies[0] == "Hello, this is a partial wo"
-        assert hidden_bodies[1] == "Hello, this is a partial wo\n\n"
+        assert hidden_bodies[1] == "Hello, this is a partial wo"
 
     @pytest.mark.asyncio
     async def test_pre_tool_flush_does_not_double_emit_after_idle_gap(self) -> None:
@@ -3260,7 +3265,7 @@ class TestStreamingBehavior:
                 session_id="session-1",
                 run_id="run-1",
                 requirements=(RunRequirement(tool),),
-                response_text=f"Before approval.{marker}",
+                response_text=f"Before approval.\n\n{marker}",
                 tool_trace=(trace_entry,),
                 toolkit_owners={("general", "inspect"): "test_toolkit"},
             ),
@@ -3287,7 +3292,7 @@ class TestStreamingBehavior:
             streaming.accumulated_text = "Before approval."
             await streaming._send_or_edit_message(mock_client)
             recorded_force_flags.clear()
-            streaming.accumulated_text += marker
+            streaming._append_incremental_text(marker)
             streaming.tool_trace.append(trace_entry)
             raise pause
 
@@ -3323,7 +3328,7 @@ class TestStreamingBehavior:
                     await run_stream()
                 assert raised_pause.value is pause
                 assert pause.presentation is not None
-                assert pause.presentation.response_text == f"Before approval.{marker}".rstrip()
+                assert pause.presentation.response_text == f"Before approval.\n\n{marker}"
                 assert pause.presentation.tool_trace == (trace_entry,)
             else:
                 with pytest.raises(PausePresentationError) as raised_delivery:
@@ -3353,7 +3358,7 @@ class TestStreamingBehavior:
                 session_id="session-1",
                 run_id="run-1",
                 requirements=(RunRequirement(tool),),
-                response_text=f"{raw_interactive}{marker}".rstrip(),
+                response_text=f"{raw_interactive}\n\n{marker}",
                 tool_trace=(trace_entry,),
                 toolkit_owners={("general", "inspect"): "test_toolkit"},
             ),
@@ -3361,7 +3366,7 @@ class TestStreamingBehavior:
 
         async def paused_stream() -> AsyncIterator[object]:
             yield StructuredStreamChunk(
-                content=f"{raw_interactive}{marker}",
+                content=f"{raw_interactive}\n\n{marker}",
                 tool_trace=[trace_entry],
             )
             raise pause
@@ -3385,8 +3390,8 @@ class TestStreamingBehavior:
 
         assert raised_pause.value is pause
         assert pause.presentation is not None
-        assert pause.presentation.response_text == f"{raw_interactive}{marker}".rstrip()
-        assert pause.presentation.rendered_response_text == f"{rendered_interactive}{marker}".rstrip()
+        assert pause.presentation.response_text == f"{raw_interactive}\n\n{marker}"
+        assert pause.presentation.rendered_response_text == f"{rendered_interactive}\n\n{marker}"
         assert pause.presentation.tool_trace == (trace_entry,)
 
     @pytest.mark.asyncio
@@ -4592,3 +4597,101 @@ async def test_a_failing_final_transform_still_delivers_the_streamed_answer(tmp_
 
     assert prepared is not None
     assert "the streamed answer" in prepared.content["body"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chunks", "expected_body", "expected_at", "expected_body_line"),
+    [
+        pytest.param(
+            [
+                ToolStarted(ToolExecution(tool_call_id="call-1", tool_name="read_file", tool_args={}).call),
+                ToolCompleted(ToolExecution(tool_call_id="call-1", tool_name="read_file", result="ok").call),
+                ToolStarted(ToolExecution(tool_call_id="call-2", tool_name="shell", tool_args={}).call),
+                ToolCompleted(ToolExecution(tool_call_id="call-2", tool_name="shell", result="ok").call),
+                TextDelta("Done!"),
+            ],
+            "Done!",
+            [0, 0],
+            [0, 0],
+            id="leading-tools",
+        ),
+        pytest.param(
+            [
+                TextDelta("Checking."),
+                ToolStarted(ToolExecution(tool_call_id="call-1", tool_name="read_file", tool_args={}).call),
+                ToolCompleted(ToolExecution(tool_call_id="call-1", tool_name="read_file", result="ok").call),
+                ToolStarted(ToolExecution(tool_call_id="call-2", tool_name="shell", tool_args={}).call),
+                ToolCompleted(ToolExecution(tool_call_id="call-2", tool_name="shell", result="ok").call),
+                TextDelta("Found it."),
+            ],
+            "Checking.\n\nFound it.",
+            [1, 1],
+            [2, 2],
+            id="between-paragraphs",
+        ),
+    ],
+)
+async def test_tool_markers_strip_to_clean_wire_body_without_blank_lines(
+    tmp_path: Path,
+    chunks: list[object],
+    expected_body: str,
+    expected_at: list[int],
+    expected_body_line: list[int],
+) -> None:
+    """Streaming, collected, and hidden-tool replies strip to a clean wire body and round-trip v2<->v3 byte-exact."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    paths = runtime_paths_for(config)
+    mock_client = _make_matrix_client_mock()
+    mock_response = MagicMock(spec=nio.RoomSendResponse)
+    mock_response.event_id = "$stream-1"
+    mock_client.room_send.return_value = mock_response
+
+    async def stream() -> AsyncIterator[object]:
+        for chunk in chunks:
+            yield chunk
+
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=paths,
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    await _consume_streaming_chunks_for_test(mock_client, stream(), streaming)
+    prepared = await streaming._prepare_delivery_async(is_final=True, allow_empty_progress=False)
+    assert prepared is not None
+    streamed_wire = tool_markers_out_of_text(prepared.content)
+    assert streamed_wire["body"] == expected_body
+    assert streamed_wire["io.mindroom.tool_trace"]["version"] == 3
+    assert [event["at"] for event in streamed_wire["io.mindroom.tool_trace"]["events"]] == expected_at
+    assert [event["body_line"] for event in streamed_wire["io.mindroom.tool_trace"]["events"]] == expected_body_line
+    assert tool_markers_in_text(streamed_wire) == prepared.content
+
+    collected_body, collected_trace = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
+    )
+    collected_content = format_message_with_mentions(
+        config,
+        paths,
+        collected_body,
+        extra_content=build_tool_trace_content(collected_trace),
+    )
+    collected_wire = tool_markers_out_of_text(collected_content)
+    assert collected_wire["body"] == expected_body
+    assert collected_wire["io.mindroom.tool_trace"]["version"] == 3
+    assert [event["at"] for event in collected_wire["io.mindroom.tool_trace"]["events"]] == expected_at
+    assert [event["body_line"] for event in collected_wire["io.mindroom.tool_trace"]["events"]] == expected_body_line
+    assert tool_markers_in_text(collected_wire) == collected_content
+
+    hidden = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=paths,
+        show_tool_calls=False,
+        **reply_hooks(),
+    )
+    await _consume_streaming_chunks_for_test(mock_client, stream(), hidden)
+    assert hidden.has_progress() is True
+    assert hidden.accumulated_text == expected_body
