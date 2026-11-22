@@ -1792,3 +1792,37 @@ async def test_a_call_whose_wait_is_refused_leaves_its_job_to_be_reported(
     finally:
         gate.set()
         await runtime.shutdown()
+
+
+class _QueueTools(Toolkit):
+    """A plugin's toolkit with a method of its own that happens to be named as the framework's job preparation."""
+
+    def __init__(self) -> None:
+        super().__init__(name="queue", tools=[self.summary])
+
+    def managed_job(self, job_id: str) -> str:
+        """Return the plugin's own name for a job, which has nothing to do with managed calls."""
+        return f"queue:{job_id}"
+
+    def summary(self) -> str:
+        """Say what is queued."""
+        return "queue empty"
+
+
+@pytest.mark.asyncio
+async def test_a_plugins_own_method_named_managed_job_does_not_make_its_toolkit_prepare_jobs(tmp_path: Path) -> None:
+    """Only a toolkit that opts in by its class prepares its calls' jobs: a method's name opts nothing in.
+
+    The reproducer of the second full review (Astra M2), which is a regression against main: the managed call
+    failed with `managed_job() got an unexpected keyword argument 'job_id'` before the tool ran.
+    """
+    context, runtime = await _managed_context(tmp_path)
+    actor = job_actor(*toolkit_job_tools(_QueueTools(), authored_name="queue").values())
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                outcome = await call_job_tool(actor, "summary")
+        assert (outcome.content, outcome.is_error) == ("queue empty", False)
+        assert execution.approval_can_run_as_job(actor.tools["summary"].function, _QueueTools())
+    finally:
+        await runtime.shutdown()

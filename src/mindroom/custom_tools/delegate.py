@@ -21,7 +21,7 @@ from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import CONTINUE_SUBAGENT, RUN_SUBAGENT
 from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_target
 from mindroom.delegation.workers import dedicated_worker_refusal, resource_profiles_available
-from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_jobs.runtime import ManagedJobToolkit, get_background_runtime
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.plugins import config_plugins
@@ -49,7 +49,7 @@ def _model_choice(name: str, model: ModelConfig) -> str:
     return f"{name} ({model.reasoning.describe()}; write {name}@<level>)" if model.reasoning else name
 
 
-class DelegateTools(Toolkit):
+class DelegateTools(Toolkit, ManagedJobToolkit):
     """Tools that let an agent run configured agents as fresh subagents."""
 
     def __init__(

@@ -20,7 +20,13 @@ from mindroom.matrix.state import resolve_room_aliases
 from mindroom.script_runs.manager import workflow_placement
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, BackgroundOutcome, JobSpec, get_background_runtime
+from mindroom.tool_jobs.runtime import (
+    TERMINAL_STATUSES,
+    BackgroundOutcome,
+    JobSpec,
+    ManagedJobToolkit,
+    get_background_runtime,
+)
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
@@ -121,7 +127,7 @@ _JOB_STATUS: dict[WorkflowRunState, Literal["completed", "failed", "cancelled", 
 }
 
 
-class WorkflowTools(Toolkit):
+class WorkflowTools(Toolkit, ManagedJobToolkit):
     """Start, read and cancel the workflow runs of one agent and requester."""
 
     def __init__(

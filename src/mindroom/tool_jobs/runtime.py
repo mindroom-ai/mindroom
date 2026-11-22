@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from operator import attrgetter
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
@@ -117,9 +117,12 @@ class JobSpec:
     handle: Callable[[BackgroundJob], str] | None = None
 
 
-@runtime_checkable
-class ManagedJobToolkit(Protocol):
-    """A toolkit that prepares the job a managed call of one of its functions runs as."""
+class ManagedJobToolkit:
+    """A toolkit that prepares the job a managed call of one of its functions runs as.
+
+    A toolkit opts in by this class, which only the framework's own toolkits have: a method that a plugin happens
+    to name `managed_job` opts nothing in.
+    """
 
     async def managed_job(
         self,
@@ -130,7 +133,7 @@ class ManagedJobToolkit(Protocol):
         runtime: ToolJobRuntime,
     ) -> JobSpec | str | None:
         """Return the job, the sentence that refuses the call, or None for a function that runs as any tool does."""
-        ...
+        raise NotImplementedError
 
 
 @dataclass(frozen=True)
