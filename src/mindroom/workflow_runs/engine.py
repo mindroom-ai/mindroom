@@ -982,7 +982,8 @@ class WorkflowEngine:
         if (run.parent_run_id, run.parent_node_key) != outer[:2]:
             return None
         if run.owner != run.origin_job_id:
-            return run.claims.get(str(run.origin_job_id)) or _TAKEN.format(run_id)
+            kept = run.claims.get(str(run.origin_job_id))
+            return _TAKEN.format(run_id) if kept is None else kept
 
         async def found() -> tuple[WorkflowRun, bool]:
             return run, False

@@ -885,3 +885,22 @@ async def test_script_tool_delegate_above_the_rate_limit_waits_and_then_runs(
         records.commit()
 
     assert (await _settled(stack, receipt)).result == "helped"
+
+
+@pytest.mark.asyncio
+async def test_empty_report_of_a_run_that_another_call_resumed_since_is_still_the_first_calls_report(
+    stack: WorkflowStack,
+) -> None:
+    """A report of no text is a report: the call that started the run gets it, not word that the run was taken."""
+    parent, child = await _cut_short(stack, _START)
+    assert set(await stack.recover()) == {parent, child.run_id}
+    await _report(stack, child.run_id, "")
+    stack.run_id = child.run_id
+    await stack.resume(child.run_id, owner="later")
+    await stack.finish_attempt(result="later")
+    stack.run_id = parent
+    model = stack.child_script(answer("done"))
+    await stack.continue_agents()
+
+    assert await stack.result("@0", "agent", _PROMPT) == "done"
+    assert "<start_workflow_result>\n\n</start_workflow_result>" in _sent(model)
