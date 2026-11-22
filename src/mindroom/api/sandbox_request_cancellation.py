@@ -102,7 +102,9 @@ def request_cancelled() -> bool:
     return running is not None and running.cancelled
 
 
-def _begin_cancel(request_id: str) -> tuple[bool, Callable[[], object] | None, Callable[[], bool | Awaitable[bool]] | None]:
+def _begin_cancel(
+    request_id: str,
+) -> tuple[bool, Callable[[], object] | None, Callable[[], bool | Awaitable[bool]] | None]:
     with _lock:
         running = _running.get(request_id)
         if running is None:
