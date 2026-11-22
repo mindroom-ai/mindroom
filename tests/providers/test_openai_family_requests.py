@@ -27,7 +27,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.request_messages import TurnMessages, build_request, build_resume_request, scope_history_messages
 from mindroom.history.types import HistoryScope
-from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, File, Image
+from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, Audio, File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, TurnCompleted
 from mindroom.llm.runs import RunRecord
@@ -756,6 +756,8 @@ def test_the_conversation_digest_is_the_one_stored_responses_recorded() -> None:
             role="user",
             content="What should I pack? Café ☕",
             images=[Image(id="img_1", url="https://example.test/a.png")],
+            audio=[Audio(id="audio_1", content=b"RIFF", format="wav")],
+            files=[File(id="file_1", content=b"notes", mime_type="text/plain", filename="notes.txt")],
         ),
         Message(
             role="assistant",
@@ -765,13 +767,13 @@ def test_the_conversation_digest_is_the_one_stored_responses_recorded() -> None:
                     "id": "call_1",
                     "type": "function",
                     "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
-                }
+                },
             ],
         ),
         Message(role="tool", content="Sunny, 21°C", tool_call_id="call_1"),
     ]
 
-    assert conversation_digest(messages) == "640fe1f9d4adc2431dbd3a0a4e7bc47b8da640b5d0bba4f3cfe8a9dd9b3d3cfe"
+    assert conversation_digest(messages) == "3fc622e2bd6b317a54a71aff6aec2957d51ba38cf22bf2fd1fb3126cc5cc388c"
     assert conversation_digest([]) == "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 
 

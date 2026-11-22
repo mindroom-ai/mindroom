@@ -282,8 +282,8 @@ async def test_the_history_is_encoded_off_the_event_loop_one_message_at_a_time(
 ) -> None:
     """No JSON encoding of the history runs on the event loop, and each message encodes in its own call.
 
-    The encoder holds the GIL through one call, so a worker thread encoding the whole history at once would stall the
-    loop as long as encoding it there; between calls the loop takes the GIL back.
+    The encoder holds the GIL through one call, so a worker thread encoding the whole history at once could still
+    stall the loop for most of that call; between calls the loop takes the GIL back.
     """
     loop_thread = threading.current_thread()
     dumps = json.dumps

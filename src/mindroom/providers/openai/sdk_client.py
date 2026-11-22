@@ -18,8 +18,8 @@ __all__ = ["AsyncOpenAI", "encoded_body"]
 def encoded_body(body: dict[Any, Any]) -> bytes:
     """Return the bytes the SDK encodes ``body`` to, from each member and each item of a list member encoded alone.
 
-    The JSON encoder holds the GIL through one call, so a worker thread encoding a long history in one call stalls the
-    event loop as long as encoding it on the loop would; between calls the loop takes the GIL back. Each member is
+    The JSON encoder holds the GIL through one call, so a worker thread encoding a long history in one call can still
+    stall the event loop for most of that call; between calls the loop takes the GIL back. Each member is
     encoded as a one-member object without its braces, so its key is written as the encoder writes keys.
     """
     members = []
