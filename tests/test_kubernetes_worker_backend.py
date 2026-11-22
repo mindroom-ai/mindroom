@@ -1024,6 +1024,7 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
         committed_runtime,
         tool_validation_snapshot=_TEST_TOOL_VALIDATION_SNAPSHOT,
         public_runtime=True,
+        eager_setup_plugins=[],
     )
     assert deployment["spec"]["template"]["spec"]["securityContext"] == {
         "runAsUser": 1000,
@@ -2645,6 +2646,7 @@ def test_kubernetes_backend_renders_configured_annotations_on_worker_pod_templat
         committed_runtime,
         tool_validation_snapshot=_TEST_TOOL_VALIDATION_SNAPSHOT,
         public_runtime=True,
+        eager_setup_plugins=[],
     )
     assert annotations[ANNOTATION_WORKER_KEY] != "user-supplied-value"
     assert annotations[_ANNOTATION_STARTUP_MANIFEST_HASH] != "user-supplied-value"
@@ -5595,6 +5597,7 @@ def test_kubernetes_maintenance_reconciles_against_the_launch_it_is_given(tmp_pa
         ),
         tool_validation_snapshot=updated_snapshot,
         public_runtime=True,
+        eager_setup_plugins=[],
     )
 
 
@@ -6309,7 +6312,7 @@ def test_kubernetes_worker_health_read_times_out(monkeypatch: pytest.MonkeyPatch
         def __exit__(self, *_args: object) -> None:
             return None
 
-        def get(self, _url: str, *, timeout: httpx.Timeout) -> httpx.Response:
+        def get(self, _url: str, *, timeout: httpx.Timeout) -> httpx.Response:  # noqa: ARG002
             message = "connection refused"
             raise httpx.ConnectError(message)
 

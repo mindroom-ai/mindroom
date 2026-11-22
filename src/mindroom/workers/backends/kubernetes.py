@@ -80,6 +80,8 @@ from .kubernetes_config import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+    import httpx
+
     from mindroom.constants import RuntimePaths
 
 __all__ = [
@@ -113,6 +115,15 @@ _RESTART_RUNTIME_HINT = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _reported_setup(health: httpx.Response) -> object:
+    """Return the state of its eager setup that a worker's health answer reports, or None when it reports none."""
+    try:
+        payload = health.json()
+    except ValueError:
+        return None
+    return payload.get("setup") if isinstance(payload, dict) else None
 
 
 @contextmanager
@@ -380,7 +391,8 @@ class KubernetesWorkerBackend:
                 )
                 if reporter is not None:
                     reporter.mark("pod_ready")
-                if not self._ready_worker_needs_replacement(worker_id, is_replacement=replacing_stale_worker):
+                health = self._compatible_worker_health(worker_id, is_replacement=replacing_stale_worker)
+                if health is not None:
                     break
                 # A mutable tag such as `:latest` keeps an older pod running after an upgrade, and
                 # the template is unchanged, so only a new pod pulls the tag again under `Always`.
@@ -411,7 +423,7 @@ class KubernetesWorkerBackend:
             raise WorkerBackendError(failure_reason) from exc
 
         if reporter is not None:
-            self._wait_for_worker_setup(worker_id, reporter)
+            self._wait_for_worker_setup(worker_id, reporter, health)
             reporter.finish(None)
         final_deployment_annotations = {
             **dict(deployment.metadata.annotations or {}),
@@ -437,7 +449,7 @@ class KubernetesWorkerBackend:
         )
         return handle
 
-    def _wait_for_worker_setup(self, worker_id: str, reporter: WorkerStartReporter) -> None:
+    def _wait_for_worker_setup(self, worker_id: str, reporter: WorkerStartReporter, health: httpx.Response) -> None:
         """Wait while a worker that just started reports it is still preparing itself, reporting that as progress.
 
         The worker is ready already and prepares on its first call whatever is still missing, so the call goes on when
@@ -445,23 +457,23 @@ class KubernetesWorkerBackend:
         """
         reporter.preparing()
         deadline = time.monotonic() + self.config.setup_timeout_seconds
-        while True:
+        while (setup := _reported_setup(health)) == "preparing" and time.monotonic() < deadline:
+            time.sleep(_SETUP_POLL_INTERVAL_SECONDS)
             try:
                 health = self._resources.read_worker_health(worker_id, timeout_seconds=_SETUP_HEALTH_TIMEOUT_SECONDS)
-                payload = health.json()
-            except (WorkerBackendError, ValueError):
-                payload = None
-            setup = payload.get("setup") if isinstance(payload, dict) else None
-            if setup != "preparing" or time.monotonic() >= deadline:
+            except WorkerBackendError:
                 break
-            time.sleep(_SETUP_POLL_INTERVAL_SECONDS)
         if setup not in {None, "ready"}:
             logger.warning("Worker %s did not finish its setup (%s); its first call prepares it", worker_id, setup)
 
-    def _ready_worker_needs_replacement(self, worker_id: str, *, is_replacement: bool) -> bool:
-        """Return whether the ready worker speaks another protocol, refusing a replacement that still does."""
+    def _compatible_worker_health(self, worker_id: str, *, is_replacement: bool) -> httpx.Response | None:
+        """Return the ready worker's health answer, or None when it speaks another protocol and gets replaced.
+
+        A replacement that still speaks another protocol is refused.
+        """
+        health = self._resources.read_worker_health(worker_id, timeout_seconds=self.config.ready_timeout_seconds)
         mismatch = ready_worker_protocol_mismatch(
-            self._resources.read_worker_health(worker_id, timeout_seconds=self.config.ready_timeout_seconds),
+            health,
             worker=f"Kubernetes worker image '{self.config.image}'",
             # Under `Always` kubelet resolves the tag on every start, so no node can serve an older cached copy.
             older_worker_hint=None if self.config.image_pull_policy == "Always" else _CACHED_IMAGE_HINT,
@@ -470,7 +482,7 @@ class KubernetesWorkerBackend:
         if mismatch is not None and is_replacement:
             # A worker is replaced once; a replacement that still mismatches fails the request.
             raise WorkerBackendError(mismatch.error)
-        return mismatch is not None
+        return health if mismatch is None else None
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
