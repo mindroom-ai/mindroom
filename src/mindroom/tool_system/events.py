@@ -9,9 +9,8 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.constants import (
+    NONTERMINAL_STREAM_STATUSES,
     STREAM_STATUS_KEY,
-    STREAM_STATUS_PENDING,
-    STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
 )
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
@@ -27,7 +26,6 @@ _TOOL_TRACE_KEY = "io.mindroom.tool_trace"
 _TOOL_TRACE_VERSION = 3
 # Version 2 has its markers in the text, as the pipeline builds a reply before sending it.
 _MARKED_TEXT_VERSION = 2
-_NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 
 _MAX_TOOL_ARGS_PREVIEW_CHARS = 1200
 _MAX_TOOL_ARG_VALUE_PREVIEW_CHARS = 250
@@ -799,12 +797,18 @@ def _layer_without_markers(layer: Mapping[str, Any], fallback: str | None) -> tu
     events = [{**event, **places.get(index, {})} for index, event in enumerate(payload["events"], start=1)]
     remaining_html = "".join(pieces) + html[cursor:]
     if not any(line.strip() for line in kept):
-        if kept or other or not body_lines or len(body_lines) != len(blocks) or remaining_html:
+        # Emit placeholder_body only for non-terminal streaming replies (never committed to the durable outbox),
+        # so rolling back to an older backend never breaks exact outbox recovery on terminal replies.
+        if (
+            kept
+            or other
+            or not body_lines
+            or len(body_lines) != len(blocks)
+            or remaining_html
+            or layer.get(STREAM_STATUS_KEY) not in NONTERMINAL_STREAM_STATUSES
+        ):
             return None
-        if layer.get(STREAM_STATUS_KEY) in _NONTERMINAL_STREAM_STATUSES:
-            placeholder = "Thinking..."
-        else:
-            placeholder = "1 tool call" if len(body_lines) == 1 else f"{len(body_lines)} tool calls"
+        placeholder = "Thinking..."
         return {
             **layer,
             "body": placeholder,

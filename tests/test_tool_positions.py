@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
+from mindroom import reply_lifecycle as rl
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
@@ -52,7 +53,9 @@ from mindroom.matrix.client_visible_messages import (
 from mindroom.matrix.conversation_reads import projected_thread_history
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from mindroom.matrix.large_messages import (
+    _MATRIX_EVENT_HARD_LIMIT,
     EDIT_MESSAGE_SIZE_LIMIT,
+    _calculate_delivery_event_size,
     calculate_event_size,
     should_send_oversized_nonterminal_streaming_edit,
 )
@@ -67,7 +70,11 @@ from mindroom.matrix.room_history_reads import (
     find_outbox_delivery_event_id_via_room_messages,
     missing_outbox_delivery_copy_indices_via_room_messages,
 )
+from mindroom.message_target import MessageTarget
 from mindroom.mid_turn import MidTurnGate, MidTurnOutcome, QueuedMessage
+from mindroom.reply_presentation import Presentation, encode_presentation
+from mindroom.reply_scope import ReplyWrite
+from mindroom.response_sources import ResponseSources
 from mindroom.tool_system import events
 from mindroom.tool_system.events import (
     ToolTraceEntry,
@@ -81,6 +88,7 @@ from tests.cpu_budget_helpers import cpu_budget
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_matrix_api_tool import _make_context
 from tests.test_mentions import _default_runtime_paths, _make_config, _runtime_paths_for
+from tests.test_response_delivery_gateway import _gateway
 from tests.tool_position_helpers import _CASES, _SENT_CASES, _SHELL, _TRACE_KEY, _case, _content, _marked, _sent, _wire
 
 if TYPE_CHECKING:
@@ -255,80 +263,150 @@ async def test_an_edit_bound_to_its_target_when_its_row_is_claimed_sends_no_mark
     assert tool_markers_in_text(wire) == row
 
 
+_USABLE_ENCRYPTED_SIDECAR = (
+    "mxc://localhost/full",
+    {
+        "size": 100,
+        "mimetype": "application/json",
+        "url": "mxc://localhost/full",
+        "key": {"k": "secret"},
+        "iv": "iv",
+        "hashes": {"sha256": "hash"},
+        "v": "v2",
+    },
+)
+
+
 @pytest.mark.asyncio
-async def test_a_late_bound_sidecar_edit_row_uses_the_clean_preview_as_its_fallback() -> None:
-    """A sidecar reply row bound late must wrap its bounded clean preview, never the unbounded marked reply_row.new_text."""
+@pytest.mark.parametrize(
+    ("upload_result", "expect_sidecar"),
+    [(_USABLE_ENCRYPTED_SIDECAR, True), ((None, None), False)],
+    ids=["usable-sidecar", "upload-failure-fallback"],
+)
+async def test_a_late_bound_large_edit_freezes_clean_fallback_and_fits_after_wrapping(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    upload_result: tuple[str | None, dict[str, Any] | None],
+    expect_sidecar: bool,
+) -> None:
+    """A late-bound edit freezes a clean bounded new_text and budgets for the m.replace wrapper on sidecar and fallback."""
+    outbox = journal_store.principal("principal")
+    gateway = _gateway(tmp_path, outbox)
+    gateway.deps.runtime.client.user_id = _AGENT
+    gateway.deps.runtime.client.rooms[_ROOM] = next(iter(gateway.deps.runtime.client.rooms.values()))
+    gateway.deps.runtime.client.room_send = AsyncMock(return_value=None)
+    # Claim a reply whose INITIAL row has not yet bound a Matrix event ID (event_id=None).
+    claimed = await outbox.replies.claim(
+        rl.ClaimRequest(
+            span_id="span-1",
+            delivery_id="$src",
+            sources=ResponseSources(pending_event_ids=("$src",), logical_source_event_ids=("$src",)),
+            bot_generation="gen-1",
+            now_ns=1,
+            new_reply_id="reply-1",
+            entity_name="agent",
+            room_id=_ROOM,
+            thread_id=None,
+            membership_epoch=await outbox.membership_epoch(_ROOM),
+            empty_presentation=encode_presentation(Presentation()),
+        ),
+    )
+    reply = claimed.transition.reply
+    span = claimed.transition.claimed
+    assert reply is not None
+    assert span is not None
+    assert reply.event_id is None
+
     replacement = _large(3, 80_000)
-    client = _client()
-    usable_sidecar = (
-        "mxc://localhost/full",
-        {
-            "size": 100,
-            "mimetype": "application/json",
-            "url": "mxc://localhost/full",
-            "key": {"k": "secret"},
-            "iv": "iv",
-            "hashes": {"sha256": "hash"},
-            "v": "v2",
-        },
+    shown = Presentation()
+    write = ReplyWrite(
+        span=span,
+        stage=rl.WriteStage.FINAL,
+        shown=shown,
+        decide=lambda current, active: rl.finish(
+            current,
+            active,
+            rl.TerminalWrite(
+                shown=encode_presentation(shown),
+                prepared_revision=current.revision,
+                state=rl.ReplyState.COMPLETED,
+            ),
+            now_ns=2,
+        ),
     )
 
-    with patch("mindroom.matrix.large_messages.upload_json_sidecar", new=AsyncMock(return_value=usable_sidecar)):
-        payload = await prepare_message_content(
-            client,
-            _ROOM,
-            matrix_delivery_payload("principal", "$turn", DeliveryStage.EDIT, replacement),
+    with patch("mindroom.matrix.large_messages.upload_json_sidecar", new=AsyncMock(return_value=upload_result)):
+        await gateway._deliver_reply_write(
+            write,
+            target=MessageTarget.resolve(_ROOM, None, "$src"),
+            content=replacement,
+            new_text=replacement["body"],
+            result=None,
         )
-    assert isinstance(payload, dict)
-    assert "io.mindroom.long_text" in payload
+
+    enqueued_row = await outbox.load_matrix_delivery(delivery_id="$src", stage=DeliveryStage.FINAL)
+    assert enqueued_row is not None
+    assert enqueued_row.reply_row is not None
+    assert ("io.mindroom.long_text" in enqueued_row.payload) is expect_sidecar
+    assert enqueued_row.reply_row.new_text == enqueued_row.payload["body"]
+    assert "🔧" not in enqueued_row.reply_row.new_text
+
+    wrapped = _reply_row_wire_content(replace(enqueued_row, edits_event_id="$" + "e" * 43))
+    _assert_no_raw_markers_on_wire(wrapped)
+    assert wrapped["body"] == f"* {enqueued_row.payload['body']}"
+    for room_encrypted in (False, True):
+        size = _calculate_delivery_event_size(
+            wrapped,
+            room_id=_ROOM,
+            room_encrypted=room_encrypted,
+            device_id="CURRENT-DEVICE",
+        )
+        assert size <= _MATRIX_EVENT_HARD_LIMIT
+
+
+def test_pre_upgrade_late_bound_sidecar_row_keeps_verbatim_new_text_for_exact_recovery() -> None:
+    """Claim-time wrapping must preserve a pre-upgrade row's frozen new_text verbatim so exact recovery never resends."""
+    preview_payload = {
+        "msgtype": "m.file",
+        "body": "clean preview",
+        "format": "org.matrix.custom.html",
+        "formatted_body": "<p>clean preview</p>\n",
+        "url": "mxc://localhost/full",
+        "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+    }
+    pre_upgrade_new_text = "🔧 `shell` [1]\n\npre-upgrade original text"
     claimed = MatrixDelivery(
         delivery_id="$turn",
-        stage=DeliveryStage.EDIT,
+        stage=DeliveryStage.FINAL,
         room_id=_ROOM,
         membership_epoch=0,
         thread_id=None,
         transaction_id="tx",
-        payload=payload,
+        payload=preview_payload,
         edits_event_id="$reply",
         acknowledged_event_id=None,
         created_at_ns=0,
         reply_id="reply",
-        reply_row=ReplyRowFacts(placeholder_only=False, new_text=replacement["body"]),
+        reply_row=ReplyRowFacts(placeholder_only=False, new_text=pre_upgrade_new_text),
     )
 
-    row = _reply_row_wire_content(claimed)
+    wrapped = _reply_row_wire_content(claimed)
 
-    assert row["body"] == f"* {payload['body']}"
-    assert "🔧" not in row["body"]
-    assert "🔧" not in row["formatted_body"]
-    assert "🔧" not in row["m.new_content"]["body"]
-    assert "🔧" not in row["m.new_content"]["formatted_body"]
-    assert len(row["body"]) < len(replacement["body"])
+    assert wrapped["body"] == f"* {pre_upgrade_new_text}"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("edit", [False, True])
-@pytest.mark.parametrize(
-    ("calls", "stream_status", "expected_placeholder"),
-    [
-        (1, None, "1 tool call"),
-        (2, None, "2 tool calls"),
-        (1, STREAM_STATUS_COMPLETED, "1 tool call"),
-        (2, STREAM_STATUS_PENDING, "Thinking..."),
-        (2, STREAM_STATUS_STREAMING, "Thinking..."),
-    ],
-)
-async def test_a_canonical_reply_of_calls_alone_sends_a_placeholder_and_restores_exactly(
+@pytest.mark.parametrize("calls", [1, 2])
+@pytest.mark.parametrize("stream_status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
+async def test_a_canonical_streaming_reply_of_calls_alone_sends_thinking_placeholder_and_restores_exactly(
     calls: int,
-    stream_status: str | None,
-    expected_placeholder: str,
+    stream_status: str,
     edit: bool,
 ) -> None:
-    """Canonical tool-calls-only replies go out as v3 with a plain-client placeholder and placeholder_body=True."""
+    """Non-terminal tool-calls-only replies go out as v3 with Thinking... and placeholder_body=True."""
     body = "\n\n".join(f"🔧 `shell` [{index}]" for index in range(1, calls + 1))
-    built = _marked(body, [_SHELL] * calls)
-    if stream_status is not None:
-        built[STREAM_STATUS_KEY] = stream_status
+    built = {**_marked(body, [_SHELL] * calls), STREAM_STATUS_KEY: stream_status}
     content = build_edit_event_content(event_id="$reply", new_content=built, new_text=body) if edit else built
     client = _client()
 
@@ -336,18 +414,18 @@ async def test_a_canonical_reply_of_calls_alone_sends_a_placeholder_and_restores
 
     wire = _on_the_wire(client)
     inner = wire["m.new_content"] if edit else wire
-    assert inner["body"] == expected_placeholder
-    assert inner["formatted_body"] == f"<p>{expected_placeholder}</p>\n"
+    assert inner["body"] == "Thinking..."
+    assert inner["formatted_body"] == "<p>Thinking...</p>\n"
     assert inner[_TRACE_KEY]["version"] == 3
     assert inner[_TRACE_KEY]["placeholder_body"] is True
     assert "🔧" not in inner["body"]
     assert "🔧" not in inner["formatted_body"]
     if edit:
-        assert wire["body"] == f"* {expected_placeholder}"
-        assert wire["formatted_body"] == f"<p>{expected_placeholder}</p>\n"
+        assert wire["body"] == "* Thinking..."
+        assert wire["formatted_body"] == "<p>Thinking...</p>\n"
         assert "🔧" not in wire["body"]
     # Even a reader that does not put markers back sees non-empty placeholder text.
-    assert message_judgment_text(_message(inner)) == expected_placeholder
+    assert message_judgment_text(_message(inner)) == "Thinking..."
     # Restoring markers reproduces the built content byte-for-byte without placeholder_body.
     restored = tool_markers_in_text(wire)
     assert restored == content
@@ -357,10 +435,36 @@ async def test_a_canonical_reply_of_calls_alone_sends_a_placeholder_and_restores
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("edit", [False, True])
-async def test_a_non_canonical_reply_of_calls_alone_stays_version_2(edit: bool) -> None:
-    """Extra blank lines or leftover HTML keep v2 so byte-exact round-trip is never relaxed."""
-    body = "🔧 `shell` [1]\n\n \n\n🔧 `shell` [2]\n\n"
+@pytest.mark.parametrize("stream_status", [None, STREAM_STATUS_COMPLETED])
+@pytest.mark.parametrize("body", ["🔧 `shell` [1]\n\n🔧 `shell` [2]", "🔧 `shell` [1]\n\n \n\n🔧 `shell` [2]\n\n"])
+async def test_a_terminal_reply_of_calls_alone_is_sent_with_its_markers_in_its_text(
+    body: str,
+    stream_status: str | None,
+    edit: bool,
+) -> None:
+    """Terminal tool-calls-only replies stay v2 so rollback to an older backend never breaks exact outbox recovery."""
     built = _content(body, "<p>🔧 <code>shell</code> [1]</p>\n<p>🔧 <code>shell</code> [2]</p>\n", 2, [_SHELL, _SHELL])
+    if stream_status is not None:
+        built[STREAM_STATUS_KEY] = stream_status
+    content = build_edit_event_content(event_id="$reply", new_content=built, new_text=body) if edit else built
+    client = _client()
+
+    await send_message_result(client, _ROOM, content)
+
+    wire = _on_the_wire(client)
+    assert wire is content
+    assert message_judgment_text(_message(wire.get("m.new_content", wire))) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", [False, True])
+async def test_a_non_canonical_streaming_reply_of_calls_alone_stays_version_2(edit: bool) -> None:
+    """Extra blank lines or leftover HTML keep v2 even while streaming so byte-exact round-trip is never relaxed."""
+    body = "🔧 `shell` [1]\n\n \n\n🔧 `shell` [2]\n\n"
+    built = {
+        **_content(body, "<p>🔧 <code>shell</code> [1]</p>\n<p>🔧 <code>shell</code> [2]</p>\n", 2, [_SHELL, _SHELL]),
+        STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+    }
     content = build_edit_event_content(event_id="$reply", new_content=built, new_text=body) if edit else built
     client = _client()
 
@@ -373,21 +477,24 @@ async def test_a_non_canonical_reply_of_calls_alone_stays_version_2(edit: bool) 
 
 @pytest.mark.asyncio
 async def test_an_edit_with_prose_after_an_edit_of_calls_alone_is_read_as_it_was_built() -> None:
-    """Calls alone use a placeholder_body v3 envelope, and the prose after them uses a normal v3 envelope."""
-    calls, prose = _marked("🔧 `shell` [1]", [_SHELL]), _marked("🔧 `shell` [1]\n\nFound it.", [_SHELL])
+    """Streaming calls-alone edits use placeholder_body v3; terminal calls-alone stay v2; prose uses normal v3."""
+    streaming_calls = {**_marked("🔧 `shell` [1]", [_SHELL]), STREAM_STATUS_KEY: STREAM_STATUS_STREAMING}
+    terminal_calls = _marked("🔧 `shell` [1]", [_SHELL])
+    prose = _marked("🔧 `shell` [1]\n\nFound it.", [_SHELL])
     edits = [
         build_edit_event_content(event_id="$reply", new_content=built, new_text=built["body"])
-        for built in (calls, prose)
+        for built in (streaming_calls, terminal_calls, prose)
     ]
 
     held = [tool_markers_out_of_text(edit) for edit in edits]
 
-    assert held[0]["body"] == "* 1 tool call"
-    assert held[0]["m.new_content"]["body"] == "1 tool call"
+    assert held[0]["body"] == "* Thinking..."
+    assert held[0]["m.new_content"]["body"] == "Thinking..."
     assert held[0]["m.new_content"][_TRACE_KEY]["version"] == 3
     assert held[0]["m.new_content"][_TRACE_KEY]["placeholder_body"] is True
-    assert (held[1]["body"], held[1]["m.new_content"][_TRACE_KEY]["version"]) == ("* Found it.", 3)
-    for built, wire in zip((calls, prose), held, strict=True):
+    assert held[1] is edits[1]
+    assert (held[2]["body"], held[2]["m.new_content"][_TRACE_KEY]["version"]) == ("* Found it.", 3)
+    for built, wire in zip((streaming_calls, terminal_calls, prose), held, strict=True):
         assert await extract_edit_body(_event(wire, "$edit")) == (built["body"], built)
 
 
@@ -810,14 +917,9 @@ async def test_a_reply_of_calls_alone_by_an_agent_this_runtime_does_not_run_leav
     agent = registry.current_ids["general"].full_id
     case = _case("a reply of calls alone")
     built, held = _sent(case), _wire(case)
-    legacy_held = {
-        **held,
-        "body": "",
-        "formatted_body": "",
-        _TRACE_KEY: {key: value for key, value in held[_TRACE_KEY].items() if key != "placeholder_body"},
-    }
-    assert held["body"] == "2 tool calls"
-    assert legacy_held["body"] == ""
+    streaming_held = _wire(_case("a streaming reply of calls alone"))
+    assert held["body"] == ""
+    assert streaming_held["body"] == "Thinking..."
 
     def synced(event_id: str, ts: int, sender: str, content: dict[str, Any]) -> VisibleMessage:
         """Return the row of one event as this agent's sync stores it."""
@@ -861,7 +963,7 @@ async def test_a_reply_of_calls_alone_by_an_agent_this_runtime_does_not_run_leav
 
     assert await judged(built) == (MidTurnOutcome.WAIT, 1)
     assert await judged(held) == (MidTurnOutcome.WAIT, 1)
-    assert await judged(legacy_held) == (MidTurnOutcome.WAIT, 1)
+    assert await judged(streaming_held) == (MidTurnOutcome.WAIT, 1)
 
 
 @pytest.mark.asyncio
@@ -876,14 +978,14 @@ async def test_a_reply_stored_as_matrix_holds_it_is_read_with_its_markers_in_its
     """
     config, paths = runtime.config, runtime.runtime_paths
     held = _wire(_case("a reply of calls alone"))
-    legacy_held = {
+    placeholder_held = {
         **held,
-        "body": "",
-        "formatted_body": "",
-        _TRACE_KEY: {key: value for key, value in held[_TRACE_KEY].items() if key != "placeholder_body"},
+        "body": "2 tool calls",
+        "formatted_body": "<p>2 tool calls</p>\n",
+        _TRACE_KEY: {**held[_TRACE_KEY], "placeholder_body": True},
     }
-    assert held["body"] == "2 tool calls"
-    assert legacy_held["body"] == ""
+    assert held["body"] == ""
+    assert placeholder_held["body"] == "2 tool calls"
 
     def synced(event_id: str, ts: int, sender: str, content: dict[str, Any]) -> ProjectedEvent:
         """Return the row this release's sync stores for one event of the thread."""
@@ -927,7 +1029,7 @@ async def test_a_reply_stored_as_matrix_holds_it_is_read_with_its_markers_in_its
     assert read is not None
     assert "shell" in read[1].text
     assert await judged("the release before", replace(by_this_release, content=held)) == read
-    assert await judged("legacy empty v3", replace(by_this_release, content=legacy_held)) == read
+    assert await judged("placeholder v3", replace(by_this_release, content=placeholder_held)) == read
 
 
 @pytest.mark.asyncio
@@ -1129,25 +1231,47 @@ def test_a_trace_with_an_entry_that_is_no_call_names_no_marker() -> None:
     assert "shell" not in (message_judgment_text(_message(content)) or "")
 
 
-def test_legacy_empty_body_v3_without_placeholder_body_still_restores_markers() -> None:
-    """Older v3 messages with empty body/formatted_body and no placeholder_body still read back identically."""
+def test_placeholder_body_reader_restores_non_streaming_placeholders_and_legacy_empty_v3() -> None:
+    """The reader supports placeholder_body=True for any stream_status as well as legacy empty-body v3."""
     case = _case("a reply of calls alone")
     sent = _sent(case)
-    wire = _wire(case)
-    legacy_wire = {
-        **wire,
-        "body": "",
-        "formatted_body": "",
-        _TRACE_KEY: {key: value for key, value in wire[_TRACE_KEY].items() if key != "placeholder_body"},
-    }
+    legacy_wire = _wire(case)
+    assert legacy_wire["body"] == ""
+    assert "placeholder_body" not in legacy_wire[_TRACE_KEY]
     assert tool_markers_in_text(legacy_wire) == sent
 
-    edit = build_edit_event_content(event_id="$reply", new_content=sent, new_text=sent["body"])
-    legacy_edit = {
-        **edit,
-        "body": "* ",
-        "formatted_body": "",
-        _TRACE_KEY: legacy_wire[_TRACE_KEY],
-        "m.new_content": legacy_wire,
+    non_streaming_placeholder = {
+        **legacy_wire,
+        "body": "2 tool calls",
+        "formatted_body": "<p>2 tool calls</p>\n",
+        _TRACE_KEY: {**legacy_wire[_TRACE_KEY], "placeholder_body": True},
     }
-    assert tool_markers_in_text(legacy_edit) == edit
+    restored = tool_markers_in_text(non_streaming_placeholder)
+    assert restored == sent
+    assert "placeholder_body" not in restored[_TRACE_KEY]
+
+    edit = build_edit_event_content(event_id="$reply", new_content=sent, new_text=sent["body"])
+    placeholder_edit = {
+        **edit,
+        "body": "* 2 tool calls",
+        "formatted_body": "<p>2 tool calls</p>\n",
+        _TRACE_KEY: non_streaming_placeholder[_TRACE_KEY],
+        "m.new_content": non_streaming_placeholder,
+    }
+    assert tool_markers_in_text(placeholder_edit) == edit
+
+
+@pytest.mark.parametrize(
+    "bad_position",
+    [
+        {"body_line": 1, "at": 0},
+        {"body_line": 0, "at": 1},
+        {"body_line": -1, "at": 0},
+        {"body_line": 0, "at": -1},
+    ],
+)
+def test_placeholder_body_reader_rejects_nonzero_positions(bad_position: dict[str, int]) -> None:
+    """Malformed placeholder_body=True traces with non-zero positions are left untouched."""
+    wire = _wire(_case("a streaming reply of calls alone"))
+    wire[_TRACE_KEY]["events"][0].update(bad_position)
+    assert tool_markers_in_text(wire) is wire

@@ -19,6 +19,7 @@ from mindroom.constants import (
     CALL_TRANSCRIPT_CONTENT_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     HOOK_SOURCE_KEY,
+    NONTERMINAL_STREAM_STATUSES,
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
@@ -28,8 +29,6 @@ from mindroom.constants import (
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
-    STREAM_STATUS_PENDING,
-    STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
     TOOL_TRACE_CONTENT_KEY,
@@ -42,7 +41,7 @@ from mindroom.live_frames.frames import utf16_length
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
-from mindroom.matrix.message_builder import markdown_to_html
+from mindroom.matrix.message_builder import build_matrix_edit_content, markdown_to_html
 from mindroom.matrix_identifiers import has_agent_username
 from mindroom.tool_system.events import tool_markers_out_of_text
 
@@ -90,7 +89,7 @@ _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
     },
 )
 _FILE_FALLBACK_KEYS = ("url", "file", "filename", "info")
-_NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
+_LATE_BOUND_EDIT_PLACEHOLDER_EVENT_ID = "$" + "x" * 43
 _NONTERMINAL_STREAM_PREVIEW_BYTES = 12000
 _PREVIEW_SHRINK_MARGIN = 0.9
 _MATRIX_EVENT_HARD_LIMIT = 64000
@@ -255,11 +254,27 @@ def _calculate_delivery_event_size(
     return calculate_event_size(estimated_content)
 
 
+def _late_bound_edit_envelope(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Wrap one replacement payload as ``_reply_row_wire_content`` wraps it when claimed."""
+    new_text = str(candidate.get("body", ""))
+    envelope = build_matrix_edit_content(_LATE_BOUND_EDIT_PLACEHOLDER_EVENT_ID, candidate)
+    envelope.update(
+        {
+            "msgtype": candidate.get("msgtype", "m.text"),
+            "body": f"* {new_text}",
+            "format": "org.matrix.custom.html",
+            "formatted_body": candidate.get("formatted_body", new_text),
+        },
+    )
+    return envelope
+
+
 def _delivery_event_size_calculator(
     client: nio.AsyncClient,
     *,
     room_id: str,
     room_encrypted: bool,
+    edit_wrapper_budget: bool = False,
 ) -> Callable[[dict[str, Any]], int]:
     """Bind the currently observed delivery fields for size estimation."""
     device_id: str | None = None
@@ -269,8 +284,9 @@ def _delivery_event_size_calculator(
         device_id = raw_device_id if isinstance(raw_device_id, str) else None
 
     def calculate(candidate: dict[str, Any]) -> int:
+        measured = _late_bound_edit_envelope(candidate) if edit_wrapper_budget else candidate
         return _calculate_delivery_event_size(
-            candidate,
+            measured,
             room_id=room_id,
             room_encrypted=room_encrypted,
             device_id=device_id,
@@ -288,7 +304,7 @@ def is_edit_message(content: dict[str, Any]) -> bool:
 
 def _is_nonterminal_stream_content(content: dict[str, Any]) -> bool:
     """Return whether content is an in-progress streaming payload."""
-    return content.get(STREAM_STATUS_KEY) in _NONTERMINAL_STREAM_STATUSES
+    return content.get(STREAM_STATUS_KEY) in NONTERMINAL_STREAM_STATUSES
 
 
 def _prune_expired_oversized_nonterminal_streaming_edit_rate_limits(now: float) -> None:
@@ -661,6 +677,7 @@ def fit_reasoning_to_ordinary_event(
     *,
     room_encrypted: bool,
     size_limit: int | None = None,
+    edit_wrapper_budget: bool = False,
 ) -> dict[str, Any]:
     """Keep a reply's reasoning from pushing an ordinary-size reply into a sidecar or segments.
 
@@ -674,8 +691,14 @@ def fit_reasoning_to_ordinary_event(
     reasoning = holder.get(REASONING_CONTENT_KEY) or content.get(REASONING_CONTENT_KEY)
     if not isinstance(reasoning, dict) or not isinstance(reasoning.get("text"), str):
         return content
-    limit = size_limit or (EDIT_MESSAGE_SIZE_LIMIT if is_edit_message(content) else _NORMAL_MESSAGE_LIMIT)
-    delivery_size = _delivery_event_size_calculator(client, room_id=room_id, room_encrypted=room_encrypted)
+    is_edit = is_edit_message(content)
+    limit = size_limit or (EDIT_MESSAGE_SIZE_LIMIT if is_edit or edit_wrapper_budget else _NORMAL_MESSAGE_LIMIT)
+    delivery_size = _delivery_event_size_calculator(
+        client,
+        room_id=room_id,
+        room_encrypted=room_encrypted,
+        edit_wrapper_budget=edit_wrapper_budget and not is_edit,
+    )
 
     def fits(candidate: dict[str, Any]) -> bool:
         return calculate_event_size(candidate) <= limit and delivery_size(candidate) <= _MATRIX_EVENT_HARD_LIMIT
@@ -891,6 +914,7 @@ async def prepare_large_message(
     room_encrypted: bool,
     prepare_for_encrypted_delivery: bool = False,
     sidecar_required: bool = False,
+    edit_wrapper_budget: bool = False,
 ) -> dict[str, Any]:
     """Check if message is too large and prepare it if needed.
 
@@ -909,6 +933,8 @@ async def prepare_large_message(
             waiting out a homeserver outage for the sidecar rather than freezing a truncated text
         sidecar_required: Raise ``MatrixEventTooLargeError`` instead of falling back to a truncated text without
             the content's sidecar-only keys, for a message that must arrive whole or not at all
+        edit_wrapper_budget: Budget a non-edit replacement payload for the late-bound ``m.replace`` wrapper
+            that ``_reply_row_wire_content`` adds when the row is claimed
 
     Returns:
         The original content object when no preparation is needed, otherwise
@@ -918,12 +944,13 @@ async def prepare_large_message(
 
     """
     is_edit = is_edit_message(content)
-    size_limit = EDIT_MESSAGE_SIZE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
+    size_limit = EDIT_MESSAGE_SIZE_LIMIT if is_edit or edit_wrapper_budget else _NORMAL_MESSAGE_LIMIT
     encrypted_delivery_safe = room_encrypted or prepare_for_encrypted_delivery
     calculate_delivery_event_size = _delivery_event_size_calculator(
         client,
         room_id=room_id,
         room_encrypted=encrypted_delivery_safe,
+        edit_wrapper_budget=edit_wrapper_budget and not is_edit,
     )
     current_size = calculate_event_size(content)
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content

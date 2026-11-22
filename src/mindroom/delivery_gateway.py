@@ -185,6 +185,7 @@ class _PreparedWirePayload:
 
     content: dict[str, Any]
     continuation_payloads: tuple[dict[str, Any], ...] = ()
+    used_preview: bool = False
 
 
 def _result_with_segment_payloads(
@@ -363,7 +364,7 @@ def _reply_row_wire_content(claimed: MatrixDelivery) -> dict[str, Any]:
     payload = dict(claimed.payload)
     if claimed.reply_id is None or claimed.edits_event_id is None or "m.new_content" in payload:
         return payload
-    new_text = None if claimed.reply_row is None or "io.mindroom.long_text" in payload else claimed.reply_row.new_text
+    new_text = None if claimed.reply_row is None else claimed.reply_row.new_text
     envelope = build_edit_event_content(
         event_id=claimed.edits_event_id,
         new_content=payload,
@@ -1009,6 +1010,7 @@ class DeliveryGateway:
                 assert reply is not None
                 delivery_id = edit_delivery_id(delivery_id, reply.reply_sequence + 1)
             edits = stage is not DeliveryStage.INITIAL and event_id is not None
+            late_bound_edit = not edits and stage is not DeliveryStage.INITIAL
             payload: dict[str, Any] = (
                 build_edit_event_content(event_id=event_id, new_content=content, new_text=new_text or "")
                 if edits and event_id is not None
@@ -1021,6 +1023,7 @@ class DeliveryGateway:
                 stage=stage,
                 continuation_thread_id=target.resolved_thread_id,
                 continuation_reply_to_event_id=event_id if edits else target.reply_to_event_id,
+                late_bound_edit=late_bound_edit,
             )
             failure_reason = None
             if isinstance(prepared, MatrixDeliveryFailure):
@@ -1035,8 +1038,12 @@ class DeliveryGateway:
                 permanent_failure_reason=failure_reason,
                 # Wrapped when the row is claimed, if the reply's create binds an event by then.
                 new_text=(
-                    new_text or str(content.get("body", ""))
-                    if not edits and stage is not DeliveryStage.INITIAL
+                    (
+                        str(payload.get("body", ""))
+                        if not isinstance(prepared, MatrixDeliveryFailure) and prepared.used_preview
+                        else (new_text or str(content.get("body", "")))
+                    )
+                    if late_bound_edit
                     else None
                 ),
             )
@@ -2254,6 +2261,7 @@ class DeliveryGateway:
         stage: DeliveryStage,
         continuation_thread_id: str | None = None,
         continuation_reply_to_event_id: str | None = None,
+        late_bound_edit: bool = False,
     ) -> _PreparedWirePayload | MatrixDeliveryFailure:
         """Prepare a payload for the wire, unless a frozen one already exists.
 
@@ -2290,6 +2298,7 @@ class DeliveryGateway:
             payload,
             room_encrypted=True,
             size_limit=first_segment_target_bytes(payload, room_encrypted=encryption_outcome) if split else None,
+            edit_wrapper_budget=late_bound_edit,
         )
         segmented = (
             segment_matrix_content(
@@ -2317,8 +2326,9 @@ class DeliveryGateway:
                 wire_content,
                 room_encrypted=encryption_outcome,
                 prepare_for_encrypted_delivery=True,
+                edit_wrapper_budget=late_bound_edit,
             )
-            return _PreparedWirePayload(content=prepared)
+            return _PreparedWirePayload(content=prepared, used_preview=prepared is not wire_content)
         except MatrixEventTooLargeError as error:
             return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
 
