@@ -104,6 +104,9 @@ def _refusals() -> Iterator[None]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except WorkflowRunStoreError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ScriptRuntimeUnavailableError as exc:
+        # `Try again in a moment`: the SDK does, and it is no fault of the server.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 async def _read[Body: _WireModel](request: Request, body_type: type[Body], limit: int) -> Body | Response:

@@ -147,6 +147,25 @@ async def test_superseded_attempt_is_409(stack: WorkflowStack, client: httpx.Asy
 
 
 @pytest.mark.asyncio
+async def test_call_that_the_engine_cannot_answer_yet_is_503(
+    stack: WorkflowStack,
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine's `try again` is the gateway's 503, which the SDK retries and nobody reads as a server fault."""
+
+    async def not_yet(*_args: object, **_options: object) -> None:
+        msg = "Try again in a moment."
+        raise ScriptRuntimeUnavailableError(msg)
+
+    monkeypatch.setattr(stack.engine, "submit_node", not_yet)
+
+    answer = await client.post("nodes", json=_NODE)
+
+    assert (answer.status_code, answer.json()["detail"]) == (503, "Try again in a moment.")
+
+
+@pytest.mark.asyncio
 async def test_malformed_requests_are_422_and_save_nothing(stack: WorkflowStack, client: httpx.AsyncClient) -> None:
     """A key that is not `lane@index`, an unknown field, a number JSON cannot carry and a later node kind are refused."""
     bodies = [
