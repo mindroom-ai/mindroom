@@ -326,21 +326,19 @@ class KubernetesWorkerBackend:
                         if due:
                             self._wait_for_worker_setup(*due.pop())
                     finally:
-                        waited = time.monotonic() - started_at >= _SETUP_POLL_INTERVAL_SECONDS
-                        handle = self._end_setup_wait(spec.worker_key, setup, record_use=waited) or handle
+                        handle = self._end_setup_wait(spec.worker_key, setup, time.monotonic() - started_at) or handle
             return handle
 
-    def _end_setup_wait(self, worker_key: str, setup: object, *, record_use: bool) -> WorkerHandle | None:
+    def _end_setup_wait(self, worker_key: str, setup: object, waited_seconds: float) -> WorkerHandle | None:
         """Record a worker as used now that its setup wait hands it to a caller, then forget the wait."""
         try:
-            return self.touch_worker(worker_key) if record_use else None
+            return self.touch_worker(worker_key) if waited_seconds >= _SETUP_POLL_INTERVAL_SECONDS else None
         except self._resources.api_exception as exc:
             # A start records no use after the worker is ready, so a cluster that refuses this one changes nothing.
             logger.warning("Worker %s was not recorded as used after its setup: %s", worker_log_id(worker_key), exc)
             return None
         finally:
-            # Under the lock a start publishes its wait in, so this never forgets a newer start's wait.
-            with self._worker_locks.for_key(worker_key):
+            with self._worker_locks.for_key(worker_key):  # Where a start publishes its wait, so a newer one stays.
                 if self._setup_waits.get(worker_key) is setup:
                     del self._setup_waits[worker_key]
 
@@ -537,7 +535,7 @@ class KubernetesWorkerBackend:
         return health if mismatch is None else None
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
-        """Refresh last-used metadata for one existing worker."""
+        """Refresh last-used metadata for one existing worker, never moving its last use back."""
         timestamp = time.time() if now is None else now
         with self._worker_locks.for_key(worker_key):
             cached_handle = self._touch_cached_worker(worker_key, now=timestamp)
@@ -551,7 +549,6 @@ class KubernetesWorkerBackend:
 
             annotations = resources.with_lifecycle_transition(
                 deployment.metadata.annotations or {},
-                # A use never moves the worker's last use back.
                 lambda state: touch_worker_lifecycle(state, now=max(timestamp, state.last_used_at)),
                 now=timestamp,
             )
