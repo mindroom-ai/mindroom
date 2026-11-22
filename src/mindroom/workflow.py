@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import difflib
 import functools
+import hashlib
 import http.client
 import json
 import os
@@ -19,7 +20,7 @@ import types
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Self, cast
@@ -27,16 +28,19 @@ from typing import TYPE_CHECKING, Self, cast
 from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, RUN_ID_ENV, TOKEN_PATH_ENV
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable, Sequence
 
 __all__ = [
     "AgentError",
+    "PartialFailure",
     "ShellResult",
     "ToolError",
     "WorkflowError",
     "agent",
+    "foreach",
     "log",
     "now",
+    "parallel",
     "phase",
     "random",
     "run_workflow",
@@ -58,6 +62,18 @@ _RAW_THREAD_CALL = (
 )
 _NO_MAIN = "Define def main(args): and return the report. MindRoom calls it."
 _NO_SCHEMA = "schema is not available yet in this MindRoom version."
+# How many lanes of one foreach() or parallel() run at once in the script; the run's own limit is the gateway's.
+_MAX_ACTIVE_LANES = 256
+# How many failures a PartialFailure names in its message; `errors` holds them all.
+_MAX_NAMED_FAILURES = 5
+_NOT_FUNCTIONS = (
+    "parallel() takes functions. Write parallel([lambda: agent(a), lambda: agent(b)]) or use foreach(items, fn)."
+)
+_SAME_LOOP_VARIABLE = (
+    "These functions capture the same loop variable, so each would see its last value. "
+    "Use foreach(prompts, lambda p: agent(p))."
+)
+_BAD_LIMIT = "max_concurrent must be a whole number of at least 1."
 
 
 class WorkflowError(RuntimeError):
@@ -74,6 +90,28 @@ class AgentError(WorkflowError):
 
 class ToolError(WorkflowError):
     """kind: failed | denied | indeterminate (the call may have run; check its effect, then resume with rerun=[...])."""
+
+
+class PartialFailure(WorkflowError):  # noqa: N818 - the name the workflow's author catches.
+    """Some calls of a foreach() or parallel() failed.
+
+    ok: the results that succeeded, in order.
+    results: one entry per position; a failed position holds None, so check `errors`, since None can also be a real result.
+    errors: {position: exception}. items: the foreach items.
+    """
+
+    def __init__(self, results: list[object], errors: dict[int, BaseException], items: list[object] | None) -> None:
+        named = [f"[{position}] {_describe(errors[position])}" for position in sorted(errors)[:_MAX_NAMED_FAILURES]]
+        more = len(errors) - len(named)
+        listed = "; ".join(named) + (f"; and {more} more" if more else "")
+        super().__init__(f"{len(errors)} of {len(results)} calls failed: {listed}", kind="partial")
+        self.results, self.errors, self.items = results, errors, items
+        self.ok = [result for position, result in enumerate(results) if position not in errors]
+
+
+def _describe(error: BaseException) -> str:
+    kind = f"({error.kind})" if isinstance(error, WorkflowError) else ""
+    return f"{type(error).__name__}{kind}: {error}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +134,8 @@ class _Lane:
 
 class _Local(threading.local):
     lane: _Lane | None = None
+    # The place the thread's lane holds among the active lanes of its fan-out, given up while its call waits.
+    place: threading.Semaphore | None = None
 
 
 _local = _Local()
@@ -151,12 +191,10 @@ class _Gateway:
         body: dict[str, object] = {"key": key, "kind": kind, "args": args, "meta": meta}
         return cast("dict[str, object]", self._request("POST", "nodes", body))
 
-    def wait(self, node_id: str) -> dict[str, object]:
+    def poll(self, node_id: str) -> dict[str, object]:
+        """Return the node's receipt, held by the gateway until the node changes or the wait is over."""
         route = f"nodes/{urllib.parse.quote(node_id, safe='')}?wait={_NODE_WAIT_SECONDS}"
-        while True:
-            receipt = cast("dict[str, object]", self._request("GET", route))
-            if receipt["state"] in _SETTLED_STATES:
-                return receipt
+        return cast("dict[str, object]", self._request("GET", route))
 
     def result(self, node_id: str) -> object:
         return self._request("GET", f"results/{urllib.parse.quote(node_id, safe='')}")
@@ -205,8 +243,15 @@ def _call(
     gateway = _gateway()
     receipt = gateway.submit(_next_key(), kind, args, {key: value for key, value in meta.items() if value is not None})
     node_id = str(receipt["id"])
-    if receipt["state"] not in _SETTLED_STATES:
-        receipt = gateway.wait(node_id)
+    # A call that waits for a person is no active lane of its fan-out: the next lane starts in its place, and the
+    # call takes a place again before it goes on.
+    place, waiting = _local.place, False
+    while receipt["state"] not in _SETTLED_STATES or waiting:
+        if place is not None and waiting != (receipt["state"] == "waiting"):
+            waiting = not waiting
+            (place.release if waiting else place.acquire)()
+        if receipt["state"] not in _SETTLED_STATES:
+            receipt = gateway.poll(node_id)
     if receipt["state"] == "completed":
         return gateway.result(node_id) if receipt.get("result_ref") else receipt.get("result")
     details = cast("dict[str, object]", receipt.get("error") or {})
@@ -281,6 +326,121 @@ def agent(
     given = {option: value for option, value in options.items() if value is not None and value is not False}
     call = {"prompt": str(prompt), **given}
     return str(_call("agent", call, name=name, timeout=timeout))
+
+
+def foreach(items: Iterable[object], fn: Callable[..., object], *, max_concurrent: int | None = None) -> list[object]:
+    """Call fn(item) for every item in parallel and return the results in item order.
+
+    When calls fail, the others still finish, then PartialFailure is raised.
+    Finished items are remembered by value, so adding or reordering items on resume reuses them.
+    Items that are not JSON values are remembered by position.
+    """
+    _current_lane()
+    values = list(items)
+    seen: dict[str, int] = {}
+    names = [_item_key(item, position, seen) for position, item in enumerate(values)]
+    calls = [functools.partial(fn, item) for item in values]
+    return _fan_out("foreach", calls, names, values, max_concurrent)
+
+
+def parallel(fns: Iterable[Callable[[], object]], *, max_concurrent: int | None = None) -> list[object]:
+    """Call every zero-argument function in parallel and return the results in order; raises PartialFailure like foreach."""
+    _current_lane()
+    calls = list(fns)
+    if not all(callable(call) for call in calls):
+        raise WorkflowError(_NOT_FUNCTIONS)
+    captured: dict[tuple[object, ...], object] = {}
+    for call in calls:
+        # Two functions with one body, the very same variables and no value bound to either differ in nothing.
+        cells, bound = getattr(call, "__closure__", None) or (), getattr(call, "__defaults__", None) or ()
+        same = captured.setdefault((getattr(call, "__code__", None), *map(id, cells), None, *map(id, bound)), call)
+        if cells and same is not call:
+            raise WorkflowError(_SAME_LOOP_VARIABLE)
+    return _fan_out("parallel", calls, [f"p{position}" for position in range(len(calls))], None, max_concurrent)
+
+
+def _item_key(item: object, position: int, seen: dict[str, int]) -> str:
+    """Return the name of a foreach item's lane: a hash of its JSON value, numbered from its second occurrence on.
+
+    An item that is no JSON value is named by its *position*, so a resume matches it only while it stays there.
+    """
+    try:
+        text = json.dumps(item, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError):
+        return f"p{position}"
+    name = hashlib.sha256(text.encode()).hexdigest()[:12]
+    seen[name] = count = seen.get(name, 0) + 1
+    return name if count == 1 else f"{name}#{count}"
+
+
+def _fan_out(
+    op: str,
+    calls: Sequence[Callable[[], object]],
+    names: Sequence[str],
+    items: list[object] | None,
+    max_concurrent: int | None,
+) -> list[object]:
+    """Run *calls* each in a lane of its own, at most `max_concurrent` at a time, and return their results in order.
+
+    The group node comes first and names every lane, so a resume sees which items came, went or moved. Every call
+    ends before a failure is raised, as one PartialFailure. An attempt that MindRoom told to exit, or a run that was
+    cancelled as a whole, is no failure of an item: it stops the fan-out and leaves it as it is.
+    """
+    if max_concurrent is not None and (type(max_concurrent) is not int or max_concurrent < 1):
+        raise WorkflowError(_BAD_LIMIT)
+    lane, key = _current_lane(), _next_key()
+    members = [f"{lane.path}/{key.rpartition('@')[2]}:{name}" for name in names]
+    positional = items is not None and any(name.startswith("p") for name in names)
+    meta = {"cached": True, "phase": lane.phase, "members": members}
+    args: dict[str, object] = {"op": op, "positional": True} if positional else {"op": op}
+    _gateway().submit(key, "group", args, {name: value for name, value in meta.items() if value is not None})
+    lanes = _Lanes(threading.Semaphore(min(len(calls), max_concurrent or _MAX_ACTIVE_LANES) or 1), [None] * len(calls))
+    threads: list[threading.Thread] = []
+    for position, call in enumerate(calls):
+        # Waits for a lane to end, or to wait for a person, so 1,000 items are never 1,000 threads at work.
+        lanes.places.acquire()
+        if lanes.stopped:
+            break
+        work = (position, call, _Lane(members[position], phase=lane.phase))
+        threads.append(threading.Thread(target=lanes.run, args=work, daemon=True))
+        threads[-1].start()
+    for thread in threads:
+        thread.join()
+    if lanes.stopped:
+        raise lanes.stopped[0]
+    if lanes.errors:
+        raise PartialFailure(lanes.results, lanes.errors, items)
+    return lanes.results
+
+
+@dataclass(slots=True)
+class _Lanes:
+    """The lanes of one fan-out while they run: the places they share, their results, and what failed or stopped it."""
+
+    places: threading.Semaphore
+    results: list[object]
+    errors: dict[int, BaseException] = field(default_factory=dict)
+    stopped: list[BaseException] = field(default_factory=list)
+
+    def run(self, position: int, call: Callable[[], object], lane: _Lane) -> None:
+        """Run one call in *lane* on this thread, and keep its result or its failure under its position."""
+        _local.lane, _local.place = lane, self.places
+        try:
+            self.results[position] = call()
+        except SystemExit as error:
+            self.stopped.append(error)
+        except BaseException as error:
+            if type(error) is WorkflowError and error.kind == "cancelled":
+                self.stopped.append(error)
+                return
+            # Every other failure is the item's, a bug of the script included.
+            self.errors[position] = error
+            if not isinstance(error, (AgentError, ToolError, PartialFailure)):
+                # No call of the lane shows this failure, so a node of its own does.
+                report: dict[str, object] = {"type": type(error).__name__, "message": str(error)[:_ERROR_BYTES]}
+                _gateway().submit(_next_key(), "error", report, {"phase": lane.phase} if lane.phase else {})
+        finally:
+            self.places.release()
 
 
 def shell(command: str, *, timeout: int = 3600, tail: int = 2000, cached: bool = True) -> ShellResult:

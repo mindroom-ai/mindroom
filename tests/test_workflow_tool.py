@@ -536,7 +536,9 @@ async def test_a_narrowed_childs_run_calls_the_tools_its_persona_keeps_and_no_ot
         assert stack.counting_tool.lines == []
         assert stack.counting_tool.calls == 1
         await stack.finish_attempt(result="the report")
-        assert await asyncio.wait_for(call, SETTLE_TIMEOUT_SECONDS) == "the report"
+        # The refused call is a failure the run completed in spite of, which the report's first line names.
+        failed = '1 call failed (n2); get_workflow(run_id, nodes="failed") shows them.'
+        assert await asyncio.wait_for(call, SETTLE_TIMEOUT_SECONDS) == f"{failed}\n\nthe report"
         await stack.engine.close()
 
 
@@ -1482,15 +1484,20 @@ def test_a_workflow_job_is_granted_while_the_agent_has_the_toolkit_and_the_reque
 _OFFERED_DESCRIPTION = """\
 Run a workflow: a Python script that puts many agents to work in the background.
 
-Use it when a task needs many agents, an independent check, or a loop with a hard stop.
+Use it when a task needs many agents, the same step over many items, an independent check, or a loop with a hard stop.
 Give exactly one of `source` (inline Python) or `path` (a file in your workspace).
 The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
 
-    from mindroom.workflow import agent, shell, tool, phase, log, now, random
+    from mindroom.workflow import agent, foreach, parallel, shell, tool, phase, log, now, random, PartialFailure
 
     def main(args):
+        phase("Research")                        # the same step over many items, in parallel
+        try:
+            notes = foreach(args["topics"], lambda t: agent(f"Research {t}. Cite sources."))
+        except PartialFailure as e:              # some items failed: keep the rest, or do not catch and the run fails
+            notes = e.ok
         phase("Write")
-        draft = agent("Write a report on: " + args["topic"])
+        draft = agent("Write a report from these notes:\\n\\n" + "\\n\\n".join(notes))
         for _ in range(3):                       # a bounded loop with an independent check
             problems = agent("List factual problems in this report, or reply NONE.\\n\\n" + draft)
             if problems.strip() == "NONE":
@@ -1507,6 +1514,11 @@ The script defines `def main(args):` and returns the final report, a string or a
   profile: a subagents/<profile>.md file. minimal=True: a cheap copy with one shell tool. timeout: seconds, then the turn is cancelled.
   output_path: also write the answer to this workspace file. dedicated_worker=True: its own container. resource_profile: a worker size.
   A failed turn raises AgentError.
+- foreach(items, fn) calls fn(item) for every item in parallel and returns the results in order.
+  parallel([fn1, fn2]) does the same for different functions; for a loop over items use foreach, not a list of lambdas.
+  If any call fails, both wait for the others and then raise PartialFailure: .ok holds the results that succeeded,
+  .results every position, .errors the failures by position. Not caught, it fails the run.
+  fn may make several calls and may itself call foreach or parallel. At most max_concurrent agents and tools run at once.
 - shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
   shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - phase(title) groups the calls that follow; log(text) shows a progress line.
@@ -1514,11 +1526,12 @@ The script defines `def main(args):` and returns the final report, a string or a
 Every agent, tool and shell call is saved with its result. The Python between the calls runs again on every resume,
 so do writes (files, git, HTTP) through shell(), tool() or an agent, never with plain Python.
 resume_workflow reuses saved calls: in each sequence of calls, those before the first changed call are reused; that call and the
-calls after it run again.
+calls after it run again, and so does everything after a foreach or parallel in which an item ran again. Unchanged items are reused.
 Use now() and random() from the SDK instead of time and random when the value goes into a prompt.
 shell(..., cached=False) and tool(..., cached=False) run again on every resume: use it for a check of something outside the run.
 The call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.
 Where the call cannot be a background job, it waits and returns the report itself.
+A run that completed although calls failed says so in the first line of the report.
 An agent that needs an approval waits for the user; it does not fail.
 
 Models: haiku, opus (add an effort as in opus@high).
@@ -1528,7 +1541,7 @@ Agents you can run with agent=: helper, roommate."""
 def test_description_teaches_what_this_release_runs_and_lists_the_configured_models(stack: WorkflowStack) -> None:
     """The offered description names the calls a script has now, how the report arrives, the models and the agents.
 
-    It promises nothing a later release adds: no schema, no fan-out, no graph. The agents are those the owner may
+    It promises nothing a later release adds: no schema, no sessions, no graph. The agents are those the owner may
     delegate to and those configured for the room, without the owner itself.
     """
     config, room_id = stack.context.config, stack.context.room_id

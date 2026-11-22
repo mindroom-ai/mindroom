@@ -6,6 +6,8 @@ Level: pure (the SDK against `FakeWorkflowGateway`).
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
 import sys
 import threading
 from pathlib import Path
@@ -346,3 +348,253 @@ def test_now_and_random_are_value_nodes_whose_saved_results_they_return(
         ("@0", "value", {"op": "now"}),
         ("@1", "value", {"op": "random"}),
     ]
+
+
+def _by_prompt(answers: dict[str, dict[str, object]]) -> Callable[[dict[str, object]], dict[str, object]]:
+    """Answer each agent call with the receipt its prompt names, and every other node as completed."""
+
+    def respond(request: dict[str, object]) -> dict[str, object]:
+        args = request["args"]
+        assert isinstance(args, dict)
+        return answers[str(args["prompt"])] if request["kind"] == "agent" else completed(None)
+
+    return respond
+
+
+def _item(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:12]
+
+
+@pytest.mark.usefixtures("in_main")
+def test_foreach_lanes_are_keyed_by_item_value(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """Each item runs in a lane named by its value, an equal item by its occurrence; the group names them in order."""
+    gateway.respond = lambda request: completed(str(request["args"].get("prompt", "")).upper())  # type: ignore[union-attr]
+    sdk.phase("Research")
+
+    assert sdk.foreach(["b", "a", "b"], lambda item: sdk.agent(item)) == ["B", "A", "B"]
+
+    a, b = _item("a"), _item("b")
+    [group] = gateway.nodes_of_kind("group")
+    assert (group["key"], group["args"]) == ("@0", {"op": "foreach"})
+    assert group["meta"] == {"cached": True, "phase": "Research", "members": [f"/0:{b}", f"/0:{a}", f"/0:{b}#2"]}
+    agents = {node["key"]: node["meta"] for node in gateway.nodes_of_kind("agent")}
+    assert sorted(agents) == sorted([f"/0:{b}@0", f"/0:{a}@0", f"/0:{b}#2@0"])
+    # A lane starts in the phase of the call that opened it, and the next call of the root lane follows the group.
+    assert {meta["phase"] for meta in agents.values()} == {"Research"}
+    sdk.agent("after")
+    assert gateway.nodes[-1]["key"] == "@1"
+
+
+@pytest.mark.usefixtures("in_main")
+def test_fan_out_inside_a_lane_opens_lanes_below_it(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """A lane counts its own calls, and a fan-out inside it names its lanes under the lane's path."""
+    gateway.respond = lambda _request: completed("ok")
+
+    def both(item: str) -> list[object]:
+        sdk.agent(f"first {item}")
+        return sdk.parallel([lambda: sdk.agent(f"left {item}"), lambda: sdk.agent(f"right {item}")])
+
+    assert sdk.foreach(["a"], both) == [["ok", "ok"]]
+
+    keys = {str(node["args"].get("prompt", node["args"].get("op"))): node["key"] for node in gateway.nodes}  # type: ignore[union-attr]
+    lane = f"/0:{_item('a')}"
+    assert (keys["first a"], keys["parallel"]) == (f"{lane}@0", f"{lane}@1")
+    assert (keys["left a"], keys["right a"]) == (f"{lane}/1:p0@0", f"{lane}/1:p1@0")
+
+
+@pytest.mark.usefixtures("in_main")
+def test_one_failure_lets_siblings_finish_then_raises_with_partial_results(
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
+) -> None:
+    """Every call settles before the fan-out raises, with what succeeded and what failed by position."""
+    gateway.respond = _by_prompt({"a": completed("A"), "b": failed("failed", "boom"), "c": completed(None)})
+
+    with pytest.raises(sdk.PartialFailure) as caught:
+        sdk.foreach(["a", "b", "c"], lambda item: sdk.agent(item))
+
+    error = caught.value
+    assert (error.ok, error.results, list(error.errors), error.items) == (
+        ["A", "None"],
+        ["A", None, "None"],
+        [1],
+        ["a", "b", "c"],
+    )
+    assert (error.kind, str(error)) == ("partial", "1 of 3 calls failed: [1] AgentError(failed): boom")
+    assert isinstance(error.errors[1], sdk.AgentError)
+    assert len(gateway.nodes_of_kind("agent")) == 3
+
+
+@pytest.mark.usefixtures("in_main", "gateway")
+def test_a_legitimate_none_result_is_not_a_failure(sdk: ModuleType) -> None:
+    """Without an error the plain list returns, and a None in it is what the function returned."""
+    assert sdk.foreach(["a", "b"], lambda item: sdk.tool("files", "touch", path=item)) == [None, None]
+
+
+@pytest.mark.usefixtures("in_main")
+def test_all_failed_raises_and_ok_is_empty(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """A fan-out in which nothing succeeded raises like any other, with nothing in `ok`."""
+    gateway.respond = lambda request: failed("failed", "no") if request["kind"] == "tool" else completed(None)
+
+    with pytest.raises(sdk.PartialFailure) as caught:
+        sdk.parallel([lambda: sdk.tool("files", "read", path="a"), lambda: sdk.tool("files", "read", path="b")])
+
+    error = caught.value
+    assert (error.ok, error.results, sorted(error.errors), error.items) == ([], [None, None], [0, 1], None)
+    assert str(error) == "2 of 2 calls failed: [0] ToolError(failed): no; [1] ToolError(failed): no"
+
+
+@pytest.mark.usefixtures("in_main")
+def test_a_script_bug_in_the_callback_is_an_error_at_its_position_with_a_node(
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
+) -> None:
+    """An exception of the script's own code fails its item only, and the lane gets a node that shows it."""
+    table = {"a": 1}
+
+    with pytest.raises(sdk.PartialFailure) as caught:
+        sdk.foreach(["a", "x"], lambda item: sdk.tool("files", "read", path=str(table[item])))
+
+    assert isinstance(caught.value.errors[1], KeyError)
+    assert str(caught.value) == "1 of 2 calls failed: [1] KeyError: 'x'"
+    [node] = gateway.nodes_of_kind("error")
+    assert (node["key"], node["args"]) == (f"/0:{_item('x')}@0", {"type": "KeyError", "message": "'x'"})
+
+
+@pytest.mark.usefixtures("in_main")
+def test_run_cancel_is_not_collected(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """An attempt that the run left behind exits from the fan-out itself: no item of it is a failure to catch."""
+
+    def respond(request: dict[str, object]) -> dict[str, object]:
+        if request["kind"] == "agent":
+            gateway.refuse = (409, {"detail": "superseded"})
+        return completed("ok")
+
+    gateway.respond = respond
+
+    with pytest.raises(SystemExit) as stopped:
+        sdk.foreach(["a", "b", "c"], lambda item: sdk.agent(item), max_concurrent=1)
+
+    assert stopped.value.code == 3
+    assert len(gateway.nodes_of_kind("agent")) == 1
+
+
+@pytest.mark.usefixtures("in_main")
+def test_parallel_of_lambdas_over_a_loop_variable_is_refused(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """Functions that share one loop variable would all see its last value: the call says what to write instead."""
+    prompts = ["a", "b"]
+
+    with pytest.raises(sdk.WorkflowError, match="capture the same loop variable") as refused:
+        sdk.parallel([lambda: sdk.agent(p) for p in prompts])  # noqa: B023 - the mistake under test.
+
+    assert str(refused.value).endswith("Use foreach(prompts, lambda p: agent(p)).")
+    assert gateway.nodes == []
+
+
+@pytest.mark.usefixtures("in_main")
+def test_parallel_of_distinct_functions_and_of_default_bound_lambdas_is_fine(
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
+) -> None:
+    """A lambda that binds its value, different functions, and one function given twice each see what they should."""
+    gateway.respond = lambda request: completed(str(request["args"].get("prompt", "")).upper())  # type: ignore[union-attr]
+    prompts, tone = ["a", "b"], "x"
+
+    def ask() -> str:
+        return sdk.agent(tone)
+
+    assert sdk.parallel([lambda p=p: sdk.agent(p) for p in prompts]) == ["A", "B"]
+    assert sdk.parallel([lambda: sdk.agent(tone), lambda: sdk.agent(tone + "y")]) == ["X", "XY"]
+    assert sdk.parallel([ask, ask]) == ["X", "X"]
+    assert gateway.nodes_of_kind("group")[0]["meta"]["members"] == ["/0:p0", "/0:p1"]  # type: ignore[index]
+
+
+@pytest.mark.usefixtures("in_main")
+def test_parallel_given_results_says_to_pass_functions(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """`parallel([agent(a), agent(b)])` ran its calls one after the other already: the message shows the right form."""
+    with pytest.raises(sdk.WorkflowError) as refused:
+        sdk.parallel(["answer a", "answer b"])
+
+    assert str(refused.value) == (
+        "parallel() takes functions. Write parallel([lambda: agent(a), lambda: agent(b)]) or use foreach(items, fn)."
+    )
+    assert gateway.nodes == []
+
+
+@pytest.mark.usefixtures("in_main")
+def test_foreach_of_1000_items_opens_at_most_256_requests(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """Items are fed to at most 256 lanes at a time, however many there are, and every result comes back in order."""
+    barrier = threading.Barrier(256, timeout=20)
+
+    def respond(request: dict[str, object]) -> dict[str, object]:
+        if request["kind"] != "tool":
+            return completed(None)
+        arguments = request["args"]["arguments"]  # type: ignore[index]
+        if arguments["n"] < 256:
+            # The first 256 calls are open together: the fan-out is parallel up to its limit.
+            barrier.wait()
+        return completed(arguments["n"])
+
+    gateway.respond = respond
+
+    assert sdk.foreach(range(1000), lambda n: sdk.tool("files", "stat", n=n)) == list(range(1000))
+
+    assert gateway.peak_open == 256
+    assert len(gateway.nodes_of_kind("group")[0]["meta"]["members"]) == 1000  # type: ignore[arg-type]
+
+
+@pytest.mark.usefixtures("in_main")
+def test_max_concurrent_of_a_fan_out_holds_its_lanes_to_that_many(
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
+) -> None:
+    """`max_concurrent` of the call itself starts the next lane only when one has ended."""
+    assert sdk.foreach(range(20), lambda n: sdk.tool("files", "stat", n=n), max_concurrent=2) == [None] * 20
+    assert gateway.peak_open <= 2
+    with pytest.raises(sdk.WorkflowError, match="max_concurrent must be a whole number of at least 1"):
+        sdk.foreach([1], str, max_concurrent=0)
+
+
+@pytest.mark.usefixtures("in_main")
+def test_a_waiting_lane_lets_the_next_lane_start_at_max_concurrent_one(
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
+) -> None:
+    """A lane whose call waits for a person gives its place to the next lane, and takes one again to go on."""
+    submitted = threading.Event()
+
+    def respond(request: dict[str, object]) -> dict[str, object]:
+        if request["kind"] == "agent" and request["args"]["prompt"] == "b":  # type: ignore[index]
+            submitted.set()
+        return completed("ok")
+
+    def hold(request: dict[str, object]) -> str | None:
+        # The first item waits for a person until the second one has started.
+        waits = request["kind"] == "agent" and request["args"]["prompt"] == "a"  # type: ignore[index]
+        return "waiting" if waits and not submitted.is_set() else None
+
+    gateway.respond, gateway.hold = respond, hold
+
+    assert sdk.foreach(["a", "b"], lambda item: sdk.agent(item), max_concurrent=1) == ["ok", "ok"]
+
+
+@pytest.mark.usefixtures("in_main")
+def test_non_json_items_are_positional_and_marked(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """An item that is no JSON value is remembered by its position, and the group says that it is."""
+    items = [object(), {"a": 1}, {1, 2}]
+
+    assert sdk.foreach(items, lambda _item: None) == [None, None, None]
+
+    [group] = gateway.nodes_of_kind("group")
+    assert group["args"] == {"op": "foreach", "positional": True}
+    assert group["meta"]["members"] == ["/0:p0", f"/0:{_item({'a': 1})}", "/0:p2"]  # type: ignore[index]
+
+
+@pytest.mark.usefixtures("in_main")
+def test_fan_out_of_nothing_returns_nothing_and_still_has_its_group(
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
+) -> None:
+    """An empty list is a fan-out too: its group is saved, so a resume sees items that were added since."""
+    assert (sdk.foreach([], str), sdk.parallel([])) == ([], [])
+    assert [node["meta"]["members"] for node in gateway.nodes_of_kind("group")] == [[], []]  # type: ignore[index]

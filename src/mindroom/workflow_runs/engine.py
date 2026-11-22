@@ -614,10 +614,14 @@ class WorkflowEngine:
             return await self._dispatch_agent(run, node, _timeout(meta))
         if kind == "value":
             node = replace(node, result=_value(request.args))
+        elif kind == "error":
+            # What the script's own code raised in a lane of a fan-out: nothing ran, and the run shows where.
+            message = f"{request.args.get('type')}: {request.args.get('message')}"
+            node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "error", "message": message})
         elif kind != "group":
             msg = f"This MindRoom cannot run a '{kind}' call in a workflow yet."
             raise WorkflowRunStoreError(msg)
-        # A value and a group are complete when they are submitted, so no restart finds one half done. What earlier
+        # A value, a group and an error have ended when they are submitted, so no restart finds one half done. What earlier
         # attempts left after the call runs again in any attempt, which this one remembers and the same write saves.
         lanes.mark(key)
         put = partial(self.store.put_node, replace(node, ended_at=node.started_at), epoch, dirty_after=True)
@@ -1109,7 +1113,11 @@ def _default_label(kind: str, args: dict[str, object]) -> object:
     if kind == "agent":
         # Where the label goes the prompt does not: its first line stands for it.
         return args.get("name") or str(args.get("prompt") or kind).strip().partition("\n")[0]
-    return f"{args.get('toolkit')}.{args.get('function')}" if kind == "tool" else args.get("op") or kind
+    return (
+        f"{args.get('toolkit')}.{args.get('function')}"
+        if kind == "tool"
+        else args.get("op") or args.get("type") or kind
+    )
 
 
 def _timeout(meta: dict[str, object]) -> float | None:

@@ -54,15 +54,20 @@ _RESUME = "resume_workflow"
 _START_DESCRIPTION = """\
 Run a workflow: a Python script that puts many agents to work in the background.
 
-Use it when a task needs many agents, an independent check, or a loop with a hard stop.
+Use it when a task needs many agents, the same step over many items, an independent check, or a loop with a hard stop.
 Give exactly one of `source` (inline Python) or `path` (a file in your workspace).
 The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
 
-    from mindroom.workflow import agent, shell, tool, phase, log, now, random
+    from mindroom.workflow import agent, foreach, parallel, shell, tool, phase, log, now, random, PartialFailure
 
     def main(args):
+        phase("Research")                        # the same step over many items, in parallel
+        try:
+            notes = foreach(args["topics"], lambda t: agent(f"Research {t}. Cite sources."))
+        except PartialFailure as e:              # some items failed: keep the rest, or do not catch and the run fails
+            notes = e.ok
         phase("Write")
-        draft = agent("Write a report on: " + args["topic"])
+        draft = agent("Write a report from these notes:\\n\\n" + "\\n\\n".join(notes))
         for _ in range(3):                       # a bounded loop with an independent check
             problems = agent("List factual problems in this report, or reply NONE.\\n\\n" + draft)
             if problems.strip() == "NONE":
@@ -79,6 +84,11 @@ The script defines `def main(args):` and returns the final report, a string or a
   profile: a subagents/<profile>.md file. minimal=True: a cheap copy with one shell tool. timeout: seconds, then the turn is cancelled.
   output_path: also write the answer to this workspace file. dedicated_worker=True: its own container. resource_profile: a worker size.
   A failed turn raises AgentError.
+- foreach(items, fn) calls fn(item) for every item in parallel and returns the results in order.
+  parallel([fn1, fn2]) does the same for different functions; for a loop over items use foreach, not a list of lambdas.
+  If any call fails, both wait for the others and then raise PartialFailure: .ok holds the results that succeeded,
+  .results every position, .errors the failures by position. Not caught, it fails the run.
+  fn may make several calls and may itself call foreach or parallel. At most max_concurrent agents and tools run at once.
 - shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
   shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - phase(title) groups the calls that follow; log(text) shows a progress line.
@@ -86,17 +96,20 @@ The script defines `def main(args):` and returns the final report, a string or a
 Every agent, tool and shell call is saved with its result. The Python between the calls runs again on every resume,
 so do writes (files, git, HTTP) through shell(), tool() or an agent, never with plain Python.
 resume_workflow reuses saved calls: in each sequence of calls, those before the first changed call are reused; that call and the
-calls after it run again.
+calls after it run again, and so does everything after a foreach or parallel in which an item ran again. Unchanged items are reused.
 Use now() and random() from the SDK instead of time and random when the value goes into a prompt.
 shell(..., cached=False) and tool(..., cached=False) run again on every resume: use it for a check of something outside the run.
 The call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.
 Where the call cannot be a background job, it waits and returns the report itself.
+A run that completed although calls failed says so in the first line of the report.
 An agent that needs an approval waits for the user; it does not fail.
 """
 _ONE_SOURCE = "Give exactly one of source or path."
 _AT_MOST_ONE_SOURCE = "Give at most one of source or path."
 _NEEDS_JOBS = "Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow."
 
+# How many failed calls the first line of a report names; `get_workflow` lists them all.
+_MAX_FAILED_NAMED = 10
 _ACTIVE = frozenset({WorkflowNodeState.QUEUED, WorkflowNodeState.RUNNING, WorkflowNodeState.WAITING})
 _FAILED = frozenset({WorkflowNodeState.FAILED, WorkflowNodeState.INDETERMINATE})
 _JOB_STATUS: dict[WorkflowRunState, Literal["completed", "failed", "cancelled", "interrupted"]] = {
@@ -182,7 +195,7 @@ class WorkflowTools(Toolkit):
         engine, context = _waiting_runtime()
         origin = _inline_origin(context)
         reserve = partial(self._reserve, engine, context, origin, arguments)
-        return (await engine.attend(origin, reserve, context, self.limits)).outcome_text()
+        return await _delivery(engine, await engine.attend(origin, reserve, context, self.limits))
 
     async def get_workflow(self, run_id: str, nodes: Literal["active", "failed", "all"] = "active") -> str:
         """Return a run's status, cost, open questions, failed calls and nodes. nodes is "active" (default), "failed" or "all".
@@ -257,7 +270,7 @@ class WorkflowTools(Toolkit):
             return report
         # The call owns the run it takes, as an inline start owns the run it reserves: its leaving stops that run.
         reopen = partial(engine.reopen, run.run_id, context, limits=self.limits, owner=origin, **request)
-        return (await engine.attend(origin, reopen, context, self.limits)).outcome_text()
+        return await _delivery(engine, await engine.attend(origin, reopen, context, self.limits))
 
     async def managed_job(
         self,
@@ -420,7 +433,7 @@ def _run_job(
         try:
             if resume is not None:
                 await engine.reopen(run_id, context, limits=limits, owner=job_id, job_id=job_id, **resume)
-            outcome = _workflow_job_outcome(await engine.wait(run_id, launch, job_id))
+            outcome = await _workflow_job_outcome(engine, await engine.wait(run_id, launch, job_id))
         except WorkflowRunStoreError as exc:
             # Another call took the run: this job owns nothing of it, waits for none of its reports, and says so.
             return BackgroundOutcome("failed", str(exc), encode_result_payload(ToolResultPayload(value=str(exc))))
@@ -466,7 +479,8 @@ async def stopped_workflow_job(
     except WorkflowRunNotFoundError:
         return None
     # A run of another owner is left: a resume that never took it, or a job whose run was resumed since.
-    return _workflow_job_outcome(run) if run.owner == job.job_id and run.state in TERMINAL_RUN_STATES else None
+    ended = run.owner == job.job_id and run.state in TERMINAL_RUN_STATES
+    return await _workflow_job_outcome(engine, run) if ended else None
 
 
 async def continued_workflow_job(job: BackgroundJob) -> JobSpec:
@@ -532,9 +546,26 @@ def workflow_limits(config: Config, agent_name: str) -> WorkflowLimits:
     return WorkflowLimits(**limits)
 
 
-def _workflow_job_outcome(run: WorkflowRun) -> BackgroundOutcome:
-    """Return how the job of an ended run ends: with the whole report, or with why the run did not finish."""
+async def _delivery(engine: WorkflowEngine, run: WorkflowRun) -> str:
+    """Return what an ended run delivers to whoever started it: its report, or why it did not finish.
+
+    A run that completed although calls of it failed, which its script caught, says so in a first line.
+    """
     text = run.outcome_text()
+    if run.state is not WorkflowRunState.COMPLETED:
+        return text
+    nodes = await asyncio.to_thread(engine.store.nodes, run.run_id)
+    failed = [f"n{node.seq}" for node in nodes if node.state in _FAILED]
+    if not failed:
+        return text
+    named = ", ".join(failed[:_MAX_FAILED_NAMED]) + (", ..." if len(failed) > _MAX_FAILED_NAMED else "")
+    calls = "call" if len(failed) == 1 else "calls"
+    return f'{len(failed)} {calls} failed ({named}); get_workflow(run_id, nodes="failed") shows them.\n\n{text}'
+
+
+async def _workflow_job_outcome(engine: WorkflowEngine, run: WorkflowRun) -> BackgroundOutcome:
+    """Return how the job of an ended run ends: with what the run delivers."""
+    text = await _delivery(engine, run)
     return BackgroundOutcome(_JOB_STATUS[run.state], text, encode_result_payload(ToolResultPayload(value=text)))
 
 

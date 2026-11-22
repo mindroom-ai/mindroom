@@ -14,6 +14,7 @@ import json
 import shutil
 import sqlite3
 import threading
+import time
 from contextlib import closing, contextmanager, suppress
 from dataclasses import replace
 from functools import partial
@@ -121,6 +122,11 @@ def failed(kind: str, message: str, *, state: str = "failed") -> dict[str, objec
     return {"state": state, "cached": False, "result": None, "error": {"kind": kind, "message": message}}
 
 
+class _Server(ThreadingHTTPServer):
+    # A fan-out connects from every lane at once.
+    request_queue_size = 512
+
+
 class FakeWorkflowGateway:
     """A threaded HTTP server that records the SDK's requests and answers nodes from `respond`."""
 
@@ -140,8 +146,14 @@ class FakeWorkflowGateway:
         """How many of the next requests are cut off without an answer, as a restarting gateway does."""
         self.refuse: tuple[int, object] | None = None
         """A status and JSON body answered to every request instead of the normal answer."""
+        self.hold: Callable[[dict[str, object]], str | None] = lambda _request: None
+        """Asked at every answer for a node: a state such as `waiting` keeps the node in it, None lets it settle."""
+        self.peak_open = 0
+        """The most node submissions that were being answered at one moment."""
+        self._open = 0
+        self._lock = threading.Lock()
         self._receipts: dict[str, dict[str, object]] = {}
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        self._server = _Server(("127.0.0.1", 0), self._handler())
         self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         self.url = f"http://127.0.0.1:{self._server.server_port}/api/script-gateway"
 
@@ -160,18 +172,25 @@ class FakeWorkflowGateway:
         if (method, route) == ("GET", "run"):
             return {"run_id": "wf-" + "b" * 32, "attempt": 1, "args": self.args}
         if (method, route) == ("POST", "nodes"):
-            self.nodes.append(body)
-            node_id = f"n{len(self.nodes) - 1}"
-            self._receipts[node_id] = {"id": node_id, **self.respond(body)}
+            with self._lock:
+                self.nodes.append(body)
+                node_id = f"n{len(self.nodes) - 1}"
+                self._open += 1
+                self.peak_open = max(self.peak_open, self._open)
+            try:
+                self._receipts[node_id] = {"id": node_id, "request": body, **self.respond(body)}
+            finally:
+                with self._lock:
+                    self._open -= 1
             if self.polls_before_settled:
                 return {"id": node_id, "state": "running", "cached": False, "result": None, "error": None}
-            return self._receipts[node_id]
+            return self._receipt(node_id)
         if method == "GET" and route.startswith("nodes/"):
             node_id = route.removeprefix("nodes/").partition("?")[0]
             self.polls_before_settled -= 1
             if self.polls_before_settled > 0:
                 return {"id": node_id, "state": "running", "cached": False, "result": None, "error": None}
-            return self._receipts[node_id]
+            return self._receipt(node_id)
         if method == "GET" and route.startswith("results/"):
             return self.results[route.removeprefix("results/")]
         if (method, route) == ("POST", "log"):
@@ -182,6 +201,19 @@ class FakeWorkflowGateway:
             return {}
         msg = f"Unexpected request {method} {route}"
         raise AssertionError(msg)
+
+    def _receipt(self, node_id: str) -> dict[str, object]:
+        """Return the node's receipt, or one in the state `hold` keeps it in."""
+        receipt = dict(self._receipts[node_id])
+        held = self.hold(receipt.pop("request"))  # type: ignore[arg-type]
+        if held is None:
+            return receipt
+        time.sleep(0.005)
+        return {"id": node_id, "state": held, "cached": False, "result": None, "error": None}
+
+    def nodes_of_kind(self, kind: str) -> list[dict[str, object]]:
+        """Return the submitted nodes of one kind, in the order they arrived."""
+        return [node for node in self.nodes if node["kind"] == kind]
 
     def _handler(self) -> type[BaseHTTPRequestHandler]:
         gateway = self

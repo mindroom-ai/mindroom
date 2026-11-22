@@ -9942,7 +9942,7 @@ A run that another call resumed since belongs to that call: the earlier one neit
 ## What The Script Can Call
 
 ```python
-from mindroom.workflow import agent, shell, tool, phase, log, now, random
+from mindroom.workflow import agent, foreach, parallel, shell, tool, phase, log, now, random, PartialFailure
 
 def main(args):
     phase("Test")
@@ -9957,6 +9957,7 @@ def main(args):
 - `shell(command)` runs a command with the agent's `shell` tool and returns `.ok`, `.exit_code`, and `.output`.
   It returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - `tool(toolkit, function, **arguments)` calls any other tool of the agent and returns its result.
+- `foreach(items, fn)` and `parallel([fn1, fn2])` run calls in parallel; see [Fan-Out](#fan-out).
 - `phase(title)` groups the calls that follow, and `log(text)` adds a progress line to the run.
 - `now()` returns the current UTC time and `random()` a float in `[0, 1)`; both are saved, so a resumed run gets the same values again.
 - `shell(..., cached=False)` and `tool(..., cached=False)` run again on every resume; use it for a check of something outside the run.
@@ -10012,6 +10013,65 @@ An agent keeps running when the attempt that asked for it ends, and the next att
 Cancelling the run stops its agents, and a call whose prompt or options changed stops the agent of the old call.
 `schema` is not available yet.
 
+## Fan-Out
+
+```python
+from mindroom.workflow import PartialFailure, agent, foreach, parallel
+
+def main(args):
+    try:
+        notes = foreach(args["topics"], lambda topic: agent(f"Research {topic}. Cite sources."))
+    except PartialFailure as failure:
+        notes = failure.ok
+    summary, critique = parallel([
+        lambda: agent("Summarize these notes:\n\n" + "\n\n".join(notes)),
+        lambda: agent("List what these notes leave open:\n\n" + "\n\n".join(notes)),
+    ])
+    return summary + "\n\nOpen points:\n" + critique
+```
+
+- `foreach(items, fn)` calls `fn(item)` for every item in parallel and returns the results in the order of the items.
+- `parallel([fn1, fn2])` calls each function, which takes no argument, in parallel and returns the results in the order of the functions.
+  For a loop over items use `foreach`: `parallel([lambda: agent(p) for p in prompts])` is refused with `These functions capture the same loop variable, so each would see its last value. Use foreach(prompts, lambda p: agent(p)).`
+  `parallel([agent(a), agent(b)])` is refused with `parallel() takes functions. Write parallel([lambda: agent(a), lambda: agent(b)]) or use foreach(items, fn).`
+- A function may make several calls, one after the other, and may itself call `foreach` or `parallel`.
+- There is no limit on the number of items.
+  The run's `max_concurrent`, 16 unless `start_workflow` was given another number, is how many agent and tool calls of the run work at the same time; the others wait `queued`.
+  `foreach(items, fn, max_concurrent=4)` and `parallel(fns, max_concurrent=4)` hold one fan-out to fewer.
+  The script itself works on at most 256 items of one fan-out at a time, whatever the limit.
+- When calls fail, the others still finish, and then the fan-out raises `PartialFailure`.
+  Its `.ok` holds the results that succeeded, in order; `.results` has one entry per position, with `None` where the call failed; `.errors` maps each failed position to its exception; `.items` holds the items of a `foreach`.
+  Its message names the failures, for example `2 of 5 calls failed: [1] AgentError(failed): ...; [3] KeyError: 'x'`.
+  A `PartialFailure` that the script does not catch fails the run.
+- An exception of the script's own code inside a function, such as a `KeyError`, fails only that item, and the run shows it as a failed call of kind `error` where it happened.
+- A run that completed although calls failed says so in the first line of its report: `3 calls failed (n4, n9, n12); get_workflow(run_id, nodes="failed") shows them.`
+
+On a resume each item is matched by its value, not by its position, so adding, removing, or reordering items reuses the saved calls of the items that stayed.
+Of two equal items the first and the second are told apart by their order.
+An item that is not a JSON value, such as an object of the script's own class, is matched by its position.
+The functions of `parallel` are matched by position.
+An item whose calls all completed is not run again, and one that failed is: a failed agent in a fan-out of 500 reruns that one agent.
+What follows the fan-out in the script then runs again too, because it may depend on the item that ran again.
+
+### Agents That Edit The Same Repository
+
+Agents that run in parallel share the agent's workspace, so two of them editing one checkout would overwrite each other.
+Give each item its own git worktree and branch, and merge the branches in one step afterwards.
+
+```python
+def fix(issue):
+    path = f"../wt-{issue['id']}"
+    shell(f"git worktree add {path} -b fix/{issue['id']}")
+    agent(f"Work only in {path}. Fix and commit: {issue['text']}")
+    return f"fix/{issue['id']}"
+
+def main(args):
+    branches = foreach(args["issues"], fix)
+    return agent(f"Merge these branches into the current branch one by one and resolve conflicts: {branches}")
+```
+
+`agent(..., dedicated_worker=True)` gives an agent its own container when files outside git must not collide either.
+
 ## Resume A Run
 
 `resume_workflow(run_id)` works on a run that ended in any state: `failed`, `cancelled`, `interrupted`, or `completed`.
@@ -10021,6 +10081,7 @@ The next attempt runs the script from the top, and each call gets its saved resu
 - A call that completed with the same arguments returns its saved result at once.
 - A call that failed or was cancelled runs again.
 - In each sequence of calls, the first call that runs again makes every call after it run again too, because it may have changed what they see.
+  Each item of a `foreach` and each function of a `parallel` is a sequence of its own, so one item that runs again leaves the other items alone; the calls after that fan-out run again.
 - A `cached=False` call always runs again; the calls after it are reused when it returns the same result as before, compared whole and as JSON, so `1` and `1.0` differ.
   That also holds when the call's arguments were edited, as long as no call before it ran again and `rerun` does not name it.
 - A call that ended `indeterminate` raises `ToolError` with kind `indeterminate` on every attempt, whatever its arguments are now.

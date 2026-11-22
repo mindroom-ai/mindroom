@@ -52,6 +52,26 @@ def main(args):
 """
 
 
+_FAN_OUT = """\
+from mindroom.workflow import PartialFailure, foreach, parallel, tool
+
+
+def write(line):
+    if line == "bad":
+        return tool("counter", "fail")
+    return tool("counter", "append", line=line)
+
+
+def main(args):
+    try:
+        written = foreach(args["lines"], write)
+    except PartialFailure as failure:
+        written = {"ok": failure.ok, "failed": sorted(failure.errors), "said": str(failure)}
+    both = parallel([lambda: tool("counter", "append", line="x"), lambda: tool("counter", "append", line="y")])
+    return {"written": written, "both": both}
+"""
+
+
 class LocalWorkflowStack(WorkflowStack):
     """The engine harness with the real script manager: an attempt is a real child process of this test."""
 
@@ -123,6 +143,41 @@ async def test_real_local_script_returns_its_report(local_stack: LocalWorkflowSt
         ("counter.append", WorkflowNodeState.COMPLETED),
         ("shell.run_shell_command", WorkflowNodeState.COMPLETED),
     ]
+
+
+@pytest.mark.asyncio
+async def test_real_script_fans_out_in_parallel_and_a_resume_runs_only_what_failed_and_what_follows(
+    local_stack: LocalWorkflowStack,
+) -> None:
+    """A real `foreach` and `parallel`: every item's call is saved in its own lane, and the failed one alone runs again."""
+    lines = ["a", "bad", "b", "c"]
+    run = await local_stack.start(_FAN_OUT, args={"lines": lines})
+
+    done = await local_stack.engine.wait(run.run_id)
+
+    assert done.error is None
+    assert done.result == {
+        "written": {
+            "ok": ["appended"] * 3,
+            "failed": [1],
+            "said": "1 of 4 calls failed: [1] ToolError(failed): The counter failed.",
+        },
+        "both": ["appended", "appended"],
+    }
+    assert sorted(local_stack.counting_tool.lines) == ["a", "b", "c", "x", "y"]
+    _, nodes = local_stack.engine.status(run.run_id)
+    foreach_group, parallel_group = [node for node in nodes if node.kind == "group"]
+    assert (foreach_group.key, len(foreach_group.members or ()), parallel_group.key) == ("@0", 4, "@1")
+    assert parallel_group.members == ("/1:p0", "/1:p1")
+
+    await local_stack.resume(run.run_id)
+    again = await local_stack.engine.wait(run.run_id)
+
+    # The three finished items are reused. The failed one ran again, so what follows the fan-out did too.
+    assert again.result == done.result
+    assert sorted(local_stack.counting_tool.lines) == ["a", "b", "c", "x", "x", "y", "y"]
+    _, nodes = local_stack.engine.status(run.run_id)
+    assert sorted(node.generation for node in nodes if node.kind == "tool") == [1, 1, 1, 2, 2, 2]
 
 
 @pytest.mark.asyncio
