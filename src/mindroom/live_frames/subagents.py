@@ -87,7 +87,7 @@ def _run_docs(snapshot: SubagentSnapshot, *, previews: bool, text_cut: int = 0) 
         marker, _ = format_tool_started_event(call, len(entries))
         if item.state != "running":
             marker = complete_pending_tool_block(marker, item.tool.tool_name, len(entries))
-        md = append_stream_text(md, marker, separate=True)
+        md = append_stream_text(md, marker, marker=True)
     tools = serialize_tool_trace(entries)
     if not previews:
         tools = tuple({"type": entry["type"], "tool_name": entry["tool_name"]} for entry in tools)

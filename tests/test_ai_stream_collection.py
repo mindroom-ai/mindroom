@@ -103,6 +103,27 @@ async def test_collect_streamed_response_can_hide_tool_markers() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("replaces_text", [False, True])
+async def test_a_document_that_replaces_the_text_ends_a_tool_call_s_pending_paragraph_break(
+    replaces_text: bool,
+) -> None:
+    """Text after a whole document continues it, though a tool call before the document left a break pending."""
+    document = "🔧 `read` [1] ⏳\n\nHel"
+
+    async def stream() -> AsyncGenerator[object]:
+        yield ToolStarted(call=ToolExecution(tool_call_id="call-1", tool_name="read", tool_args={}).call)
+        yield document if replaces_text else StructuredStreamChunk(content=document)
+        yield TextDelta("lo")
+
+    body, _ = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(show_tool_calls=True, replaces_text=replaces_text),
+    )
+
+    assert body == "🔧 `read` [1] ⏳\n\nHello"
+
+
+@pytest.mark.asyncio
 async def test_collect_streamed_response_resumes_pending_tool_by_exact_id() -> None:
     """A continuation completes the persisted marker in place and appends later events in order."""
     prior_trace = [

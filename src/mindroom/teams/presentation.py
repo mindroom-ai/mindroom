@@ -162,7 +162,7 @@ class TeamStreamPresentation:
         """Restore a durable structured snapshot without interpreting its rendered Markdown.
 
         The snapshot must hold the slots of ``config_names`` in order, and every tool call of ``tool_trace`` one of
-        them; a tool call or a new run separates only slot text written before it. A snapshot an earlier release stored as
+        them; a call or a new run separates only slot text written before it. A snapshot an earlier release stored as
         version 2 restores as the version 3 it stands for (``upgrade_v2_team_snapshot``).
         """
         if state is not None and state.get("kind") == "team_stream" and state.get("version") == 2:
@@ -248,10 +248,8 @@ class TeamStreamPresentation:
         """Append a delta of member run ``run_id``; text from another run than the slot's last text starts a paragraph."""
         if not content:
             return
-        if self._last_text_run.get(member_id, run_id) != run_id:
-            self.separate_next_slots.add(member_id)
+        self.append_member(member_id, content, separate=self._last_text_run.get(member_id, run_id) != run_id)
         self._last_text_run[member_id] = run_id
-        self.append_member(member_id, content)
 
     def append_consensus(self, content: object | None, *, separate: bool = False) -> None:
         """Append a coordinator content delta to the consensus slot; ``separate`` as for ``append_member``."""
@@ -259,8 +257,11 @@ class TeamStreamPresentation:
 
     def _append_text(self, member_id: str | None, content: object | None, *, separate: bool) -> None:
         """Append to a slot; text after a tool call or another run's text in that slot starts a paragraph of its own."""
-        separate = separate or member_id in self.separate_next_slots
-        self._set_slot_text(member_id, append_stream_text(self._slot_text(member_id), content, separate=separate))
+        text = self._slot_text(member_id)
+        if separate and text and content:
+            self.separate_next_slots.add(member_id)
+        separate = member_id in self.separate_next_slots
+        self._set_slot_text(member_id, append_stream_text(text, content, separate=separate))
         if str(content or "").strip("\r\n"):
             self.separate_next_slots.discard(member_id)
 
@@ -298,7 +299,7 @@ class TeamStreamPresentation:
             return
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
-            self._set_slot_text(member_id, append_stream_text(self._slot_text(member_id), marker, separate=True))
+            self._set_slot_text(member_id, append_stream_text(self._slot_text(member_id), marker, marker=True))
         if self._slot_text(member_id):
             self.separate_next_slots.add(member_id)
         self._align_tool_trace_with_document()

@@ -238,6 +238,20 @@ def test_a_member_run_that_opens_with_newlines_still_starts_a_paragraph_below_an
     assert presentation.per_member["scout"] == "First.\n\nSecond."
 
 
+def test_newlines_appended_as_a_paragraph_of_their_own_keep_the_break_for_the_text_after_them() -> None:
+    """Whoever asks for the break, a run switch or a caller, a delta of newlines alone does not use it up."""
+    presentation = _presentation()
+    presentation.append_member("scout", "First.")
+    presentation.append_member("scout", "\n", separate=True)
+    presentation.append_member("scout", "Second.")
+    presentation.append_consensus("Summing up.")
+    presentation.append_consensus("\r\n", separate=True)
+    presentation.append_consensus("Four in all.")
+
+    assert presentation.per_member["scout"] == "First.\n\nSecond."
+    assert presentation.consensus == "Summing up.\n\nFour in all."
+
+
 @pytest.mark.parametrize(
     ("separators", "trace_member"),
     [

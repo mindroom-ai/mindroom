@@ -762,19 +762,23 @@ class StreamingResponse:
             *_merge_tool_trace(self.tool_trace[resumed_count:], incoming),
         ]
 
-    def _append_incremental_text(self, new_chunk: str) -> None:
-        """Append additive streaming text regardless of snapshot replacement mode."""
-        self.accumulated_text = append_stream_text(self.accumulated_text, new_chunk, separate=self._separate_next_text)
-        if new_chunk.strip("\r\n"):
-            self._separate_next_text = False
-        self.chars_since_last_update += len(new_chunk)
+    def _append_incremental_text(self, new_chunk: str, *, marker: bool = False) -> None:
+        """Append additive streaming text regardless of snapshot replacement mode; a tool ``marker`` is a paragraph."""
+        separate = self._separate_next_text
+        updated = append_stream_text(self.accumulated_text, new_chunk, separate=separate, marker=marker)
+        added = len(updated) - len(self.accumulated_text)
+        if new_chunk and not added:
+            # Newlines alone after a tool call add nothing, and the text after them still starts its paragraph.
+            return
+        if new_chunk:
+            self._separate_next_text = marker
+        self.accumulated_text = updated
+        self.chars_since_last_update += added
         self.last_delta_at = time.time()
 
     def _append_tool_marker(self, marker: str) -> None:
-        """Append a visible tool marker as a paragraph of its own, which the text after it starts another below."""
-        self._separate_next_text = True
-        self._append_incremental_text(marker)
-        self._separate_next_text = True
+        """Append a visible tool marker, which the text after it starts a paragraph below."""
+        self._append_incremental_text(marker, marker=True)
 
     def _mark_nonadditive_text_mutation(self) -> None:
         """Count a visible in-place text change that did not append characters as one received character."""

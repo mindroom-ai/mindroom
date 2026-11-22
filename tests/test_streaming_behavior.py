@@ -4695,6 +4695,33 @@ def _tool_pair(call_id: str, tool_name: str) -> list[object]:
             id="lone-cr-before-marker",
         ),
         pytest.param(
+            [TextDelta("Doc\r\n\r\n"), *_tool_pair("call-1", "read_file")],
+            "Doc\r\n\r",
+            [1],
+            [2],
+            "Doc\r\n\r\n",
+            id="crlf-blank-line-before-trailing-marker",
+        ),
+        pytest.param(
+            [
+                TextDelta("Doc\r\n\r\n"),
+                ToolStarted(ToolExecution(tool_call_id="call-1", tool_name="read_file", tool_args={}).call),
+            ],
+            "Doc\r\n\r",
+            [1],
+            [2],
+            "Doc\r\n\r\n",
+            id="crlf-blank-line-before-pending-marker",
+        ),
+        pytest.param(
+            [TextDelta("Before\r\n\r\n"), *_tool_pair("call-1", "read_file"), TextDelta("After")],
+            "Before\r\n\r\n\nAfter",
+            [1],
+            [3],
+            "Before\r\n\r\nAfter",
+            id="crlf-blank-line-before-interior-marker",
+        ),
+        pytest.param(
             [TextDelta("Checking."), *_tool_pair("call-1", "read_file"), *_tool_pair("call-2", "shell")],
             "Checking.",
             [1, 1],
@@ -4923,6 +4950,12 @@ async def test_marker_shaped_prose_joins_as_plain_text_however_its_deltas_split(
         ),
         pytest.param("🔧 `read` [1] ⏳\n\nDoc", "🔧 `read` [1]\n\nDoc", id="own-marker-first"),
         pytest.param("Doc\n\n🔧 `read` [1] ⏳", "Doc\n\n🔧 `read` [1]", id="own-marker-last"),
+        # As a collected reply writes the marker of a call below text that ends in a CRLF blank line.
+        pytest.param(
+            "Doc\r\n\r\n\n🔧 `read` [1] ⏳\n\nAfter",
+            "Doc\r\n\r\n\n🔧 `read` [1]\n\nAfter",
+            id="own-marker-below-crlf-blank-line",
+        ),
     ],
 )
 async def test_a_replacement_snapshot_holds_its_pending_call_as_one_marker_paragraph(
@@ -4948,3 +4981,31 @@ async def test_a_replacement_snapshot_holds_its_pending_call_as_one_marker_parag
     )
 
     assert replacement.accumulated_text == expected
+
+
+def test_newlines_dropped_after_a_tool_call_do_not_count_as_received_text(tmp_path: Path) -> None:
+    """Only appended characters count toward the next edit; an empty append still marks a presentation change."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    streaming._append_incremental_text("Checking.")
+    streaming._append_tool_marker("🔧 `read` [1] ⏳")
+    counted, delta_at = streaming.chars_since_last_update, streaming.last_delta_at
+    assert counted == len("Checking.\n\n🔧 `read` [1] ⏳")
+
+    streaming._append_incremental_text("\r\n")
+    assert (streaming.chars_since_last_update, streaming.last_delta_at) == (counted, delta_at)
+
+    streaming.last_delta_at = None
+    streaming._append_incremental_text("")
+    assert streaming.chars_since_last_update == counted
+    assert streaming.last_delta_at is not None
+
+    streaming._append_incremental_text("\nDone")
+    assert streaming.accumulated_text == "Checking.\n\n🔧 `read` [1] ⏳\n\nDone"
+    assert streaming.chars_since_last_update == len(streaming.accumulated_text)

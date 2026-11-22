@@ -249,6 +249,7 @@ class CollectedStreamPresentation:
         """Apply one text chunk: it replaces the collected text in a stream of whole documents, else continues it."""
         if self.replaces_text:
             self.response_text = content
+            self.separate_next_text = False
             return
         self.append_text(content)
 
@@ -272,7 +273,7 @@ class CollectedStreamPresentation:
             return
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
-            self.response_text = append_stream_text(self.response_text, text, separate=True)
+            self.response_text = append_stream_text(self.response_text, text, marker=True)
         self.separate_next_text = bool(self.response_text)
 
     def visible_tool_count(self) -> int:
@@ -306,6 +307,7 @@ class CollectedStreamPresentation:
     def show_document(self, chunk: StructuredStreamChunk) -> None:
         """Replace the collected presentation with a document the stream sent whole; one without a trace keeps it."""
         self.response_text = chunk.content
+        self.separate_next_text = False
         if chunk.tool_trace is not None:
             self.tool_trace = list(chunk.tool_trace)
         self.document_state = chunk.presentation_state
@@ -919,17 +921,24 @@ def renumbered_tool_trace(body: str, trace: Sequence[ToolTraceEntry]) -> tuple[s
     return remap_visible_tool_marker_indices(body, index_map), entries
 
 
-def append_stream_text(existing_text: str, content: object | None, *, separate: bool = False) -> str:
-    """Append one delta or tool marker; ``separate`` puts it one blank line below any text before it.
+def append_stream_text(
+    existing_text: str,
+    content: object | None,
+    *,
+    separate: bool = False,
+    marker: bool = False,
+) -> str:
+    """Append one delta, or a tool ``marker``; that or ``separate`` puts it one blank line below any text before it.
 
     A separated delta loses the newlines it opens with, and one of newlines alone adds nothing, so its caller keeps
     separating until a delta holds other text.
     """
     delta = str(content or "")
-    if not (separate and existing_text):
+    if not ((separate or marker) and existing_text):
         return existing_text + delta
     delta = delta.lstrip("\r\n")
-    if not delta or existing_text.endswith(("\n\n", "\n\r\n")):
+    # Matrix gets a marker as a v3 position only when an LF blank line precedes it, so a CRLF one serves text alone.
+    if not delta or existing_text.endswith("\n\n" if marker else ("\n\n", "\n\r\n")):
         return existing_text + delta
     return f"{existing_text}{'\n' if existing_text.endswith('\n') else '\n\n'}{delta}"
 

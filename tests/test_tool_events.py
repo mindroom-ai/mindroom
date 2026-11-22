@@ -326,6 +326,22 @@ def test_separated_stream_text_starts_one_blank_line_below_the_text_before_it(
 
 
 @pytest.mark.parametrize(
+    ("existing", "expected"),
+    [
+        ("", "🔧 `read` [1] ⏳"),
+        ("Doc", "Doc\n\n🔧 `read` [1] ⏳"),
+        ("Doc\n\n", "Doc\n\n🔧 `read` [1] ⏳"),
+        ("Doc\r\n", "Doc\r\n\n🔧 `read` [1] ⏳"),
+        ("Doc\r\n\r\n", "Doc\r\n\r\n\n🔧 `read` [1] ⏳"),
+        ("Doc\n\r\n", "Doc\n\r\n\n🔧 `read` [1] ⏳"),
+    ],
+)
+def test_a_tool_marker_stands_below_an_lf_blank_line(existing: str, expected: str) -> None:
+    """A CRLF blank line does not serve a marker: Matrix gets it as a v3 position only below an LF one."""
+    assert append_stream_text(existing, "🔧 `read` [1] ⏳", marker=True) == expected
+
+
+@pytest.mark.parametrize(
     "deltas",
     [
         ["🔧 `read` [1]", " is literal."],
