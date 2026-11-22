@@ -1,6 +1,6 @@
 """Tests for `workers run` control plane: cancel, long-poll, progress, stderr, and exit codes."""
 
-# ruff: noqa: D103, ANN001, ANN202, ARG001, PLR0915
+# ruff: noqa: ANN001, ANN202, ARG001, PLR0915
 from __future__ import annotations
 
 import asyncio
@@ -26,8 +26,8 @@ from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER, AgentCliS
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.shell.output_capture import format_shell_completion, format_shell_timeout
-from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system import runtime_context
+from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.sandbox_proxy import _make_progress_sink
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.workers.models import WorkerReadyProgress
@@ -528,7 +528,7 @@ def test_cli_workers_run_cancels_on_signal_and_exits_128_plus_signo(
             handler = installed[sig]
             assert callable(handler)
             handler(int(sig), None)
-            raise AssertionError("signal handler should interrupt wait")
+            pytest.fail("signal handler should interrupt wait")
 
         def cancel(self, call_id, *, timeout: float = 5.0):
             cancelled.append((call_id, timeout))
@@ -571,7 +571,7 @@ def test_cli_workers_run_warns_when_signal_cancel_cannot_be_confirmed(
             handler = installed[signal.SIGTERM]
             assert callable(handler)
             handler(int(signal.SIGTERM), None)
-            raise AssertionError("signal handler should interrupt wait")
+            pytest.fail("signal handler should interrupt wait")
 
         def cancel(self, call_id, *, timeout: float = 5.0):
             del call_id, timeout
@@ -652,7 +652,7 @@ def test_cli_workers_run_uses_long_poll_without_sleeping_and_prints_progress_and
             return next(receipts)
 
     def no_sleep(_seconds: float) -> None:
-        raise AssertionError("healthy long-poll must not sleep")
+        pytest.fail("healthy long-poll must not sleep")
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     monkeypatch.setattr("mindroom.agent_cli.main.time.sleep", no_sleep)
@@ -748,3 +748,96 @@ def test_cli_workers_run_splits_exit_255_unknown_from_exit_125_not_run(
     assert out_unknown.out == ""
     assert f"(call {submissions[0]['call_id']})" in out_unknown.err
     assert "may still be running" in out_unknown.err
+
+
+@pytest.mark.asyncio
+async def test_long_poll_rejects_negative_and_nonfinite_wait(tmp_path: Path) -> None:
+    """Invalid `?wait=` query values are rejected with 422."""
+
+    async def run_shell_command(args: str) -> str:
+        return args
+
+    owner, token = await _make_owner(tmp_path, run_shell_command)
+    app = _make_app(owner)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as http:
+            for bad in ("-1", "nan", "inf"):
+                resp = await http.get(
+                    f"/api/agent-cli/calls/{uuid4()}?wait={bad}",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert resp.status_code == 422
+    finally:
+        await owner.close()
+
+
+def test_progress_sink_formats_cold_start_waiting_and_ready_for_call_progress() -> None:
+    """`cold_start`, `waiting`, and `ready` forward bounded messages; `failed` does not duplicate errors."""
+    messages: list[str] = []
+    sink = _make_progress_sink(
+        None,
+        reply_timing=None,
+        call_progress=messages.append,
+        worker_name="fan3",
+        tool_name="shell",
+        function_name="run_shell_command",
+    )
+    for phase, elapsed in (("cold_start", 1.6), ("waiting", 6.2), ("ready", 12.4), ("failed", 15.0)):
+        sink(
+            WorkerReadyProgress(
+                phase=phase,
+                worker_key="w",
+                backend_name="kubernetes",
+                elapsed_seconds=elapsed,
+                error="boom" if phase == "failed" else None,
+            ),
+        )
+    assert messages == [
+        "starting worker fan3...",
+        "starting worker fan3... (6s)",
+        "worker fan3 ready (12s)",
+    ]
+
+
+def test_http_client_cancel_and_long_poll_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`AgentCliClient.cancel` posts to `/calls/{id}/cancel` and `receipt(..., wait=25)` passes `?wait=25`."""
+    import threading  # noqa: PLC0415
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: PLC0415
+
+    seen: list[tuple[str, str]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            seen.append(("GET", self.path))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"running"}')
+
+        def do_POST(self) -> None:
+            seen.append(("POST", self.path))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"cancelled"}')
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN", "private-capability")
+    call_id = str(uuid4())
+    try:
+        client = AgentCliClient()
+        assert client.receipt(call_id, wait=25)["status"] == "running"
+        assert client.cancel(call_id)["status"] == "cancelled"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert seen == [
+        ("GET", f"/api/agent-cli/calls/{call_id}?wait=25"),
+        ("POST", f"/api/agent-cli/calls/{call_id}/cancel"),
+    ]

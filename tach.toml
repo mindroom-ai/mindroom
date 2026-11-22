@@ -420,6 +420,7 @@ expose = [
 [[modules]]
 path = "mindroom.agent_cli.turn"
 depends_on = [
+    "mindroom.tool_system.runtime_context",
     "mindroom.agent_cli.approval",
     "mindroom.agent_cli.delegation",
     "mindroom.agent_cli.events",
@@ -7476,6 +7477,8 @@ expose = [
     "current_plugins",
     "detached_tool_scope",
     "emit_custom_event",
+    "call_progress_sink_scope",
+    "get_call_progress_sink",
     "get_worker_progress_pump",
     "get_tool_runtime_context",
     "get_tool_runtime_media_attachment",

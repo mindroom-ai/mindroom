@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-__all__ = ["bind_agent_cli_registry", "get_call", "router", "submit_operation"]
+__all__ = ["bind_agent_cli_registry", "cancel_call", "get_call", "router", "submit_operation"]
 
+import math
 import time
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -72,10 +73,22 @@ async def submit_operation(request: Request) -> Response:
 
 
 @router.get("/calls/{call_id}")
-async def get_call(request: Request, call_id: str) -> Response:
+async def get_call(request: Request, call_id: str, wait: float = 0.0) -> Response:
     """Hide absent and other-owner receipts behind the identical auth response."""
     owner = _owner(request)
+    if not math.isfinite(wait) or wait < 0:
+        raise HTTPException(status_code=422, detail="Invalid Agent CLI wait duration")
     try:
-        return _response(await owner.get_call(str(UUID(call_id))))
+        return _response(await owner.get_call(str(UUID(call_id)), wait=wait))
+    except (CliAuthenticationError, ValueError):
+        raise HTTPException(status_code=401, detail="Agent CLI authority is unavailable") from None
+
+
+@router.post("/calls/{call_id}/cancel")
+async def cancel_call(request: Request, call_id: str) -> Response:
+    """Idempotently cancel one owned call without requiring a free capacity slot."""
+    owner = _owner(request)
+    try:
+        return _response(await owner.cancel_call(str(UUID(call_id))))
     except (CliAuthenticationError, ValueError):
         raise HTTPException(status_code=401, detail="Agent CLI authority is unavailable") from None

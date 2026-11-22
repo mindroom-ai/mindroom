@@ -452,6 +452,10 @@ _WORKER_PROGRESS_PUMP: ContextVar[WorkerProgressPump | None] = ContextVar(
     "worker_progress_pump",
     default=None,
 )
+_CALL_PROGRESS_SINK: ContextVar[Callable[[str], None] | None] = ContextVar(
+    "call_progress_sink",
+    default=None,
+)
 
 
 def get_tool_runtime_context() -> ToolRuntimeContext | None:
@@ -491,6 +495,11 @@ def current_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
 def get_worker_progress_pump() -> WorkerProgressPump | None:
     """Get the current worker progress pump bound to the stream task."""
     return _WORKER_PROGRESS_PUMP.get()
+
+
+def get_call_progress_sink() -> Callable[[str], None] | None:
+    """Get the current per-call progress sink bound to one CLI call."""
+    return _CALL_PROGRESS_SINK.get()
 
 
 def scope_hook_context_kwargs(
@@ -733,3 +742,13 @@ def worker_progress_pump_scope(
     finally:
         pump.shutdown.set()
         _WORKER_PROGRESS_PUMP.reset(token)
+
+
+@contextmanager
+def call_progress_sink_scope(sink: Callable[[str], None] | None) -> Iterator[None]:
+    """Bind one per-call progress sink for the lifetime of a CLI tool call."""
+    token = _CALL_PROGRESS_SINK.set(sink)
+    try:
+        yield
+    finally:
+        _CALL_PROGRESS_SINK.reset(token)

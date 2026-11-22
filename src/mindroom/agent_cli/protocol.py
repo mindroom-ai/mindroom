@@ -100,6 +100,7 @@ class ToolCallReceipt(_Operation):
     function: _SELECTOR
     status: Literal["queued", "running", "waiting", "completed", "failed", "cancelled"]
     parent_bash_call_id: str | None = Field(default=None, max_length=128)
+    progress: str | None = Field(default=None, max_length=256)
     outcome: JsonValue = None
     attachments: list[dict[str, JsonValue]] = Field(default_factory=list)
 

@@ -19,6 +19,8 @@ from mindroom.agent_cli.shell_contract import (
 )
 
 _HTTP_TIMEOUT_SECONDS = 30
+_MAX_LONG_POLL_SECONDS = 25
+_CANCEL_TIMEOUT_SECONDS = 5
 
 
 class AgentCliUnavailableError(RuntimeError):
@@ -77,9 +79,26 @@ class AgentCliClient:
         """Submit once; callers retain the exact call ID on uncertain acceptance."""
         return self._request("/api/agent-cli/operations", canonical_json(payload).encode("utf-8"))
 
-    def receipt(self, call_id: str, *, timeout: float = _HTTP_TIMEOUT_SECONDS) -> dict[str, object]:
-        """Read one canonical call ID, shortening the HTTP timeout if the caller has less time."""
-        return self._request(f"/api/agent-cli/calls/{UUID(call_id)}", timeout=min(timeout, _HTTP_TIMEOUT_SECONDS))
+    def receipt(
+        self,
+        call_id: str,
+        *,
+        timeout: float = _HTTP_TIMEOUT_SECONDS,
+        wait: float | None = None,
+    ) -> dict[str, object]:
+        """Read one canonical call ID, optionally long-polling up to 25 seconds."""
+        route = f"/api/agent-cli/calls/{UUID(call_id)}"
+        if wait is not None and wait > 0:
+            route = f"{route}?wait={min(wait, _MAX_LONG_POLL_SECONDS):g}"
+        return self._request(route, timeout=min(timeout, _HTTP_TIMEOUT_SECONDS))
+
+    def cancel(self, call_id: str, *, timeout: float = _CANCEL_TIMEOUT_SECONDS) -> dict[str, object]:
+        """Idempotently cancel one canonical call ID."""
+        return self._request(
+            f"/api/agent-cli/calls/{UUID(call_id)}/cancel",
+            b"",
+            timeout=min(timeout, _HTTP_TIMEOUT_SECONDS),
+        )
 
     def _request(
         self,

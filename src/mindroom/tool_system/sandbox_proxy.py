@@ -34,6 +34,7 @@ from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
+    get_call_progress_sink,
     get_tool_runtime_context,
     get_worker_progress_pump,
 )
@@ -599,16 +600,34 @@ def view_file_from_worker(
         return result
 
 
+def _format_worker_progress(progress: WorkerReadyProgress, *, worker_name: str | None) -> str | None:
+    """Format one worker warmup milestone for a CLI call receipt."""
+    target = f"worker {worker_name}" if worker_name else "worker"
+    if progress.phase == "cold_start":
+        return f"starting {target}..."
+    if progress.phase == "waiting":
+        return f"starting {target}... ({max(1, int(progress.elapsed_seconds))}s)"
+    if progress.phase == "ready":
+        return f"{target} ready ({max(1, int(progress.elapsed_seconds))}s)"
+    return None
+
+
 def _make_progress_sink(
     pump: WorkerProgressPump | None,
     *,
     reply_timing: ReplyTimingBinding | None,
     tool_name: str,
     function_name: str,
+    call_progress: Callable[[str], None] | None = None,
+    worker_name: str | None = None,
 ) -> ProgressSink:
     def sink(progress: WorkerReadyProgress) -> None:
         if reply_timing is not None and progress.phase in {"ready", "failed"}:
             reply_timing.note_worker_wait(progress.elapsed_seconds)
+        if call_progress is not None:
+            message = _format_worker_progress(progress, worker_name=worker_name)
+            if message is not None:
+                call_progress(message)
         if pump is None or pump.shutdown.is_set() or pump.loop.is_closed():
             return
         event = WorkerProgressEvent(
@@ -868,14 +887,17 @@ def _call_proxy_sync(
     # A streamed reply shows the worker's warmup; a streamed or collected reply keeps how long the call waited for it.
     pump = get_worker_progress_pump()
     reply_timing = reply_timing_binding()
+    call_progress = get_call_progress_sink()
     progress_sink = (
         _make_progress_sink(
             pump,
             reply_timing=reply_timing,
             tool_name=tool_name,
             function_name=function_name,
+            call_progress=call_progress,
+            worker_name=named.name if named is not None else None,
         )
-        if pump is not None or reply_timing is not None
+        if pump is not None or reply_timing is not None or call_progress is not None
         else None
     )
     with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
