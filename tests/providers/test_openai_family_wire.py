@@ -3559,3 +3559,136 @@ def test_responses_capabilities_follow_model_and_endpoint(tmp_path: Path) -> Non
 def test_non_openai_family_provider_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="not an OpenAI-family provider"):
         build_provider(ModelConfig(provider="anthropic", id="claude-sonnet-5-5"), _runtime(tmp_path))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "google/gemini-4-neon",
+        "google/gemini-3.8-flash:thinking",
+        "~google/gemini-pro-latest",
+        "Google/Gemini-4-Neon",
+    ],
+)
+async def test_openrouter_gemini_wraps_tool_results_as_json_objects(tmp_path: Path, model_id: str) -> None:
+    """OpenRouter's Gemini translator parses ``{...}`` out of plain-text tool content unless it is a JSON object."""
+    built = _Built(tmp_path, {"provider": "openrouter", "id": model_id, "api_key": "k"}, _chat_reply())
+    text = 'Header\nextra_kwargs: {}\nSee `{viaServers: ["child.example"]}` 🚀\nFooter'
+    assistant = Message(role="assistant", content="", tool_calls=[_CALL])
+    ok_result = Message(role="tool", content=text, tool_call_id="call_1", tool_name="get_weather")
+    err_result = Message(
+        role="tool",
+        content="Failed with {code: 500}",
+        tool_call_id="call_2",
+        tool_name="get_weather",
+        tool_call_error=True,
+    )
+    empty_err = Message(role="tool", content="", tool_call_id="call_3", tool_name="get_weather", tool_call_error=True)
+
+    await _turn(built, ModelRequest(messages=[_user(), assistant, ok_result, err_result, empty_err]))
+
+    sent = built.body()["messages"]
+    assert json.loads(sent[2]["content"]) == {"result": text}
+    assert json.loads(sent[3]["content"]) == {"error": "Failed with {code: 500}"}
+    assert json.loads(sent[4]["content"]) == {"error": "The tool call failed without an error message."}
+    # Wrapping happens only on the wire; stored messages stay plain text for cross-provider replay.
+    assert ok_result.content == text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra_kwargs",
+    [
+        {"request_params": {"model": "google/gemini-4-neon"}},
+        {"extra_body": {"model": "google/gemini-4-neon"}},
+    ],
+    ids=["request_params-model", "extra_body-model"],
+)
+async def test_openrouter_gemini_tool_wrapping_follows_authored_model_override(
+    tmp_path: Path,
+    extra_kwargs: dict[str, Any],
+) -> None:
+    built = _Built(
+        tmp_path,
+        {"provider": "openrouter", "id": "openrouter/auto", "api_key": "k", "extra_kwargs": extra_kwargs},
+        _chat_reply(),
+    )
+    assistant = Message(role="assistant", content="", tool_calls=[_CALL])
+    result = Message(role="tool", content="Header\n{}\nFooter", tool_call_id="call_1", tool_name="get_weather")
+
+    await _turn(built, ModelRequest(messages=[_user(), assistant, result]))
+
+    assert json.loads(built.body()["messages"][2]["content"]) == {"result": "Header\n{}\nFooter"}
+
+
+@pytest.mark.asyncio
+async def test_openrouter_gemini_wraps_multimodal_and_multipart_tool_results(tmp_path: Path) -> None:
+    """Attached media stays beside one JSON-wrapped text part, and multi-text parts coalesce before wrapping."""
+    built = _Built(tmp_path, {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}, _chat_reply())
+    assistant = Message(role="assistant", content="", tool_calls=[_CALL])
+    image_part = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+    with_attached_image = Message(
+        role="tool",
+        content="Caption {}",
+        tool_call_id="call_1",
+        tool_name="get_weather",
+        images=[Image(content=b"\x89PNG\r\n\x1a\n", mime_type="image/png")],
+    )
+    multi_text_only = Message(
+        role="tool",
+        content=[{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2 {a: 1}"}],
+        tool_call_id="call_2",
+        tool_name="get_weather",
+    )
+    mixed_parts = Message(
+        role="tool",
+        content=[{"type": "text", "text": "Before {}"}, image_part],
+        tool_call_id="call_3",
+        tool_name="get_weather",
+    )
+    image_only = Message(role="tool", content=[image_part], tool_call_id="call_4", tool_name="get_weather")
+
+    await _turn(
+        built,
+        ModelRequest(messages=[_user(), assistant, with_attached_image, multi_text_only, mixed_parts, image_only]),
+    )
+
+    sent = built.body()["messages"]
+    assert sent[2]["content"][0]["type"] == "text"
+    assert json.loads(sent[2]["content"][0]["text"]) == {"result": "Caption {}"}
+    assert sent[2]["content"][1]["type"] == "image_url"
+    assert json.loads(sent[3]["content"]) == {"result": "Part 1\nPart 2 {a: 1}"}
+    assert sent[4]["content"][0]["type"] == "text"
+    assert json.loads(sent[4]["content"][0]["text"]) == {"result": "Before {}"}
+    assert sent[4]["content"][1] == image_part
+    assert sent[5]["content"] == [image_part]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        {"provider": "openrouter", "id": "anthropic/claude-opus-5.5", "api_key": "k"},
+        {"provider": "openrouter", "id": "google/gemma-4-31b-it", "api_key": "k"},
+        {"provider": "openrouter", "id": "z-ai/glm-5.3", "api_key": "k"},
+        {"provider": "openai", "api": "chat_completions", "id": "google/gemini-4-neon", "api_key": "k"},
+    ],
+    ids=["openrouter-claude", "openrouter-gemma", "openrouter-glm", "openai-route"],
+)
+async def test_non_openrouter_gemini_routes_keep_plain_text_tool_results(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+) -> None:
+    built = _Built(tmp_path, model_config, _chat_reply())
+    text = "Header\nextra_kwargs: {}\nFooter"
+    assistant = Message(role="assistant", content="", tool_calls=[_CALL])
+    result = Message(role="tool", content=text, tool_call_id="call_1", tool_name="get_weather")
+
+    await _turn(built, ModelRequest(messages=[_user(), assistant, result]))
+
+    sent_content = built.body()["messages"][2]["content"]
+    if model_config["id"].startswith("anthropic/"):
+        assert sent_content[0]["text"] == text
+    else:
+        assert sent_content == text

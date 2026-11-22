@@ -9,6 +9,7 @@ one finished turn.
 from __future__ import annotations
 
 import inspect
+import json
 import time
 from collections.abc import Mapping
 from copy import deepcopy
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
     from openai.types.chat import ChatCompletionChunk
     from pydantic import BaseModel
 
-    from mindroom.llm.messages import Message
+    from mindroom.llm.messages import Message, ToolResultView
     from mindroom.llm.provider import StreamEvent, ToolChoice, ToolSpec
     from mindroom.providers.openai.settings import ChatSettings
     from mindroom.token_counting.requests import RequestParts
@@ -68,6 +69,9 @@ _CEREBRAS_SERIAL_TOOL_MODEL = "llama-4-scout-17b-16e-instruct"
 _UNASKED_STREAM_USAGE_ROUTES = frozenset({"groq", "cerebras"})
 # Routes whose thinking models need each assistant message's ``reasoning_content`` sent back, as their APIs document.
 _REASONING_CONTENT_ROUTES = frozenset({"deepseek", "kimi"})
+# OpenRouter model id prefixes routed through its Gemini request translator, whose ``role: "tool"`` parser
+# extracts ``{...}`` substrings out of non-JSON text into ``functionResponse.response`` and drops surrounding text.
+_OPENROUTER_GEMINI_MODEL_PREFIXES = ("google/gemini-", "~google/gemini-")
 # The ``create`` arguments that are request options, not body fields; ``extra_body`` merges into the body.
 SDK_OPTION_KEYS = ("extra_headers", "extra_query", "extra_body", "timeout")
 _CHAT_STOP_REASONS: dict[str, StopReason] = {
@@ -119,9 +123,60 @@ def chat_stop_reason(finish_reason: str | None) -> StopReason | None:
 _REASONING_DETAIL_TEXT = {"reasoning.text": "text", "reasoning.summary": "summary"}
 
 
-def _message_content(message: Message) -> str | list[Any] | None:
+def _gemini_tool_result_json(text: str, *, is_error: bool) -> str:
+    """Encode a tool result's text as a JSON object so OpenRouter forwards it intact to Gemini ``functionResponse``."""
+    return json.dumps({"error": text} if is_error else {"result": text}, ensure_ascii=False)
+
+
+def _wrap_gemini_tool_result(result: ToolResultView) -> str | list[Any]:
+    """Wrap a tool result's text in ``{"result": ...}`` or ``{"error": ...}`` for OpenRouter's Gemini adapter.
+
+    OpenRouter's Gemini translator extracts ``{...}`` substrings from plain-text tool content when ``JSON.parse``
+    fails, discarding all surrounding text. Sending a valid JSON object matches the native Gemini wire
+    (``providers/gemini/wire.py``) and keeps every character intact. When the content is a list of content parts,
+    OpenRouter concatenates text parts before parsing, so text parts are joined into one wrapped text part while
+    non-text parts stay untouched.
+    """
+    content = result.content
+    if isinstance(content, str):
+        return _gemini_tool_result_json(content, is_error=result.is_error)
+    text_parts: list[Mapping[str, Any]] = []
+    other_parts: list[Any] = []
+    for part in content:
+        if isinstance(part, Mapping) and part.get("type") == "text" and isinstance(part.get("text"), str):
+            text_parts.append(part)
+        else:
+            other_parts.append(part)
+    if not text_parts:
+        return content
+    joined = "\n".join(part["text"] for part in text_parts)
+    wrapped = _gemini_tool_result_json(joined, is_error=result.is_error)
+    if not other_parts:
+        return wrapped
+    first = dict(text_parts[0]) if len(text_parts) == 1 else {"type": "text"}
+    first["text"] = wrapped
+    return [first, *other_parts]
+
+
+def _wraps_openrouter_gemini_tool_results(wire: ChatWire, params: Mapping[str, Any], model_id: str) -> bool:
+    """Return whether OpenRouter routes this request through its Gemini ``functionResponse`` converter."""
+    if wire.route != "openrouter":
+        return False
+    extra_body = params.get("extra_body")
+    effective_model = model_id
+    for source in (extra_body, params):
+        if isinstance(source, Mapping) and isinstance(candidate := source.get("model"), str) and candidate:
+            effective_model = candidate
+            break
+    return effective_model.casefold().startswith(_OPENROUTER_GEMINI_MODEL_PREFIXES)
+
+
+def _message_content(message: Message, *, wrap_gemini_tool_results: bool = False) -> str | list[Any] | None:
     """Return the content a Chat message carries; a tool result always has one, as the API requires."""
-    return tool_result_view(message).content if message.role == "tool" else message.content
+    if message.role != "tool":
+        return message.content
+    result = tool_result_view(message)
+    return _wrap_gemini_tool_result(result) if wrap_gemini_tool_results else result.content
 
 
 # The fields of a Chat tool call. A call another route stored may carry that route's replay state beside them, such as
@@ -133,13 +188,19 @@ def _chat_call(call: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in call.items() if key in _CALL_FIELDS}
 
 
-def _chat_message(message: Message, wire: ChatWire, provider: str) -> dict[str, Any]:
+def _chat_message(
+    message: Message,
+    wire: ChatWire,
+    provider: str,
+    *,
+    wrap_gemini_tool_results: bool = False,
+) -> dict[str, Any]:
     if PROMPT_UPDATE_KEY in (message.provider_data or {}):
         # Only a request to a route that takes one where it stands holds one (``pipeline.prompt_hold``).
         return {"role": "system", "content": message.content}
     values: dict[str, Any] = {
         "role": wire.system_role if message.role == "system" else message.role,
-        "content": _message_content(message),
+        "content": _message_content(message, wrap_gemini_tool_results=wrap_gemini_tool_results),
         "tool_call_id": message.tool_call_id,
         "tool_calls": [_chat_call(call) for call in message.tool_calls or ()] or None,
     }
@@ -196,10 +257,19 @@ def _joined_reasoning_details(details: Sequence[Mapping[str, Any]]) -> list[dict
     return joined
 
 
-def _chat_messages(messages: Sequence[Message], wire: ChatWire, provider: str) -> list[dict[str, Any]]:
+def _chat_messages(
+    messages: Sequence[Message],
+    wire: ChatWire,
+    provider: str,
+    *,
+    wrap_gemini_tool_results: bool = False,
+) -> list[dict[str, Any]]:
     """Return the request's messages: the system prompt joined, in the wire's ``system_role``, and foreign ids fitted."""
     canonical = reformat_tool_call_ids(with_joined_system(messages), "chat")
-    return [_chat_message(message, wire, provider) for message in canonical]
+    return [
+        _chat_message(message, wire, provider, wrap_gemini_tool_results=wrap_gemini_tool_results)
+        for message in canonical
+    ]
 
 
 def function_definition(tool: ToolSpec) -> dict[str, Any]:
@@ -413,9 +483,10 @@ def chat_request_kwargs(
     if output_tool:
         params["tool_choice"] = {"type": "function", "function": {"name": STRUCTURED_OUTPUT_TOOL}}
     _add_route_params(params, model_id=model_id, settings=settings, wire=wire, tool_choice=tool_choice)
+    wrap_gemini_tool_results = _wraps_openrouter_gemini_tool_results(wire, params, model_id)
     params = {
         "model": model_id,
-        "messages": _chat_messages(messages, wire, provider),
+        "messages": _chat_messages(messages, wire, provider, wrap_gemini_tool_results=wrap_gemini_tool_results),
         **disable_tool_selection(params, tool_choice),
     }
     params["stream"] = True
