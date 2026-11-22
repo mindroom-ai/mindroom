@@ -2541,6 +2541,15 @@ expose = [
 ]
 
 [[modules]]
+path = "mindroom.workflow_runs.structured"
+depends_on = []
+visibility = ["mindroom.workflow_runs.agent_nodes", "mindroom.workflow_runs.engine"]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.structured"]
+expose = ["SCHEMA_TURNS", "SchemaError", "check_schema", "extract_json", "schema_prompt", "validation_error"]
+
+[[modules]]
 path = "mindroom.workflow_runs.graph"
 depends_on = ["mindroom.workflow_runs.models", "mindroom.workflow_runs.replay"]
 
@@ -2593,6 +2602,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.replay",
+    "mindroom.workflow_runs.structured",
 ]
 
 [[interfaces]]
@@ -2618,6 +2628,7 @@ depends_on = [
     "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.recovery",
+    "mindroom.workflow_runs.structured",
     "mindroom.workflow_runs.replay",
     "mindroom.workflow_runs.store",
 ]

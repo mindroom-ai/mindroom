@@ -37,6 +37,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 from mindroom.workflow_runs.models import RECHECK_SECONDS, DispatchHandle, WorkflowNodeState
 from mindroom.workflow_runs.replay import may_have_written
+from mindroom.workflow_runs.structured import SchemaError, check_schema, schema_prompt
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -76,7 +77,11 @@ EARLIER_TURN = "cut:"
 
 
 class AgentNodeError(Exception):
-    """An agent turn that did not start: the refusal the script reads, of kind `refused`."""
+    """An agent turn that did not start: the refusal the script reads, of kind `refused` unless it says another."""
+
+    def __init__(self, message: str, kind: str = "refused") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class AgentNotReadyError(Exception):
@@ -98,6 +103,18 @@ def delegated_request(arguments: dict[str, object]) -> dict[str, object]:
     return {names.get(name, name): value for name, value in arguments.items()}
 
 
+def _first_prompt(node: WorkflowNode) -> str:
+    """Return what the agent of *node* is sent first: its prompt, and with a schema the instruction to match it."""
+    prompt, schema = str(node.request.get("prompt")), node.request.get("schema")
+    if schema is None:
+        return prompt
+    try:
+        check_schema(schema)
+    except SchemaError as exc:
+        raise AgentNodeError(str(exc), kind="schema") from exc
+    return schema_prompt(prompt, schema)
+
+
 def turn_job_id(run: WorkflowRun, key: str, generation: int, turn: int) -> str:
     """Return the ID of the job one turn of one generation of a node runs as: the same for the same turn, always."""
     identity = [run.execution_identity, run.run_id, key, generation, turn]
@@ -114,6 +131,9 @@ async def launch_child(
     jobs: ToolJobRuntime,
     timeout: float | None = None,  # noqa: ASYNC109 - the seconds of work the turn gets, not a deadline of this call.
     queued: bool = False,
+    turn: int = 1,
+    correction: str | None = None,
+    made: bool = False,
 ) -> WorkflowNode:
     """Start the job of one agent turn of *run* in its owner's *context*, and return the node as saved with its handle.
 
@@ -122,8 +142,16 @@ async def launch_child(
     the handle says so afterwards. The child's task is the node's label; the job is sent the whole prompt. A turn
     that may not start raises `AgentNodeError` and saves nothing. A *queued* node is saved already, as waiting for a
     place among its run's working calls, and gets its handle here.
+
+    A call with a `schema` is refused before anything starts when that is no JSON Schema, and its agent is told to
+    answer with a value that matches. A further *turn* of the node continues the child of the turn before it with
+    *correction*: it is authorized as the first was, and is a job and a ledger entry of its own. *made* says
+    whether an earlier turn started a tool call, which the node keeps.
     """
     owner = parse_tool_execution_identity_payload(run.execution_identity)
+    prompt = correction or _first_prompt(node)
+    earlier = node.handle.ref if turn > 1 and node.handle is not None else None
+    previous = next((delegation_child(job) for job in jobs.retained_jobs() if job.job_id == earlier), None)
     config, paths, caller = context.current_config, context.runtime_paths, run.agent_name
     arguments = {_RENAMED.get(name, name): value for name, value in node.request.items() if name in _OPTIONS}
     cap = SubagentPersona.from_dict(run.persona) if run.persona else None
@@ -174,7 +202,7 @@ async def launch_child(
             budget_monitor=context.budget_monitor,
             model=target.model,
             agent_mode=target.agent_mode,
-            previous=None,
+            previous=previous,
             persona=target.persona,
             dedicated_worker=target.dedicated_worker,
             worker_resource_profile=target.resource_profile,
@@ -184,7 +212,7 @@ async def launch_child(
             node.key,
             node.generation,
         )
-        job_id = turn_job_id(run, node.key, node.generation, 1)
+        job_id = turn_job_id(run, node.key, node.generation, turn)
         orchestrator = context.orchestrator
         spec = delegation_call_job(
             child,
@@ -195,7 +223,7 @@ async def launch_child(
             tool_name=RUN_SUBAGENT,
             arguments=arguments,
             run_child=run_delegated_child_response,
-            prompt=str(node.request.get("prompt")),
+            prompt=prompt,
             config=authorized,
             runtime_paths=paths,
             refresh_scheduler=None if orchestrator is None else orchestrator.knowledge_refresh_scheduler,
@@ -209,6 +237,7 @@ async def launch_child(
         links = {"job_id": job_id, "delegation_id": child.delegation_id, "subagent_id": child.subagent_id}
         # And what the call resolved to, which its arguments need not name.
         links |= {"agent": target.agent_name, "model": child.model_name}
+        links |= {"turn": turn, "made": made} if turn > 1 else {}
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle, links=links)
         stamp = partial(store.update_node, run.run_id, node.key, node.generation, epoch)
         if not queued:

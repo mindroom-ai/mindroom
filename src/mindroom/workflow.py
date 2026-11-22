@@ -62,7 +62,6 @@ _RAW_THREAD_CALL = (
     "Raw threads are not tracked, so resume could not match their calls."
 )
 _NO_MAIN = "Define def main(args): and return the report. MindRoom calls it."
-_NO_SCHEMA = "schema is not available yet in this MindRoom version."
 # How many lanes of one foreach() or parallel() run at once in the script; the run's own limit is the gateway's.
 _MAX_ACTIVE_LANES = 256
 # How many failures a PartialFailure names in its message; `errors` holds them all.
@@ -298,10 +297,11 @@ def agent(
     dedicated_worker: bool = False,
     resource_profile: str | None = None,
     **unknown: object,
-) -> str:
+) -> object:
     """Run one agent turn and return its answer.
 
     Returns text, or parsed JSON matching `schema` (a JSON Schema dict).
+    With `schema` the agent is asked again, up to 5 turns, until its answer matches; then AgentError(kind="schema").
     The agent is a fresh copy of the workflow's owner with all its tools, unless `agent` names another configured agent.
     `system`, `tools`, `skills`, `knowledge` or `profile` (a `subagents/<profile>.md` file) shape a copy of the owner.
     `model` is any configured model name, such as "haiku" or "opus@high".
@@ -325,13 +325,13 @@ def agent(
         "resource_profile": resource_profile,
     }
     _check_options("agent", unknown, frozenset(options) | {"schema", "timeout"})
-    if schema is not None:
-        raise WorkflowError(_NO_SCHEMA)
     # What the turn is, which a resume compares; how long this attempt waits for it is no part of that.
     # An empty list is a choice, of none: only an option that was not given is left out.
     given = {option: value for option, value in options.items() if value is not None and value is not False}
     call = {"prompt": str(prompt), **given}
-    return str(_call("agent", call, name=name, timeout=timeout))
+    if schema is None:
+        return str(_call("agent", call, name=name, timeout=timeout))
+    return _call("agent", {**call, "schema": schema}, name=name, timeout=timeout)
 
 
 def foreach(items: Iterable[object], fn: Callable[..., object], *, max_concurrent: int | None = None) -> list[object]:

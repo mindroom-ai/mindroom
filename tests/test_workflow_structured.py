@@ -1,0 +1,243 @@
+"""Structured agent output: the schema helpers (pure) and the turns that correct an answer (engine harness)."""
+
+from __future__ import annotations
+
+import sqlite3
+from contextlib import closing
+from typing import TYPE_CHECKING
+
+import pytest
+import pytest_asyncio
+
+from mindroom.config.models import ModelPricing
+from mindroom.delegation.background import delegation_child
+from mindroom.workflow_runs import agent_nodes
+from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs.agent_nodes import turn_job_id
+from mindroom.workflow_runs.models import WorkflowNodeState
+from mindroom.workflow_runs.replay import node_digest
+from mindroom.workflow_runs.structured import (
+    SCHEMA_TURNS,
+    SchemaError,
+    check_schema,
+    extract_json,
+    schema_prompt,
+    validation_error,
+)
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
+from tests.workflow_helpers import NodeFailed, WorkflowStack, workflow_stack
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
+
+_OK = {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}}
+_GOOD = 'It holds.\n```json\n{"ok": true}\n```'
+_ASK = {"prompt": "Does it hold?", "schema": _OK}
+_TEN_CENTS = usage(100_000, 0)
+
+
+def test_invalid_schema_names_the_path_and_the_reason() -> None:
+    """A schema that is no JSON Schema is refused with where it is wrong and why."""
+    check_schema(_OK)
+    with pytest.raises(SchemaError) as wrong:
+        check_schema({"type": "object", "properties": {"ok": {"type": "bool"}}})
+
+    assert str(wrong.value).startswith("schema is not valid JSON Schema: properties/ok/type: 'bool' is not valid")
+    assert str(wrong.value).endswith(".")
+    with pytest.raises(SchemaError) as whole:
+        check_schema("object")
+    assert str(whole.value).startswith("schema is not valid JSON Schema: schema: 'object' is not of type")
+
+
+def test_prompt_ends_with_the_instruction_and_the_schema() -> None:
+    """The agent is told to end with one fenced json block, and is shown the schema."""
+    said = schema_prompt("Does it hold?", {"type": "boolean"})
+
+    assert said == (
+        "Does it hold?\n\nEnd your answer with one fenced json block that matches this JSON Schema:\n"
+        '{\n  "type": "boolean"\n}'
+    )
+
+
+def test_extract_takes_the_last_fenced_block() -> None:
+    """The answer's value is its last fenced json block, else the whole answer; anything else is no value."""
+    assert extract_json('First:\n```json\n{"ok": false}\n```\nNo, rather:\n```json\n{"ok": true}\n```\n') == {
+        "ok": True,
+    }
+    assert extract_json(' {"ok": true} ') == {"ok": True}
+    assert extract_json("```json\n[1, 2]\n```") == [1, 2]
+    for text in ("no json here", "```json\n{broken\n```", ""):
+        with pytest.raises(SchemaError) as none:
+            extract_json(text)
+        assert str(none.value) == "no JSON value found"
+
+
+def test_validation_error_names_the_path() -> None:
+    """The first error of a value says where it is, unless it is the whole value's."""
+    nested = {"type": "object", "properties": {"problems": {"type": "array", "items": {"type": "string"}}}}
+
+    assert validation_error({"ok": True}, _OK) is None
+    assert validation_error({}, _OK) == "'ok' is a required property"
+    assert validation_error({"problems": ["a", 3]}, nested) == "problems/1: 3 is not of type 'string'"
+
+
+def test_null_is_a_valid_value_for_a_schema_that_allows_it() -> None:
+    """JSON null is a value like any other."""
+    assert extract_json("```json\nnull\n```") is None
+    assert validation_error(None, {"type": ["null", "string"]}) is None
+    assert validation_error(None, {"type": "string"}) == "None is not of type 'string'"
+
+
+def test_schema_is_part_of_the_digest() -> None:
+    """A call with another schema is another call: a resume does not reuse its saved answer."""
+    assert node_digest("agent", _ASK) != node_digest("agent", {**_ASK, "schema": {"type": "object"}})
+    assert node_digest("agent", _ASK) != node_digest("agent", {"prompt": "Does it hold?"})
+
+
+@pytest_asyncio.fixture
+async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
+    """The harness with one started run whose agents run as real jobs on a priced, scripted model."""
+    options = {"extra_tools": ("workflow",), "require_approval": (), "pricing": ModelPricing(input=1, output=2)}
+    with workflow_stack(tmp_path, other_agents=("helper",), delegate_to=("helper",), **options) as stack:
+        monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.05)
+        monkeypatch.setattr(agent_nodes, "RECHECK_SECONDS", 0.05)
+        await stack.open_jobs()
+        stack.script_agents(monkeypatch)
+        await stack.start()
+        yield stack
+        await stack.close()
+
+
+def _turns(stack: WorkflowStack) -> list[str]:
+    """Return the turn of each entry of the run's ledger for the call at `@0`, in order."""
+    with closing(sqlite3.connect(stack.store.database_path)) as connection:
+        rows = connection.execute(
+            "SELECT CAST(turn AS TEXT) FROM workflow_usage WHERE run_id = ? AND key = '@0' ORDER BY rowid",
+            (stack.run_id,),
+        ).fetchall()
+    return [turn for (turn,) in rows]
+
+
+def _last_said(model: ScriptedModel) -> str:
+    return str([message.content for message in model.requests[-1].messages if message.role == "user"][-1])
+
+
+@pytest.mark.asyncio
+async def test_invalid_schema_fails_before_any_agent_starts(stack: WorkflowStack) -> None:
+    """A schema that is no JSON Schema fails its call with kind `schema`, and no agent runs for it."""
+    model = stack.child_script()
+
+    with pytest.raises(NodeFailed) as failed:
+        await stack.result("@0", "agent", {"prompt": "x", "schema": {"type": "bool"}})
+
+    assert failed.value.kind == "schema"
+    assert str(failed.value).startswith("schema is not valid JSON Schema: type: 'bool' is not valid")
+    assert (model.requests, list(stack.jobs.retained_jobs())) == ([], [])
+
+
+@pytest.mark.asyncio
+async def test_second_turn_fixes_the_answer_in_the_same_session_with_its_own_job_and_usage(
+    stack: WorkflowStack,
+) -> None:
+    """An answer that does not match is corrected by a further turn of the same agent: its own job and ledger entry."""
+    model = stack.child_script(answer("no json here", _TEN_CENTS), answer(_GOOD, _TEN_CENTS))
+
+    result = await stack.result("@0", "agent", _ASK, {"name": "checker"})
+
+    run = stack.store.get_run(stack.run_id)
+    jobs = {job.job_id: delegation_child(job) for job in stack.jobs.retained_jobs()}
+    first, second = (jobs[turn_job_id(run, "@0", 1, turn)] for turn in (1, 2))
+    node = stack.store.get_node(stack.run_id, "@0")
+    assert result == {"ok": True}
+    assert (first.session_id, first.subagent_id) == (second.session_id, second.subagent_id)
+    assert (len(jobs), len(model.requests), _turns(stack)) == (2, 2, ["1", "2"])
+    assert schema_prompt("Does it hold?", _OK) in str(model.requests[0].messages[-1].content)
+    assert (
+        "Your answer did not match the schema: no JSON value found. Reply with only the corrected fenced json block."
+    ) in _last_said(model)
+    assert (node.links["turn"], node.links["job_id"]) == (2, turn_job_id(run, "@0", 1, 2))
+    assert stack.engine.run_usage(stack.run_id)["cost_usd"] == pytest.approx(0.2)
+
+
+@pytest.mark.asyncio
+async def test_correction_follows_a_turn_that_ran_a_subagent_of_its_own(stack: WorkflowStack) -> None:
+    """What the subagent of a turn cost is an entry beside that turn's, and the correction is the turn after it."""
+    delegated = tool_call("run_subagent", "c1", task="Help.", agent_name="helper")
+    stack.child_script(calls(delegated, metrics=_TEN_CENTS), answer("no json here"), answer(_GOOD))
+    stack.child_script(answer("helped", _TEN_CENTS), agent="helper")
+
+    assert await stack.result("@0", "agent", _ASK) == {"ok": True}
+
+    turns = _turns(stack)
+    assert (turns[0], turns[1][:4], turns[2]) == ("1", "sub:", "2")
+    assert stack.store.get_node(stack.run_id, "@0").links["made"] is True
+
+
+@pytest.mark.asyncio
+async def test_five_bad_answers_fail_with_the_last_error(stack: WorkflowStack) -> None:
+    """After five turns the call fails with kind `schema` and what was wrong with the last answer."""
+    bad = [answer("```json\n{}\n```") for _ in range(SCHEMA_TURNS - 1)]
+    model = stack.child_script(*bad, answer('```json\n{"ok": "yes"}\n```'), answer(_GOOD))
+
+    with pytest.raises(NodeFailed) as failed:
+        await stack.result("@0", "agent", _ASK, {"name": "checker"})
+
+    assert failed.value.kind == "schema"
+    assert str(failed.value) == (
+        "Agent 'checker' did not return JSON matching the schema after 5 attempts. "
+        "Last error: ok: 'yes' is not of type 'boolean'."
+    )
+    assert (len(model.requests), _turns(stack)) == (5, ["1", "2", "3", "4", "5"])
+    assert stack.store.get_node(stack.run_id, "@0").state is WorkflowNodeState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_agent_that_called_a_tool_and_never_met_the_schema_is_not_run_again_unasked(
+    stack: WorkflowStack,
+) -> None:
+    """A turn that started a tool call may have written: its call ends indeterminate, as any other without a result."""
+    wrote = calls(tool_call("append", "c1", line="a"))
+    stack.child_script(wrote, *(answer("still no json") for _ in range(SCHEMA_TURNS)))
+
+    with pytest.raises(NodeFailed) as failed:
+        await stack.result("@0", "agent", _ASK)
+
+    assert failed.value.kind == "indeterminate"
+    assert "did not return JSON matching the schema after 5 attempts" in str(failed.value)
+    assert stack.counting_tool.lines == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_null_answer_is_the_calls_result(stack: WorkflowStack) -> None:
+    """An agent that answers null for a schema that allows it completes its call with None."""
+    stack.child_script(answer("```json\nnull\n```"))
+
+    result = await stack.result("@0", "agent", {"prompt": "Anything?", "schema": {"type": ["null", "string"]}})
+
+    assert result is None
+    assert stack.store.get_node(stack.run_id, "@0").state is WorkflowNodeState.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_run_that_ends_while_an_answer_is_wrong_starts_no_correction(stack: WorkflowStack) -> None:
+    """A Stop of the run reads the turn that ended and starts no further one."""
+    model = stack.child_script(answer("no json here"), answer(_GOOD))
+    original = engine_module.launch_child
+    started: list[int] = []
+
+    async def counted(*args: object, **options: object) -> object:
+        started.append(int(options.get("turn", 1)))  # type: ignore[call-overload]
+        if started[-1] > 1:
+            # The run is stopped while the first answer is read: the correction that was about to start must not.
+            await stack.engine.cancel(stack.run_id, reason="Stopped.")
+        return await original(*args, **options)  # type: ignore[arg-type]
+
+    engine_module.launch_child = counted  # type: ignore[assignment]
+    try:
+        await stack.submit("@0", "agent", _ASK)
+        await stack.until(lambda: stack.store.get_node(stack.run_id, "@0").state is not WorkflowNodeState.RUNNING)
+    finally:
+        engine_module.launch_child = original
+
+    assert len(model.requests) == 1

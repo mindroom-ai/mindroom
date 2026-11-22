@@ -1594,15 +1594,18 @@ The script defines `def main(args):` and returns the final report, a string or a
         phase("Write")
         draft = agent("Write a report from these notes:\\n\\n" + "\\n\\n".join(notes))
         for _ in range(3):                       # a bounded loop with an independent check
-            problems = agent("List factual problems in this report, or reply NONE.\\n\\n" + draft)
-            if problems.strip() == "NONE":
+            check = agent("List factual problems in this report.\\n\\n" + draft,
+                          schema={"type": "object", "required": ["problems"],
+                                  "properties": {"problems": {"type": "array", "items": {"type": "string"}}}})
+            if not check["problems"]:
                 break
-            draft = agent(f"Fix these problems: {problems}\\n\\n{draft}")
+            draft = agent(f"Fix these problems: {check['problems']}\\n\\n{draft}")
         return draft
 
-- agent(prompt, *, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
+- agent(prompt, *, schema=None, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
         profile=None, minimal=False, timeout=None, output_path=None, dedicated_worker=False, resource_profile=None)
-  runs one agent turn and returns its answer as text.
+  runs one agent turn and returns its answer: text, or parsed JSON when schema (a JSON Schema dict) is given.
+  With schema the agent is asked again until its answer matches, up to 5 turns; then AgentError with kind "schema".
   The agent is a fresh copy of you with all your tools and no memory of this conversation: put everything it needs in the prompt.
   agent="other" runs that configured agent with its own tools. name is only a label; it does not pick an agent.
   model: one of the models below. system: replaces the system prompt. tools, skills, knowledge: lists that narrow a copy of you.
@@ -1639,7 +1642,7 @@ Agents you can run with agent=: helper, roommate."""
 def test_description_teaches_what_this_release_runs_and_lists_the_configured_models(stack: WorkflowStack) -> None:
     """The offered description names the calls a script has now, how the report arrives, the models and the agents.
 
-    It promises nothing a later release adds: no schema, no sessions, no graph. The agents are those the owner may
+    It promises nothing a later release adds: no sessions, no peers, no saved workflows. The agents are those the owner may
     delegate to and those configured for the room, without the owner itself.
     """
     config, room_id = stack.context.config, stack.context.room_id

@@ -266,6 +266,7 @@ Matrix sync callback
 | `workflow_runs/agent_nodes.py` | The agents of a workflow run: an `agent()` call started as a subagent job under the rules of `run_subagent`, the wait for that job with the turn's working time, and how its turn ended as read from the child's own runs |
 | `workflow_runs/recovery.py` | Which interruptions of an attempt resume its run on its own, and the pass that deletes intents no job holds, records how ended attempts left their runs, and replays the runs that no unfinished job owns |
 | `workflow_runs/faults.py` | Named barriers at which a tool call of a workflow waits while a crash test holds them |
+| `workflow_runs/structured.py` | Structured agent output: checks a call's JSON Schema, builds the prompt that asks for a matching value, reads the value from an answer, and says what is wrong with it |
 | `workflow_runs/graph.py` | Pure graph model of a run for people: the `meta`, node, group and edge rows, the snapshot fitted to one event by priority, and the delta between two graphs |
 | `workflow_runs/view.py` | What people see of a run: follows the store's writes, builds the run's view from what is saved, queues its graph frames, and posts and edits its card |
 | `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |

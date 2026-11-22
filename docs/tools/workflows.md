@@ -119,7 +119,7 @@ Only a call that provably never reached its tool fails as safe to run again: a h
 ## Agents
 
 ```python
-agent(prompt, *, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
+agent(prompt, *, schema=None, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
       profile=None, minimal=False, timeout=None, output_path=None, dedicated_worker=False, resource_profile=None)
 ```
 
@@ -129,6 +129,7 @@ The options are those of `run_subagent` under shorter names.
 
 | Option | Meaning |
 |--------|---------|
+| `schema` | A JSON Schema; the call returns the parsed JSON value that matches it instead of text. See [Structured Output](#structured-output) |
 | `agent` | Run that configured agent, with its own tools, instead of a copy of the run's agent |
 | `name` | A label for the call; it does not pick an agent. Without it the label is the first line of the prompt. Every label is redacted and then cut to 80 characters; one that was cut ends in `... [truncated]` |
 | `model` | Any configured model name, such as `haiku` or `opus@high` |
@@ -150,7 +151,7 @@ Every call of a run takes the same check before it is saved or sent: the run's s
 That holds for `tool()`, for an agent behind `tool("delegate", ...)`, for `agent()`, and for each attempt.
 A call made while that access cannot be answered yet, for example while the bot is restarting, waits and is asked again.
 
-A turn that fails raises `AgentError`, whose `kind` says how: `failed`, `cancelled`, `timeout`, `refused`, `interrupted`, or `indeterminate`.
+A turn that fails raises `AgentError`, whose `kind` says how: `failed`, `cancelled`, `timeout`, `schema`, `refused`, `interrupted`, or `indeterminate`.
 A turn that may not start, for example because the model name is unknown or the agent may not reply to the requester, is `refused` with the sentence `run_subagent` gives.
 `tools`, `skills` or `knowledge` without `system` is refused with `tools, skills and knowledge narrow a copy only together with system=.`
 Stopping one agent from the Sub-agents panel fails only that call with kind `cancelled`; the run goes on.
@@ -171,7 +172,29 @@ A message it sends with `matrix_message` and no other target lands in that threa
 The agents of a run are not listed among the conversation's background jobs: the run reports them, and `get_workflow` shows each as a node whose `links` hold the IDs of its job and subagent and the agent and model it ran as.
 An agent keeps running when the attempt that asked for it ends, and the next attempt waits for the same turn instead of starting another.
 Cancelling the run stops its agents, and a call whose prompt or options changed stops the agent of the old call.
-`schema` is not available yet.
+
+### Structured Output
+
+```python
+check = agent("List factual problems in this report.\n\n" + draft,
+              schema={"type": "object", "required": ["problems"],
+                      "properties": {"problems": {"type": "array", "items": {"type": "string"}}}})
+if not check["problems"]:
+    ...
+```
+
+With `schema`, a JSON Schema as a dict, `agent()` returns the parsed JSON value instead of text; JSON `null` is a value like any other.
+It needs no special tool, so it works with every model, in standard and in minimal mode.
+
+- The schema is checked first.
+  One that is no valid JSON Schema fails the call with kind `schema` and `schema is not valid JSON Schema: <path>: <reason>.` before any agent starts.
+- The agent gets the prompt, then `End your answer with one fenced json block that matches this JSON Schema:` and the schema.
+- The value is the last fenced `json` block of the answer, or the whole answer when it has none.
+- An answer without a JSON value, or with one that does not match, is corrected by the same agent in a further turn: `Your answer did not match the schema: <error>. Reply with only the corrected fenced json block.`
+  The agent keeps its conversation, each turn is a job and a [cost](#cost) entry of its own, and the turns share the call's `timeout`.
+- After 5 turns the call raises `AgentError` with kind `schema`: `Agent '<name>' did not return JSON matching the schema after 5 attempts. Last error: <error>.`
+  A resume runs it again, unless one of its turns started a tool call: then the call is `indeterminate`, as any call that may have written.
+- The schema is part of what the call is, so a resume with another schema runs the call again.
 
 ## Runs Inside Runs
 

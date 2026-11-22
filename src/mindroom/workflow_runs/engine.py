@@ -73,6 +73,7 @@ from mindroom.workflow_runs.replay import (
     stale_keys,
 )
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError, WorkflowRunStoreError
+from mindroom.workflow_runs.structured import SCHEMA_TURNS, SchemaError, extract_json, validation_error
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -115,6 +116,9 @@ _NAME_LABELS = 'name="{name}" only labels the node. Use agent="{name}" to run th
 _STOPPED_JOB_STATUSES = frozenset({"cancel_requested", "cancelled", "denied"})
 _NOT_CONTINUED_YET = "The agent of this call has not been continued yet after a restart. Try again in a moment."
 _RUN_ENDED = "The run ended before the agent did."
+_CORRECTION = "Your answer did not match the schema: {error}. Reply with only the corrected fenced json block."
+_NO_MATCH = "Agent '{name}' did not return JSON matching the schema after {turns} attempts. Last error: {error}."
+_CORRECTING = "The agent of this call is correcting its answer. Try again in a moment."
 _NO_SESSIONS = 'A workflow script cannot call delegate.{function} yet. Start a fresh agent with agent() or tool("delegate", "run_subagent", ...).'
 _FILTERED_TURN = "A turn that is limited to some of its agent's tools cannot start or resume a workflow."
 # The node of the script's tool call that the current task runs, for a call of the `workflow` toolkit made in it.
@@ -1082,7 +1086,7 @@ class WorkflowEngine:
             raise ScriptRuntimeUnavailableError(str(exc)) from exc
         except AgentNodeError as exc:
             # Nothing ran. The node is saved already when the job runtime refused the job it names.
-            end = {"state": WorkflowNodeState.FAILED, "error": {"kind": "refused", "message": str(exc)}}
+            end = {"state": WorkflowNodeState.FAILED, "error": {"kind": exc.kind, "message": str(exc)}}
             settle = partial(self.store.settle_node, run.run_id, node.key, node.generation, run.epoch, **end)
             if not await asyncio.to_thread(settle) and not queued:
                 refused = replace(node, **end, ended_at=utc_timestamp())
@@ -1135,7 +1139,29 @@ class WorkflowEngine:
         The turn's usage and its answer are saved before the job's outcome is acknowledged, so a primary that dies
         in between reads the same job again. A run that moved on meanwhile reads the job itself. Without *block*,
         for a caller that holds the run's lock, a job that cannot be read now raises `AgentNotReadyError`.
+
+        An answer that does not match the call's schema starts a further turn of the same agent, which is waited
+        for here, unless the run is ending or the turn was the last the agent gets.
         """
+        while (further := await self._settle_turn(run, node, epoch, block=block)) is not None:
+            node = further
+            if not block:
+                # The further turn runs now: its end is the next reader's.
+                raise AgentNotReadyError(_CORRECTING)
+            task, timed = asyncio.current_task(), f"{_TIMED}{cast('DispatchHandle', node.handle).ref}"
+            if task is not None and task.get_name().startswith(_TIMED):
+                # The wait is found by the job it waits for, by the attempt that takes it over.
+                task.set_name(timed)
+
+    async def _settle_turn(
+        self,
+        run: WorkflowRun,
+        node: WorkflowNode,
+        epoch: int,
+        *,
+        block: bool,
+    ) -> WorkflowNode | None:
+        """Read the job of one turn of an agent node and settle the node, or return it with its further turn started."""
         assert node.handle is not None
         if (runtime := self.agents()) is None:
             # Without a job runtime nobody can read the job, now.
@@ -1149,29 +1175,78 @@ class WorkflowEngine:
             logger.exception("workflow_agent_outcome_unreadable", run_id=node.run_id, key=node.key)
             # What the turn did is unknown, so its call is not one to run again without being asked to.
             (kind, text), usage, claim = ("indeterminate", str(exc)), {}, None
-        outcome: _Outcome = WorkflowNodeState.FAILED, None, {"kind": kind, "message": text}
+        # A further turn of the node is an entry of its own, and the node keeps whether any turn started a tool call.
+        turn = int(node.links.get("turn", 1))
+        usage = {turn if key == 1 else key: used for key, used in usage.items()}
+        made = bool(node.links.get("made")) or any(used.get("tool_calls") for used in usage.values())
+        outcome: _Outcome | str | WorkflowNode = WorkflowNodeState.FAILED, None, {"kind": kind, "message": text}
         if kind == "completed":
-            outcome = WorkflowNodeState.COMPLETED, text, None
+            stopping = node.run_id in self._stopping
+            outcome = _answer_outcome(node, text, last=turn >= SCHEMA_TURNS, made=made, stopping=stopping)
         elif kind in ("cancelled", "indeterminate"):
             outcome = _indeterminate(node) if kind == "indeterminate" else (WorkflowNodeState.CANCELLED, *outcome[1:])
-        state, result, error = outcome
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
+        further = None
         try:
             # A turn that no restart cut short worked in the attempt that started it, whichever attempt reads it. What
             # a restart cut short is of the attempt before the one that reads the turn's end.
-            cut = [turn for turn in usage if str(turn).startswith(EARLIER_TURN)]
-            for turn, used in usage.items():
-                attempt = run.attempt - (turn in cut) if cut else node.attempt
-                add = partial(self.store.add_usage, node.run_id, node.key, node.generation, turn, attempt, used)
+            cut = [entry for entry in usage if str(entry).startswith(EARLIER_TURN)]
+            for entry, used in usage.items():
+                attempt = run.attempt - (entry in cut) if cut else node.attempt
+                add = partial(self.store.add_usage, node.run_id, node.key, node.generation, entry, attempt, used)
                 await asyncio.to_thread(add)
             with suppress(SupersededAttemptError):
-                await asyncio.to_thread(partial(settle, state=state, result=result, error=error))
+                if isinstance(outcome, str):
+                    correct = partial(self._correct, run, node, epoch, outcome, turn=turn + 1, made=made)
+                    outcome = await correct(block=block)
+                if isinstance(outcome, WorkflowNode):
+                    further = outcome
+                else:
+                    state, result, error = outcome
+                    await asyncio.to_thread(partial(settle, state=state, result=result, error=error))
                 if claim is not None:
                     await runtime.jobs.acknowledge_wait(node.handle.ref, claim)
         finally:
             # An outcome this wait did not save, because the run moved on or the wait was cancelled, is the next
             # reader's. After the acknowledgement there is no claim left to give back.
             await runtime.jobs.release_wait(node.handle.ref, claim)
+        return further
+
+    async def _correct(
+        self,
+        run: WorkflowRun,
+        node: WorkflowNode,
+        epoch: int,
+        correction: str,
+        *,
+        turn: int,
+        made: bool,
+        block: bool,
+    ) -> WorkflowNode | _Outcome:
+        """Start the further *turn* of an agent node whose answer did not match its schema; return the node with it.
+
+        The turn is authorized as every call of the run is, and gets what the call has left of its working time.
+        One that may not start is the node's end, which is returned. While that cannot be decided the turn waits,
+        or raises `AgentNotReadyError` without *block*.
+        """
+        handle = cast("DispatchHandle", node.handle)
+        while True:
+            left = None if handle.work_until is None else max(0.0, handle.work_until - time.time())
+            try:
+                access, runtime = self.authorize(run), self.agents()
+                if access is None:
+                    raise AgentNotReadyError(_OWNER_NOT_READY)  # noqa: TRY301
+                if not isinstance(access, tuple) or runtime is None:
+                    raise AgentNodeError(access if isinstance(access, str) else _NO_AGENTS)  # noqa: TRY301
+                launch = partial(launch_child, access[0], run, node, epoch, store=self.store, jobs=runtime.jobs)
+                return await launch(timeout=left, queued=True, turn=turn, correction=correction, made=made)
+            except AgentNotReadyError:
+                if not block:
+                    raise
+                await asyncio.sleep(RECHECK_SECONDS)
+            except AgentNodeError as exc:
+                refused: _Outcome = WorkflowNodeState.FAILED, None, {"kind": exc.kind, "message": str(exc)}
+                return _unless_proven(node, made, refused)
 
     async def _node_waits(self, node: WorkflowNode, epoch: int, on: str | None, left: float | None = None) -> None:
         """Show a node as waiting for a person, for what *on* says, or as running again with None; its run follows.
@@ -1658,6 +1733,32 @@ def _indeterminate(node: WorkflowNode, said: object = None) -> _Outcome:
 def _unless_proven(node: WorkflowNode, started: bool | None, safe: _Outcome, said: object = None) -> _Outcome:
     """Return how a node that ended without a result ends: as *safe* to run again only if its record proves that."""
     return _indeterminate(node, said) if may_have_written(started) else safe
+
+
+def _answer_outcome(node: WorkflowNode, text: str, *, last: bool, made: bool, stopping: bool) -> _Outcome | str:
+    """Return how an agent's call ends on its answer, or what a further turn tells an agent that missed its schema.
+
+    The answer is the call's result, or with a schema the value in it when that matches. A run that is ending
+    starts no further turn, and after the *last* turn the call fails with kind `schema`: neither is run again
+    unasked when a turn *made* a tool call.
+    """
+    if "schema" not in node.request:
+        return WorkflowNodeState.COMPLETED, text, None
+    value = None
+    try:
+        value = extract_json(text)
+        wrong = validation_error(value, node.request["schema"])
+    except SchemaError as exc:
+        wrong = str(exc)
+    if wrong is None:
+        return WorkflowNodeState.COMPLETED, value, None
+    if stopping:
+        ended: _Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": _RUN_ENDED}
+        return _unless_proven(node, made, ended)
+    if not last:
+        return _CORRECTION.format(error=wrong)
+    said = _NO_MATCH.format(name=node.name or node.label, turns=SCHEMA_TURNS, error=wrong)
+    return _unless_proven(node, made, (WorkflowNodeState.FAILED, None, {"kind": "schema", "message": said}), said)
 
 
 def _completed_outcome(node: WorkflowNode, call: ScriptCallRecord) -> _Outcome:

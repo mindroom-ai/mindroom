@@ -158,15 +158,29 @@ def test_agent_refuses_an_option_it_does_not_take_before_any_node(
     gateway: FakeWorkflowGateway,
     sdk: ModuleType,
 ) -> None:
-    """A misnamed option, and one this release cannot honour, fail in the script, where the model can fix them."""
+    """A misnamed option fails in the script, where the model can fix it."""
     with pytest.raises(sdk.WorkflowError) as misnamed:
         sdk.agent("Say hi", system_prompt="Be brief.")
-    with pytest.raises(sdk.WorkflowError) as schema:
-        sdk.agent("Say hi", schema={"type": "object"})
 
     assert str(misnamed.value) == "agent() has no option 'system_prompt'. Did you mean system?"
-    assert str(schema.value) == "schema is not available yet in this MindRoom version."
     assert gateway.nodes == []
+
+
+@pytest.mark.usefixtures("in_main")
+def test_agent_with_a_schema_sends_it_and_returns_the_parsed_value(
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
+) -> None:
+    """With `schema` the call names the schema and returns the value as it is, also null; without it, text."""
+    answers = iter([completed({"ok": True}), completed(None), completed(None)])
+    gateway.respond = lambda _request: next(answers)
+    schema = {"type": ["object", "null"]}
+
+    assert sdk.agent("Does it hold?", schema=schema) == {"ok": True}
+    assert sdk.agent("Does it still?", schema=schema) is None
+    assert sdk.agent("Say hi") == "None"
+    assert gateway.nodes[0]["args"] == {"prompt": "Does it hold?", "schema": schema}
+    assert "schema" not in gateway.nodes[2]["args"]
 
 
 @pytest.mark.usefixtures("in_main")
