@@ -23,6 +23,7 @@ Standard library only; Linux only, because it reads the backend's command and en
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import hashlib
 import json
@@ -33,6 +34,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -100,6 +102,7 @@ class Deployment:
     slot: int
     live: dict[str, Any]
     directory: Path
+    edited: bool = False
 
     @classmethod
     def find(cls, slot: int | None) -> Deployment:
@@ -157,29 +160,54 @@ class Deployment:
             raise LiveError(msg)
         return Backend(self, pid, command, directory, dict(pairs))
 
-    def give_workflow_toolkit(self, room_agent: bool = False) -> bool:
-        """Give the Helper `workflow` and `file`, and let its shell and scripts run here when no worker is routed.
+    def edit_config(self, change: Callable[[str], str]) -> bool:
+        """Write the slot's `config.yaml` as *change* makes it, and return whether that changed it.
 
-        With *room_agent*, the lobby also gets a second agent, `ROOM_AGENT`, for a run of the Helper to run.
-        Return whether the config changed: a backend that is running reloads it some time later, so the caller
-        starts it again before it asks the Helper for anything.
+        The script's exit writes the file back as the script found it, so no script meets the edit of another.
+        A backend that is running reloads an edit some time later, so the caller starts it again before it asks
+        the Helper for anything.
         """
         path = self.directory / "config.yaml"
-        before = text = path.read_text()
-        for toolkit in ("workflow", "file"):
-            if f"      - {toolkit}\n" not in text:
-                text = text.replace("      - shell\n", f"      - shell\n      - {toolkit}\n", 1)
-        if "allow_shell_without_worker" not in text and "worker_tools" not in text:
-            text = text.replace("defaults:\n", "defaults:\n  allow_shell_without_worker: true\n", 1)
-        if room_agent and f"\n  {ROOM_AGENT}:\n" not in text:
-            text = text.replace("\nagents:\n", f"\nagents:\n{_ROOM_AGENT_CONFIG}", 1)
-        path.write_text(text)
-        return text != before
+        before = path.read_text()
+        after = change(before)
+        if after == before:
+            return False
+        if not self.edited:
+            self.edited = True
+            atexit.register(path.write_text, before)
+        path.write_text(after)
+        return True
+
+    def give_workflow_toolkit(self, room_agent: bool = False, also: tuple[str, ...] = ()) -> bool:
+        """Give the Helper `workflow` and each toolkit of *also*, and let its shell and scripts run here without a worker.
+
+        With *room_agent*, the lobby also gets a second agent, `ROOM_AGENT`, for a run of the Helper to run.
+        Return whether the config changed, as `edit_config` does.
+        """
+
+        def change(text: str) -> str:
+            for toolkit in ("workflow", *also):
+                if f"      - {toolkit}\n" not in text:
+                    text = text.replace("      - shell\n", f"      - shell\n      - {toolkit}\n", 1)
+            if "allow_shell_without_worker" not in text and "worker_tools" not in text:
+                text = text.replace("defaults:\n", "defaults:\n  allow_shell_without_worker: true\n", 1)
+            if room_agent and f"\n  {ROOM_AGENT}:\n" not in text:
+                text = text.replace("\nagents:\n", f"\nagents:\n{_ROOM_AGENT_CONFIG}", 1)
+            return text
+
+        return self.edit_config(change)
 
     def in_lobby(self, agent: str) -> bool:
         """Return whether the bot of *agent* has joined the lobby, which a run needs to run it."""
         room = urllib.parse.quote(self.live["lobby"]["roomId"], safe="")
         return any(agent in member for member in self.matrix(f"/v3/rooms/{room}/joined_members")["joined"])
+
+    def lobby_encrypted(self) -> bool:
+        """Return whether the lobby is an encrypted room, which nothing undoes."""
+        room = urllib.parse.quote(self.live["lobby"]["roomId"], safe="")
+        with contextlib.suppress(urllib.error.HTTPError):
+            return bool(self.matrix(f"/v3/rooms/{room}/state/m.room.encryption").get("algorithm"))
+        return False
 
     def matrix(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         """GET *path* from the homeserver's client API as the test account, or PUT *body* there."""

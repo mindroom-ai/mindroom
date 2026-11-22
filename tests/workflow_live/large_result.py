@@ -5,8 +5,9 @@ Usage, from the checkout, on a live deployment (README.md has every step; the pl
     python3 -m tests.workflow_live.large_result [--slot N] [--send api]
 
 The script saves a file of 9 MiB of one character in the Helper's workspace and starts a run that reads it with
-`tool("file", "read_file", ...)`, which returns up to 10,000,000 characters.
+`tool("python", "read_file", ...)`, which returns a file whole; `filesystem` and `shell` return 50 KiB at most.
 The result is over the 8 MiB a node keeps in its row, so the engine saves it in a file and the script fetches it.
+The Helper has the `python` toolkit for this run only: the script's exit puts the slot's `config.yaml` back.
 It prints
 
     chars=<characters the script got> same=<whether they are the file's> spilled=<whether the node kept a file>
@@ -32,7 +33,7 @@ from mindroom.workflow import tool
 
 
 def main(args):
-    text = tool("file", "read_file", file_name="{name}")
+    text = tool("python", "read_file", file_name="{name}")
     return {{"report": "{report}", "chars": len(text), "same": text == "x" * {chars}}}
 """
 
@@ -48,8 +49,8 @@ def main() -> int:
     name = f"large_{token}.txt"
 
     backend = deployment.backend()
-    deployment.give_workflow_toolkit()
-    # The Helper gets the `file` toolkit with the first restart after the edit, which also drops a fault directory.
+    deployment.give_workflow_toolkit(also=("python",))
+    # The Helper gets the `python` toolkit with the first restart after the edit, which also drops a fault directory.
     backend.stop()
     backend.start()
     deployment.workspace.mkdir(parents=True, exist_ok=True)

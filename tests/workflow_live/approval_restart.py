@@ -49,36 +49,31 @@ from mindroom.workflow import agent
 
 def main(args):
     agent(
-        "Run the shell command `echo written >> {counter}` exactly once. Then call the tool save_file with "
-        "file_name \\"{saved}\\" and contents \\"approved\\". Then reply with the single word: done. "
+        "Run the shell command `echo written >> {counter}` exactly once. Then call the tool write_file with "
+        "path \\"{saved}\\" and content \\"approved\\". Then reply with the single word: done. "
         "Never run the echo command a second time, whatever happens.",
         name="writer",
     )
     return {{"report": "{report}"}}
 """
-_RULE = "    - match: save_file\n      action: require_approval\n"
+_RULE = "    - match: write_file\n      action: require_approval\n"
 _CARD = "io.mindroom.tool_approval"
 _EXPECTED = "lines=1 cards=1 open=1 saved=1 agents=1/1 attempt=3 run=completed deliveries=1 reports=1"
 
 
-def _require_approval(deployment: Deployment) -> bool:
-    """Make `save_file` ask for an approval in the slot's config, and return whether the config changed."""
-    path = deployment.directory / "config.yaml"
-    text = path.read_text()
+def _with_rule(text: str) -> str:
+    """Return the config *text* with a rule, first in its list, that makes `write_file` ask for an approval."""
     if _RULE in text:
-        return False
+        return text
     # The section's own lines: everything indented under its key, whatever else the section sets.
     section = re.search(r"^tool_approval:\n((?:[ \t]+.*\n|\n)*)", text, re.MULTILINE)
     if section is None:
-        text += f"\ntool_approval:\n  rules:\n{_RULE}"
-    elif (rules := re.search(r"^  rules:\n", section.group(1), re.MULTILINE)) is not None:
+        return text + f"\ntool_approval:\n  rules:\n{_RULE}"
+    if (rules := re.search(r"^  rules:\n", section.group(1), re.MULTILINE)) is not None:
         # First in the list: the first rule that matches a call decides.
         at = section.start(1) + rules.end()
-        text = text[:at] + _RULE + text[at:]
-    else:
-        text = text[: section.start(1)] + f"  rules:\n{_RULE}" + text[section.start(1) :]
-    path.write_text(text)
-    return True
+        return text[:at] + _RULE + text[at:]
+    return text[: section.start(1)] + f"  rules:\n{_RULE}" + text[section.start(1) :]
 
 
 def _cards(deployment: Deployment, token: str) -> dict[str, str]:
@@ -127,7 +122,7 @@ def main() -> int:
     report = f"harbor{secrets.token_hex(6)}"
 
     backend = deployment.backend()
-    changed = [deployment.give_workflow_toolkit(), _require_approval(deployment)]
+    changed = [deployment.give_workflow_toolkit(also=("filesystem",)), deployment.edit_config(_with_rule)]
     # A running backend reloads the edit some time later; one started after it has the rule before it is asked.
     if any(changed) or "MINDROOM_WORKFLOW_FAULT_DIR" in backend.environment:
         backend.stop()

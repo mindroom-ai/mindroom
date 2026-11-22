@@ -92,7 +92,7 @@ def main(args):
     log(f"tests exited with {tests.exit_code}")
     if not tests.ok:
         return agent("Explain these test failures in five lines:\n\n" + tests.output)
-    return tool("file", "read_file", file_name="CHANGELOG.md")
+    return tool("filesystem", "read_file", path="CHANGELOG.md")
 ```
 
 - `agent(prompt)` runs one agent turn and returns its answer as text, or as parsed JSON with `schema`; see [Agents](#agents).
@@ -100,6 +100,7 @@ def main(args):
 - `shell(command)` runs a command with the agent's `shell` tool and returns `.ok`, `.exit_code`, and `.output`.
   It returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - `tool(toolkit, function, **arguments)` calls any other tool of the agent and returns its result.
+  Name the toolkit as it is registered: another name of it, such as `file` for `filesystem`, is refused as a tool the run does not have.
   `tool("delegate", "run_subagent", ...)` and `tool("workflow", "start_workflow", ...)` start an agent and a run; see [Runs Inside Runs](#runs-inside-runs).
 - `foreach(items, fn)` and `parallel([fn1, fn2])` run calls in parallel; see [Fan-Out](#fan-out).
 - `phase(title)` groups the calls that follow, and `log(text)` adds a progress line to the run.

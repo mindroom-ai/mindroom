@@ -15,19 +15,19 @@ Each prints one result line on stdout and exits 0 when that line is the expected
 | `kill_after_write.py --barrier after-receipt` | Kills the backend with `SIGKILL` after the receipt was saved and before the run's node was written. | `lines=1 node=cached attempt=2 run=completed deliveries=1 reports=1` |
 | `restart_mid_run.py` | Stops the backend with `SIGTERM` after three of six writes and starts it again. | `lines=6 nodes=6/6 attempt=2 run=completed deliveries=1 reports=1` |
 | `agents_restart.py` | Stops the backend with `SIGTERM` while the second of three agents is working, after that agent wrote its one line, and starts it again. The first two are copies of the Helper; the third is the lobby's second agent, `deckhand`. | `lines=1 agents=3/3 subagents=3 attempt=2 run=completed deliveries=1 reports=1` |
-| `large_result.py` | Reads a 9 MiB file through `tool("file", "read_file", ...)` and compares what the script got. | `chars=9437184 same=True spilled=True attempt=1 run=completed` |
-| `approval_restart.py` | One agent writes its one line and then calls `save_file`, which asks for an approval. While the card is open the script stops the backend with `SIGTERM`, starts it, kills it with `SIGKILL`, starts it again, and then approves the card. | `lines=1 cards=1 open=1 saved=1 agents=1/1 attempt=3 run=completed deliveries=1 reports=1` |
+| `large_result.py` | Reads a 9 MiB file through `tool("python", "read_file", ...)` and compares what the script got. | `chars=9437184 same=True spilled=True attempt=1 run=completed` |
+| `approval_restart.py` | One agent writes its one line and then calls `write_file`, which asks for an approval. While the card is open the script stops the backend with `SIGTERM`, starts it, kills it with `SIGKILL`, starts it again, and then approves the card. | `lines=1 cards=1 open=1 saved=1 agents=1/1 attempt=3 run=completed deliveries=1 reports=1` |
 | `diamond_restart.py` | A plan agent returns six lines, `foreach` runs one research agent per line, two at a time, and one agent joins their answers. The script stops the backend with `SIGTERM` after three research agents completed and starts it again. | `agents=8/8 subagents=8 paid_once=True attempt_below_run=True attempt=2 run=completed deliveries=1 reports=1` |
 
-| `pauses.py` | One run with `max_cost_usd=0.000001`: an agent with a `schema` that answers without JSON first, an `ask_user` that the script answers `Yes` after it stopped the backend with `SIGTERM` and started it again, and an agent that waits at the cost limit until the script answers the cost question `Stop`. | `schema_turns=2 checked=True questions=1 answered=Yes held=1 budget_cards=1 attempt=2 run=cancelled` |
-| `graph_frames.py` | Makes the lobby an encrypted room and runs one `foreach` over 200 agents that answer with one word. The backend keeps each graph frame and each post and edit of the run's card in a capture directory, and the script reads the room's job state while the run goes on. | `agents=200/200 encrypted=True refused=0 rate_limited=0 state_jobs=1 state_kinds=workflow state_labels=0 card=completed graph=True saved=4 run=completed` |
+| `pauses.py` | Two runs. The first has an agent with a `schema` that no value matches, which fails with kind `schema` after its five turns. The second has `max_cost_usd=0.000001`: an `ask_user` that the script answers `Yes` after it stopped the backend with `SIGTERM` and started it again, one agent, and an agent that waits at the cost limit until the script answers the cost question `Stop`. | `schema_turns=5 schema_kind=schema questions=1 answered=Yes held=1 budget_cards=1 attempt=2 run=cancelled` |
+| `graph_frames.py` | Has the backend make the lobby an encrypted room and runs one `foreach` over 200 agents that answer with one word. The backend keeps each graph frame and each post and edit of the run's card in a capture directory, and the script reads the room's job state while the run goes on. | `agents=200/200 encrypted=True refused=0 rate_limited=0 state_jobs=1 state_kinds=workflow state_labels=0 card=completed graph=True saved=4 run=completed` |
 
 - `lines` is the number of lines in the file the run appends to, so a write that ran twice shows as one line too many.
 - `node` is the state of the write's call; `cached` means a later attempt read the saved result back without running the call.
 - `agents` counts the `agent()` calls that completed as the call they first were, so an agent that was started a second time shows as one too few; `subagents` is the number of subagents those calls ran as.
 - `attempt=2` shows that the run was replayed after the kill; a run that only ended `interrupted` would show `attempt=1`.
   `approval_restart.py` restarts twice, so it shows `attempt=3`.
-- `cards` is the number of approval cards the agent's `save_file` call got, and `open` how many of them were still open after both restarts; a card that a restart closed and asked again shows as `cards=2`.
+- `cards` is the number of approval cards the agent's `write_file` call got, and `open` how many of them were still open after both restarts; a card that a restart closed and asked again shows as `cards=2`.
   `saved` is the number of lines in the file the approved call wrote, so an approval that was not accepted shows as `saved=0`.
 - `paid_once` says that the run's usage ledger pays no agent twice.
   Each agent call has one entry for the turn it ended with.
@@ -35,7 +35,7 @@ Each prints one result line on stdout and exits 0 when that line is the expected
   A call whose turn the restart cut short may have one more entry, of an earlier attempt, for what that turn had spent by then.
   How many calls are cut short, none to two, depends on when the restart lands, so the number of entries is printed on stderr and is not part of the line.
   `attempt_below_run` says that the attempt after the restart used less than the whole run, in USD when every turn has a price and in tokens otherwise.
-- `schema_turns` is the number of turns the agent with a `schema` took, `questions` and `budget_cards` are the cards the lobby holds for the script's question and for the cost question, without their edits, and `held` is 1 when the agent at the limit ended `cancelled` without ever having had a job.
+- `schema_turns` is the number of turns the agent with a `schema` took and `schema_kind` the kind of the error its call ended with, `questions` and `budget_cards` are the cards the lobby holds for the script's question and for the cost question, without their edits, and `held` is 1 when the agent at the limit ended `cancelled` without ever having had a job.
 - `refused` counts the graph frames the homeserver did not accept, and `rate_limited` the `M_LIMIT_EXCEEDED` errors in the backend's log since the script started it.
   `state_jobs` is the most jobs the room's `io.mindroom.background_jobs` state listed at once, `state_kinds` their kinds, and `state_labels` how many of them carried an agent's label.
   `saved` is the number of files `graph_frames.py` wrote to the slot's log directory: `workflow_frame_first_snapshot.json`, `workflow_frame_first_delta.json`, `workflow_frame_last_snapshot.json` and `workflow_card_final.json`.
@@ -53,13 +53,20 @@ The script restarts the backend with that variable set, and starts it without th
 In the `before-receipt` case the second attempt fails, because the script does not catch the error of the call that may already have run.
 That failure is delivered once, no report is, and `resume_workflow(run_id, rerun=["n1"])` runs the call again on purpose.
 
-Each script edits the slot's `config.yaml` once: the Helper gets the `workflow` and `file` toolkits, and `defaults.allow_shell_without_worker: true` unless the config routes tools to workers.
+Each script edits the slot's `config.yaml`: the Helper gets the `workflow` toolkit, and `defaults.allow_shell_without_worker: true` unless the config routes tools to workers.
+Every edit goes through `Deployment.edit_config`, and the script's exit writes the file back as the script found it, so no script meets the edit of another.
+A script that is killed with `SIGKILL` leaves its edit behind.
 `agents_restart.py` also adds the agent `deckhand` to the lobby, which the Helper may not delegate to: a run runs it because its bot is in the room.
-`approval_restart.py` also adds a `tool_approval` rule, first in the list of rules, that makes `save_file` ask for an approval, and approves the card itself with an `io.mindroom.tool_approval_response` event of the test account.
+`large_result.py` also gives the Helper the `python` toolkit, whose `read_file` returns a file whole: `filesystem` and `shell` return 50 KiB at most.
+`approval_restart.py` also gives the Helper the `filesystem` toolkit and adds a `tool_approval` rule, first in the list of rules, that makes `write_file` ask for an approval, and approves the card itself with an `io.mindroom.tool_approval_response` event of the test account.
+A script names a toolkit by its registered name: `tool("file", ...)` fails with `The requested tool is no longer available to this script run.` since `file` became another name of `filesystem`, and an approval rule that matches the retired `save_file` alone stops the backend from starting.
 A running backend reloads a config edit some time later, so each script starts the backend again after an edit that changed the file, and only then sends its message.
 `agents_restart.py` also waits until the bot of `deckhand` has joined the lobby.
-`graph_frames.py` encrypts the lobby, which cannot be undone, and starts the backend with `MINDROOM_WORKFLOW_FAULT_DIR` set to its capture directory: `workflow_runs.faults.capture` writes `workflow_frames.jsonl` and `workflow_cards.jsonl` there, and nothing without that variable.
-Its one message must reach an encrypted room, so use the default `--send ask`, which types it in Chat.
+`graph_frames.py` sets `room_defaults.encrypted: true`, with which the backend encrypts the lobby when it starts: the test account has no right to change that state itself.
+The room stays encrypted when the config is written back, since nothing undoes that.
+The script starts the backend with `MINDROOM_WORKFLOW_FAULT_DIR` set to its capture directory: `workflow_runs.faults.capture` writes `workflow_frames.jsonl` and `workflow_cards.jsonl` there, and nothing without that variable.
+Its one message reaches the Helper either way: `--send ask` types it in Chat, which encrypts it, and `--send api` sends it as it is, which the Helper also takes in an encrypted room.
+What the run shows the room is encrypted in both cases.
 `pauses.py` reads the question cards from the lobby and answers them with `io.mindroom.workflow_answer` events of the test account, so it needs a lobby that is not encrypted: run it before `graph_frames.py`, or on another slot.
 It also needs a model with a price, since a run on an unpriced model never reaches a cost limit; without one it says so and exits 1.
 Each script then asks the Helper to start a run from a file it saved in the Helper's workspace.
