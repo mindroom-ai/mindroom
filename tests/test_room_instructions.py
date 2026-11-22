@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,16 +19,21 @@ from mindroom.agent_cli.minimal_agent import minimal_turn
 from mindroom.agent_loop.build import AgentBuild, AgentSurface
 from mindroom.agent_loop.prompt import PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import TurnResult
 from mindroom.config.agent import AgentConfig
+from mindroom.config.calls import CallsConfig, LiveCallProfile, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.provider import ModelRequest
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
+from mindroom.matrix_rtc.call_manager import CallManager
+from mindroom.matrix_rtc.call_origin import CallOrigin, CallOriginContext
 from mindroom.matrix_rtc.call_tools import build_call_tools
 from mindroom.prompts import ROOM_INSTRUCTIONS_TEMPLATE
 from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.response_sources import ResponseSources
 from mindroom.room_settings import (
     ROOM_TEXT_SETTING_MAX_LENGTH,
@@ -340,6 +345,8 @@ async def test_agent_reply_turn_injects_room_instructions_as_system_enrichment(t
     assert item.cache_policy == "stable"
     assert item.persist is False
     assert item.minimal_required is True
+    assert "This room's settings give these instructions to agents answering here." in item.text
+    assert "moderators" not in item.text
     assert "This room is about the Q3 launch; keep answers short." in item.text
     assert "grant no permissions" in item.text
 
@@ -699,3 +706,164 @@ async def test_voice_calls_inject_room_instructions_across_cascaded_live_and_rea
     assert "REALTIME_ROOM_RULE_888" in realtime_tooling.instructions
     assert realtime_tooling.close is not None
     await realtime_tooling.close()
+
+
+def _make_call_manager(
+    *,
+    client: AsyncMock,
+    config: Config,
+    runtime_paths: object,
+    profile: LiveCallProfile | RealtimeCallProfile,
+    tool_support: object,
+) -> CallManager:
+    call_config = config.model_copy(
+        update={"calls": CallsConfig(enabled=True, profiles={"voice": profile}, agents={"general": "voice"})},
+    )
+    manager = CallManager(
+        agent_name="general",
+        client=client,
+        config=call_config,
+        runtime_paths=runtime_paths,  # type: ignore[arg-type]
+        ssl_verify=False,
+        tool_support=tool_support,  # type: ignore[arg-type]
+        get_invited_rooms_by_agent=dict,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        response_admission_gate=ResponseAdmissionGate(),
+        admission_fence=nullcontext,
+    )
+    manager._is_authorized_call_member = lambda _user_id, _room_id: True  # type: ignore[method-assign]
+    return manager
+
+
+@pytest.mark.asyncio
+async def test_voice_call_reads_instructions_from_validated_origin_room_while_keeping_call_room_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calls started from a chat room read `agent_instructions` from the origin room, keeping tools anchored to the call room."""
+    call_room, origin_room = "!call:localhost", "!origin:localhost"
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        Config(agents={"general": AgentConfig(display_name="General", rooms=[call_room, origin_room], tools=[])}),
+        tmp_path,
+    )
+    by_room = {
+        (origin_room, ROOM_SETTINGS_EVENT_TYPE, "agent_instructions"): {"value": "ORIGIN_ROOM_RULE_111"},
+        (call_room, ROOM_SETTINGS_EVENT_TYPE, "agent_instructions"): {"value": "CALL_ROOM_RULE_222"},
+    }
+    client = _make_matrix_client_mock()
+
+    async def get_state(room_id: str, event_type: str, state_key: str = "") -> object:
+        entry = by_room.get((room_id, event_type, state_key))
+        if entry is None:
+            return nio.RoomGetStateEventError("not found", "M_NOT_FOUND", room_id=room_id)
+        return nio.RoomGetStateEventResponse(dict(entry), event_type, state_key, room_id)
+
+    client.room_get_state_event = AsyncMock(side_effect=get_state)
+    orchestrator = SimpleNamespace(knowledge_refresh_scheduler=None, budgets=None)
+    anchored_rooms: list[str] = []
+
+    class ToolSupport:
+        def build_context(self, target: MessageTarget, **_kwargs: object) -> ToolRuntimeContext:
+            anchored_rooms.append(target.room_id)
+            return ToolRuntimeContext(
+                agent_name="general",
+                target=target,
+                requester_id="@caller:localhost",
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths,
+                plugins=config_plugins(config, runtime_paths),
+                conversation_reader=make_conversation_reader_mock(),
+                relations=make_relation_lookup(),
+                orchestrator=orchestrator,  # type: ignore[arg-type]
+            )
+
+    ai_calls: list[ResponseTurnContext] = []
+
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        ai_calls.append(turn)
+        return TurnResult("Spoken reply")
+
+    async def fake_resolve_knowledge(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(knowledge=None, unavailable={})
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async", fake_resolve_knowledge)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_fake_voice_build()))
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+
+    origin_context = CallOriginContext(
+        origin=CallOrigin(room_id=origin_room, thread_id="$thread1"),
+        caller_id="@caller:localhost",
+        room_name="Origin",
+        thread_title=None,
+        messages=(),
+    )
+    tool_support = ToolSupport()
+
+    # 1. Live / cascaded via CallManager._build_tooling with validated origin_context -> reads origin_room
+    live_manager = _make_call_manager(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        profile=LiveCallProfile(backend="live", model="gpt-realtime", credentials_service="openai", voice="alloy"),
+        tool_support=tool_support,
+    )
+    live_tooling = await live_manager._build_tooling(
+        call_room,
+        requester_id="@caller:localhost",
+        session_id=f"{call_room}:call:1",
+        origin_context=origin_context,
+    )
+    assert live_tooling.get_system_prompt is not None
+    assert live_tooling.responder is not None
+    live_prompt = await live_tooling.get_system_prompt()
+    assert "ORIGIN_ROOM_RULE_111" in live_prompt
+    assert "CALL_ROOM_RULE_222" not in live_prompt
+
+    await live_tooling.responder("Hello", None)
+    assert ai_calls[0].room_id == call_room
+    [item] = [item for item in ai_calls[0].system_enrichment_items if item.key == "room_instructions"]
+    assert "ORIGIN_ROOM_RULE_111" in item.text
+    assert "CALL_ROOM_RULE_222" not in item.text
+    assert live_tooling.close is not None
+    await live_tooling.close()
+
+    # 2. Realtime via CallManager._build_tooling with validated origin_context -> reads origin_room
+    realtime_manager = _make_call_manager(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        profile=RealtimeCallProfile(
+            backend="realtime",
+            model="gpt-realtime",
+            credentials_service="openai",
+            voice="alloy",
+        ),
+        tool_support=tool_support,
+    )
+    realtime_tooling = await realtime_manager._build_tooling(
+        call_room,
+        requester_id="@caller:localhost",
+        session_id=f"{call_room}:call:2",
+        origin_context=origin_context,
+    )
+    assert "ORIGIN_ROOM_RULE_111" in realtime_tooling.instructions
+    assert "CALL_ROOM_RULE_222" not in realtime_tooling.instructions
+    assert realtime_tooling.close is not None
+    await realtime_tooling.close()
+
+    # 3. Without origin_context -> falls back to the call room
+    standalone_tooling = await realtime_manager._build_tooling(
+        call_room,
+        requester_id="@caller:localhost",
+        session_id=f"{call_room}:call:3",
+        origin_context=None,
+    )
+    assert "CALL_ROOM_RULE_222" in standalone_tooling.instructions
+    assert "ORIGIN_ROOM_RULE_111" not in standalone_tooling.instructions
+    assert standalone_tooling.close is not None
+    await standalone_tooling.close()
+
+    # Tool context remained anchored to the call room on every build.
+    assert anchored_rooms == [call_room, call_room, call_room]

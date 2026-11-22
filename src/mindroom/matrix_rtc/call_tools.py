@@ -369,6 +369,7 @@ class _CallAgentCache:
     runtime_paths: RuntimePaths
     context: ToolRuntimeContext
     active_model_name: str | None
+    instructions_room_id: str | None = None
     build: AgentBuild | None = None
     knowledge_identity: tuple[int, ...] = ()
     refresh_scheduler: KnowledgeRefreshScheduler | None = None
@@ -387,7 +388,11 @@ class _CallAgentCache:
                 refresh_scheduler=scheduler,
                 execution_identity=self.context.execution_identity,
             ),
-            room_instructions_item(self.context.client, self.context.room_id, self.config),
+            room_instructions_item(
+                self.context.client,
+                self.instructions_room_id or self.context.room_id,
+                self.config,
+            ),
         )
         room_enrichment = render_system_enrichment_block((instructions_item,)) if instructions_item is not None else ""
 
@@ -478,6 +483,7 @@ async def build_call_tools(
     voice_instructions: str | None = None,
     active_model_name: str | None = None,
     origin_brief: Callable[[TokenCounter], str] | None = None,
+    instructions_room_id: str | None = None,
 ) -> CallAgentTooling:
     """Materialize the agent for the selected voice backend.
 
@@ -520,6 +526,7 @@ async def build_call_tools(
         ),
     )
     execution_identity = context.execution_identity
+    resolved_instructions_room_id = instructions_room_id or room_id
     if enable_responder:
         voice_enrichment_items: tuple[EnrichmentItem, ...] = ()
         if voice_instructions:
@@ -552,6 +559,7 @@ async def build_call_tools(
             runtime_paths=runtime_paths,
             context=context,
             active_model_name=active_model_name,
+            instructions_room_id=resolved_instructions_room_id,
         )
         responder = functools.partial(
             _run_call_agent,
@@ -560,6 +568,7 @@ async def build_call_tools(
             runtime_paths=runtime_paths,
             context=context,
             room_id=room_id,
+            instructions_room_id=resolved_instructions_room_id,
             requester_id=requester_id,
             session_id=session_id,
             voice_enrichment_items=voice_enrichment_items,
@@ -588,7 +597,7 @@ async def build_call_tools(
             refresh_scheduler=refresh_scheduler,
             execution_identity=execution_identity,
         ),
-        room_instructions_item(context.client, room_id, config),
+        room_instructions_item(context.client, resolved_instructions_room_id, config),
     )
     build = _spoken(
         # Finished before a cancellation goes on, as the live agent cache does, so no build outlives the call.
@@ -699,6 +708,7 @@ async def _run_call_agent(
     active_model_name: str | None,
     authorize_operation: _CallAuthorizationGuard,
     reconcile_spoken_response: bool = True,
+    instructions_room_id: str | None = None,
 ) -> CallAgentResponse:
     """Run one finalized transcript only while its current caller remains authorized."""
     await response_tracker.wait_for_settlements()
@@ -713,6 +723,7 @@ async def _run_call_agent(
             runtime_paths=runtime_paths,
             context=context,
             room_id=room_id,
+            instructions_room_id=instructions_room_id,
             requester_id=requester_id,
             session_id=session_id,
             voice_enrichment_items=voice_enrichment_items,
@@ -739,6 +750,7 @@ async def _run_authorized_call_agent(
     agent_cache: _CallAgentCache,
     active_model_name: str | None,
     reconcile_spoken_response: bool = True,
+    instructions_room_id: str | None = None,
 ) -> CallAgentResponse:
     """Run one admitted call transcript through the normal MindRoom agent."""
     from mindroom.ai import ai_response  # noqa: PLC0415 - heavy optional call path
@@ -770,7 +782,7 @@ async def _run_authorized_call_agent(
                 refresh_scheduler=refresh_scheduler,
                 execution_identity=context.execution_identity,
             ),
-            room_instructions_item(context.client, room_id, config),
+            room_instructions_item(context.client, instructions_room_id or room_id, config),
         )
         transient_enrichment_items = append_knowledge_availability_enrichment(
             (),

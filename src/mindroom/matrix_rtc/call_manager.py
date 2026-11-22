@@ -1683,6 +1683,7 @@ class CallManager:
             active_model_name=active_model_name,
             reconcile_spoken_response=self._call_config.backend != "live",
             origin_brief=partial(self._call_context_text, origin_context) if enable_responder else None,
+            instructions_room_id=origin_context.origin.room_id if origin_context is not None else None,
         )
 
     def _call_context_text(self, origin_context: CallOriginContext | None, counter: TokenCounter) -> str:

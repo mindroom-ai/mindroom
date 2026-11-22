@@ -234,7 +234,7 @@ async def room_instructions_item(
     room_id: str,
     config: Config,
 ) -> EnrichmentItem | None:
-    """Build system room-moderator instructions when the room sets ``agent_instructions``."""
+    """Build system room instructions when the room sets ``agent_instructions``."""
     from mindroom.hooks.types import EnrichmentItem  # noqa: PLC0415 - config imports this module directly
 
     instructions = await read_room_text_setting(
