@@ -218,6 +218,47 @@ class _ImmediateLifecycleReservation:
 
 
 @dataclass
+class _RecordingConversations:
+    """Stand-in for the runner's conversation coordinator, none of whose conversations has a running reply.
+
+    It is its own object, as the real coordinator is, so asking the runner itself for any of this fails.
+    """
+
+    # Whether a pending approval holds every conversation.
+    held_for_approval: bool = False
+    # The queued messages whose edits ingress applied, which a restart's continued reply no longer covers.
+    edited_sources: list[str] = field(default_factory=list)
+    # The messages ingress asked to have told to a running reply.
+    notice_requests: list[str] = field(default_factory=list)
+
+    def has_active_response_for_target(self, target: MessageTarget) -> bool:  # noqa: ARG002
+        return False
+
+    def approval_holds(self, room_id: str, thread_id: str | None) -> tuple[str, ...]:  # noqa: ARG002
+        return ("approval",) if self.held_for_approval else ()
+
+    def note_edited_source(self, source_event_id: str) -> None:
+        self.edited_sources.append(source_event_id)
+
+    async def reserve_response_lifecycle(self, response_envelope: MessageEnvelope) -> _ImmediateLifecycleReservation:  # noqa: ARG002
+        return _ImmediateLifecycleReservation()
+
+    def reserve_waiting_human_message(
+        self,
+        *,
+        target: MessageTarget,
+        response_envelope: MessageEnvelope,
+        mentions_nobody: bool = False,  # noqa: ARG002
+        transcript: str | None = None,  # noqa: ARG002
+        mode: MidTurnMode = MidTurnMode.AUTO,  # noqa: ARG002
+    ) -> QueuedHumanNoticeReservation | None:
+        """Reserve nothing, as a conversation with no running reply does, for a call the coordinator would accept."""
+        assert target.lifecycle_key == response_envelope.target.lifecycle_key
+        self.notice_requests.append(response_envelope.source_event_id)
+        return None
+
+
+@dataclass
 class _RecordingResponseRunner:
     """Typed ResponseRunner stand-in that records the execution-seam requests.
 
@@ -247,48 +288,13 @@ class _RecordingResponseRunner:
     runtime: BotRuntimeState = field(kw_only=True)
     # Records a turn answered, as a reply's records do when its answer settles its sources.
     answered: Callable[[tuple[str, ...]], Awaitable[None]] | None = None
-    # Whether a pending approval holds every conversation.
-    held_for_approval: bool = False
-    # The queued messages whose edits ingress applied, which a restart's continued reply no longer covers.
-    edited_sources: list[str] = field(default_factory=list)
-    # The messages ingress asked to have told to a running reply.
-    notice_requests: list[str] = field(default_factory=list)
+    # The conversations the runner shares, which ingress and dispatch ask about a running reply or a pending approval.
+    lifecycle_coordinator: _RecordingConversations = field(default_factory=_RecordingConversations)
 
     @property
     def inbox(self) -> _RecordingResponseRunner:
         """Stand in for the runner's inbox ownership too, which ``track_inbox_response`` records."""
         return self
-
-    @property
-    def lifecycle_coordinator(self) -> _RecordingResponseRunner:
-        """Stand in for the conversations the runner shares too, none of which has a running reply."""
-        return self
-
-    def has_active_response_for_target(self, target: MessageTarget) -> bool:  # noqa: ARG002
-        return False
-
-    def approval_holds(self, room_id: str, thread_id: str | None) -> tuple[str, ...]:  # noqa: ARG002
-        return ("approval",) if self.held_for_approval else ()
-
-    def note_edited_source(self, source_event_id: str) -> None:
-        self.edited_sources.append(source_event_id)
-
-    async def reserve_response_lifecycle(self, response_envelope: MessageEnvelope) -> _ImmediateLifecycleReservation:  # noqa: ARG002
-        return _ImmediateLifecycleReservation()
-
-    def reserve_waiting_human_message(
-        self,
-        *,
-        target: MessageTarget,
-        response_envelope: MessageEnvelope,
-        mentions_nobody: bool = False,  # noqa: ARG002
-        transcript: str | None = None,  # noqa: ARG002
-        mode: MidTurnMode = MidTurnMode.AUTO,  # noqa: ARG002
-    ) -> QueuedHumanNoticeReservation | None:
-        """Reserve nothing, as a conversation with no running reply does, for a call the coordinator would accept."""
-        assert target.lifecycle_key == response_envelope.target.lifecycle_key
-        self.notice_requests.append(response_envelope.source_event_id)
-        return None
 
     def track_inbox_response(
         self,
@@ -3085,7 +3091,7 @@ async def test_a_message_waiting_for_a_pending_approval_gets_an_hourglass(
     The queue records whether it is for another participant, so it never shares a turn with messages for this agent.
     """
     harness = _build_harness(config, tmp_path)
-    harness.runner.held_for_approval = held
+    harness.runner.lifecycle_coordinator.held_for_approval = held
     room = _room_with_members(config, "general", "research")
     event = _text_event("and what about tomorrow?")
     if mention is not None:
@@ -3098,7 +3104,9 @@ async def test_a_message_waiting_for_a_pending_approval_gets_an_hourglass(
     waits = held and mention in {None, "general"}
     assert harness.gateway.reactions == ([(event.event_id, "⏳", "approval_wait")] if waits else [])
     # A message for another participant never asks to be told to this agent's running reply.
-    assert harness.runner.notice_requests == ([event.event_id] if mention in {None, "general"} else [])
+    assert harness.runner.lifecycle_coordinator.notice_requests == (
+        [event.event_id] if mention in {None, "general"} else []
+    )
     await harness.gate.drain_all()
     assert [batch.event.for_another_participant for batch in harness.gate_batches] == [
         {None: None, "general": False}.get(mention, True),
@@ -7802,7 +7810,7 @@ async def test_an_edit_before_the_turn_starts_changes_what_it_answers_unless_an_
     assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     assert regenerator.edit_event_ids == []
     # A person's edit names the queued message it changed, so a restart's replay of it is news again.
-    assert harness.runner.edited_sources == ([] if by_agent else [original.event_id])
+    assert harness.runner.lifecycle_coordinator.edited_sources == ([] if by_agent else [original.event_id])
     (request,) = harness.runner.requests
     answered, replaced = ("2+2", "3+3") if by_agent else ("3+3", "2+2")
     assert f"what is {answered}?" in request.prompt
