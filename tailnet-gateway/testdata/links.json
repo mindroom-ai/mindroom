@@ -1,0 +1,7 @@
+[
+  {
+    "id": "245114feb27b4c95",
+    "hostname": "v1-default-shared-mine",
+    "allowed_logins": ["alice@github", "bas@github"]
+  }
+]

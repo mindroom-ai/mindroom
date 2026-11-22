@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import importlib
+import ipaddress
 import math
 import threading
 import time
@@ -52,6 +53,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     retire_pinned_worker,
     stable_json_digest,
     subagent_worker_expired,
+    tailnet_ssh_marked,
     validate_dedicated_worker_extra_env,
     validate_unique_worker_visible_paths,
 )
@@ -106,7 +108,13 @@ from mindroom.workers.backends.legacy_docker_worker_metadata import (
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
 from mindroom.workers.backends.worker_security import docker_worker_security_options
 from mindroom.workers.compatibility import WorkerProtocolMismatch, ready_worker_protocol_mismatch
-from mindroom.workers.models import SANDBOX_RUNNER_API_ROOT, ConfiguredWorkerBackend
+from mindroom.workers.models import (
+    LABEL_TAILNET_SSH,
+    SANDBOX_RUNNER_API_ROOT,
+    WORKER_SSH_PORT,
+    ConfiguredWorkerBackend,
+    WorkerSshEndpoint,
+)
 from mindroom.workers.progress import WorkerStartReporter, WorkerWarmupProgress
 from mindroom.workers.worker_retirement import open_worker_state_root
 
@@ -930,6 +938,7 @@ class DockerWorkerBackend(WorkerBackendDefaults):
                 image_id=render_image_id,
                 mounts=mounts,
                 startup_manifest_hash=self._startup_manifest_hash(spec, launch),
+                ssh=self._ssh_marked(spec, launch),
             ).launch_hash
         )
         return _WorkerContainerState(container=container, current=current, image_id=image_id, mounts=mounts or [])
@@ -941,8 +950,9 @@ class DockerWorkerBackend(WorkerBackendDefaults):
         image_id: str,
         mounts: Sequence[tuple[Path, str, bool]],
         startup_manifest_hash: str,
+        ssh: bool,
     ) -> _DockerLaunch:
-        """Return the ``containers.run`` call that starts the worker's container from ``image_id`` now."""
+        """Render the container launch, adding the SSH label and port only if marked."""
         container_name = self._container_name_for_worker(worker_key)
         labels = {
             LABEL_COMPONENT: "worker",
@@ -955,6 +965,10 @@ class DockerWorkerBackend(WorkerBackendDefaults):
             LABEL_IMAGE_REFERENCE: self.config.image,
             **self.config.extra_labels,
         }
+        ports = {f"{self.config.worker_port}/tcp": (self.config.publish_host, None)}
+        if ssh:
+            labels[LABEL_TAILNET_SSH] = "true"
+            ports[f"{WORKER_SSH_PORT}/tcp"] = (self.config.publish_host, None)
         arguments: dict[str, object] = {
             "command": _WORKER_COMMAND,
             "name": container_name,
@@ -964,7 +978,7 @@ class DockerWorkerBackend(WorkerBackendDefaults):
                 f"{host_path}:{container_path}:{'ro' if read_only else 'rw'}"
                 for host_path, container_path, read_only in mounts
             ],
-            "ports": {f"{self.config.worker_port}/tcp": (self.config.publish_host, None)},
+            "ports": ports,
             "labels": labels,
             "user": self.config.user,
             "read_only": True,
@@ -1022,13 +1036,14 @@ class DockerWorkerBackend(WorkerBackendDefaults):
             image_id=image_id,
             mounts=mounts,
             startup_manifest_hash=startup_manifest_hash,
+            ssh=self._ssh_marked(spec, launch),
         )
         container = self._client.containers.run(rendered.image, **rendered.arguments)
         return self._published_container(container, worker_key=spec.worker_key)
 
     def _published_container(self, container: _DockerContainer, *, worker_key: str) -> _DockerContainer:
         self._reload_container(container)
-        if self._container_host_port(container) is None:
+        if self._container_host_port(container, self.config.worker_port) is None:
             msg = f"Docker worker '{worker_log_id(worker_key)}' is missing a published port."
             raise WorkerBackendError(msg)
         return container
@@ -1088,7 +1103,7 @@ class DockerWorkerBackend(WorkerBackendDefaults):
         on_poll_tick: Callable[[], None] | None = None,
     ) -> None:
         """Poll the worker's health until it answers with this runtime's protocol, calling ``on_poll_tick`` per retry."""
-        host_port = self._container_host_port(container)
+        host_port = self._container_host_port(container, self.config.worker_port)
         assert host_port is not None, "callers pass a container whose published port was checked"
 
         endpoint_root = self._endpoint_root(host_port)
@@ -1285,6 +1300,14 @@ class DockerWorkerBackend(WorkerBackendDefaults):
                 msg = f"Docker worker mount target must be a real directory: {paths.state.root / relative_path}"
                 raise WorkerBackendError(msg) from exc
 
+    def _ssh_marked(self, spec: WorkerSpec, launch: WorkerLaunchConfig) -> bool:
+        # Publish sshd only on a literal, non-wildcard address.
+        try:
+            address = ipaddress.ip_address(self.config.publish_host)
+        except ValueError:
+            return False
+        return not address.is_unspecified and tailnet_ssh_marked(spec.worker_key, launch, spec.state_scope_worker_key)
+
     def _scoped_storage_mount_specs(self, spec: WorkerSpec, launch: WorkerLaunchConfig) -> list[tuple[Path, str, bool]]:
         resolved_agent_policies = launch.agent_policies
         state_scope_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
@@ -1339,14 +1362,13 @@ class DockerWorkerBackend(WorkerBackendDefaults):
     def _container_is_running(self, container: _DockerContainer | None) -> bool:
         return container is not None and container.status == "running"
 
-    def _container_host_port(self, container: _DockerContainer | None) -> int | None:
+    def _container_host_port(self, container: _DockerContainer | None, container_port: int) -> int | None:
+        """Return the host port bound to one of the container's TCP ports, or None when it is not published."""
         if container is None:
             return None
         network_settings = container.attrs.get("NetworkSettings")
         ports = cast("dict[str, object]", network_settings).get("Ports") if isinstance(network_settings, dict) else None
-        bindings = (
-            cast("dict[str, object]", ports).get(f"{self.config.worker_port}/tcp") if isinstance(ports, dict) else None
-        )
+        bindings = cast("dict[str, object]", ports).get(f"{container_port}/tcp") if isinstance(ports, dict) else None
         first_binding = bindings[0] if isinstance(bindings, list) and bindings else None
         raw_host_port = (
             cast("dict[str, object]", first_binding).get("HostPort") if isinstance(first_binding, dict) else None
@@ -1405,8 +1427,16 @@ class DockerWorkerBackend(WorkerBackendDefaults):
         paths: _DockerWorkerPaths,
     ) -> WorkerHandle:
         # Only a running container publishes a port, so any other worker has no endpoint.
-        host_port = self._container_host_port(container) if self._container_is_running(container) else None
+        running = container if self._container_is_running(container) else None
+        host_port = self._container_host_port(running, self.config.worker_port)
         endpoint = "" if host_port is None else f"{self._endpoint_root(host_port)}{SANDBOX_RUNNER_API_ROOT}/execute"
+        # The label is the launch's decision; a 2222 binding on a container without it is not an SSH endpoint.
+        ssh_port = (
+            self._container_host_port(running, WORKER_SSH_PORT)
+            if running is not None and container_config_labels(running).get(LABEL_TAILNET_SSH) == "true"
+            else None
+        )
+        ssh_host = self.config.endpoint_host.strip("[]")
         return worker_handle(
             worker_id=metadata.worker_id,
             worker_key=metadata.worker_key,
@@ -1422,4 +1452,7 @@ class DockerWorkerBackend(WorkerBackendDefaults):
                 "state_root": str(paths.state.root),
                 "api_root": endpoint.removesuffix("/execute").rstrip("/"),
             },
+            ssh_endpoint=None
+            if ssh_port is None
+            else WorkerSshEndpoint(ssh_host, ssh_port, paths.state.root / ".runtime" / "ssh"),
         )

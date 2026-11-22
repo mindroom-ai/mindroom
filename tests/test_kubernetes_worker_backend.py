@@ -17,9 +17,10 @@ from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import asdict, replace
 from functools import cache
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from typing import TYPE_CHECKING, Self, cast
+from typing import TYPE_CHECKING, Any, Self, cast
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -74,7 +75,13 @@ from mindroom.workers.backends.kubernetes_resources import (
     ANNOTATION_WORKER_KEY,
     worker_auth_token,
 )
-from mindroom.workers.models import WorkerHandle, WorkerLaunchConfig, WorkerReadyProgress, WorkerSpec
+from mindroom.workers.models import (
+    WorkerHandle,
+    WorkerLaunchConfig,
+    WorkerReadyProgress,
+    WorkerSpec,
+    WorkerSshEndpoint,
+)
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 from mindroom.workers.runtime import build_worker_launch_config, configured_primary_worker_manager_identity
 
@@ -180,10 +187,34 @@ class _FakeApiError(Exception):
 
 
 _MAPPING_KEYS = {"annotations", "labels", "matchLabels", "selector", "stringData", "data"}
+_MERGE_PATCH = "application/merge-patch+json"
 
 
 def _encoded_secret_data(values: dict[str, str]) -> dict[str, str]:
     return {key: base64.b64encode(value.encode("utf-8")).decode("ascii") for key, value in values.items()}
+
+
+def _json_merge_patch(target: object, patch: object) -> object:
+    """Apply an RFC 7386 merge patch, as the API server does for ``application/merge-patch+json``: lists are replaced."""
+    if not isinstance(patch, dict):
+        return deepcopy(patch)
+    merged = dict(target) if isinstance(target, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = _json_merge_patch(merged.get(key), value)
+    return merged
+
+
+def _strategic_merge_service(target: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """Apply a strategic merge patch to a Service, whose ``spec.ports`` merge by ``port``: an omitted port stays."""
+    merged = cast("dict[str, Any]", _json_merge_patch(target, patch))
+    ports = {port["port"]: port for port in target["spec"]["ports"]}
+    for port in patch["spec"]["ports"]:
+        ports[port["port"]] = {**ports.get(port["port"], {}), **port}
+    merged["spec"]["ports"] = list(ports.values())
+    return merged
 
 
 def _to_namespace(value: object, *, key: str | None = None) -> object:
@@ -377,6 +408,8 @@ def _absence_inventory(items: dict[str, object], namespace: str, **kwargs: objec
 class _FakeCoreApi:
     def __init__(self) -> None:
         self.services: dict[str, object] = {}
+        # Each Service as the API server stores it, which a patch merges into under its content type's rules.
+        self._service_bodies: dict[str, dict[str, Any]] = {}
         self.secrets: dict[str, object] = {}
         self.pods: dict[str, object] = {}
         self.read_service_names: list[str] = []
@@ -400,19 +433,30 @@ class _FakeCoreApi:
     def create_namespaced_service(self, namespace: str, body: dict[str, object]) -> object:
         _ = namespace
         self.created_bodies.append(body)
-        service = _to_namespace(body)
-        self.services[service.metadata.name] = service
-        return service
+        return self._store_service(body["metadata"]["name"], deepcopy(body))
 
-    def patch_namespaced_service(self, name: str, namespace: str, body: dict[str, object]) -> object:
+    def patch_namespaced_service(
+        self,
+        name: str,
+        namespace: str,
+        body: dict[str, Any],
+        *,
+        _content_type: str | None = None,
+    ) -> object:
+        """Patch as the client does: a mapping is a strategic merge patch unless the caller names a merge patch."""
         _ = namespace
-        service = _to_namespace(body)
-        self.services[name] = service
-        return service
+        merge = _json_merge_patch if _content_type == _MERGE_PATCH else _strategic_merge_service
+        return self._store_service(name, cast("dict[str, Any]", merge(self._service_bodies[name], body)))
+
+    def _store_service(self, name: str, body: dict[str, Any]) -> object:
+        self._service_bodies[name] = body
+        self.services[name] = _to_namespace(body)
+        return self.services[name]
 
     def delete_namespaced_service(self, name: str, namespace: str) -> None:
         _ = namespace
         self.services.pop(name, None)
+        self._service_bodies.pop(name, None)
 
     def read_namespaced_secret(self, name: str, namespace: str) -> object:
         _ = namespace
@@ -487,7 +531,7 @@ def test_kubernetes_deployment_snapshot_tolerates_missing_status() -> None:
 
 
 def test_kubernetes_deployment_snapshot_tolerates_missing_labels() -> None:
-    """Labels are carried but never read; their absence must not fail the pass."""
+    """A Deployment listed without labels carries no mark; their absence must not fail the pass."""
     payload = {
         "metadata": {"name": "mindroom-worker"},
         "spec": {"replicas": 1},
@@ -521,6 +565,19 @@ def test_script_recovery_contract_survives_image_upgrade() -> None:
     )
 
     assert backend.script_recovery_signature() == initial
+
+
+@pytest.mark.parametrize("release_id", [None, "c" * 32], ids=["ssh-off", "ssh-on"])
+def test_script_recovery_contract_matches_the_digest_before_tailnet_ssh(release_id: str | None) -> None:
+    """The SSH-only label must not invalidate existing background script workers on upgrade."""
+    backend, _apps, _core = _backend(tailnet_ssh_release_id=release_id)
+    main_payload = backend._script_recovery_payload()
+    main_config = main_payload["config"]
+    assert isinstance(main_config, dict)
+    main_config.pop("tailnet_ssh_release_id", None)
+    main_digest = hashlib.sha256(json.dumps(main_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    assert backend.script_recovery_signature() == main_digest
 
 
 def test_script_recovery_contract_rejects_a_runtime_class_change() -> None:
@@ -716,6 +773,7 @@ def _backend(
     named_worker_max_age_seconds: float = 14400.0,
     extra_containers: tuple[dict[str, object], ...] = (),
     extra_volumes: tuple[dict[str, object], ...] = (),
+    tailnet_ssh_release_id: str | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     profile_config: dict[str, object] = {}
     if script_resource_profiles is not None:
@@ -756,6 +814,7 @@ def _backend(
         named_worker_max_age_seconds=named_worker_max_age_seconds,
         extra_containers=extra_containers,
         extra_volumes=extra_volumes,
+        tailnet_ssh_release_id=tailnet_ssh_release_id,
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
@@ -1614,7 +1673,7 @@ def test_kubernetes_worker_patches_and_deletes_go_through_the_installed_client(
         deployment_path = f"{_DEPLOYMENTS_PATH}/{worker_id}"
         running_annotations = server.objects[deployment_path]["metadata"]["annotations"]
         server.sent.clear()
-        resources.apply_service(worker_id)
+        resources.apply_service(worker_id, ssh=False)
         resources.apply_auth_secret(worker_key=_ALICE_USER_WORKER_KEY, worker_id=worker_id)
         deployment_args = {
             "worker_key": _ALICE_USER_WORKER_KEY,
@@ -1634,7 +1693,7 @@ def test_kubernetes_worker_patches_and_deletes_go_through_the_installed_client(
 
     strategic = "application/strategic-merge-patch+json"
     assert _writes(server.sent) == [
-        ("PATCH", f"{_SERVICES_PATH}/{worker_id}", strategic),
+        ("PATCH", f"{_SERVICES_PATH}/{worker_id}", _MERGE_PATCH),
         ("PATCH", f"{_SECRETS_PATH}/{worker_id}", "application/merge-patch+json"),
         ("PATCH", deployment_path, strategic),
         ("PATCH", deployment_path, strategic),
@@ -1646,7 +1705,7 @@ def test_kubernetes_worker_patches_and_deletes_go_through_the_installed_client(
     ]
     bodies = [request.body for request in server.sent if request.method != "GET"]
     assert bodies == [
-        resources._service_manifest(worker_id),
+        resources._service_manifest(worker_id, ssh=False),
         resources._auth_secret_patch(worker_key=_ALICE_USER_WORKER_KEY, worker_id=worker_id),
         resources._deployment_manifest(**deployment_args),
         {"metadata": {"annotations": {**running_annotations, "example.org/stopped": "yes"}}, "spec": {"replicas": 0}},
@@ -2278,6 +2337,27 @@ def test_kubernetes_backend_availability_uses_runtime_env_values(tmp_path: Path)
     assert configured_primary_worker_manager_identity(runtime_paths) is not None
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["MINDROOM_TAILNET_SSH_GATEWAY_TOKEN", "TAILNET_SSH_GATEWAY_TOKEN", "TAILNET_SSH_AUTH_KEY", "TS_AUTHKEY"],
+)
+def test_kubernetes_worker_config_rejects_tailnet_secrets_in_extra_env(tmp_path: Path, name: str) -> None:
+    """The Kubernetes extra-env option cannot pass a tailnet secret to the worker pod."""
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "test-image",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "test-pvc",
+            "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({name: "test-only"}),
+        },
+    )
+
+    with pytest.raises(WorkerBackendError, match=rf"reserved env vars: {name}") as error:
+        KubernetesWorkerBackendConfig.from_runtime(paths)
+    assert "test-only" not in str(error.value)
+
+
 def test_kubernetes_backend_config_resource_envs_override_defaults(tmp_path: Path) -> None:
     """Resource request/limit env vars override the built-in defaults."""
     config_dir = tmp_path / "cfg"
@@ -2749,6 +2829,12 @@ def test_kubernetes_backend_requires_configured_owner_deployment_to_exist() -> N
 
     with pytest.raises(WorkerBackendError, match="owner deployment 'mindroom-missing' was not found"):
         backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+
+def test_kubernetes_worker_config_refuses_ssh_port() -> None:
+    """A Kubernetes runner cannot serve on the sshd port."""
+    with pytest.raises(WorkerBackendError, match=r"2222.*reserved.*SSH"):
+        _backend(worker_port=2222)
 
 
 def test_kubernetes_backend_honors_custom_worker_port() -> None:
@@ -3940,9 +4026,14 @@ def test_kubernetes_script_worker_rejects_an_unrelated_state_scope() -> None:
     assert apps_api.created_bodies == []
 
 
-def _materialize_private_workspace(storage_root: Path, worker_key: str, requester_id: str) -> Path:
+def _materialize_private_workspace(
+    storage_root: Path,
+    worker_key: str,
+    requester_id: str,
+    agent_name: str = "mind",
+) -> Path:
     ensure_private_instance_identity(storage_root, worker_key=worker_key, requester_id=requester_id)
-    workspace = private_instance_scope_root_path(storage_root, worker_key) / "mind" / "mind_data"
+    workspace = private_instance_scope_root_path(storage_root, worker_key) / agent_name / f"{agent_name}_data"
     workspace.mkdir(parents=True)
     return workspace
 
@@ -6752,8 +6843,8 @@ def test_kubernetes_backend_warm_reconcile_failures_are_non_destructive(
         backend._resources.apply_deployment = apply_deployment_with_failure
     else:
 
-        def apply_service_with_failure(worker_id: str) -> None:
-            _ = worker_id
+        def apply_service_with_failure(worker_id: str, *, ssh: bool) -> None:
+            _ = worker_id, ssh
             msg = error_message
             raise RuntimeError(msg)
 
@@ -6800,8 +6891,8 @@ def test_kubernetes_backend_existing_starting_worker_failures_record_failure(
 
     if failure_target == "apply_service":
 
-        def apply_service_with_failure(worker_id: str) -> None:
-            _ = worker_id
+        def apply_service_with_failure(worker_id: str, *, ssh: bool) -> None:
+            _ = worker_id, ssh
             msg = error_message
             raise RuntimeError(msg)
 
@@ -6864,8 +6955,8 @@ def test_kubernetes_backend_prestartup_failures_are_normalized(
         )
     else:
 
-        def apply_service_with_failure(worker_id: str) -> None:
-            _ = worker_id
+        def apply_service_with_failure(worker_id: str, *, ssh: bool) -> None:
+            _ = worker_id, ssh
             msg = error_message
             raise RuntimeError(msg)
 
@@ -7286,3 +7377,308 @@ def test_kubernetes_ready_cache_rechecks_shared_directories(tmp_path: Path) -> N
             "readOnly": True,
         },
     ]
+
+
+# `mine` is the one agent a tailnet SSH launch may mark: per person and agent, and admitting that person alone.
+_SSH_AGENT = """
+    display_name: Mine
+    worker_scope: user_agent
+    tailnet_ssh: true
+    access:
+      users: ["@alice:example.org"]
+      members_of_rooms: []
+""".strip("\n")
+_SSH_WORKER_KEY = "v1:tenant-123:user_agent:~@alice:example.org:mine"
+_SSH_LABEL = "mindroom.ai/tailnet-ssh"
+_API_PORT = {"name": "api", "port": 8766, "targetPort": 8766}
+_SSH_PORT = {"name": "ssh", "port": 2222, "targetPort": 2222}
+
+
+def _ssh_backend(
+    tmp_path: Path,
+    *,
+    include_alias: bool = False,
+    tailnet_ssh_release_id: str | None = None,
+) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi, RuntimePaths]:
+    alias = _SSH_AGENT.replace("tailnet_ssh: true", "tailnet_ssh: false")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"agents:\n  mine:\n{_SSH_AGENT}\n"
+        + (f"  mine_:\n{alias}\n" if include_alias else "")
+        + """
+  helper:
+    display_name: Helper
+    worker_scope: user
+  code:
+    display_name: Code
+    worker_scope: shared
+  solo:
+    display_name: Solo
+models:
+  default:
+    provider: openai
+    id: gpt-6-astra
+router:
+  model: default
+""".lstrip("\n"),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths, tailnet_ssh_release_id=tailnet_ssh_release_id)
+    return backend, apps_api, core_api, runtime_paths
+
+
+def _container_ports(body: dict[str, object]) -> list[dict[str, object]]:
+    return body["spec"]["template"]["spec"]["containers"][0]["ports"]  # type: ignore[index]
+
+
+def test_marked_pod_has_label_port_and_service_port(tmp_path: Path) -> None:
+    """An eligible launch labels the Deployment and its pods and opens 2222 on the pod and its Service."""
+    backend, apps_api, core_api, _runtime_paths = _ssh_backend(tmp_path)
+
+    backend.ensure_worker(_spec(_SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
+
+    [body] = apps_api.created_bodies
+    assert body["metadata"]["labels"][_SSH_LABEL] == "true"
+    assert body["spec"]["template"]["metadata"]["labels"][_SSH_LABEL] == "true"
+    # A selector is immutable and names the worker, so the mark never enters it.
+    assert _SSH_LABEL not in body["spec"]["selector"]["matchLabels"]
+    assert _container_ports(body) == [{"containerPort": 8766, "name": "api"}, {"containerPort": 2222, "name": "ssh"}]
+    [service] = core_api.created_bodies
+    assert service["spec"]["ports"] == [_API_PORT, _SSH_PORT]
+    assert _SSH_LABEL not in service["spec"]["selector"]
+
+
+@pytest.mark.parametrize(
+    ("worker_key", "state_scope_worker_key"),
+    [
+        ("v1:tenant-123:user:~@alice:example.org", None),
+        ("v1:tenant-123:shared:code", None),
+        ("v1:tenant-123:unscoped:solo", None),
+        (script_worker_key_for_run(_SSH_WORKER_KEY, f"script-{'a' * 32}"), _SSH_WORKER_KEY),
+    ],
+    ids=["user", "shared", "unscoped", "script"],
+)
+def test_unmarked_scopes_have_no_ssh_port_or_label(
+    tmp_path: Path,
+    worker_key: str,
+    state_scope_worker_key: str | None,
+) -> None:
+    """Without an opted-in route, the worker and Service have only the runner port."""
+    backend, apps_api, core_api, _runtime_paths = _ssh_backend(tmp_path)
+
+    spec = _spec(worker_key, private_agent_names=frozenset(), state_scope_worker_key=state_scope_worker_key)
+
+    handle = backend.ensure_worker(spec, now=10.0)
+
+    [body] = apps_api.created_bodies
+    assert _SSH_LABEL not in body["metadata"]["labels"]
+    assert _SSH_LABEL not in body["spec"]["template"]["metadata"]["labels"]
+    assert _container_ports(body) == [{"containerPort": 8766, "name": "api"}]
+    assert core_api.created_bodies[0]["spec"]["ports"] == [_API_PORT]
+    assert handle.ssh_endpoint is None
+
+
+def test_kubernetes_stamps_the_release_identity_only_on_marked_pods(tmp_path: Path) -> None:
+    """The release identity does not affect unmarked pods or immutable selectors."""
+    release_id = "a" * 32
+    release_label = "mindroom.ai/tailnet-ssh-release"
+    backend, apps_api, _core_api, _runtime_paths = _ssh_backend(tmp_path, tailnet_ssh_release_id=release_id)
+    backend.ensure_worker(_spec(_SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
+    backend.ensure_worker(_spec("v1:tenant-123:shared:code", private_agent_names=frozenset()), now=10.0)
+
+    marked, plain = apps_api.created_bodies
+    assert marked["spec"]["template"]["metadata"]["labels"][release_label] == release_id
+    assert release_label not in marked["spec"]["selector"]["matchLabels"]
+    assert release_label not in plain["spec"]["template"]["metadata"]["labels"]
+
+
+def test_kubernetes_handle_endpoint_follows_the_deployment_label(tmp_path: Path) -> None:
+    """A handle has an SSH endpoint exactly when its Deployment carries the mark, from the ready cache too."""
+    backend, apps_api, _core_api, _runtime_paths = _ssh_backend(tmp_path)
+
+    first = backend.ensure_worker(_spec(_SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
+
+    endpoint = WorkerSshEndpoint(
+        host=f"{first.worker_id}.chat.svc.cluster.local",
+        port=2222,
+        projection_dir=backend.storage_root / "workers" / worker_dir_name(_SSH_WORKER_KEY) / ".runtime" / "ssh",
+    )
+    assert first.ssh_endpoint == endpoint
+    reads = len(apps_api.read_names)
+    cached = backend.ensure_worker(_spec(_SSH_WORKER_KEY, private_agent_names=frozenset()), now=11.0)
+    touched = backend.touch_worker(_SSH_WORKER_KEY, now=12.0)
+    assert len(apps_api.read_names) == reads
+    assert cached.ssh_endpoint == endpoint
+    assert touched is not None
+    assert touched.ssh_endpoint == endpoint
+    assert [handle.ssh_endpoint for handle in backend.list_workers(now=13.0)] == [endpoint]
+
+    # The label is the mark: a Deployment of the same worker without it has no endpoint.
+    del apps_api.deployments[first.worker_id].metadata.labels[_SSH_LABEL]
+    assert [handle.ssh_endpoint for handle in backend.list_workers(now=13.0)] == [None]
+
+
+def test_kubernetes_service_ports_follow_the_mark_in_both_directions(tmp_path: Path) -> None:
+    """Re-applying a Service replaces its ports, so one that loses the mark no longer exposes 2222."""
+    backend, _apps_api, core_api, _runtime_paths = _ssh_backend(tmp_path)
+
+    def applied_ports() -> list[str]:
+        return [port.name for port in core_api.services["worker"].spec.ports]
+
+    backend._resources.apply_service("worker", ssh=True)
+    assert applied_ports() == ["api", "ssh"]
+    backend._resources.apply_service("worker", ssh=False)
+    assert applied_ports() == ["api"]
+    backend._resources.apply_service("worker", ssh=True)
+    assert applied_ports() == ["api", "ssh"]
+
+
+def test_installed_client_sends_secret_and_service_patches_as_merge_patches(tmp_path: Path) -> None:
+    """The installed Kubernetes client sends both patches as JSON merge patches, with a Secret's null entry kept.
+
+    The fakes stand in for the client everywhere else. A release of the client can change how a patch is sent, as 36
+    and 37 did, so here the client itself talks to a local HTTP server that records what arrives.
+    """
+    kubernetes_client = pytest.importorskip("kubernetes.client")
+    patches: list[tuple[str, str | None, dict[str, Any]]] = []
+
+    class ApiServer(BaseHTTPRequestHandler):
+        def _answer(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def do_GET(self) -> None:
+            self._answer()
+
+        def do_PATCH(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            patches.append((self.path, self.headers["Content-Type"], body))
+            self._answer()
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            del format, args
+
+    backend, _apps_api, _core_api, _runtime_paths = _ssh_backend(tmp_path)
+    with ThreadingHTTPServer(("127.0.0.1", 0), ApiServer) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        configuration = kubernetes_client.Configuration(host=f"http://127.0.0.1:{server.server_port}")
+        backend._resources.core_api = kubernetes_client.CoreV1Api(kubernetes_client.ApiClient(configuration))
+        try:
+            backend._resources.apply_auth_secret(worker_key=_SSH_WORKER_KEY, worker_id="worker")
+            backend._resources.apply_service("worker", ssh=True)
+        finally:
+            server.shutdown()
+
+    (secret_path, secret_type, secret), (service_path, service_type, service) = patches
+    assert (secret_path, secret_type) == ("/api/v1/namespaces/chat/secrets/worker", _MERGE_PATCH)
+    assert secret["data"][CREDENTIALS_ENCRYPTION_KEY_ENV] is None
+    assert (service_path, service_type) == ("/api/v1/namespaces/chat/services/worker", _MERGE_PATCH)
+    assert service["spec"]["ports"] == [_API_PORT, _SSH_PORT]
+
+
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_kubernetes_config_reserves_the_tailnet_ssh_label(tmp_path: Path, value: str) -> None:
+    """An operator label cannot mark a worker, because only an eligible launch sets the tailnet SSH label."""
+    backend, _apps_api, _core_api, _runtime_paths = _ssh_backend(tmp_path)
+    with pytest.raises(WorkerBackendError, match=r"must not set mindroom\.ai/tailnet-ssh"):
+        replace(backend.config, extra_labels={"mindroom.ai/tenant": "test", _SSH_LABEL: value})
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    (config_dir / ".env").write_text(
+        "MINDROOM_WORKER_BACKEND=kubernetes\n"
+        "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image\n"
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc\n"
+        f"MINDROOM_KUBERNETES_WORKER_LABELS_JSON={json.dumps({_SSH_LABEL: value})}",
+        encoding="utf-8",
+    )
+    with pytest.raises(WorkerBackendError, match=r"must not set mindroom\.ai/tailnet-ssh"):
+        KubernetesWorkerBackendConfig.from_runtime(resolve_primary_runtime_paths(config_path=config_path))
+
+
+def test_kubernetes_ready_cache_rechecks_the_ssh_mark(tmp_path: Path) -> None:
+    """Opting an agent in or out leaves the launch digest alone, so the ready cache compares the mark itself."""
+    backend, apps_api, _core_api, _runtime_paths = _ssh_backend(tmp_path)
+    marked_launch = _launch_of(backend)
+    opted_out = marked_launch.config.model_copy(deep=True)
+    opted_out.agents["mine"].tailnet_ssh = False
+    plain_launch = build_worker_launch_config(
+        opted_out,
+        tool_validation_snapshot=deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT),
+    )
+    assert plain_launch.digest == marked_launch.digest
+    spec = _spec(_SSH_WORKER_KEY, private_agent_names=frozenset())
+
+    _BACKEND_LAUNCHES[backend] = plain_launch
+    plain = backend.ensure_worker(spec, now=10.0)
+    _BACKEND_LAUNCHES[backend] = marked_launch
+    marked = backend.ensure_worker(spec, now=11.0)
+    _BACKEND_LAUNCHES[backend] = plain_launch
+    plain_again = backend.ensure_worker(spec, now=12.0)
+
+    assert [_SSH_LABEL in body["metadata"]["labels"] for body in apps_api.created_bodies] == [False, True, False]
+    assert apps_api.deleted_names == [plain.worker_id, plain.worker_id]
+    assert plain.ssh_endpoint is None
+    assert marked.ssh_endpoint is not None
+    assert plain_again.ssh_endpoint is None
+
+
+def test_joining_a_directory_keeps_the_kubernetes_mark(tmp_path: Path) -> None:
+    """A new read-only mount replaces the cached worker without changing its SSH mark."""
+    backend, apps_api, core_api, runtime_paths = _ssh_backend(tmp_path)
+    create_shared_directory(runtime_paths, owner="code", name="report")
+    first = backend.ensure_worker(_spec(_SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
+    assert first.ssh_endpoint is not None
+
+    add_shared_directory_member(runtime_paths, owner="code", name="report", member="mine")
+    second = backend.ensure_worker(_spec(_SSH_WORKER_KEY, private_agent_names=frozenset()), now=15.0)
+    cached = backend.ensure_worker(_spec(_SSH_WORKER_KEY, private_agent_names=frozenset()), now=16.0)
+
+    assert apps_api.deleted_names == [first.worker_id]
+    marked, joined = apps_api.created_bodies
+    assert (
+        marked["metadata"]["annotations"][ANNOTATION_TEMPLATE_HASH]
+        != (joined["metadata"]["annotations"][ANNOTATION_TEMPLATE_HASH])
+    )
+    assert _share_mounts(joined)[0]["readOnly"] is True
+    assert joined["metadata"]["labels"][_SSH_LABEL] == "true"
+    assert joined["spec"]["template"]["metadata"]["labels"][_SSH_LABEL] == "true"
+    assert _container_ports(joined) == [{"containerPort": 8766, "name": "api"}, {"containerPort": 2222, "name": "ssh"}]
+    assert [port.name for port in core_api.services[first.worker_id].spec.ports] == ["api", "ssh"]
+    assert second.ssh_endpoint is not None
+    assert cached.ssh_endpoint == second.ssh_endpoint
+
+
+def test_ambiguous_agent_name_is_never_marked(tmp_path: Path) -> None:
+    """`mine` and `mine_` share one worker key, so its worker is no one agent's and is never launched with the mark."""
+    backend, apps_api, core_api, _runtime_paths = _ssh_backend(tmp_path, include_alias=True)
+    launch = _launch_of(backend)
+    assert launch.config.agents["mine"].tailnet_ssh
+    assert not launch.config.agents["mine_"].tailnet_ssh
+
+    # The mount planner refuses the key before any template is rendered, so no container exists to carry a mark.
+    with pytest.raises(WorkerBackendError, match="ambiguous normalized agent name"):
+        backend.ensure_worker(_spec(_SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
+    assert apps_api.created_bodies == []
+    assert core_api.created_bodies == []
+
+
+def test_kubernetes_pinned_worker_has_no_mark(tmp_path: Path) -> None:
+    """Pinning a run to a worker does not make the run an SSH target."""
+    backend, apps_api, core_api, _runtime_paths = _ssh_backend(tmp_path)
+    script_key = script_worker_key_for_run(_SSH_WORKER_KEY, f"script-{'a' * 32}")
+
+    spec = _spec(script_key, private_agent_names=frozenset(), state_scope_worker_key=_SSH_WORKER_KEY)
+
+    handle = backend.ensure_worker(spec, now=10.0)
+
+    assert _SSH_LABEL not in apps_api.created_bodies[0]["metadata"]["labels"]
+    assert _container_ports(apps_api.created_bodies[0]) == [{"containerPort": 8766, "name": "api"}]
+    assert core_api.created_bodies[0]["spec"]["ports"] == [_API_PORT]
+    assert handle.ssh_endpoint is None

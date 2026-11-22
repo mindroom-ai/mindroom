@@ -36,6 +36,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     retire_pinned_worker,
     stable_json_digest,
     subagent_worker_expired,
+    tailnet_ssh_marked,
 )
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
@@ -50,7 +51,9 @@ from mindroom.workers.backends._lifecycle import (
 )
 from mindroom.workers.compatibility import ready_worker_protocol_mismatch
 from mindroom.workers.models import (
+    LABEL_TAILNET_SSH,
     SANDBOX_RUNNER_API_ROOT,
+    WORKER_SSH_PORT,
     ConfiguredWorkerBackend,
     ProgressSink,
     ScriptResourceProfile,
@@ -60,6 +63,7 @@ from mindroom.workers.models import (
     WorkerLaunchConfig,
     WorkerMaintenanceResult,
     WorkerSpec,
+    WorkerSshEndpoint,
     WorkerStatus,
 )
 from mindroom.workers.progress import WorkerStartReporter, WorkerWarmupProgress
@@ -133,6 +137,8 @@ class _ReadyWorkerCacheEntry:
     # The UID of the worker's Deployment, which a failure names so that it never stops the worker's replacement.
     incarnation: str | None
     state_subpath: str
+    # Whether the Deployment carried the tailnet SSH mark when cached, so a cached handle keeps its SSH endpoint.
+    ssh: bool
     # The worker's lifecycle when cached, so a cached touch returns its full handle without reading the Deployment.
     lifecycle: WorkerLifecycleState
     validated_at: float
@@ -234,6 +240,8 @@ class KubernetesWorkerBackend:
         config.pop("named_worker_idle_timeout_seconds")
         config.pop("named_worker_max_age_seconds")
         config.pop("named_workers_max")
+        # The SSH release ID only labels interactive workers, not script worker authority.
+        config.pop("tailnet_ssh_release_id")
         return {
             "config": config,
             "owner": self.cleanup_locator,
@@ -344,7 +352,7 @@ class KubernetesWorkerBackend:
             auth_secret_applied = True
             replacing_stale_worker = False
             while True:
-                recreated = self._resources.apply_deployment(
+                recreated, ssh = self._resources.apply_deployment(
                     worker_key=worker_key,
                     worker_id=worker_id,
                     state_subpath=state_subpath,
@@ -369,7 +377,8 @@ class KubernetesWorkerBackend:
                     )
                     self._resources.patch_deployment(worker_id, annotations=annotations)
                 self._sync_shared_credentials(spec, launch)
-                self._resources.apply_service(worker_id)
+                # The Service follows the mark of the template just rendered, never a second reading of the plan.
+                self._resources.apply_service(worker_id, ssh=ssh)
                 deployment = self._resources.wait_for_ready(
                     worker_id,
                     timeout_seconds=self.config.ready_timeout_seconds,
@@ -426,6 +435,7 @@ class KubernetesWorkerBackend:
                 worker_id=worker_id,
                 incarnation=deployment.metadata.uid,
                 state_subpath=state_subpath,
+                ssh=handle.ssh_endpoint is not None,
                 lifecycle=lifecycle,
                 validated_at=timestamp,
                 workspace_mounts=workspace_mounts,
@@ -993,7 +1003,13 @@ class KubernetesWorkerBackend:
             self._invalidate_ready_worker(spec.worker_key)
             return None
         # Shared directories change at runtime, so the Deployment is re-applied whenever their mounts differ.
-        if entry.shared_directory_mounts != self._plan_shared_directory_mounts(spec, launch):
+        # So it is when the tailnet SSH mark differs, which follows config the launch digest leaves out.
+        shared_directory_mounts = self._plan_shared_directory_mounts(spec, launch)
+        if entry.shared_directory_mounts != shared_directory_mounts or entry.ssh != tailnet_ssh_marked(
+            spec.worker_key,
+            launch,
+            spec.state_scope_worker_key,
+        ):
             self._invalidate_ready_worker(spec.worker_key)
             return None
         try:
@@ -1063,6 +1079,7 @@ class KubernetesWorkerBackend:
             lifecycle,
             "ready",
             state_subpath=entry.state_subpath,
+            ssh=entry.ssh,
             incarnation=entry.incarnation,
         )
 
@@ -1140,6 +1157,7 @@ class KubernetesWorkerBackend:
             lifecycle,
             self._effective_status(deployment, lifecycle, now=now, replicas_override=replicas_override),
             state_subpath=annotations.get(resources.ANNOTATION_STATE_SUBPATH, ""),
+            ssh=(metadata.labels or {}).get(LABEL_TAILNET_SSH) == "true",
             incarnation=metadata.uid,
         )
 
@@ -1151,8 +1169,10 @@ class KubernetesWorkerBackend:
         status: WorkerStatus,
         *,
         state_subpath: str,
+        ssh: bool = False,
         incarnation: str | None,
     ) -> WorkerHandle:
+        """Build a worker's handle; ``ssh`` says its Deployment carries the tailnet SSH mark."""
         endpoint_root = resources.service_host(worker_id, self.config.namespace, self.config.worker_port)
         return worker_handle(
             worker_id=worker_id,
@@ -1169,6 +1189,13 @@ class KubernetesWorkerBackend:
                 "state_subpath": state_subpath,
                 "api_root": f"{endpoint_root}{SANDBOX_RUNNER_API_ROOT}",
             },
+            ssh_endpoint=WorkerSshEndpoint(
+                host=resources.service_dns_name(worker_id, self.config.namespace),
+                port=WORKER_SSH_PORT,
+                projection_dir=(self.storage_root / state_subpath).resolve() / ".runtime" / "ssh",
+            )
+            if ssh
+            else None,
             incarnation=incarnation,
         )
 

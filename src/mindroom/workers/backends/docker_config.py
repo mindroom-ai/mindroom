@@ -19,6 +19,7 @@ from mindroom.credentials.manager import runtime_credentials_manager_key
 from mindroom.runtime_env_policy import (
     DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
+    TAILNET_SSH_SECRET_ENV_NAMES,
     WORKER_BACKEND_ENV,
     WORKER_COMPUTER_ENABLED_ENV,
 )
@@ -37,6 +38,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
 )
 from mindroom.workers.backends._lifecycle import DEFAULT_IDLE_TIMEOUT_SECONDS
 from mindroom.workers.backends.worker_security import docker_worker_security_policy_signature
+from mindroom.workers.models import LABEL_TAILNET_SSH, WORKER_SSH_PORT
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -92,6 +94,7 @@ _EXTRA_ENV_JSON_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"]
 _EXTRA_LABELS_JSON_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_labels_json"]
 DOCKER_RESERVED_EXTRA_ENV_NAMES = frozenset(
     {
+        *TAILNET_SSH_SECRET_ENV_NAMES,
         SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
     },
 )
@@ -121,6 +124,8 @@ _DOCKER_RESERVED_LABEL_NAMES = frozenset(
         LABEL_IMAGE_REFERENCE,
         LABEL_RUNTIME_NAMESPACE,
         LABEL_STORAGE_LAYOUT,
+        # Only a launch that passed the tailnet SSH rule carries the mark.
+        LABEL_TAILNET_SSH,
     },
 )
 
@@ -231,6 +236,9 @@ class DockerWorkerBackendConfig:
 
     def __post_init__(self) -> None:
         """Reject an unknown security policy, reserved labels, and an invalid mount layout or endpoint host."""
+        if self.worker_port == WORKER_SSH_PORT:
+            msg = f"{_PORT_ENV} cannot be {WORKER_SSH_PORT}; that port is reserved for SSH."
+            raise WorkerBackendError(msg)
         if self.security_policy not in {"runtime_default", "computer"}:
             msg = f"{_SECURITY_POLICY_ENV} must be runtime_default or computer; got {self.security_policy!r}."
             raise WorkerBackendError(msg)

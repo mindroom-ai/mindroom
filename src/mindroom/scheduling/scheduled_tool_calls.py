@@ -85,8 +85,8 @@ class LiveFunction:
 class _LiveTools:
     """The functions one agent's run offers and how the run calls them.
 
-    ``middleware`` is the run's tool-call policy, and ``context`` is the run's context for the call that is
-    running, so a stored call runs exactly as the model's own call of it would.
+    ``middleware`` is the run's tool-call policy, without the step that binds these, and ``context`` is the run's
+    context for the call that is running, so a stored call runs exactly as the model's own call of it would.
     """
 
     functions: Mapping[str, ToolFunction]
@@ -104,22 +104,23 @@ def bind_live_tools(
     """Return ``middleware`` behind a first step that shows each call the run's functions, for scheduled calls.
 
     ``functions`` are the ones the run offers, by name; a generated function names no toolkit, so no stored call can
-    name it; a stored call runs under the returned policy, this step included. A run that offers no scheduler
-    function reading them gets ``middleware`` as it is.
+    name it. A stored call runs under ``middleware`` alone: it runs inside ``run_scheduled_call``'s own call, which
+    this step already bound. A run that offers no scheduler function reading them gets ``middleware`` as it is.
     """
+    rest = tuple(middleware)
     if _LIVE_FUNCTION_READERS.isdisjoint(functions):
-        return tuple(middleware)
-    policy: tuple[ToolMiddleware, ...]
+        return rest
+    # The step binds the policy without itself: holding the policy that holds it would be a reference cycle, which
+    # keeps all of the run's functions until the cyclic garbage collector runs.
 
     async def bind_live_functions(call: ToolCall, call_next: ToolNext) -> object:
-        token = _LIVE_TOOLS.set(_LiveTools(functions=functions, middleware=policy, context=call.context))
+        token = _LIVE_TOOLS.set(_LiveTools(functions=functions, middleware=rest, context=call.context))
         try:
             return await call_next(call.arguments)
         finally:
             _LIVE_TOOLS.reset(token)
 
-    policy = (bind_live_functions, *middleware)
-    return policy
+    return (bind_live_functions, *rest)
 
 
 def _parse_arguments(text: str) -> dict[str, object] | str:

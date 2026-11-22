@@ -245,9 +245,9 @@ def _openai_client(
     settings: ChatSettings | ResponsesSettings,
     http_client: httpx2.AsyncClient,
 ) -> AsyncOpenAI:
-    from openai import AsyncOpenAI  # noqa: PLC0415 - keep the SDK out of module import time
+    from mindroom.providers.openai import sdk_client  # noqa: PLC0415 - keep the SDK out of module import time
 
-    return AsyncOpenAI(**_sdk_client_kwargs({"api_key": api_key, **options}, settings, http_client))
+    return sdk_client.AsyncOpenAI(**_sdk_client_kwargs({"api_key": api_key, **options}, settings, http_client))
 
 
 def _route_base_url(
