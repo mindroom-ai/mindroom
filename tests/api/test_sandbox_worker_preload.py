@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import signal
 import threading
 import time
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,7 +31,7 @@ from mindroom.tool_system.plugins import worker_preload_plugin_paths
 from tests.api.sandbox_runner_support import execute_call
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     from mindroom.constants import RuntimePaths
     from mindroom.workers.protocol import ExecuteResponse
@@ -854,6 +855,34 @@ def test_eager_setup_runs_behind_the_health_check_and_preloads_only_opt_in_plugi
     assert {cwd for _pid, cwd, _data in plain_imports} == {workspace}
 
 
+def _end_the_setup_budget_once(monkeypatch: pytest.MonkeyPatch, happened: Callable[[], bool]) -> None:
+    """Make a worker's setup budget run out as soon as ``happened()``, and not after a time a busy machine outlasts."""
+    budget_seconds = 200.0
+    monkeypatch.setattr(sandbox_runner_module, "_EAGER_SETUP_BUDGET_SECONDS", budget_seconds)
+
+    @asynccontextmanager
+    async def timeout(delay: float | None) -> AsyncIterator[asyncio.Timeout]:
+        async with asyncio.timeout(delay) as budget:
+
+            async def end_the_budget() -> None:
+                while not happened():  # noqa: ASYNC110 - what happens is in another process, which sets no event.
+                    await asyncio.sleep(0.05)
+                budget.reschedule(asyncio.get_running_loop().time())
+
+            ending = asyncio.create_task(end_the_budget()) if delay == budget_seconds else None
+            try:
+                yield budget
+            finally:
+                if ending is not None:
+                    ending.cancel()
+
+    class _AsyncioWithThatTimeout:
+        def __getattr__(self, name: str) -> object:
+            return timeout if name == "timeout" else getattr(asyncio, name)
+
+    monkeypatch.setattr(sandbox_runner_module, "asyncio", _AsyncioWithThatTimeout())
+
+
 def test_a_setup_that_outlasts_its_budget_ends_the_preload_and_calls_run(
     manager: _SandboxForkserver,
     monkeypatch: pytest.MonkeyPatch,
@@ -862,7 +891,8 @@ def test_a_setup_that_outlasts_its_budget_ends_the_preload_and_calls_run(
     """A preload still running when the setup budget ends is killed with all it started, and calls run without it."""
     hangs = _write_hanging_plugin(tmp_path)
     app, _worker_root = _dedicated_worker_app(monkeypatch, tmp_path, eager_setup_plugins=[hangs.path])
-    monkeypatch.setattr(sandbox_runner_module, "_EAGER_SETUP_BUDGET_SECONDS", 6.0)
+    # The budget ends once the plugin's import has started its process, however long this machine took to get there.
+    _end_the_setup_budget_once(monkeypatch, lambda: bool(_started_processes(tmp_path)))
 
     with TestClient(app) as client:
         _wait_for_setup(client, "failed")
