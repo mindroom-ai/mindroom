@@ -270,7 +270,7 @@ async def test_a_connect_does_not_wait_for_the_setup_of_a_kubernetes_worker_that
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """sshd needs a worker that answers and not its tool runtime, so a link goes on once a cold worker is healthy."""
+    """An SSH link needs a worker that answers and not its tool runtime, so it goes on once a cold worker is healthy."""
     link = _link(paths)
     _wire_connect(monkeypatch, tmp_path, link)
     backend, _apps_api, _core_api = _backend(applied_config=config)
