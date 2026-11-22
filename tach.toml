@@ -9925,9 +9925,7 @@ visibility = [
     "mindroom.ai_runtime",
     "mindroom.mid_turn_judgment",
     "mindroom.response_lifecycle",
-    "mindroom.response_runner",
     "mindroom.turns.ingress",
-    "mindroom.turns.queued_notice",
 ]
 
 [[modules]]
