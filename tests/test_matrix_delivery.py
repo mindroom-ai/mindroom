@@ -313,14 +313,22 @@ async def test_room_encryption_resolution_names_each_refusal(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_room_encryption_resolution_treats_503_m_not_found_as_unknown() -> None:
-    """A 503 whose body says M_NOT_FOUND must never be treated as an unencrypted room."""
+@pytest.mark.parametrize(
+    ("errcode", "http_status"),
+    [("M_NOT_FOUND", 503), ("M_UNRECOGNIZED", 404), (None, 404)],
+    ids=["503-m-not-found", "404-m-unrecognized", "404-no-errcode"],
+)
+async def test_room_encryption_resolution_treats_unproven_absence_as_unknown(
+    errcode: str | None,
+    http_status: int,
+) -> None:
+    """Only a 404 M_NOT_FOUND proves a room unencrypted; a 503 body or a proxy's 404 never does."""
     client = _cache_bypass_client(encrypted=None)
     client.room_get_state_event.return_value = nio.RoomGetStateEventError(
         "Service unavailable",
-        status_code="M_NOT_FOUND",
+        status_code=errcode,
         room_id="!room:localhost",
-        http_status=503,
+        http_status=http_status,
     )
 
     outcome = await resolve_room_encryption_outcome(client, "!room:localhost", operation="op")

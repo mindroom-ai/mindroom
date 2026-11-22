@@ -26,6 +26,15 @@ _STATE_URL = re.compile(r"^http://localhost:8008/_matrix/client/v3/rooms/[^/]+/s
         ),
         (nio.RoomGetStateEventError("html 403", None, room_id=_ROOM_ID, http_status=403), StateFailure.REFUSED),
         (
+            nio.RoomGetStateEventError("consent", "M_CONSENT_NOT_GIVEN", room_id=_ROOM_ID, http_status=403),
+            StateFailure.REFUSED,
+        ),
+        (
+            nio.RoomGetStateEventError("no route", "M_UNRECOGNIZED", room_id=_ROOM_ID, http_status=404),
+            StateFailure.TRANSIENT,
+        ),
+        (nio.RoomGetStateEventError("proxy 404", None, room_id=_ROOM_ID, http_status=404), StateFailure.TRANSIENT),
+        (
             nio.RoomGetStateEventError("not found", "M_NOT_FOUND", room_id=_ROOM_ID, http_status=404),
             StateFailure.MISSING,
         ),
@@ -52,6 +61,9 @@ _STATE_URL = re.compile(r"^http://localhost:8008/_matrix/client/v3/rooms/[^/]+/s
     ids=[
         "get-403",
         "get-403-no-errcode",
+        "get-403-other-errcode",
+        "get-404-m-unrecognized",
+        "get-404-no-errcode",
         "get-404",
         "get-503-m-not-found",
         "get-503-m-forbidden",
@@ -66,7 +78,7 @@ _STATE_URL = re.compile(r"^http://localhost:8008/_matrix/client/v3/rooms/[^/]+/s
     ],
 )
 def test_state_failure_classifies_by_http_status(response: nio.ErrorResponse, expected: StateFailure) -> None:
-    """HTTP status decides refusal/missing/transient; hand-built errors fall back to errcode."""
+    """HTTP status decides; a 404 is MISSING only with M_NOT_FOUND; hand-built errors fall back to errcode."""
     assert state_failure(response) is expected
 
 
@@ -77,6 +89,8 @@ def test_state_failure_classifies_by_http_status(response: nio.ErrorResponse, ex
         ("GET", 503, {"payload": {"errcode": "M_NOT_FOUND", "error": "Service unavailable"}}, StateFailure.TRANSIENT),
         ("GET", 503, {"payload": {"errcode": "M_FORBIDDEN", "error": "Service unavailable"}}, StateFailure.TRANSIENT),
         ("GET", 403, {"body": "<html>Forbidden</html>", "content_type": "text/html"}, StateFailure.REFUSED),
+        ("GET", 403, {"payload": {"errcode": "M_FORBIDDEN", "error": "Forbidden"}}, StateFailure.REFUSED),
+        ("GET", 404, {"body": "<html>Not Found</html>", "content_type": "text/html"}, StateFailure.TRANSIENT),
         ("GET", 404, {"payload": {"errcode": "M_NOT_FOUND", "error": "Not found"}}, StateFailure.MISSING),
         ("PUT", 503, {"payload": {"errcode": "M_FORBIDDEN", "error": "Service unavailable"}}, StateFailure.TRANSIENT),
         ("PUT", 403, {"payload": {"errcode": "M_FORBIDDEN", "error": "Forbidden"}}, StateFailure.REFUSED),

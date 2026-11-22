@@ -20,13 +20,13 @@ class StateFailure(StrEnum):
 
 
 def state_failure(response: nio.ErrorResponse) -> StateFailure:
-    """Classify a state read/write error by HTTP status: 403 is REFUSED, 404 on a GET is MISSING, else TRANSIENT.
+    """Classify a state read/write error: 403 is REFUSED, 404 M_NOT_FOUND on a read is MISSING, else TRANSIENT.
 
-    When ``http_status`` is ``None`` (hand-built errors in tests or snapshots), infer 403/404 from ``status_code``.
+    A 404 without M_NOT_FOUND, such as a proxy's, proves no absence, which could read as an unencrypted room. An error
+    built by hand (tests, snapshots) has no ``http_status``, so its errcode stands in for it.
     """
     import nio  # noqa: PLC0415 - room_settings imports this module without loading nio
 
-    # No real HTTP answer reaches the errcode fallback; nio sets http_status on every parsed response.
     status = (
         response.http_status
         if isinstance(response.http_status, int)
@@ -34,6 +34,6 @@ def state_failure(response: nio.ErrorResponse) -> StateFailure:
     )
     if status == 403:
         return StateFailure.REFUSED
-    if status == 404 and isinstance(response, nio.RoomGetStateEventError):
+    if status == 404 and response.status_code == "M_NOT_FOUND" and isinstance(response, nio.RoomGetStateEventError):
         return StateFailure.MISSING
     return StateFailure.TRANSIENT
