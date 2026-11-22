@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from dataclasses import replace
 from itertools import count
 from typing import TYPE_CHECKING, Any
@@ -57,7 +58,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
-from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN, SYNC_RESTART_SHUTDOWN
 from mindroom.session_storage import summary_rows
 from mindroom.session_storage.usage_reader import stored_usage
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
@@ -1038,6 +1039,32 @@ async def test_draining_parks_compaction_without_delaying_later_room_work(
             await dispatcher.drain_once()
             await asyncio.sleep(0.02)
     assert _summaries(config, paths, "code")
+
+
+@pytest.mark.asyncio
+async def test_removed_target_settles_the_compaction_it_parked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fold whose target is removed has no later generation to run it, so removal settles its row unanswered."""
+    config, paths = _config(tmp_path)
+    _, target, room, command = _compact_pair(config, paths)
+    await _hydrate(target)
+    runner, store = target._response_runner, target.journal_principal()
+    build = MagicMock(side_effect=AssertionError("a removed target folds nothing"))
+    monkeypatch.setattr(runner_module.provider_registry, "build_model_provider", build)
+    runner.lifecycle_coordinator._hold_for_approval(PausedReply(store.principal_id, "held", ROOM, THREAD))
+    await _dispatch_message(target, room, command)
+    waiting = await _start_fold(target)
+    sent = target.client.room_send.await_count
+
+    await target.prepare_for_sync_shutdown(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
+    await target.stop(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
+    assert isinstance(waiting.exception(), ResponseAdmissionRefusedError)
+    assert await store.is_pending(_ROW_ID)  # Stopping alone keeps the row, which a replacement replays.
+
+    # What the fleet does for an entity it removed, once its bot is gone.
+    await target.orchestrator.event_journal_store().end_entity_replies({"code"}.__contains__, now_ns=time.time_ns())
+    assert not await store.is_pending(_ROW_ID)
+    build.assert_not_called()
+    assert target.client.room_send.await_count == sent
 
 
 @pytest.mark.asyncio

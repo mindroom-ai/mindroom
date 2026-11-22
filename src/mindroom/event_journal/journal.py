@@ -42,6 +42,7 @@ from .identity import agent_of_principal, decode_thread_id, encode_thread_id
 from .membership_state import claim_active_membership_epoch as claim_active
 from .membership_state import claim_membership_epoch, current_membership_epoch, projection_generation
 from .models import (
+    RUNTIME_SOURCE_KINDS,
     TURN_BACKED_KINDS,
     AdmissionFacts,
     AdmissionResult,
@@ -68,6 +69,8 @@ from .projection import ProjectedEvent, is_redacted, project, scrub_redacted_pro
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.turn_record import TurnRecord
 
     from .backend import Row, Transaction
@@ -1483,6 +1486,23 @@ def _settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
         "DELETE FROM interactive_selections WHERE principal_id = ? AND source_event_id = ?",
         (principal_id, event_id),
     )
+
+
+def settle_runtime_sources_of(transaction: Transaction, ends: Callable[[str], bool]) -> None:
+    """Settle the pending runtime sources of every principal whose entity ``ends`` names: it has no bot any more.
+
+    Only the entity's own runtime runs such a source, so its row would wait for an owner that never comes.
+    """
+    kinds = tuple(sorted(kind.value for kind in RUNTIME_SOURCE_KINDS))
+    # Placeholders are generated, values are still bound.
+    owed = f"state = 'pending' AND kind IN ({', '.join('?' for _ in kinds)})"
+    principals = transaction.fetchall(f"SELECT DISTINCT principal_id FROM journal_events WHERE {owed}", kinds)  # noqa: S608
+    for principal_id in (str(row["principal_id"]) for row in principals):
+        if ends(agent_of_principal(principal_id)):
+            transaction.execute(
+                f"UPDATE journal_events SET state = ?, source_json = '' WHERE principal_id = ? AND {owed}",  # noqa: S608
+                (SETTLED_STATE, principal_id, *kinds),
+            )
 
 
 def settle_many(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> None:

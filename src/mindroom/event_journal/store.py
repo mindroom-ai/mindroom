@@ -245,7 +245,7 @@ class EventJournalStore:
         return await self.backend.still_usable()
 
     async def end_entity_replies(self, ends: Callable[[str], bool], *, now_ns: int) -> int:
-        """End the open replies of the entities ``ends`` names; return how many ended."""
+        """End the open replies of the entities ``ends`` names, settling their runtime sources; return how many ended."""
         return await self.backend.write(
             lambda transaction: replies.end_entity_replies(transaction, ends, now_ns=now_ns),
         )
