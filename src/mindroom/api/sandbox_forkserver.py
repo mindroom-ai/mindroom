@@ -576,13 +576,14 @@ def preloading_forkserver() -> _SandboxForkserver | None:
     return _preloading_forkserver
 
 
-def abandon_preload(error: str) -> None:
-    """Give the preload up for this process's lifetime, killing the template that tried or holds it and its group."""
+def abandon_preload(error: str | None) -> None:
+    """Give the preload up for good, killing its template and group; a worker that shuts down has no ``error``."""
     global _preloading_forkserver
     with _forkserver_lock:
         forkserver, _preloading_forkserver = _preloading_forkserver, None
     if forkserver is not None:
-        logger.warning("sandbox_forkserver_plugin_preload_failed", error=error)
+        if error is not None:
+            logger.warning("sandbox_forkserver_plugin_preload_failed", error=error)
         forkserver.shutdown()
 
 

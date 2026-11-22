@@ -437,6 +437,9 @@ async def _eager_worker_setup(app: FastAPI, runtime_paths: RuntimePaths, preload
                 budget_seconds = _EAGER_SETUP_BUDGET_SECONDS - (time.monotonic() - started_at)
                 steps.append(asyncio.to_thread(_warm_forkserver_template, paths, budget_seconds))
             await asyncio.gather(*steps)
+    except asyncio.CancelledError:  # The worker shuts down, and must not wait for a preload that is still importing.
+        sandbox_forkserver.abandon_preload(None)
+        raise
     except Exception as exc:  # Whatever failed, the first request prepares it and reports its error.
         app.state.worker_setup = "failed"
         error = str(exc) or type(exc).__name__
@@ -446,7 +449,7 @@ async def _eager_worker_setup(app: FastAPI, runtime_paths: RuntimePaths, preload
         if (preloading := sandbox_forkserver.preloading_forkserver()) is not None:
             preloading.serves = preloaded
         app.state.worker_setup = "ready"
-        logger.info("sandbox_worker_eager_setup_ready", setup_ms=elapsed_ms_since(started_at))
+        logger.debug("sandbox_worker_eager_setup_ready", setup_ms=elapsed_ms_since(started_at))
 
 
 def _warm_forkserver_template(paths: LocalWorkerStatePaths, budget_seconds: float) -> None:
@@ -460,6 +463,8 @@ def _warm_forkserver_template(paths: LocalWorkerStatePaths, budget_seconds: floa
         try:
             preloading.warm(python_executable, template_env, budget_seconds)
         except sandbox_forkserver.ForkserverError as exc:
+            if sandbox_forkserver.preloading_forkserver() is not preloading:
+                return  # The setup's end or the worker's shutdown gave the preload up, and this setup with it.
             sandbox_forkserver.abandon_preload(str(exc) or "The preload outlasted the worker's setup budget.")
         else:
             return
