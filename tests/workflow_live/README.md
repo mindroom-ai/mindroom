@@ -19,6 +19,9 @@ Each prints one result line on stdout and exits 0 when that line is the expected
 | `approval_restart.py` | One agent writes its one line and then calls `save_file`, which asks for an approval. While the card is open the script stops the backend with `SIGTERM`, starts it, kills it with `SIGKILL`, starts it again, and then approves the card. | `lines=1 cards=1 open=1 saved=1 agents=1/1 attempt=3 run=completed deliveries=1 reports=1` |
 | `diamond_restart.py` | A plan agent returns six lines, `foreach` runs one research agent per line, two at a time, and one agent joins their answers. The script stops the backend with `SIGTERM` after three research agents completed and starts it again. | `agents=8/8 subagents=8 paid_once=True attempt_below_run=True attempt=2 run=completed deliveries=1 reports=1` |
 
+| `pauses.py` | One run with `max_cost_usd=0.000001`: an agent with a `schema` that answers without JSON first, an `ask_user` that the script answers `Yes` after it stopped the backend with `SIGTERM` and started it again, and an agent that waits at the cost limit until the script answers the cost question `Stop`. | `schema_turns=2 checked=True questions=1 answered=Yes held=1 budget_cards=1 attempt=2 run=cancelled` |
+| `graph_frames.py` | Makes the lobby an encrypted room and runs one `foreach` over 200 agents that answer with one word. The backend keeps each graph frame and each post and edit of the run's card in a capture directory, and the script reads the room's job state while the run goes on. | `agents=200/200 encrypted=True refused=0 rate_limited=0 state_jobs=1 state_kinds=workflow state_labels=0 card=completed graph=True saved=4 run=completed` |
+
 - `lines` is the number of lines in the file the run appends to, so a write that ran twice shows as one line too many.
 - `node` is the state of the write's call; `cached` means a later attempt read the saved result back without running the call.
 - `agents` counts the `agent()` calls that completed as the call they first were, so an agent that was started a second time shows as one too few; `subagents` is the number of subagents those calls ran as.
@@ -32,6 +35,11 @@ Each prints one result line on stdout and exits 0 when that line is the expected
   A call whose turn the restart cut short may have one more entry, of an earlier attempt, for what that turn had spent by then.
   How many calls are cut short, none to two, depends on when the restart lands, so the number of entries is printed on stderr and is not part of the line.
   `attempt_below_run` says that the attempt after the restart used less than the whole run, in USD when every turn has a price and in tokens otherwise.
+- `schema_turns` is the number of turns the agent with a `schema` took, `questions` and `budget_cards` are the cards the lobby holds for the script's question and for the cost question, without their edits, and `held` is 1 when the agent at the limit ended `cancelled` without ever having had a job.
+- `refused` counts the graph frames the homeserver did not accept, and `rate_limited` the `M_LIMIT_EXCEEDED` errors in the backend's log since the script started it.
+  `state_jobs` is the most jobs the room's `io.mindroom.background_jobs` state listed at once, `state_kinds` their kinds, and `state_labels` how many of them carried an agent's label.
+  `saved` is the number of files `graph_frames.py` wrote to the slot's log directory: `workflow_frame_first_snapshot.json`, `workflow_frame_first_delta.json`, `workflow_frame_last_snapshot.json` and `workflow_card_final.json`.
+  They are what MindRoom Chat's fixtures are made from.
 - `run` is the state the run ended in.
 - `deliveries` is the number of follow-up turns the journal admitted for the run's job, read from `journal_events` in the slot's `storage/tracking/event_journal.db`.
   It counts the delivery itself, whatever the model then wrote.
@@ -50,6 +58,10 @@ Each script edits the slot's `config.yaml` once: the Helper gets the `workflow` 
 `approval_restart.py` also adds a `tool_approval` rule, first in the list of rules, that makes `save_file` ask for an approval, and approves the card itself with an `io.mindroom.tool_approval_response` event of the test account.
 A running backend reloads a config edit some time later, so each script starts the backend again after an edit that changed the file, and only then sends its message.
 `agents_restart.py` also waits until the bot of `deckhand` has joined the lobby.
+`graph_frames.py` encrypts the lobby, which cannot be undone, and starts the backend with `MINDROOM_WORKFLOW_FAULT_DIR` set to its capture directory: `workflow_runs.faults.capture` writes `workflow_frames.jsonl` and `workflow_cards.jsonl` there, and nothing without that variable.
+Its one message must reach an encrypted room, so use the default `--send ask`, which types it in Chat.
+`pauses.py` reads the question cards from the lobby and answers them with `io.mindroom.workflow_answer` events of the test account, so it needs a lobby that is not encrypted: run it before `graph_frames.py`, or on another slot.
+It also needs a model with a price, since a run on an unpriced model never reaches a cost limit; without one it says so and exits 1.
 Each script then asks the Helper to start a run from a file it saved in the Helper's workspace.
 It sends that one message with `just live ask`, which types it in Chat with Chromium.
 Pass `--send api` to send it through the homeserver's client API instead, on a machine with no browser, when Chat does not load, or for a stack without Chat.
@@ -70,6 +82,8 @@ python3 -m tests.workflow_live.agents_restart --slot N
 python3 -m tests.workflow_live.large_result --slot N
 python3 -m tests.workflow_live.approval_restart --slot N
 python3 -m tests.workflow_live.diamond_restart --slot N
+python3 -m tests.workflow_live.pauses --slot N
+python3 -m tests.workflow_live.graph_frames --slot N          # last: it encrypts the lobby
 cd ~/repos/dev
 just live down --slot N
 ```
@@ -130,6 +144,9 @@ With `worker_tools` set, the scripts leave `allow_shell_without_worker` out, and
 - 2026-11-22 at `1beaf6aef`, local stack (slot 50), with both scripts fixed: both printed their expected lines.
   The diamond run cost 0.0017 USD in all, and 0.0005 USD in the attempt after the restart.
 - Without the gateway lines above, the Docker stack refuses every run with `Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL.`: the stack's `MINDROOM_PUBLIC_URL` is a loopback address, which workers may not use.
+
+- `pauses.py` and `graph_frames.py` were added with the run card, the graph frames, `schema`, `ask_user` and `max_cost_usd`.
+  Neither has been run.
 
 ## What to check besides the result line
 

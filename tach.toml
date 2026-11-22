@@ -2573,7 +2573,7 @@ depends_on = []
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.faults"]
-expose = ["hold"]
+expose = ["capture", "hold"]
 
 [[modules]]
 path = "mindroom.workflow_runs.recovery"
@@ -2675,6 +2675,7 @@ depends_on = [
     "mindroom.live_frames.workflow",
     "mindroom.matrix.client_delivery",
     "mindroom.workflow_runs.engine",
+    "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.store",
@@ -8528,6 +8529,7 @@ visibility = ["mindroom.delegation.lifecycle", "mindroom.live_frames.workflow"]
 path = "mindroom.live_frames.workflow"
 depends_on = [
     "mindroom.live_frames.subagents",
+    "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.models",
 ]

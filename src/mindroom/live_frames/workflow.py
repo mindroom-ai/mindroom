@@ -17,6 +17,7 @@ from mindroom.live_frames.frames import FRAME_VERSION, new_publisher_id
 from mindroom.live_frames.subagents import publish_stream
 from mindroom.live_frames.transport import LiveSendOutcome, frame_fits, send_live_frame
 from mindroom.matrix.event_types import WORKFLOW_FRAME_EVENT_TYPE
+from mindroom.workflow_runs.faults import capture
 from mindroom.workflow_runs.graph import REPLACE, Graph, fit_snapshot, graph_delta
 from mindroom.workflow_runs.models import TERMINAL_RUN_STATES
 
@@ -94,6 +95,7 @@ class _RunStream:
             transaction_id=f"workflow.{self.sid}.{self.seq}",
             event_type=WORKFLOW_FRAME_EVENT_TYPE,
         )
+        capture("workflow_frames", {"outcome": outcome.value, "frame": frame})
         if outcome is LiveSendOutcome.SENT:
             self.landed = (meta, snapshot)
             if "snapshot" in frame:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -18,6 +19,7 @@ from tests.test_workflow_graph import _RUN, _USAGE, _node, _nodes
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
+    from pathlib import Path
 
     from mindroom.workflow_runs.models import WorkflowNode
 
@@ -81,6 +83,29 @@ async def test_frame_has_exactly_the_pinned_shape() -> None:
     assert frame["meta"] == graph_meta(_RUN, nodes, _USAGE, large=False)
     assert list(frame["snapshot"]) == ["phases", "groups", "nodes", "edges", "omitted", "log"]
     assert [node["id"] for node in frame["snapshot"]["nodes"]] == ["n1"]
+
+
+@pytest.mark.asyncio
+async def test_live_test_captures_each_frame_as_it_was_sent_and_nothing_is_kept_otherwise(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the fault directory of a live test set, every frame is kept with how its send ended; else nothing is."""
+    room = FrameRoom(encrypted=True)
+    _publish(room, [_node(1, state=WorkflowNodeState.RUNNING)])
+    await _until(lambda: len(room.sent) == 1)
+    assert list(tmp_path.iterdir()) == []
+
+    monkeypatch.setenv("MINDROOM_WORKFLOW_FAULT_DIR", str(tmp_path))
+    _publish(room, [_node(1, state=WorkflowNodeState.COMPLETED)], state=WorkflowRunState.COMPLETED)
+    await _until(lambda: len(room.sent) == 2)
+    await _until(lambda: (tmp_path / "workflow_frames.jsonl").exists())
+
+    (line,) = (tmp_path / "workflow_frames.jsonl").read_text().splitlines()
+    kept = json.loads(line)
+    assert kept["outcome"] == "sent"
+    assert list(kept["frame"]) == ["v", "run", "sid", "seq", "meta", "snapshot"]
+    assert (kept["frame"]["seq"], kept["frame"]["meta"]["status"]) == (1, "completed")
 
 
 @pytest.mark.asyncio

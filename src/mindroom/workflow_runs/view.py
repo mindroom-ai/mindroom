@@ -25,6 +25,7 @@ from mindroom.matrix.large_messages import fits_one_event
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.redaction import redact_sensitive_text
 from mindroom.workflow_runs.engine import WorkflowLimits
+from mindroom.workflow_runs.faults import capture
 from mindroom.workflow_runs.graph import LOG_LINES, Graph, fit_snapshot, graph_meta, graph_rows, projected_cost_usd
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
@@ -287,4 +288,5 @@ class RunViews:
                 return
         else:
             return
+        capture("workflow_cards", content)
         self._cards[run.run_id] = (follows, digest, now)

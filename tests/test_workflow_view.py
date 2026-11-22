@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -104,6 +105,25 @@ async def test_card_has_exactly_the_pinned_content_and_a_text_for_other_clients(
     )
     assert content["m.relates_to"]["event_id"] == "$thread:example.test"
     assert stack.store.get_run(stack.run_id).card_event_id == event_id
+
+
+@pytest.mark.asyncio
+async def test_live_test_captures_the_card_as_each_post_and_edit_said_it(
+    stack: WorkflowStack,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the fault directory of a live test set, the card's content is kept each time the room took it."""
+    faults = tmp_path / "faults"
+    faults.mkdir()
+    monkeypatch.setenv("MINDROOM_WORKFLOW_FAULT_DIR", str(faults))
+    await _shown(stack)
+    await stack.finish_attempt("done")
+    last = await _shown(stack)
+
+    kept = [json.loads(line) for line in (faults / "workflow_cards.jsonl").read_text().splitlines()]
+    assert [card["status"] for card in kept] == ["running", "completed"]
+    assert kept[-1] == last
 
 
 @pytest.mark.asyncio
