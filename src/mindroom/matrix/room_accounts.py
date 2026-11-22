@@ -35,10 +35,8 @@ async def _read_state(
     response = await client.room_get_state_event(room_id, event_type, state_key=state_key)
     transport = response.transport_response if isinstance(response, nio.RoomGetStateEventResponse) else None
     if isinstance(transport, aiohttp.ClientResponse) and transport.status != 200:
-        body = response.content if isinstance(response, nio.RoomGetStateEventResponse) else None
-        raw = body if isinstance(body, dict) else {}
-        err = nio.RoomGetStateEventError.from_dict({"error": f"HTTP {transport.status}", **raw}, room_id)
-        return err if err.status_code else nio.RoomGetStateEventError(f"HTTP {transport.status}", room_id=room_id)
+        code = "M_FORBIDDEN" if transport.status == 403 else None
+        return nio.RoomGetStateEventError(f"HTTP {transport.status}", code, room_id=room_id)
     return response
 
 
