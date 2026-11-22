@@ -380,7 +380,13 @@ def _post_execute_cancel(
         logger.warning("worker_execute_cancel_failed", url=url, exc_info=True)
 
 
-async def _post_execute_stdin(post: Callable[..., _WorkerProxyResponse], seq: int, data: str, eof: bool) -> bool:
+async def _post_execute_stdin(
+    post: Callable[..., _WorkerProxyResponse],
+    failures: dict[int, int],
+    seq: int,
+    data: str,
+    eof: bool,
+) -> bool:
     """Write one chunk to the stdin of a streamed call's command, and return whether its stdin takes more.
 
     ``post`` sends through the call's own client, which keeps one connection for the chunks. Only the runner's
@@ -393,7 +399,10 @@ async def _post_execute_stdin(post: Callable[..., _WorkerProxyResponse], seq: in
         response = await asyncio.to_thread(post, json=request.model_dump(mode="json"))
         if not (refused := httpx.codes.is_client_error(response.status_code)):
             response.raise_for_status()
-    except (httpx.HTTPError, RuntimeError):
+    except (httpx.HTTPError, RuntimeError) as exc:
+        failures[seq] = failures.get(seq, 0) + 1
+        if failures[seq] == 2:
+            logger.warning("worker_stdin_chunk_not_written", seq=seq, error=repr(exc))
         raise TimeoutError from None
     if refused:
         raise ValueError(_proxy_http_error_message(response))
@@ -517,7 +526,7 @@ def execute_worker_proxy_request(
                 if stream is not None:
                     stdin_url = f"{cancel_url.removesuffix('/cancel')}/{cancellation.request_id}/stdin"
                     post_stdin = functools.partial(client.post, stdin_url, headers=headers)
-                    stream.write_stdin = functools.partial(_post_execute_stdin, post_stdin)
+                    stream.write_stdin = functools.partial(_post_execute_stdin, post_stdin, {})
             lease_id = _create_credential_lease(
                 client,
                 config=config,
