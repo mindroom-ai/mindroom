@@ -116,6 +116,8 @@ class _Call:
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     # Where the command of a call that streams its output (`workers run`) puts it for the call's reader.
     stream: CallOutputStream | None = None
+    # Whether the reader that claimed the stream has started to read it.
+    read: bool = False
 
     def notify(self) -> None:
         """Wake all active long-poll and cancel waiters for this call."""
@@ -300,9 +302,10 @@ class LiveTurnTools(TurnToolBridge):
         )
         if operation.stream:
             loop = asyncio.get_running_loop()
-            call.stream = stream = CallOutputStream(loop)
-            # Nobody reads the output of a call whose reader never comes, so it does not run on.
-            loop.call_later(_STREAM_ATTACH_SECONDS, lambda: stream.attached or self._request_cancel(call))
+            call.stream = CallOutputStream(loop)
+            # Nobody reads the output of a call whose reader never comes or never starts to read, so it does not
+            # run on.
+            loop.call_later(_STREAM_ATTACH_SECONDS, lambda: call.read or self._request_cancel(call))
         self._calls[call_id] = call
         self._admit(_Queued(operation.model_copy(deep=True)), window)
         return call.receipt.model_dump(mode="json")
@@ -461,13 +464,13 @@ class LiveTurnTools(TurnToolBridge):
         if stream.attached:
             msg = "This call's output already has its reader"
             raise CliCallConflictError(msg)
+        # Claimed before the response starts, so no second reader is told it may read. A reader that then never
+        # starts to read keeps the claim, and the call is cancelled as one nobody came to read.
+        stream.attached = True
         return self._relay(call, stream)
 
     async def _relay(self, call: _Call, stream: CallOutputStream) -> AsyncGenerator[dict[str, object]]:
-        # Only a relay that started is the call's reader: one that was asked for and never read keeps nothing.
-        if stream.attached:
-            return
-        stream.attached = True
+        call.read = True
         revision = 0
         try:
             while not self._closed and not self._revoked:
