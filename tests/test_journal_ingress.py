@@ -284,7 +284,7 @@ def _journal_dispatcher(
         "source_has_live_owner": lambda _event_id: False,
         "turn_has_live_claim": lambda _event_id: False,
         "replies_ended": lambda _reply_ids: None,
-        "on_job_follow_up": AsyncMock(),
+        "on_runtime_source": AsyncMock(),
         "on_job_cancel": AsyncMock(),
     }
     return JournalDispatcher(
@@ -1650,7 +1650,7 @@ class TestPendingEventWorker:
         resumed: list[asyncio.Task[str]] = []
         order: list[str] = []
 
-        async def deliver(_target: object) -> str:
+        async def deliver() -> str:
             order.append("resume")
             return "approved response"
 
@@ -1677,7 +1677,7 @@ class TestPendingEventWorker:
         worker.start()
         reservation = await coordinator.reserve_response_lifecycle(envelope)
 
-        async def publish(_target: object) -> None:
+        async def publish() -> None:
             order.append("selection")
             await admit_message(alice, text_event("$source"))
             assert not worker._lanes

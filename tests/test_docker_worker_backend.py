@@ -81,7 +81,7 @@ from mindroom.workers.backends.docker_projection import (
 from mindroom.workers.backends.legacy_state_root_mounts import _remove_docker_workers_mounting_state_roots
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.compatibility import WorkerProtocolMismatch
-from mindroom.workers.models import WorkerLaunchConfig, WorkerReadyProgress, WorkerSpec
+from mindroom.workers.models import WorkerLaunchConfig, WorkerReadyProgress, WorkerSpec, WorkerSshEndpoint
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 from mindroom.workers.runtime import build_worker_launch_config, configured_primary_worker_manager_identity
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
@@ -95,6 +95,12 @@ if TYPE_CHECKING:
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _ROTATED_AUTH_TOKEN = "rotated-token"  # noqa: S105
 _TEST_UNSCOPED_WORKER_KEY = "v1:default:unscoped:code"
+_TAILNET_SECRET_NAMES = (
+    "MINDROOM_TAILNET_SSH_GATEWAY_TOKEN",
+    "TAILNET_SSH_AUTH_KEY",
+    "TAILNET_SSH_GATEWAY_TOKEN",
+    "TS_AUTHKEY",
+)
 _STALE_IMAGE_MISMATCH = WorkerProtocolMismatch(error="stale worker image", worker_is_newer=False)
 
 
@@ -221,6 +227,12 @@ class _FakeContainersApi:
             environment=dict(environment) if isinstance(environment, dict) else {},
             labels=dict(labels) if isinstance(labels, dict) else {},
         )
+        ports = kwargs.get("ports")
+        if isinstance(ports, dict) and "2222/tcp" in ports:
+            container.attrs["NetworkSettings"]["Ports"]["2222/tcp"] = [
+                {"HostIp": ports["2222/tcp"][0], "HostPort": str(self.next_host_port)},
+            ]
+            self.next_host_port += 1
         if isinstance(volumes, list):
             container.attrs["Mounts"] = [
                 {
@@ -1202,6 +1214,20 @@ def test_docker_worker_config_reads_the_env_file_under_blank_exports(tmp_path: P
     assert (config.image, config.user) == ("ghcr.io/mindroom-ai/mindroom:env", None)
 
 
+def test_docker_worker_config_refuses_ssh_port(tmp_path: Path) -> None:
+    """The Docker runner cannot use the port reserved for sshd."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+            "MINDROOM_DOCKER_WORKER_PORT": "2222",
+        },
+    )
+    with pytest.raises(WorkerBackendError, match=r"2222.*reserved.*SSH"):
+        DockerWorkerBackendConfig.from_runtime(paths)
+
+
 def test_docker_worker_host_config_path_rejects_directories(tmp_path: Path) -> None:
     """Docker host-config path must point at a file when explicitly configured."""
     config_path = tmp_path / "config.yaml"
@@ -1465,6 +1491,8 @@ def test_docker_worker_config_allows_explicit_endpoint_host_with_wildcard_publis
         "mindroom.ai/component",
         # An operator override would make startup remove every container as one from an older release.
         "mindroom.ai/storage-layout",
+        # Only an eligible launch sets the mark.
+        "mindroom.ai/tailnet-ssh",
     ],
 )
 def test_docker_worker_backend_rejects_reserved_extra_labels(
@@ -1496,6 +1524,7 @@ def test_docker_worker_backend_rejects_reserved_extra_labels(
         "mindroom.ai/launch-config-hash",
         "mindroom.ai/worker-key",
         "mindroom.ai/component",
+        "mindroom.ai/tailnet-ssh",
     ],
 )
 def test_docker_worker_config_rejects_reserved_extra_labels_from_env(
@@ -1949,6 +1978,27 @@ def test_docker_worker_manifest_holds_no_docker_backend_settings(
     assert committed.process_env["MATRIX_HOMESERVER"] == "https://chat.example.test"
     leaked = {*committed.process_env, *committed.env_file_values} & set(backend_env)
     assert leaked == set()
+
+
+def test_docker_container_launch_and_manifest_omit_tailnet_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The primary's tailnet secrets stay out of the container even when regular extra env is enabled."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=dict.fromkeys(_TAILNET_SECRET_NAMES, "test-only"),
+    )
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+
+    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    env = fake_client.containers.run_calls[0]["environment"]
+    assert env["EXTRA_ENV"] == "present"
+    assert set(_TAILNET_SECRET_NAMES).isdisjoint(env)
+    committed = _committed_startup_runtime(backend, _TEST_UNSCOPED_WORKER_KEY)
+    assert all(committed.env_value(name) is None for name in _TAILNET_SECRET_NAMES)
 
 
 @pytest.mark.parametrize(
@@ -3644,9 +3694,9 @@ def test_docker_backend_drops_retired_keys_from_old_control_records(
     current_record = json.loads(record_path.read_text(encoding="utf-8")) | {"startup_count": 3}
     old_hash = "0" * 64
     old_record = current_record | {
-        "endpoint": f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute",
+        "endpoint": f"http://127.0.0.1:{backend._container_host_port(container, 8766)}/api/sandbox-runner/execute",
         "backend_name": "docker",
-        "host_port": backend._container_host_port(container),
+        "host_port": backend._container_host_port(container, 8766),
         "container_id": container.id,
         "image": backend.config.image,
         "publish_host": "127.0.0.1",
@@ -4209,6 +4259,23 @@ def test_docker_worker_config_rejects_reserved_extra_env_names_from_env(tmp_path
         match="MINDROOM_SANDBOX_PROXY_TOKEN, MINDROOM_STORAGE_PATH",
     ):
         DockerWorkerBackendConfig.from_runtime(runtime_paths)
+
+
+@pytest.mark.parametrize("name", _TAILNET_SECRET_NAMES)
+def test_docker_worker_config_rejects_tailnet_secrets_in_extra_env(tmp_path: Path, name: str) -> None:
+    """The Docker extra-env option cannot pass a tailnet secret directly to the container."""
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+            "MINDROOM_DOCKER_WORKER_ENV_JSON": json.dumps({name: "test-only"}),
+        },
+    )
+
+    with pytest.raises(WorkerBackendError, match=rf"reserved env vars: {name}") as error:
+        DockerWorkerBackendConfig.from_runtime(paths)
+    assert "test-only" not in str(error.value)
 
 
 @pytest.mark.parametrize("credentials_in_env_file", [False, True], ids=["exported", "env-file-under-blank-export"])
@@ -5613,7 +5680,10 @@ def test_docker_worker_without_a_running_container_has_no_endpoint(
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
     handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     container = fake_client.containers.by_name[handle.worker_id]
-    assert handle.endpoint == f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute"
+    assert (
+        handle.endpoint
+        == f"http://127.0.0.1:{backend._container_host_port(container, 8766)}/api/sandbox-runner/execute"
+    )
 
     container.stop()
     [stopped] = backend.list_workers(include_idle=True, now=20.0)
@@ -6421,6 +6491,175 @@ def test_docker_worker_restarts_after_an_invitation_changes_its_mounts(
 
     assert existing_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
+
+
+# `mine` is the one agent a tailnet SSH launch may mark: per person and agent, and admitting that person alone.
+_SSH_CONFIG_TEXT = """
+agents:
+  mine:
+    display_name: Mine
+    worker_scope: user_agent
+    tailnet_ssh: true
+    access:
+      users: ["@alice:example.org"]
+      members_of_rooms: []
+  other:
+    display_name: Other
+    worker_scope: shared
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip()
+_SSH_WORKER_KEY = "v1:default:user_agent:~@alice:example.org:mine"
+_SSH_LABEL = "mindroom.ai/tailnet-ssh"
+
+
+def _ssh_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    publish_host: str = "127.0.0.1",
+    endpoint_host: str = "127.0.0.1",
+) -> tuple[DockerWorkerBackend, _FakeDockerClient]:
+    base_backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=_SSH_CONFIG_TEXT)
+    if (publish_host, endpoint_host) == (base_backend.config.publish_host, base_backend.config.endpoint_host):
+        return base_backend, fake_client
+    backend = _docker_backend(
+        config=replace(base_backend.config, publish_host=publish_host, endpoint_host=endpoint_host),
+        auth_token=base_backend.auth_token,
+        storage_root=tmp_path,
+    )
+    monkeypatch.setattr(backend, "_wait_for_ready", lambda _container, **_kwargs: None)
+    return backend, fake_client
+
+
+def test_marked_docker_launch_publishes_2222_on_publish_host(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An eligible launch carries the tailnet SSH label and publishes 2222 where the runner port is published."""
+    backend, fake_client = _ssh_backend(monkeypatch, tmp_path)
+
+    backend.ensure_worker(_spec(backend, _SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
+    backend.ensure_worker(_spec(backend, _shared_worker_key("other")), now=10.0)
+
+    marked, unmarked = fake_client.containers.run_calls
+    assert marked["ports"] == {"8766/tcp": ("127.0.0.1", None), "2222/tcp": ("127.0.0.1", None)}
+    assert marked["labels"][_SSH_LABEL] == "true"
+    assert unmarked["ports"] == {"8766/tcp": ("127.0.0.1", None)}
+    assert _SSH_LABEL not in unmarked["labels"]
+
+
+@pytest.mark.parametrize("publish_host", ["0.0.0.0", "::"])  # noqa: S104 - wildcard bind is the scenario under test
+def test_docker_ssh_port_is_never_published_on_a_wildcard_address(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    publish_host: str,
+) -> None:
+    """A backend that publishes on every interface gives no worker the mark, so no sshd is reachable from outside."""
+    backend, fake_client = _ssh_backend(monkeypatch, tmp_path, publish_host=publish_host)
+
+    handle = backend.ensure_worker(_spec(backend, _SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
+
+    run_call = fake_client.containers.run_calls[0]
+    assert run_call["ports"] == {"8766/tcp": (publish_host, None)}
+    assert _SSH_LABEL not in run_call["labels"]
+    assert handle.ssh_endpoint is None
+
+
+def test_docker_ssh_port_needs_a_publish_host_that_is_an_address(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A publish host that is a name could resolve to any interface, so it counts as a wildcard."""
+    backend, fake_client = _ssh_backend(monkeypatch, tmp_path, publish_host="localhost")
+
+    handle = backend.ensure_worker(_spec(backend, _SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
+
+    assert "2222/tcp" not in fake_client.containers.run_calls[0]["ports"]
+    assert _SSH_LABEL not in fake_client.containers.run_calls[0]["labels"]
+    assert handle.ssh_endpoint is None
+
+
+@pytest.mark.parametrize(("endpoint_host", "host"), [("127.0.0.1", "127.0.0.1"), ("[::1]", "::1")])
+def test_docker_handle_endpoint_needs_label_and_running_container(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    endpoint_host: str,
+    host: str,
+) -> None:
+    """Only a marked running worker exposes its bound SSH port, with a bare host for the gateway."""
+    backend, fake_client = _ssh_backend(monkeypatch, tmp_path, publish_host=host, endpoint_host=endpoint_host)
+    other_key = _shared_worker_key("other")
+
+    marked = backend.ensure_worker(_spec(backend, _SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
+    unmarked = backend.ensure_worker(_spec(backend, other_key), now=10.0)
+
+    marked_container = fake_client.containers.by_name[marked.worker_id]
+    ssh_port = int(marked_container.attrs["NetworkSettings"]["Ports"]["2222/tcp"][0]["HostPort"])
+    assert ssh_port != int(marked.debug_metadata["host_port"])
+    assert marked.endpoint.startswith(f"http://{endpoint_host}:")
+    assert marked.ssh_endpoint == WorkerSshEndpoint(
+        host=host,
+        port=ssh_port,
+        projection_dir=Path(marked.debug_metadata["state_root"]) / ".runtime" / "ssh",
+    )
+    assert unmarked.ssh_endpoint is None
+
+    # A binding alone is not the mark: the label is what the opted-in config produced.
+    unmarked_container = fake_client.containers.by_name[unmarked.worker_id]
+    unmarked_container.attrs["NetworkSettings"]["Ports"]["2222/tcp"] = [{"HostIp": "127.0.0.1", "HostPort": "45000"}]
+    touched = backend.touch_worker(other_key, now=11.0)
+    assert touched is not None
+    assert touched.ssh_endpoint is None
+
+    marked_container.stop()
+    stopped = backend.touch_worker(_SSH_WORKER_KEY, now=11.0)
+    assert stopped is not None
+    assert stopped.ssh_endpoint is None
+
+
+def test_joining_a_directory_changes_the_docker_launch_hash(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A new read-only mount replaces the worker without changing its SSH mark."""
+    backend, fake_client = _ssh_backend(monkeypatch, tmp_path)
+    create_shared_directory(backend._runtime_paths, owner="other", name="report")
+    first = backend.ensure_worker(_spec(backend, _SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
+    first_container = fake_client.containers.by_name[first.worker_id]
+    assert first.ssh_endpoint is not None
+
+    add_shared_directory_member(backend._runtime_paths, owner="other", name="report", member="mine")
+    second = backend.ensure_worker(_spec(backend, _SSH_WORKER_KEY, private_agent_names=frozenset()), now=20.0)
+
+    assert first_container.removed == 1
+    marked, joined = fake_client.containers.run_calls
+    assert marked["labels"][_SSH_LABEL] == "true"
+    assert joined["labels"][_SSH_LABEL] == "true"
+    assert joined["ports"]["2222/tcp"] == ("127.0.0.1", None)
+    assert marked["labels"]["mindroom.ai/launch-config-hash"] != joined["labels"]["mindroom.ai/launch-config-hash"]
+    share = str((tmp_path / "shared_directories" / "other" / "report").resolve())
+    assert _volumes_by_source(joined["volumes"])[share]["mode"] == "ro"
+    assert second.ssh_endpoint is not None
+
+
+def test_docker_pinned_worker_has_no_mark(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pinning a run to a worker does not make the run an SSH target."""
+    backend, fake_client = _ssh_backend(monkeypatch, tmp_path)
+    script_key = script_worker_key_for_run(_SSH_WORKER_KEY, f"script-{'a' * 32}")
+
+    spec = _spec(backend, script_key, private_agent_names=frozenset(), state_scope_worker_key=_SSH_WORKER_KEY)
+
+    handle = backend.ensure_worker(spec, now=10.0)
+
+    assert _SSH_LABEL not in fake_client.containers.run_calls[0]["labels"]
+    assert "2222/tcp" not in fake_client.containers.run_calls[0]["ports"]
+    assert handle.ssh_endpoint is None
 
 
 def test_docker_worker_container_env_drops_kubernetes_pod_limit_markers(

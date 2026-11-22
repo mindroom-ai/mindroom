@@ -24,6 +24,7 @@ from pydantic import (
 
 from mindroom import yaml_io
 from mindroom.access_policy import resolve_responder_access
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.agent_policy import (
     PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
     PolicyInputs,
@@ -104,6 +105,7 @@ from mindroom.config.resolution import (
 from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
 from mindroom.config.slack import SlackConfig
+from mindroom.config.tailnet_ssh import TailnetSshConfig
 from mindroom.config.validation import TimezoneName  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
 from mindroom.config.yaml_includes import (
@@ -149,8 +151,7 @@ from mindroom.matrix_identifiers import (
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
-from mindroom.room_reply_modes import resolve_room_reply_mode_override
-from mindroom.room_thread_modes import resolve_room_thread_mode_override
+from mindroom.room_settings import REPLY_MODE, THREAD_MODE, resolve_room_setting
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
@@ -164,7 +165,7 @@ if TYPE_CHECKING:
     from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
     from mindroom.config.agent import RoomReplyMode
     from mindroom.config.personal_agents import PersonalAgentRoster
-    from mindroom.room_reply_modes import ReplyModeRead
+    from mindroom.room_settings import RoomThreadMode, SettingRead
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -209,6 +210,7 @@ _OPTIONAL_SECTION_NAMES = (
     "external_trigger_policy",
     "matrix_sync",
     "tool_approval",
+    "tailnet_ssh",
 )
 
 
@@ -474,6 +476,10 @@ class Config(BaseModel):
     slack: SlackConfig = Field(
         default_factory=SlackConfig,
         description="Slack integration: how Slack workspace members map to Matrix users",
+    )
+    tailnet_ssh: TailnetSshConfig = Field(
+        default_factory=TailnetSshConfig,
+        description="Tailnet SSH credentials for users of the operator-managed tailnet",
     )
     timezone: TimezoneName = Field(
         default="UTC",
@@ -1528,6 +1534,7 @@ class Config(BaseModel):
                 tools=tools,
             )
         self._validate_listen_tools(tools)
+        self._validate_tailnet_ssh_tools(tools)
         # why-lazy: catalog pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
 
@@ -1541,6 +1548,31 @@ class Config(BaseModel):
         if (escaped := approval_rule_a_file_rename_escapes(globs, elsewhere)) is not None:
             msg = f"{escaped}, which another rule or the default now decides; rewrite the rules for the new names."
             raise ToolConfigOverrideError(msg)
+
+    def _validate_tailnet_ssh_tools(self, tools: ToolRegistry) -> None:
+        """Refuse an SSH opt-in when the turn can offer another toolkit's shell instead."""
+        # why-lazy: config loads before the runtime tool registry and its dependencies.
+        from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
+        from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+
+        for name, agent in self.agents.items():
+            if not agent.tailnet_ssh:
+                continue
+            entries = resolve_agent_tools(self, name, tools).candidates()
+            shell_index = next((i for i, entry in enumerate(entries) if entry.name == "shell"), None)
+            if shell_index is None:
+                continue
+            # Native functions beat MCP regardless of order. Stored settings can re-enable a declared function.
+            for entry in entries[:shell_index]:
+                metadata = tools.entries[entry.name]
+                if metadata.mcp_server_id is not None:
+                    continue
+                if not metadata.function_names or SHELL_FUNCTION in metadata.function_names:
+                    msg = (
+                        f"agents.{name}.tailnet_ssh: Toolkit {entry.name!r} can take precedence for {SHELL_FUNCTION}. "
+                        "List 'shell' first."
+                    )
+                    raise ToolConfigOverrideError(msg)
 
     def _validate_listen_tools(self, tools: ToolRegistry) -> None:
         """Reject a ``listen.tools`` entry whose toolkit this config cannot build, posts, or the agent's tools leave out.
@@ -1734,15 +1766,20 @@ class Config(BaseModel):
         entity_name: str,
         runtime_paths: RuntimePaths,
         room_id: str | None = None,
+        read: SettingRead[RoomThreadMode] | None = None,
     ) -> Literal["thread", "room"]:
         """Get effective thread mode for an agent, team, or router.
 
-        Agents use their explicit per-agent setting.
+        The room's `thread_mode` setting decides for every entity when set: ``read`` is the setting a refresh just
+        found, to decide by; without it, the runtime's copy of the setting.
+        Otherwise agents use their explicit per-agent setting.
         Teams inherit a mode only when all member agents share it.
         Router inherits a mode only when all relevant configured agents share it.
         In ambiguous cases, default to "thread".
         """
-        runtime_room_override = resolve_room_thread_mode_override(runtime_paths, room_id)
+        runtime_room_override = (
+            resolve_room_setting(THREAD_MODE, runtime_paths, room_id) if read is None else read.value
+        )
         if runtime_room_override is not None:
             return runtime_room_override
 
@@ -1762,13 +1799,13 @@ class Config(BaseModel):
         self,
         runtime_paths: RuntimePaths,
         room_id: str,
-        read: ReplyModeRead | None = None,
+        read: SettingRead[RoomReplyMode] | None = None,
     ) -> RoomReplyMode:
         """Return one room's reply mode: its `reply_mode` room setting, else its `rooms` entry, else `auto`.
 
         ``read`` is the setting a refresh just found, to decide by; without it, the runtime's copy of the setting.
         """
-        runtime_room_override = resolve_room_reply_mode_override(runtime_paths, room_id) if read is None else read.mode
+        runtime_room_override = resolve_room_setting(REPLY_MODE, runtime_paths, room_id) if read is None else read.value
         if runtime_room_override is not None:
             return runtime_room_override
         room = resolve_room_scoped_value(self.rooms, room_id, runtime_paths)

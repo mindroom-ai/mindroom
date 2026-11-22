@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.budgets.monitor import budget_model
 from mindroom.config.resolution import entity_model_name
 from mindroom.entity_resolution import resolve_room_scoped_value
-from mindroom.room_model_overrides import resolve_room_model_override
+from mindroom.room_settings import resolve_room_model_override
 from mindroom.thread_models import resolve_thread_model_override
 
 if TYPE_CHECKING:
@@ -59,7 +59,7 @@ class TurnModel:
     model_name: str
     requested_model_name: str
     context_window: int | None
-    # An explicit choice, a thread override, or a saved room override chose the requested model.
+    # An explicit choice, a thread override, or the room's `model` setting chose the requested model.
     overridden: bool
 
 
@@ -109,7 +109,7 @@ def resolve_inherited_model(
 ) -> tuple[str, InheritedModelSource]:
     """Return the model ``entity`` runs in a room without a thread choice, and what chose it, from one read.
 
-    The source is the room's saved override, its authored `room_models` entry, or the entity's own model.
+    The source is the room's `model` setting, its authored `room_models` entry, or the entity's own model.
     """
     model_name, source = _requested_choice(config, runtime_paths, ModelScope(entity=entity, room_id=room_id))
     # A scope without a thread or an explicit choice never names either.
@@ -138,7 +138,7 @@ def resolve_turn_model(
 ) -> TurnModel:
     """Return the model one entity's turn runs.
 
-    Precedence: an explicit choice, the thread's saved choice for the entity, the room's saved choice, the authored
+    Precedence: an explicit choice, the thread's saved choice for the entity, the room's `model` setting, the authored
     `room_models` entry, then the entity's authored model; the requester's budget may then swap in its fallback.
     ``budget`` None skips the budget, for a turn that runs a model already budgeted or no requester's turn.
     """

@@ -1,4 +1,8 @@
-"""Tests for `workers run` control plane: cancel, long-poll, progress, stderr, and exit codes."""
+"""Tests for `workers run` control plane: cancel, long-poll, progress, stderr, and exit codes.
+
+The CLI reads one stream per command (`tests/test_workers_run_stream.py` runs it end to end); the long-poll route
+stays for other readers of a receipt.
+"""
 
 # ruff: noqa: ANN001, ANN202, ARG001, PLR0915
 from __future__ import annotations
@@ -16,7 +20,7 @@ import time
 import urllib.request
 from contextlib import ExitStack, contextmanager, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from io import BytesIO
+from io import BytesIO, TextIOWrapper
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -33,7 +37,7 @@ from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, Tur
 from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER, AgentCliShellEnv
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.session_storage.agent_storage import create_agent_state_storage
-from mindroom.shell.output_capture import format_shell_completion, format_shell_timeout
+from mindroom.shell.output_capture import format_shell_completion
 from mindroom.tool_system import runtime_context
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.sandbox_proxy import _make_progress_sink
@@ -42,6 +46,7 @@ from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, live_turn_tools_for_test
 from tests.minimal_agent_fixtures import capture_bash_batch
 from tests.test_agent_tool_calls import _catalog, _function, _toolkit
+from tests.workers_run_frames import command_frames
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -74,6 +79,15 @@ async def _make_owner(
     owner.shell_env = _SHELL_ENV
     grant = owner.issue(now_ns=time.time_ns(), expires_at_ns=time.time_ns() + 10**12)
     return owner, grant.raw_token
+
+
+class _NoStdin:
+    """What a fake client answers the CLI's forwarding of its stdin, which is empty under pytest."""
+
+    def stdin(self, call_id, seq, data, *, eof):
+        del call_id
+        assert (seq, data, eof) == (0, b"", True)
+        return {"open": False}
 
 
 def _make_app(*owners: LiveTurnTools) -> FastAPI:
@@ -177,6 +191,133 @@ async def test_cancel_route_cancels_running_call_without_cancelling_sibling(tmp_
                 assert (await bash_task).content == "outer done"
     finally:
         await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_after_the_reader_left_still_waits_for_the_call_to_end(tmp_path: Path) -> None:
+    """A streamed call's reader that leaves cancels it; the CLI's cancel that follows answers once the call ended."""
+    outer_entered = asyncio.Event()
+    release_outer = asyncio.Event()
+    long_started = asyncio.Event()
+
+    async def run_shell_command(args: str) -> str:
+        if args == "outer":
+            outer_entered.set()
+            await release_outer.wait()
+            return "outer done"
+        long_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # As a worker's stop does, ending takes a moment.
+            await asyncio.sleep(0.2)
+            raise
+        return args
+
+    owner, token = await _make_owner(tmp_path, run_shell_command)
+    headers = {"Authorization": f"Bearer {token}", AGENT_CLI_WINDOW_HEADER: "outer-1"}
+    try:
+        async with response_cli_lifetime():
+            await capture_bash_batch(owner, ("outer-1", {"command": "outer"}))
+            bash_task = asyncio.create_task(
+                owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, "outer-1"),
+            )
+            async with (
+                asyncio.timeout(SETTLE_TIMEOUT_SECONDS),
+                httpx.AsyncClient(transport=httpx.ASGITransport(app=_make_app(owner)), base_url="http://test") as http,
+            ):
+                await outer_entered.wait()
+                call_id = str(uuid4())
+                operation = {
+                    "operation": "tools.call",
+                    "call_id": call_id,
+                    "toolkit": "shell",
+                    "function": "run_shell_command",
+                    "arguments": {"args": "long"},
+                    "stream": True,
+                }
+                assert (
+                    await http.post("/api/agent-cli/operations", headers=headers, json=operation)
+                ).status_code == 200
+                await long_started.wait()
+                await owner.stream_call(call_id).aclose()
+                first = await http.post(f"/api/agent-cli/calls/{call_id}/cancel", headers=headers)
+                assert first.json()["status"] == "cancelled"
+            release_outer.set()
+            await bash_task
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_was_asked_for_but_never_read_does_not_keep_its_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a relay that started counts as the call's reader; until then the call is cancelled as one nobody reads."""
+    monkeypatch.setattr("mindroom.agent_cli.turn._STREAM_ATTACH_SECONDS", 0.3)
+    outer_entered = asyncio.Event()
+    release_outer = asyncio.Event()
+
+    async def run_shell_command(args: str) -> str:
+        if args == "outer":
+            outer_entered.set()
+            await release_outer.wait()
+            return "outer done"
+        await asyncio.Event().wait()
+        return args
+
+    owner, token = await _make_owner(tmp_path, run_shell_command)
+    headers = {"Authorization": f"Bearer {token}", AGENT_CLI_WINDOW_HEADER: "outer-1"}
+    try:
+        async with response_cli_lifetime():
+            await capture_bash_batch(owner, ("outer-1", {"command": "outer"}))
+            bash_task = asyncio.create_task(
+                owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, "outer-1"),
+            )
+            async with (
+                asyncio.timeout(SETTLE_TIMEOUT_SECONDS),
+                httpx.AsyncClient(transport=httpx.ASGITransport(app=_make_app(owner)), base_url="http://test") as http,
+            ):
+                await outer_entered.wait()
+                call_id = str(uuid4())
+                operation = {
+                    "operation": "tools.call",
+                    "call_id": call_id,
+                    "toolkit": "shell",
+                    "function": "run_shell_command",
+                    "arguments": {"args": "long"},
+                    "stream": True,
+                }
+                assert (
+                    await http.post("/api/agent-cli/operations", headers=headers, json=operation)
+                ).status_code == 200
+                unread = owner.stream_call(call_id)
+                receipt = (await http.get(f"/api/agent-cli/calls/{call_id}?wait=10", headers=headers)).json()
+                assert receipt["status"] == "cancelled"
+                await unread.aclose()
+            release_outer.set()
+            await bash_task
+    finally:
+        await owner.close()
+
+
+def test_a_frame_for_a_loop_that_stopped_is_dropped() -> None:
+    """The worker call's thread does not wait for ever to hand a frame to an event loop that no longer runs."""
+    loop = asyncio.new_event_loop()
+    serving = threading.Thread(target=loop.run_forever, daemon=True)
+    serving.start()
+    stream = runtime_context.CallOutputStream(loop, queued_frames=1)
+    stream.put({"t": "out"})
+    blocked = threading.Thread(target=stream.put, args=({"t": "out"},), daemon=True)
+    blocked.start()
+    blocked.join(0.2)
+    assert blocked.is_alive()
+    loop.call_soon_threadsafe(loop.stop)
+    serving.join(SETTLE_TIMEOUT_SECONDS)
+    blocked.join(5)
+    assert not blocked.is_alive()
+    loop.close()
 
 
 @pytest.mark.asyncio
@@ -532,15 +673,8 @@ def test_cli_workers_run_cancels_on_signal_and_exits_128_plus_signo(
             submitted.append(payload["call_id"])
             return {"status": "running", "call_id": payload["call_id"]}
 
-        def receipt(
-            self,
-            call_id,
-            *,
-            timeout: float = 30,
-            wait: float | None = None,
-            after_progress: int | None = None,
-        ):
-            del call_id, timeout, wait, after_progress
+        def stream(self, call_id):
+            del call_id
             handler = installed[sig]
             assert callable(handler)
             handler(int(sig), None)
@@ -585,15 +719,8 @@ def test_cli_workers_run_warns_when_signal_cancel_cannot_be_confirmed(
             submitted.append(payload["call_id"])
             return {"status": "running", "call_id": payload["call_id"]}
 
-        def receipt(
-            self,
-            call_id,
-            *,
-            timeout: float = 30,
-            wait: float | None = None,
-            after_progress: int | None = None,
-        ):
-            del call_id, timeout, wait, after_progress
+        def stream(self, call_id):
+            del call_id
             handler = installed[signal.SIGTERM]
             assert callable(handler)
             handler(int(signal.SIGTERM), None)
@@ -618,56 +745,39 @@ def test_cli_workers_run_warns_when_signal_cancel_cannot_be_confirmed(
     assert f"(call {call_id})" in lines[0]
 
 
-def test_cli_workers_run_uses_long_poll_without_sleeping_and_prints_progress_and_started_to_stderr(
+def test_cli_workers_run_reads_one_stream_without_sleeping_and_prints_progress_and_started_to_stderr(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Healthy polling uses `?wait=25` with zero sleep and writes progress + started lines to stderr."""
-    waits: list[float | None] = []
-    receipts = iter(
-        [
-            {"status": "running", "progress": "starting worker fan3...", "progress_revision": 1},
-            {"status": "running", "progress": "starting worker fan3...", "progress_revision": 1},
-            {"status": "running", "progress": "starting worker fan3... (5s)", "progress_revision": 2},
-            {
-                "status": "completed",
-                "outcome": "[worker: fan3, started]\n" + format_shell_completion("hello", None, return_code=0),
-            },
-        ],
-    )
+    """A healthy run is one read of the call's stream, with zero sleep, and its progress and started lines on stderr."""
+    streams: list[str] = []
+    frames = [
+        {"t": "progress", "text": "starting worker fan3..."},
+        {"t": "keepalive"},
+        {"t": "progress", "text": "starting worker fan3... (5s)"},
+        *command_frames(b"hello\n", header="[worker: fan3, started]"),
+    ]
 
-    class Client:
+    class Client(_NoStdin):
         def operation(self, payload):
             return {"status": "queued", "call_id": payload["call_id"]}
 
-        def receipt(
-            self,
-            call_id,
-            *,
-            timeout: float = 30,
-            wait: float | None = None,
-            after_progress: int | None = None,
-        ):
-            del call_id, timeout, after_progress
-            waits.append(wait)
-            return next(receipts)
-
-    now = 0.0
+        def stream(self, call_id):
+            streams.append(call_id)
+            return iter(frames)
 
     class Clock:
         def sleep(self, _seconds: float) -> None:
-            pytest.fail("healthy long-poll must not sleep")
+            pytest.fail("a healthy stream must not sleep")
 
         def monotonic(self) -> float:
-            nonlocal now
-            now += 1.0
-            return now
+            return 0.0
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     monkeypatch.setattr("mindroom.agent_cli.main.time", Clock())
 
     assert main(["workers", "run", "fan3", "--", "echo", "hello"]) == 0
-    assert waits == [25.0, 25.0, 25.0, 25.0]
+    assert len(streams) == 1
     output = capsys.readouterr()
     assert output.out == "hello\n"
     assert output.err == (
@@ -681,19 +791,22 @@ def test_cli_workers_run_prints_stopped_after_on_stderr_not_stdout(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Timeout stop message goes to stderr while partial command output stays on stdout."""
-    outcome = "[worker: w]\n" + format_shell_timeout("partial", "warn", timeout=5)
+    """Timeout stop message goes to stderr, after the command's own, while its partial output stays on stdout."""
+    frames = command_frames(b"partial\n", b"warn\n", code=-9, timed_out=True)
 
-    class Client:
+    class Client(_NoStdin):
         def operation(self, payload):
-            return {"status": "completed", "call_id": payload["call_id"], "outcome": outcome}
+            return {"status": "queued", "call_id": payload["call_id"]}
+
+        def stream(self, _call_id):
+            return iter(frames)
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
 
     assert main(["workers", "run", "w", "--timeout", "5", "--", "sleep", "30"]) == 124
     output = capsys.readouterr()
-    assert output.out == "Output:\npartial\nStderr:\nwarn\n"
-    assert output.err == "mindroom-agent: stopped after 5s\n"
+    assert output.out == "partial\n"
+    assert output.err == "warn\nmindroom-agent: stopped after 5s\n"
 
 
 def test_cli_workers_run_usage_error_writes_only_to_stderr(
@@ -899,6 +1012,9 @@ def test_cli_exit_125_only_for_known_not_run_and_255_when_command_may_have_run(
             submitted.append(payload["call_id"])
             return receipt
 
+        def stream(self, _call_id):
+            return iter([receipt])
+
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
 
     assert main(["workers", "run", "w", "--", "true"]) == expected_code
@@ -913,7 +1029,7 @@ def test_cli_output_save_failure_exits_255_with_call_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A completed command whose output auto-save failed already ran, so the CLI exits 255 with call id."""
+    """A completed call whose result could not be saved and whose stream had no exit ends 255 with call id."""
     from mindroom.agent_cli.projection import project_cli_result  # noqa: PLC0415
 
     submitted: list[str] = []
@@ -924,7 +1040,10 @@ def test_cli_output_save_failure_exits_255_with_call_id(
     class Client:
         def operation(self, payload):
             submitted.append(payload["call_id"])
-            return {"status": "completed", "outcome": outcome}
+            return {"status": "queued"}
+
+        def stream(self, _call_id):
+            return iter([{"status": "completed", "outcome": outcome}])
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
 
@@ -1081,74 +1200,28 @@ async def test_progress_revision_delivers_changes_between_gets_and_on_terminal_r
     finally:
         await owner.close()
 
-    # CLI also prints unseen progress carried on a terminal receipt.
-    class TerminalProgressClient:
+    # The CLI prints the progress its stream carries, before the command's output.
+    class ProgressClient(_NoStdin):
         def operation(self, payload):
             del payload
-            return {
-                "status": "completed",
-                "progress": "worker fan3 ready (3s)",
-                "progress_revision": 2,
-                "outcome": "[worker: fan3]\n" + format_shell_completion("hi", None, return_code=0),
-            }
+            return {"status": "queued"}
 
-    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", TerminalProgressClient)
+        def stream(self, _call_id):
+            ready = {"t": "progress", "text": "worker fan3 ready (3s)"}
+            return iter([ready, *command_frames(b"hi\n", header="[worker: fan3]")])
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", ProgressClient)
     assert main(["workers", "run", "fan3", "--", "echo", "hi"]) == 0
     output = capsys.readouterr()
     assert output.out == "hi\n"
-    assert "mindroom-agent: worker fan3 ready (3s)\n" in output.err
-
-
-def test_cli_reads_at_most_every_200ms_from_a_server_that_ignores_wait(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A server that answers at once, as one without `?wait` does, is read at a fixed 0.2 s interval."""
-    now = 0.0
-    reads = 0
-    sleeps: list[float] = []
-
-    class Clock:
-        def sleep(self, seconds: float) -> None:
-            nonlocal now
-            sleeps.append(seconds)
-            now += seconds
-
-        def monotonic(self) -> float:
-            return now
-
-    class EarlyServerClient:
-        def operation(self, payload):
-            del payload
-            return {"status": "running"}
-
-        def receipt(
-            self,
-            call_id,
-            *,
-            timeout: float = 30,
-            wait: float | None = None,
-            after_progress: int | None = None,
-        ):
-            nonlocal reads
-            del call_id, timeout, wait, after_progress
-            reads += 1
-            if now >= 1.9 or reads > 50:
-                return {"status": "completed", "outcome": "[worker: w]\nok"}
-            return {"status": "running"}
-
-    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", EarlyServerClient)
-    monkeypatch.setattr("mindroom.agent_cli.main.time", Clock())
-
-    assert main(["workers", "run", "w", "--", "true"]) == 0
-    assert sleeps == [pytest.approx(0.2)] * 10
-    assert reads == 11
+    assert output.err == "mindroom-agent: worker fan3 ready (3s)\n"
 
 
 def test_cli_signal_after_command_finished_reports_finished_and_returns_command_code(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When cancel returns an already-completed receipt, report it finished and exit with its real code."""
+    """A signal after the command's exit arrived changes nothing: its output is written, and its code is the CLI's."""
     installed: dict[int, object] = {}
     submitted: list[str] = []
 
@@ -1157,20 +1230,15 @@ def test_cli_signal_after_command_finished_reports_finished_and_returns_command_
         installed[signum] = handler
         return previous
 
-    class Client:
+    class Client(_NoStdin):
         def operation(self, payload):
             submitted.append(payload["call_id"])
             return {"status": "running", "call_id": payload["call_id"]}
 
-        def receipt(
-            self,
-            call_id,
-            *,
-            timeout: float = 30,
-            wait: float | None = None,
-            after_progress: int | None = None,
-        ):
-            del call_id, timeout, wait, after_progress
+        def stream(self, call_id):
+            del call_id
+            # Everything but the receipt: the signal lands after the command's exit.
+            yield from command_frames(b"done\n", code=7)[:-1]
             handler = installed[signal.SIGTERM]
             assert callable(handler)
             handler(int(signal.SIGTERM), None)
@@ -1178,18 +1246,14 @@ def test_cli_signal_after_command_finished_reports_finished_and_returns_command_
 
         def cancel(self, call_id, *, timeout: float = 8.0):
             del timeout
-            return {
-                "status": "completed",
-                "call_id": call_id,
-                "outcome": "[worker: w]\n" + format_shell_completion("done", None, return_code=7),
-            }
+            return {"status": "completed", "call_id": call_id, "outcome": "[worker: w]\nExit code 7"}
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     monkeypatch.setattr(signal, "signal", fake_signal)
 
     assert main(["workers", "run", "w", "--", "sh", "-c", "exit 7"]) == 7
     output = capsys.readouterr()
-    assert output.out == "Output:\ndone\n"
+    assert output.out == "done\n"
     assert output.err == ""
 
 
@@ -1221,6 +1285,9 @@ def test_r2_receipt_has_no_dispatched_field_and_only_typed_refusal_exits_125(
                 _submitted.append(op["call_id"])
                 return _payload
 
+            def stream(self, _call_id, _payload=payload):
+                return iter([_payload])
+
         monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
         assert main(["workers", "run", "w", "--", "true"]) == expected_code
         output = capsys.readouterr()
@@ -1233,7 +1300,7 @@ def test_r2_cancel_messages_for_submitted_refused_and_completed(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancel says 'may still be running' unless the call was refused, waits for approval, or completed."""
+    """Cancel says 'may still be running' unless the call was refused, waits for approval, or had ended."""
     for cancel_receipt, expected_code, expected_out, expected_err_sub, forbidden_err_sub in (
         (
             {"status": "waiting"},
@@ -1256,15 +1323,13 @@ def test_r2_cancel_messages_for_submitted_refused_and_completed(
             "never ran",
             "may still be running",
         ),
+        # The command ended while the signal stopped the CLI reading: its exit never arrived, so the signal decides.
         (
-            {
-                "status": "completed",
-                "outcome": "[worker: fan3]\n" + format_shell_completion("finished ok", None, return_code=7),
-            },
-            7,
-            "Output:\nfinished ok\n",
+            {"status": "completed", "outcome": "[worker: fan3]\nExit code 7"},
+            143,
             "",
-            "SIGTERM",
+            "cancelled by SIGTERM; the command had ended, and the rest of its output was not read",
+            "may still be running",
         ),
     ):
         installed: dict[int, object] = {}
@@ -1280,16 +1345,8 @@ def test_r2_cancel_messages_for_submitted_refused_and_completed(
                 _submitted.append(op["call_id"])
                 return {"status": "running", "call_id": op["call_id"]}
 
-            def receipt(
-                self,
-                call_id,
-                *,
-                timeout: float = 30,
-                wait: float | None = None,
-                after_progress: int | None = None,
-                _installed=installed,
-            ):
-                del call_id, timeout, wait, after_progress
+            def stream(self, call_id, _installed=installed):
+                del call_id
                 handler = _installed[signal.SIGTERM]
                 assert callable(handler)
                 handler(int(signal.SIGTERM), None)
@@ -1304,11 +1361,8 @@ def test_r2_cancel_messages_for_submitted_refused_and_completed(
         assert main(["workers", "run", "fan3", "--", "true"]) == expected_code
         output = capsys.readouterr()
         assert output.out == expected_out
-        if expected_err_sub:
-            assert expected_err_sub in output.err
-            assert f"(call {submitted[0]})" in output.err
-        else:
-            assert output.err == ""
+        assert expected_err_sub in output.err
+        assert f"(call {submitted[0]})" in output.err
         assert forbidden_err_sub not in output.err
 
 
@@ -1571,8 +1625,8 @@ def test_cli_signal_during_submit_is_held_until_the_submit_returns(
             events.append(f"submitted {payload['call_id']}")
             return {"status": "running", "call_id": payload["call_id"]}
 
-        def receipt(self, call_id, **kwargs: object):
-            del call_id, kwargs
+        def stream(self, call_id):
+            del call_id
             pytest.fail("a held signal cancels before the first read")
 
         def cancel(self, call_id, *, timeout: float = 8.0):
@@ -1594,13 +1648,12 @@ def test_cli_signal_during_submit_is_held_until_the_submit_returns(
     )
 
 
-def test_cli_signal_handlers_are_removed_before_the_result_is_printed(
+def test_cli_signal_handlers_are_removed_before_its_closing_line_is_printed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The result prints under the signal handlers the CLI started with, so a signal then ends it as on main."""
+    """The command's output is written while a signal still cancels it; the CLI's closing line after that."""
     installed: dict[int, object] = {}
-    handlers_while_printing: list[dict[int, object]] = []
-    written: list[str] = []
+    handlers_at: dict[str, list[dict[int, object]]] = {"out": [], "err": []}
     cancel_calls: list[str] = []
 
     def fake_signal(signum, handler):
@@ -1608,38 +1661,41 @@ def test_cli_signal_handlers_are_removed_before_the_result_is_printed(
         installed[signum] = handler
         return previous
 
-    class RecordingStdout:
-        def write(self, data: str) -> int:
-            handlers_while_printing.append(dict(installed))
-            written.append(data)
-            return len(data)
+    def recording(name: str) -> TextIOWrapper:
+        class Recording(BytesIO):
+            def write(self, data) -> int:
+                handlers_at[name].append(dict(installed))
+                return super().write(data)
 
-        def flush(self) -> None:
-            handlers_while_printing.append(dict(installed))
+        return TextIOWrapper(Recording(), write_through=True)
 
-    class Client:
+    class Client(_NoStdin):
         def operation(self, payload):
-            return {
-                "status": "completed",
-                "call_id": payload["call_id"],
-                "outcome": "[worker: w]\n" + format_shell_completion("final line", None, return_code=9),
-            }
+            return {"status": "queued", "call_id": payload["call_id"]}
+
+        def stream(self, _call_id):
+            return iter(command_frames(b"final line\n", code=-9, timed_out=True))
 
         def cancel(self, call_id, *, timeout: float = 8.0):
             del timeout
             cancel_calls.append(call_id)
             return {"status": "completed"}
 
+    stdout, stderr = recording("out"), recording("err")
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     monkeypatch.setattr(signal, "signal", fake_signal)
-    monkeypatch.setattr("mindroom.agent_cli.main.sys.stdout", RecordingStdout())
+    monkeypatch.setattr("mindroom.agent_cli.main.sys.stdout", stdout)
+    monkeypatch.setattr("mindroom.agent_cli.main.sys.stderr", stderr)
 
-    assert main(["workers", "run", "w", "--", "sh", "-c", "echo final line; exit 9"]) == 9
-    assert "".join(written) == "Output:\nfinal line\n"
+    assert main(["workers", "run", "w", "--timeout", "5", "--", "sh", "-c", "echo final line; sleep 9"]) == 124
+    assert stdout.buffer.getvalue() == b"final line\n"
+    assert stderr.buffer.getvalue() == b"mindroom-agent: stopped after 5s\n"
     assert cancel_calls == []
     restored = dict.fromkeys((signal.SIGINT, signal.SIGTERM, signal.SIGHUP), signal.SIG_DFL)
-    assert handlers_while_printing
-    assert all(handlers == restored for handlers in handlers_while_printing)
+    assert handlers_at["out"]
+    assert all(handlers != restored for handlers in handlers_at["out"])
+    assert handlers_at["err"]
+    assert all(handlers == restored for handlers in handlers_at["err"])
 
 
 @pytest.mark.asyncio
@@ -1732,20 +1788,17 @@ def test_cli_messages_are_dropped_when_stderr_is_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without a stderr, `print` would write the CLI's own lines to stdout, among the command's output."""
-    receipts = iter(
-        [
-            {"status": "running", "progress": "starting worker w... (5s)", "progress_revision": 2},
-            {"status": "completed", "outcome": "[worker: w, started]\nhello"},
-        ],
-    )
+    frames = [
+        {"t": "progress", "text": "starting worker w... (5s)"},
+        *command_frames(b"hello\n", b"warning\n", header="[worker: w, started]"),
+    ]
 
-    class Client:
+    class Client(_NoStdin):
         def operation(self, _payload: object) -> dict[str, object]:
-            return {"status": "running", "progress": "starting worker w...", "progress_revision": 1}
+            return {"status": "running"}
 
-        def receipt(self, call_id, **kwargs: object):
-            del call_id, kwargs
-            return next(receipts)
+        def stream(self, _call_id):
+            return iter(frames)
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     monkeypatch.setattr("mindroom.agent_cli.main.time.sleep", lambda _seconds: None)
@@ -1757,19 +1810,19 @@ def test_cli_messages_are_dropped_when_stderr_is_closed(
 
 @pytest.mark.parametrize("stderr", ["closed", "full"])
 @pytest.mark.parametrize(
-    ("receipt", "expected_code", "expected_out"),
+    ("frames", "expected_code", "expected_out"),
     [
-        ({"status": "completed", "outcome": "[worker: w, started]\nhello"}, 0, b"hello\n"),
-        ({"status": "failed", "error_kind": "named_worker_refusal", "outcome": "limit reached"}, 125, b""),
+        (command_frames(b"hello\n", b"warning\n", header="[worker: w, started]"), 0, b"hello\n"),
+        ([{"status": "failed", "error_kind": "named_worker_refusal", "outcome": "limit reached"}], 125, b""),
     ],
 )
 def test_real_unusable_stderr_changes_neither_stdout_nor_the_exit_code(
-    receipt: dict[str, object],
+    frames: list[dict[str, object]],
     expected_code: int,
     expected_out: bytes,
     stderr: str,
 ) -> None:
-    """A stderr that is closed (`2>&-`) or fails every write (`2>/dev/full`) only loses the CLI's own lines.
+    """A stderr that is closed (`2>&-`) or fails every write (`2>/dev/full`) only loses what was written to it.
 
     A closed stderr is None in most Pythons; in one that starts with another file open as descriptor 2, writes fail.
     """
@@ -1777,14 +1830,12 @@ def test_real_unusable_stderr_changes_neither_stdout_nor_the_exit_code(
         pytest.skip("needs /dev/full")
     reads = 0
 
-    def respond(method: str, _path: str) -> dict[str, object]:
+    def respond(method: str, _path: str) -> object:
         nonlocal reads
         if method == "POST":
             return {"status": "queued"}
         reads += 1
-        if reads == 1:
-            return {"status": "running", "progress": "starting worker w...", "progress_revision": 1}
-        return receipt
+        return [{"t": "progress", "text": "starting worker w..."}, *frames]
 
     with ExitStack() as stack:
         popen: dict[str, object] = {"preexec_fn": lambda: os.close(2)}
@@ -1793,7 +1844,7 @@ def test_real_unusable_stderr_changes_neither_stdout_nor_the_exit_code(
         proc = stack.enter_context(_real_workers_run(respond, stdout=subprocess.PIPE, **popen))
         stdout, _ = proc.communicate(timeout=SETTLE_TIMEOUT_SECONDS)
         assert (proc.returncode, stdout) == (expected_code, expected_out)
-    assert reads == 2
+    assert reads == 1
 
 
 @contextmanager
@@ -1803,7 +1854,13 @@ def _real_workers_run(respond, **popen: object) -> Iterator[subprocess.Popen[byt
     class Handler(BaseHTTPRequestHandler):
         def _answer(self) -> None:
             self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            body = json.dumps(respond(self.command, self.path)).encode()
+            if self.path.endswith("/stdin"):
+                answer: object = {"open": False}
+            else:
+                answer = respond(self.command, self.path)
+            # A list is a stream: one JSON object per line.
+            lines = answer if isinstance(answer, list) else [answer]
+            body = b"".join(json.dumps(line).encode() + b"\n" for line in lines)
             # The CLI may be gone by the time a held answer is written.
             with suppress(OSError):
                 self.send_response(200)
@@ -1847,25 +1904,32 @@ def _small_pipe() -> tuple[int, int]:
     return read_fd, write_fd
 
 
-def test_real_sigterm_during_a_blocked_final_write_stops_the_cli() -> None:
-    """SIGTERM stops a CLI that is blocked writing its result to a full stdout pipe, as it does on main."""
-    submitted = threading.Event()
+def test_real_sigterm_during_a_blocked_write_of_output_cancels_and_stops_the_cli() -> None:
+    """SIGTERM reaches a CLI that is blocked writing output to a full stdout pipe: it cancels and exits at once."""
+    submitted, cancelled = threading.Event(), threading.Event()
 
-    def respond(_method: str, _path: str) -> dict[str, object]:
+    def respond(method: str, path: str) -> object:
+        if path.endswith("/cancel"):
+            cancelled.set()
+            return {"status": "cancelled"}
+        if method == "POST":
+            return {"status": "queued"}
         submitted.set()
-        return {"status": "completed", "outcome": "[worker: w]\n" + "x" * (8 * _PIPE_BYTES)}
+        return command_frames(b"x" * (8 * _PIPE_BYTES))
 
     read_fd, write_fd = _small_pipe()
     try:
         with _real_workers_run(respond, stdout=write_fd, stderr=subprocess.DEVNULL) as proc:
             assert submitted.wait(timeout=SETTLE_TIMEOUT_SECONDS)
-            # Nothing reads the pipe, so once it is full the CLI is blocked in its final write.
+            # Nothing reads the pipe, so once it is full the CLI is blocked writing the command's output.
             deadline = time.monotonic() + SETTLE_TIMEOUT_SECONDS
             while int.from_bytes(fcntl.ioctl(read_fd, termios.FIONREAD, bytes(4)), sys.byteorder) < _PIPE_BYTES:
                 assert time.monotonic() < deadline, "the CLI never filled its stdout pipe"
                 time.sleep(0.01)
             proc.send_signal(signal.SIGTERM)
-            assert proc.wait(timeout=SETTLE_TIMEOUT_SECONDS) == -signal.SIGTERM
+            # The output it could not write does not hold up its exit either.
+            assert proc.wait(timeout=SETTLE_TIMEOUT_SECONDS) == 128 + signal.SIGTERM
+            assert cancelled.is_set()
     finally:
         os.close(read_fd)
         os.close(write_fd)
@@ -1942,9 +2006,9 @@ def test_cli_submit_refused_with_401_exits_125_at_once(
             msg = "Agent CLI authority or transport is unavailable"
             raise AgentCliRefusedError(msg)
 
-        def receipt(self, call_id, **kwargs: object):
-            del call_id, kwargs
-            pytest.fail("a refused submit has no receipt to read")
+        def stream(self, call_id):
+            del call_id
+            pytest.fail("a refused submit has no stream to read")
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     monkeypatch.setattr("mindroom.agent_cli.main.time.sleep", lambda _seconds: pytest.fail("must not wait"))
@@ -2043,8 +2107,8 @@ def test_cli_signal_during_handler_installation_is_held_until_the_submit_returns
             events.append("submitted")
             return {"status": "running", "call_id": payload["call_id"]}
 
-        def receipt(self, call_id, **kwargs: object):
-            del call_id, kwargs
+        def stream(self, call_id):
+            del call_id
             pytest.fail("a held signal cancels before the first read")
 
         def cancel(self, call_id, *, timeout: float = 8.0):

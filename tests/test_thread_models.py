@@ -34,7 +34,6 @@ from mindroom.llm.runs import RunStatus
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
-from mindroom.room_model_overrides import set_room_model_override
 from mindroom.thread_models import (
     _get_thread_model_override,
     _store_path,
@@ -72,6 +71,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.room_settings_helpers import set_room_model_override
 from tests.runtime_fakes import ready_runtime
 from tests.test_hook_sender import _agent_bot, _dispatch_context
 from tests.test_model_selection_commands import OTHER, resolved_thread_models, restricted_config

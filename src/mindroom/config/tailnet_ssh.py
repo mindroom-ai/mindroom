@@ -1,0 +1,87 @@
+"""Tailnet logins and SSH public keys keyed by Matrix user ID."""
+
+import base64
+import binascii
+import re
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from mindroom.config.access import validate_concrete_matrix_user_ids
+from mindroom.config.schema_hints import dashboard_hint
+
+_KEY_TYPE_PATTERN = re.compile(r"(?:ssh|ecdsa|sk)-[A-Za-z0-9.@-]+")
+_PRIVATE_KEY_HEADER = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+_NOT_A_KEY = "Expected an SSH public key line from a .pub file."
+
+
+def _is_canonical_base64(token: str) -> bool:
+    # The SSH key loader accepts some blobs that OpenSSH refuses.
+    try:
+        return base64.b64encode(base64.b64decode(token, validate=True)).decode() == token
+    except binascii.Error:
+        return False
+
+
+def _normalize_public_key(line: str) -> str:
+    """Normalize one OpenSSH public key line; the primary sets its own key options."""
+    text = line.strip()
+    if _PRIVATE_KEY_HEADER.match(text):
+        msg = "Use the .pub file, not the private key."
+        raise ValueError(msg)
+    if any(character in text for character in "\r\n\0"):
+        msg = "Each entry must be one SSH public key line."
+        raise ValueError(msg)
+    fields = text.split(maxsplit=2)
+    if len(fields) < 2:
+        raise ValueError(_NOT_A_KEY)
+    if not _KEY_TYPE_PATTERN.fullmatch(fields[0]):
+        msg = "Expected an SSH public key type, not key options such as command=."
+        raise ValueError(msg)
+    if not _is_canonical_base64(fields[1]):
+        raise ValueError(_NOT_A_KEY)
+    # Deferred: cryptography's SSH serialization loads bcrypt, which the slim config entry points must not.
+    from cryptography.exceptions import UnsupportedAlgorithm  # noqa: PLC0415
+    from cryptography.hazmat.primitives.serialization import load_ssh_public_key  # noqa: PLC0415
+
+    try:
+        load_ssh_public_key(f"{fields[0]} {fields[1]}".encode())
+    except (ValueError, UnsupportedAlgorithm):
+        raise ValueError(_NOT_A_KEY) from None
+    return " ".join(fields)
+
+
+class TailnetSshConfig(BaseModel):
+    """Operator-supplied tailnet SSH settings, keyed by concrete Matrix user ID."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    logins: dict[str, str] = Field(
+        default_factory=dict,
+        description="Exact Tailscale or Headscale login each Matrix user may connect from",
+        json_schema_extra=dashboard_hint(key_placeholder="@alice:example.org"),
+    )
+    authorized_keys: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="OpenSSH public key lines each Matrix user may authenticate with",
+        json_schema_extra=dashboard_hint(key_placeholder="@alice:example.org"),
+    )
+
+    @field_validator("logins")
+    @classmethod
+    def _validate_logins(cls, value: dict[str, str]) -> dict[str, str]:
+        validate_concrete_matrix_user_ids(list(value), field_name="tailnet_ssh.logins")
+        # Tagged peers have empty logins. Never make one an allowed login.
+        logins = value.values()
+        if any(not login or login != login.strip() for login in logins):
+            msg = "tailnet_ssh.logins needs nonempty logins with no surrounding whitespace."
+            raise ValueError(msg)
+        if len(set(logins)) != len(value):
+            msg = "tailnet_ssh.logins must map Matrix users to distinct logins."
+            raise ValueError(msg)
+        return value
+
+    @field_validator("authorized_keys")
+    @classmethod
+    def _validate_authorized_keys(cls, value: dict[str, list[str]]) -> dict[str, list[str]]:
+        validate_concrete_matrix_user_ids(list(value), field_name="tailnet_ssh.authorized_keys")
+        return {user_id: [_normalize_public_key(line) for line in lines] for user_id, lines in value.items()}

@@ -22,10 +22,10 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.llm.provider import TextDelta
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, TeamRunRecord
-from mindroom.room_model_overrides import set_room_model_override
 from mindroom.teams.members import resolve_exact_team_members
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call
+from tests.room_settings_helpers import set_room_model_override
 from tests.team_turn_helpers import (
     PROBE_TOOL,
     ROOM_ID,

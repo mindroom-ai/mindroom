@@ -34,14 +34,17 @@ from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
+    get_call_output_stream,
     get_call_progress_sink,
     get_tool_runtime_context,
     get_worker_progress_pump,
+    note_call_cancelled_never_ran,
     note_call_refusal,
 )
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_proxy_client import (
+    STOP_CONFIRMATION_SECONDS,
     WorkerCallCancellation,
     WorkerProxyClientConfig,
     execute_worker_proxy_request,
@@ -791,6 +794,7 @@ def _build_execute_request(
     wire_kwargs: dict[str, object],
     progress_sink: ProgressSink | None = None,
     start: bool = True,
+    include_execution_env: bool = True,
     named: NamedWorkerCall | None = None,
 ) -> tuple[ExecuteRequest, WorkerHandle | None]:
     """Build one call that ``stand_ins`` sends, unsent, and return it with the handle of the worker that serves it.
@@ -818,15 +822,22 @@ def _build_execute_request(
     )
     # A shell call's own environment, plugin hooks' changes and a response's CLI grant, travels with each command;
     # the runner passes a variable on only when told to, so the call's pass-through patterns join the configured ones.
-    call_environment = current_tool_environment() if tool_name == "shell" else ToolEnvironment()
-    execution_env = call_environment.applied(stand_ins.execution_env or {}, runtime_paths.process_env)
+    call_environment = (
+        current_tool_environment() if tool_name == "shell" and include_execution_env else ToolEnvironment()
+    )
+    execution_env = (
+        call_environment.applied(stand_ins.execution_env or {}, runtime_paths.process_env)
+        if include_execution_env
+        else {}
+    )
     extra_env_passthrough = (
         ",".join(filter(None, (stand_ins.extra_env_passthrough, *call_environment.pass_through))) or None
     )
     agent_name = worker_target.routing_agent_name if worker_target is not None else None
     # Only an agent that opted into Agent Keys gets the broker env; a call without a configured agent never does.
     if (
-        tool_name in EXECUTION_ENV_TOOL_NAMES
+        include_execution_env
+        and tool_name in EXECUTION_ENV_TOOL_NAMES
         and egress_broker_enabled(runtime_paths)
         and runtime_config is not None
         and agent_name is not None
@@ -915,6 +926,22 @@ def _call_proxy_sync(
             progress_sink=progress_sink,
             named=named,
         )
+        # A CLI call that asked for its command's raw output (`workers run`) gets it as frames while it runs.
+        stream = get_call_output_stream() if tool_name == "shell" else None
+        header = None
+        on_frame = None
+        if stream is not None:
+            request = request.model_copy(update={"stream_io": True})
+
+            def on_frame(frame: dict[str, object]) -> None:
+                nonlocal header
+                if frame.get("t") == "started":
+                    # The frame that says the command runs also says whether its worker is a new start, as the
+                    # result does; asked only now, so a call that fails before its command runs does not use it up.
+                    header = named.header(worker_handle) if named is not None and worker_handle is not None else None
+                    frame = {**frame, "header": header}
+                stream.put(frame)
+
         result = execute_worker_proxy_request(
             config=worker_proxy_client_config(
                 proxy_config,
@@ -943,6 +970,8 @@ def _call_proxy_sync(
                 else None
             ),
             cancellation=cancellation,
+            stream=stream,
+            on_frame=on_frame,
         )
         # Deferred: it loads the attachment store and the provider registry, which the slim tool registry must not.
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
@@ -951,8 +980,9 @@ def _call_proxy_sync(
             decoded = decode_media_result(result)
             return finalize_tool_media(decoded) if isinstance(decoded, ToolValue) else decoded
         if named is not None and worker_handle is not None:
+            header = header or named.header(worker_handle)
             if isinstance(result, str):
-                return f"{named.header(worker_handle)}\n{result}"
+                return f"{header}\n{result}"
             # The runner can save its shell result before it gets here. The preview has the same exit line.
             saved = result.get("mindroom_tool_output") if isinstance(result, dict) else None
             if isinstance(saved, dict) and saved.get("status") == "saved_to_file":
@@ -960,7 +990,7 @@ def _call_proxy_sync(
                 if isinstance(preview, str):
                     return {
                         **result,
-                        "mindroom_tool_output": {**saved, "preview": f"{named.header(worker_handle)}\n{preview}"},
+                        "mindroom_tool_output": {**saved, "preview": f"{header}\n{preview}"},
                     }
         return result
 
@@ -1070,7 +1100,12 @@ class WorkerStandIns:
                 raise
             except asyncio.CancelledError:
                 # The blocking request keeps running after this await is cancelled; stop it at the worker too.
-                cancellation.cancel()
+                if cancellation.cancel():
+                    note_call_cancelled_never_ran()
+                elif self.tool_name == "shell" and (stream := get_call_output_stream()) is not None:
+                    # The exit of a streamed command says its stop took effect, which its caller's cancel reports.
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(stream.ended.wait(), STOP_CONFIRMATION_SECONDS)
                 raise
 
         return proxy_entrypoint
@@ -1117,15 +1152,22 @@ class WorkerCall:
     # The runner's API root, such as ``http://worker:8766/api/sandbox-runner``, under which it serves each operation.
     api_root: str
     headers: dict[str, str] = field(repr=False)
+    handle: WorkerHandle | None = field(repr=False, compare=False)
 
 
-def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = True) -> WorkerCall | None:
+def worker_call(
+    stand_ins: WorkerStandIns,
+    function_name: str,
+    *,
+    start: bool = True,
+    include_execution_env: bool = True,
+) -> WorkerCall | None:
     """Build the call of ``function_name`` that ``stand_ins`` would send, without sending it.
 
     The request carries no arguments, nor what sending adds: the job flag, the cancellation id, and a credential lease.
     Otherwise it is the request a sent call carries, for the worker that would serve it. That worker starts unless
     ``start`` is False; then a dedicated worker is only marked used, as ``worker_route`` describes, and the answer
-    is None while it is not running.
+    is None while it is not running. Worker-wide sessions omit the call environment and scoped broker credentials.
     """
     runtime_paths = stand_ins.runtime_paths
     proxy_config = sandbox_proxy_config(runtime_paths)
@@ -1137,22 +1179,18 @@ def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = 
             wire_args=[],
             wire_kwargs={},
             start=start,
+            include_execution_env=include_execution_env,
         )
     if worker_backend_kind(runtime_paths).dedicated and (worker_handle is None or worker_handle.status != "ready"):
         return None
-    return WorkerCall(
-        request=request,
-        # Without a worker of its own, the call goes to the shared runner, whose URL its route has already required.
-        api_root=(
-            worker_api_root(worker_handle)
-            if worker_handle is not None
-            else normalize_sandbox_runner_api_root(proxy_config.proxy_url or "")
-        ),
-        headers=worker_request_headers(
-            worker_handle,
-            config=worker_proxy_client_config(proxy_config, runtime_paths),
-        ),
+    # Without a worker of its own, the call goes to the shared runner, whose URL its route has already required.
+    api_root = (
+        worker_api_root(worker_handle)
+        if worker_handle is not None
+        else normalize_sandbox_runner_api_root(proxy_config.proxy_url or "")
     )
+    headers = worker_request_headers(worker_handle, config=worker_proxy_client_config(proxy_config, runtime_paths))
+    return WorkerCall(request, api_root, headers, worker_handle)
 
 
 __all__ = [

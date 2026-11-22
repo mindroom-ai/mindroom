@@ -82,25 +82,24 @@ def bind_response_owner(
     """
     runtime = catalog.runtime_context
     assert runtime.orchestrator is not None
-    owner = lifetime.owner
-    if owner is not None:
-        owner.bind_catalog(catalog, context=context_documents)
-        return owner
+    if (existing := lifetime.owner) is not None:
+        existing.bind_catalog(catalog, context=context_documents)
+        return existing
     # Check that Bash can reach MindRoom before any grant exists.
     if problems := minimal_shell_problems(runtime.config, runtime.runtime_paths, runtime.agent_name):
         raise RuntimeError(" ".join(problems))
     expected_target = runtime.resolve_worker_target()
     bindings: dict[tuple[int, ToolKey], PreparedAgentToolBinding] = {}
 
-    async def authorize(key: ToolKey, _arguments: dict[str, object]) -> None:
-        current = new_owner.catalog
+    async def authorize(owner: LiveTurnTools, key: ToolKey, _arguments: dict[str, object]) -> None:
+        current = owner.catalog
 
         def check_authority() -> None:
             try:
                 check_prepared_catalog_authority(current.runtime_context)
             except PermissionError as exc:
                 if reload_ends_run:
-                    new_owner.end_run_for_reload()
+                    owner.end_run_for_reload()
                 raise CliCatalogReloadedError(_RELOADED) from exc
 
         # Before binding, so a refused catalog builds no deferred toolkit.

@@ -34,6 +34,8 @@ _CODE_RUNNING_JOBS = (
     ("security-scan.yml", "scan"),
     ("smoke-stacks.yml", "smoke"),
     ("tach.yml", "check"),
+    ("tailnet-gateway.yml", "go-test"),
+    ("tailnet-gateway.yml", "headscale-e2e"),
 )
 
 
@@ -49,6 +51,19 @@ def _job_permissions(workflow: dict[str, Any], job: str) -> dict[str, str]:
     permissions = workflow["jobs"][job].get("permissions", workflow.get("permissions"))
     assert isinstance(permissions, dict), "the job must not inherit the repository-default token scope"
     return permissions
+
+
+def test_headscale_e2e_triggers_on_shell_admission_and_worker_changes() -> None:
+    """Changes to the worker route or its admission should run the PR's tailnet checks."""
+    paths = _load_workflow("tailnet-gateway.yml")["on"]["pull_request"]["paths"]
+    assert {
+        "src/mindroom/authorization.py",
+        "src/mindroom/tool_system/worker_routing.py",
+        "src/mindroom/tool_system/sandbox_proxy.py",
+        "src/mindroom/workers/backends/**",
+        "src/mindroom/tailnet_ssh/**",
+        "src/mindroom/api/*ssh*.py",
+    }.issubset(paths)
 
 
 @pytest.mark.parametrize("workflow_path", sorted(WORKFLOW_DIR.glob("*.yml")), ids=lambda path: path.name)
@@ -96,6 +111,7 @@ def test_generated_docs_are_checked_rather_than_pushed_from_ci() -> None:
         "platform-backend-tests.yml",
         "publish-helm-charts.yml",
         "release.yml",
+        "tailnet-gateway.yml",
     ],
 )
 def test_workflows_pin_actions_to_commits(name: str) -> None:

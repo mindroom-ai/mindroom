@@ -82,7 +82,7 @@ def test_a_route_posts_as_the_rooms_poster_and_streams_to_a_member(plugin: Loade
 
 
 def test_a_route_reads_the_room_as_set_up(plugin: LoadedPlugin) -> None:
-    """A route reads the room as set up, and saves a thread mode its admin sets, which it answers 503 to publish."""
+    """A route reads the room as set up; the kit's rooms take no state writes, so a thread mode its admin sets is 503."""
     directory = entity_directory(plugin.config, plugin.runtime_paths)
     (helper,) = (user for user, entity in directory.items() if entity.name == "helper")
     plugin.add_room(
@@ -103,8 +103,11 @@ def test_a_route_reads_the_room_as_set_up(plugin: LoadedPlugin) -> None:
         "thread_mode": None,
     }
     assert (about[BOB]["admin"], about[BOB]["agents"]) == (False, [])
-    assert set_mode.status_code == 503
-    assert plugin.client(ALICE).get(f"{ROUTES}/about").json()["thread_mode"] == "room"
+    assert (set_mode.status_code, set_mode.json()) == (
+        503,
+        {"detail": "The room did not take its thread mode; try again."},
+    )
+    assert plugin.client(ALICE).get(f"{ROUTES}/about").json()["thread_mode"] is None
 
 
 def test_a_room_is_direct_as_running_agents_tell_and_no_load_sees_another_ones_answer(tmp_path: Path) -> None:

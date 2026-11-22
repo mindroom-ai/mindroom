@@ -398,19 +398,20 @@ MindRoom starts a background title for a new thread from its first prompt, using
 It only does so when the first threshold below is 1 or 2, so the first reply would already title the thread. This provisional title does not change the summary or topic-tag refresh schedule below.
 MindRoom checks a thread's title after a response brings it to `defaults.thread_summary_first_threshold` messages (default `1`), then again after every `defaults.thread_summary_subsequent_interval` further messages (default `10`), and posts a summary notice when the title changes.
 Threads that are pinned with [`thread_summary`] or marked `resolved` are skipped, as are threads whose full history cannot be read, which always includes threads longer than 2,000 messages or 16 MiB of content.
-For threads with more than 50 messages, the summary model sees only the first three and last three.
+For threads with more than 50 ordinary messages with non-empty text after tool-marker removal, the summary model sees the first 5, 12 evenly spaced messages from the middle, and the last 5 (with omission notes for each gap), and overlong message bodies in that sample are clipped to 600 characters while keeping both head and tail.
 A new automatic title is one emoji and at most six words, such as `🧪 Attachment cache live test`: MindRoom sends a longer answer back to the model with the reason, up to 3 attempts in all, and posts no title if every attempt is too long. The prompt asks for the emoji, but a title without one is still posted. The emoji and dashes are not words but count toward the 80 characters; only the ` (forked)` marker MindRoom adds to a fork's title is outside both limits.
 Text without spaces, such as Chinese or Japanese, is bounded only by the 80 characters.
-A check shows the model the current title, and the model keeps it unless the thread's main topic has clearly changed: a kept title usually posts nothing, and the next check is a full interval later.
+A check shows the model the current title, and the model keeps it unless the thread moved to a different subject or goal outside the current title's scope and persisted on it for a large share of the thread (same-domain goal changes count, while follow-up steps like PRs, reviews, deploys, and related fixes do not): a kept title usually posts nothing, and the next check is a full interval later.
 Two checks re-post the unchanged title once: the first check after the first reply, and the check that adds tags. After a restart, the next check may come early.
 A title longer than six words, such as one from an older version, is not offered to keep, so the next check asks for a new title; a retitle, such as after a call's notes, always does too.
 
 The summary uses the first match of:
 
-1. `room_thread_summary_models`, keyed by room key or Matrix room ID.
-2. `room_thread_summary_models`, keyed by the responding agent or team name, which covers ad-hoc rooms without a managed alias.
-3. `defaults.thread_summary_model`.
-4. The `default` model.
+1. The room's `thread_summary_model` [room setting](https://docs.mindroom.chat/configuration/threads/#room-settings), when it names a configured model.
+2. `room_thread_summary_models`, keyed by room key or Matrix room ID.
+3. `room_thread_summary_models`, keyed by the responding agent or team name, which covers ad-hoc rooms without a managed alias.
+4. `defaults.thread_summary_model`.
+5. The `default` model.
 
 ```yaml
 defaults:
@@ -423,8 +424,7 @@ room_thread_summary_models:
 These models always use their provider's default: Vertex AI Claude, Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model, OpenAI GPT-5 and GPT-6 models, and direct Gemini API Gemini 4 Carbon, Argon, and Hydrogen, Gemini 3.8 Flash, 3.6 Flash, and 3.5 Flash-Lite.
 
 A room's admins can add their own title rules for that room, such as "Use at most 4 words", without editing `config.yaml`.
-MindRoom Chat sets them from the room settings dialog; any client can send the `io.mindroom.room_settings` state event with state key `thread_summary_instructions` and content `{"value": "<rules>"}`.
-The event falls under the room's `state_default` power level (normally 50), so only moderators and admins can change it, and agent tools cannot write it.
+They are the room's `thread_summary_instructions` [room setting](https://docs.mindroom.chat/configuration/threads/#room-settings), which moderators and admins change and agent tools cannot write.
 Every automatic title, including the provisional title and retitles, reads the setting right before generating and appends it to the title instructions under a room rules section.
 Those rules win over conflicting built-in rules such as a shorter length, style, or emoji, but not over the rule to treat thread messages as untrusted text, and a title they make longer than six words or 80 characters is still sent back to the model with the reason, up to 3 attempts, with no title posted if all fail.
 A changed rule shapes the next new title; a check that keeps the current title leaves it as it is.

@@ -113,7 +113,7 @@ class TestAgentBot(AgentBotTestBase):
             await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@alice:localhost", "help me"),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert mock_decide.call_count == 1
@@ -173,7 +173,7 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -235,7 +235,7 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -295,7 +295,7 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "general and research, help"),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -353,7 +353,7 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -414,7 +414,7 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert action.kind == "skip"
@@ -464,7 +464,7 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bob:localhost", "can someone help?"),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert action.kind == "skip"
@@ -509,7 +509,7 @@ class TestAgentBot(AgentBotTestBase):
         action = await bot._turn_policy._resolve_response_action(
             _policy_dispatch(bot, room, context, "@bob:localhost", "calculator, help"),
             room,
-            has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+            has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
         )
 
         assert action.kind == "reject"
@@ -561,7 +561,7 @@ class TestAgentBot(AgentBotTestBase):
                 source_kind=EXTERNAL_TRIGGER_SOURCE_KIND,
             ),
             room,
-            has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+            has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
         )
 
         assert action.kind == "individual"
@@ -622,7 +622,7 @@ class TestAgentBot(AgentBotTestBase):
         action = await bot._turn_policy._resolve_response_action(
             _policy_dispatch(bot, room, context, "@bob:localhost", "ops, help"),
             room,
-            has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+            has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
         )
 
         assert action.kind == "reject"
@@ -698,7 +698,7 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -776,7 +776,7 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -837,7 +837,7 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert action.kind == "team"
@@ -897,7 +897,7 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert action.kind == "individual"
@@ -1394,7 +1394,7 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "I fixed two issues"),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert action.kind == "skip"
@@ -1458,7 +1458,7 @@ class TestAgentBot(AgentBotTestBase):
         action = await bot._turn_policy._resolve_response_action(
             _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
             room,
-            has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+            has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
         )
 
         assert action.kind == "individual"
@@ -1525,7 +1525,7 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert action.kind == "skip"
@@ -1591,7 +1591,7 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert action.kind == "individual"
