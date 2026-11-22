@@ -1284,9 +1284,12 @@ async def test_named_shell_launch_errors_fail_the_tool_without_matching_command_
             await call(command, worker="build")
     else:
         assert "definitely-not-a-binary-xyz" in await call(command)
-        assert await call(command, worker="build") == (
-            "Could not start command (exit code 127): definitely-not-a-binary-xyz: command not found"
-        )
+        assert await call(command, worker="build") == {
+            "mindroom_shell_launch_error": {
+                "exit_code": 127,
+                "message": "definitely-not-a-binary-xyz: command not found",
+            },
+        }
         assert await call(["printf", "Error: ordinary output"], worker="build") == "Error: ordinary output"
 
 

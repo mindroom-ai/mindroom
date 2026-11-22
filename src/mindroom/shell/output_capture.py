@@ -74,11 +74,6 @@ def format_shell_timeout(stdout: str, stderr: str | None, *, timeout: float, no_
     return "\n".join(lines)
 
 
-def format_shell_launch_failure(detail: str, *, return_code: int) -> str:
-    """Format a command that could not be started (126 not executable, 127 not found)."""
-    return f"Could not start command (exit code {return_code}): {detail}"
-
-
 class CapturedShellStream:
     """Spool decoded text up to the redirect cap without retaining it in memory."""
 

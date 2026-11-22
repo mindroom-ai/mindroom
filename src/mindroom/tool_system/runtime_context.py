@@ -454,6 +454,10 @@ _WORKER_PROGRESS_PUMP: ContextVar[WorkerProgressPump | None] = ContextVar(
 )
 _CALL_PROGRESS_SINK: ContextVar[Callable[[str], None] | None] = ContextVar("call_progress_sink", default=None)
 _CALL_REFUSAL_HOOK: ContextVar[Callable[[], None] | None] = ContextVar("call_refusal_hook", default=None)
+_CALL_LAUNCH_ERROR_HOOK: ContextVar[Callable[[int, str], None] | None] = ContextVar(
+    "call_launch_error_hook",
+    default=None,
+)
 _CALL_CANCEL_CONFIRMED_HOOK: ContextVar[Callable[[], None] | None] = ContextVar(
     "call_cancel_confirmed_hook",
     default=None,
@@ -508,6 +512,12 @@ def note_call_refusal() -> None:
     """Record a typed pre-execution named-worker refusal for the active CLI call."""
     if (hook := _CALL_REFUSAL_HOOK.get()) is not None:
         hook()
+
+
+def note_call_launch_error(exit_code: int, message: str) -> None:
+    """Record a missing or non-executable binary launch error for the active CLI call."""
+    if (hook := _CALL_LAUNCH_ERROR_HOOK.get()) is not None:
+        hook(exit_code, message)
 
 
 def get_call_cancel_confirmed_hook() -> Callable[[], None] | None:
@@ -763,14 +773,17 @@ def call_progress_sink_scope(
     *,
     on_refused: Callable[[], None] | None = None,
     on_cancel_confirmed: Callable[[], None] | None = None,
+    on_launch_error: Callable[[int, str], None] | None = None,
 ) -> Iterator[None]:
-    """Bind per-call progress, refusal, and cancel-confirmation hooks for one CLI tool call."""
+    """Bind per-call progress, refusal, launch-error, and cancel hooks for one CLI tool call."""
     progress_token = _CALL_PROGRESS_SINK.set(sink)
     refusal_token = _CALL_REFUSAL_HOOK.set(on_refused)
     cancel_token = _CALL_CANCEL_CONFIRMED_HOOK.set(on_cancel_confirmed)
+    launch_token = _CALL_LAUNCH_ERROR_HOOK.set(on_launch_error)
     try:
         yield
     finally:
+        _CALL_LAUNCH_ERROR_HOOK.reset(launch_token)
         _CALL_CANCEL_CONFIRMED_HOOK.reset(cancel_token)
         _CALL_REFUSAL_HOOK.reset(refusal_token)
         _CALL_PROGRESS_SINK.reset(progress_token)

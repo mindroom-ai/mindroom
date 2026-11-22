@@ -103,6 +103,8 @@ class ToolCallReceipt(_Operation):
     progress: str | None = Field(default=None, max_length=256)
     progress_revision: int = Field(default=0, ge=0)
     error_kind: Literal["named_worker_refusal"] | None = None
+    launch_exit_code: Literal[126, 127] | None = None
+    launch_error: str | None = Field(default=None, max_length=1024)
     cancel_confirmed: bool = False
     outcome: JsonValue = None
     attachments: list[dict[str, JsonValue]] = Field(default_factory=list)

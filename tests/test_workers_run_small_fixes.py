@@ -70,14 +70,18 @@ def _shell_entrypoint(
     return shell.functions["run_shell_command"]
 
 
-def _cli_with_completed(monkeypatch: pytest.MonkeyPatch, outcome: str) -> list[str]:
+def _cli_with_completed(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+    **extra: object,
+) -> list[str]:
     submitted: list[str] = []
 
     class Client:
         def operation(self, payload: dict[str, object]) -> dict[str, object]:
             call_id = str(payload["call_id"])
             submitted.append(call_id)
-            return {"status": "completed", "call_id": call_id, "outcome": outcome}
+            return {"status": "completed", "call_id": call_id, "outcome": outcome, **extra}
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     return submitted
@@ -97,9 +101,16 @@ async def test_item7_missing_absolute_binary_completes_as_127_on_stderr(
     """Running a missing absolute binary completes and exits 127 with a clean stderr message and no call id."""
     run_shell = _shell_entrypoint(tmp_path, monkeypatch)
     shell_result = await run_shell(["/nonexistent-binary-xyz"], worker="w1")
-    assert isinstance(shell_result, str)
+    assert isinstance(shell_result, dict)
+    launch = shell_result["mindroom_shell_launch_error"]
+    assert isinstance(launch, dict)
 
-    submitted = _cli_with_completed(monkeypatch, f"[worker: w1]\n{shell_result}")
+    submitted = _cli_with_completed(
+        monkeypatch,
+        f"[worker: w1]\n{launch['message']}",
+        launch_exit_code=launch["exit_code"],
+        launch_error=launch["message"],
+    )
     exit_code = main(["workers", "run", "w1", "--", "/nonexistent-binary-xyz"])
     output = capsys.readouterr()
 
@@ -119,9 +130,16 @@ async def test_item7_missing_bare_command_completes_as_127_on_stderr(
     """Running a missing bare command completes and exits 127 with command not found on stderr."""
     run_shell = _shell_entrypoint(tmp_path, monkeypatch)
     shell_result = await run_shell(["__missing_bare_cmd_xyz__"], worker="w1")
-    assert isinstance(shell_result, str)
+    assert isinstance(shell_result, dict)
+    launch = shell_result["mindroom_shell_launch_error"]
+    assert isinstance(launch, dict)
 
-    submitted = _cli_with_completed(monkeypatch, f"[worker: w1, started]\n{shell_result}")
+    submitted = _cli_with_completed(
+        monkeypatch,
+        f"[worker: w1, started]\n{launch['message']}",
+        launch_exit_code=launch["exit_code"],
+        launch_error=launch["message"],
+    )
     exit_code = main(["workers", "run", "w1", "--", "__missing_bare_cmd_xyz__"])
     output = capsys.readouterr()
 
@@ -146,9 +164,16 @@ async def test_item7_non_executable_file_completes_as_126_on_stderr(
 
     run_shell = _shell_entrypoint(tmp_path, monkeypatch)
     shell_result = await run_shell([str(nonexec)], worker="w1")
-    assert isinstance(shell_result, str)
+    assert isinstance(shell_result, dict)
+    launch = shell_result["mindroom_shell_launch_error"]
+    assert isinstance(launch, dict)
 
-    submitted = _cli_with_completed(monkeypatch, f"[worker: w1]\n{shell_result}")
+    submitted = _cli_with_completed(
+        monkeypatch,
+        f"[worker: w1]\n{launch['message']}",
+        launch_exit_code=launch["exit_code"],
+        launch_error=launch["message"],
+    )
     exit_code = main(["workers", "run", "w1", "--", str(nonexec)])
     output = capsys.readouterr()
 

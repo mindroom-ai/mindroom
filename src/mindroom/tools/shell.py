@@ -21,7 +21,7 @@ from mindroom.constants import (
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import run_command, shell_call_timeout
-from mindroom.shell.output_capture import ShellOutputDestination, format_shell_launch_failure
+from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, run_command_via_supervisor
 from mindroom.terminal.lines import PROMPT_COMMAND
 from mindroom.terminal.session import TerminalError, TerminalLaunch
@@ -525,7 +525,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             timeout: int | None = None,  # noqa: ASYNC109
             worker: str | None = None,
             resource_profile: ScriptResourceProfileName | None = None,
-        ) -> str | ToolOutputFileHandled:
+        ) -> str | ToolOutputFileHandled | dict[str, object]:
             """Runs a shell command and returns the output or error.
 
             The last ``tail`` lines of stdout, then of stderr, are returned; on
@@ -626,7 +626,12 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 )
             if worker is not None:
                 if result.launch_exit_code is not None and result.launch_error is not None:
-                    return format_shell_launch_failure(result.launch_error, return_code=result.launch_exit_code)
+                    return {
+                        "mindroom_shell_launch_error": {
+                            "exit_code": result.launch_exit_code,
+                            "message": result.launch_error,
+                        },
+                    }
                 if result.execution_error:
                     raise ValueError(result.message)
             return ToolOutputFileHandled(result.message) if result.output_file_handled else result.message

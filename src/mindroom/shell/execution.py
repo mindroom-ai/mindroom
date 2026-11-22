@@ -362,6 +362,15 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
             capture = ShellOutputCapture(output_destination)
         started_at = time.monotonic()
         spawn_argv = _idle_launch_argv(argv, env, cwd)
+    except asyncio.CancelledError:
+        if capture is not None:
+            capture.close()
+        raise
+    except Exception as exc:
+        if capture is not None:
+            capture.close()
+        return ShellRunResult(message=f"Error: {exc}", execution_error=True)
+    try:
         process = await asyncio.create_subprocess_exec(
             *spawn_argv,
             stdin=stdin,
@@ -820,7 +829,7 @@ def _idle_launcher() -> str | None:
 
 def _launch_failure(argv: list[str], cwd: str | None, exc: OSError) -> tuple[int, str] | None:
     """Return ``(exit_code, detail)`` for a missing or non-executable binary, else None."""
-    if not argv or (cwd is not None and exc.filename == cwd and (exc.filename != argv[0] or not Path(cwd).is_dir())):
+    if not argv or exc.filename != argv[0] or (cwd is not None and exc.filename == cwd and not Path(cwd).is_dir()):
         return None
     program = argv[0]
     if exc.errno == errno.ENOENT:

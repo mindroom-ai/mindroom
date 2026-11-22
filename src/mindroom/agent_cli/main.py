@@ -47,8 +47,6 @@ _WORKER_SIGNALS = tuple(
 # signal that killed it, then the streams it kept under their labels. A command that succeeds while printing exactly
 # these lines first reads as failed, which the shell result cannot tell apart.
 _FAILED_COMMAND = re.compile(r"Exit code (-?[1-9][0-9]*)(?:\n(?=(?:Output|Stderr):\n)|\Z)")
-# How a shell result reports a missing or non-executable binary (`format_shell_launch_failure`).
-_LAUNCH_FAILED = re.compile(r"Could not start command \(exit code (126|127)\): (.+)")
 # Parsed options the CLI handles itself instead of sending in the operation payload.
 _LOCAL_ARGUMENTS = frozenset(
     {"group", "action", "json", "json_argument", "json_file", "json_stdin", "call_id", "timeout"},
@@ -308,8 +306,9 @@ class _WorkerStderr:
             with suppress(OSError, ValueError):
                 is_tty = bool(sys.stderr.isatty())
         if is_tty:
-            if self._write(f"\r\x1b[K{message}"):
-                self._progress_open = True
+            self._progress_open = True
+            if not self._write(f"\r\x1b[K{message}"):
+                self._progress_open = False
             return
         self.note(message)
 
@@ -437,37 +436,39 @@ def _run_in_worker(args: argparse.Namespace) -> int:
     result: dict[str, object] | None = None
     error: Exception | None = None
     signum: int | None = None
-    with _worker_signal_handlers() as signals:
-        try:
+    try:
+        with _worker_signal_handlers() as signals:
             try:
-                # Signals are held until the submit returns: a cancel that overtook it would find no call.
-                submitting = AgentCliClient()
-                result = _submit_once(
-                    submitting,
-                    {
-                        "operation": "tools.call",
-                        "toolkit": "shell",
-                        "function": "run_shell_command",
-                        "call_id": call_id,
-                        "arguments": arguments,
-                    },
-                )
-                client = submitting
+                try:
+                    # Signals are held until the submit returns: a cancel that overtook it would find no call.
+                    submitting = AgentCliClient()
+                    result = _submit_once(
+                        submitting,
+                        {
+                            "operation": "tools.call",
+                            "toolkit": "shell",
+                            "function": "run_shell_command",
+                            "call_id": call_id,
+                            "arguments": arguments,
+                        },
+                    )
+                    client = submitting
+                    signals.release()
+                    result = _settled(client, call_id, result, stderr)
+                except (AgentCliUnavailableError, ValueError) as exc:
+                    error = exc
+                # A signal held through a refused submit is raised now; after that nothing is left to cancel.
                 signals.release()
-                result = _settled(client, call_id, result, stderr)
-            except (AgentCliUnavailableError, ValueError) as exc:
-                error = exc
-            # A signal held through a refused submit is raised now; after that nothing is left to cancel.
-            signals.release()
-            signals.held = True
-        except _WorkerSignal as exc:
-            signum, error, result = exc.signum, None, None
-            if client is not None:
-                result = {}
-                with suppress(AgentCliUnavailableError, ValueError):
-                    result = client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
-    # From here on the CLI prints under the signal handlers it started with.
-    stderr.finish_progress()
+                signals.held = True
+            except _WorkerSignal as exc:
+                signum, error, result = exc.signum, None, None
+                if client is not None:
+                    result = {}
+                    with suppress(AgentCliUnavailableError, ValueError):
+                        result = client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
+    finally:
+        # From here on the CLI prints under the signal handlers it started with.
+        stderr.finish_progress()
     if signum is not None and (result is None or result.get("status") != "completed"):
         stderr.note(_cancel_notice(args.name, call_id, signum, result))
         return 128 + signum
@@ -511,20 +512,22 @@ def _print_worker_result(
         return _EXIT_UNKNOWN
     if header == started_header:
         stderr.note(f"mindroom-agent: started worker {args.name}")
-    return _print_worker_body(args, body, saved_path=saved_path, stderr=stderr)
+    return _print_worker_body(args, body, result=result, saved_path=saved_path, stderr=stderr)
 
 
 def _print_worker_body(
     args: argparse.Namespace,
     body: str,
     *,
+    result: dict[str, object],
     saved_path: object,
     stderr: _WorkerStderr,
 ) -> int:
     """Print a completed worker command's body and return its exit code."""
-    if (launch_failed := _LAUNCH_FAILED.fullmatch(body)) is not None:
-        stderr.note(f"mindroom-agent: {launch_failed[2]}")
-        return int(launch_failed[1])
+    launch_code, launch_error = result.get("launch_exit_code"), result.get("launch_error")
+    if launch_code in (126, 127) and isinstance(launch_error, str):
+        stderr.note(f"mindroom-agent: {launch_error}")
+        return cast("int", launch_code)
     failed = _FAILED_COMMAND.match(body)
     # `format_shell_timeout` gives an exact line, then only output and stderr sections if present.
     first_line, newline, streams = body.partition("\n")
