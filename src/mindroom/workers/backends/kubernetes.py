@@ -308,7 +308,7 @@ class KubernetesWorkerBackend:
                 return cached_handle
             return self._provision_worker_locked(spec, launch, timestamp=timestamp)
 
-    def _provision_worker_locked(  # noqa: C901, PLR0915
+    def _provision_worker_locked(  # noqa: C901, PLR0912, PLR0915
         self,
         spec: WorkerSpec,
         launch: WorkerLaunchConfig,
@@ -395,6 +395,8 @@ class KubernetesWorkerBackend:
                     reporter.mark("pod_ready")
                 health = self._compatible_worker_health(worker_id, is_replacement=replacing_stale_worker)
                 if health is not None:
+                    if reporter is not None:
+                        reporter.mark("healthy")
                     break
                 # A mutable tag such as `:latest` keeps an older pod running after an upgrade, and
                 # the template is unchanged, so only a new pod pulls the tag again under `Always`.
@@ -425,8 +427,9 @@ class KubernetesWorkerBackend:
             raise WorkerBackendError(failure_reason) from exc
 
         if reporter is not None:
-            reporter.mark("healthy")
-            self._wait_for_worker_setup(worker_id, reporter, health)
+            # A caller that only shows the worker needs it to answer, not to run tools.
+            if spec.wait_for_setup:
+                self._wait_for_worker_setup(worker_id, reporter, health)
             reporter.finish(None)
         final_deployment_annotations = {
             **dict(deployment.metadata.annotations or {}),

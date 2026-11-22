@@ -135,7 +135,7 @@ def _resolve_target(
         requester_id,
         room_id,
         agent_user_id,
-        WorkerSpec(target.worker_key, private_agent_names=target.private_agent_names),
+        WorkerSpec(target.worker_key, private_agent_names=target.private_agent_names, wait_for_setup=False),
         fingerprint,
     )
 
