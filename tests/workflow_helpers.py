@@ -16,6 +16,7 @@ import sqlite3
 import threading
 import time
 from contextlib import closing, contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import replace
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -269,6 +270,8 @@ def sdk_env(monkeypatch: pytest.MonkeyPatch, gateway: FakeWorkflowGateway) -> No
 
 
 _SETTLED_STATES = frozenset({"completed", "failed", "cancelled", "indeterminate"})
+# Set when the call that `WorkflowStack.call` is making has returned, for the job that call starts.
+_CALL_RETURNED: ContextVar[asyncio.Event | None] = ContextVar("workflow_call_returned", default=None)
 
 
 def tool_args(toolkit: str, function: str, **arguments: object) -> dict[str, object]:
@@ -939,6 +942,20 @@ class WorkflowStack:
             cancel=coordinator._interrupt,
             continues=lambda job: self.continues(job),
         )
+        start = self.jobs.start
+
+        async def start_job(job_id: str, *, operation: Callable[[], Awaitable[Any]], **options: Any) -> object:  # noqa: ANN401
+            returned = _CALL_RETURNED.get()
+
+            async def work() -> object:
+                if returned is not None:
+                    await returned.wait()
+                return await operation()
+
+            return await start(job_id, operation=work, **options)
+
+        # The job of a call made with `call` works once that call has returned, see there.
+        self.jobs.start = start_job  # type: ignore[method-assign]
         self._instance = pin_background_tool_jobs(self.context.config, paths)
         register_background_runtime(paths, self.jobs)
         coordinator._runtime, coordinator._journal = self.jobs, self.jobs.journal
@@ -966,20 +983,30 @@ class WorkflowStack:
         """Make one model call of the `workflow` toolkit through job admission, as a turn in *context* does.
 
         A call that fails raises `CallFailed` with the text the model would read.
+
+        A call that starts or resumes a run waits no time for its job, and returns the job's own end instead of its
+        handle when the job had ended by the time the call looked. Which of the two a job that ends at once gives
+        is a matter of timing, so here the job works once its call has returned: the call returns the handle.
         """
         context = context or self.context
         toolkit = WorkflowTools(context.config)
         bind_toolkit_construction(toolkit, ToolConstruction("workflow", None))
         tools = toolkit_job_tools(toolkit, authored_name="workflow").values()
-        async with execution_resources():
-            with tool_runtime_context(context):
-                outcome = await call_job_tool(
-                    job_actor(*tools, name=context.agent_name, depth=depth),
-                    name,
-                    arguments,
-                    call_id=call_id or uuid4().hex,
-                    session_id=context.execution_identity.session_id or "session",
-                )
+        returned = asyncio.Event()
+        held = _CALL_RETURNED.set(returned if depth == 0 and name in ("start_workflow", "resume_workflow") else None)
+        try:
+            async with execution_resources():
+                with tool_runtime_context(context):
+                    outcome = await call_job_tool(
+                        job_actor(*tools, name=context.agent_name, depth=depth),
+                        name,
+                        arguments,
+                        call_id=call_id or uuid4().hex,
+                        session_id=context.execution_identity.session_id or "session",
+                    )
+        finally:
+            _CALL_RETURNED.reset(held)
+            returned.set()
         if outcome.is_error:
             raise CallFailed(outcome.content)
         return outcome.content
