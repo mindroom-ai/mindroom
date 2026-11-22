@@ -6336,6 +6336,43 @@ async def test_a_cancelled_unreserved_response_frees_its_lock_before_it_returns(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reserved_early", [True, False])
+async def test_a_message_arriving_as_a_reply_returns_waits_only_behind_an_early_place(*, reserved_early: bool) -> None:
+    """A place reserved early is given back a loop turn after its reply returns; any other place at once."""
+    coordinator = ResponseLifecycleCoordinator()
+    envelope = _queued_envelope("$interactive")
+    late = _queued_envelope("$late")
+    notices: list[object] = []
+
+    async def reply() -> None:
+        # Ingress for a newer message is already due to run when this reply returns.
+        asyncio.get_running_loop().call_soon(
+            lambda: notices.append(
+                coordinator.reserve_waiting_human_message(target=late.target, response_envelope=late),
+            ),
+        )
+
+    async def respond() -> None:
+        await coordinator.run_locked_response(
+            target=envelope.target,
+            response_envelope=envelope,
+            pipeline_timing=None,
+            locked_operation=reply,
+        )
+
+    if reserved_early:
+        reservation = await coordinator.reserve_response_lifecycle(envelope)
+        with response_lifecycle_reservation_context(reservation):
+            await respond()
+    else:
+        await respond()
+    await asyncio.sleep(0)
+
+    assert [notice is not None for notice in notices] == [reserved_early]
+    assert not coordinator.has_active_response_for_target(envelope.target)
+
+
+@pytest.mark.asyncio
 async def test_response_lifecycle_reservation_surfaces_lock_acquire_failure() -> None:
     """A failed acquire task must wake reservation startup and remain observable."""
     coordinator = ResponseLifecycleCoordinator()

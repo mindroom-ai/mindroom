@@ -148,11 +148,16 @@ class _ResponseLifecycleReservation:
     async def release(self) -> None:
         """Release or cancel this place exactly once.
 
-        The release starts at once: a place that is not still queueing for its lock is free before this first
-        suspends, so a cancelled reply never returns while it holds the lock.
+        A place taken where the reply runs is free before this first suspends, so a cancelled reply never returns
+        while it holds the lock. A place reserved early is freed a loop turn later, so ingress already due to run
+        still finds the conversation busy.
         """
         if self._release_task is None:
-            self._release_task = asyncio.eager_task_factory(asyncio.get_running_loop(), self._release())
+            release = self._release()
+            if self._acquire_task is None:
+                self._release_task = asyncio.eager_task_factory(asyncio.get_running_loop(), release)
+            else:
+                self._release_task = asyncio.create_task(release)
         await asyncio.shield(self._release_task)
 
 
