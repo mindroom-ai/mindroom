@@ -606,7 +606,9 @@ async def test_a_command_that_never_reads_stdin_holds_one_pending_chunk(
             return await http.post(f"{route}/stdin", headers=stack.headers, json={"seq": seq, "b": chunk, "eof": False})
 
         async with http.stream("GET", f"{route}/stream", headers=stack.headers) as response:
-            assert (await anext(_frames(response)))["t"] == "started"
+            # The frames stay referenced: collecting their generator would close the stream, as a reader that left.
+            frames = _frames(response)
+            assert (await anext(frames))["t"] == "started"
             async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 seq = 0
                 while (answer := await send(seq)).status_code == 200:
@@ -657,7 +659,9 @@ async def test_a_cancel_wakes_the_call_that_waits_for_its_reader(tmp_path: Path)
         assert (await http.post("/api/agent-cli/operations", headers=stack.headers, json=operation)).status_code == 200
         route = f"/api/agent-cli/calls/{operation['call_id']}"
         async with http.stream("GET", f"{route}/stream", headers=stack.headers) as response:
-            assert (await anext(_frames(response)))["t"] == "started"
+            # The frames stay referenced: collecting their generator would close the stream, as a reader that left.
+            frames = _frames(response)
+            assert (await anext(frames))["t"] == "started"
             pid = await _pid(leader)
             await _until(lambda: _stream_frames(stack.owner).full(), what="the unread output never filled the queue")
             async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):

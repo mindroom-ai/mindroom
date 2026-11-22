@@ -357,7 +357,7 @@ def test_workers_run_defaults_to_an_hour_and_the_normal_worker_size(monkeypatch)
     sent = _worker_client(monkeypatch, *command_frames(header="[worker: build]"))
 
     assert main(["workers", "run", "build", "--", "make test && make lint"]) == 0
-    assert sent[0]["arguments"] == {"args": ["make test && make lint"], "worker": "build", "timeout": 3600}
+    assert sent[0]["arguments"] == {"args": ["make test && make lint"], "worker": "build", "timeout": 3600, "tail": 100}
 
 
 @pytest.mark.parametrize(
