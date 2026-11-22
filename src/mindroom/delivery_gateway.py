@@ -338,7 +338,7 @@ def _ensure_terminal_ai_run_metadata(
             updated_ai_run["model"] = dict(reply_model)
         updated_ai_run["status"] = constants.STREAM_STATUS_COMPLETED
         extra_content[constants.AI_RUN_METADATA_KEY] = updated_ai_run
-    elif edited_existing and constants.AI_RUN_METADATA_KEY not in extra_content and reply_model is not None:
+    elif edited_existing and constants.AI_RUN_METADATA_KEY not in extra_content:
         extra_content.update(build_terminal_note_ai_run_metadata_content("completed", model=reply_model))
 
 
@@ -521,8 +521,6 @@ class StreamingDeliveryRequest:
     tool_trace_collector: list[ToolTraceEntry] | None = None
     # The automatic compactions the reply runs, which its writes carry.
     compactions: ReplyCompactions | None = None
-    # Reads the active model payload for provisional streaming metadata; defaults to the span's reply_model.
-    active_model: Callable[[], Mapping[str, str] | None] | None = None
     streaming_cls: type[StreamingResponse] = StreamingResponse
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
@@ -1233,9 +1231,8 @@ class DeliveryGateway:
         Raises ``ReplyWriteRefusedError`` when the reply's rule writes no row. A running span's note keeps listing
         the compactions its answer ran, a running one included, which the client shows as interrupted.
         """
-        resolved_model = (
-            model if model is not None else (write.handle.reply_model if write.handle is not None else None)
-        )
+        handle_model = write.handle.reply_model if write.handle is not None else None
+        resolved_model = handle_model if handle_model is not None else model
         extra_content: dict[str, Any] = {
             constants.STREAM_STATUS_KEY: rendered.stream_status,
             **build_terminal_note_ai_run_metadata_content(rendered.stream_status, model=resolved_model),
@@ -1399,7 +1396,15 @@ class DeliveryGateway:
             )
             state = ReplyState.CANCELLED if shown_note is NoteKind.CANCELLED else ReplyState.FAILED
             write = approval_note_write(reply, span, shown, approval_id=approval_id, state=state)
-            model = model_payload(self.deps.runtime.config, model_name) if model_name is not None else None
+            live_handle = current_span()
+            live_model = (
+                live_handle.reply_model if live_handle is not None and live_handle.reply_id == reply.reply_id else None
+            )
+            model = (
+                live_model
+                if live_model is not None
+                else (model_payload(self.deps.runtime.config, model_name) if model_name is not None else None)
+            )
             return _NoteRow(reply, write, render(shown, state=state), target, model=model)
 
         sent = await self._send_note(compose)
@@ -2076,7 +2081,7 @@ class DeliveryGateway:
             ),
             tool_trace_collector=request.tool_trace_collector,
             compactions=request.compactions,
-            active_model=(request.active_model if request.active_model is not None else (lambda: handle.reply_model)),
+            active_model=lambda: handle.reply_model,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,
             visible_progress_callback=request.visible_progress_callback,

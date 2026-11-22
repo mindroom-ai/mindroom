@@ -656,6 +656,8 @@ class StreamingResponse:
     # Frames start once the reply's event shows this stream: its adopted placeholder or its first progress write.
     _shows_stream: bool = field(default=False, init=False, repr=False)
     _transport_ended: bool = field(default=False, init=False, repr=False)
+    # Set when the stream yields a handled FailedReply, so final ai_run reports status="error" even without run metrics.
+    _saw_failed_reply: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Derive Matrix delivery fields from the canonical target."""
@@ -1200,14 +1202,15 @@ class StreamingResponse:
 
     def _apply_ai_run_metadata(self, extra_content: dict[str, Any], *, is_final: bool) -> None:
         """Attach provisional or terminal ``io.mindroom.ai_run`` metadata without masking settled run metadata."""
+        terminal_status: Literal["completed", "error"] = "error" if self._saw_failed_reply else "completed"
         ai_run = extra_content.get(AI_RUN_METADATA_KEY)
         if not isinstance(ai_run, dict):
             model = self._active_model_payload()
-            if model is None:
+            if model is None and not (is_final and self._saw_failed_reply):
                 return
             if is_final:
-                extra_content.update(build_terminal_note_ai_run_metadata_content("completed", model=model))
-            else:
+                extra_content.update(build_terminal_note_ai_run_metadata_content(terminal_status, model=model))
+            elif model is not None:
                 extra_content.update(streaming_ai_run_content(model))
             return
         if "status" in ai_run:
@@ -1217,7 +1220,7 @@ class StreamingResponse:
         if model is not None and (not is_final or "model" not in updated):
             updated["model"] = model
         if is_final:
-            updated["status"] = STREAM_STATUS_COMPLETED
+            updated["status"] = terminal_status
         extra_content[AI_RUN_METADATA_KEY] = updated
 
     def _delivery_extra_content(self, *, is_final: bool) -> dict[str, Any]:
@@ -1735,6 +1738,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                     _queue_delivery_request(delivery_queue, progress_hint=True)
                     continue
             elif isinstance(chunk, FailedReply):
+                streaming._saw_failed_reply = True
                 text_chunk = chunk.text
             elif isinstance(chunk, RunFinished):
                 if chunk.record.content is not None:

@@ -1229,8 +1229,8 @@ def test_an_empty_run_s_metadata_stays_out_of_collector() -> None:
     """An empty run's payload must not ride out on a later resolution.
 
     The retry's resolution owns the collector; here it errors without
-    metadata, so the collector must stay empty rather than describe a run
-    that history never holds.
+    run metrics, so the collector records only a terminal error status
+    rather than describing a run that history never holds.
     """
     collector: dict[str, Any] = {}
     attempts = 0
@@ -1256,7 +1256,7 @@ def test_an_empty_run_s_metadata_stays_out_of_collector() -> None:
 
     assert attempts == 2
     assert chunks == [_FRIENDLY_ERROR]
-    assert collector == {}
+    assert collector == {"io.mindroom.ai_run": {"version": 1, "status": "error"}}
 
 
 def test_superseded_continuation_metadata_stays_out_of_collector() -> None:

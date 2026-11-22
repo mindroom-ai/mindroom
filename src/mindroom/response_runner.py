@@ -1216,7 +1216,6 @@ class ResponseRunner:
         history_scope: HistoryScope,
         execution_identity: ToolExecutionIdentity,
         placeholder_message: str | None,
-        model_name: str | None = None,
     ) -> str | None:
         """Send a claimed reply's placeholder as its create, unless it shows something or compacts first; return it."""
         target = request.response_envelope.target
@@ -1233,9 +1232,8 @@ class ResponseRunner:
         handle = current_span()
         assert handle is not None, "a placeholder is its reply's create"
         extra_content: dict[str, Any] = {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
-        model = model_payload(self.deps.runtime.config, model_name) if model_name is not None else handle.reply_model
-        if model is not None:
-            extra_content.update(streaming_ai_run_content(model))
+        if handle.reply_model is not None:
+            extra_content.update(streaming_ai_run_content(handle.reply_model))
         try:
             placeholder_event_id = await self.deps.delivery_gateway.send_text(
                 SendTextRequest(
@@ -1908,6 +1906,7 @@ class ResponseRunner:
             turn_recorder=recorder,
             run_metadata_collector=run_metadata_content,
             on_model_resolved=note_resolved_model,
+            active_model=lambda: handle.reply_model,
             response_event_id=current_reply_event_id,
             stopped_by_user=current_span_stopped,
         )

@@ -13,11 +13,7 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits, CliWaiters
-from mindroom.ai_run_metadata import (
-    build_streaming_ai_run_metadata_content,
-    model_payload,
-    streaming_ai_run_content,
-)
+from mindroom.ai_run_metadata import model_payload, streaming_ai_run_content
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.continuation_rules import (
     CliExit,
@@ -860,13 +856,12 @@ class ApprovalContinuationRunner:
     ) -> tuple[FinalDeliveryOutcome, ApprovalContinuation]:
         """Deliver execution output against the latest native continuation generation."""
         tool_trace: list[ToolTraceEntry] = []
-        provisional_ai_run = (
-            build_streaming_ai_run_metadata_content(self.deps.runtime.config, claimed.runtime_model_name)
-            if claimed.runtime_model_name is not None
-            else None
-        )
-        if claimed.runtime_model_name is not None and (handle := current_span()) is not None:
-            handle.reply_model = model_payload(self.deps.runtime.config, claimed.runtime_model_name)
+        provisional_ai_run: dict[str, Any] | None = None
+        if claimed.runtime_model_name is not None:
+            model = model_payload(self.deps.runtime.config, claimed.runtime_model_name)
+            provisional_ai_run = streaming_ai_run_content(model)
+            if (handle := current_span()) is not None:
+                handle.reply_model = model
         # Streaming requesters watch the resumed work in the reply it continues, unless the turn is quiet.
         # Progress closes before any terminal edit, which stays owned below.
         progress_scope: AbstractAsyncContextManager[ProgressPublisher | None] = (

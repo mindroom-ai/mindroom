@@ -372,6 +372,7 @@ async def _stream_continuation_turn(
                 if (span_handle := current_span()) is not None
                 else None
             ),
+            active_model=lambda: span_handle.reply_model if (span_handle := current_span()) is not None else None,
             subagent_cost=subagent_cost,
             response_event_id=current_reply_event_id,
             stopped_by_user=current_span_stopped,

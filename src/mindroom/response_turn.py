@@ -30,7 +30,11 @@ from uuid import uuid4
 
 from mindroom import ai_runtime
 from mindroom.agent_cli.lifetime import CliTurnLifetime
-from mindroom.ai_run_metadata import merge_usage, prior_usage_by_run
+from mindroom.ai_run_metadata import (
+    build_terminal_note_ai_run_metadata_content,
+    merge_usage,
+    prior_usage_by_run,
+)
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.constants import (
@@ -114,6 +118,7 @@ __all__ = [
     "pause_without_approval_error",
     "paused_attempt_from_response",
     "pending_approval_requirements",
+    "publish_error_run_metadata",
     "replays_as_turn",
     "skip_unapproved_attempt",
     "stream_response_turn",
@@ -455,6 +460,8 @@ class TurnSinks:
     on_attempt_start: Callable[[str, str], None] | None = None
     # Receives each attempt's resolved configured model name before streaming starts.
     on_model_resolved: Callable[[str], None] | None = None
+    # Reads the active model payload for terminal error metadata when a failure happens without a run record.
+    active_model: Callable[[], Mapping[str, str] | None] | None = None
     # Whether the driver stores an interrupted turn in its scope's history; a delegated child's interruption belongs
     # to delegation recovery, and a voice call stores what it spoke.
     persist_interrupted: bool = True
@@ -901,6 +908,14 @@ def _persist_interrupted(
         logger.exception("Failed to persist interrupted replay state", entity=ctx.entity_label)
 
 
+def publish_error_run_metadata(sinks: TurnSinks) -> None:
+    """Publish terminal error ``io.mindroom.ai_run`` metadata when a handled failure has no run record."""
+    if sinks.run_metadata_collector is None:
+        return
+    model = sinks.active_model() if sinks.active_model is not None else None
+    sinks.run_metadata_collector.update(build_terminal_note_ai_run_metadata_content("error", model=model))
+
+
 async def _settle_failure(
     ctx: ResponseTurnContext,
     adapter: TurnAdapter[Any],
@@ -911,6 +926,8 @@ async def _settle_failure(
 ) -> FailedReply:
     """Record a failed turn as interrupted and report its failure to the caller; return its error reply."""
     _publish_run_metadata(sinks, failure.build_run_metadata)
+    if failure.build_run_metadata is None:
+        publish_error_run_metadata(sinks)
     await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
     if sinks.on_failed is not None:
         sinks.on_failed(failure)

@@ -46,11 +46,12 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.message_target import MessageTarget
-from mindroom.reply_presentation import AGENT_PLACEHOLDER, TEAM_PLACEHOLDER, NoteKind
+from mindroom.reply_presentation import AGENT_PLACEHOLDER, TEAM_PLACEHOLDER, NoteKind, Presentation
 from mindroom.reply_scope import SpanHandle
-from mindroom.response_sources import Owned
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.streaming import send_streaming_response
 from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.events import FailedReply
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
@@ -1094,3 +1095,206 @@ async def test_approval_failure_note_carries_terminal_ai_run_with_model(
         }
     finally:
         await shutdown_approval_runtime()
+
+
+@pytest.mark.asyncio
+async def test_approval_failure_note_prefers_live_span_model_over_stale_continuation_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
+) -> None:
+    """When a live span exists for the reply and switched models, approval failure note uses the span's model."""
+    del echo_tool
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi"))]},
+    )
+    turn.bot.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
+    )
+    turn.bot.config.background_tool_jobs.enabled = False
+
+    async def prepare_event(_room: str, _thread: str | None, content: dict[str, Any], _sender: str) -> dict[str, Any]:
+        return content
+
+    initialize_approval_store_for_test(
+        turn.bot.runtime_paths,
+        prepare_approval_event=prepare_event,
+        send_approval_delivery=AsyncMock(return_value="$approval-card"),
+        resolve_approval_delivery=AsyncMock(return_value=None),
+        cards=turn.bot._journal_store.principal("router@shared"),
+        sender_bot=lambda _entity_name, _room_id: object(),
+        sender_device_id=AsyncMock(return_value="DEVICE"),
+    )
+    try:
+        assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+        continuation = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)
+        assert continuation is not None
+        assert continuation.runtime_model_name == "default"
+        reply = await turn.bot.journal_principal().replies.for_event(continuation.response_event_id)
+        assert reply is not None
+        span = await turn.bot.journal_principal().replies.span(reply.last_span_id)
+        assert span is not None
+
+        gateway = unwrap_extracted_collaborator(turn.bot._delivery_gateway)
+        live_handle = SpanHandle(
+            runtime=turn.bot._reply_runtime,
+            span=span,
+            reply=reply,
+            base=Presentation(placeholder=AGENT_PLACEHOLDER, show_tool_calls=True),
+            reply_model=model_payload(turn.bot.config, "large"),
+        )
+        async with turn.bot._reply_runtime.span_scope() as slot:
+            slot.handle = live_handle
+            assert await gateway.write_approval_failure_note(
+                continuation.response_event_id,
+                approval_id=continuation.approval_id,
+                note=NoteKind.ERROR,
+                text="Switched model failed.",
+                target=continuation_target(continuation),
+                model_name=continuation.runtime_model_name,
+            )
+        note_write = turn.homeserver.writes[-1]
+        assert _stream_status(note_write) == STREAM_STATUS_ERROR
+        assert _ai_run(note_write) == {
+            "version": 1,
+            "status": "error",
+            "model": model_payload(turn.bot.config, "large"),
+        }
+    finally:
+        await shutdown_approval_runtime()
+
+
+# ---------------------------------------------------------------------------
+# 6. Rejected team regeneration and handled FailedReply without metadata builder
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rejected_team_regeneration_seals_terminal_ai_run_without_stale_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team-rejection regeneration editing an earlier reply seals terminal ai_run with no stale model."""
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        scripts={"default": [answer("Original reply.")]},
+    )
+    assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+    reply = await turn.bot.journal_principal().replies.for_sources((_SOURCE,))
+    assert reply is not None
+    assert reply.event_id is not None
+    original_event_id = reply.event_id
+    original_ai_run = _ai_run(turn.homeserver.writes[-1])
+    assert original_ai_run is not None
+    assert original_ai_run["model"] == model_payload(turn.bot.config, "default")
+
+    await turn.bot.journal_principal().admit(
+        InboundEvent(
+            event_id="$edit1",
+            room_id=_ROOM,
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender=_REQUESTER,
+            origin_server_ts=2,
+            source={},
+        ),
+    )
+    base_request = _plain_request(_target())
+    regen_request = replace(
+        base_request,
+        sources=ResponseSources(pending_event_ids=("$edit1",), logical_source_event_ids=(_SOURCE,)),
+        response_envelope=replace(base_request.response_envelope, source_event_id="$edit1"),
+        correlation_id="$edit1",
+        existing_event_id=original_event_id,
+        edit_regeneration=True,
+    )
+    writes_before = len(turn.homeserver.writes)
+    assert (
+        await turn.runner.deliver_team_rejection(
+            regen_request,
+            member_names=["writer", "checker"],
+            team_mode="collaborate",
+            rejection_message="Team cannot run for this regeneration.",
+        )
+        == Owned()
+    )
+    rejection_writes = turn.homeserver.writes[writes_before:]
+    assert len(rejection_writes) == 1
+    rejection_edit = rejection_writes[0]
+    assert rejection_edit.get("m.relates_to") == {"rel_type": "m.replace", "event_id": original_event_id}
+    assert _stream_status(rejection_edit) == STREAM_STATUS_COMPLETED
+    assert _ai_run(rejection_edit) == {"version": 1, "status": "completed"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "collected"])
+async def test_handled_failed_reply_without_metadata_builder_reports_error_ai_run_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    streaming: bool,
+) -> None:
+    """Preparation failure yielding FailedReply with build_run_metadata=None sets ai_run.status='error'."""
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        streaming=streaming,
+        scripts={"default": [answer("never called")]},
+    )
+
+    with patch("mindroom.ai._prepare_agent_run_context", side_effect=RuntimeError("prep boom")):
+        assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+
+    final_write = turn.homeserver.writes[-1]
+    assert "prep boom" in str(_visible_content(final_write).get("body", ""))
+    assert _stream_status(final_write) == STREAM_STATUS_COMPLETED
+    assert _ai_run(final_write) == {
+        "version": 1,
+        "status": "error",
+        "model": model_payload(turn.bot.config, "default"),
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_model", [True, False], ids=["with-model", "without-model"])
+async def test_streaming_response_failed_reply_chunk_sets_error_ai_run_status(
+    tmp_path: Path,
+    *,
+    with_model: bool,
+) -> None:
+    """Direct StreamingResponse callers yielding FailedReply report ai_run.status='error' with stream_status='completed'."""
+    config = _config(tmp_path)
+    config.defaults.streaming.update_interval = 0.0
+    config.defaults.streaming.min_update_interval = 0.0
+    config.defaults.streaming.max_idle = 0.0
+    client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
+    homeserver = _Homeserver()
+    client.room_send = AsyncMock(side_effect=homeserver.room_send)
+    records = FakeReplyRecords()
+    model = model_payload(config, "default") if with_model else None
+
+    async def chunks() -> AsyncIterator[FailedReply]:
+        yield FailedReply("[general] ⚠️ Error: prep failed", RuntimeError("prep failed"))
+
+    await send_streaming_response(
+        client,
+        MessageTarget.resolve(_ROOM, None, None, room_mode=True),
+        config,
+        runtime_paths_for(config),
+        chunks(),
+        extra_content=None,
+        active_model=(lambda: model) if with_model else None,
+        **records.hooks(),
+    )
+    final_write = homeserver.writes[-1]
+    assert _stream_status(final_write) == STREAM_STATUS_COMPLETED
+    expected: dict[str, Any] = {"version": 1, "status": "error"}
+    if model is not None:
+        expected["model"] = model
+    assert _ai_run(final_write) == expected

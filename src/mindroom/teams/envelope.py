@@ -54,6 +54,7 @@ from mindroom.response_turn import (
     is_empty_reply,
     pause_without_approval_error,
     paused_attempt_from_response,
+    publish_error_run_metadata,
     replays_as_turn,
     stream_response_turn,
     stream_with_llm_request_log_context,
@@ -776,6 +777,7 @@ async def team_response_stream(
     turn = await asyncio.to_thread(_team_turn, spec, ctx)
     if isinstance(turn, FailedReply):
         # A turn whose members cannot run ran nothing to record; its message and this reply stay in the thread.
+        publish_error_run_metadata(sinks)
         yield turn
         return
 

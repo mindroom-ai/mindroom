@@ -91,6 +91,7 @@ from mindroom.response_turn import (
     is_empty_reply,
     pause_without_approval_error,
     paused_attempt_from_response,
+    publish_error_run_metadata,
     replays_as_turn,
     skip_unapproved_attempt,
     stream_response_turn,
@@ -1378,6 +1379,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     try:
         _assert_agent_target(agent_name, config)
     except ValueError as e:
+        publish_error_run_metadata(sinks)
         yield FailedReply(error_text(e), e)
         return
 
