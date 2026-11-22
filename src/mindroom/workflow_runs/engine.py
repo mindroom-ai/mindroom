@@ -72,6 +72,8 @@ _SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
 _MAX_LABEL_CHARS = 80
 # The owner of the tasks that admit calls: they outlive their requests, and a run's end waits for them, not stops them.
 _ADMISSIONS = "admissions"
+# How the engine's wait for an agent with a timeout is named, before its job's ID.
+_TIMED = "timed:"
 _ERROR_TAIL_BYTES = 4096
 _NO_RETURN = "The script ended without returning from main(args)."
 _ABANDONED = "The call that waited was cancelled."
@@ -564,8 +566,10 @@ class WorkflowEngine:
                 # It may have run, so nothing is dispatched until a resume names it.
                 return replace(_receipt(saved), state=WorkflowNodeState.FAILED)
             if action == "attach":
-                # The job an earlier attempt started still runs: this attempt waits for it, and starts none.
-                self._spawn(run.run_id, self._run_agent_node(run, saved, epoch))
+                # The job an earlier attempt started still runs: this attempt waits for it, and starts none. The run
+                # waits for a person if that job does, which the attempt's start did not know.
+                self._wait_for_agent(run, saved, epoch)
+                await self._restate(run.run_id)
             return replace(_receipt(saved), cached=action == "hit")
         # The completed node this call replaces although no rule before it said so: the call itself changed, or it
         # runs on every resume.
@@ -692,11 +696,25 @@ class WorkflowEngine:
             # script's SDK sends it again.
             saved = self.store.get_node(run.run_id, node.key)
             if saved is not None and saved.generation == node.generation and saved.handle is not None:
-                self._spawn(run.run_id, self._run_agent_node(run, saved, run.epoch))
+                self._wait_for_agent(run, saved, run.epoch)
             raise
-        self._spawn(run.run_id, self._run_agent_node(run, node, run.epoch))
+        self._wait_for_agent(run, node, run.epoch)
         await self._restate(run.run_id)
         return _receipt(node)
+
+    def _wait_for_agent(self, run: WorkflowRun, node: WorkflowNode, epoch: int) -> None:
+        """Start the engine's wait for the job of an agent node, in place of an earlier attempt's wait for it.
+
+        The wait for a turn with a timeout is not stopped with its attempt (`_end_run`), so somebody stops the turn
+        on time between two attempts as well. What it reads then it cannot save, and leaves to the next wait.
+        """
+        assert node.handle is not None
+        name = f"{_TIMED}{node.handle.ref}"
+        for stale in [task for task in self._tasks.get(run.run_id, ()) if task.get_name() == name]:
+            stale.cancel()
+        task = self._spawn(run.run_id, self._run_agent_node(run, node, epoch))
+        if node.handle.work_until is not None or node.handle.work_left is not None:
+            task.set_name(name)
 
     async def _run_agent_node(self, run: WorkflowRun, node: WorkflowNode, epoch: int) -> None:
         """Wait for the job of an agent node and settle the node as its turn ended, then wake the run's waiters."""
@@ -1015,13 +1033,16 @@ class WorkflowEngine:
             current = self.store.get_run(run.run_id)
             if current.epoch != run.epoch or current.state in TERMINAL_RUN_STATES:
                 return current
-            tasks = self._tasks.pop(run.run_id, set()) - {asyncio.current_task()}
+            ended = state in TERMINAL_RUN_STATES
+            mine = self._tasks.get(run.run_id, set()) if not ended else self._tasks.pop(run.run_id, set())
+            # The wait for a timed agent outlives the attempt: it stops the turn on time while no attempt waits.
+            kept = () if ended else [task for task in mine if task.get_name().startswith(_TIMED)]
+            tasks = mine - {asyncio.current_task(), *kept}
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             current = self.store.get_run(run.run_id)
             nodes = self.store.nodes(run.run_id, include_stale=True)
-            ended = state in TERMINAL_RUN_STATES
             for node in nodes:
                 # An agent's job outlives an attempt: the next one waits for it. It does not outlive its run.
                 if node.state in _LIVE_NODE_STATES and node.handle is not None and (ended or node.handle.kind != "job"):

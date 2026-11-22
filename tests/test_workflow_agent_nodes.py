@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from contextlib import suppress
 from datetime import timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -442,6 +443,51 @@ async def test_timeout_is_not_given_again_to_the_attempt_that_finds_the_agent_wo
         await stack.result("@0", "agent", _PROMPT, {"timeout": 3.0})
 
     assert (failed.value.kind, asyncio.get_running_loop().time() - started < 4.5) == ("timeout", True)
+
+
+@pytest.mark.asyncio
+async def test_timeout_stops_the_agent_also_while_no_attempt_waits_for_it(stack: WorkflowStack) -> None:
+    """The working time is the turn's, not an attempt's: the turn is stopped on time between two attempts too.
+
+    The attempt that comes then finds a call that was stopped, and runs it again, as after any timeout.
+    """
+    _hanging(stack)
+    await stack.submit("@0", "agent", _PROMPT, {"timeout": 1.0})
+    job_id = stack.node_job("@0").job_id
+
+    await _replayed(stack)
+
+    await asyncio.wait_for(wait_for_status(stack.jobs, job_id, "cancelled"), 5)
+    stack.child_script(answer("second try"))
+    answers: list[object] = []
+    while not answers:
+        # Asked again, as the script's SDK does, while the wait that stopped the turn gives its outcome back.
+        with suppress(ScriptRuntimeUnavailableError):
+            answers.append(await stack.result("@0", "agent", _PROMPT, {"timeout": 1.0}))
+        await asyncio.sleep(0.05)
+    assert (answers, _node(stack).generation) == (["second try"], 2)
+
+
+@pytest.mark.asyncio
+async def test_run_is_waiting_again_for_the_attempt_that_finds_its_timed_agent_waiting_for_a_person(
+    gated: WorkflowStack,
+) -> None:
+    """The next attempt starts as running; the agent it attaches to still waits for the same card, and so does the run."""
+    cards: JobApprovalCards = gated.cards  # type: ignore[attr-defined]
+    gated.child_script(calls(tool_call("append", "c1", line="a")), answer("sent"))
+    await gated.submit("@0", "agent", _PROMPT, {"timeout": 30.0})
+    await gated.until(lambda: gated.store.get_run(gated.run_id).state is WorkflowRunState.WAITING)
+    await _replayed(gated)
+    assert gated.store.get_run(gated.run_id).state is WorkflowRunState.RUNNING
+
+    await gated.submit("@0", "agent", _PROMPT, {"timeout": 30.0})
+
+    assert (gated.store.get_run(gated.run_id).state, _node(gated).state) == (
+        WorkflowRunState.WAITING,
+        WorkflowNodeState.WAITING,
+    )
+    cards.decision.set_result(BackgroundApprovalDecision("approved", None))
+    assert await gated.result("@0", "agent", _PROMPT, {"timeout": 30.0}) == "sent"
 
 
 @pytest.mark.asyncio
