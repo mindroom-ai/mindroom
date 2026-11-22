@@ -131,6 +131,38 @@ async def test_agent_starts_a_nested_run_inline_and_gets_its_report(stack: Workf
     assert _group(stack, child).state is _COMPLETED
 
 
+_OWN_RUN = "A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script."
+
+
+@pytest.mark.asyncio
+async def test_a_run_s_own_call_cannot_cancel_it_or_a_run_around_it(stack: WorkflowStack) -> None:
+    """The end of a run waits for its calls to stop, so a call that asked for it would wait for itself.
+
+    Refused for the script's own `tool()` call, for the script of a run inside, and for an agent of the run.
+    """
+    await stack.start()
+    parent = stack.run_id
+    with pytest.raises(NodeFailed) as refused:
+        await asyncio.wait_for(stack.result("@0", "tool", tool_args("workflow", "cancel_workflow", run_id=parent)), 5)
+    assert (refused.value.kind, str(refused.value)) == ("failed", _OWN_RUN)
+
+    await stack.submit("@1", "tool", tool_args("workflow", "start_workflow", source=_SOURCE))
+    child = await _nested(stack, parent)
+    stack.run_id = child.run_id
+    with pytest.raises(NodeFailed) as refused:
+        await asyncio.wait_for(stack.result("@0", "tool", tool_args("workflow", "cancel_workflow", run_id=parent)), 5)
+    assert str(refused.value) == _OWN_RUN
+
+    stack.run_id = parent
+    model = stack.child_script(calls(tool_call("cancel_workflow", "c1", run_id=parent)), answer("done"))
+    assert await asyncio.wait_for(stack.result("@2", "agent", _PROMPT), 10) == "done"
+    assert _OWN_RUN in str(model.requests[1].messages[-1].content)
+    assert [stack.store.get_run(run_id).state for run_id in (parent, child.run_id)] == [WorkflowRunState.RUNNING] * 2
+    # A run inside may still be cancelled from the run around it.
+    stopped = await stack.result("@3", "tool", tool_args("workflow", "cancel_workflow", run_id=child.run_id))
+    assert (child.run_id in str(stopped), stack.store.get_run(child.run_id).state) == (True, WorkflowRunState.CANCELLED)
+
+
 @pytest.mark.asyncio
 async def test_stop_of_the_parent_cancels_the_nested_run(stack: WorkflowStack) -> None:
     """A run inside a run does not outlive it: the stop of the parent ends the nested run and its group."""

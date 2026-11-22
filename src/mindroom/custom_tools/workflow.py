@@ -105,6 +105,7 @@ A run that completed although calls failed says so in the first line of the repo
 get_workflow(run_id) shows each call and what the run cost: cost_usd for the whole run, attempt_cost_usd for this attempt.
 An agent that needs an approval waits for the user; it does not fail.
 """
+_OWN_RUN = "A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script."
 _ONE_SOURCE = "Give exactly one of source or path."
 _AT_MOST_ONE_SOURCE = "Give at most one of source or path."
 _NEEDS_JOBS = "Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow."
@@ -251,6 +252,12 @@ class WorkflowTools(Toolkit):
         """
         engine, context = _runtime()
         run = _owned(engine, context, run_id)
+        # The end of a run waits until its calls have stopped, so a call inside it would wait for itself.
+        inside = (_outer_call() or (None,))[0]
+        while inside is not None:
+            if inside == run.run_id:
+                raise WorkflowRunStoreError(_OWN_RUN)
+            inside = engine.store.get_run(inside).parent_run_id
         ended = await engine.cancel(run.run_id, reason="Cancelled by the agent.")
         return json.dumps({"run_id": ended.run_id, "status": ended.state.value})
 
