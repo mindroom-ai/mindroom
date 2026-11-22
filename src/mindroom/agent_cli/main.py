@@ -9,9 +9,7 @@ import io
 import json
 import os
 import re
-import select
 import signal
-import stat
 import sys
 import threading
 import time
@@ -254,27 +252,6 @@ def _worker_signal_handlers(is_cancelling: Callable[[], bool]) -> Iterator[None]
             signal.signal(signum, handler)
 
 
-def _stdout_fifo_fd() -> int | None:
-    """Return stdout's file descriptor when it is a real FIFO pipe, else ``None``."""
-    try:
-        fd = sys.stdout.fileno()
-        return fd if stat.S_ISFIFO(os.fstat(fd).st_mode) else None
-    except (OSError, ValueError, io.UnsupportedOperation):
-        return None
-
-
-def _stdout_pipe_broken() -> bool:
-    """Return whether stdout is a pipe whose reader has already closed."""
-    if not hasattr(select, "poll") or (fd := _stdout_fifo_fd()) is None:
-        return False
-    try:
-        poller = select.poll()
-        poller.register(fd, select.POLLERR | select.POLLHUP)
-        return any(event & (select.POLLERR | select.POLLHUP) for _, event in poller.poll(0))
-    except OSError:
-        return False
-
-
 def _silence_broken_stdout() -> None:
     """Redirect a broken stdout fd to ``/dev/null`` so CPython's shutdown flush does not exit 120."""
     try:
@@ -286,54 +263,6 @@ def _silence_broken_stdout() -> None:
             os.close(devnull)
     except (OSError, ValueError, io.UnsupportedOperation):
         pass
-
-
-@contextmanager
-def _watch_stdout_pipe(is_cancelling: Callable[[], bool]) -> Iterator[None]:
-    """Interrupt a blocked long-poll immediately when a real stdout pipe's reader closes."""
-    sigpipe = getattr(signal, "SIGPIPE", None)
-    if (
-        threading.current_thread() is not threading.main_thread()
-        or sigpipe is None
-        or not hasattr(select, "poll")
-        or not hasattr(signal, "pthread_kill")
-        or (stdout_fd := _stdout_fifo_fd()) is None
-    ):
-        yield
-        return
-
-    def _on_sigpipe(_signum: int, _frame: object) -> None:
-        if is_cancelling():
-            return
-        raise BrokenPipeError
-
-    previous = signal.signal(sigpipe, _on_sigpipe)
-    wakeup_r, wakeup_w = os.pipe()
-    main_tid = threading.get_ident()
-
-    def _watch() -> None:
-        poller = select.poll()
-        poller.register(stdout_fd, select.POLLERR | select.POLLHUP)
-        poller.register(wakeup_r, select.POLLIN)
-        with suppress(OSError):
-            events = poller.poll()
-            if any(fd == stdout_fd and (ev & (select.POLLERR | select.POLLHUP)) for fd, ev in events):
-                with suppress(OSError):
-                    signal.pthread_kill(main_tid, sigpipe)
-
-    watcher = threading.Thread(target=_watch, name="mindroom-stdout-pipe-watch", daemon=True)
-    watcher.start()
-    try:
-        yield
-    finally:
-        with suppress(OSError):
-            os.write(wakeup_w, b"x")
-        watcher.join(timeout=1.0)
-        with suppress(OSError):
-            os.close(wakeup_r)
-        with suppress(OSError):
-            os.close(wakeup_w)
-        signal.signal(sigpipe, previous)
 
 
 def _emit_progress(
@@ -351,11 +280,6 @@ def _emit_progress(
         print(f"mindroom-agent: {progress}", file=sys.stderr, flush=True)
         return progress, next_revision
     return last_progress, next_revision
-
-
-def _check_stdout_pipe() -> None:
-    if _stdout_pipe_broken():
-        raise BrokenPipeError
 
 
 def _receipt_poll_state(receipt: dict[str, object] | None) -> tuple[object, object, object] | None:
@@ -392,7 +316,6 @@ def _settled(client: AgentCliClient, call_id: str, result: dict[str, object] | N
     read_error: AgentCliUnavailableError | None = None
     last_progress, last_revision = _emit_progress(result, None, 0)
     while result is None or _exit_code(result) == 3:
-        _check_stdout_pipe()
         if deadline is not None:
             if (sleep_for := min(delay, deadline - time.monotonic())) > 0:
                 time.sleep(sleep_for)
@@ -417,7 +340,6 @@ def _settled(client: AgentCliClient, call_id: str, result: dict[str, object] | N
             deadline, read_error, delay = None, None, 0.2
             last_progress, last_revision = _emit_progress(result, last_progress, last_revision)
             early_delay = _next_early_delay(early_delay, result, prev_state, time.monotonic() - started_at)
-    _check_stdout_pipe()
     return result
 
 
@@ -469,16 +391,12 @@ def _cancel_worker_call(
         except BrokenPipeError:
             _silence_broken_stdout()
             return 128 + int(signal.SIGPIPE)
-    if not submitted or (
-        isinstance(receipt, dict) and status == "cancelled" and _is_cancelled_before_dispatch(receipt)
-    ):
-        message = f"mindroom-agent: cancelled by {sig_name} (call {call_id})"
-    elif isinstance(receipt, dict) and status == "cancelled":
+    if isinstance(receipt, dict) and status == "cancelled" and not _is_cancelled_before_dispatch(receipt):
         message = (
             f"mindroom-agent: cancelled by {sig_name}; cancel requested; "
             f"the command may still be running in worker {args.name} (call {call_id})"
         )
-    elif isinstance(receipt, dict) and status in _TERMINAL_STATUSES:
+    elif not submitted or (isinstance(receipt, dict) and status in _TERMINAL_STATUSES):
         message = f"mindroom-agent: cancelled by {sig_name} (call {call_id})"
     else:
         message = (
@@ -516,7 +434,7 @@ def _run_in_worker(args: argparse.Namespace) -> int:
     submitting = False
     submitted = False
     cancelling = False
-    with _worker_signal_handlers(lambda: cancelling), _watch_stdout_pipe(lambda: cancelling):
+    with _worker_signal_handlers(lambda: cancelling):
         try:
             client = AgentCliClient()
             # Sent once: a second submission after an unknown outcome could run the command twice.

@@ -1046,8 +1046,8 @@ def test_cli_retries_cancel_once_after_401_and_reports_unconfirmed_remote_stop(
 
 
 @pytest.mark.parametrize("case", ["final_write_epipe", "closed_during_wait_no_output"])
-def test_real_pipe_subprocess_exits_141_without_traceback_and_cancels(case: str) -> None:
-    """Real subprocesses with a closed stdout pipe exit 141, cancel the call, and emit no shutdown traceback."""
+def test_real_pipe_subprocess_handles_closed_stdout_pipe(case: str) -> None:
+    """EPIPE on write exits 141 without shutdown traceback; a command writing nothing exits with its own code."""
     import os  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
     import sys  # noqa: PLC0415
@@ -1090,7 +1090,10 @@ def test_real_pipe_subprocess_exits_141_without_traceback_and_cancels(case: str)
             if case == "final_write_epipe":
                 receipt = {"status": "completed", "outcome": "[worker: w]\nhello from worker"}
             else:
-                receipt = {"status": "completed", "outcome": "[worker: w]\n"}
+                receipt = {
+                    "status": "completed",
+                    "outcome": "[worker: w]\n" + format_shell_completion("", None, return_code=7),
+                }
             self.send_response(200)
             self.end_headers()
             self.wfile.write(json.dumps(receipt).encode())
@@ -1137,10 +1140,14 @@ def test_real_pipe_subprocess_exits_141_without_traceback_and_cancels(case: str)
         thread.join()
 
     stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-    assert code == 141, f"expected 141, got {code}; stderr={stderr_text!r}"
     assert "Traceback" not in stderr_text
     assert "Exception ignored" not in stderr_text
-    assert len(cancelled) >= 1
+    if case == "final_write_epipe":
+        assert code == 141, f"expected 141, got {code}; stderr={stderr_text!r}"
+        assert len(cancelled) >= 1
+    else:
+        assert code == 7, f"expected command exit code 7, got {code}; stderr={stderr_text!r}"
+        assert cancelled == []
 
 
 @pytest.mark.parametrize(
