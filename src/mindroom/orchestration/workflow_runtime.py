@@ -49,6 +49,7 @@ class WorkflowRuntimeLifecycle:
         """Follow each pass of the script runtime, which records the attempts that ended, and show the runs."""
         self.engine.owner_access = self._access
         self.engine.agents = self._agents
+        self.engine.served_by = self._served_by
         self.script_runtime.after_reconcile = self._maintain
         if self.views is not None:
             self.views.start()
@@ -78,6 +79,11 @@ class WorkflowRuntimeLifecycle:
         paths, config = self.script_runtime.runtime_paths, self.script_runtime.config_provider()
         jobs = get_background_runtime(paths)
         return None if jobs is None or config is None else AgentRuntime(jobs, config, paths)
+
+    def _served_by(self, run: WorkflowRun) -> str | None:
+        """Return the name of the running bot that serves a run: the team's for a run of its member, as it posts."""
+        bot = self.script_runtime.resolver.serving_bot(cast("ScriptRunRecord", run))
+        return None if bot is None else bot.agent_name
 
     def _access(self, run: WorkflowRun) -> ResumeAccess:
         """Return what the next attempt of a run starts with, from its saved owner's live runtime.

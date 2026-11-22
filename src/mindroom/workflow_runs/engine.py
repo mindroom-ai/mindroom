@@ -256,6 +256,9 @@ class WorkflowEngine:
         self.owner_access: Callable[[WorkflowRun], ResumeAccess] = lambda _run: "pending"
         # What agent turns run on, None while there is no job runtime; set by the runtime that knows it.
         self.agents: Callable[[], AgentRuntime | None] = lambda: None
+        # The bot that serves a run, which posts its cards and acts on the events people send to them: its agent's,
+        # or the bot its agent answers through. None while that bot is not running; set by the same runtime.
+        self.served_by: Callable[[WorkflowRun], str | None] = lambda run: run.agent_name
         # The attempts this engine started, each with the epoch its run got when it began: all it may ever write
         # with. No other attempt is served: one an earlier primary left is a leftover process.
         self._launched: dict[str, int] = {}

@@ -321,6 +321,8 @@ Room state lists the run as one job, with its IDs only: no title, label or phase
 
 MindRoom Chat's Resume button sends `io.mindroom.workflow_control` with `{"run": "<run id>", "action": "resume"}` in the run's thread.
 It resumes the run as `resume_workflow(run_id)` does, with a new job, when the run's requester sent it in the run's room and thread.
+The report of that job is delivered in the thread when the run ends, as the report of any job nobody waits for.
+The bot that posts a run's cards also takes these events and the answers to its questions: for a run that a team's member started in the team, that is the team's bot.
 Anything else, such as another person's event, another action, or a run that has not ended, changes nothing.
 A Stop that names the job of one agent of a run cancels that agent only; the script gets `AgentError` with kind `cancelled` for it.
 

@@ -1358,6 +1358,8 @@ async def test_run_that_a_teams_member_started_is_answered_for_by_the_team(stack
         )
 
     bots = {context.agent_name: bot(), "crew": bot(context.room_id)}
+    for name, named in bots.items():
+        named.agent_name = name
     resolver = _LiveScriptRuntimeResolver(context.runtime_paths, bots.get, lambda _run: None)  # type: ignore[arg-type]
     script_runtime = SimpleNamespace(
         resolver=resolver,
@@ -1373,6 +1375,9 @@ async def test_run_that_a_teams_member_started_is_answered_for_by_the_team(stack
 
     assert isinstance(access, tuple)
     assert access[0] is context
+    # The team's bot posts the run's cards, so the answers and the Resume a person sends to them are its to act on.
+    own = stack.store.get_run(stack.run_id)
+    assert (lifecycle._served_by(run), lifecycle._served_by(own)) == ("crew", context.agent_name)
     attempt = replace(stack.attempt, execution_identity=served)
     assert resolver.is_authorized(attempt) is True
     assert resolver.is_authorized(replace(attempt, workflow_run_id=None)) is False

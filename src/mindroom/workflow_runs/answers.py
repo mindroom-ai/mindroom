@@ -82,8 +82,8 @@ async def handle_workflow_answer(
     """Answer the question a client's answer event names, and tell its sender when the answer did not count.
 
     The event is `{run, node, option | text}` in the run's thread, as a reply to the question's card. Every bot in
-    the room gets it: only the run's agent acts (the others return None), and sends `{run, node, reason}` as a reply
-    to an answer that was not accepted.
+    the room gets it: only the bot that serves the run acts (the others return None), and sends `{run, node, reason}`
+    as a reply to an answer that was not accepted.
     """
     content, sender, workflows = event.source.get("content"), event.source.get("sender"), engine()
     if not isinstance(content, dict) or not isinstance(sender, str):
@@ -92,7 +92,7 @@ async def handle_workflow_answer(
         run = workflows.store.get_run(str(content.get("run")))
     except WorkflowRunNotFoundError:
         return None
-    if run.agent_name != agent_name:
+    if workflows.served_by(run) != agent_name:
         return None
     relation = content.get("m.relates_to")
     relation = relation if isinstance(relation, dict) else {}

@@ -204,7 +204,7 @@ async def test_answer_event_answers_the_card_and_a_rejected_one_gets_the_rejecti
     room = nio.MatrixRoom(_ROOM, "@mindroom_watcher:example.test")
     handle = {"agent_name": stack.context.agent_name, "engine": lambda: stack.engine}
 
-    # Every bot in the room gets the event: only the run's agent acts on it.
+    # Every bot in the room gets the event: only the bot that serves the run acts on it.
     assert (
         await handle_workflow_answer(room, _answer_event(card, {"option": "Yes"}), **{**handle, "agent_name": "x"})
         is None
@@ -222,6 +222,19 @@ async def test_answer_event_answers_the_card_and_a_rejected_one_gets_the_rejecti
     assert await handle_workflow_answer(room, _answer_event(card, {"option": "No"}), **handle) == "accepted"
     assert await stack.result("@0", "ask", _DEPLOY) == "No"
     assert await handle_workflow_answer(room, _answer_event(card, {"option": "Yes"}), **handle) == "already_answered"
+
+
+@pytest.mark.asyncio
+async def test_answer_event_is_for_the_bot_that_serves_the_run(stack: WorkflowStack) -> None:
+    """A run of a team's member is served by the team's bot: that bot posted the card, and acts on its answers."""
+    card = await _ask(stack)
+    room = nio.MatrixRoom(_ROOM, "@mindroom_crew:example.test")
+    handle = {"agent_name": stack.context.agent_name, "engine": lambda: stack.engine}
+    stack.engine.served_by = lambda _run: "crew"
+
+    assert await handle_workflow_answer(room, _answer_event(card, {"option": "Yes"}), **handle) is None
+    crew = {**handle, "agent_name": "crew"}
+    assert await handle_workflow_answer(room, _answer_event(card, {"option": "Yes"}), **crew) == "accepted"
 
 
 @pytest.mark.asyncio

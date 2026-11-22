@@ -156,6 +156,36 @@ async def test_resume_control_from_the_requester_in_the_runs_thread_resumes(stac
     assert stack.store.get_run(stack.run_id).attempt == 2
 
 
+@pytest.mark.asyncio
+async def test_report_of_a_run_that_a_resume_control_resumed_is_delivered(stack: WorkflowStack) -> None:
+    """Nobody waits for the job a Resume event starts, so nobody holds its outcome: the report is a follow-up."""
+    await _fail(stack)
+    assert await _control(stack) is True
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+    job_id = stack.store.get_run(stack.run_id).job_id
+    assert job_id not in stack.jobs.awaited_job_ids()
+
+    await stack.finish_attempt(result="the resumed report")
+    done = lambda: any(job.job_id == job_id and job.status == "completed" for job in stack.jobs.retained_jobs())  # noqa: E731
+    await stack.until(done)
+
+    assert len(await stack.follow_ups()) == 1
+    [job] = [job for job in stack.jobs.retained_jobs() if job.job_id == job_id]
+    assert await stack.collect(job) == "the resumed report"
+
+
+@pytest.mark.asyncio
+async def test_events_of_a_run_are_for_the_bot_that_serves_it(stack: WorkflowStack) -> None:
+    """A run of a team's member is served by the team's bot, which gets its events: the member's bot need not be there."""
+    await _fail(stack)
+    stack.engine.served_by = lambda _run: "crew"
+
+    assert await _control(stack) is False
+    assert stack.store.get_run(stack.run_id).attempt == 1
+    assert await _control(stack, agent_name="crew") is True
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+
+
 @pytest.mark.parametrize(
     "event",
     [

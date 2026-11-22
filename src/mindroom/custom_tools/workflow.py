@@ -340,19 +340,14 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             if (declined := await hooks(before=True, registered_toolkit="workflow")) is not None:
                 await hooks(before=False, result=declined, blocked=True)
                 return declined
-            refused = request = None
-            if function_name == _START:
-                run, _ = await self._reserve(engine, context, job_id, arguments, job_id=job_id)
-                refused = partial(asyncio.to_thread, engine.store.delete_intent, run.run_id, job_id, run.epoch)
-            else:
-                # A call delivered again names the job that already holds what was accepted, and is checked no more.
-                known = next((job.adapter for job in runtime.retained_jobs() if job.job_id == job_id), None)
-                accepted = known and known.get("resume")
-                run, request = await _resumption(engine, context, arguments, self.limits, accepted, owner=job_id)
+            after = partial(hooks, before=False)
+            if function_name == _RESUME:
+                return await _resume_job(engine, context, arguments, self.limits, job_id, runtime, after=after)
+            run, _ = await self._reserve(engine, context, job_id, arguments, job_id=job_id)
+            refused = partial(asyncio.to_thread, engine.store.delete_intent, run.run_id, job_id, run.epoch)
         except ValueError as exc:
             return str(exc)
-        after = partial(hooks, before=False)
-        return _run_job(engine, run, job_id, context, self.limits, after=after, refused=refused, resume=request)
+        return _run_job(engine, run, job_id, context, self.limits, after=after, refused=refused)
 
     async def _reserve(
         self,
@@ -439,6 +434,26 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         return reserved
 
 
+async def _resume_job(
+    engine: WorkflowEngine,
+    context: ToolRuntimeContext,
+    arguments: Mapping[str, Any],
+    limits: WorkflowLimits,
+    job_id: str,
+    runtime: ToolJobRuntime,
+    after: Callable[..., Awaitable[object]] | None = None,
+) -> JobSpec:
+    """Return the job that resumes the run *arguments* name, for a tool call or a person's Resume; a refusal raises.
+
+    The one check of a resume. A call or an event delivered again names the job that already holds what was
+    accepted, and is checked no more.
+    """
+    known = next((job.adapter for job in runtime.retained_jobs() if job.job_id == job_id), None)
+    accepted = known and known.get("resume")
+    run, request = await _resumption(engine, context, arguments, limits, accepted, owner=job_id)
+    return _run_job(engine, run, job_id, context, limits, after=after, resume=request)
+
+
 async def _resumption(
     engine: WorkflowEngine,
     context: ToolRuntimeContext,
@@ -508,19 +523,21 @@ async def handle_workflow_control(
     workflows = engine()
     try:
         run = workflows.store.get_run(str(content.get("run")))
-        if (run.agent_name, run.owner_user_id, run.room_id, run.thread_root_event_id) != where:
+        if (workflows.served_by(run), run.owner_user_id, run.room_id, run.thread_root_event_id) != where:
             return False
         access = workflows.authorize(run)
         if not isinstance(access, tuple) or (jobs := get_background_runtime(access[0].runtime_paths)) is None:
             return False
         context, limits = access
         job_id = hashlib.sha256(f"workflow_control:{event.event_id}".encode()).hexdigest()
+        if job_id in (run.owner, *run.claims):
+            # The event took the run before, and its job is no longer kept: delivered again, it starts nothing.
+            return False
         async with jobs.admission(job_id):
-            run, request = await _resumption(workflows, context, {"run_id": run.run_id}, limits, owner=job_id)
-            job = _run_job(workflows, run, job_id, context, limits, resume=request)
+            job = await _resume_job(workflows, context, {"run_id": run.run_id}, limits, job_id, jobs)
             # In the owner's context, which the job's task keeps, as the job of a call's resume has it.
             with tool_runtime_context(context):
-                await jobs.start(
+                _, claim = await jobs.start(
                     job_id,
                     tool_name=job.tool_name,
                     depth=run.depth,
@@ -531,6 +548,8 @@ async def handle_workflow_control(
                     operation=job.operation,
                     cancel=job.cancel,
                 )
+            # Nobody waits for this job, so nobody keeps its outcome: its report is a follow-up in the thread.
+            await jobs.release_wait(job_id, claim)
     except ValueError:
         # No such run, a run that cannot be resumed now, or a job the runtime does not admit: nothing was started.
         return False
