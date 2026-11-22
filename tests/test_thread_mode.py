@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -24,18 +25,21 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     resolve_runtime_paths,
+    tracking_dir,
 )
 from mindroom.delivery_gateway import SendTextRequest
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND, SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
-from mindroom.matrix.thread_membership import ThreadResolution, ThreadResolutionState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.room_settings import MODEL, THREAD_MODE, resolve_room_setting
 from mindroom.router.relay import execute_router_relay
 from mindroom.routing_judgment import ResponderSelection
 from mindroom.session_ids import create_session_id
@@ -45,6 +49,7 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.bot_helpers import make_test_agent_bot
+from tests.journal_helpers import admit_dispatch_event
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -687,55 +692,79 @@ class TestRoomModeThreadDecision:
         assert ctx.thread_history == ()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("read", ["answers", "hangs"])
-    async def test_the_first_messages_after_a_restart_wait_for_the_rooms_thread_mode(
+    @pytest.mark.parametrize("kept", ["room-state", "older-runtimes-files", "unreadable-room"])
+    async def test_the_first_events_after_a_restart_are_dispatched_after_the_rooms_settings_are_read(
         self,
         room_mode_config: Config,
         coder_user: AgentMatrixUser,
         monkeypatch: pytest.MonkeyPatch,
-        read: str,
+        kept: str,
     ) -> None:
-        """After a restart nothing has read the room, and its restoration may still run when messages are released.
+        """After a restart the runtime has no copy of a room's settings, and its restoration may still run.
 
-        The room's `thread_mode` setting is read, once, before the first messages' conversation is chosen, so the
-        reply to a threaded message goes to the main timeline. A read that hangs is given up in time, not repeated,
-        and the messages are placed by the configured mode as before.
+        Every event is dispatched after the room's settings were read, so the first message, the first edit and the
+        first command all see the room's thread mode and model. Overrides an older runtime stored in files move into
+        the room on that read, through the room's steward. A read that hangs is given up in time, and the events go
+        on by the configured mode as before.
         """
         monkeypatch.setattr("mindroom.room_settings._REQUEST_TIMEOUT_SECONDS", 0.05)
         bot = _agent_bot(config=room_mode_config, agent_user=coder_user)
+        paths, room_id = bot.runtime_paths, "!room:localhost"
         homeserver = RoomStateHomeserver()
-        homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "thread_mode"] = {"value": "room"}
         bot.client = homeserver.client()
-        if read == "hangs":
-            bot.client.room_get_state_event.side_effect = lambda *_args, **_kwargs: asyncio.sleep(3600)
-        room = _matrix_room("!room:localhost", name="Test Room")
-        source = {
-            "event_id": "$event123",
-            "sender": "@user:localhost",
-            "content": {
-                "body": "hello",
-                "msgtype": "m.text",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread123"},
-            },
-            "type": "m.room.message",
+        monkeypatch.setattr(bot.orchestrator, "room_steward", lambda _room_id: bot)
+        settings = {"thread_mode": "room", "model": "default"}
+        if kept == "older-runtimes-files":
+            for setting in (THREAD_MODE, MODEL):
+                record = {room_id: {setting.legacy_field: settings[setting.key]}}
+                (tracking_dir(paths) / setting.legacy_filename).write_text(json.dumps(record))
+        else:
+            homeserver.events.update(
+                {(ROOM_SETTINGS_EVENT_TYPE, key): {"value": value} for key, value in settings.items()},
+            )
+        never = asyncio.Event()
+
+        async def hangs(*_args: object, **_kwargs: object) -> None:
+            await never.wait()
+
+        if kept == "unreadable-room":
+            bot.client.room_get_state_event.side_effect = hangs
+        seen: list[tuple[bool, str | None]] = []
+
+        async def on_message(room: nio.MatrixRoom, _event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
+            seen.append(
+                (
+                    bot._conversation_resolver.room_is_one_conversation(room.room_id),
+                    resolve_room_setting(MODEL, paths, room.room_id),
+                ),
+            )
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        bot._journal_dispatcher.callbacks = replace(bot._journal_dispatcher.callbacks, on_message=on_message)
+        room = _matrix_room(room_id, name="Test Room")
+        edit = {
+            "m.new_content": {"msgtype": "m.text", "body": "hi"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$0"},
         }
-        event = MagicMock(spec=nio.RoomMessageText, event_id="$event123", sender="@user:localhost", source=source)
-        resolver = bot._conversation_resolver
-        threaded = ThreadResolution(ThreadResolutionState.THREADED, thread_id="$thread123")
-        monkeypatch.setattr(resolver, "_coalescing_thread_resolution", AsyncMock(return_value=threaded))
+        for index, content in enumerate(({}, edit, {"body": "!compact"})):
+            event = nio.RoomMessageText.from_dict(
+                {
+                    "type": "m.room.message",
+                    "event_id": f"${index}:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": index + 1,
+                    "content": {"msgtype": "m.text", "body": "hello"} | content,
+                },
+            )
+            await admit_dispatch_event(bot._journal_dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
 
-        first, second = await asyncio.gather(*(resolver.coalescing_thread_id(room, event) for _ in range(2)))
-        third = await resolver.coalescing_thread_id(room, event)
-        target = resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=first,
-            reply_to_event_id=event.event_id,
-            event_source=source,
-        )
+        async with asyncio.timeout(5):
+            await bot._journal_dispatcher.drain_once()
 
-        expected = None if read == "answers" else "$thread123"
-        assert (first, second, third, target.resolved_thread_id) == (expected,) * 4
-        assert bot.client.room_get_state_event.await_count == 1
+        assert seen == [(False, None) if kept == "unreadable-room" else (True, "default")] * 3
+        if kept == "older-runtimes-files":
+            assert homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "thread_mode"] == {"value": "room"}
+            assert homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "model"] == {"value": "default"}
 
     @pytest.mark.asyncio
     async def test_room_override_skips_derive_only_for_matching_room(

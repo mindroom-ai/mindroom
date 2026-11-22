@@ -5150,7 +5150,6 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_membership",
-    "mindroom.room_settings",
     "mindroom.runtime_protocols",
 ]
 

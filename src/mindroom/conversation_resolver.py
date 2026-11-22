@@ -42,7 +42,6 @@ from mindroom.matrix.thread_membership import (
     thread_messages_thread_membership_access,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.room_settings import THREAD_MODE, await_first_room_setting_read
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_utils import check_agent_mentioned, should_skip_mentions
 
@@ -345,9 +344,6 @@ class ConversationResolver:
         ``ThreadMembershipLookupError`` when the scope is unknown for now.
         """
         event_info = EventInfo.from_event(event.source)
-        if (client := self.deps.runtime.client) is not None:
-            # The room's thread mode decides the conversation, so a room nothing has read yet is read first.
-            await await_first_room_setting_read(THREAD_MODE, client, self.deps.runtime_paths, room.room_id)
         if self.room_is_one_conversation(room.room_id):
             return self._trusted_automation_fire_root_event_id(
                 event.source,

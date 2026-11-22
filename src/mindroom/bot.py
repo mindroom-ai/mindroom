@@ -111,7 +111,7 @@ from .response_lifecycle import ResponseHookService, ResponseLifecycleCoordinato
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
-from .room_settings import THREAD_MODE, observe_room_settings_event, refresh_room_setting
+from .room_settings import THREAD_MODE, observe_room_settings_event, refresh_room_setting, refresh_room_settings
 from .steward_duties import (
     StewardDuties,
     StewardDutiesDeps,
@@ -538,6 +538,7 @@ class AgentBot:
                 turn_has_live_claim=lambda event_id: self._turn_store.has_live_turn_claim(event_id),
                 replies_ended=self._replies_ended,
                 on_job_follow_up=lambda event: self._response_runner.handoff_job_follow_up(event),
+                before_room_event=self._refresh_room_settings,
             ),
             room_for_id=self._room_for_journal_event,
             # Resolved late: the ingress validator, which owns the trust rule, is built after the dispatcher.
@@ -1095,6 +1096,11 @@ class AgentBot:
         """Hand a joined room's schedules this bot owns and the room's thread snoozes to the runtime."""
         await self.orchestrator.scheduled_tasks.restore_room(self, room_id)
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
+
+    async def _refresh_room_settings(self, room_id: str) -> None:
+        if self.client is not None:
+            put_state = partial(room_state_response_as_steward, self.orchestrator.room_steward)
+            await refresh_room_settings(self.client, self.runtime_paths, room_id, put_state=put_state)
 
     async def _reread_room_setting(self, client: nio.AsyncClient, room_id: str, setting: RoomSetting[Any]) -> None:
         if setting is THREAD_MODE:

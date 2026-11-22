@@ -115,6 +115,8 @@ class JournalCallbacks:
     on_job_follow_up: Callable[[JournalEvent], Awaitable[None]]
     on_job_cancel: _JobCancelCallback
     on_rtc: _RtcCallback | None = None
+    # Awaited with the room of every Matrix event before its callback runs: what the callbacks need read first.
+    before_room_event: Callable[[str], Awaitable[object]] | None = None
 
 
 @dataclass
@@ -263,6 +265,8 @@ class JournalDispatcher:
             # A runtime source, not a Matrix event: nothing for ingress to parse.
             await self.callbacks.on_job_follow_up(event)
             return False
+        if self.callbacks.before_room_event is not None:
+            await self.callbacks.before_room_event(event.room_id)
         return await self._parse_and_invoke(event, needs_turn_replay=needs_turn_replay)
 
     async def _parse_and_invoke(self, event: JournalEvent, *, needs_turn_replay: bool) -> bool:

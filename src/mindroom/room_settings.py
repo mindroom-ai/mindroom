@@ -2,8 +2,8 @@
 
 Each setting is the room's `io.mindroom.room_settings` state under its own state key with content `{"value": value}`;
 `{}`, no event, or a value the setting does not take leaves it unset. The runtime keeps a copy per room and setting,
-so checks that cannot wait for the homeserver use it, and a turn reads the room unless a read confirmed the copy
-recently.
+so checks that cannot wait for the homeserver use it, and the room is read before each of its events is dispatched
+unless a read confirmed the copy recently.
 
 One rule keeps each copy: every read and write is numbered when it starts, every write's acknowledgement and every
 live event when it arrives, and a result never replaces one numbered after it. So a read that started before a write
@@ -120,8 +120,6 @@ _writes: WeakValueDictionary[_Key, asyncio.Lock] = WeakValueDictionary()
 _stale_models_logged: set[_Key] = set()
 # What a runtime has tell a room's steward that a read found the room's `thread_mode` changed.
 _thread_mode_changed: dict[Path, Callable[[str], object]] = {}
-# The first read of a setting that a caller waited for: later callers wait for it too, and none repeats it.
-_first_reads: dict[_Key, asyncio.Task[object]] = {}
 
 
 def _key(setting: RoomSetting[Any], runtime_paths: RuntimePaths, room_id: str) -> _Key:
@@ -329,36 +327,15 @@ async def refresh_room_setting[T: str](  # noqa: PLR0911 - one outcome per answe
         logger.warning("room_setting_read_failed", room_id=room_id, setting=setting.key, error=str(response))
         return SettingRead(ok=False, value=resolve_room_setting(setting, runtime_paths, room_id))
     held = _known.get(key)
-    _take(key, value, started, confirmed=True)
+    # An override this read could not try to move, for want of a writer, is not the room's setting: the next read
+    # that has a writer moves it.
+    _take(key, value, started, confirmed=content is not None or value is None or put_state is not None)
     if content is not None:
         # The room's own event, even an empty one, decides over the override an older runtime stored.
         _drop_legacy_override(setting, runtime_paths, room_id)
     if setting is THREAD_MODE and held is not None and held.order < started and held.value != value:
         request_thread_mode_republish(runtime_paths, room_id)
     return SettingRead(ok=True, value=value)
-
-
-async def await_first_room_setting_read[T: str](
-    setting: RoomSetting[T],
-    client: nio.AsyncClient,
-    runtime_paths: RuntimePaths,
-    room_id: str,
-) -> None:
-    """Wait, a few seconds at most, for the room's setting to be read once when the runtime has no copy of it.
-
-    After a restart nothing may have read the room yet, and a caller that acts on the copy before a turn's read,
-    as the one that chooses a message's conversation does, would act on no setting. Callers at once share one read.
-    A read that fails is not repeated here: the caller acts on what the runtime knows, as it did before.
-    """
-    key = _key(setting, runtime_paths, room_id)
-    if key in _known:
-        return
-    read = _first_reads.get(key)
-    if read is None:
-        first = refresh_room_setting(setting, client, runtime_paths, room_id, put_state=None)
-        read = _first_reads[key] = asyncio.ensure_future(first)
-    # The read outlives a caller that stops waiting or is cancelled, for the callers still waiting.
-    await asyncio.wait({read}, timeout=_REQUEST_TIMEOUT_SECONDS)
 
 
 async def refresh_room_settings(
@@ -368,7 +345,13 @@ async def refresh_room_settings(
     *,
     put_state: _PutState | None,
 ) -> SettingRead[RoomReplyMode]:
-    """Refresh every setting a turn uses, at once, and return what the reply mode's read found."""
+    """Refresh every setting a turn uses, at once, and return what the reply mode's read found.
+
+    Every event of a room is dispatched after this, so nothing an event decides by the runtime's copy, such as its
+    conversation, an edit's scope or a command's model, is decided before the room was read: not after a restart,
+    when the runtime has no copy, and not by a copy no read confirmed recently. Each read gives up after a few
+    seconds, and the event then goes on by what the runtime knew.
+    """
     reply_mode, _model, _thread_mode = await asyncio.gather(
         refresh_room_setting(REPLY_MODE, client, runtime_paths, room_id, put_state=put_state),
         refresh_room_setting(MODEL, client, runtime_paths, room_id, put_state=put_state),

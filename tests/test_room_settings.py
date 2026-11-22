@@ -101,6 +101,29 @@ async def test_an_older_runtimes_override_applies_until_it_moves_into_the_room(
 
 @pytest.mark.asyncio
 @_SETTINGS
+async def test_an_override_a_read_without_a_writer_applies_moves_on_the_next_read_with_one(
+    tmp_path: Path,
+    setting: RoomSetting[Any],
+) -> None:
+    """A read that cannot write applies the stored override without confirming it, so the next read moves it."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    value = _VALUES[setting.key]
+    legacy = _write_legacy_overrides(runtime_paths, setting, (ROOM_ID,))
+    homeserver = RoomStateHomeserver()
+    client = homeserver.client()
+
+    assert await refresh_room_setting(setting, client, runtime_paths, ROOM_ID, put_state=None) == (True, value)
+    assert (ROOM_SETTINGS_EVENT_TYPE, setting.key) not in homeserver.events
+
+    read = await refresh_room_setting(setting, client, runtime_paths, ROOM_ID, put_state=client.room_put_state)
+
+    assert read == SettingRead(ok=True, value=value)
+    assert homeserver.events[ROOM_SETTINGS_EVENT_TYPE, setting.key] == {"value": value}
+    assert json.loads(legacy.read_text()) == {}
+
+
+@pytest.mark.asyncio
+@_SETTINGS
 async def test_a_setting_the_room_already_has_supersedes_an_older_runtimes_override(
     tmp_path: Path,
     setting: RoomSetting[Any],

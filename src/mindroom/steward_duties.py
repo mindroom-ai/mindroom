@@ -180,7 +180,7 @@ class StewardDuties:
     _room_state_retrying: set[str] = field(default_factory=set, init=False, repr=False)
     # Pending operations, including fresh failures that race an in-flight retry.
     _room_state_reruns: dict[str, set[str]] = field(default_factory=dict, init=False, repr=False)
-    # Each room's latest republish of its thread mode after a change to the setting.
+    # Each room's running republish of its thread mode after a change to the setting.
     _thread_mode_republishes: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
 
     @property
@@ -237,8 +237,13 @@ class StewardDuties:
         running = self._thread_mode_republishes.get(room_id)
         # A republish that ended, or was cancelled before it ran, serves no later change.
         if running is None or running.done():
-            republish = self._publish_room_state(room_id, {"mode"})
-            self._thread_mode_republishes[room_id] = self._publish_in_background(republish, "steward_thread_mode")
+            republish = self._publish_in_background(self._publish_room_state(room_id, {"mode"}), "steward_thread_mode")
+            self._thread_mode_republishes[room_id] = republish
+            republish.add_done_callback(lambda done: self._forget_thread_mode_republish(room_id, done))
+
+    def _forget_thread_mode_republish(self, room_id: str, done: asyncio.Task[None]) -> None:
+        if self._thread_mode_republishes.get(room_id) is done:
+            del self._thread_mode_republishes[room_id]
 
     async def power_levels_event(self, room: nio.MatrixRoom, _event: nio.PowerLevelsEvent) -> None:
         """Publish a room's state after its power levels changed, which can change its steward."""
