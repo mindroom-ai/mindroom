@@ -7,6 +7,7 @@ import base64
 import importlib
 import json
 import re
+import threading
 import time
 from copy import deepcopy
 from dataclasses import replace
@@ -263,6 +264,50 @@ async def test_the_sdk_sends_the_history_and_tools_without_walking_them(
     assert body[history]
     assert body["tools"]
     assert body["stream"] is True
+
+
+@pytest.mark.parametrize(
+    ("model_config", "reply"),
+    [
+        (_OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop"))),
+        (_OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed())),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_history_is_encoded_off_the_event_loop_one_message_at_a_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model_config: dict[str, Any],
+    reply: dict[str, Any],
+) -> None:
+    """No JSON encoding of the history runs on the event loop, and each message encodes in its own call.
+
+    The encoder holds the GIL through one call, so a worker thread encoding the whole history at once would stall the
+    loop as long as encoding it there; between calls the loop takes the GIL back.
+    """
+    loop_thread = threading.current_thread()
+    dumps = json.dumps
+    encoded: list[tuple[bool, str]] = []
+
+    def recording(obj: object, **kwargs: Any) -> str:  # noqa: ANN401
+        text = dumps(obj, **kwargs)
+        encoded.append((threading.current_thread() is loop_thread, text))
+        return text
+
+    monkeypatch.setattr(json, "dumps", recording)
+    built = _Built(tmp_path, model_config, reply)
+
+    await _adapter_turn(
+        built, ModelRequest(messages=[_user("first marker"), Message(role="assistant", content="second marker")])
+    )
+
+    history = [(on_loop, text) for on_loop, text in encoded if "marker" in text]
+    assert history
+    assert not [text for on_loop, text in history if on_loop]
+    assert not [text for _, text in history if "first marker" in text and "second marker" in text]
+    sent = built.requests[0].content.decode()
+    assert "first marker" in sent
+    assert "second marker" in sent
 
 
 @pytest.mark.asyncio

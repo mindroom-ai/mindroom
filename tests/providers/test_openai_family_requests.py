@@ -748,6 +748,33 @@ def _stored_response(response_id: str, before: list[Message] | None = None) -> d
     return {"response_id": response_id, "mindroom_conversation_sha256": conversation_digest(before or [])}
 
 
+def test_the_conversation_digest_is_the_one_stored_responses_recorded() -> None:
+    """The digest of a conversation stays the value releases before it stored, so their responses still continue."""
+    messages = [
+        Message(role="system", content="Pack light."),
+        Message(
+            role="user",
+            content="What should I pack? Café ☕",
+            images=[Image(id="img_1", url="https://example.test/a.png")],
+        ),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+                }
+            ],
+        ),
+        Message(role="tool", content="Sunny, 21°C", tool_call_id="call_1"),
+    ]
+
+    assert conversation_digest(messages) == "640fe1f9d4adc2431dbd3a0a4e7bc47b8da640b5d0bba4f3cfe8a9dd9b3d3cfe"
+    assert conversation_digest([]) == "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+
+
 def test_a_stored_tool_turn_continues_whatever_the_model_name(tmp_path: Path) -> None:
     """Continuation does not depend on the model name, so aliases and non-reasoning models continue too."""
     adapter = responses_adapter(tmp_path, model_id="custom-alias", store=True)

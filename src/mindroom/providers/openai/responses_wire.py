@@ -136,10 +136,13 @@ def conversation_digest(messages: Sequence[Message]) -> str:
 
     It covers what a request sends of each message, the system text and the turn context (``add_to_agent_memory=False``)
     included, and leaves out what only storage reads: ids, replay flags, usage, a reply's provider data and reasoning,
-    and inline media bytes, which a media item's id and source stand for.
+    and inline media bytes, which a media item's id and source stand for. Each message is encoded alone, which hashes
+    the bytes of the list encoded in one call, so a worker thread computing it lets the event loop take the GIL
+    between messages.
     """
-    sent = [
-        {
+    digest = hashlib.sha256(b"[")
+    for index, message in enumerate(messages):
+        sent = {
             "role": message.role,
             "content": message.content,
             "tool_call_id": message.tool_call_id,
@@ -155,9 +158,10 @@ def conversation_digest(messages: Sequence[Message]) -> str:
                 )
             ],
         }
-        for message in messages
-    ]
-    return hashlib.sha256(json.dumps(sent, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+        encoded = json.dumps(sent, ensure_ascii=False, sort_keys=True, default=str)
+        digest.update(f"{', ' if index else ''}{encoded}".encode())
+    digest.update(b"]")
+    return digest.hexdigest()
 
 
 def _continuable(provider_data: dict[str, Any], before: Sequence[Message]) -> bool:
