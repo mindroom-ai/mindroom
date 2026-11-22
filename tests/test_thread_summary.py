@@ -46,6 +46,7 @@ from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.thread_summary import automatic
 from mindroom.thread_summary.automatic import maybe_generate_thread_summary
 from mindroom.thread_summary.generation import (
+    _CLIP_SEPARATOR,
     _MAX_MESSAGE_CHARS,
     _MAX_MESSAGES_BEFORE_TRUNCATION,
     _TRUNCATION_EDGE_COUNT,
@@ -2577,10 +2578,9 @@ class TestConversationText:
         assert "omitted" not in text
         assert text.count("\n") == 4  # 5 messages, 4 newlines
 
-    async def test_long_thread_truncated(self) -> None:
-        """Threads above the truncation threshold sample start, evenly spaced middle, and end with gap markers."""
-        count = 100
-
+    @pytest.mark.parametrize("count", [51, 52, 100, 1000])
+    async def test_long_thread_truncated(self, count: int) -> None:
+        """Threads above the truncation threshold sample start, evenly spaced middle, and end with exact gap markers."""
         text = await self._conversation(_make_thread_history(count))
 
         lines = text.splitlines()
@@ -2597,27 +2597,61 @@ class TestConversationText:
         indices = [int(line.rsplit(" ", 1)[1]) for line in message_lines]
         assert indices == sorted(set(indices))
         assert len(marker_lines) == _TRUNCATION_MIDDLE_COUNT + 1
-        omitted_counts = [int(marker.split()[1]) for marker in marker_lines]
-        assert sum(omitted_counts) + len(message_lines) == count
-        # Even spacing for 100 messages with 5 + 12 + 5 -> 13 gaps of 6 omitted each.
-        assert marker_lines == ["[... 6 messages omitted ...]"] * (_TRUNCATION_MIDDLE_COUNT + 1)
+        # Verify every omission marker matches the gap between its adjacent sampled message indices.
+        prev_index: int | None = None
+        pending_omitted: int | None = None
+        omitted_total = 0
+        for line in lines:
+            if line.startswith("[..."):
+                assert pending_omitted is None
+                pending_omitted = int(line.split()[1])
+                omitted_total += pending_omitted
+            else:
+                cur_index = int(line.rsplit(" ", 1)[1])
+                if prev_index is not None:
+                    expected_gap = cur_index - prev_index - 1
+                    assert (pending_omitted or 0) == expected_gap
+                pending_omitted = None
+                prev_index = cur_index
+        assert pending_omitted is None
+        assert omitted_total + len(message_lines) == count
+        if count == 100:
+            # Even spacing for 100 messages with 5 + 12 + 5 -> 13 gaps of 6 omitted each.
+            assert marker_lines == ["[... 6 messages omitted ...]"] * (_TRUNCATION_MIDDLE_COUNT + 1)
 
-    async def test_long_message_bodies_are_clipped(self) -> None:
-        """Rendered message bodies exceeding the cap are clipped with an ellipsis."""
+    async def test_long_thread_clips_head_and_tail_and_skips_whitespace_only(self) -> None:
+        """Long-thread sampling keeps head and tail of overlong bodies and drops whitespace-only messages."""
         exact = "a" * _MAX_MESSAGE_CHARS
-        overlong = "  " + ("b" * (_MAX_MESSAGE_CHARS + 200)) + "  "
+        overlong = f"  HEAD_START {'b' * (_MAX_MESSAGE_CHARS + 200)} REAL_TAIL_QUESTION?  "
         history = [
-            ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body=exact, event_id="$m1"),
-            ResolvedVisibleMessage.synthetic(sender="@bob:localhost", body=overlong, event_id="$m2"),
+            ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body=exact, event_id="$m0"),
+            ResolvedVisibleMessage.synthetic(sender="@bob:localhost", body=overlong, event_id="$m1"),
+            ResolvedVisibleMessage.synthetic(sender="@blank:localhost", body="   \n\t  ", event_id="$m2"),
+            *_make_thread_history(58),
         ]
 
         text = await self._conversation(history)
 
-        first, second = text.splitlines()
-        assert first == f"@alice:localhost: {exact}"
-        clipped_body = second.removeprefix("@bob:localhost: ")
-        assert clipped_body.endswith("...")
-        assert len(clipped_body) == _MAX_MESSAGE_CHARS
+        lines = text.splitlines()
+        assert lines[0] == f"@alice:localhost: {exact}"
+        clipped_body = lines[1].removeprefix("@bob:localhost: ")
+        assert _CLIP_SEPARATOR in clipped_body
+        assert clipped_body.startswith("HEAD_START")
+        assert clipped_body.endswith("REAL_TAIL_QUESTION?")
+        assert len(clipped_body) <= _MAX_MESSAGE_CHARS
+        assert "@blank:localhost" not in text
+
+    async def test_short_thread_long_body_not_clipped(self) -> None:
+        """Threads at or below the truncation threshold render long bodies verbatim, unclipped."""
+        overlong = f"  HEAD_START {'b' * (_MAX_MESSAGE_CHARS + 400)} REAL_TAIL_QUESTION?  "
+        history = [
+            ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body=overlong, event_id="$m0"),
+            ResolvedVisibleMessage.synthetic(sender="@bob:localhost", body="Short reply", event_id="$m1"),
+        ]
+
+        text = await self._conversation(history)
+
+        assert text == f"@alice:localhost: {overlong}\n@bob:localhost: Short reply"
 
     async def test_exactly_at_threshold_not_truncated(self) -> None:
         """Exactly at the threshold boundary, no truncation occurs."""

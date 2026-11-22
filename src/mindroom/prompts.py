@@ -532,7 +532,7 @@ THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE = """The thread's current title:
 </current_title>"""
 THREAD_SUMMARY_KEEP_INSTRUCTIONS = """CURRENT TITLE:
 The thread already has a title, shown after the thread messages.
-Strongly default to keeping the current title. Replace it ONLY when the conversation abandoned that subject and spent a large part of the thread on a completely unrelated subject, so the current title no longer describes most of the thread.
+Strongly default to keeping the current title. Replace it ONLY when the conversation moved to a different subject or goal that the current title no longer covers and stayed on it for a large share of the thread.
 On long threads, the middle messages are an evenly spaced sample with omitted-message markers between gaps; judge the whole thread's arc, not just the last few messages.
 
 NOT a topic change (KEEP — set keep_current to true and repeat the current title verbatim):
@@ -542,13 +542,13 @@ NOT a topic change (KEEP — set keep_current to true and repeat the current tit
 - Any borderline case: when unsure, keep the current title.
 
 IS a topic change (CHANGE — set keep_current to false and write a new title):
-- After the early messages, the thread moved to an unrelated subject and spent a large portion of the thread on that new subject.
+- The thread moved on from the current title's subject or goal to a different one that the current title no longer covers, and stayed on it for a large share of the thread (whether the switch happened early or halfway through).
 
 KEEP vs CHANGE EXAMPLES:
 - Current: "🔧 Billing webhook retries" — later messages review follow-up PR #812, fix a related bug, and deploy → KEEP (keep_current: true).
 - Current: "📊 Export CSV PR #104" — later messages open follow-up PR #129 and refactor related formatting helpers → KEEP (keep_current: true).
 - Current: "🎨 Dashboard chart layout" — later messages adjust legends, fix a tooltip bug, and extract a shared styling package → KEEP (keep_current: true).
-- Current: "📦 Docker image size" — after the opening messages, most of the thread switches to choosing a home espresso machine → CHANGE (keep_current: false).
+- Current: "📦 Docker image size" — the thread leaves image size behind and spends most of the rest choosing a home espresso machine → CHANGE (keep_current: false).
 
 To keep it, set keep_current to true and repeat the current title; this is not a copied message.
 Otherwise set keep_current to false and write a new title by the rules above."""

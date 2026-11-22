@@ -35,6 +35,8 @@ _MAX_MESSAGES_BEFORE_TRUNCATION = 50
 _TRUNCATION_EDGE_COUNT = 5
 _TRUNCATION_MIDDLE_COUNT = 12
 _MAX_MESSAGE_CHARS = 600
+_CLIP_TAIL_CHARS = 250
+_CLIP_SEPARATOR = " … "
 _ROOM_INSTRUCTIONS_MAX_LENGTH = 2000
 # A new generated title over these after normalization goes back to the model; a person's pin may use
 # ``THREAD_SUMMARY_MAX_LENGTH``.
@@ -131,24 +133,37 @@ def resolve_thread_summary_model_name(
 def _conversation_text(messages: Sequence[ResolvedVisibleMessage]) -> str:
     """Render a thread's ordinary messages as the summarizer reads them.
 
-    Clips each message body to ``_MAX_MESSAGE_CHARS`` characters. For threads
-    exceeding ``_MAX_MESSAGES_BEFORE_TRUNCATION`` messages, samples the first
-    and last ``_TRUNCATION_EDGE_COUNT`` messages plus ``_TRUNCATION_MIDDLE_COUNT``
-    evenly spaced messages from the middle, with omission notes for each gap.
+    Threads at or under ``_MAX_MESSAGES_BEFORE_TRUNCATION`` messages are rendered
+    verbatim. Longer threads sample the first and last ``_TRUNCATION_EDGE_COUNT``
+    non-empty messages plus ``_TRUNCATION_MIDDLE_COUNT`` evenly spaced middle
+    messages with omission notes for each gap, clipping overlong bodies to
+    ``_MAX_MESSAGE_CHARS`` characters while keeping both head and tail.
     """
-    lines: list[str] = []
+    entries: list[tuple[str, str]] = []
     for message in messages:
         sender = message.sender or "unknown"
-        body = body_without_tool_markers(message.body, message.content).strip()
-        if not body:
+        body = body_without_tool_markers(message.body, message.content)
+        if body:
+            entries.append((sender, body))
+
+    if len(entries) <= _MAX_MESSAGES_BEFORE_TRUNCATION:
+        return "\n".join(f"{sender}: {body}" for sender, body in entries)
+
+    lines: list[str] = []
+    head_chars = _MAX_MESSAGE_CHARS - _CLIP_TAIL_CHARS - len(_CLIP_SEPARATOR)
+    for sender, body in entries:
+        stripped = body.strip()
+        if not stripped:
             continue
-        if len(body) > _MAX_MESSAGE_CHARS:
-            body = f"{body[: _MAX_MESSAGE_CHARS - 3].rstrip()}..."
-        lines.append(f"{sender}: {body}")
+        if len(stripped) > _MAX_MESSAGE_CHARS:
+            head = stripped[:head_chars].rstrip()
+            tail = stripped[-_CLIP_TAIL_CHARS:].lstrip()
+            stripped = f"{head}{_CLIP_SEPARATOR}{tail}"
+        lines.append(f"{sender}: {stripped}")
 
     total = len(lines)
     if total <= _MAX_MESSAGES_BEFORE_TRUNCATION:
-        return "\n".join(lines)
+        return "\n".join(f"{sender}: {body}" for sender, body in entries)
 
     edge = _TRUNCATION_EDGE_COUNT
     span = total - 2 * edge + 1
