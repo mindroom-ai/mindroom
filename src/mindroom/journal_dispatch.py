@@ -76,6 +76,10 @@ logger = get_logger(__name__)
 _RUNNING_EVENT: ContextVar[JournalEvent | None] = ContextVar("running_journal_event", default=None)
 
 
+# Their callbacks stop or clean up work and use nothing `before_room_event` reads, so they never wait for it.
+_KINDS_THAT_ONLY_STOP_WORK = frozenset({EventKind.JOB_CANCEL, EventKind.REDACTION})
+
+
 def _needs_turn_replay(event: JournalEvent) -> bool:
     """Return whether replay needs responders and turn recovery semantics."""
     return (
@@ -115,7 +119,7 @@ class JournalCallbacks:
     on_job_follow_up: Callable[[JournalEvent], Awaitable[None]]
     on_job_cancel: _JobCancelCallback
     on_rtc: _RtcCallback | None = None
-    # Awaited with the room of every Matrix event before its callback runs: what the callbacks need read first.
+    # Awaited with the room of every event whose callback may use what it reads, before that callback runs.
     before_room_event: Callable[[str], Awaitable[object]] | None = None
 
 
@@ -261,12 +265,12 @@ class JournalDispatcher:
             # routing policy, either duplicating side effects or settling the
             # source before the continuation can resume.
             return approval_settled
+        if self.callbacks.before_room_event is not None and event.kind not in _KINDS_THAT_ONLY_STOP_WORK:
+            await self.callbacks.before_room_event(event.room_id)
         if event.kind is EventKind.JOB_FOLLOW_UP:
             # A runtime source, not a Matrix event: nothing for ingress to parse.
             await self.callbacks.on_job_follow_up(event)
             return False
-        if self.callbacks.before_room_event is not None:
-            await self.callbacks.before_room_event(event.room_id)
         return await self._parse_and_invoke(event, needs_turn_replay=needs_turn_replay)
 
     async def _parse_and_invoke(self, event: JournalEvent, *, needs_turn_replay: bool) -> bool:

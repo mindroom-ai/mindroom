@@ -1098,7 +1098,13 @@ class AgentBot:
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
 
     async def _refresh_room_settings(self, room_id: str) -> None:
-        if self.client is not None:
+        """Read the room's settings before one of its events is handled, unless this bot left the room.
+
+        A bot that left is answered with the room's state as it left it, which would replace a setting changed since.
+        The events it still owes go by what the runtime knows, or an older runtime's override, and move nothing.
+        """
+        position = await self.journal_principal().ingestion_membership_position(room_id)
+        if self.client is not None and (position is None or position.membership == "join"):
             put_state = partial(room_state_response_as_steward, self.orchestrator.room_steward)
             await refresh_room_settings(self.client, self.runtime_paths, room_id, put_state=put_state)
 
