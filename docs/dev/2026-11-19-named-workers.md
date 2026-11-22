@@ -83,11 +83,13 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
 - **A forkserver template imports only plugins that opt in, once, and is never changed afterwards.**
   Importing in the template runs a plugin before the call's working directory and environment apply, and shares its threads, open files, and state with every call, which is only correct for a plugin that promises it, so `worker_preload` in the plugin manifest defaults to off.
   The primary lists the plugins that opt in in the worker's startup manifest, because a worker pod has no config file and would otherwise learn its plugins only from the first request; listing every enabled plugin would recreate all workers whenever any plugin is added or disabled.
-  A request whose opt-in plugins or their files differ from what the template imported runs in a second, plain template that never imported them, started on the first such request: an import's global effects, such as a registered YAML constructor, cannot be undone in the process that ran it, and starting an interpreter per call would cost the whole tool import each time.
-  So no request replaces a template another request is about to fork from, at the price of a second template's memory in a worker whose plugins changed.
-  The child decides whether the preload suits its request, after the request's config is validated and before any plugin or tool code runs, and tells the runner by its exit status.
+  A request whose opt-in plugins differ from what the template imported runs in a second, plain template that never imported them, started on the first such request: an import's global effects, such as a registered YAML constructor, cannot be undone in the process that ran it, and starting an interpreter per call would cost the whole tool import each time.
+  So no request replaces a template another request is about to fork from, at the price of a second template's memory in a worker that serves both kinds of request.
+  The runner chooses the template before it dispatches, by comparing the request's opt-in plugin entries as configured with the preloaded ones, so each request is dispatched once and keeps one deadline; a child that decided for itself needed a second dispatch.
+  Nothing checks whether a preloaded plugin's files changed: three review rounds each found a way past the check (kept timestamps, replaced files, retargeted links, a plugin named as a package), so opting in instead promises files that stay as they are while a worker runs.
   A preload that fails, breaks its promise, or outlasts its time limit ends its template, and the worker gives the preload up for its lifetime; the limit is a kernel timer, because an import stuck in native code never returns to Python.
-  The fingerprint compares each file's size, modification and change time, inode, and device instead of hashing contents, because it runs in every call; the change time and inode catch a replacement that keeps size and modification time.
+  The preloading template leads its own process group, which the runner kills whole, because the import may have started processes that outlive it.
+  It starts once per worker, during the setup, and requests use it only after the whole setup succeeded, so no request waits for a preload, and a template that ends later is not replaced.
   The preload reaches the template through its environment, and the template has no control channel, because tool code runs under the same user and could otherwise change what later calls inherit.
 
 ## Rejected alternatives
@@ -114,7 +116,8 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
 - A subagent owns the named workers its own turn starts, not its caller's, and only when its own agent sets `named_workers`.
 - Background scripts, OpenAI-compatible API requests, and other calls without a reply's turn cannot name a worker.
 - Each named worker starts with empty package caches and costs a cold start, and nodes the autoscaler adds can take longer than `readyTimeoutSeconds`.
-- A worker whose opt-in plugin changed on disk imports it in every call until the worker restarts, and a package upgraded in the worker's venv is not picked up by plugins the template already imported.
+- An opt-in plugin's edited files and upgraded packages are not reloaded until the worker restarts.
+- A worker whose preloading template ends, or whose venv is rebuilt, imports its plugins in every call until it restarts.
 - A plugin that opts in after the config was applied is preloaded only by workers started after the config is applied again.
 - The runner process still imports a request's plugins itself on its first request, and admission still lists the worker Deployments once per new worker under one lock.
 - With a `ReadWriteOnce` storage claim every worker runs on the runtime's node, so named workers add isolation and their own resource limits there, not capacity.

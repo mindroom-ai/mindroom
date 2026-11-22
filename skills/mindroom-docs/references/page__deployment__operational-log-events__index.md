@@ -280,6 +280,7 @@ A `timeout` means the worker did not become ready within [`workers.kubernetes.re
 
 Logged by a Kubernetes worker, in its own pod's log, when the setup it runs at startup fails or does not finish within 180 seconds.
 The worker stays up: its first call prepares what is missing and reports its own error, so that call is as slow as it was before workers prepared themselves.
+A worker that was to import plugins ahead of its calls gives that up too, and also logs [`sandbox_forkserver_plugin_preload_failed`](#sandbox_forkserver_plugin_preload_failed).
 
 | Field | Meaning |
 |-------|---------|
@@ -295,7 +296,7 @@ Check the worker's storage and its CPU limit, and how many workers started at on
 ### `sandbox_forkserver_plugin_preload_failed`
 
 Logged by a Kubernetes worker, in its own pod's log, once, when it gives up importing the plugins that set [`worker_preload`](https://docs.mindroom.chat/plugins/#importing-once-per-worker) ahead of its calls.
-The import raised, took longer than 60 seconds, left a thread or an open file behind, or outlasted the worker's setup.
+The import raised, took longer than 60 seconds, or left a thread or an open file behind, the worker's setup failed or took too long, or the process that held the imported plugins ended later.
 Calls still work, and each imports its plugins itself until the worker restarts.
 
 | Field | Meaning |
@@ -307,7 +308,7 @@ Calls still work, and each imports its plugins itself until the worker restarts.
 ```
 
 Alert on any record, since every tool call in that worker pays the plugin's import time again.
-Fix the plugin, or remove `worker_preload` from its manifest.
+Fix what `error` names, or remove `worker_preload` from the plugin's manifest.
 
 ### `oauth_credentials_refresh_failed`
 

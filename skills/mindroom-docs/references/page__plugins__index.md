@@ -811,18 +811,17 @@ Calling `toolkit.functions[name]` directly skips all of that: the validation, th
 
 A tool call that runs in a Kubernetes worker imports the configured plugins in a fresh process, so every call pays for those imports again.
 A plugin whose manifest sets `"worker_preload": true` is imported once when the worker starts, and the calls in that worker reuse it.
-Setting it promises that importing the plugin's tools, hooks, and OAuth modules:
+Setting it promises that the plugin's files and the packages it uses do not change while a worker runs, and that importing its tools, hooks, and OAuth modules:
 
 - Reads nothing a call sets: the import runs before any call, in the worker's own working directory and environment, without the call's `.mindroom/worker-env.sh` values or per-call environment.
 - Leaves no thread running and no file, socket, or database connection open, because every later call would share it.
 - Keeps no state that must differ between calls, such as a cache, a counter, or a seeded random generator other than Python's `random`.
-- Does not need a package installed or upgraded in the worker afterwards: MindRoom does not watch the plugin's dependencies, and the packages it imported stay as imported until the worker restarts.
 - Finishes within 60 seconds, for all the worker's plugins that set it together.
-- Writes nothing under the plugin's own directory, at import or later, such as a cache or a state file.
 
-A worker whose plugins break the second or fifth promise, or fail to import, logs a warning that names the reason, and all its calls import their plugins themselves, as without the setting.
-The same holds for each call once any file under the plugin's directory changed since the worker started, other than under `.git` and `__pycache__`, and for a call whose config enables another set of plugins that set `worker_preload`; workers started after the change import once again.
-MindRoom notices a change from each file's size, times, and identity without reading it, which it checks on every call, so a directory with many thousands of files, including those behind linked directories, slows each call down.
+MindRoom does not look for changes while a worker runs: the worker keeps the plugin, and the packages it imported, as they were when it started.
+An edited file or an upgraded package is certain to take effect only once the worker restarts, which happens after its idle timeout stopped it, after it was retired, or after a config change replaced it.
+A worker whose plugins break the second or fourth promise, or fail to import, logs the warning [`sandbox_forkserver_plugin_preload_failed`](https://docs.mindroom.chat/deployment/operational-log-events/#sandbox_forkserver_plugin_preload_failed) with the reason, and all its calls import their plugins themselves, as without the setting.
+So does a call whose config enables other plugins that set `worker_preload` than the worker started with, or names one of them by another path.
 Every other plugin, and every plugin in a Docker worker or the shared sandbox runner, is imported by each call.
 
 ## OAuth providers
