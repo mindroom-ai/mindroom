@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, cast
 from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator, Iterator
 
 from mindroom.agent_cli.client import AgentCliClient, AgentCliRefusedError, AgentCliUnavailableError
 from mindroom.agent_cli.json_io import MAX_ENVELOPE_BYTES, canonical_json, read_json
@@ -388,7 +388,7 @@ def _forward_stdin(client: AgentCliClient, call_id: str, done: threading.Event, 
         seq += 1
 
 
-def _frames(client: AgentCliClient, call_id: str) -> Iterator[dict[str, object]]:
+def _frames(client: AgentCliClient, call_id: str) -> Generator[dict[str, object]]:
     """Yield a streamed call's frames as they arrive.
 
     The command runs on in its worker, so a stream that cannot be reached is tried again for a minute. Once its
