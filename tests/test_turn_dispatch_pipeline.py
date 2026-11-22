@@ -1462,11 +1462,6 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_active_thread_ids,
             patch.object(
                 bot._response_runner.lifecycle_coordinator,
-                "has_active_response_for_target",
-                return_value=True,
-            ),
-            patch.object(
-                bot._response_runner.lifecycle_coordinator,
                 "reserve_waiting_human_message",
                 return_value=MagicMock(),
             ) as mock_reserve_waiting_human_message,
@@ -1547,11 +1542,6 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(
                 bot._response_runner.lifecycle_coordinator,
-                "has_active_response_for_target",
-                return_value=True,
-            ),
-            patch.object(
-                bot._response_runner.lifecycle_coordinator,
                 "reserve_waiting_human_message",
                 return_value=MagicMock(),
             ) as reserve_waiting_human_message,
@@ -1615,11 +1605,6 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch.object(
-                bot._response_runner.lifecycle_coordinator,
-                "has_active_response_for_target",
-                return_value=True,
-            ),
             patch.object(
                 bot._response_runner.lifecycle_coordinator,
                 "reserve_waiting_human_message",
@@ -1754,11 +1739,6 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch.object(
                 bot._response_runner.lifecycle_coordinator,
-                "has_active_response_for_target",
-                return_value=True,
-            ),
-            patch.object(
-                bot._response_runner.lifecycle_coordinator,
                 "reserve_waiting_human_message",
                 return_value=MagicMock(),
             ) as mock_reserve_waiting_human_message,
@@ -1839,11 +1819,6 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_voice_event",
                 new=AsyncMock(return_value=_VoiceNormalizationResult(event=prepared_event)),
-            ),
-            patch.object(
-                bot._response_runner.lifecycle_coordinator,
-                "has_active_response_for_target",
-                return_value=True,
             ),
             patch.object(
                 bot._response_runner.lifecycle_coordinator,
@@ -2026,11 +2001,6 @@ class TestAgentBot(AgentBotTestBase):
                 bot._coalescing_gate,
                 "_active_thread_ids_for_room",
                 return_value=frozenset({"$thread_root"}),
-            ),
-            patch.object(
-                bot._response_runner.lifecycle_coordinator,
-                "has_active_response_for_target",
-                return_value=True,
             ),
             patch.object(
                 bot._response_runner.lifecycle_coordinator,
