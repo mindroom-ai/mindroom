@@ -841,3 +841,731 @@ def test_http_client_cancel_and_long_poll_query(monkeypatch: pytest.MonkeyPatch)
         ("GET", f"/api/agent-cli/calls/{call_id}?wait=25"),
         ("POST", f"/api/agent-cli/calls/{call_id}/cancel"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Round 1 review fixes (tests-first against 7d2f8bb6a)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_early_cancel_before_submit_prevents_execution_and_is_owner_scoped(tmp_path: Path) -> None:
+    """An early cancel for an unknown id returns 401, stops a late submit of that owner, and never affects another owner."""
+    outer_a_entered = asyncio.Event()
+    release_outer_a = asyncio.Event()
+    outer_b_entered = asyncio.Event()
+    release_outer_b = asyncio.Event()
+    ran: list[str] = []
+
+    async def run_shell_command(args: str) -> str:
+        if args == "outer-a":
+            outer_a_entered.set()
+            await release_outer_a.wait()
+            return "outer-a done"
+        if args == "outer-b":
+            outer_b_entered.set()
+            await release_outer_b.wait()
+            return "outer-b done"
+        ran.append(args)
+        return f"ran:{args}"
+
+    owner_a, token_a = await _make_owner(tmp_path, run_shell_command, turn_id="early-a")
+    owner_b, token_b = await _make_owner(tmp_path, run_shell_command, turn_id="early-b")
+    app = _make_app(owner_a, owner_b)
+
+    try:
+        async with response_cli_lifetime():
+            await capture_bash_batch(owner_a, ("win-a", {"command": "outer-a"}))
+            await capture_bash_batch(owner_b, ("win-b", {"command": "outer-b"}))
+            task_a = asyncio.create_task(
+                owner_a.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer-a"}, "win-a"),
+            )
+            task_b = asyncio.create_task(
+                owner_b.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer-b"}, "win-b"),
+            )
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                await outer_a_entered.wait()
+                await outer_b_entered.wait()
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as http:
+                    early_id = str(uuid4())
+                    other_id = str(uuid4())
+
+                    # Owner A cancels early_id BEFORE submit arrives -> 401 (does not leak existence).
+                    resp_a = await http.post(
+                        f"/api/agent-cli/calls/{early_id}/cancel",
+                        headers={"Authorization": f"Bearer {token_a}"},
+                    )
+                    assert resp_a.status_code == 401
+
+                    # Owner B cancels other_id early -> 401, must NOT affect Owner A submitting other_id.
+                    resp_b = await http.post(
+                        f"/api/agent-cli/calls/{other_id}/cancel",
+                        headers={"Authorization": f"Bearer {token_b}"},
+                    )
+                    assert resp_b.status_code == 401
+
+                    # Now Owner A's delayed submit for early_id arrives -> immediately terminal cancelled, never runs.
+                    sub_early = await http.post(
+                        "/api/agent-cli/operations",
+                        headers={"Authorization": f"Bearer {token_a}", AGENT_CLI_WINDOW_HEADER: "win-a"},
+                        json={
+                            "operation": "tools.call",
+                            "call_id": early_id,
+                            "toolkit": "shell",
+                            "function": "run_shell_command",
+                            "arguments": {"args": "must-not-run"},
+                        },
+                    )
+                    assert sub_early.status_code == 200
+                    assert sub_early.json()["status"] == "cancelled"
+
+                    # Owner A submitting other_id still runs normally despite Owner B's early cancel.
+                    sub_other = await http.post(
+                        "/api/agent-cli/operations",
+                        headers={"Authorization": f"Bearer {token_a}", AGENT_CLI_WINDOW_HEADER: "win-a"},
+                        json={
+                            "operation": "tools.call",
+                            "call_id": other_id,
+                            "toolkit": "shell",
+                            "function": "run_shell_command",
+                            "arguments": {"args": "allowed"},
+                        },
+                    )
+                    assert sub_other.status_code == 200
+                    done_other = await http.get(
+                        f"/api/agent-cli/calls/{other_id}?wait=5",
+                        headers={"Authorization": f"Bearer {token_a}"},
+                    )
+                    assert done_other.json()["status"] == "completed"
+                    assert done_other.json()["outcome"] == "ran:allowed"
+                    assert ran == ["allowed"]
+
+                release_outer_a.set()
+                release_outer_b.set()
+                await asyncio.gather(task_a, task_b)
+    finally:
+        await owner_a.close()
+        await owner_b.close()
+
+
+def test_cli_retries_cancel_once_after_401_and_reports_unconfirmed_remote_stop(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 401 on the first cancel retries once after ~0.5s; a dispatched cancel warns that the command may still run."""
+    installed: dict[int, object] = {}
+    sleeps: list[float] = []
+    cancel_calls: list[tuple[str, float]] = []
+    submitted: list[str] = []
+
+    def fake_signal(signum, handler):
+        previous = installed.get(signum, signal.SIG_DFL)
+        installed[signum] = handler
+        return previous
+
+    class Client:
+        def operation(self, payload):
+            submitted.append(payload["call_id"])
+            return {"status": "running", "call_id": payload["call_id"]}
+
+        def receipt(self, call_id, *, timeout: float = 30, wait: float | None = None, after_progress: int | None = None):
+            del call_id, timeout, wait, after_progress
+            handler = installed[signal.SIGTERM]
+            assert callable(handler)
+            handler(int(signal.SIGTERM), None)
+            pytest.fail("signal handler should interrupt wait")
+
+        def cancel(self, call_id, *, timeout: float = 8.0):
+            cancel_calls.append((call_id, timeout))
+            if len(cancel_calls) == 1:
+                msg = "Agent CLI authority or transport is unavailable"
+                raise AgentCliUnavailableError(msg, status_code=401)
+            return {
+                "status": "cancelled",
+                "call_id": call_id,
+                "dispatched": True,
+                "outcome": "Call interrupted after dispatch; effects may have occurred",
+            }
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setattr(signal, "signal", fake_signal)
+    monkeypatch.setattr("mindroom.agent_cli.main.time.sleep", sleeps.append)
+
+    assert main(["workers", "run", "fan3", "--", "sleep", "300"]) == 143
+    [call_id] = submitted
+    assert len(cancel_calls) == 2
+    assert cancel_calls[0][1] >= 7.0  # Client cancel timeout has headroom over server's 5s settle wait.
+    assert sleeps == [pytest.approx(0.5)]
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "cancel requested" in output.err
+    assert f"may still be running in worker fan3 (call {call_id})" in output.err
+
+
+@pytest.mark.parametrize("case", ["final_write_epipe", "closed_during_wait_no_output"])
+def test_real_pipe_subprocess_exits_141_without_traceback_and_cancels(case: str) -> None:
+    """Real subprocesses with a closed stdout pipe exit 141, cancel the call, and emit no shutdown traceback."""
+    import os  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+    import threading  # noqa: PLC0415
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: PLC0415
+
+    poll_entered = threading.Event()
+    release_poll = threading.Event()
+    cancelled: list[str] = []
+    submitted: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length else b""
+            if self.path.endswith("/cancel"):
+                cancelled.append(self.path)
+                release_poll.set()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"status":"cancelled","dispatched":true}')
+                return
+            payload = json.loads(body)
+            submitted.append(payload["call_id"])
+            if case == "final_write_epipe":
+                poll_entered.set()
+                release_poll.wait(timeout=5.0)
+                receipt = {"status": "completed", "outcome": "[worker: w]\nhello from worker"}
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(json.dumps(receipt).encode())
+                return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"running"}')
+
+        def do_GET(self) -> None:
+            poll_entered.set()
+            release_poll.wait(timeout=5.0)
+            if case == "final_write_epipe":
+                receipt = {"status": "completed", "outcome": "[worker: w]\nhello from worker"}
+            else:
+                receipt = {"status": "completed", "outcome": "[worker: w]\n"}
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps(receipt).encode())
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    env = {
+        **os.environ,
+        "MINDROOM_AGENT_CLI_URL": f"http://127.0.0.1:{server.server_port}",
+        "MINDROOM_AGENT_CLI_TOKEN": "private-capability",
+    }
+    try:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys; from mindroom.agent_cli.main import main; raise SystemExit(main(['workers', 'run', 'w', '--', 'true']))",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        assert proc.stdout is not None and proc.stderr is not None
+        assert poll_entered.wait(timeout=5.0)
+        # Close the reader end of the real pipe while the CLI is waiting on the long-poll.
+        proc.stdout.close()
+        if case == "final_write_epipe":
+            # Let the server return a large output so final write hits EPIPE if not already caught.
+            release_poll.set()
+        else:
+            # Let the server finish immediately with empty output after the reader closed.
+            release_poll.set()
+        stderr_bytes = proc.stderr.read()
+        code = proc.wait(timeout=10.0)
+    finally:
+        release_poll.set()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+    assert code == 141, f"expected 141, got {code}; stderr={stderr_text!r}"
+    assert "Traceback" not in stderr_text
+    assert "Exception ignored" not in stderr_text
+    assert len(cancelled) >= 1
+
+
+@pytest.mark.parametrize(
+    ("receipt", "expected_code"),
+    [
+        ({"status": "cancelled", "dispatched": False, "outcome": "Call cancelled before dispatch"}, 125),
+        ({"status": "failed", "dispatched": False, "outcome": "Cannot start worker 'w': limit reached"}, 125),
+        (
+            {
+                "status": "cancelled",
+                "dispatched": True,
+                "outcome": "Call interrupted after dispatch; effects may have occurred",
+            },
+            255,
+        ),
+        (
+            {
+                "status": "failed",
+                "dispatched": True,
+                "outcome": "Sandbox proxy stream ended without a result.",
+            },
+            255,
+        ),
+    ],
+)
+def test_cli_exit_125_only_for_known_not_run_and_255_when_command_may_have_run(
+    receipt: dict[str, object],
+    expected_code: int,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exit 125 is reserved for failures known to precede launch; post-dispatch failures exit 255 with call id."""
+    submitted: list[str] = []
+
+    class Client:
+        def operation(self, payload):
+            submitted.append(payload["call_id"])
+            return receipt
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+
+    assert main(["workers", "run", "w", "--", "true"]) == expected_code
+    output = capsys.readouterr()
+    assert output.out == ""
+    if expected_code == 255:
+        assert f"(call {submitted[0]})" in output.err
+
+
+def test_cli_output_save_failure_exits_255_with_call_id(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A completed command whose output auto-save failed already ran, so the CLI exits 255 with call id."""
+    from mindroom.agent_cli.projection import project_cli_result  # noqa: PLC0415
+
+    submitted: list[str] = []
+    result = format_shell_completion("finished", None, return_code=0)
+    policy = ToolOutputFilePolicy(tmp_path, max_bytes=1, auto_save_threshold_bytes=1)
+    outcome = project_cli_result(f"[worker: w]\n{result}", policy, "run_shell_command")
+
+    class Client:
+        def operation(self, payload):
+            submitted.append(payload["call_id"])
+            return {"status": "completed", "outcome": outcome}
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+
+    assert main(["workers", "run", "w", "--", "true"]) == 255
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert f"(call {submitted[0]})" in output.err
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cancels_invoke_task_cancel_only_once(tmp_path: Path) -> None:
+    """Two concurrent cancel requests call `task.cancel()` once so cleanup is not interrupted."""
+    outer_entered = asyncio.Event()
+    release_outer = asyncio.Event()
+    child_started = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_interrupted = False
+
+    async def run_shell_command(args: str) -> str:
+        nonlocal cleanup_interrupted
+        if args == "outer":
+            outer_entered.set()
+            await release_outer.wait()
+            return "outer done"
+        child_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_entered.set()
+            try:
+                await release_cleanup.wait()
+            except asyncio.CancelledError:
+                cleanup_interrupted = True
+                raise
+            raise
+        return "unreachable"
+
+    owner, _token = await _make_owner(tmp_path, run_shell_command)
+    try:
+        async with response_cli_lifetime():
+            await capture_bash_batch(owner, ("outer-1", {"command": "outer"}))
+            bash_task = asyncio.create_task(
+                owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, "outer-1"),
+            )
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                await outer_entered.wait()
+                call_id = uuid4()
+                await owner.operation(
+                    window="outer-1",
+                    operation=ToolCallOperation(
+                        operation="tools.call",
+                        call_id=call_id,
+                        toolkit="shell",
+                        function="run_shell_command",
+                        arguments={"args": "child"},
+                    ),
+                )
+                await child_started.wait()
+
+                cancel_1 = asyncio.create_task(owner.cancel_call(str(call_id)))
+                await cleanup_entered.wait()
+                # Second cancel arrives while first cancel's cleanup is running.
+                cancel_2 = asyncio.create_task(owner.cancel_call(str(call_id)))
+                await asyncio.sleep(0.02)
+                release_cleanup.set()
+
+                res_1, res_2 = await asyncio.gather(cancel_1, cancel_2)
+                assert res_1["status"] == "cancelled"
+                assert res_2["status"] == "cancelled"
+                assert not cleanup_interrupted
+
+                release_outer.set()
+                await bash_task
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_approval_withdraws_pending_approval_and_unblocks_sibling(tmp_path: Path) -> None:
+    """Cancelling a CLI call paused for approval withdraws its continuation so a sibling approval succeeds."""
+    from functools import partial  # noqa: PLC0415
+    from unittest.mock import AsyncMock, patch  # noqa: PLC0415
+
+    from agno.tools.toolkit import Toolkit  # noqa: PLC0415
+
+    from mindroom.agent_cli.approval import CliApprovalCall  # noqa: PLC0415
+    from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits  # noqa: PLC0415
+    from mindroom.final_delivery import TurnProgress  # noqa: PLC0415
+    from mindroom.orchestration.locked_turns import LockedTurns  # noqa: PLC0415
+    from mindroom.tool_system.agno_toolkits import adapt_toolkit  # noqa: PLC0415
+    from tests.conftest import unwrap_extracted_collaborator  # noqa: PLC0415
+    from tests.test_response_runner_focused import (  # noqa: PLC0415
+        _admit_approval_source,
+        _bot,
+        _in_reply_span,
+        _plain_request,
+        _target,
+    )
+
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.replies.store
+    await _admit_approval_source(store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    first_paused = asyncio.Event()
+    second_paused = asyncio.Event()
+    published_ids: list[str] = []
+
+    async def publish_gen(continuation, plan, **kwargs):
+        del plan, kwargs
+        published_ids.append(continuation.approval_id)
+        if len(published_ids) == 1:
+            first_paused.set()
+        else:
+            await store.approvals.activate_approval_continuation(
+                continuation.approval_id,
+                expected_generation=continuation.generation,
+            )
+            second_paused.set()
+
+    outer_entered = asyncio.Event()
+    release_outer = asyncio.Event()
+
+    async def run_shell_command(args: str) -> str:
+        outer_entered.set()
+        await release_outer.wait()
+        return "outer done"
+
+    async def gated(label: str) -> str:
+        return f"approved:{label}"
+
+    gated_toolkit = Toolkit(name="gated", tools=[gated], requires_confirmation_tools=["gated"])
+    catalog = await _catalog(tmp_path / "cli", [_toolkit("shell", run_shell_command), adapt_toolkit(gated_toolkit)])
+    catalog.store = create_agent_state_storage("helper", tmp_path / "cli")
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn-approval", "run"),
+        catalog=catalog,
+        authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    owner.shell_env = _SHELL_ENV
+    waits: CliApprovalWaits = runner.approvals._cli_approval_waits
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=request.response_envelope.target,
+        user_id=request.user_id,
+    )
+
+    try:
+        with (
+            patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
+            patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
+            patch.object(runner.approvals, "_publish_generation", new=publish_gen),
+            patch.object(LockedTurns, "request_remains_authorized", new=AsyncMock(return_value=True)),
+        ):
+            async with _in_reply_span(runner, request), waits.scope(
+                source_event_ids=("$source",),
+                progress=TurnProgress(),
+                target=request.response_envelope.target,
+                publish=partial(
+                    runner.approvals.suspend_for_approval,
+                    request=request,
+                    target=request.response_envelope.target,
+                    execution_identity=identity,
+                    history_scope=runner.deps.state_writer.history_scope(),
+                    entity_kind="agent",
+                    show_tool_calls=True,
+                ),
+                authorize=lambda: runner.locked.request_remains_authorized(request),
+                settle_terminal=True,
+            ) as pause:
+                from dataclasses import replace  # noqa: PLC0415
+
+                catalog.runtime_context = replace(catalog.runtime_context, cli_approval_handler=pause)
+                async with response_cli_lifetime():
+                    await capture_bash_batch(owner, ("outer-1", {"command": "outer"}))
+                    bash_task = asyncio.create_task(
+                        owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, "outer-1"),
+                    )
+                    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                        await outer_entered.wait()
+                        first_id = uuid4()
+                        await owner.operation(
+                            window="outer-1",
+                            operation=ToolCallOperation(
+                                operation="tools.call",
+                                call_id=first_id,
+                                toolkit="gated",
+                                function="gated",
+                                arguments={"label": "first"},
+                            ),
+                        )
+                        await first_paused.wait()
+
+                        cancelled = await owner.cancel_call(str(first_id))
+                        assert cancelled["status"] == "cancelled"
+
+                        # Sibling call needing approval in the same response must now succeed!
+                        second_id = uuid4()
+                        await owner.operation(
+                            window="outer-1",
+                            operation=ToolCallOperation(
+                                operation="tools.call",
+                                call_id=second_id,
+                                toolkit="gated",
+                                function="gated",
+                                arguments={"label": "second"},
+                            ),
+                        )
+                        await second_paused.wait()
+                        done = await owner.get_call(str(second_id), wait=5.0)
+                        assert done["status"] == "completed", done
+                        assert done["outcome"] == "approved:second"
+
+                        release_outer.set()
+                        await bash_task
+    finally:
+        await owner.close()
+    del CliApprovalCall
+
+
+@pytest.mark.asyncio
+async def test_progress_revision_delivers_changes_between_gets_and_on_terminal_receipt(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Server wakes immediately when `after_progress` is behind; CLI prints unseen progress on terminal receipts too."""
+    outer_entered = asyncio.Event()
+    release_outer = asyncio.Event()
+    child_started = asyncio.Event()
+    finish_child = asyncio.Event()
+
+    async def run_shell_command(args: str) -> str:
+        if args == "outer":
+            outer_entered.set()
+            await release_outer.wait()
+            return "outer done"
+        sink = _make_progress_sink(
+            None,
+            reply_timing=None,
+            call_progress=runtime_context.get_call_progress_sink(),
+            worker_name="fan3",
+            tool_name="shell",
+            function_name="run_shell_command",
+        )
+        sink(WorkerReadyProgress(phase="cold_start", worker_key="w", backend_name="kubernetes", elapsed_seconds=1.6))
+        child_started.set()
+        await finish_child.wait()
+        return "[worker: fan3]\nok"
+
+    owner, token = await _make_owner(tmp_path, run_shell_command)
+    app = _make_app(owner)
+    try:
+        async with response_cli_lifetime():
+            await capture_bash_batch(owner, ("outer-1", {"command": "outer"}))
+            bash_task = asyncio.create_task(
+                owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, "outer-1"),
+            )
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                await outer_entered.wait()
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as http:
+                    call_id = str(uuid4())
+                    await http.post(
+                        "/api/agent-cli/operations",
+                        headers={"Authorization": f"Bearer {token}", AGENT_CLI_WINDOW_HEADER: "outer-1"},
+                        json={
+                            "operation": "tools.call",
+                            "call_id": call_id,
+                            "toolkit": "shell",
+                            "function": "run_shell_command",
+                            "arguments": {"args": "child"},
+                        },
+                    )
+                    await child_started.wait()
+                    await asyncio.sleep(0.02)
+
+                    # Progress happened BEFORE this GET arrived: passing after_progress=0 must return immediately!
+                    started = time.monotonic()
+                    resp = await http.get(
+                        f"/api/agent-cli/calls/{call_id}?wait=3&after_progress=0",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    assert time.monotonic() - started < 1.0
+                    body = resp.json()
+                    assert body["progress_revision"] >= 1
+                    assert "fan3" in body["progress"]
+
+                    finish_child.set()
+                    done = await http.get(
+                        f"/api/agent-cli/calls/{call_id}?wait=5&after_progress={body['progress_revision']}",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    assert done.json()["status"] == "completed"
+                    assert done.json()["progress"] == body["progress"]
+                release_outer.set()
+                await bash_task
+    finally:
+        await owner.close()
+
+    # CLI also prints unseen progress carried on a terminal receipt.
+    class TerminalProgressClient:
+        def operation(self, payload):
+            del payload
+            return {
+                "status": "completed",
+                "progress": "worker fan3 ready (3s)",
+                "progress_revision": 2,
+                "outcome": "[worker: fan3]\n" + format_shell_completion("hi", None, return_code=0),
+            }
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", TerminalProgressClient)
+    assert main(["workers", "run", "fan3", "--", "echo", "hi"]) == 0
+    output = capsys.readouterr()
+    assert output.out == "hi\n"
+    assert "mindroom-agent: worker fan3 ready (3s)\n" in output.err
+
+
+def test_cli_backs_off_against_server_that_ignores_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older server that returns immediately with unchanged status does not cause a busy-loop."""
+    now = 0.0
+    reads = 0
+
+    class Clock:
+        def sleep(self, seconds: float) -> None:
+            nonlocal now
+            now += seconds
+
+        def monotonic(self) -> float:
+            return now
+
+    class EarlyServerClient:
+        def operation(self, payload):
+            del payload
+            return {"status": "running"}
+
+        def receipt(self, call_id, *, timeout: float = 30, wait: float | None = None, after_progress: int | None = None):
+            nonlocal reads
+            del call_id, timeout, wait, after_progress
+            reads += 1
+            if now >= 2.0 or reads > 50:
+                return {"status": "completed", "outcome": "[worker: w]\nok"}
+            return {"status": "running"}
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", EarlyServerClient)
+    monkeypatch.setattr("mindroom.agent_cli.main.time", Clock())
+
+    assert main(["workers", "run", "w", "--", "true"]) == 0
+    assert reads <= 10
+
+
+def test_cli_signal_after_command_finished_reports_finished_and_returns_command_code(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When cancel returns an already-completed receipt, report it finished and exit with its real code."""
+    installed: dict[int, object] = {}
+    submitted: list[str] = []
+
+    def fake_signal(signum, handler):
+        previous = installed.get(signum, signal.SIG_DFL)
+        installed[signum] = handler
+        return previous
+
+    class Client:
+        def operation(self, payload):
+            submitted.append(payload["call_id"])
+            return {"status": "running", "call_id": payload["call_id"]}
+
+        def receipt(self, call_id, *, timeout: float = 30, wait: float | None = None, after_progress: int | None = None):
+            del call_id, timeout, wait, after_progress
+            handler = installed[signal.SIGTERM]
+            assert callable(handler)
+            handler(int(signal.SIGTERM), None)
+            pytest.fail("signal handler should interrupt wait")
+
+        def cancel(self, call_id, *, timeout: float = 8.0):
+            del timeout
+            return {
+                "status": "completed",
+                "call_id": call_id,
+                "outcome": "[worker: w]\n" + format_shell_completion("done", None, return_code=7),
+            }
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setattr(signal, "signal", fake_signal)
+
+    assert main(["workers", "run", "w", "--", "sh", "-c", "exit 7"]) == 7
+    output = capsys.readouterr()
+    assert "already finished" in output.err
+    assert f"(call {submitted[0]})" in output.err
+    assert "cancelled by" not in output.err
+
+
+def test_cli_flag_before_workers_usage_error_writes_only_to_stderr(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A leading flag before `workers` still suppresses JSON on stdout for usage errors."""
+    assert main(["--unknown", "workers", "run", "w", "--", "true"]) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "mindroom-agent:" in output.err
