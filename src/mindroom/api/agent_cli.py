@@ -73,13 +73,18 @@ async def submit_operation(request: Request) -> Response:
 
 
 @router.get("/calls/{call_id}")
-async def get_call(request: Request, call_id: str, wait: float = 0.0) -> Response:
+async def get_call(
+    request: Request,
+    call_id: str,
+    wait: float = 0.0,
+    after_progress: int | None = None,
+) -> Response:
     """Hide absent and other-owner receipts behind the identical auth response."""
     owner = _owner(request)
-    if not math.isfinite(wait) or wait < 0:
+    if not math.isfinite(wait) or wait < 0 or (after_progress is not None and after_progress < 0):
         raise HTTPException(status_code=422, detail="Invalid Agent CLI wait duration")
     try:
-        return _response(await owner.get_call(str(UUID(call_id)), wait=wait))
+        return _response(await owner.get_call(str(UUID(call_id)), wait=wait, after_progress=after_progress))
     except (CliAuthenticationError, ValueError):
         raise HTTPException(status_code=401, detail="Agent CLI authority is unavailable") from None
 

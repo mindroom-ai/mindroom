@@ -40,7 +40,9 @@ _EXIT_UNKNOWN = 255
 _RESULT_UNREACHABLE_SECONDS = 60
 _HTTP_TIMEOUT_SECONDS = 30.0
 _LONG_POLL_SECONDS = 25.0
-_CANCEL_TIMEOUT_SECONDS = 5.0
+_CANCEL_TIMEOUT_SECONDS = 8.0
+_CANCEL_401_RETRY_DELAY_SECONDS = 0.5
+_EARLY_RETURN_THRESHOLD_SECONDS = 0.5
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _WORKER_SIGNALS = tuple(
     sig for name in ("SIGINT", "SIGTERM", "SIGHUP") if (sig := getattr(signal, name, None)) is not None
@@ -252,28 +254,130 @@ def _worker_signal_handlers(is_cancelling: Callable[[], bool]) -> Iterator[None]
             signal.signal(signum, handler)
 
 
-def _stdout_pipe_broken() -> bool:
-    """Return whether stdout is a pipe whose reader has already closed."""
-    if not hasattr(select, "poll"):
-        return False
+def _stdout_fifo_fd() -> int | None:
+    """Return stdout's file descriptor when it is a real FIFO pipe, else ``None``."""
     try:
         fd = sys.stdout.fileno()
-        if not stat.S_ISFIFO(os.fstat(fd).st_mode):
-            return False
-        poller = select.poll()
-        poller.register(fd, select.POLLERR)
-        return any(event & select.POLLERR for _, event in poller.poll(0))
+        return fd if stat.S_ISFIFO(os.fstat(fd).st_mode) else None
     except (OSError, ValueError, io.UnsupportedOperation):
+        return None
+
+
+def _stdout_pipe_broken() -> bool:
+    """Return whether stdout is a pipe whose reader has already closed."""
+    if not hasattr(select, "poll") or (fd := _stdout_fifo_fd()) is None:
+        return False
+    try:
+        poller = select.poll()
+        poller.register(fd, select.POLLERR | select.POLLHUP)
+        return any(event & (select.POLLERR | select.POLLHUP) for _, event in poller.poll(0))
+    except OSError:
         return False
 
 
-def _emit_progress(receipt: dict[str, object] | None, last_progress: str | None) -> str | None:
+def _silence_broken_stdout() -> None:
+    """Redirect a broken stdout fd to ``/dev/null`` so CPython's shutdown flush does not exit 120."""
+    try:
+        fd = sys.stdout.fileno()
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, fd)
+        finally:
+            os.close(devnull)
+    except (OSError, ValueError, io.UnsupportedOperation):
+        pass
+
+
+@contextmanager
+def _watch_stdout_pipe(is_cancelling: Callable[[], bool]) -> Iterator[None]:
+    """Interrupt a blocked long-poll immediately when a real stdout pipe's reader closes."""
+    sigpipe = getattr(signal, "SIGPIPE", None)
+    if (
+        threading.current_thread() is not threading.main_thread()
+        or sigpipe is None
+        or not hasattr(select, "poll")
+        or not hasattr(signal, "pthread_kill")
+        or (stdout_fd := _stdout_fifo_fd()) is None
+    ):
+        yield
+        return
+
+    def _on_sigpipe(_signum: int, _frame: object) -> None:
+        if is_cancelling():
+            return
+        raise BrokenPipeError
+
+    previous = signal.signal(sigpipe, _on_sigpipe)
+    wakeup_r, wakeup_w = os.pipe()
+    main_tid = threading.get_ident()
+
+    def _watch() -> None:
+        poller = select.poll()
+        poller.register(stdout_fd, select.POLLERR | select.POLLHUP)
+        poller.register(wakeup_r, select.POLLIN)
+        with suppress(OSError):
+            events = poller.poll()
+            if any(fd == stdout_fd and (ev & (select.POLLERR | select.POLLHUP)) for fd, ev in events):
+                with suppress(OSError):
+                    signal.pthread_kill(main_tid, sigpipe)
+
+    watcher = threading.Thread(target=_watch, name="mindroom-stdout-pipe-watch", daemon=True)
+    watcher.start()
+    try:
+        yield
+    finally:
+        with suppress(OSError):
+            os.write(wakeup_w, b"x")
+        watcher.join(timeout=1.0)
+        with suppress(OSError):
+            os.close(wakeup_r)
+        with suppress(OSError):
+            os.close(wakeup_w)
+        signal.signal(sigpipe, previous)
+
+
+def _emit_progress(
+    receipt: dict[str, object] | None,
+    last_progress: str | None,
+    last_revision: int,
+) -> tuple[str | None, int]:
     """Print each new warmup progress message on stderr as one `mindroom-agent:` line."""
-    progress = receipt.get("progress") if isinstance(receipt, dict) else None
-    if isinstance(progress, str) and progress and progress != last_progress:
+    if not isinstance(receipt, dict):
+        return last_progress, last_revision
+    rev = receipt.get("progress_revision")
+    next_revision = rev if isinstance(rev, int) and rev > last_revision else last_revision
+    progress = receipt.get("progress")
+    if isinstance(progress, str) and progress and (progress != last_progress or next_revision > last_revision):
         print(f"mindroom-agent: {progress}", file=sys.stderr, flush=True)
-        return progress
-    return last_progress
+        return progress, next_revision
+    return last_progress, next_revision
+
+
+def _check_stdout_pipe() -> None:
+    if _stdout_pipe_broken():
+        raise BrokenPipeError
+
+
+def _receipt_poll_state(receipt: dict[str, object] | None) -> tuple[object, object, object] | None:
+    if not isinstance(receipt, dict):
+        return None
+    return (receipt.get("status"), receipt.get("progress"), receipt.get("progress_revision"))
+
+
+def _next_early_delay(
+    current: float,
+    result: dict[str, object],
+    prev_state: tuple[object, object, object] | None,
+    elapsed: float,
+) -> float:
+    """Back off when talking to an older server that ignores `?wait=` and returns unchanged status at once."""
+    if (
+        _exit_code(result) == 3
+        and _receipt_poll_state(result) == prev_state
+        and elapsed < _EARLY_RETURN_THRESHOLD_SECONDS
+    ):
+        return min(current * 1.5, 2.0) if current > 0 else 0.2
+    return 0.0
 
 
 def _settled(client: AgentCliClient, call_id: str, result: dict[str, object] | None) -> dict[str, object]:
@@ -283,62 +387,103 @@ def _settled(client: AgentCliClient, call_id: str, result: dict[str, object] | N
     submission response) and includes time spent in HTTP as well as between attempts.
     """
     delay = 0.2
+    early_delay = 0.0
     deadline = time.monotonic() + _RESULT_UNREACHABLE_SECONDS if result is None else None
     read_error: AgentCliUnavailableError | None = None
-    last_progress = _emit_progress(result, None)
+    last_progress, last_revision = _emit_progress(result, None, 0)
     while result is None or _exit_code(result) == 3:
-        if _stdout_pipe_broken():
-            raise BrokenPipeError
+        _check_stdout_pipe()
         if deadline is not None:
-            sleep_for = min(delay, deadline - time.monotonic())
-            if sleep_for > 0:
+            if (sleep_for := min(delay, deadline - time.monotonic())) > 0:
                 time.sleep(sleep_for)
             delay = min(delay * 1.5, 2.0)
+        elif early_delay > 0:
+            time.sleep(early_delay)
         now = time.monotonic()
         attempt_deadline = now + _RESULT_UNREACHABLE_SECONDS if deadline is None else deadline
         remaining = attempt_deadline - now
         if remaining <= 0:
-            if read_error is not None:
-                raise read_error
-            msg = "Timed out waiting for a call receipt"
-            raise AgentCliUnavailableError(msg)
+            raise read_error or AgentCliUnavailableError("Timed out waiting for a call receipt")
         http_timeout = min(remaining, _HTTP_TIMEOUT_SECONDS)
         wait = min(_LONG_POLL_SECONDS, max(0.0, http_timeout - 5.0))
+        prev_state = _receipt_poll_state(result)
+        started_at = time.monotonic()
         try:
-            result = client.receipt(call_id, timeout=http_timeout, wait=wait)
+            result = client.receipt(call_id, timeout=http_timeout, wait=wait, after_progress=last_revision)
         except AgentCliUnavailableError as exc:
-            if deadline is None:
-                deadline = attempt_deadline
-            read_error = exc
+            deadline = attempt_deadline if deadline is None else deadline
+            read_error, early_delay = exc, 0.0
         else:
-            deadline = None
-            read_error = None
-            delay = 0.2
-            last_progress = _emit_progress(result, last_progress)
+            deadline, read_error, delay = None, None, 0.2
+            last_progress, last_revision = _emit_progress(result, last_progress, last_revision)
+            early_delay = _next_early_delay(early_delay, result, prev_state, time.monotonic() - started_at)
+    _check_stdout_pipe()
     return result
 
 
+def _is_cancelled_before_dispatch(receipt: dict[str, object]) -> bool:
+    dispatched = receipt.get("dispatched")
+    if isinstance(dispatched, bool):
+        return not dispatched
+    outcome = receipt.get("outcome")
+    return isinstance(outcome, str) and outcome.startswith("Call cancelled before dispatch")
+
+
+def _request_cancel(client: AgentCliClient, call_id: str) -> dict[str, object] | None:
+    """Send cancel once, retrying once after ~0.5s on 401 in case cancel overtook submit."""
+    try:
+        return client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
+    except AgentCliUnavailableError as exc:
+        if exc.status_code != 401:
+            return None
+    except ValueError:
+        return None
+    time.sleep(_CANCEL_401_RETRY_DELAY_SECONDS)
+    with suppress(AgentCliUnavailableError, ValueError):
+        return client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
+    return None
+
+
 def _cancel_worker_call(
+    args: argparse.Namespace,
     client: AgentCliClient | None,
     call_id: str,
-    worker: str,
     signum: int,
     *,
     submitted: bool,
 ) -> int:
     """Ask MindRoom to cancel an in-flight worker call and report the signal exit on stderr."""
     sig_name = signal.Signals(signum).name
-    confirmed = not submitted
-    if submitted and client is not None:
-        with suppress(AgentCliUnavailableError, ValueError):
-            receipt = client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
-            confirmed = isinstance(receipt, dict) and receipt.get("status") in _TERMINAL_STATUSES
-    if confirmed:
+    is_sigpipe = signum == getattr(signal, "SIGPIPE", -1)
+    receipt = _request_cancel(client, call_id) if submitted and client is not None else None
+    status = receipt.get("status") if isinstance(receipt, dict) else None
+    if not is_sigpipe and isinstance(receipt, dict) and status == "completed":
+        with suppress(BrokenPipeError):
+            print(
+                f"mindroom-agent: {sig_name} received after command already finished (call {call_id})",
+                file=sys.stderr,
+                flush=True,
+            )
+        try:
+            return _print_worker_result(args, receipt, call_id=call_id)
+        except BrokenPipeError:
+            _silence_broken_stdout()
+            return 128 + int(signal.SIGPIPE)
+    if not submitted or (
+        isinstance(receipt, dict) and status == "cancelled" and _is_cancelled_before_dispatch(receipt)
+    ):
+        message = f"mindroom-agent: cancelled by {sig_name} (call {call_id})"
+    elif isinstance(receipt, dict) and status == "cancelled":
+        message = (
+            f"mindroom-agent: cancelled by {sig_name}; cancel requested; "
+            f"the command may still be running in worker {args.name} (call {call_id})"
+        )
+    elif isinstance(receipt, dict) and status in _TERMINAL_STATUSES:
         message = f"mindroom-agent: cancelled by {sig_name} (call {call_id})"
     else:
         message = (
             f"mindroom-agent: cancelled by {sig_name}; cancel could not be confirmed, "
-            f"the command may still be running in worker {worker} (call {call_id})"
+            f"the command may still be running in worker {args.name} (call {call_id})"
         )
     with suppress(BrokenPipeError):
         print(message, file=sys.stderr, flush=True)
@@ -371,7 +516,7 @@ def _run_in_worker(args: argparse.Namespace) -> int:
     submitting = False
     submitted = False
     cancelling = False
-    with _worker_signal_handlers(lambda: cancelling):
+    with _worker_signal_handlers(lambda: cancelling), _watch_stdout_pipe(lambda: cancelling):
         try:
             client = AgentCliClient()
             # Sent once: a second submission after an unknown outcome could run the command twice.
@@ -391,13 +536,14 @@ def _run_in_worker(args: argparse.Namespace) -> int:
                 result = None
             submitted = True
             result = _settled(client, call_id, result)
-            return _print_worker_result(args, result)
+            return _print_worker_result(args, result, call_id=call_id)
         except _WorkerSignal as exc:
             cancelling = True
-            return _cancel_worker_call(client, call_id, args.name, exc.signum, submitted=submitting)
+            return _cancel_worker_call(args, client, call_id, exc.signum, submitted=submitting)
         except BrokenPipeError:
             cancelling = True
-            return _cancel_worker_call(client, call_id, args.name, int(signal.SIGPIPE), submitted=submitting)
+            _silence_broken_stdout()
+            return _cancel_worker_call(args, client, call_id, int(signal.SIGPIPE), submitted=submitting)
         except (AgentCliUnavailableError, ValueError) as exc:
             if submitted:
                 print(
@@ -409,7 +555,7 @@ def _run_in_worker(args: argparse.Namespace) -> int:
             return _EXIT_NOT_RUN
 
 
-def _print_worker_result(args: argparse.Namespace, result: dict[str, object]) -> int:
+def _print_worker_result(args: argparse.Namespace, result: dict[str, object], *, call_id: str) -> int:
     """Print a command's output or a tool error, and return its CLI exit code."""
     outcome = result.get("outcome")
     saved_path = None
@@ -417,15 +563,25 @@ def _print_worker_result(args: argparse.Namespace, result: dict[str, object]) ->
     if isinstance(saved, dict):
         receipt = cast("dict[str, object]", saved)
         if receipt.get("status") == "error":
-            print(f"mindroom-agent: {receipt.get('error', 'Could not save command output')}", file=sys.stderr)
-            return _EXIT_NOT_RUN
+            print(
+                f"mindroom-agent: {receipt.get('error', 'Could not save command output')} (call {call_id})",
+                file=sys.stderr,
+            )
+            return _EXIT_UNKNOWN
         # A long result arrives as its start and the workspace file that holds all of it.
         outcome, saved_path = receipt.get("preview"), receipt.get("path")
     text = outcome if isinstance(outcome, str) else canonical_json(outcome)
     header, _, body = text.partition("\n")
     started_header = f"[worker: {args.name}, started]"
-    if result.get("status") != "completed" or header not in (f"[worker: {args.name}]", started_header):
-        # The call failed, or its shell ran it without a worker of that name.
+    status = result.get("status")
+    if status != "completed" or header not in (f"[worker: {args.name}]", started_header):
+        # Reserve 125 for failures known to precede command execution; otherwise 255 with call id.
+        may_have_run = (status == "cancelled" and not _is_cancelled_before_dispatch(result)) or (
+            status == "failed" and result.get("dispatched") is True
+        )
+        if may_have_run:
+            print(f"mindroom-agent: {text} (call {call_id})", file=sys.stderr)
+            return _EXIT_UNKNOWN
         print(f"mindroom-agent: {text}", file=sys.stderr)
         return _EXIT_NOT_RUN
     if header == started_header:
@@ -471,13 +627,19 @@ def _script_tool_call(args: argparse.Namespace) -> dict[str, object]:
     return receipt | {"status": "completed", "outcome": outcome}
 
 
+def _is_workers_invocation(argv: list[str]) -> bool:
+    """Return whether raw CLI arguments target the `workers` subcommand, even with a leading flag."""
+    head = argv[: argv.index("--")] if "--" in argv else argv
+    return next((arg for arg in head if not arg.startswith("-")), None) == "workers"
+
+
 def _parsed_or_exit_code(argv: list[str] | None) -> argparse.Namespace | int:
     """Return the parsed arguments, or the exit code of a command line that asked for help or is invalid."""
     raw_argv = sys.argv[1:] if argv is None else argv
     try:
         return parse_arguments(argv)
     except SystemExit as exc:
-        if exc.code and raw_argv[:1] != ["workers"]:
+        if exc.code and not _is_workers_invocation(raw_argv):
             print(canonical_json({"error": "Invalid CLI arguments"}))
         return int(exc.code or 0)
 

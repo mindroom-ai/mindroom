@@ -97,8 +97,10 @@ class CliApprovalWaits:
     # Runs what the paused reply of a source does as a scope that paused it ends.
     exit: Callable[[str, CliExit], Awaitable[None]]
     waiters: CliWaiters
+    # Withdraws one cancelled CLI call's pending approval so sibling calls can pause.
+    withdraw: Callable[[ApprovalContinuation], Awaitable[None]] | None = None
 
-    async def wait(  # noqa: C901 - expiry fences both sides of awaited authorization
+    async def wait(  # noqa: C901, PLR0912 - expiry fences both sides of awaited authorization
         self,
         paused: PausedAttempt,
         *,
@@ -120,39 +122,65 @@ class CliApprovalWaits:
         else:
             msg = "CLI approval source already has another owner"
             raise RuntimeError(msg)
-        while True:
-            # Registration precedes publication; clearing before the durable read
-            # makes a decision on either side of that read observable.
-            waiter.clear()
-            current = await self.store.approval_continuation_for_source(source)
-            if current is None or current.state not in {"waiting", "ready"}:
-                # A failed publication records its cause; report that, not the lost ownership it implies.
-                msg = (
-                    "CLI approval lost its source ownership"
-                    if current is None or current.failure is None
-                    else current.failure.reason
-                )
-                raise RuntimeError(msg)
-            lifetime = current_cli_lifetime()
-            deadline = lifetime.grant_expires_at_ns if lifetime is not None else None
-            if deadline is not None and time.time_ns() >= deadline:
-                raise ResponsePausedForApproval(paused)
-            if current.state == "ready":
-                if not await authorize():
-                    msg = "Current authorization no longer permits this CLI approval"
-                    raise PermissionError(msg)
+        try:
+            while True:
+                # Registration precedes publication; clearing before the durable read
+                # makes a decision on either side of that read observable.
+                waiter.clear()
+                current = await self.store.approval_continuation_for_source(source)
+                if current is None or current.state not in {"waiting", "ready"}:
+                    # A failed publication records its cause; report that, not the lost ownership it implies.
+                    msg = (
+                        "CLI approval lost its source ownership"
+                        if current is None or current.failure is None
+                        else current.failure.reason
+                    )
+                    raise RuntimeError(msg)
+                lifetime = current_cli_lifetime()
+                deadline = lifetime.grant_expires_at_ns if lifetime is not None else None
                 if deadline is not None and time.time_ns() >= deadline:
                     raise ResponsePausedForApproval(paused)
-                claimed = await self.claim(current)
-                if claimed is None:
-                    msg = "CLI approval lost its single execution claim"
-                    raise RuntimeError(msg)
-                return tuple(apply_exact_approval_decisions(deepcopy(paused.requirements), claimed.calls))
-            try:
-                async with asyncio.timeout(None if deadline is None else max(0, (deadline - time.time_ns()) / 1e9)):
-                    await waiter.wait()
-            except TimeoutError:
-                raise ResponsePausedForApproval(paused) from None
+                if current.state == "ready":
+                    if not await authorize():
+                        msg = "Current authorization no longer permits this CLI approval"
+                        raise PermissionError(msg)
+                    if deadline is not None and time.time_ns() >= deadline:
+                        raise ResponsePausedForApproval(paused)
+                    claimed = await self.claim(current)
+                    if claimed is None:
+                        msg = "CLI approval lost its single execution claim"
+                        raise RuntimeError(msg)
+                    return tuple(apply_exact_approval_decisions(deepcopy(paused.requirements), claimed.calls))
+                try:
+                    async with asyncio.timeout(None if deadline is None else max(0, (deadline - time.time_ns()) / 1e9)):
+                        await waiter.wait()
+                except TimeoutError:
+                    raise ResponsePausedForApproval(paused) from None
+        except asyncio.CancelledError as error:
+            await self._withdraw_if_owned(source, paused, error)
+            raise
+
+    async def _withdraw_if_owned(
+        self,
+        source: str,
+        paused: PausedAttempt,
+        error: asyncio.CancelledError,
+    ) -> None:
+        if (
+            current_task_is_process_shutdown()
+            or classify_cancel_source(error) != "interrupted"
+            or self.withdraw is None
+        ):
+            return
+        current = await self.store.approval_continuation_for_source(source)
+        paused_call_id = (paused.cli_call or {}).get("call_id")
+        if (
+            current is not None
+            and current.state in {"waiting", "ready"}
+            and current.cli_call is not None
+            and current.cli_call.get("call_id") == paused_call_id
+        ):
+            await self.withdraw(current)
 
     @asynccontextmanager
     async def scope(

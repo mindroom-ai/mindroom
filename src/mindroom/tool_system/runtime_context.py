@@ -456,6 +456,10 @@ _CALL_PROGRESS_SINK: ContextVar[Callable[[str], None] | None] = ContextVar(
     "call_progress_sink",
     default=None,
 )
+_CALL_DISPATCHED_HOOK: ContextVar[Callable[[], None] | None] = ContextVar(
+    "call_dispatched_hook",
+    default=None,
+)
 
 
 def get_tool_runtime_context() -> ToolRuntimeContext | None:
@@ -500,6 +504,11 @@ def get_worker_progress_pump() -> WorkerProgressPump | None:
 def get_call_progress_sink() -> Callable[[str], None] | None:
     """Get the current per-call progress sink bound to one CLI call."""
     return _CALL_PROGRESS_SINK.get()
+
+
+def get_call_dispatched_hook() -> Callable[[], None] | None:
+    """Get the current per-call dispatch hook bound to one CLI call."""
+    return _CALL_DISPATCHED_HOOK.get()
 
 
 def scope_hook_context_kwargs(
@@ -745,10 +754,16 @@ def worker_progress_pump_scope(
 
 
 @contextmanager
-def call_progress_sink_scope(sink: Callable[[str], None] | None) -> Iterator[None]:
-    """Bind one per-call progress sink for the lifetime of a CLI tool call."""
-    token = _CALL_PROGRESS_SINK.set(sink)
+def call_progress_sink_scope(
+    sink: Callable[[str], None] | None,
+    *,
+    on_dispatched: Callable[[], None] | None = None,
+) -> Iterator[None]:
+    """Bind per-call progress and dispatch hooks for the lifetime of one CLI tool call."""
+    progress_token = _CALL_PROGRESS_SINK.set(sink)
+    dispatched_token = _CALL_DISPATCHED_HOOK.set(on_dispatched)
     try:
         yield
     finally:
-        _CALL_PROGRESS_SINK.reset(token)
+        _CALL_DISPATCHED_HOOK.reset(dispatched_token)
+        _CALL_PROGRESS_SINK.reset(progress_token)

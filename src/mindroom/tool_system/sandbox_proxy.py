@@ -34,6 +34,7 @@ from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
+    get_call_dispatched_hook,
     get_call_progress_sink,
     get_tool_runtime_context,
     get_worker_progress_pump,
@@ -938,6 +939,7 @@ def _call_proxy_sync(
                 else None
             ),
             cancellation=cancellation,
+            on_dispatch=get_call_dispatched_hook(),
         )
         # Deferred: it loads the attachment store and the provider registry, which the slim tool registry must not.
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
@@ -1065,6 +1067,7 @@ class WorkerStandIns:
                 cancellation.cancel()
                 raise
 
+        proxy_entrypoint._mindroom_worker_proxy = True  # type: ignore[attr-defined]
         return proxy_entrypoint
 
 

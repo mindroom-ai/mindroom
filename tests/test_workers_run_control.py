@@ -523,16 +523,23 @@ def test_cli_workers_run_cancels_on_signal_and_exits_128_plus_signo(
             submitted.append(payload["call_id"])
             return {"status": "running", "call_id": payload["call_id"]}
 
-        def receipt(self, call_id, *, timeout: float = 30, wait: float | None = None):
-            del call_id, timeout, wait
+        def receipt(
+            self,
+            call_id,
+            *,
+            timeout: float = 30,
+            wait: float | None = None,
+            after_progress: int | None = None,
+        ):
+            del call_id, timeout, wait, after_progress
             handler = installed[sig]
             assert callable(handler)
             handler(int(sig), None)
             pytest.fail("signal handler should interrupt wait")
 
-        def cancel(self, call_id, *, timeout: float = 5.0):
+        def cancel(self, call_id, *, timeout: float = 8.0):
             cancelled.append((call_id, timeout))
-            return {"status": "cancelled", "call_id": call_id}
+            return {"status": "cancelled", "call_id": call_id, "dispatched": False}
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     monkeypatch.setattr(signal, "signal", fake_signal)
@@ -542,7 +549,7 @@ def test_cli_workers_run_cancels_on_signal_and_exits_128_plus_signo(
     [call_id] = submitted
     assert len(cancelled) == 1
     assert cancelled[0][0] == call_id
-    assert cancelled[0][1] <= 5.0
+    assert cancelled[0][1] <= 8.0
     output = capsys.readouterr()
     assert output.out == ""
     assert output.err == f"mindroom-agent: cancelled by {sig_name} (call {call_id})\n"
@@ -566,14 +573,21 @@ def test_cli_workers_run_warns_when_signal_cancel_cannot_be_confirmed(
             submitted.append(payload["call_id"])
             return {"status": "running", "call_id": payload["call_id"]}
 
-        def receipt(self, call_id, *, timeout: float = 30, wait: float | None = None):
-            del call_id, timeout, wait
+        def receipt(
+            self,
+            call_id,
+            *,
+            timeout: float = 30,
+            wait: float | None = None,
+            after_progress: int | None = None,
+        ):
+            del call_id, timeout, wait, after_progress
             handler = installed[signal.SIGTERM]
             assert callable(handler)
             handler(int(signal.SIGTERM), None)
             pytest.fail("signal handler should interrupt wait")
 
-        def cancel(self, call_id, *, timeout: float = 5.0):
+        def cancel(self, call_id, *, timeout: float = 8.0):
             del call_id, timeout
             msg = "Agent CLI transport outcome is unknown"
             raise AgentCliUnavailableError(msg)
@@ -605,8 +619,15 @@ def test_cli_workers_run_cancels_on_broken_stdout_pipe(
             submitted.append(payload["call_id"])
             return {"status": "running", "call_id": payload["call_id"]}
 
-        def receipt(self, call_id, *, timeout: float = 30, wait: float | None = None):
-            del call_id, timeout, wait
+        def receipt(
+            self,
+            call_id,
+            *,
+            timeout: float = 30,
+            wait: float | None = None,
+            after_progress: int | None = None,
+        ):
+            del call_id, timeout, wait, after_progress
             raise BrokenPipeError
 
         def cancel(self, call_id, *, timeout: float = 5.0):
@@ -632,9 +653,9 @@ def test_cli_workers_run_uses_long_poll_without_sleeping_and_prints_progress_and
     waits: list[float | None] = []
     receipts = iter(
         [
-            {"status": "running", "progress": "starting worker fan3..."},
-            {"status": "running", "progress": "starting worker fan3..."},
-            {"status": "running", "progress": "starting worker fan3... (5s)"},
+            {"status": "running", "progress": "starting worker fan3...", "progress_revision": 1},
+            {"status": "running", "progress": "starting worker fan3...", "progress_revision": 1},
+            {"status": "running", "progress": "starting worker fan3... (5s)", "progress_revision": 2},
             {
                 "status": "completed",
                 "outcome": "[worker: fan3, started]\n" + format_shell_completion("hello", None, return_code=0),
@@ -646,16 +667,31 @@ def test_cli_workers_run_uses_long_poll_without_sleeping_and_prints_progress_and
         def operation(self, payload):
             return {"status": "queued", "call_id": payload["call_id"]}
 
-        def receipt(self, call_id, *, timeout: float = 30, wait: float | None = None):
-            del call_id, timeout
+        def receipt(
+            self,
+            call_id,
+            *,
+            timeout: float = 30,
+            wait: float | None = None,
+            after_progress: int | None = None,
+        ):
+            del call_id, timeout, after_progress
             waits.append(wait)
             return next(receipts)
 
-    def no_sleep(_seconds: float) -> None:
-        pytest.fail("healthy long-poll must not sleep")
+    now = 0.0
+
+    class Clock:
+        def sleep(self, _seconds: float) -> None:
+            pytest.fail("healthy long-poll must not sleep")
+
+        def monotonic(self) -> float:
+            nonlocal now
+            now += 1.0
+            return now
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
-    monkeypatch.setattr("mindroom.agent_cli.main.time.sleep", no_sleep)
+    monkeypatch.setattr("mindroom.agent_cli.main.time", Clock())
 
     assert main(["workers", "run", "fan3", "--", "echo", "hello"]) == 0
     assert waits == [25.0, 25.0, 25.0, 25.0]
@@ -968,7 +1004,14 @@ def test_cli_retries_cancel_once_after_401_and_reports_unconfirmed_remote_stop(
             submitted.append(payload["call_id"])
             return {"status": "running", "call_id": payload["call_id"]}
 
-        def receipt(self, call_id, *, timeout: float = 30, wait: float | None = None, after_progress: int | None = None):
+        def receipt(
+            self,
+            call_id,
+            *,
+            timeout: float = 30,
+            wait: float | None = None,
+            after_progress: int | None = None,
+        ):
             del call_id, timeout, wait, after_progress
             handler = installed[signal.SIGTERM]
             assert callable(handler)
@@ -1074,7 +1117,8 @@ def test_real_pipe_subprocess_exits_141_without_traceback_and_cancels(case: str)
             stderr=subprocess.PIPE,
             env=env,
         )
-        assert proc.stdout is not None and proc.stderr is not None
+        assert proc.stdout is not None
+        assert proc.stderr is not None
         assert poll_entered.wait(timeout=5.0)
         # Close the reader end of the real pipe while the CLI is waiting on the long-poll.
         proc.stdout.close()
@@ -1248,10 +1292,7 @@ async def test_cancel_during_approval_withdraws_pending_approval_and_unblocks_si
 
     from agno.tools.toolkit import Toolkit  # noqa: PLC0415
 
-    from mindroom.agent_cli.approval import CliApprovalCall  # noqa: PLC0415
-    from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits  # noqa: PLC0415
     from mindroom.final_delivery import TurnProgress  # noqa: PLC0415
-    from mindroom.orchestration.locked_turns import LockedTurns  # noqa: PLC0415
     from mindroom.tool_system.agno_toolkits import adapt_toolkit  # noqa: PLC0415
     from tests.conftest import unwrap_extracted_collaborator  # noqa: PLC0415
     from tests.test_response_runner_focused import (  # noqa: PLC0415
@@ -1270,16 +1311,25 @@ async def test_cancel_during_approval_withdraws_pending_approval_and_unblocks_si
     second_paused = asyncio.Event()
     published_ids: list[str] = []
 
-    async def publish_gen(continuation, plan, **kwargs):
+    from mindroom.event_journal import CallKey  # noqa: PLC0415
+
+    async def publish_gen(continuation, plan, **kwargs: object):
         del plan, kwargs
         published_ids.append(continuation.approval_id)
+        await store.approvals.activate_approval_continuation(
+            continuation.approval_id,
+            expected_generation=continuation.generation,
+        )
         if len(published_ids) == 1:
             first_paused.set()
         else:
-            await store.approvals.activate_approval_continuation(
-                continuation.approval_id,
-                expected_generation=continuation.generation,
-            )
+            for call in continuation.calls:
+                await store.approvals.resolve_approval_call(
+                    CallKey(continuation.approval_id, continuation.generation, call.tool_call_id),
+                    requested_status="approved",
+                    reason=None,
+                )
+            runner.cli_waiters.wake(("$source",))
             second_paused.set()
 
     outer_entered = asyncio.Event()
@@ -1307,7 +1357,7 @@ async def test_cancel_during_approval_withdraws_pending_approval_and_unblocks_si
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     owner.shell_env = _SHELL_ENV
-    waits: CliApprovalWaits = runner.approvals._cli_approval_waits
+    waits = runner.approvals._cli_approval_waits
     identity = runner.deps.tool_runtime.build_execution_identity(
         target=request.response_envelope.target,
         user_id=request.user_id,
@@ -1318,27 +1368,33 @@ async def test_cancel_during_approval_withdraws_pending_approval_and_unblocks_si
             patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
             patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
             patch.object(runner.approvals, "_publish_generation", new=publish_gen),
-            patch.object(LockedTurns, "request_remains_authorized", new=AsyncMock(return_value=True)),
         ):
-            async with _in_reply_span(runner, request), waits.scope(
-                source_event_ids=("$source",),
-                progress=TurnProgress(),
-                target=request.response_envelope.target,
-                publish=partial(
-                    runner.approvals.suspend_for_approval,
-                    request=request,
+            async with (
+                _in_reply_span(runner, request),
+                waits.scope(
+                    source_event_ids=("$source",),
+                    progress=TurnProgress(),
                     target=request.response_envelope.target,
-                    execution_identity=identity,
-                    history_scope=runner.deps.state_writer.history_scope(),
-                    entity_kind="agent",
-                    show_tool_calls=True,
-                ),
-                authorize=lambda: runner.locked.request_remains_authorized(request),
-                settle_terminal=True,
-            ) as pause:
+                    publish=partial(
+                        runner.approvals.suspend_for_approval,
+                        request=request,
+                        target=request.response_envelope.target,
+                        execution_identity=identity,
+                        history_scope=runner.deps.state_writer.history_scope(),
+                        entity_kind="agent",
+                        show_tool_calls=True,
+                    ),
+                    authorize=AsyncMock(return_value=True),
+                    settle_terminal=True,
+                ) as pause,
+            ):
                 from dataclasses import replace  # noqa: PLC0415
 
-                catalog.runtime_context = replace(catalog.runtime_context, cli_approval_handler=pause)
+                catalog.runtime_context = replace(
+                    catalog.runtime_context,
+                    agent_name="general",
+                    cli_approval_handler=pause,
+                )
                 async with response_cli_lifetime():
                     await capture_bash_batch(owner, ("outer-1", {"command": "outer"}))
                     bash_task = asyncio.create_task(
@@ -1383,7 +1439,6 @@ async def test_cancel_during_approval_withdraws_pending_approval_and_unblocks_si
                         await bash_task
     finally:
         await owner.close()
-    del CliApprovalCall
 
 
 @pytest.mark.asyncio
@@ -1503,7 +1558,14 @@ def test_cli_backs_off_against_server_that_ignores_wait(
             del payload
             return {"status": "running"}
 
-        def receipt(self, call_id, *, timeout: float = 30, wait: float | None = None, after_progress: int | None = None):
+        def receipt(
+            self,
+            call_id,
+            *,
+            timeout: float = 30,
+            wait: float | None = None,
+            after_progress: int | None = None,
+        ):
             nonlocal reads
             del call_id, timeout, wait, after_progress
             reads += 1
@@ -1536,7 +1598,14 @@ def test_cli_signal_after_command_finished_reports_finished_and_returns_command_
             submitted.append(payload["call_id"])
             return {"status": "running", "call_id": payload["call_id"]}
 
-        def receipt(self, call_id, *, timeout: float = 30, wait: float | None = None, after_progress: int | None = None):
+        def receipt(
+            self,
+            call_id,
+            *,
+            timeout: float = 30,
+            wait: float | None = None,
+            after_progress: int | None = None,
+        ):
             del call_id, timeout, wait, after_progress
             handler = installed[signal.SIGTERM]
             assert callable(handler)

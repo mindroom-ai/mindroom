@@ -7478,6 +7478,7 @@ expose = [
     "detached_tool_scope",
     "emit_custom_event",
     "call_progress_sink_scope",
+    "get_call_dispatched_hook",
     "get_call_progress_sink",
     "get_worker_progress_pump",
     "get_tool_runtime_context",

@@ -20,11 +20,15 @@ from mindroom.agent_cli.shell_contract import (
 
 _HTTP_TIMEOUT_SECONDS = 30
 _MAX_LONG_POLL_SECONDS = 25
-_CANCEL_TIMEOUT_SECONDS = 5
+_CANCEL_TIMEOUT_SECONDS = 8
 
 
 class AgentCliUnavailableError(RuntimeError):
     """Authority or transport could not yield a known response."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _rejection(error: HTTPError) -> ValueError:
@@ -85,11 +89,17 @@ class AgentCliClient:
         *,
         timeout: float = _HTTP_TIMEOUT_SECONDS,
         wait: float | None = None,
+        after_progress: int | None = None,
     ) -> dict[str, object]:
         """Read one canonical call ID, optionally long-polling up to 25 seconds."""
         route = f"/api/agent-cli/calls/{UUID(call_id)}"
+        params: list[str] = []
         if wait is not None and wait > 0:
-            route = f"{route}?wait={min(wait, _MAX_LONG_POLL_SECONDS):g}"
+            params.append(f"wait={min(wait, _MAX_LONG_POLL_SECONDS):g}")
+        if after_progress is not None and after_progress >= 0:
+            params.append(f"after_progress={after_progress}")
+        if params:
+            route = f"{route}?{'&'.join(params)}"
         return self._request(route, timeout=min(timeout, _HTTP_TIMEOUT_SECONDS))
 
     def cancel(self, call_id: str, *, timeout: float = _CANCEL_TIMEOUT_SECONDS) -> dict[str, object]:
@@ -122,7 +132,7 @@ class AgentCliClient:
             if exc.code in {400, 409, 413, 422}:
                 raise _rejection(exc) from None
             msg = "Agent CLI authority or transport is unavailable"
-            raise AgentCliUnavailableError(msg) from None
+            raise AgentCliUnavailableError(msg, status_code=exc.code) from None
         except (OSError, HTTPException, URLError, ValueError) as exc:
             # Name the address so a blocked route back to MindRoom is diagnosable from the shell.
             msg = f"Agent CLI transport outcome is unknown; check that this shell can reach {self._url}"

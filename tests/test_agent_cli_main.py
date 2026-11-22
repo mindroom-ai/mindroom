@@ -307,8 +307,15 @@ def _worker_client(monkeypatch, *receipts: dict[str, object]) -> list[dict[str, 
             sent.append(payload)
             return self.receipt(payload["call_id"])
 
-        def receipt(self, call_id, *, timeout: float = 30, wait: float | None = None) -> dict[str, object]:
-            del timeout, wait
+        def receipt(
+            self,
+            call_id,
+            *,
+            timeout: float = 30,
+            wait: float | None = None,
+            after_progress: int | None = None,
+        ) -> dict[str, object]:
+            del timeout, wait, after_progress
             assert call_id == sent[0]["call_id"]
             return remaining.pop(0) if len(remaining) > 1 else remaining[0]
 
@@ -507,8 +514,15 @@ def test_workers_run_counts_a_minute_of_failed_reads_from_the_last_one_that_work
             del payload
             return {"status": "running"}
 
-        def receipt(self, call_id, *, timeout: float, wait: float | None = None) -> dict[str, object]:
-            del call_id, timeout, wait
+        def receipt(
+            self,
+            call_id,
+            *,
+            timeout: float,
+            wait: float | None = None,
+            after_progress: int | None = None,
+        ) -> dict[str, object]:
+            del call_id, timeout, wait, after_progress
             answer = next(answers)
             if answer is None:
                 msg = "Agent CLI transport outcome is unknown"
@@ -549,7 +563,7 @@ def test_workers_run_recovers_after_a_lost_submission_response(
     "receipt",
     [
         {"status": "failed", "outcome": "Cannot start worker 'w': 2 of the 2 named workers ..."},
-        {"status": "cancelled", "outcome": "Call interrupted after dispatch; effects may have occurred"},
+        {"status": "cancelled", "outcome": "Call cancelled before dispatch"},
         # A shell that runs without workers answers without the worker's line, so nothing ran in a worker named so.
         _completed("Error: `worker` and `resource_profile` need a shell that runs in a worker"),
         _completed("[worker: other]\n" + format_shell_completion("ran elsewhere", None, return_code=0)),
@@ -615,7 +629,7 @@ def test_workers_run_prints_the_error_when_output_auto_save_fails(capsys, monkey
     outcome = project_cli_result(f"[worker: w]\n{result}", policy, "run_shell_command")
     _worker_client(monkeypatch, _completed(outcome))
 
-    assert main(["workers", "run", "w", "--", "true"]) == 125
+    assert main(["workers", "run", "w", "--", "true"]) == 255
     output = capsys.readouterr()
     assert output.out == ""
     assert "exceeds the 1 byte auto-save limit" in output.err

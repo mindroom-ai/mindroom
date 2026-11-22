@@ -191,7 +191,13 @@ class CliOperationOwner(Protocol):
         """Read metadata, or enqueue one owned operation from the shell command that opened ``window``."""
         ...
 
-    async def get_call(self, call_id: str, *, wait: float = 0.0) -> dict[str, object]:
+    async def get_call(
+        self,
+        call_id: str,
+        *,
+        wait: float = 0.0,
+        after_progress: int | None = None,
+    ) -> dict[str, object]:
         """Read one exact-owner receipt, optionally long-polling for settlement or progress."""
         ...
 

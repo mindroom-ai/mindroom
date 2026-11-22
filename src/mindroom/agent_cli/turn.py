@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from contextlib import asynccontextmanager, suppress
 from contextvars import Context, copy_context
 from dataclasses import dataclass, field, replace
@@ -53,7 +54,7 @@ from mindroom.tool_system.agent_tool_calls import (
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.invocation import tool_outcome
-from mindroom.tool_system.runtime_context import call_progress_sink_scope
+from mindroom.tool_system.runtime_context import call_progress_sink_scope, get_call_dispatched_hook
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, search_tool_metadata, tool_definition
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 
@@ -79,6 +80,8 @@ _MAX_ACTIVE_OPERATIONS = 64
 _MAX_LONG_POLL_SECONDS = 25.0
 _CANCEL_SETTLE_TIMEOUT_SECONDS = 5.0
 _MAX_PROGRESS_LENGTH = 256
+_MAX_EARLY_CANCELS = 256
+_EARLY_CANCEL_TTL_SECONDS = 300.0
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 
@@ -104,6 +107,8 @@ class _Call:
     arguments_json: str
     receipt: ToolCallReceipt
     task: asyncio.Task[None] | None = None
+    cancel_requested: bool = False
+    dispatched: bool = False
     changed: asyncio.Event = field(default_factory=asyncio.Event)
 
     def notify(self) -> None:
@@ -182,6 +187,8 @@ class LiveTurnTools(TurnToolBridge):
         self._delegation = asyncio.Lock()
         self._admission = asyncio.Lock()
         self._calls: dict[str, _Call] = {}
+        # Owner-scoped early cancels for calls whose cancel POST arrived before their submit POST.
+        self._early_cancels: dict[str, float] = {}
         self._schema_documents: dict[ToolKey, str] = {}
         # Each admitted task belongs to the Bash window whose command made the call.
         self._active: dict[asyncio.Task[None], str] = {}
@@ -276,6 +283,22 @@ class LiveTurnTools(TurnToolBridge):
         if len(self._calls) >= _MAX_CALL_RECEIPTS:
             msg = f"This response already holds {_MAX_CALL_RECEIPTS} CLI call receipts"
             raise CliOperationError(msg)
+        if self._consume_early_cancel(call_id):
+            call = _Call(
+                arguments,
+                ToolCallReceipt(
+                    call_id=operation.call_id,
+                    toolkit=operation.toolkit,
+                    function=operation.function,
+                    status="cancelled",
+                    parent_bash_call_id=window,
+                    dispatched=False,
+                    outcome="Call cancelled before dispatch",
+                ),
+                cancel_requested=True,
+            )
+            self._calls[call_id] = call
+            return call.receipt.model_dump(mode="json")
         self._require_capacity()
         call = _Call(
             arguments,
@@ -334,6 +357,25 @@ class LiveTurnTools(TurnToolBridge):
             else:
                 return page
 
+    def _prune_early_cancels(self, now: float) -> None:
+        expired = [cid for cid, expires_at in self._early_cancels.items() if expires_at <= now]
+        for cid in expired:
+            self._early_cancels.pop(cid, None)
+
+    def _record_early_cancel(self, call_id: str) -> None:
+        now = time.monotonic()
+        self._prune_early_cancels(now)
+        self._early_cancels.pop(call_id, None)
+        while len(self._early_cancels) >= _MAX_EARLY_CANCELS:
+            self._early_cancels.pop(next(iter(self._early_cancels)))
+        self._early_cancels[call_id] = now + _EARLY_CANCEL_TTL_SECONDS
+
+    def _consume_early_cancel(self, call_id: str) -> bool:
+        now = time.monotonic()
+        self._prune_early_cancels(now)
+        expires_at = self._early_cancels.pop(call_id, None)
+        return expires_at is not None and expires_at > now
+
     def _require_call(self, call_id: str) -> _Call:
         self._check_live()
         call = self._calls.get(call_id)
@@ -348,17 +390,23 @@ class LiveTurnTools(TurnToolBridge):
                 while not self._closed and not self._revoked and keep_waiting():
                     await call.changed.wait()
 
-    async def get_call(self, call_id: str, *, wait: float = 0.0) -> dict[str, object]:
+    async def get_call(
+        self,
+        call_id: str,
+        *,
+        wait: float = 0.0,
+        after_progress: int | None = None,
+    ) -> dict[str, object]:
         """Receipt reads do not acquire the mutation or window locks or consume active capacity."""
         call = self._require_call(call_id)
         wait_seconds = min(max(wait, 0.0), _MAX_LONG_POLL_SECONDS)
         if wait_seconds > 0 and call.receipt.status not in _TERMINAL_STATUSES:
-            initial_progress = call.receipt.progress
+            seen_revision = call.receipt.progress_revision if after_progress is None else after_progress
             await self._wait_for_call(
                 call,
                 wait_seconds,
                 keep_waiting=lambda: (
-                    call.receipt.status not in _TERMINAL_STATUSES and call.receipt.progress == initial_progress
+                    call.receipt.status not in _TERMINAL_STATUSES and call.receipt.progress_revision == seen_revision
                 ),
             )
             self._check_live()
@@ -366,22 +414,34 @@ class LiveTurnTools(TurnToolBridge):
 
     async def cancel_call(self, call_id: str) -> dict[str, object]:
         """Idempotently cancel one owned call without cancelling its sibling calls or needing capacity."""
-        call = self._require_call(call_id)
+        self._check_live()
+        call = self._calls.get(call_id)
+        if call is None:
+            # Record an owner-scoped early cancel while keeping 401 indistinguishable for other owners.
+            self._record_early_cancel(call_id)
+            msg = "Agent CLI authority is unavailable"
+            raise CliAuthenticationError(msg)
         if call.receipt.status in _TERMINAL_STATUSES:
             return call.receipt.model_dump(mode="json")
         if call.receipt.status == "queued":
+            call.cancel_requested = True
             call.receipt = call.receipt.model_copy(
-                update={"status": "cancelled", "progress": None, "outcome": "Call cancelled before dispatch"},
+                update={"status": "cancelled", "dispatched": False, "outcome": "Call cancelled before dispatch"},
             )
             call.notify()
-        if call.task is not None and not call.task.done():
-            request_task_cancel(call.task, process_shutdown=self._is_shutdown())
-            if call.receipt.status not in _TERMINAL_STATUSES:
-                await self._wait_for_call(
-                    call,
-                    _CANCEL_SETTLE_TIMEOUT_SECONDS,
-                    keep_waiting=lambda: call.receipt.status not in _TERMINAL_STATUSES,
-                )
+            if call.task is not None and not call.task.done():
+                request_task_cancel(call.task, process_shutdown=self._is_shutdown())
+            return call.receipt.model_dump(mode="json")
+        if not call.cancel_requested:
+            call.cancel_requested = True
+            if call.task is not None and not call.task.done():
+                request_task_cancel(call.task, process_shutdown=self._is_shutdown())
+        if call.task is not None and call.receipt.status not in _TERMINAL_STATUSES:
+            await self._wait_for_call(
+                call,
+                _CANCEL_SETTLE_TIMEOUT_SECONDS,
+                keep_waiting=lambda: call.receipt.status not in _TERMINAL_STATUSES,
+            )
         return call.receipt.model_dump(mode="json")
 
     @staticmethod
@@ -392,7 +452,9 @@ class LiveTurnTools(TurnToolBridge):
             def _apply() -> None:
                 if call.receipt.status in _TERMINAL_STATUSES or call.receipt.progress == bounded:
                     return
-                call.receipt = call.receipt.model_copy(update={"progress": bounded})
+                call.receipt = call.receipt.model_copy(
+                    update={"progress": bounded, "progress_revision": call.receipt.progress_revision + 1},
+                )
                 call.notify()
 
             if not loop.is_closed():
@@ -586,6 +648,10 @@ class LiveTurnTools(TurnToolBridge):
             msg = "Minimal Bash has no CLI environment"
             raise RuntimeError(msg)
         entrypoint = binding.function.entrypoint
+        if not getattr(entrypoint, "_mindroom_worker_proxy", False):
+            on_dispatched = get_call_dispatched_hook()
+            if on_dispatched is not None:
+                on_dispatched()
         with bound_agent_cli_shell_env(self.shell_env, window=window):
             if inspect.iscoroutinefunction(entrypoint):
                 return await entrypoint(**arguments)
@@ -802,7 +868,13 @@ class LiveTurnTools(TurnToolBridge):
                     self._check_dispatch()
                 await self._authorize(key, arguments)
 
-            with call_progress_sink_scope(self._progress_reporter(call, asyncio.get_running_loop())):
+            def mark_dispatched() -> None:
+                call.dispatched = True
+
+            with call_progress_sink_scope(
+                self._progress_reporter(call, asyncio.get_running_loop()),
+                on_dispatched=mark_dispatched,
+            ):
                 events = self._execute(
                     binding,
                     call_id,
@@ -834,7 +906,11 @@ class LiveTurnTools(TurnToolBridge):
             result = "Tool is unavailable or arguments are invalid"
         except asyncio.CancelledError:
             status = "cancelled"
-            result = "Call interrupted after dispatch; effects may have occurred"
+            result = (
+                "Call interrupted after dispatch; effects may have occurred"
+                if call.dispatched
+                else "Call cancelled before dispatch"
+            )
             raise
         except Exception:
             result = "Internal CLI operation failed"
@@ -854,13 +930,18 @@ class LiveTurnTools(TurnToolBridge):
                 result = project_cli_result(result, self._output_file_policy, key.function)
                 call.receipt = ToolCallReceipt.model_validate(
                     call.receipt.model_dump()
-                    | {"status": status, "progress": None, "outcome": result, "attachments": attachments},
+                    | {
+                        "status": status,
+                        "dispatched": call.dispatched,
+                        "outcome": result,
+                        "attachments": attachments,
+                    },
                 )
             except Exception:  # Projection failure cannot undo an observed completed execution.
                 call.receipt = call.receipt.model_copy(
                     update={
                         "status": status,
-                        "progress": None,
+                        "dispatched": call.dispatched,
                         "outcome": {"error": "Tool result projection failed; execution status is retained"},
                     },
                 )
@@ -924,6 +1005,7 @@ class LiveTurnTools(TurnToolBridge):
         for call in self._calls.values():
             call.notify()
         self._calls.clear()
+        self._early_cancels.clear()
         for catalog in (*self._retired_catalogs, self.catalog):
             await catalog.close()
         self._retired_catalogs.clear()
