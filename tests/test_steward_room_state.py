@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+from contextlib import asynccontextmanager
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -11,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import aiohttp
 import nio
 import pytest
+from aiohttp import web
 from structlog.testing import capture_logs
 
 from mindroom import room_modes
@@ -21,6 +23,7 @@ from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import AdmissionFacts, RoomMembershipPosition
+from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.room_accounts import reconcile_room_accounts, reconcile_room_router_binding
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
@@ -50,7 +53,7 @@ from tests.identity_helpers import entity_ids
 from tests.test_bot_ready_hook import _validated_reported_membership_admission
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -666,6 +669,151 @@ async def test_steward_forbidden_members_read_is_terminal_at_debug(room_state: R
         assert await reconcile_room_accounts(client, config, paths, ROOM_ID) is True
     assert [log["log_level"] for log in logs if log["event"] == "matrix_room_members_fetch_failed"] == ["debug"]
     client.room_put_state.assert_not_awaited()
+
+
+@asynccontextmanager
+async def _http_state_clients(
+    handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    *user_ids: str,
+) -> AsyncIterator[list[MindRoomAsyncClient]]:
+    """Run real MindRoomAsyncClient instances against an in-process HTTP handler."""
+    app = web.Application()
+    app.router.add_route("*", "/{path:.*}", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", 0).start()
+    host, port = runner.addresses[0]
+    clients = [MindRoomAsyncClient(f"http://{host}:{port}", user_id, "BOT", store_path=None) for user_id in user_ids]
+    for client, user_id in zip(clients, user_ids, strict=True):
+        client.restore_login(user_id, "BOT", "token")
+        client.rooms[ROOM_ID] = nio.MatrixRoom(ROOM_ID, user_id)
+    try:
+        yield clients
+    finally:
+        await asyncio.gather(*(client.close() for client in clients))
+        await runner.cleanup()
+
+
+def _error_http_response(kind: str) -> web.StreamResponse:
+    if kind == "html_503":
+        return web.Response(text="<html>503 Service Unavailable</html>", status=503, content_type="text/html")
+    if kind == "forbidden_403":
+        return web.json_response({"errcode": "M_FORBIDDEN", "error": "Forbidden"}, status=403)
+    return web.json_response({"errcode": "M_UNKNOWN", "error": "Service Unavailable"}, status=503)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_kind", ["json_503", "html_503"])
+async def test_non_200_binding_read_in_accounts_retries_without_writing(
+    room_state: RoomState,
+    response_kind: str,
+) -> None:
+    """A decoded 503 binding GET retries without falling back to a steward roster write."""
+    config, paths, ids, _, _ = room_state
+    steward_id, bound_id = ids[ROUTER_AGENT_NAME].full_id, ids["agent1"].full_id
+    joined = {identity.full_id: {} for identity in ids.values()}
+    puts: list[str] = []
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        if request.method == "PUT":
+            puts.append(request.path)
+            return web.json_response({"event_id": "$put"})
+        if request.path.endswith("/joined_members"):
+            return web.json_response({"joined": joined})
+        if ROUTER_EVENT_TYPE in request.path:
+            return _error_http_response(response_kind)
+        return web.json_response({"errcode": "M_NOT_FOUND", "error": "Not found"}, status=404)
+
+    async with _http_state_clients(handle, steward_id, bound_id) as (steward, bound):
+        with capture_logs() as logs:
+            result = await reconcile_room_accounts(
+                steward,
+                config,
+                paths,
+                ROOM_ID,
+                get_alternate_clients=lambda: {bound_id: bound},
+            )
+    assert result is False
+    assert puts == []
+    assert [log["log_level"] for log in logs if log["event"] == "room_accounts_publish_failed"] == ["warning"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_kind", "expected_done", "expected_level"),
+    [
+        ("json_503", False, "warning"),
+        ("html_503", False, "warning"),
+        ("forbidden_403", True, "debug"),
+    ],
+)
+async def test_non_200_binding_read_in_claim_path_never_claims(
+    room_state: RoomState,
+    response_kind: str,
+    expected_done: bool,
+    expected_level: str,
+) -> None:
+    """A decoded non-200 binding GET is never mistaken for a malformed binding to claim."""
+    _, _, ids, _, _ = room_state
+    steward_id = ids[ROUTER_AGENT_NAME].full_id
+    puts: list[str] = []
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        if request.method == "PUT":
+            puts.append(request.path)
+            return web.json_response({"event_id": "$put"})
+        return _error_http_response(response_kind)
+
+    async with _http_state_clients(handle, steward_id) as (steward,):
+        with capture_logs() as logs:
+            result = await reconcile_room_router_binding(steward, ROOM_ID)
+    assert result is expected_done
+    assert puts == []
+    assert [log["log_level"] for log in logs if log["event"] == "room_router_binding_publish_failed"] == [
+        expected_level,
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("writer_kind", "response_kind", "expected_done", "expected_level"),
+    [
+        ("bound", "forbidden_403", True, "debug"),
+        ("steward", "forbidden_403", True, "debug"),
+        ("bound", "json_503", False, "warning"),
+        ("steward", "json_503", False, "warning"),
+    ],
+)
+async def test_non_200_roster_get_stops_before_put(
+    room_state: RoomState,
+    writer_kind: str,
+    response_kind: str,
+    expected_done: bool,
+    expected_level: str,
+) -> None:
+    """A decoded 403 or 503 roster GET stops without issuing a PUT for either writer."""
+    config, paths, ids, _, _ = room_state
+    steward_id, bound_id = ids[ROUTER_AGENT_NAME].full_id, ids["agent1"].full_id
+    joined = {identity.full_id: {} for identity in ids.values()}
+    puts: list[str] = []
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        if request.method == "PUT":
+            puts.append(request.path)
+            return web.json_response({"event_id": "$put"})
+        if ROUTER_EVENT_TYPE in request.path:
+            return web.json_response({"user_id": bound_id})
+        if request.path.endswith("/joined_members"):
+            return web.json_response({"joined": joined})
+        return _error_http_response(response_kind)
+
+    async with _http_state_clients(handle, steward_id, bound_id) as (steward, bound):
+        alternates = (lambda: {bound_id: bound}) if writer_kind == "bound" else dict
+        with capture_logs() as logs:
+            result = await reconcile_room_accounts(steward, config, paths, ROOM_ID, get_alternate_clients=alternates)
+    assert result is expected_done
+    assert puts == []
+    assert [log["log_level"] for log in logs if log["event"] == "room_accounts_publish_failed"] == [expected_level]
 
 
 async def _reconcile_accounts_during_bound_bot_stop(
