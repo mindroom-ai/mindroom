@@ -90,7 +90,7 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
 - Agents whose workers are shared or per user run no named workers.
 - Cancelling `workers run` via `SIGINT`/`SIGTERM`/`SIGHUP` requests remote cancellation (8-second client budget over the server's 5-second settle wait); `SIGKILL` still cannot be caught, leaving the command's own `--timeout` to stop it.
 - Cancelling a command that waits for approval leaves its approval card in place until it is decided or the reply ends; approving the card runs nothing.
-  If the reply pauses for that approval first, the approved command runs when the reply resumes, as without the cancel.
+  If the reply pauses for that approval, before or right after it is decided (such as a grant expiring during the approval check), the approved command runs when the reply resumes, as without the cancel.
   Withdrawing the card on cancel is left to a follow-up change.
 - A closed stdout pipe is not handled by `workers run` yet; that comes with the change to how output travels.
 - A subagent owns the named workers its own turn starts, not its caller's, and only when its own agent sets `named_workers`.
