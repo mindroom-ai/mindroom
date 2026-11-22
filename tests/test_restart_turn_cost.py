@@ -24,6 +24,7 @@ from mindroom.constants import (
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     SUBAGENT_COST_RUN_METADATA_KEY,
 )
+from mindroom.delegation.background import delegation_child
 from mindroom.delegation.cost import (
     continued_subagent_cost_usd,
     receive_subagent_cost,
@@ -38,6 +39,7 @@ from mindroom.history.run_checkpoint import is_recovered_run
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration import tool_job_runtime as tool_job_coordinator
 from mindroom.providers.identity import model_identity
 from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.reply_turn.request import ResponseRequest
@@ -64,7 +66,15 @@ from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, 
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import _envelope, _noop_typing, _target
 from tests.scripted_agent_helpers import registered_toolkit
-from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import (
+    continue_stopped_jobs,
+    job_owner,
+    lookup,
+    settle_stopped_subagent,
+    start_job,
+    tool_job_runtime,
+    wait_for_status,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Iterator
@@ -110,28 +120,31 @@ def _scripted_model(bot: AgentBot, turns: list[Any]) -> ScriptedModel:
     return ScriptedModel(turns, identity=model_identity(bot.config.models["default"]))
 
 
-def _priced_bot(tmp_path: Path, *, background_jobs: bool = False) -> AgentBot:
-    config = bind_runtime_paths(
-        with_current_room_member_access(
-            Config(
-                agents={
-                    "general": AgentConfig(
-                        display_name="General",
-                        rooms=["!room:localhost"],
-                        tools=[_COST_PROBE_TOOL],
-                    ),
-                },
-                teams={},
-                models={
-                    "default": ModelConfig(
-                        provider="openai",
-                        id="priced-model",
-                        pricing=ModelPricing(input=10, output=20),
-                    ),
-                },
-                memory={"backend": "none"},
-            ),
+def _priced_bot(tmp_path: Path, *, background_jobs: bool = False, with_worker: bool = False) -> AgentBot:
+    agents: dict[str, AgentConfig] = {
+        "general": AgentConfig(
+            display_name="General",
+            rooms=["!room:localhost"],
+            tools=[_COST_PROBE_TOOL],
+            delegate_to=["worker"] if with_worker else [],
         ),
+    }
+    models: dict[str, ModelConfig] = {
+        "default": ModelConfig(
+            provider="openai",
+            id="priced-model",
+            pricing=ModelPricing(input=10, output=20),
+        ),
+    }
+    if with_worker:
+        agents["worker"] = AgentConfig(display_name="Worker", model="worker_model", tools=[_COST_PROBE_TOOL])
+        models["worker_model"] = ModelConfig(
+            provider="openai",
+            id="priced-worker",
+            pricing=ModelPricing(input=10, output=20),
+        )
+    config = bind_runtime_paths(
+        with_current_room_member_access(Config(agents=agents, teams={}, models=models, memory={"backend": "none"})),
         test_runtime_paths(tmp_path),
     )
     config.background_tool_jobs.enabled = background_jobs
@@ -729,3 +742,134 @@ def test_resumed_subagent_cost_with_continued_runs_keeps_per_run_metadata_disjoi
         # Reply publishes total (0.4 + 0.3 + 0.2 = 0.9), while stored metadata keeps only run-b's own (0.5).
         assert received_subagent_cost_usd() == pytest.approx(0.9)
         assert subagent_cost_metadata() == {SUBAGENT_COST_RUN_METADATA_KEY: pytest.approx(0.5)}
+
+
+@pytest.mark.asyncio
+async def test_restart_continued_subagent_job_carries_pre_restart_own_and_nested_cost_to_parent_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subagent job continued across restarts rolls all attempts' own and nested subagent costs into the parent reply."""
+    bot = _priced_bot(tmp_path, background_jobs=True, with_worker=True)
+    await bot._take_over_replies()
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    async def start_runtime() -> ToolJobRuntime:
+        rt = await tool_job_runtime(
+            tmp_path,
+            grant=lambda _job: "allowed",
+            cancel=settle_stopped_subagent(bot.config, bot.runtime_paths),
+            continues=tool_job_coordinator._is_subagent_job,
+        )
+        pin_background_tool_jobs(bot.config, bot.runtime_paths)
+        register_background_runtime(bot.runtime_paths, rt)
+        return rt
+
+    runtime = await start_runtime()
+    try:
+        worker_model = _scripted_model(
+            bot,
+            [
+                # Attempt 1: $1.20 + $0.50 nested subagent + $1.20 -> stall (restart #1).
+                calls(tool_call("charge_subagent", "w1", usd=0.5), metrics=_REQ_USAGE),
+                calls(tool_call("stall", "ws1"), metrics=_REQ_USAGE),
+                # Attempt 2 (continuation #1): $1.20 + $0.30 nested subagent + $1.20 -> stall (restart #2).
+                calls(tool_call("charge_subagent", "w2", usd=0.3), metrics=_REQ_USAGE),
+                calls(tool_call("stall", "ws2"), metrics=_REQ_USAGE),
+                # Attempt 3 (continuation #2): $1.20 -> complete.
+                answer("Worker finished.", metrics=_REQ_USAGE),
+            ],
+        )
+        leader_model_1 = _scripted_model(
+            bot,
+            [
+                calls(
+                    tool_call("run_subagent", "deleg-1", agent_name="worker", task="Investigate", background_after=0),
+                    metrics=_REQ_USAGE,
+                ),
+                answer("Started worker in background.", metrics=_REQ_USAGE),
+            ],
+        )
+        worker_model = ScriptedModel(
+            worker_model.turns,
+            identity=model_identity(bot.config.models["worker_model"]),
+        )
+        install_model_providers(monkeypatch, {"default": leader_model_1, "worker_model": worker_model})
+
+        source_1 = "$start-subagent"
+        await _admit_user_message(bot, source_event_id=source_1)
+        request_1 = _user_request(source_event_id=source_1)
+        with patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ):
+            await runner.generate_response(request_1)
+
+        # Wait for worker attempt 1 to stall, then restart #1.
+        await asyncio.wait_for(_CostProbeTools.stalled.wait(), 10)
+        _CostProbeTools.stalled = asyncio.Event()
+        await runtime.shutdown()
+        runtime = await start_runtime()
+        await runtime.recover()
+        tool_ctx = runner.deps.tool_runtime.build_turn_context(
+            request_1.response_envelope.target,
+            user_id="@user:localhost",
+            active_model_name="default",
+            source_envelope=request_1.response_envelope,
+            turn_id=request_1.turn_id,
+        )
+        await continue_stopped_jobs(runtime, bot.config, bot.runtime_paths, tool_ctx)
+
+        # Wait for worker attempt 2 (continuation #1) to stall, then restart #2.
+        await asyncio.wait_for(_CostProbeTools.stalled.wait(), 10)
+        _CostProbeTools.stalled = asyncio.Event()
+        await runtime.shutdown()
+        runtime = await start_runtime()
+        await runtime.recover()
+        tool_ctx = runner.deps.tool_runtime.build_turn_context(
+            request_1.response_envelope.target,
+            user_id="@user:localhost",
+            active_model_name="default",
+            source_envelope=request_1.response_envelope,
+            turn_id=request_1.turn_id,
+        )
+        await continue_stopped_jobs(runtime, bot.config, bot.runtime_paths, tool_ctx)
+
+        # Wait for worker attempt 3 (continuation #2) to complete.
+        leader_owner = replace(
+            job_owner(),
+            agent_name="general",
+            requester_id="@user:localhost",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id=request_1.response_envelope.target.session_id,
+        )
+        [job_info] = await runtime.list_jobs(owner=leader_owner, depth=0)
+        await wait_for_status(runtime, job_info.job_id, "completed")
+        done = await lookup(runtime, job_info.job_id, owner=leader_owner, depth=0)
+        # 5 requests * $1.20 = $6.00 own + ($0.50 + $0.30) nested subagents = $6.80.
+        assert delegation_child(done).cost_usd == pytest.approx(6.8)
+
+        # Parent collects the finished job in its next reply and publishes the full $6.80 subagent cost.
+        leader_model_2 = _scripted_model(
+            bot,
+            [
+                calls(tool_call("job", "collect-worker", action="collect"), metrics=_REQ_USAGE),
+                answer("Worker reported back.", metrics=_REQ_USAGE),
+            ],
+        )
+        install_model_providers(monkeypatch, {"default": leader_model_2, "worker_model": worker_model})
+        source_2 = "$collect-subagent"
+        await _admit_user_message(bot, source_event_id=source_2)
+        request_2 = _user_request(source_event_id=source_2)
+        with patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ):
+            await runner.generate_response(request_2)
+
+        _, ai_run = _final_ai_run_metadata(bot)
+        assert ai_run["cost"] == {"usd": "2.4", "subagents_usd": "6.8"}
+    finally:
+        await runtime.shutdown()

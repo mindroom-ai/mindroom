@@ -258,6 +258,7 @@ async def _run_child(
     approval_calls: Sequence[ApprovalCall] | None,
     fresh: bool,
     prompt: str | None = None,
+    prior_usage: Sequence[RunMetrics] = (),
 ) -> _ChildOutcome:
     """Reserve the child and run it in its execution scope; the caller holds its liveness through settlement.
 
@@ -278,6 +279,7 @@ async def _run_child(
                 approval_calls=approval_calls,
                 fresh=fresh,
                 prompt=prompt,
+                prior_usage=prior_usage,
             )
         # The child's latest record: the one its run's stream ended with, or, for a child that did not run, the one
         # retained for it.
@@ -296,6 +298,7 @@ async def _execute_child(
     approval_calls: Sequence[ApprovalCall] | None,
     fresh: bool,
     prompt: str | None,
+    prior_usage: Sequence[RunMetrics] = (),
 ) -> _ChildOutcome:
     """Start a fresh envelope or resume the exact stored child under its own scope."""
     # mindroom.agents imports this module, so the child's agent is created through a deferred import.
@@ -316,6 +319,7 @@ async def _execute_child(
             runtime_paths,
             prompt=prompt or child.task,
             refresh_scheduler=refresh_scheduler,
+            prior_usage=prior_usage,
         )
     persisted = await read_child_run(child, config, runtime_paths)
     if persisted is None:
@@ -642,6 +646,7 @@ async def _run_job_child(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     runtime: ToolJobRuntime,
     prompt: str | None,
+    prior_usage: Sequence[RunMetrics] = (),
 ) -> tuple[DelegationTerminalStatus, str]:
     """Start, run, and settle a child inside its job, which asks for its approvals; return its status and text."""
 
@@ -680,7 +685,13 @@ async def _run_job_child(
             )
             # From here on, recovery after a crash settles the child's audit record from the job's saved child.
             await runtime.save_adapter(job_id, child=child_snapshot(child))
-            outcome = await run(config=config, approval_calls=None, fresh=True, prompt=prompt)
+            outcome = await run(
+                config=config,
+                approval_calls=None,
+                fresh=True,
+                prompt=prompt,
+                prior_usage=prior_usage,
+            )
             while outcome.response.status == RunStatus.paused:
                 # The job, not a parent reply, asks for the child's approvals and resumes it with the decided calls.
                 calls = await request_child_approvals(
@@ -742,6 +753,7 @@ def delegation_call_job(
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     prompt: str | None = None,
+    prior_usage: Sequence[RunMetrics] = (),
 ) -> JobSpec | str:
     """Return the job a prepared subagent call runs as, known as its child, or why the call cannot run.
 
@@ -782,6 +794,7 @@ def delegation_call_job(
                 refresh_scheduler=refresh_scheduler,
                 runtime=runtime,
                 prompt=prompt,
+                prior_usage=prior_usage,
             )
         except BaseException as error:
             await after_delegation(
