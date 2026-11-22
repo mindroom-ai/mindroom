@@ -836,7 +836,7 @@ depends_on = [
     "mindroom.helper_usage",
     "mindroom.history.interrupted_replay",
     "mindroom.history.run_checkpoint",
-    "mindroom.history.storage",
+    "mindroom.history.session_context",
     "mindroom.history.turn_recorder",
     "mindroom.llm",
     "mindroom.streaming",
@@ -6345,6 +6345,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.event_journal.legacy_turn_rows",
+    "mindroom.history.session_context",
     "mindroom.history.storage",
     "mindroom.turn_record",
 ]
@@ -8406,6 +8407,8 @@ visibility = [
     "mindroom.history.manual",
     "mindroom.teams",
     "mindroom.delegation.recovery",
+    "mindroom.response_turn",
+    "mindroom.turn_store",
 ]
 
 [[modules]]

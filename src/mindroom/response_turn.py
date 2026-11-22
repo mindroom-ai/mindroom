@@ -44,7 +44,7 @@ from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput, persist_interrupted_replay_snapshot
 from mindroom.history.run_checkpoint import recover_stopped_run
-from mindroom.history.storage import remove_history_of_redacted_events
+from mindroom.history.session_context import load_scrubbed_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.request_context import bind_llm_request_log_context
@@ -954,41 +954,13 @@ def _drop_spent_attempt(run: TurnRunState, resolution: CompletedAttempt) -> None
     run.attempt = None
 
 
-async def _remove_history_of_redacted_events(
-    ctx: ResponseTurnContext,
-    scope_context: ScopeSessionContext,
-) -> None:
-    """Remove persisted history derived from events since redacted, before the history is used.
-
-    This is the only cleanup after a redaction: every event this scope's history derives
-    from is checked against the agent's recorded redactions each time a
-    response opens it, which also covers a message no turn answered but a later turn read
-    as context.
-    """
-    if ctx.redacted_history_events is None or scope_context.session is None:
-        return
-    removed_event_ids = await remove_history_of_redacted_events(
-        scope_context.storage,
-        scope_context.session,
-        ctx.redacted_history_events,
-    )
-    if removed_event_ids:
-        logger.info(
-            "Removed history derived from redacted events",
-            session_id=scope_context.session.session_id,
-            history_scope=scope_context.scope.key,
-            redacted_event_ids=removed_event_ids,
-        )
-
-
 async def _load_scope_session(
     ctx: ResponseTurnContext,
     adapter: TurnAdapter[Any],
     run: TurnRunState,
 ) -> ScopeSessionContext:
     """Load the turn's scope session off the event loop, without the history of events since redacted."""
-    scope_context = await run_blocking_until_complete(adapter.load_scope)
-    await _remove_history_of_redacted_events(ctx, scope_context)
+    scope_context = await load_scrubbed_scope_session(adapter.load_scope, ctx.redacted_history_events)
     run.scope_context = scope_context
     set_consumption_storage(scope_context.storage_factory)
     return scope_context
