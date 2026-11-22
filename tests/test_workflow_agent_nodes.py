@@ -1083,9 +1083,8 @@ async def test_agent_whose_handle_never_got_its_mark_is_not_run_again_when_its_a
     gate.set()
     await wait_for_status(stack.jobs, stack.node_job("@0").job_id, "completed")
     node, epoch = _node(stack), stack.store.get_run(stack.run_id).epoch
-    assert stack.store.update_node(
-        stack.run_id, "@0", node.generation, epoch, handle=replace(node.handle, dispatched=False)
-    )
+    unstamped = replace(node.handle, dispatched=False)
+    assert stack.store.update_node(stack.run_id, "@0", node.generation, epoch, handle=unstamped)
     await stack.restart(kill=True)
     stack.admission = "denied"
     assert await stack.recover() == [stack.run_id]
