@@ -306,8 +306,12 @@ class _WorkerStderr:
             with suppress(OSError, ValueError):
                 is_tty = bool(sys.stderr.isatty())
         if is_tty:
+            # A line wider than the terminal wraps, and the next rewrite would clear only its last row.
+            columns = 0
+            with suppress(OSError, ValueError):
+                columns = os.get_terminal_size(sys.stderr.fileno()).columns
             self._progress_open = True
-            if not self._write(f"\r\x1b[K{message}"):
+            if not self._write(f"\r\x1b[K{message[: columns - 1] if columns > 1 else message}"):
                 self._progress_open = False
             return
         self.note(message)

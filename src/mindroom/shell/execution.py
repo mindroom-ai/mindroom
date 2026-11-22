@@ -389,7 +389,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
         raise
     except Exception as exc:
         try:
-            exited = _launch_failure(argv, cwd, exc, capture) if launch_failure_exits else None
+            exited = _launch_failure(argv, env, cwd, exc, capture) if launch_failure_exits else None
             return exited or ShellRunResult(message=f"Error: {exc}", execution_error=True)
         finally:
             if capture is not None:
@@ -827,34 +827,60 @@ def _idle_launcher() -> str | None:
     return None
 
 
+def _find_program(program: str, env: dict[str, str], cwd: str | None, mode: int = os.F_OK | os.X_OK) -> str | None:
+    """Like Popen, look a bare name up on the command's PATH and a path with a slash up, both from the command's directory."""
+    program = str(Path(cwd, program)) if cwd and os.sep in program else program
+    search = [str(Path(cwd, entry)) if cwd else entry for entry in os.get_exec_path(env)]
+    return shutil.which(program, mode=mode, path=os.pathsep.join(search))
+
+
+def _interpreter(script: str) -> str | None:
+    """Return the interpreter the first line of *script* names, or None for a file that is no readable script."""
+    try:
+        with Path(script).open("rb") as file:
+            line = file.readline(256)
+    except OSError:
+        return None
+    words = line[2:].split() if line.startswith(b"#!") else []
+    return os.fsdecode(words[0]) if words else None
+
+
 def _launch_failure(
     argv: list[str],
+    env: dict[str, str],
     cwd: str | None,
     exc: Exception,
     capture: ShellOutputCapture | None,
 ) -> ShellRunResult | None:
-    """Return a spawn error of a program that is missing or cannot be executed as a shell reports it, else None.
+    """Return a spawn error of a program that is missing or cannot be executed as Bash reports it, else None.
 
-    The result is the one of a command that exited 127 or 126 with the shell's words on stderr, so everything that
-    reads a failed command's result reads this one.
+    The result is the one of a command that exited 127 or 126 with Bash's words on stderr, so everything that reads a
+    failed command's result reads this one. A working directory the command cannot enter fails before any program.
     """
     if (
         not isinstance(exc, OSError)
         or not argv
         or exc.filename != argv[0]
-        or (cwd is not None and exc.filename == cwd and not Path(cwd).is_dir())
+        or (cwd is not None and not (Path(cwd).is_dir() and os.access(cwd, os.X_OK)))
     ):
         return None
-    program = argv[0]
-    if exc.errno == errno.ENOENT:
-        return_code, reason = 127, "No such file or directory" if os.sep in program else "command not found"
-    elif exc.errno in {errno.EACCES, errno.EISDIR, errno.ENOTDIR, errno.ENOEXEC}:
-        return_code, reason = 126, exc.strerror or os.strerror(exc.errno)
-    else:
+    program, bare = argv[0], os.sep not in argv[0]
+    file = _find_program(program, env, cwd, os.F_OK)
+    return_code, reason = 126, os.strerror(exc.errno)
+    if bare and file is None:
+        # No PATH entry holds the name, whatever error the last entry gave.
+        return_code, reason = 127, "command not found"
+    elif exc.errno in {errno.ENOENT, errno.ENOTDIR} and file and (interpreter := _interpreter(file)):
+        reason = f"{interpreter}: bad interpreter: {reason}"
+    elif exc.errno == errno.ENOENT:
+        return_code = 127
+    elif exc.errno not in {errno.EACCES, errno.EISDIR, errno.ENOTDIR, errno.ENOEXEC}:
         return None
+    # Bash names a program it found on PATH by where it found it.
+    said = f"{file if bare and file else program}: {reason}"
     if capture is None:
-        return ShellRunResult(message=format_shell_completion("", f"{program}: {reason}", return_code=return_code))
-    capture.stderr.append(f"{program}: {reason}\n")
+        return ShellRunResult(message=format_shell_completion("", said, return_code=return_code))
+    capture.stderr.append(f"{said}\n")
     capture.stdout.reached_eof = capture.stderr.reached_eof = True
     return ShellRunResult(message=capture.publish(return_code), output_file_handled=True)
 
@@ -870,10 +896,7 @@ def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> 
     """
     if sys.platform != "linux" or not argv or (chrt := _idle_launcher()) is None:
         return argv
-    # Like Popen, look a bare name up on the command's PATH and a path with a slash up, both from the command's directory.
-    program = str(Path(cwd, argv[0])) if cwd and os.sep in argv[0] else argv[0]
-    search = [str(Path(cwd, entry)) if cwd else entry for entry in os.get_exec_path(env)]
-    if shutil.which(program, path=os.pathsep.join(search)) is None:
+    if _find_program(argv[0], env, cwd) is None:
         return argv
     return [chrt, "-i", "0", *argv]
 
