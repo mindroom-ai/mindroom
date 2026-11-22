@@ -10070,8 +10070,11 @@ A run whose script had already returned its report ends with that report and get
   A call whose record of tool calls cannot be read, or is not there, is `indeterminate` too: after a crash before the turn saved anything, nothing shows that it called no tool.
   So is a call whose ended agent the requester may no longer read.
 - An agent of a run whose own job was stopped is not continued.
-- An agent that was waiting for an approval when MindRoom stopped ends in the same two ways, and its card is closed.
-  A tool call that was still waiting for its decision counts as not started.
+- An agent that was waiting for an approval when MindRoom stopped keeps waiting: its job is not ended, its card stays open with the expiry it had, and a decision that was already given on another card of the same turn stands.
+  Once MindRoom runs again the agent's paused turn is resumed with those decisions, so the agent is not sent its task again, no tool call it had finished is made again, and no call gets a second card.
+  This holds for an orderly restart and for a killed process alike, and however many restarts the wait lasts.
+- When that paused turn cannot be resumed, the agent goes on in a new turn instead: it is sent its prompt and an account of the tool calls it had finished, its open cards are closed as `Superseded after a restart.`, and it asks again for the call that had waited, which had not run.
+  When neither is possible the call ends as that of an agent that cannot be continued does, and a tool call that was still waiting for its decision counts as not started.
 - A `tool()` or `shell()` call of the script that was waiting for an approval when MindRoom stopped never ran: the next attempt asks again with a new card.
 - After 5 attempts in a row that finish no call, the run ends `interrupted` with `Stopped resuming after 5 attempts that finished nothing. Fix the script and call resume_workflow.`
 - A run with no job, which is one that `start_workflow` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.

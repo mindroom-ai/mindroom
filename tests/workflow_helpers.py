@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shutil
+import sqlite3
 import threading
-from contextlib import contextmanager, suppress
+from contextlib import closing, contextmanager, suppress
 from dataclasses import replace
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -566,6 +568,23 @@ class HeldWrite:
         assert await asyncio.to_thread(self.done.wait, SETTLE_TIMEOUT_SECONDS)
 
 
+def _copy_saved(source: Path, target: Path) -> None:
+    """Copy a directory of durable state as it is saved now, each SQLite database with what it has committed."""
+    for path in sorted(source.rglob("*")):
+        copy = target / path.relative_to(source)
+        if path.is_dir():
+            copy.mkdir(parents=True, exist_ok=True)
+        elif not path.name.endswith(("-wal", "-shm", "-journal")):
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("rb") as file:
+                database = file.read(16) == b"SQLite format 3\x00"
+            if database:
+                with closing(sqlite3.connect(path)) as saved, closing(sqlite3.connect(copy)) as copied:
+                    saved.backup(copied)
+            else:
+                shutil.copy2(path, copy)
+
+
 def set_run(store: WorkflowRunStore, run_id: str, **changes: object) -> WorkflowRun:
     """Write fields of a run as a test arranges it, in whatever state it is; a new state raises its epoch."""
     return store.update_run(run_id, store.get_run(run_id).epoch, when=frozenset(WorkflowRunState), **changes)
@@ -860,6 +879,34 @@ class WorkflowStack:
                 await self.jobs.quiesce()
             await self.jobs.close_journal()
             release_background_tool_jobs(self.context.runtime_paths, self._instance)
+        self._open()
+        if self.has_jobs:
+            await (await self.open_jobs()).recover()
+        return self
+
+    async def kill(self) -> WorkflowStack:
+        """Stop the primary as `SIGKILL` does and start the next one: only what was saved by now survives.
+
+        The harness cannot stop a task without its cleanup, so it keeps a copy of everything durable as it is now,
+        lets the runtimes stop, and puts the copy back before the next primary opens it.
+        """
+        durable = [self.tmp_path / name for name in ("storage", "control")]
+        saved = self.tmp_path / "killed"
+        for path in durable:
+            _copy_saved(path, saved / path.name)
+        tasks = [*self.broker._tasks.values(), *(task for owned in self.engine._tasks.values() for task in owned)]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self.has_jobs:
+            with suppress(ExceptionGroup):
+                await self.jobs.quiesce()
+            await self.jobs.close_journal()
+            release_background_tool_jobs(self.context.runtime_paths, self._instance)
+        for path in durable:
+            shutil.rmtree(path)
+            (saved / path.name).rename(path)
+        saved.rmdir()
         self._open()
         if self.has_jobs:
             await (await self.open_jobs()).recover()

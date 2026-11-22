@@ -28,6 +28,9 @@ RUN_SUBAGENT = "run_subagent"
 CONTINUE_SUBAGENT = "continue_subagent"
 # Where the job of a workflow run's agent keeps the runs that restarts cut short before its current one, in its adapter.
 SPENT_RUNS_KEY = "spent_runs"
+# Under this key the job of a workflow run's agent keeps which toolkit owns each call its paused turn asks about, so
+# the start that resumes the turn after a restart can ask again before it builds the agent.
+APPROVAL_TOOLKITS_KEY = "approval_toolkits"
 # What a child turn that a restart cut short is settled with, as failed.
 RESTART_INTERRUPTION_REASON = (
     "Subagent turn was interrupted by a restart. MindRoom may continue it automatically; if it doesn't, you may be "

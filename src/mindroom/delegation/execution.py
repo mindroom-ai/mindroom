@@ -38,6 +38,7 @@ from mindroom.delegation.lifecycle import (
 from mindroom.delegation.recovery import interrupt_child, interrupt_stopped_child, read_child_run
 from mindroom.delegation.sessions import subagent_liveness
 from mindroom.delegation.state import (
+    APPROVAL_TOOLKITS_KEY,
     DELEGATION_FUNCTIONS,
     DELEGATION_STATE_KEY,
     DelegationChild,
@@ -631,6 +632,41 @@ def _child_result_text(child: DelegationChild, receipt: str) -> str:
     return f"{result}\n\n{receipt}"
 
 
+async def _ask_child_approvals(
+    child: DelegationChild,
+    outcome: _ChildOutcome,
+    *,
+    runtime: ToolJobRuntime,
+    job_id: str,
+    owner: ToolExecutionIdentity,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[ApprovalCall, ...]:
+    """Ask about the calls a paused child waits on, through its job's cards, and return them decided.
+
+    The job of a workflow run's agent says while it asks that it waits for approvals, and which toolkit owns each
+    call: the start that finds it waiting resumes this turn, and asks again before it has built the agent.
+    """
+    of_run = child.workflow_run_id is not None
+    if of_run:
+        asked = {tool.tool_name for tool in outcome.response.tools or () if tool.is_paused}
+        owners = [[*call, toolkit] for call, toolkit in outcome.toolkit_owners.items() if call[1] in asked]
+        await runtime.save_adapter(job_id, wait="approval", **{APPROVAL_TOOLKITS_KEY: owners})
+    calls = await request_child_approvals(
+        child,
+        outcome.response,
+        outcome.toolkit_owners,
+        runtime=runtime,
+        job_id=job_id,
+        owner=owner,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    if of_run:
+        await runtime.save_adapter(job_id, wait=None)
+    return calls
+
+
 async def _run_job_child(
     child: DelegationChild,
     *,
@@ -643,8 +679,13 @@ async def _run_job_child(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     runtime: ToolJobRuntime,
     prompt: str | None,
+    paused: _ChildOutcome | None = None,
 ) -> tuple[DelegationTerminalStatus, str]:
-    """Start, run, and settle a child inside its job, which asks for its approvals; return its status and text."""
+    """Start, run, and settle a child inside its job, which asks for its approvals; return its status and text.
+
+    With ``paused``, the turn of a workflow run's agent that waited for approvals when a restart came, nothing
+    starts: the job asks about that turn's calls again, on the cards they have, and resumes it.
+    """
 
     def failed_unsettled(primary_error: str, stage: str, error: Exception) -> tuple[DelegationTerminalStatus, str]:
         logger.warning(
@@ -671,23 +712,22 @@ async def _run_job_child(
     async with subagent_liveness(child, runtime_paths):
         primary_error: str | None = None
         try:
-            await start_child_turn(
-                child,
-                parent_run_id=parent_run_id,
-                parent_delegation_id=running_child_id(),
-                config=config,
-                runtime_paths=runtime_paths,
-                caller_execution_identity=owner,
-            )
-            # From here on, recovery after a crash settles the child's audit record from the job's saved child.
-            await runtime.save_adapter(job_id, child=child_snapshot(child))
-            outcome = await run(config=config, approval_calls=None, fresh=True, prompt=prompt)
-            while outcome.response.status == RunStatus.paused:
-                # The job, not a parent reply, asks for the child's approvals and resumes it with the decided calls.
-                calls = await request_child_approvals(
+            if paused is None:
+                await start_child_turn(
                     child,
-                    outcome.response,
-                    outcome.toolkit_owners,
+                    parent_run_id=parent_run_id,
+                    parent_delegation_id=running_child_id(),
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    caller_execution_identity=owner,
+                )
+                # From here on, recovery after a crash settles the child's audit record from the job's saved child.
+                await runtime.save_adapter(job_id, child=child_snapshot(child))
+            outcome = paused or await run(config=config, approval_calls=None, fresh=True, prompt=prompt)
+            while outcome.response.status == RunStatus.paused:
+                calls = await _ask_child_approvals(
+                    child,
+                    outcome,
                     runtime=runtime,
                     job_id=job_id,
                     owner=owner,
@@ -743,13 +783,19 @@ def delegation_call_job(
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     prompt: str | None = None,
+    paused: tuple[RunRecord, Sequence[Sequence[str]]] | None = None,
 ) -> JobSpec | str:
     """Return the job a prepared subagent call runs as, known as its child, or why the call cannot run.
 
     The job runs the child with the call's plugin hooks around it. The child's status decides the job's: the output
     policy shapes only the text, so a saved or redirected failure still fails the job and the call. ``prompt`` is
     what the child's first response is sent in place of its task, which stays its label; no other child receives it.
+    ``paused`` is the paused run of ``child``'s turn and the owners its job saved (`APPROVAL_TOOLKITS_KEY`): the job
+    then resumes that turn instead of starting one.
     """
+    resumed = None
+    if paused is not None:
+        resumed = _ChildOutcome(paused[0], {(agent, tool): toolkit for agent, tool, toolkit in paused[1]})
     output_request = _prepare_delegation_output(
         owner,
         config,
@@ -783,6 +829,7 @@ def delegation_call_job(
                 refresh_scheduler=refresh_scheduler,
                 runtime=runtime,
                 prompt=prompt,
+                paused=resumed,
             )
         except BaseException as error:
             await after_delegation(

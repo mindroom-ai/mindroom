@@ -338,37 +338,6 @@ async def test_replay_that_reaches_the_call_before_its_job_was_continued_waits_f
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("wrote", [True, False])
-async def test_restart_during_an_approval_wait_never_repeats_the_agents_earlier_write(
-    gated: WorkflowStack,
-    wrote: bool,
-) -> None:
-    """A job that waited for a person ends with the restart: its call is safe to run again only if it had written nothing."""
-    cards: JobApprovalCards = gated.cards  # type: ignore[attr-defined]
-    turns = [calls(tool_call("append", "c1", line="a")), calls(tool_call("append", "c2", line="b")), answer("never")]
-    gated.child_script(*turns[0 if wrote else 1 :])
-    await gated.submit("@0", "agent", _PROMPT)
-    if wrote:
-        await asyncio.wait_for(cards.posted.wait(), 10)
-        cards.decision.set_result(BackgroundApprovalDecision("approved", None))
-        await gated.until(lambda: gated.counting_tool.lines == ["a"])
-        cards.decision, cards.posted = asyncio.get_running_loop().create_future(), asyncio.Event()
-    await asyncio.wait_for(cards.posted.wait(), 10)
-    await gated.until(lambda: _node(gated).state is WorkflowNodeState.WAITING)
-
-    await _restarted(gated, answer("again"))
-
-    if wrote:
-        with pytest.raises(NodeFailed) as stopped:
-            await gated.result("@0", "agent", _PROMPT)
-        assert (stopped.value.kind, _node(gated).generation) == ("indeterminate", 1)
-    else:
-        assert await gated.result("@0", "agent", _PROMPT) == "again"
-        assert _node(gated).generation == 2
-    assert gated.counting_tool.lines == (["a"] if wrote else [])
-
-
-@pytest.mark.asyncio
 async def test_expired_card_denies_the_call_and_the_child_goes_on(gated: WorkflowStack) -> None:
     """A card nobody answered is a denial of that call, as for every subagent; the engine sets no deadline of its own."""
     cards: JobApprovalCards = gated.cards  # type: ignore[attr-defined]

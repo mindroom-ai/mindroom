@@ -236,7 +236,8 @@ async def await_child(  # noqa: C901
         return (kind, _INTERRUPTED), None, None
     # What the turn has left of its working time, as the node's handle says: an earlier wait may have used some.
     handle, loop, timed_out, claim = node.handle, asyncio.get_running_loop(), False, None
-    waiting = handle.work_left is not None
+    # Whether the node shows the wait for a person that an earlier wait saw begin, which this one must see end.
+    waiting = node.state is WorkflowNodeState.WAITING
     left = handle.work_left if waiting or handle.work_until is None else handle.work_until - time.time()
     while True:
         since = loop.time()

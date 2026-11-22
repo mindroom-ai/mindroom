@@ -183,6 +183,20 @@ def is_workflow_node_job(job: BackgroundJob) -> bool:
     return job.kind != "workflow" and "workflow" in job.adapter
 
 
+def waited_for_approval(job: BackgroundJob) -> bool:
+    """Return whether the job is a workflow run's call whose agent asked for approvals and still waits for some.
+
+    Its adapter says so (`wait`), from before the cards are posted until every one is decided, so no other wait for a
+    person is taken for it. Only such a job goes on from that wait after a restart: its paused turn is resumed.
+    """
+    return is_workflow_node_job(job) and job.adapter.get("wait") == "approval"
+
+
+def _stopped_while_working(job: BackgroundJob) -> bool:
+    """Return whether a job that a restart stopped was at work, or waited as `waited_for_approval` says."""
+    return job.status == "running" or (job.status == "awaiting_approval" and waited_for_approval(job))
+
+
 def _updated(job: BackgroundJob, **changes: object) -> BackgroundJob:
     """Return the next state of a job, stamped with its transition time."""
     return replace(job, **changes, updated_at=datetime.now(UTC).isoformat())
@@ -597,12 +611,13 @@ class ToolJobRuntime:
 
         Only an interruption is undecided: an outcome the job's own work or its cleanup reached stands. Only a job
         that worked, of a kind the runtime's creator continues, stays: one with a cancel request or waiting for a
-        person's decision ends, as does one whose reply was stopped.
+        person's decision ends, as does one whose reply was stopped. The call of a workflow run that waited for an
+        approval stays too (`_stopped_while_working`).
         """
         job = entry.job
         return (
             settled.status == "interrupted"
-            and job.status == "running"
+            and _stopped_while_working(job)
             and not entry.control.reply_stopped
             and self._continues(job)
         )
@@ -633,7 +648,7 @@ class ToolJobRuntime:
 
     @staticmethod
     def _awaits_continuation(entry: _Entry) -> bool:
-        return entry.interruption is not None and entry.task is None and entry.job.status == "running"
+        return entry.interruption is not None and entry.task is None and _stopped_while_working(entry.job)
 
     def awaiting_continuation(self) -> tuple[BackgroundJob, ...]:
         """Return the jobs a restart stopped that wait for `continue_stopped`, which continues or settles each."""
@@ -678,7 +693,9 @@ class ToolJobRuntime:
         after it, with no await before the task's creation. A Stop of the job's reply that lands from here on has the
         effect a Stop has on a working job (`cancel_stopped_reply`): the job is refused its next approval.
         """
-        await self._publish(entry, _updated(entry.job, adapter=spec.adapter))
+        job = _updated(entry.job, adapter=spec.adapter)
+        # A job that goes on with the turn that waited for approvals still waits; any other works.
+        await self._publish(entry, job if waited_for_approval(job) else replace(job, status="running"))
         if self._grant(entry.job) == "allowed":
             entry.cancel = spec.cancel
             entry.task = asyncio.create_task(self._run(entry, spec.operation), name=f"tool-job:{entry.job.job_id}")

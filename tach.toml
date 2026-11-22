@@ -9332,6 +9332,7 @@ visibility = [
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.job",
     "mindroom.delegation.background",
+    "mindroom.delegation.continuation",
     "mindroom.delegation.recovery",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.response_runner",
@@ -9418,6 +9419,8 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.history.interrupted_replay",
     "mindroom.history.run_checkpoint",
+    "mindroom.tool_jobs.approvals",
+    "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.events",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.plugins",
@@ -9740,6 +9743,7 @@ depends_on = [
     "mindroom.tool_system.tool_function",
 ]
 visibility = [
+    "mindroom.delegation.continuation",
     "mindroom.delegation.job_approvals",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_jobs.execution",
