@@ -51,6 +51,9 @@ _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 8192
 # The most bytes of a streamed command's output handed on at once.
 _STREAM_CHUNK_BYTES = 32 * 1024
+# More output than its pipes can hold, read after a streamed command's process group was killed, comes from a process
+# that left the group; it is not read further.
+_KILLED_GROUP_PIPE_BYTES = 8 * 1024 * 1024
 # How long one chunk of a streamed command's stdin waits to leave before its sender is told to send it again.
 _STDIN_WRITE_SECONDS = 20.0
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
@@ -432,6 +435,45 @@ async def _start_streamed_command(
         return failure[0]
 
 
+class _PipeReaders:
+    """The tasks that hand each read of a streamed command's stdout and stderr to ``on_output``, unchanged."""
+
+    def __init__(
+        self,
+        process: asyncio.subprocess.Process,
+        on_output: Callable[[Literal["out", "err"], bytes], Awaitable[None]],
+    ) -> None:
+        self._on_output = on_output
+        self._moved = 0
+        self._idle: set[str] = set()
+        self.tasks = {
+            asyncio.create_task(self._read(process.stdout, "out")),
+            asyncio.create_task(self._read(process.stderr, "err")),
+        }
+
+    async def _read(self, stream: asyncio.StreamReader | None, kind: Literal["out", "err"]) -> None:
+        assert stream is not None
+        while True:
+            self._idle.add(kind)
+            chunk = await stream.read(_STREAM_CHUNK_BYTES)
+            self._idle.discard(kind)
+            if not chunk:
+                return
+            await self._on_output(kind, chunk)
+            self._moved += len(chunk)
+
+    async def drain(self, until: float | None, most: float = float("inf")) -> None:
+        """Wait, at the pace of ``on_output``, until both pipes ended, stayed silent, or gave ``most`` bytes."""
+        pending, last = self.tasks, self._moved + most
+        while pending and self._moved < last:
+            seen = self._moved
+            async with asyncio.timeout_at(until):
+                _, pending = await asyncio.wait(pending, timeout=_POST_EXIT_READER_GRACE_SECONDS)
+            # Pipes that stay silent once their command ended are held open by a process it left behind.
+            if self._moved == seen and len(self._idle) == len(pending):
+                break
+
+
 async def stream_command(
     argv: list[str],
     env: dict[str, str],
@@ -450,8 +492,10 @@ async def stream_command(
     down instead of letting its output pile up. ``on_exit`` gets the exit code and whether ``timeout`` stopped the
     command, once its leader and both pipes ended; a pipe only a silent process it left behind keeps open is not
     waited for. ``timeout`` runs until then, and a stop, at ``timeout`` or by cancellation, kills the whole process
-    group, also once its leader ended; ``on_stopped`` is called when a cancelled command's group is gone. A program
-    that is missing or cannot be executed ends as a shell ends it: the reason on stderr, exit code 127 or 126.
+    group, also once its leader ended. What the group wrote before ``timeout`` stopped it reaches ``on_output``
+    before ``on_exit``, however slowly it is taken; ``on_stopped`` is called when a cancelled command's group is
+    gone, after the last ``on_output``. A program that is missing or cannot be executed ends as a shell ends it: the
+    reason on stderr, exit code 127 or 126.
     """
     process = await _start_streamed_command(argv, env, cwd, on_start, on_output)
     if isinstance(process, int):
@@ -459,48 +503,29 @@ async def stream_command(
         return
     loop = asyncio.get_running_loop()
     deadline = None if timeout is None else loop.time() + timeout
-    moved = 0
-    idle: set[str] = set()
-
-    async def read(stream: asyncio.StreamReader | None, kind: Literal["out", "err"]) -> None:
-        nonlocal moved
-        assert stream is not None
-        while True:
-            idle.add(kind)
-            chunk = await stream.read(_STREAM_CHUNK_BYTES)
-            idle.discard(kind)
-            if not chunk:
-                return
-            await on_output(kind, chunk)
-            moved += 1
-
-    readers = {asyncio.create_task(read(process.stdout, "out")), asyncio.create_task(read(process.stderr, "err"))}
+    readers = _PipeReaders(process, on_output)
     ended = timed_out = False
     try:
         stdin._writer = process.stdin
         await on_start()
         try:
             await _await_process_exit(process, timeout_seconds=None if deadline is None else deadline - loop.time())
-            pending = readers
-            while pending:
-                seen = moved
-                async with asyncio.timeout_at(deadline):
-                    _, pending = await asyncio.wait(pending, timeout=_POST_EXIT_READER_GRACE_SECONDS)
-                # Pipes that stay silent after the command ended are held open by a process it left behind.
-                if moved == seen and len(idle) == len(pending):
-                    break
+            await readers.drain(deadline)
         except TimeoutError:
             timed_out = True
             await _terminate_process_group(process, whole_group=True)
-            # What the stopped processes had written is still read.
-            await asyncio.wait(readers, timeout=_POST_EXIT_READER_GRACE_SECONDS)
+            # The killed group closed its pipes, so what it had written is all read, and then they end.
+            await readers.drain(None, _KILLED_GROUP_PIPE_BYTES)
+        # Nothing follows the exit: a reader still at a pipe that a process left behind holds reads no more.
+        await _cancel_pending_tasks(*readers.tasks)
         await on_exit(-signal.SIGKILL if process.returncode is None else process.returncode, timed_out)
         ended = True
     finally:
         stdin._writer = None
-        if not ended and await _terminate_process_group(process, whole_group=True):
+        stopped = not ended and await _terminate_process_group(process, whole_group=True)
+        await _cancel_pending_tasks(*readers.tasks)
+        if stopped:
             on_stopped()
-        await _cancel_pending_tasks(*readers)
         if process.stdin is not None:
             process.stdin.close()
 
