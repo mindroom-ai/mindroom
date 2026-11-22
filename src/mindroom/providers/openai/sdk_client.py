@@ -5,14 +5,14 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, override
 
-from openai import AsyncOpenAI
+import openai
 from openai._base_client import _merge_mappings
 from openai._utils._json import openapi_dumps
 
 if TYPE_CHECKING:
     from openai._models import FinalRequestOptions
 
-__all__ = ["OpenAIClient", "encoded_body"]
+__all__ = ["AsyncOpenAI", "encoded_body"]
 
 
 def encoded_body(body: dict[Any, Any]) -> bytes:
@@ -33,22 +33,27 @@ def encoded_body(body: dict[Any, Any]) -> bytes:
     return b"{" + b",".join(members) + b"}"
 
 
-class OpenAIClient(AsyncOpenAI):
+class AsyncOpenAI(openai.AsyncOpenAI):
     """An SDK client that encodes each JSON request body in a worker thread, which the SDK then sends as given.
 
     The SDK encodes the body on the event loop as it builds the request, and a long history or inline media make it
-    megabytes. Azure's client stays the SDK's: it picks a request's deployment from the body before encoding it.
+    megabytes. It keeps the SDK class's name, which the SDK sends in the User-Agent header. Azure's client stays the
+    SDK's: it picks a request's deployment from the body before encoding it.
     """
 
     @override
     async def _prepare_options(self, options: FinalRequestOptions) -> FinalRequestOptions:
         options = await super()._prepare_options(options)
-        # A request with files sends its body as a multipart form, which the SDK builds from the mapping.
-        if not isinstance(options.json_data, dict) or options.files is not None:
+        # The SDK builds the multipart form of a request with files or a multipart content type from the mapping.
+        if (
+            not isinstance(options.json_data, dict)
+            or options.files is not None
+            or (self._build_headers(options).get("Content-Type") or "").startswith("multipart/form-data")
+        ):
             return options
         body = options.json_data
         if options.extra_json is not None:
             body = _merge_mappings(body, options.extra_json)
-        options.json_data = await asyncio.to_thread(encoded_body, body)
-        options.extra_json = None
+        options.content = await asyncio.to_thread(encoded_body, body)
+        options.json_data = options.extra_json = None
         return options
