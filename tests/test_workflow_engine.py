@@ -482,6 +482,25 @@ async def test_settle_from_handle_reads_an_ended_receipt_by_whether_the_tool_was
 
 
 @pytest.mark.asyncio
+async def test_settle_from_handle_takes_the_calls_own_word_that_it_never_left_for_its_tool(
+    stack: WorkflowStack,
+) -> None:
+    """A call past the stamp that says it never reached its tool, as one a worker refused, may run again."""
+    node = _dispatched_node(stack)
+    _claim(stack)
+    stack.script_store.mark_call_effect_started(stack.attempt.run_id, _CALL)
+    error = {"kind": "tool_failure", "message": "The worker refused the call.", "retryable": False}
+    stack.script_store.publish_call_result(
+        run_id=stack.attempt.run_id,
+        call_id=_CALL,
+        state=ScriptCallState.FAILED,
+        error={**error, "not_started": True},
+    )
+
+    assert _settled(stack, node) == (WorkflowNodeState.FAILED, None, "failed")
+
+
+@pytest.mark.asyncio
 async def test_receipt_that_could_not_be_stored_after_the_effect_is_never_safe_to_run_again(
     stack: WorkflowStack,
     monkeypatch: pytest.MonkeyPatch,

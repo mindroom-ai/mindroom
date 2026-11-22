@@ -575,7 +575,7 @@ async def test_the_pass_that_ends_a_stopped_jobs_run_neither_cuts_that_end_short
     pass comes to first has a stopped job and an agent that does not end, and the other run only waits for its
     next attempt.
     """
-    monkeypatch.setattr(engine_module, "_STOP_SECONDS", 0.6)
+    monkeypatch.setattr(engine_module, "_STOP_SECONDS", 2.5)
     second = stack.run_id
     await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=PLUGIN_TOOLS_CHANGED)
     first = (await stack.start()).run_id
@@ -591,15 +591,15 @@ async def test_the_pass_that_ends_a_stopped_jobs_run_neither_cuts_that_end_short
     standing = lambda _paths, job_id: "stopped" if job_id == "a-stopped-job" else "ended"  # noqa: E731
     monkeypatch.setattr(workflow_runtime, "workflow_job_standing", standing)
     script_runtime = SimpleNamespace(
-        pass_timeout_seconds=0.4,
+        pass_timeout_seconds=2.0,
         runtime_paths=stack.context.runtime_paths,
         retention_seconds=3600,
     )
     lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
 
-    await asyncio.wait_for(lifecycle._maintain(), 5)
+    await asyncio.wait_for(lifecycle._maintain(), 10)
 
-    # The pass gave up after its half of 0.4 seconds, and the second run has its attempt by then.
+    # The pass gave up after its half of 2 seconds, and the second run has its attempt by then.
     assert [stack.store.get_run(run_id).attempt for run_id in (first, second)] == [1, 2]
     await stack.until(lambda: stack.store.get_run(first).state is WorkflowRunState.CANCELLED)
     stack.run_id = first

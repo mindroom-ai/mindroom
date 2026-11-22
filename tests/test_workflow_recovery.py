@@ -25,6 +25,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.custom_tools import workflow as workflow_tool_module
 from mindroom.custom_tools.workflow import workflow_job_standing
+from mindroom.delegation.lifecycle import accessed_entities
 from mindroom.orchestration import tool_job_runtime as coordinator_module
 from mindroom.orchestration.script_runtime import _LiveScriptRuntimeResolver
 from mindroom.orchestration.workflow_runtime import WorkflowRuntimeLifecycle
@@ -1321,6 +1322,16 @@ async def test_run_goes_on_only_once_its_bot_is_synced_and_still_in_the_runs_roo
 
     run = stack.store.get_run(stack.run_id)
     assert (run.state, run.error, len(stack.scripts.launched)) == ends
+
+
+def test_access_to_a_team_grants_its_members_and_no_agent_outside_it(stack: WorkflowStack) -> None:
+    """Whoever reaches a team reaches its exact members through it; any other pair of bot and agent is asked for both."""
+    config, member = stack.context.config.model_copy(deep=True), stack.context.agent_name
+    config.teams["crew"] = TeamConfig(display_name="Crew", role="Answers together.", agents=[member])
+
+    assert accessed_entities(config, "crew", member) == {"crew"}
+    assert accessed_entities(config, "crew", "outsider") == {"crew", "outsider"}
+    assert accessed_entities(config, "outsider", member) == {"outsider", member}
 
 
 @pytest.mark.asyncio
