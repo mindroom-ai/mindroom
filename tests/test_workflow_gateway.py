@@ -20,8 +20,9 @@ import mindroom.api.main as api_main
 from mindroom.api.script_gateway import serve_script_gateway_listener
 from mindroom.api.workflow_gateway import router as workflow_router
 from mindroom.constants import RuntimePaths
+from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import ScriptRunState
-from mindroom.workflow_runs.models import WorkflowRunState
+from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.workflow_helpers import WorkflowStack, set_run, tool_args, workflow_stack
 
@@ -172,6 +173,8 @@ async def test_poll_returns_when_the_node_changes_and_after_wait_otherwise(
     stack.resolver.hold_approvals = asyncio.Event()
     node_id = (await client.post("nodes", json=_NODE)).json()["id"]
     loop = asyncio.get_running_loop()
+    # The call asks for its approval some time after it started, longer than the short poll when nothing is loaded yet.
+    await stack.until(lambda: stack.engine.status(stack.run_id)[1][0].state is WorkflowNodeState.WAITING)
 
     started = loop.time()
     unchanged = await client.get(f"nodes/{node_id}", params={"wait": 0.2})
