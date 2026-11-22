@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
+import aiohttp
 import nio
 
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
@@ -15,7 +16,7 @@ from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.event_types import MINDROOM_ACCOUNTS_EVENT_TYPE, ROUTER_BINDING_EVENT_TYPE
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -25,48 +26,70 @@ logger = get_logger(__name__)
 _LOCKS: WeakValueDictionary[tuple[Path, str], asyncio.Lock] = WeakValueDictionary()
 
 
+async def _read_state(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_type: str,
+    state_key: str,
+) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+    response = await client.room_get_state_event(room_id, event_type, state_key=state_key)
+    transport = response.transport_response if isinstance(response, nio.RoomGetStateEventResponse) else None
+    if isinstance(transport, aiohttp.ClientResponse) and transport.status != 200:
+        code = "M_FORBIDDEN" if transport.status == 403 else None
+        return nio.RoomGetStateEventError(f"HTTP {transport.status}", code, room_id=room_id)
+    return response
+
+
 async def reconcile_room_accounts(
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
     room_id: str,
     *,
+    get_alternate_clients: Callable[[], Mapping[str, nio.AsyncClient]] = dict,
     failure_level: Callable[[bool], int] = lambda _: logging.WARNING,
 ) -> bool:
-    """Write the client's list of the room's joined MindRoom accounts when it changed and return whether it is current.
+    """Refresh the room roster using its bound account when eligible, otherwise the steward.
 
-    A write refused for lack of power does not need a retry until the room changes.
-
-    The state key is the writing account's user ID, the room's steward, which Matrix lets only that account write.
+    The state key is the writer's own user ID.
+    A refused roster read or write ends the attempt; a failed member read retries.
     """
     phase = "room_lock"
+    event_type = MINDROOM_ACCOUNTS_EVENT_TYPE
     try:
-        # Bound lock waits too; the lock prevents an older comparison from overwriting a newer roster.
-        async with asyncio.timeout(10), _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
+        lock = _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock())
+        async with asyncio.timeout(10), lock:
+            lookup = bool(get_alternate_clients())
+            phase = "binding_get" if lookup else phase
+            reply = await _read_state(client, room_id, ROUTER_BINDING_EVENT_TYPE, "") if lookup else None
+            skip = isinstance(reply, nio.RoomGetStateEventError) and reply.status_code in {"M_NOT_FOUND", "M_FORBIDDEN"}
+            if lookup and not isinstance(reply, nio.RoomGetStateEventResponse) and not skip:
+                logger.log(failure_level(False), "room_accounts_publish_failed", room_id=room_id, error=str(reply))
+                return False
+            binding = reply.content if isinstance(reply, nio.RoomGetStateEventResponse) else None
+            bound = binding.get("user_id") if isinstance(binding, dict) else None
+            writer = (get_alternate_clients().get(bound) if isinstance(bound, str) else None) or client
             phase = "joined_members"
-            members = await get_room_members(client, room_id, failure_level=failure_level)
+            members = await get_room_members(writer, room_id, failure_level=failure_level)
             if members is None:
                 return False
-            accounts = members & prepared_entity_names_by_user_id(config, runtime_paths).keys()
-            content = {"accounts": sorted(accounts)}
+            content = {"accounts": sorted(members & prepared_entity_names_by_user_id(config, runtime_paths).keys())}
             phase = "state_get"
-            current = await client.room_get_state_event(room_id, MINDROOM_ACCOUNTS_EVENT_TYPE, client.user_id)
-            if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
-                return True
-            phase = "state_put"
-            response = await client.room_put_state(
-                room_id,
-                MINDROOM_ACCOUNTS_EVENT_TYPE,
-                content,
-                state_key=client.user_id,
-            )
-            if not isinstance(response, nio.RoomPutStateResponse):
-                # A room whose power levels keep this account from sending this state refuses it on every trigger.
-                forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
-                level = logging.DEBUG if forbidden else failure_level(False)
-                logger.log(level, "room_accounts_publish_failed", room_id=room_id, error=str(response))
-                return forbidden
-            return True
+            response = await _read_state(writer, room_id, event_type, writer.user_id)
+            not_found = isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND"
+            if isinstance(response, nio.RoomGetStateEventResponse) or not_found:
+                if writer is not client and get_alternate_clients().get(writer.user_id) is not writer:
+                    logger.debug("room_accounts_writer_no_longer_eligible", room_id=room_id, user_id=writer.user_id)
+                    return False
+                if not (isinstance(response, nio.RoomGetStateEventResponse) and response.content == content):
+                    phase = "state_put"
+                    response = await writer.room_put_state(room_id, event_type, content, state_key=writer.user_id)
+                if isinstance(response, (nio.RoomGetStateEventResponse, nio.RoomPutStateResponse)):
+                    return True
+            forbidden = isinstance(response, nio.ErrorResponse) and response.status_code == "M_FORBIDDEN"
+            level = logging.DEBUG if forbidden else failure_level(False)
+            logger.log(level, "room_accounts_publish_failed", room_id=room_id, error=str(response))
+            return forbidden
     except Exception as exc:
         timed_out = isinstance(exc, TimeoutError)
         detail = {"error": "TimeoutError", "phase": phase} if timed_out else {"exc_info": True}
@@ -85,13 +108,13 @@ async def reconcile_room_router_binding(
 
     Returns whether nothing is left to do. The binding keeps the name today's clients read: the privileged MindRoom
     account whose room state they trust. A binding naming another account stays, so two privileged stewards cannot
-    take turns overwriting it; a stale one only leaves voice echoes as standalone rows until a room admin clears it.
+    take turns overwriting it. A stale roster can leave voice echoes standalone if the bound bot cannot refresh it.
     A room that forbids the read or write is done too. The steward retries transient failures in the background.
     """
     phase = "state_get"
     try:
         async with asyncio.timeout(10):
-            current = await client.room_get_state_event(room_id, ROUTER_BINDING_EVENT_TYPE, state_key="")
+            current = await _read_state(client, room_id, ROUTER_BINDING_EVENT_TYPE, "")
             if isinstance(current, nio.RoomGetStateEventResponse):
                 bound = current.content.get("user_id")
                 localpart, _, server = bound[1:].partition(":") if isinstance(bound, str) else ("", "", "")

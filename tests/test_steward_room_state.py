@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+from contextlib import asynccontextmanager
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -11,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import aiohttp
 import nio
 import pytest
+from aiohttp import web
 from structlog.testing import capture_logs
 
 from mindroom import room_modes
@@ -21,6 +23,7 @@ from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import AdmissionFacts, RoomMembershipPosition
+from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.room_accounts import reconcile_room_accounts, reconcile_room_router_binding
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
@@ -50,7 +53,7 @@ from tests.identity_helpers import entity_ids
 from tests.test_bot_ready_hook import _validated_reported_membership_admission
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -477,6 +480,435 @@ async def test_binding_claim_follows_a_handover_during_accounts_read(room_state:
     assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": next_client.user_id}
     assert not _writes(client, ROUTER_EVENT_TYPE)
     assert handed_off
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "writable",
+        "absent",
+        "stopped",
+        "stops_during_get",
+        "unjoined",
+        "underpowered",
+        "draining",
+        "drains_during_roster_get",
+        "members_forbidden",
+        "put_forbidden",
+    ],
+)
+async def test_roster_follows_the_binding_after_steward_handover(room_state: RoomState, binding: str) -> None:
+    """The steward refreshes the trusted roster through its author when that bot can still write it."""
+    _, _, ids, events, bound_client = room_state
+    owner = _owner_bot(room_state)
+    runtime = owner.steward_duties.deps.runtime.orchestrator
+    bound_id, steward_id, joining_id = (ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1", "agent2"))
+    bound_room = bound_client.rooms[ROOM_ID]
+    bound_room.power_levels.events[ACCOUNTS_EVENT_TYPE] = 50
+    bound_room.power_levels.users[bound_id] = 50
+    events["m.room.member", joining_id] = {"membership": "leave"}
+    await reconcile_held_room_states(runtime)
+    initial_roster = sorted([bound_id, steward_id])
+    assert _accounts(room_state) == initial_roster
+    assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": bound_id}
+    bound_client.room_put_state.reset_mock()
+    bound_client.joined_members.reset_mock()
+
+    duties = _roster_successor(room_state, owner)
+    steward_client = duties.deps.runtime.client
+    assert steward_client is not None
+    _configure_roster_handover(room_state, owner, binding)
+    events["m.room.member", joining_id] = {"membership": "join"}
+    try:
+        with capture_logs() as logs:
+            if binding == "stops_during_get":
+                await _reconcile_accounts_during_bound_bot_stop(duties, steward_client, owner)
+            else:
+                await duties.member_event(steward_client.rooms[ROOM_ID], _membership_event(joining_id, "join", "leave"))
+            if binding == "drains_during_roster_get":
+                assert duties._room_state_reruns[ROOM_ID] == {"accounts"}
+                assert (ACCOUNTS_EVENT_TYPE, steward_id) not in events
+                await asyncio.wait_for(duties._room_state_retries[ROOM_ID], timeout=3)
+            assert duties._room_state_reruns == ({ROOM_ID: {"accounts"}} if binding == "members_forbidden" else {})
+    finally:
+        duties.stopping()
+
+    if binding in {"members_forbidden", "put_forbidden"}:
+        _assert_bound_writer_refused(events, bound_client, steward_client, binding, logs)
+    else:
+        expected_client = bound_client if binding == "writable" else steward_client
+        expected_id = expected_client.user_id
+        expected_roster = {"accounts": sorted([*initial_roster, joining_id])}
+        assert events[ACCOUNTS_EVENT_TYPE, expected_id] == expected_roster
+        write = call(ROOM_ID, ACCOUNTS_EVENT_TYPE, expected_roster, state_key=expected_id)
+        assert _writes(expected_client, ACCOUNTS_EVENT_TYPE) == [write]
+        other_client = steward_client if binding == "writable" else bound_client
+        assert not _writes(other_client, ACCOUNTS_EVENT_TYPE)
+    if binding != "writable":
+        assert _accounts(room_state) == initial_roster
+    assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": steward_id if binding == "absent" else bound_id}
+    assert len(_writes(steward_client, ROUTER_EVENT_TYPE)) == (binding == "absent")
+    assert not _writes(bound_client, ROUTER_EVENT_TYPE)
+
+
+def _assert_bound_writer_refused(
+    events: dict[tuple[str, str], dict[str, Any]],
+    bound_client: AsyncMock,
+    steward_client: AsyncMock,
+    binding: str,
+    logs: list[dict[str, Any]],
+) -> None:
+    assert (ACCOUNTS_EVENT_TYPE, steward_client.user_id) not in events
+    assert not _writes(steward_client, ACCOUNTS_EVENT_TYPE)
+    assert len(_writes(bound_client, ACCOUNTS_EVENT_TYPE)) == (binding == "put_forbidden")
+    if binding == "members_forbidden":
+        bound_client.joined_members.assert_awaited_once_with(ROOM_ID)
+    event_name = (
+        "matrix_room_members_fetch_failed" if binding == "members_forbidden" else "room_accounts_publish_failed"
+    )
+    expected_level = "warning" if binding == "members_forbidden" else "debug"
+    assert [log["log_level"] for log in logs if log["event"] == event_name] == [expected_level]
+
+
+def _roster_successor(room_state: RoomState, owner: MagicMock) -> StewardDuties:
+    """Elect a new steward with its own client, sharing the fake homeserver with the bound bot."""
+    _, _, ids, _, bound_client = room_state
+    runtime = owner.steward_duties.deps.runtime.orchestrator
+    steward_id = ids["agent1"].full_id
+    steward_room = nio.MatrixRoom(ROOM_ID, steward_id)
+    steward_room.power_levels.users[steward_id] = 100
+    steward_client = AsyncMock(spec=nio.AsyncClient, user_id=steward_id, rooms={ROOM_ID: steward_room})
+    steward_client.joined_members.side_effect = bound_client.joined_members.side_effect
+    steward_client.room_get_state_event.side_effect = bound_client.room_get_state_event.side_effect
+    steward_client.room_put_state.side_effect = bound_client.room_put_state.side_effect
+    duties = _router_duties(room_state)
+    duties.deps.hook_context.agent_name = "agent1"
+    duties.deps.runtime.client = steward_client
+    duties.deps.runtime.orchestrator = runtime
+    steward = MagicMock(client=steward_client, agent_name="agent1", running=True, steward_duties=duties)
+    runtime.agent_bots["agent1"] = steward
+    runtime.room_steward.return_value = steward
+    return duties
+
+
+def _configure_roster_handover(
+    state: RoomState,
+    owner: MagicMock,
+    binding: str,
+) -> None:
+    """Make the bound bot ineligible, refuse it on the server, or remove the binding for this case."""
+    _, _, _, events, bound_client = state
+    owner.running = binding != "stopped"
+    owner.accepting_work = binding not in {"stopped", "draining"}
+    if binding == "absent":
+        del events[ROUTER_EVENT_TYPE, ""]
+    elif binding == "unjoined":
+        del bound_client.rooms[ROOM_ID]
+    elif binding == "underpowered":
+        bound_client.rooms[ROOM_ID].power_levels.users[bound_client.user_id] = 0
+    elif binding == "drains_during_roster_get":
+        read = bound_client.room_get_state_event.side_effect
+
+        async def stop_accepting(room_id: str, event_type: str, state_key: str = "") -> object:
+            reply = await read(room_id, event_type, state_key)
+            if event_type == ACCOUNTS_EVENT_TYPE:
+                owner.accepting_work = False
+            return reply
+
+        bound_client.room_get_state_event.side_effect = stop_accepting
+    elif binding == "members_forbidden":
+        bound_client.joined_members.side_effect = None
+        bound_client.joined_members.return_value = nio.JoinedMembersError("Forbidden", "M_FORBIDDEN", room_id=ROOM_ID)
+    elif binding == "put_forbidden":
+        bound_client.room_put_state.side_effect = None
+        bound_client.room_put_state.return_value = nio.RoomPutStateError("Forbidden", "M_FORBIDDEN")
+
+
+@pytest.mark.asyncio
+async def test_bound_writer_draining_during_equal_roster_get_retries(room_state: RoomState) -> None:
+    """A bound writer that drains during an equal roster GET triggers a retry instead of reporting success."""
+    config, paths, ids, events, steward = room_state
+    bound_id = ids["agent1"].full_id
+    expected_roster = sorted(identity.full_id for identity in ids.values())
+    events[ROUTER_EVENT_TYPE, ""] = {"user_id": bound_id}
+    events[ACCOUNTS_EVENT_TYPE, bound_id] = {"accounts": expected_roster}
+    bound = AsyncMock(spec=nio.AsyncClient, user_id=bound_id)
+    bound.joined_members.side_effect = steward.joined_members.side_effect
+    eligible = True
+    read = steward.room_get_state_event.side_effect
+
+    async def drain_on_roster_get(room_id: str, event_type: str, state_key: str = "") -> object:
+        nonlocal eligible
+        reply = await read(room_id, event_type, state_key)
+        if event_type == ACCOUNTS_EVENT_TYPE:
+            eligible = False
+        return reply
+
+    bound.room_get_state_event.side_effect = drain_on_roster_get
+
+    def alternates() -> dict[str, nio.AsyncClient]:
+        return {bound_id: bound} if eligible else {}
+
+    with capture_logs() as logs:
+        assert await reconcile_room_accounts(steward, config, paths, ROOM_ID, get_alternate_clients=alternates) is False
+    assert [log["log_level"] for log in logs if log["event"] == "room_accounts_writer_no_longer_eligible"] == ["debug"]
+    bound.room_put_state.assert_not_awaited()
+    steward.room_put_state.assert_not_awaited()
+
+    assert await reconcile_room_accounts(steward, config, paths, ROOM_ID, get_alternate_clients=alternates) is True
+    assert _accounts(room_state) == expected_roster
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("writer_kind", "response_kind"),
+    [
+        ("bound", "forbidden_503"),
+        ("steward", "forbidden_503"),
+        ("steward", "forbidden_403"),
+    ],
+)
+async def test_forbidden_members_read_retries_without_writing(
+    room_state: RoomState,
+    writer_kind: str,
+    response_kind: str,
+) -> None:
+    """Any failed joined_members read retries for either writer, even with an M_FORBIDDEN body."""
+    config, paths, ids, _, _ = room_state
+    steward_id, bound_id = ids[ROUTER_AGENT_NAME].full_id, ids["agent1"].full_id
+    puts: list[str] = []
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        if request.method == "PUT":
+            puts.append(request.path)
+            return web.json_response({"event_id": "$put"})
+        if ROUTER_EVENT_TYPE in request.path:
+            return web.json_response({"user_id": bound_id})
+        return _error_http_response(response_kind)
+
+    async with _http_state_clients(handle, steward_id, bound_id) as (steward, bound):
+        alternates = (lambda: {bound_id: bound}) if writer_kind == "bound" else dict
+        with capture_logs() as logs:
+            result = await reconcile_room_accounts(steward, config, paths, ROOM_ID, get_alternate_clients=alternates)
+    assert result is False
+    assert puts == []
+    assert [log["log_level"] for log in logs if log["event"] == "matrix_room_members_fetch_failed"] == ["warning"]
+
+
+@asynccontextmanager
+async def _http_state_clients(
+    handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    *user_ids: str,
+) -> AsyncIterator[list[MindRoomAsyncClient]]:
+    """Run real MindRoomAsyncClient instances against an in-process HTTP handler."""
+    app = web.Application()
+    app.router.add_route("*", "/{path:.*}", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", 0).start()
+    host, port = runner.addresses[0]
+    clients = [MindRoomAsyncClient(f"http://{host}:{port}", user_id, "BOT", store_path=None) for user_id in user_ids]
+    for client, user_id in zip(clients, user_ids, strict=True):
+        client.restore_login(user_id, "BOT", "token")
+        client.rooms[ROOM_ID] = nio.MatrixRoom(ROOM_ID, user_id)
+    try:
+        yield clients
+    finally:
+        await asyncio.gather(*(client.close() for client in clients))
+        await runner.cleanup()
+
+
+def _error_http_response(kind: str) -> web.StreamResponse:
+    if kind == "html_503":
+        return web.Response(text="<html>503 Service Unavailable</html>", status=503, content_type="text/html")
+    if kind == "forbidden_403":
+        return web.json_response({"errcode": "M_FORBIDDEN", "error": "Forbidden"}, status=403)
+    if kind == "html_403":
+        return web.Response(text="<html>403 Forbidden</html>", status=403, content_type="text/html")
+    if kind == "not_found_503":
+        return web.json_response({"errcode": "M_NOT_FOUND", "error": "Not found"}, status=503)
+    if kind == "forbidden_503":
+        return web.json_response({"errcode": "M_FORBIDDEN", "error": "Forbidden"}, status=503)
+    return web.json_response({"errcode": "M_UNKNOWN", "error": "Service Unavailable"}, status=503)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_kind", ["json_503", "html_503", "not_found_503", "forbidden_503"])
+async def test_non_200_binding_read_in_accounts_retries_without_writing(
+    room_state: RoomState,
+    response_kind: str,
+) -> None:
+    """A decoded 503 binding GET retries without falling back to a steward roster write."""
+    config, paths, ids, _, _ = room_state
+    steward_id, bound_id = ids[ROUTER_AGENT_NAME].full_id, ids["agent1"].full_id
+    joined = {identity.full_id: {} for identity in ids.values()}
+    puts: list[str] = []
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        if request.method == "PUT":
+            puts.append(request.path)
+            return web.json_response({"event_id": "$put"})
+        if request.path.endswith("/joined_members"):
+            return web.json_response({"joined": joined})
+        if ROUTER_EVENT_TYPE in request.path:
+            return _error_http_response(response_kind)
+        return web.json_response({"errcode": "M_NOT_FOUND", "error": "Not found"}, status=404)
+
+    async with _http_state_clients(handle, steward_id, bound_id) as (steward, bound):
+        with capture_logs() as logs:
+            result = await reconcile_room_accounts(
+                steward,
+                config,
+                paths,
+                ROOM_ID,
+                get_alternate_clients=lambda: {bound_id: bound},
+            )
+    assert result is False
+    assert puts == []
+    assert [log["log_level"] for log in logs if log["event"] == "room_accounts_publish_failed"] == ["warning"]
+
+
+@pytest.mark.asyncio
+async def test_forbidden_binding_read_in_accounts_writes_the_steward_roster(room_state: RoomState) -> None:
+    """A 403 binding GET leaves no bound writer, so the steward writes its own roster as on main."""
+    config, paths, ids, _, _ = room_state
+    steward_id, bound_id = ids[ROUTER_AGENT_NAME].full_id, ids["agent1"].full_id
+    joined = {identity.full_id: {} for identity in ids.values()}
+    puts: list[str] = []
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        if request.method == "PUT":
+            puts.append(request.path)
+            return web.json_response({"event_id": "$put"})
+        if request.path.endswith("/joined_members"):
+            return web.json_response({"joined": joined})
+        if ROUTER_EVENT_TYPE in request.path:
+            return _error_http_response("forbidden_403")
+        return web.json_response({"errcode": "M_NOT_FOUND", "error": "Not found"}, status=404)
+
+    async with _http_state_clients(handle, steward_id, bound_id) as (steward, bound):
+        result = await reconcile_room_accounts(
+            steward,
+            config,
+            paths,
+            ROOM_ID,
+            get_alternate_clients=lambda: {bound_id: bound},
+        )
+    assert result is True
+    assert len(puts) == 1
+    assert puts[0].endswith(f"/{steward_id}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_kind", "expected_done", "expected_level"),
+    [
+        ("json_503", False, "warning"),
+        ("html_503", False, "warning"),
+        ("not_found_503", False, "warning"),
+        ("forbidden_503", False, "warning"),
+        ("forbidden_403", True, "debug"),
+        ("html_403", True, "debug"),
+    ],
+)
+async def test_non_200_binding_read_in_claim_path_never_claims(
+    room_state: RoomState,
+    response_kind: str,
+    expected_done: bool,
+    expected_level: str,
+) -> None:
+    """A decoded non-200 binding GET is never mistaken for a malformed binding to claim."""
+    _, _, ids, _, _ = room_state
+    steward_id = ids[ROUTER_AGENT_NAME].full_id
+    puts: list[str] = []
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        if request.method == "PUT":
+            puts.append(request.path)
+            return web.json_response({"event_id": "$put"})
+        return _error_http_response(response_kind)
+
+    async with _http_state_clients(handle, steward_id) as (steward,):
+        with capture_logs() as logs:
+            result = await reconcile_room_router_binding(steward, ROOM_ID)
+    assert result is expected_done
+    assert puts == []
+    assert [log["log_level"] for log in logs if log["event"] == "room_router_binding_publish_failed"] == [
+        expected_level,
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("writer_kind", "response_kind", "expected_done", "expected_level"),
+    [
+        ("bound", "forbidden_403", True, "debug"),
+        ("steward", "forbidden_403", True, "debug"),
+        ("bound", "html_403", True, "debug"),
+        ("steward", "html_403", True, "debug"),
+        ("bound", "json_503", False, "warning"),
+        ("steward", "json_503", False, "warning"),
+        ("bound", "not_found_503", False, "warning"),
+        ("steward", "not_found_503", False, "warning"),
+        ("bound", "forbidden_503", False, "warning"),
+        ("steward", "forbidden_503", False, "warning"),
+    ],
+)
+async def test_non_200_roster_get_stops_before_put(
+    room_state: RoomState,
+    writer_kind: str,
+    response_kind: str,
+    expected_done: bool,
+    expected_level: str,
+) -> None:
+    """A decoded 403 or 503 roster GET stops without issuing a PUT for either writer."""
+    config, paths, ids, _, _ = room_state
+    steward_id, bound_id = ids[ROUTER_AGENT_NAME].full_id, ids["agent1"].full_id
+    joined = {identity.full_id: {} for identity in ids.values()}
+    puts: list[str] = []
+    roster_reads: list[str] = []
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        if request.method == "PUT":
+            puts.append(request.path)
+            return web.json_response({"event_id": "$put"})
+        if ROUTER_EVENT_TYPE in request.path:
+            return web.json_response({"user_id": bound_id})
+        if request.path.endswith("/joined_members"):
+            return web.json_response({"joined": joined})
+        roster_reads.append(request.path.rsplit("/", 1)[-1])
+        return _error_http_response(response_kind)
+
+    async with _http_state_clients(handle, steward_id, bound_id) as (steward, bound):
+        alternates = (lambda: {bound_id: bound}) if writer_kind == "bound" else dict
+        with capture_logs() as logs:
+            result = await reconcile_room_accounts(steward, config, paths, ROOM_ID, get_alternate_clients=alternates)
+    assert result is expected_done
+    assert puts == []
+    assert roster_reads == [bound_id if writer_kind == "bound" else steward_id]
+    assert [log["log_level"] for log in logs if log["event"] == "room_accounts_publish_failed"] == [expected_level]
+
+
+async def _reconcile_accounts_during_bound_bot_stop(
+    duties: StewardDuties,
+    steward_client: AsyncMock,
+    bound_bot: MagicMock,
+) -> None:
+    """Stop the bound bot after the roster's binding GET starts and before it returns."""
+    read = steward_client.room_get_state_event.side_effect
+
+    async def stop_during_binding_get(room_id: str, event_type: str, state_key: str = "") -> object:
+        reply = await read(room_id, event_type, state_key)
+        if event_type == ROUTER_EVENT_TYPE:
+            bound_bot.running = False
+        return reply
+
+    steward_client.room_get_state_event.side_effect = stop_during_binding_get
+    # Run only accounts so the binding check's own GET cannot stop the bot first.
+    assert bound_bot.running
+    assert not await duties._reconcile_room_state(ROOM_ID, needed={"accounts"})
+    assert not bound_bot.running
 
 
 @pytest.mark.asyncio
@@ -1441,6 +1873,55 @@ async def test_thread_mode_command_times_out_while_a_frame_uses_the_room_lock(
         duties.stopping()
         command.cancel()
         await asyncio.gather(frame, command, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_steward_roster_spends_the_same_budget_on_lock_wait_and_io(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acquiring the lock just before the deadline must not extend an inline membership callback."""
+    config, paths, ids, _, client = room_state
+    duties = _owner_bot(room_state).steward_duties
+    clock = 0
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock)
+    started, release, stalled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    read_members = client.joined_members.side_effect
+
+    async def members(room_id: str) -> nio.JoinedMembersResponse:
+        if started.is_set():
+            stalled.set()
+            return await asyncio.Future()
+        started.set()
+        await release.wait()
+        return await read_members(room_id)
+
+    client.joined_members.side_effect = members
+    first = asyncio.create_task(reconcile_room_accounts(client, config, paths, ROOM_ID))
+    event = _membership_event(ids["agent1"].full_id, "join", "leave")
+    callback = asyncio.create_task(duties.member_event(client.rooms[ROOM_ID], event))
+    try:
+        await _yield_loop(40)
+        assert started.is_set()
+        assert not stalled.is_set()
+        assert not callback.done()
+        clock = 9
+        release.set()
+        await _yield_loop(40)
+        assert first.done()
+        assert await first is True
+        assert stalled.is_set()
+        assert not callback.done()
+        clock = 10
+        await _yield_loop(40)
+        assert callback.done(), "The lock wait and the first writer must share one deadline"
+        await callback
+        assert duties._room_state_reruns[ROOM_ID] == {"accounts"}
+    finally:
+        duties.stopping()
+        first.cancel()
+        callback.cancel()
+        await asyncio.gather(first, callback, return_exceptions=True)
 
 
 @pytest.mark.asyncio
