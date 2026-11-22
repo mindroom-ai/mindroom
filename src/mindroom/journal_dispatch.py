@@ -123,7 +123,7 @@ class JournalCallbacks:
     # Awaited with the room of every event whose callback may use what it reads, before that callback runs.
     before_room_event: Callable[[str], Awaitable[object]] | None = None
     # Whether the owner of a runtime source takes it only once its runtime accepts work again.
-    runtime_source_parked: Callable[[JournalEvent], bool] | None = None
+    runtime_source_parked: Callable[[JournalEvent], bool] = lambda _event: False
 
 
 @dataclass
@@ -240,12 +240,9 @@ class JournalDispatcher:
         Turn work waits until the orchestrator has started responders, and a runtime source its owner will not
         start in a runtime that stopped accepting work waits until that runtime accepts work again.
         """
-        return _needs_turn_replay(event) and (not self._turn_replay_released or self._runtime_source_refused(event))
-
-    def _runtime_source_refused(self, event: JournalEvent) -> bool:
-        """Return whether the runner will not start this runtime source until its runtime accepts work again."""
-        refused = self.callbacks.runtime_source_parked
-        return refused is not None and refused(event)
+        return _needs_turn_replay(event) and (
+            not self._turn_replay_released or self.callbacks.runtime_source_parked(event)
+        )
 
     async def _run_event(self, event: JournalEvent) -> bool:
         """Run one journal event's callback and report whether it may settle.
@@ -434,14 +431,18 @@ class JournalDispatcher:
 
     def retry_turn_sources(self, room_id: str, event_ids: tuple[str, ...]) -> None:
         """Return several undelivered turn sources to the worker; one the runner refused stays deferred."""
-        self._deferred_reaction_ids.difference_update(event_ids)
-        self._worker.release(event_ids, keep=self._runtime_source_refused)
+        self._release_sources(event_ids, keep=self.callbacks.runtime_source_parked)
         self._worker.wake(room_id=room_id)
 
-    def _release_sources(self, event_ids: tuple[str, ...]) -> None:
-        """Release worker ownership and forget any deferred-reaction markers."""
+    def _release_sources(
+        self,
+        event_ids: tuple[str, ...],
+        *,
+        keep: Callable[[JournalEvent], bool] | None = None,
+    ) -> None:
+        """Release worker ownership, except of the sources ``keep`` parks, and forget any deferred-reaction markers."""
         self._deferred_reaction_ids.difference_update(event_ids)
-        self._worker.release(event_ids)
+        self._worker.release(event_ids, keep=keep)
 
     async def unsettled_event_ids(self) -> frozenset[str]:
         """Return every event that still owes semantic work."""

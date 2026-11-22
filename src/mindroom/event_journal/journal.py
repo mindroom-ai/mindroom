@@ -1497,20 +1497,20 @@ def settle_runtime_sources_of(transaction: Transaction, ends: Callable[[str], bo
     kinds = tuple(sorted(kind.value for kind in RUNTIME_SOURCE_KINDS))
     # Placeholders are generated, values are still bound.
     owed = f"state = 'pending' AND kind IN ({', '.join('?' for _ in kinds)})"
-    principals = transaction.fetchall(f"SELECT DISTINCT principal_id FROM journal_events WHERE {owed}", kinds)  # noqa: S608
-    for principal_id in (str(row["principal_id"]) for row in principals):
+    unheld = transaction.fetchall(
+        f"""
+        SELECT principal_id, event_id FROM journal_events WHERE {owed}
+          AND NOT EXISTS (
+              SELECT 1 FROM {approval_continuations.HELD_SOURCES}
+              WHERE held_source.principal_id = journal_events.principal_id
+                AND held_source.event_id = journal_events.event_id
+          )
+        """,  # noqa: S608
+        kinds,
+    )
+    for principal_id, event_id in ((str(row["principal_id"]), str(row["event_id"])) for row in unheld):
         if ends(agent_of_principal(principal_id)):
-            transaction.execute(
-                f"""
-                UPDATE journal_events SET state = ?, source_json = '' WHERE principal_id = ? AND {owed}
-                  AND NOT EXISTS (
-                      SELECT 1 FROM {approval_continuations.HELD_SOURCES}
-                      WHERE held_source.principal_id = journal_events.principal_id
-                        AND held_source.event_id = journal_events.event_id
-                  )
-                """,  # noqa: S608
-                (SETTLED_STATE, principal_id, *kinds),
-            )
+            _settle(transaction, principal_id, event_id)
 
 
 def settle_many(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> None:
