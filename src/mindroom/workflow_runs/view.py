@@ -114,10 +114,14 @@ def _fitted_card(
 
 @dataclass
 class RunViews:
-    """Show the runs of one engine: `bot` names the account and the client that posts for a run, None while it cannot."""
+    """Show the runs of one engine: `bot` names the account and the client that posts for a run, None while it cannot.
+
+    `client` returns the client an account has now, None while its bot has none.
+    """
 
     engine: WorkflowEngine
     bot: Callable[[WorkflowRun], tuple[str, nio.AsyncClient] | None]
+    client: Callable[[str], nio.AsyncClient | None]
     homeserver_url: str
     live_frames: Callable[[], bool] = lambda: True
     clock: Callable[[], float] = time.monotonic
@@ -196,13 +200,10 @@ class RunViews:
             return
         account, client = bot
         if self.live_frames():
-
-            def live_client() -> nio.AsyncClient | None:
-                now = self.bot(run)
-                return None if now is None else now[1]
-
-            url = self.homeserver_url
-            publish_run(account, run.room_id, run_id, meta, graph, client=live_client, homeserver_url=url)
+            # By the account alone, as its sub-agent frames are sent: they share one publisher, which keeps the
+            # first lookup it gets, so a run that can no longer post must not end the account's other frames.
+            live, url = partial(self.client, account), self.homeserver_url
+            publish_run(account, run.room_id, run_id, meta, graph, client=live, homeserver_url=url)
         await self._card(run, meta, graph, client)
 
     def _mark_large(self, run: WorkflowRun, text: str) -> None:

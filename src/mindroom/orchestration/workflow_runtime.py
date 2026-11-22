@@ -130,10 +130,15 @@ def build_workflow_runtime(script_runtime: ScriptRuntimeLifecycle) -> WorkflowRu
         serving = script_runtime.resolver.serving_bot(cast("ScriptRunRecord", run))
         return None if serving is None or serving.client is None else (serving.agent_name, serving.client)
 
+    def client(account: str) -> nio.AsyncClient | None:
+        """Return the client the bot of *account* has now, as the account's sub-agent frames are sent with."""
+        bot = script_runtime.resolver.bot_provider(account)
+        return None if bot is None else bot.client
+
     def live_frames() -> bool:
         config = script_runtime.config_provider()
         return config is not None and config.defaults.streaming.live_frames
 
     homeserver_url = runtime_matrix_homeserver(script_runtime.runtime_paths)
-    views = RunViews(engine, bot=bot, homeserver_url=homeserver_url, live_frames=live_frames)
+    views = RunViews(engine, bot=bot, client=client, homeserver_url=homeserver_url, live_frames=live_frames)
     return WorkflowRuntimeLifecycle(engine=engine, script_runtime=script_runtime, views=views)

@@ -160,6 +160,29 @@ async def test_run_without_its_owners_access_is_shown_nothing(
 
 
 @pytest.mark.asyncio
+async def test_frames_of_a_run_go_out_through_its_accounts_client_whatever_becomes_of_the_run(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One publisher sends every frame of an account in a room, and keeps the first client lookup it was given.
+
+    So a run hands it the lookup an ordinary sub-agent does, by the account alone: a run whose own agent stopped
+    must not end the frames of that account's other runs there.
+    """
+    lookups: list[Any] = []
+    monkeypatch.setattr(view_module, "publish_run", lambda *_args, **options: lookups.append(options["client"]))
+    stack.views.live_frames = lambda: True
+    await stack.views.show(stack.run_id)
+    [lookup] = lookups
+    client = lookup()
+
+    stack.views.bot = lambda _run: None
+
+    assert client is _room(stack).client
+    assert lookup() is client
+
+
+@pytest.mark.asyncio
 async def test_run_whose_start_was_refused_gets_no_card(stack: WorkflowStack) -> None:
     """A run that never got an attempt is shown nowhere: its call's failure says why."""
     refused = stack.reserve(title="Never started")
