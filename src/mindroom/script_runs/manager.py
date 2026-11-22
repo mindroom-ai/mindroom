@@ -93,6 +93,7 @@ __all__ = [
     "ScriptRunManager",
     "ScriptRunManagerError",
     "ScriptRunStatus",
+    "ScriptRuntimeNotReadyError",
     "script_execution_uses_worker",
     "script_gateway_isolated",
     "workflow_placement",
@@ -112,6 +113,10 @@ _WORKFLOW_PLACEMENT_REFUSAL = (
 
 class ScriptRunManagerError(ValueError):
     """Raised when a background script lifecycle request cannot be fulfilled."""
+
+
+class ScriptRuntimeNotReadyError(ScriptRunManagerError):
+    """Raised for a launch while the script runtime still cleans up what an earlier primary left."""
 
 
 # What a start, status, or cancel request reports as its own error: the worker or supervisor refused or was unreachable.
@@ -304,7 +309,7 @@ class ScriptRunManager:
                 raise ScriptRunManagerError(msg)
             if self._startup_reconciliation_owners:
                 msg = "Background script runtime reconciliation is in progress."
-                raise ScriptRunManagerError(msg)
+                raise ScriptRuntimeNotReadyError(msg)
             self._launches_in_progress += 1
             self._launches_drained.clear()
 

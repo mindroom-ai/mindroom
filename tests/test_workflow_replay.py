@@ -186,7 +186,7 @@ def test_calls_inside_a_group_that_follows_a_dirty_call_are_dirty() -> None:
 def test_changed_membership_dirties_the_parent_after_the_group_and_no_item_lane() -> None:
     """An item added, removed or moved reruns what follows the group; the items that stayed keep their results."""
     dirty = DirtyLanes()
-    dirty.mark_after("/1:x@0")  # the group at index 0 of item x has another member list
+    dirty.mark("/1:x@0")  # the group at index 0 of item x has another member list
     assert dirty.is_dirty("/1:x@1")
     assert dirty.is_dirty("@2")  # and, through the join, what follows the enclosing group
     assert not dirty.is_dirty("/1:x@0")

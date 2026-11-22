@@ -7168,7 +7168,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Run a Python script that calls your tools in the background, and read or cancel the run",
+      "description": "Run a Python script that calls your tools in the background, and read, cancel or resume the run",
       "display_name": "Workflows",
       "docs_url": "https://docs.mindroom.chat/tools/workflows/",
       "executes_code": true,
@@ -7176,7 +7176,8 @@
       "function_names": [
         "start_workflow",
         "get_workflow",
-        "cancel_workflow"
+        "cancel_workflow",
+        "resume_workflow"
       ],
       "helper_text": null,
       "icon": "Workflow",

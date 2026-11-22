@@ -68,6 +68,7 @@ from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     parse_tool_execution_identity_payload,
 )
+from mindroom.workflow_runs.faults import hold
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -84,6 +85,7 @@ __all__ = [
     "ScriptRuntimeWorkerAuthority",
     "ScriptToolBroker",
     "ScriptToolCallRequest",
+    "WorkflowAttemptRevokedError",
     "drain_script_tool_cleanup",
 ]
 
@@ -113,6 +115,10 @@ _RESULT_TOO_LARGE_ERROR = {
 
 class ScriptBrokerAuthenticationError(ValueError):
     """Raised when a gateway capability cannot be authenticated safely."""
+
+
+class WorkflowAttemptRevokedError(ScriptBrokerAuthenticationError):
+    """Raised for the verified capability of a workflow attempt that takes no more calls: its process is to exit."""
 
 
 class ScriptCallPreparationPendingError(RuntimeError):
@@ -380,6 +386,8 @@ class ScriptToolBroker:
             run = None
         expected_hash = run.token_hash if run is not None else "0" * len(token_hash)
         matches = hmac.compare_digest(expected_hash, token_hash)
+        if run is not None and matches and not run.accepts_calls and run.workflow_run_id is not None:
+            raise WorkflowAttemptRevokedError(_CALL_UNAVAILABLE)
         if run is None or not matches or not run.accepts_calls or not self._live_authorization(run):
             raise ScriptBrokerAuthenticationError(_CALL_UNAVAILABLE)
         return run
@@ -523,6 +531,9 @@ class ScriptToolBroker:
                         origin=origin,
                         arguments=arguments,
                     )
+            if run.workflow_run_id is not None:
+                # The tool's effect happened and its receipt is not saved yet: where a crash test stops MindRoom.
+                await hold("before_receipt")
             if metadata and metadata.pop("unanswered", False) and not result.succeeded:
                 # The call left for a worker, and no answer says how the tool ended there.
                 return await self._publish_async(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR)

@@ -432,6 +432,10 @@ class ToolJobRuntime:
         """Return every job this runtime retains, unfiltered by access, for the coordinator's own passes."""
         return tuple(entry.job for entry in self._entries.values())
 
+    def outcome_saved(self, job_id: str) -> bool:
+        """Return whether the journal holds the job as it is here; false while an outcome that failed to save waits."""
+        return self._entries[job_id].saved
+
     def awaited_job_ids(self) -> frozenset[str]:
         """Return the jobs whose outcome a call holds the claim on, as the call that started one does until released."""
         return frozenset(job_id for job_id, entry in self._entries.items() if entry.claim is not None)

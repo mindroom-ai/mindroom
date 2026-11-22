@@ -34,7 +34,7 @@ from mindroom.workflow_runs.models import (
 from mindroom.workflow_runs.replay import node_digest
 from mindroom.workflow_runs.store import WorkflowRunStoreError
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
-from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflow_stack
+from tests.workflow_helpers import NodeFailed, WorkflowStack, set_run, tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -55,6 +55,18 @@ async def stack(tmp_path: Path) -> AsyncIterator[WorkflowStack]:
         await stack.start()
         yield stack
         await stack.engine.close()
+
+
+def _script_runtime(stack: WorkflowStack, pass_timeout_seconds: float = 30.0) -> SimpleNamespace:
+    """Return what the workflow lifecycle reads of the script runtime it follows."""
+    return SimpleNamespace(
+        after_reconcile=None,
+        retention_seconds=3600.0,
+        pass_timeout_seconds=pass_timeout_seconds,
+        runtime_paths=stack.context.runtime_paths,
+        resolver=stack.resolver,
+        config_provider=lambda: stack.context.config,
+    )
 
 
 def _broker_call(stack: WorkflowStack, key: str = "@0") -> ScriptCallRecord:
@@ -81,6 +93,7 @@ def _dispatched_node(stack: WorkflowStack, *, script_run_id: str | None = None) 
             handle=DispatchHandle("broker", f"{script_run_id or stack.attempt.run_id}:{_CALL}", dispatched=False),
             attempt=1,
         ),
+        stack.store.get_run(stack.run_id).epoch,
     )
 
 
@@ -96,7 +109,7 @@ def _claim(stack: WorkflowStack) -> None:
 
 def _settled(stack: WorkflowStack, node: WorkflowNode) -> tuple[WorkflowNodeState, object, str | None]:
     """Settle *node* from its handle; return the state, the saved result and the saved error kind."""
-    state = stack.engine.settle_from_handle(node)
+    state = stack.engine.settle_from_handle(node, stack.store.get_run(stack.run_id).epoch)
     saved = stack.store.get_node(stack.run_id, node.key)
     assert saved is not None
     assert saved.state is state
@@ -216,7 +229,7 @@ async def test_shell_output_over_the_auto_save_size_is_never_swapped_for_a_works
 async def test_result_over_eight_mebibytes_returns_a_reference_and_the_results_route_streams_all_of_it(
     stack: WorkflowStack,
 ) -> None:
-    """The receipt of a result too large to inline names the route that returns all of it, also after a restart."""
+    """The receipt of a result too large to inline names the route that returns all of it, also to the next attempt."""
     size = 8 * 1024 * 1024 + 1
     receipt = await stack.submit("@0", "tool", tool_args("counter", "text", size=size))
     while receipt.state == "running":
@@ -227,10 +240,13 @@ async def test_result_over_eight_mebibytes_returns_a_reference_and_the_results_r
         assert (await client.get(f"results/{receipt.id}")).json() == "x" * size
 
     stack = await stack.restart()
+    await stack.settle()
+    await stack.resume(stack.run_id)
+    again = await stack.submit("@0", "tool", tool_args("counter", "text", size=size))
+    assert (again.state, again.cached, again.result_ref) == ("completed", True, f"results/{receipt.id}")
     async with stack.http() as client:
-        again = await client.get(f"nodes/{receipt.id}")
-        assert (again.json()["state"], again.json()["result_ref"]) == ("completed", f"results/{receipt.id}")
         assert (await client.get(f"results/{receipt.id}")).json() == "x" * size
+    assert stack.counting_tool.calls == 1
 
 
 @pytest.mark.asyncio
@@ -310,7 +326,7 @@ async def test_workflow_call_reaches_a_toolkit_plain_scripts_may_not_use(tmp_pat
 async def test_attempt_the_run_no_longer_names_is_refused(stack: WorkflowStack) -> None:
     """Only the run's current attempt is served, so a process the run moved on from cannot act."""
     old = stack.attempt
-    stack.store.update_run(stack.run_id, script_run_id="script-" + "0" * 32)
+    set_run(stack.store, stack.run_id, state=WorkflowRunState.STARTING)
 
     with pytest.raises(SupersededAttemptError):
         await stack.engine.submit_node(old, NodeRequest("@0", "tool", _APPEND, {}))
@@ -318,6 +334,46 @@ async def test_attempt_the_run_no_longer_names_is_refused(stack: WorkflowStack) 
         await stack.engine.finish(old, result="late", error=None)
 
     assert stack.counting_tool.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_engine_remembers_an_attempt_only_until_it_has_ended(stack: WorkflowStack) -> None:
+    """What the engine keeps for each attempt it serves does not grow with the attempts a primary has seen."""
+    first = stack.attempt.run_id
+    await stack.end_attempt(ScriptRunState.FAILED)
+    await stack.resume(stack.run_id)
+
+    assert first not in stack.engine._launched
+    assert list(stack.engine._launched) == [stack.attempt.run_id]
+
+
+@pytest.mark.asyncio
+async def test_request_that_was_let_in_before_its_attempt_was_replaced_gets_no_receipt(stack: WorkflowStack) -> None:
+    """A request is let in when it arrives and decided under the run's lock, where the next attempt may be by then.
+
+    Its key may be a call of that attempt already: the old script still gets the refusal, and no receipt of it.
+    """
+    old, let_in = stack.attempt, stack.store.get_run(stack.run_id)
+    await stack.result("@0", "tool", _APPEND)
+    await stack.end_attempt(ScriptRunState.FAILED)
+    await stack.resume(stack.run_id)
+    assert (await stack.submit("@0", "tool", _APPEND)).cached
+
+    with pytest.raises(SupersededAttemptError):
+        await stack.engine._admit(let_in, old, NodeRequest("@0", "tool", _APPEND, {}))
+
+
+@pytest.mark.asyncio
+async def test_read_that_waited_for_a_call_while_its_attempt_was_replaced_gets_no_receipt(stack: WorkflowStack) -> None:
+    """A read is held until its call has ended, which the end of its attempt does too: then it is no longer served."""
+    old, node = stack.attempt, _dispatched_node(stack)
+    read = asyncio.create_task(stack.engine.node_receipt(old, f"n{node.seq}", wait=SETTLE_TIMEOUT_SECONDS))
+    await asyncio.sleep(0.05)
+
+    await stack.end_attempt(ScriptRunState.FAILED)
+
+    with pytest.raises(SupersededAttemptError):
+        await read
 
 
 @pytest.mark.asyncio
@@ -587,8 +643,8 @@ async def test_launch_is_idempotent_and_never_starts_an_ended_run(stack: Workflo
 
 
 @pytest.mark.asyncio
-async def test_engine_stopped_before_a_launch_runs_its_first_step_interrupts_the_run(tmp_path: Path) -> None:
-    """The stop itself ends the runs it was launching, so a launch task cancelled before it ran strands none."""
+async def test_engine_stopped_before_a_launch_runs_its_first_step_leaves_the_run_starting(tmp_path: Path) -> None:
+    """A stop ends no admitted run: the launch returns, and the run waits for the next primary to start it."""
     with workflow_stack(tmp_path) as stack:
         run = stack.reserve()
         launch = asyncio.create_task(stack.engine.launch(run.run_id, stack.context))
@@ -598,13 +654,9 @@ async def test_engine_stopped_before_a_launch_runs_its_first_step_interrupts_the
         await stack.engine.close()
         await asyncio.wait_for(launch, SETTLE_TIMEOUT_SECONDS)
 
-        stored = await stack.engine.wait(run.run_id)
+        stored = stack.store.get_run(run.run_id)
         assert stack.scripts.launched == []
-        assert (stored.state, stored.attempt, stored.error) == (
-            WorkflowRunState.INTERRUPTED,
-            0,
-            "MindRoom stopped while the run was starting.",
-        )
+        assert (stored.state, stored.attempt, stored.error) == (WorkflowRunState.STARTING, 0, None)
 
 
 @pytest.mark.asyncio
@@ -618,7 +670,7 @@ async def test_launch_that_finds_its_run_ended_stops_the_attempt_it_started(
 
         async def cancelled_meanwhile(context: ToolRuntimeContext, **options: Any) -> ScriptRunRecord:  # noqa: ANN401
             attempt = await start(context, **options)
-            stack.store.update_run(options["workflow_run_id"], state=WorkflowRunState.CANCELLED, error="Stopped.")
+            set_run(stack.store, options["workflow_run_id"], state=WorkflowRunState.CANCELLED, error="Stopped.")
             return attempt
 
         monkeypatch.setattr(stack.scripts, "run", cancelled_meanwhile)
@@ -639,11 +691,11 @@ async def test_accepted_cancel_wins_over_a_stored_report(stack: WorkflowStack, m
     if maintenance_first:
         await stack.scripts.revoke(stack.attempt.run_id, reason="Stopped by the user.")
         await stack.scripts.reconcile_durable(run_id=stack.attempt.run_id)
-        await stack.engine.reconcile()
+        await stack.settle()
 
     cancelled, _ = await asyncio.gather(
         stack.engine.cancel(stack.run_id, reason="Stopped by the user."),
-        stack.engine.reconcile(),
+        stack.settle(),
     )
 
     run = await stack.engine.wait(stack.run_id)
@@ -679,7 +731,8 @@ async def test_report_after_the_run_ended_is_not_stored(stack: WorkflowStack) ->
     attempt = stack.attempt
     cancelled = await stack.engine.cancel(stack.run_id, reason="Stopped by the user.")
 
-    await stack.engine.finish(attempt, result="done", error=None)
+    with pytest.raises(SupersededAttemptError):
+        await stack.engine.finish(attempt, result="done", error=None)
 
     assert stack.store.get_run(stack.run_id) == cancelled
 
@@ -691,9 +744,8 @@ async def test_maintenance_pass_ends_every_run_it_can_and_prunes_expired_runs(
 ) -> None:
     """A run whose attempt record is gone ends interrupted, and neither it nor a failing run stops the pass."""
     with workflow_stack(tmp_path) as stack:
-        script_runtime = SimpleNamespace(after_reconcile=None, retention_seconds=3600.0, pass_timeout_seconds=30.0)
+        script_runtime = _script_runtime(stack)
         lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
-        await lifecycle.start()
         orphan = await stack.start()
         unsettled = _dispatched_node(stack)
         await stack.scripts.end(stack.attempt.run_id, ScriptRunState.EXITED)
@@ -712,6 +764,7 @@ async def test_maintenance_pass_ends_every_run_it_can_and_prunes_expired_runs(
         await stack.engine.finish(stack.attempt, result="done", error=None)
         await stack.scripts.end(stack.attempt.run_id, ScriptRunState.EXITED)
 
+        await lifecycle.start()
         await script_runtime.after_reconcile()
 
         states = {run.run_id: (run.state, run.error) for run in stack.store.list_runs()}
@@ -734,7 +787,7 @@ async def test_workflow_store_error_never_fails_the_script_runtime_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The script runtime prunes its own runs after this pass, so a workflow store it cannot read must not raise there."""
-    script_runtime = SimpleNamespace(after_reconcile=None, retention_seconds=3600.0, pass_timeout_seconds=30.0)
+    script_runtime = _script_runtime(stack)
     lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
     await lifecycle.start()
 
@@ -757,17 +810,17 @@ async def test_waiter_returns_when_the_pass_that_ended_its_run_timed_out_at_the_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The pass is cancelled while its last write is in a thread: the run ends there, and nobody is left to wake `wait`."""
-    script_runtime = SimpleNamespace(after_reconcile=None, retention_seconds=3600.0, pass_timeout_seconds=0.4)
+    script_runtime = _script_runtime(stack, pass_timeout_seconds=0.4)
     lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
     await lifecycle.start()
     at_commit, commit = threading.Event(), threading.Event()
     update_run = stack.store.update_run
 
-    def held(run_id: str, **changes: Any) -> WorkflowRun:  # noqa: ANN401
+    def held(*args: Any, **changes: Any) -> WorkflowRun:  # noqa: ANN401
         if "state" in changes:
             at_commit.set()
             commit.wait(SETTLE_TIMEOUT_SECONDS)
-        return update_run(run_id, **changes)
+        return update_run(*args, **changes)
 
     monkeypatch.setattr(stack.store, "update_run", held)
     waiter = asyncio.create_task(stack.engine.wait(stack.run_id))
@@ -822,10 +875,10 @@ class _HeldInsert:
         self.entered, self.release = threading.Event(), threading.Event()
         put_node = stack.store.put_node
 
-        def held(node: WorkflowNode) -> WorkflowNode:
+        def held(*args: Any, **options: Any) -> WorkflowNode:  # noqa: ANN401
             self.entered.set()
             self.release.wait(SETTLE_TIMEOUT_SECONDS)
-            return put_node(node)
+            return put_node(*args, **options)
 
         monkeypatch.setattr(stack.store, "put_node", held)
 
@@ -878,18 +931,18 @@ async def test_run_does_not_end_while_a_call_is_being_admitted(
 
 @pytest.mark.asyncio
 async def test_ended_run_admits_no_new_call(stack: WorkflowStack) -> None:
-    """A request authenticated just before its run ended adds no node, and one sent again still gets its receipt."""
+    """A request authenticated just before its run ended adds no node: the attempt is told that its run moved on."""
     attempt = stack.attempt
     first = await stack.engine.submit_node(attempt, NodeRequest("@0", "tool", _APPEND, {}))
     # Until the node has settled, not only until its effect shows: a cancel in between ends it indeterminate.
     await stack.until(lambda: stack.engine.status(stack.run_id)[1][0].state is WorkflowNodeState.COMPLETED)
     await stack.engine.cancel(stack.run_id, reason="Stopped by the user.")
 
-    again = await stack.engine.submit_node(attempt, NodeRequest("@0", "tool", _APPEND, {}))
-    with pytest.raises(SupersededAttemptError):
-        await stack.engine.submit_node(attempt, NodeRequest("@1", "tool", _APPEND, {}))
+    for key in ("@0", "@1"):
+        with pytest.raises(SupersededAttemptError):
+            await stack.engine.submit_node(attempt, NodeRequest(key, "tool", _APPEND, {}))
 
-    assert (again.id, again.state) == (first.id, "completed")
+    assert (first.id, stack.counting_tool.calls) == ("n1", 1)
     assert [node.key for node in stack.engine.status(stack.run_id)[1]] == ["@0"]
 
 

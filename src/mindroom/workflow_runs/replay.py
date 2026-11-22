@@ -23,6 +23,11 @@ def node_digest(kind: str, args: dict[str, object]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def result_digest(result: object) -> str:
+    """Return the SHA-256 of a result in canonical JSON, which tells 1 from 1.0 and from true as the script may."""
+    return hashlib.sha256(json.dumps(result, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def split_key(key: str) -> tuple[str, int]:
     """Split a node key `lane@index` into its lane and index."""
     lane, _, index = key.rpartition("@")
@@ -93,9 +98,6 @@ class DirtyLanes:
             lane, index = split_key(group)
             self._dirty_after[lane] = min(index, self._dirty_after.get(lane, index))
             group = parent_group(lane)
-
-    # A group whose ordered member list changed dirties what follows it and no member lane, which is what `mark` does.
-    mark_after = mark
 
     def is_dirty(self, key: str) -> bool:
         """Return whether the call at *key* follows, directly or through an enclosing group, a call that ran."""

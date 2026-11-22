@@ -23,11 +23,8 @@ class WorkflowRunState(StrEnum):
     INTERRUPTED = "interrupted"
 
 
-TERMINAL_RUN_STATES = frozenset(WorkflowRunState) - {
-    WorkflowRunState.STARTING,
-    WorkflowRunState.RUNNING,
-    WorkflowRunState.WAITING,
-}
+LIVE_RUN_STATES = frozenset({WorkflowRunState.STARTING, WorkflowRunState.RUNNING, WorkflowRunState.WAITING})
+TERMINAL_RUN_STATES = frozenset(WorkflowRunState) - LIVE_RUN_STATES
 
 
 class WorkflowNodeState(StrEnum):
@@ -48,11 +45,14 @@ class DispatchHandle:
 
     `ref` is the broker call (`"<script run id>:<call id>"`), the job ID, or a child run ID.
     `dispatched` turns true in the same transaction that hands the work over.
+    `same_as` is the digest of the result that a call which runs on every resume had before: what follows the call
+    is reused only when it answers that again, also when its answer is read after its attempt died.
     """
 
     kind: Literal["broker", "job", "run"]
     ref: str
     dispatched: bool
+    same_as: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,11 +80,15 @@ class WorkflowRun:
     parent_run_id: str | None = None
     parent_node_key: str | None = None
     state: WorkflowRunState = WorkflowRunState.STARTING
+    epoch: int = 0
+    """Raised by each write that takes the run, begins an attempt or ends one; every other write must name it."""
     attempt: int = 0
     idle_resumes: int = 0
     previous_source_digest: str | None = None
     script_run_id: str | None = None
     job_id: str | None = None
+    owner: str | None = None
+    """The invocation the run is now: its job's ID, or the key of the call that waits for it itself."""
     card_event_id: str | None = None
     result: object | None = None
     error: str | None = None

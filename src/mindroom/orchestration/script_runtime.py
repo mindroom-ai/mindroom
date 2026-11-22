@@ -201,8 +201,17 @@ class _LiveScriptRuntimeResolver:
     worker_backend_provider: Callable[[ScriptRunRecord], WorkerBackend | None]
     approval_provider: Callable[[], _BackgroundApprovalManager | None] = approval_manager.get_approval_store
 
-    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool | None:
-        """Return confirmed authority, denial, or transient live-runtime unavailability."""
+    def is_authorized(
+        self,
+        run: ScriptRunRecord,
+        *,
+        config: Config | None = None,
+        require_resolved_membership: bool = False,
+    ) -> bool | None:
+        """Return confirmed authority, denial, or transient live-runtime unavailability.
+
+        With *require_resolved_membership*, room membership that is still loading raises instead of denying.
+        """
         bot = self.bot_provider(run.agent_name)
         if bot is None or not bot.running:
             return None
@@ -214,6 +223,7 @@ class _LiveScriptRuntimeResolver:
             run.room_id,
             self.runtime_paths,
             bot.orchestrator.agent_reply_memberships,
+            require_resolved_membership=require_resolved_membership,
         )
 
     def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
