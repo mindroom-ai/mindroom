@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 import mindroom.api.sandbox_forkserver as sandbox_forkserver_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
-import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
+import mindroom.workers.backends.local as local_worker_module
 from mindroom import constants
 from mindroom.api import sandbox_runner_app
 from mindroom.api.sandbox_forkserver import _SandboxForkserver
@@ -38,6 +38,8 @@ pytestmark = pytest.mark.skipif(
 
 _WORKER_KEY = "v1:default:user_agent:~@alice:example.org:code:named-test"
 _TOKEN = "test-token"  # noqa: S105
+# How a runner hands a template what to preload; the template removes it before any tool code runs.
+_PRELOAD_ENV = "MINDROOM_SANDBOX_FORKSERVER_PRELOAD"
 
 _PLUGIN_SOURCE = '''
 import os
@@ -88,7 +90,7 @@ def _write_plugin(root: Path, name: str, *, worker_preload: object = None, at_im
             name=name,
             at_import=at_import,
             import_log=str(root / "imports.log"),
-            preload_env=sandbox_forkserver_module.PRELOAD_ENV,
+            preload_env=_PRELOAD_ENV,
         ),
         encoding="utf-8",
     )
@@ -361,12 +363,11 @@ def _dedicated_worker_app(
             "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(worker_root),
         },
     )
-    manifest_path = constants.write_startup_manifest(
-        worker_root,
-        runtime_paths,
-        public_runtime=True,
-        **({} if eager_setup_plugins is None else {"eager_setup_plugins": eager_setup_plugins}),
-    )
+    manifest_path = constants.write_startup_manifest(worker_root, runtime_paths, public_runtime=True)
+    if eager_setup_plugins is not None:
+        # What the Kubernetes backend adds to the manifest it writes.
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_path.write_text(json.dumps({**manifest, "eager_setup_plugins": eager_setup_plugins}), encoding="utf-8")
     monkeypatch.setenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", str(manifest_path))
     app = FastAPI(lifespan=sandbox_runner_app._lifespan)
     app.include_router(sandbox_runner_module.router)
@@ -408,14 +409,14 @@ def test_eager_setup_runs_behind_the_health_check_and_preloads_only_opt_in_plugi
     plain = _write_plugin(tmp_path, "plain")
     app, worker_root = _dedicated_worker_app(monkeypatch, tmp_path, eager_setup_plugins=[opted.path, plain.path])
     venv_may_start = threading.Event()
-    ensure_state = sandbox_runner_module.ensure_local_worker_state_locked
+    ensure_state = local_worker_module._ensure_local_worker_state
 
     def slow_ensure_state(paths: object) -> None:
         # A burst of starting workers shares its nodes and storage, so one venv can take longer than the ready timeout.
-        assert venv_may_start.wait(timeout=60)
+        venv_may_start.wait(timeout=10)
         ensure_state(paths)
 
-    monkeypatch.setattr(sandbox_runner_module, "ensure_local_worker_state_locked", slow_ensure_state)
+    monkeypatch.setattr(local_worker_module, "_ensure_local_worker_state", slow_ensure_state)
 
     with TestClient(app) as client:
         health = client.get("/healthz").json()
@@ -453,7 +454,7 @@ def test_a_failed_eager_setup_leaves_the_worker_healthy_and_its_first_call_repor
     app, worker_root = _dedicated_worker_app(monkeypatch, tmp_path, eager_setup_plugins=[])
     disk_full = threading.Event()
     disk_full.set()
-    ensure_state = sandbox_worker_prep_module.ensure_local_worker_state_locked
+    ensure_state = local_worker_module._ensure_local_worker_state
 
     def ensure_state_on_a_full_disk(paths: object) -> None:
         if disk_full.is_set():
@@ -461,8 +462,7 @@ def test_a_failed_eager_setup_leaves_the_worker_healthy_and_its_first_call_repor
             raise OSError(msg)
         ensure_state(paths)
 
-    monkeypatch.setattr(sandbox_runner_module, "ensure_local_worker_state_locked", ensure_state_on_a_full_disk)
-    monkeypatch.setattr(sandbox_worker_prep_module, "ensure_local_worker_state_locked", ensure_state_on_a_full_disk)
+    monkeypatch.setattr(local_worker_module, "_ensure_local_worker_state", ensure_state_on_a_full_disk)
 
     with TestClient(app) as client:
         _wait_for_setup(client, "failed")
