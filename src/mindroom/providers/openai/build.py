@@ -532,6 +532,9 @@ def _build_responses(
     identity = model_identity(model_config, endpoint=endpoint)
     model_id = identity.id
     openrouter = route_key == "openai" and endpoint == OPENROUTER_BASE_URL_DEFAULT
+    if openrouter and store is None:
+        # OpenRouter's Responses endpoint stores no response and rejects ``store: true``, which an unset one sends.
+        store = False
     # Only OpenRouter binds encrypted replay state to the upstream that created it, so only this route resets it.
     reset_scope = f"{identity.provider}:{model_id}:{endpoint}" if openrouter else None
     capabilities = Capabilities(

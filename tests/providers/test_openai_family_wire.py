@@ -27,6 +27,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.history.request_size import RequestSizer
+from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.llm.errors import (
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -1927,6 +1928,67 @@ async def test_openrouter_responses_native_compaction_wire_send(tmp_path: Path) 
     assert body["context_management"] == [{"type": "compaction", "compact_threshold": 50_000}]
     assert body["provider"] == {"order": ["openai"], "allow_fallbacks": False}
     assert turn.message.provider_data["mindroom_native_compaction"]["route"] == native.route
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_kwargs", "compacts"),
+    [({}, True), ({"request_params": {"extra_body": {"models": ["openai/gpt-6.2-sol"]}}}, False)],
+    ids=["documented-config", "rerouting-field"],
+)
+async def test_openrouter_responses_never_sends_an_unset_store_as_true(
+    tmp_path: Path,
+    extra_kwargs: dict[str, Any],
+    *,
+    compacts: bool,
+) -> None:
+    """OpenRouter rejects ``store: true``, so every request of the route goes unstored, native compaction or not."""
+    config = {**_OPENROUTER_RESPONSES, "extra_kwargs": {"base_url": "https://openrouter.ai/api/v1", **extra_kwargs}}
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(_responses_reply(*_text_events("Pack"), _completed()))
+
+    adapter = openai_family_adapter(config, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    provider = pipeline_provider(adapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert (native is not None) is compacts
+
+    # A reply with native compaction where the route has it, one without, and MindRoom's own summary call.
+    await complete(provider, ModelRequest(messages=[_user()], native_compaction=native))
+    await complete(provider, ModelRequest(messages=[_user()]))
+    summary = await generate_compaction_summary(
+        model=provider,
+        summary_input="Conversation",
+        summary_prompt="Summarize",
+        timeout_seconds=10,
+        on_usage=None,
+    )
+
+    bodies = [json.loads(request.content) for request in sent]
+    assert summary == "Pack"
+    assert [body["store"] for body in bodies] == [False, False, False]
+    assert [body["include"] for body in bodies] == [["reasoning.encrypted_content"]] * 3
+    assert ["context_management" in body for body in bodies] == [compacts, False, False]
+    assert all("previous_response_id" not in body for body in bodies)
+
+
+def test_openrouter_responses_keeps_an_authored_store_and_other_routes_keep_their_default(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+
+    def store(config: dict[str, Any]) -> bool | None:
+        adapter = build_provider(ModelConfig(**config), runtime)
+        assert isinstance(adapter, ResponsesAdapter)
+        return adapter.wire.store
+
+    openrouter = {"base_url": "https://openrouter.ai/api/v1"}
+    assert store(_OPENROUTER_RESPONSES) is False
+    assert store({**_OPENROUTER_RESPONSES, "extra_kwargs": {**openrouter, "store": True}}) is True
+    assert store({**_OPENROUTER_RESPONSES, "extra_kwargs": {**openrouter, "request_params": {"store": True}}}) is True
+    assert store(_OPENAI_RESPONSES) is None
+    assert store({"provider": "codex", "id": "gpt-6.2-sol"}) is False
 
 
 _PNG = base64.b64decode(
