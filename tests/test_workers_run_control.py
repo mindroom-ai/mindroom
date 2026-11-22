@@ -14,7 +14,7 @@ import termios
 import threading
 import time
 import urllib.request
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from typing import TYPE_CHECKING
@@ -1758,29 +1758,45 @@ def test_cli_messages_are_dropped_when_stderr_is_closed(
     assert capsys.readouterr().out == "hello\n"
 
 
-def test_real_closed_stderr_keeps_cli_messages_off_stdout() -> None:
-    """With stderr closed (`2>&-`), progress and other CLI lines are dropped, not printed among the output."""
+@pytest.mark.parametrize("stderr", ["closed", "full"])
+@pytest.mark.parametrize(
+    ("receipt", "expected_code", "expected_out"),
+    [
+        ({"status": "completed", "outcome": "[worker: w, started]\nhello"}, 0, b"hello\n"),
+        ({"status": "failed", "error_kind": "named_worker_refusal", "outcome": "limit reached"}, 125, b""),
+    ],
+)
+def test_real_unusable_stderr_changes_neither_stdout_nor_the_exit_code(
+    receipt: dict[str, object],
+    expected_code: int,
+    expected_out: bytes,
+    stderr: str,
+) -> None:
+    """A stderr that is closed (`2>&-`) or fails every write (`2>/dev/full`) only loses the CLI's own lines.
 
-    def close_stderr() -> None:
-        os.close(2)
-
-    probe = subprocess.run(
-        [sys.executable, "-c", "import sys; raise SystemExit(0 if sys.stderr is None else 3)"],
-        preexec_fn=close_stderr,
-        check=False,
-    )
-    if probe.returncode != 0:
-        pytest.skip("this Python starts with something else open as file descriptor 2")
+    A closed stderr is None in most Pythons; in one that starts with another file open as descriptor 2, writes fail.
+    """
+    if stderr == "full" and not os.path.exists("/dev/full"):  # noqa: PTH110
+        pytest.skip("needs /dev/full")
+    reads = 0
 
     def respond(method: str, _path: str) -> dict[str, object]:
+        nonlocal reads
         if method == "POST":
+            return {"status": "queued"}
+        reads += 1
+        if reads == 1:
             return {"status": "running", "progress": "starting worker w...", "progress_revision": 1}
-        return {"status": "completed", "outcome": "[worker: w, started]\nhello"}
+        return receipt
 
-    with _real_workers_run(respond, stdout=subprocess.PIPE, preexec_fn=close_stderr) as proc:
+    with ExitStack() as stack:
+        popen: dict[str, object] = {"preexec_fn": lambda: os.close(2)}
+        if stderr == "full":
+            popen = {"stderr": stack.enter_context(open("/dev/full", "w"))}  # noqa: PTH123
+        proc = stack.enter_context(_real_workers_run(respond, stdout=subprocess.PIPE, **popen))
         stdout, _ = proc.communicate(timeout=SETTLE_TIMEOUT_SECONDS)
-        assert proc.returncode == 0
-        assert stdout == b"hello\n"
+        assert (proc.returncode, stdout) == (expected_code, expected_out)
+    assert reads == 2
 
 
 @contextmanager
