@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from mindroom.api.sandbox_exec import resolve_subprocess_worker_context
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends import local as local_workers
 from tests.conftest import requires_linux
 
@@ -195,3 +196,22 @@ def test_only_an_eager_setup_limits_how_long_venv_creation_may_take(
     with pytest.raises(subprocess.TimeoutExpired):
         local_workers.ensure_local_worker_state_locked(eager, venv_timeout_seconds=0.5)
     assert not (eager.venv_dir / "bin" / "python").exists()
+
+
+def test_an_eager_setup_leaves_a_venv_only_python_can_create_to_the_first_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Without uv the venv is created in this process, which no time limit can end, so an eager setup does not try."""
+    created: list[Path] = []
+    monkeypatch.setattr(shutil, "which", lambda _command: None)
+    monkeypatch.setattr(local_workers.venv.EnvBuilder, "create", lambda _self, venv_dir: created.append(venv_dir))
+    paths = local_workers.local_worker_state_paths_for_root(tmp_path / "worker")
+
+    with pytest.raises(WorkerBackendError, match="uv"):
+        local_workers.ensure_local_worker_state_locked(paths, venv_timeout_seconds=120.0)
+    assert created == []
+
+    # A request still creates it that way, as before.
+    local_workers.ensure_local_worker_state_locked(paths)
+    assert created == [paths.venv_dir]

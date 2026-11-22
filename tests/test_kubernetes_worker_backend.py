@@ -6373,18 +6373,19 @@ def test_kubernetes_worker_health_read_allows_a_slower_handshake_on_each_retry(
     [
         # Too short to try twice: the one attempt gets the whole budget.
         (0.6, 0.55, [0.6]),
-        # No time for another attempt after this one: it may take as long as a single attempt always could.
-        (6.0, 4.5, [0.5, 1.0, 2.0, 5.0]),
+        # No time for another attempt after this one: it gets all the time that is left, and no more.
+        (6.0, 1.8, [0.5, 1.0, 2.0]),
+        (7.0, 2.5, [0.5, 1.0, 2.0, pytest.approx(2.9)]),
     ],
-    ids=["short-budget", "last-attempt"],
+    ids=["short-budget", "escalated", "last-attempt"],
 )
-def test_kubernetes_worker_health_read_never_gives_up_a_handshake_one_full_attempt_would_finish(
+def test_kubernetes_worker_health_read_gives_its_last_attempt_all_the_time_left(
     monkeypatch: pytest.MonkeyPatch,
     budget_seconds: float,
     handshake_seconds: float,
     expected_connect_timeouts: list[float],
 ) -> None:
-    """Short first tries never cost an answer that a single try with the whole timeout would have got."""
+    """Short first tries end in one that may use the whole rest of the budget, so the read never outlasts it."""
     backend, _apps_api, _core_api = _backend()
     clock = _ControlledMonotonicClock()
     connect_timeouts: list[float] = []
@@ -6400,8 +6401,12 @@ def test_kubernetes_worker_health_read_never_gives_up_a_handshake_one_full_attem
             return None
 
         def get(self, _url: str, *, timeout: httpx.Timeout | None = None) -> httpx.Response:
-            connect = (timeout or self.timeout).connect
+            timeout = timeout or self.timeout
+            connect = timeout.connect
             assert connect is not None
+            # No part of a try may take longer than the read has left.
+            time_left = budget_seconds - clock.monotonic()
+            assert max(connect, timeout.read or 0.0, timeout.write or 0.0, timeout.pool or 0.0) <= time_left + 1e-9
             connect_timeouts.append(connect)
             clock.advance_to(clock.monotonic() + min(connect, handshake_seconds))
             if connect < handshake_seconds:
@@ -6424,6 +6429,46 @@ def test_kubernetes_worker_health_read_never_gives_up_a_handshake_one_full_attem
 
     assert response.status_code == 200
     assert connect_timeouts == expected_connect_timeouts
+    assert clock.monotonic() <= budget_seconds
+
+
+def test_kubernetes_worker_health_read_fails_when_its_budget_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worker that never completes a handshake fails the read at its budget, not one whole attempt later."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _ControlledMonotonicClock()
+
+    class _NeverConnectsClient:
+        def __init__(self, *, timeout: float | httpx.Timeout) -> None:
+            self.timeout = httpx.Timeout(timeout)
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str, *, timeout: httpx.Timeout | None = None) -> httpx.Response:
+            connect = (timeout or self.timeout).connect
+            assert connect is not None
+            clock.advance_to(clock.monotonic() + connect)
+            message = "handshake timed out"
+            raise httpx.ConnectTimeout(message)
+
+    monkeypatch.setattr(kubernetes_resources_module.httpx, "Client", _NeverConnectsClient)
+    monkeypatch.setattr(
+        kubernetes_resources_module,
+        "time",
+        SimpleNamespace(time=clock.monotonic, sleep=lambda seconds: clock.advance_to(clock.monotonic() + seconds)),
+    )
+
+    with pytest.raises(WorkerStartTimeoutError, match="did not answer its health check within 6s"):
+        kubernetes_resources_module.KubernetesResourceManager.read_worker_health(
+            backend._resources,
+            "mindroom-worker-abc",
+            timeout_seconds=6.0,
+        )
+
+    assert clock.monotonic() == pytest.approx(6.0)
 
 
 def _answer_worker_setup(backend: KubernetesWorkerBackend, setup: Callable[[], str | None]) -> None:
@@ -6498,6 +6543,32 @@ def test_kubernetes_backend_runs_the_call_whatever_the_worker_setup_does(
     assert handle.failure_count == 0
     # Only a setup that keeps running is waited for, and only for the setup budget.
     assert clock.monotonic() == pytest.approx(180.0 if setup == "preparing" else 0.0)
+
+
+def test_kubernetes_backend_ends_the_wait_for_a_worker_setup_with_its_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The last sleep and the last health read of the wait both end when the setup budget does."""
+    backend, _apps_api, _core_api = _backend()
+    backend.config = replace(backend.config, setup_timeout_seconds=2.5)
+    clock = _run_on_one_clock(monkeypatch)
+    reads: list[tuple[float, float]] = []
+
+    def _read(_self: object, _worker_id: str, *, timeout_seconds: float) -> httpx.Response:
+        if reads:
+            # A worker that is busy preparing answers slowly.
+            clock.advance_to(clock.monotonic() + min(timeout_seconds, 0.4))
+        reads.append((clock.monotonic(), timeout_seconds))
+        payload = {"status": "ok", "mindroom_version": "test", "worker_protocol": WORKER_PROTOCOL_VERSION}
+        return httpx.Response(200, json={**payload, "setup": "preparing"})
+
+    backend._resources.read_worker_health = MethodType(_read, backend._resources)
+
+    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert handle.status == "ready"
+    assert clock.monotonic() == pytest.approx(2.5)
+    # The first read is the ready check; each later one answered within the budget.
+    assert [answered_at for answered_at, _timeout in reads[1:]] == [pytest.approx(1.4), pytest.approx(2.5)]
+    assert [timeout for _answered_at, timeout in reads[1:]] == [pytest.approx(1.5), pytest.approx(0.1)]
 
 
 def test_kubernetes_backend_reads_the_setup_timeout() -> None:
