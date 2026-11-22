@@ -57,6 +57,7 @@ __all__ = [
     "ResponsesTurnParts",
     "ResponsesWire",
     "conversation_digest",
+    "replays_encrypted_state",
     "request_replay",
     "request_store",
     "responses_input",
@@ -284,6 +285,17 @@ def _with_system_prefix_breakpoint(formatted_input: list[Any]) -> list[Any]:
         return formatted_input
     prefix_block = {"type": "input_text", "text": content, "prompt_cache_breakpoint": {"mode": "explicit"}}
     return [{**first_message, "content": [prefix_block]}, *formatted_input[1:]]
+
+
+def replays_encrypted_state(replay: ResponsesReplay) -> bool:
+    """Return whether ``replay`` sends a provider-encrypted compaction checkpoint or reasoning item."""
+    canonical = reformat_tool_call_ids(replay.history, "responses")
+    return any(
+        item.get("encrypted_content")
+        for message in canonical[replay.sent_from :]
+        if message.role == "assistant"
+        for item in assistant_replay_items(message, replay.native_route)
+    )
 
 
 def responses_input(

@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.errors import InvalidRequest
+from mindroom.llm.errors import InvalidRequest, ProviderError, RateLimited
 from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.llm.request_context import with_request_headers
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
@@ -21,10 +21,12 @@ from mindroom.providers.openai.replay_estimate import (
     responses_body_parts,
     responses_replay_uses_visual_tokens,
 )
+from mindroom.providers.openai.response_replay import without_encrypted_state
 from mindroom.providers.openai.responses_wire import (
     ResponsesStream,
     ResponsesWire,
     conversation_digest,
+    replays_encrypted_state,
     request_replay,
     request_store,
     responses_request_kwargs,
@@ -52,6 +54,15 @@ if TYPE_CHECKING:
     from mindroom.token_counting.requests import RequestParts
 
 __all__ = ["ResponsesAdapter"]
+
+_STICKY_PROVIDER_ERROR = "can only be processed by the provider that created it"
+
+
+def _is_sticky_replay_error(error: ProviderError, *, caller_retries: bool) -> bool:
+    """Return whether ``error`` can be caused by OpenRouter pinning encrypted replay state to another upstream."""
+    if isinstance(error, InvalidRequest) and (error.status_code == 400 or error.provider_code == "400"):
+        return _STICKY_PROVIDER_ERROR in str(error).casefold()
+    return isinstance(error, RateLimited) and not caller_retries
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -81,6 +92,17 @@ class ResponsesAdapter:
             self.identity,
             local_encoder=self.identity.endpoint == OPENAI_BASE_URL_DEFAULT or self.wire.route == "codex",
         )
+
+    def recover_sticky_replay(self, request: ModelRequest, error: ProviderError) -> ModelRequest | None:
+        """Return ``request`` without provider-encrypted replay state after a sticky-upstream failure, else None.
+
+        Attached to ``Capabilities.sticky_replay_recovery`` on the OpenRouter Responses route only.
+        """
+        if not _is_sticky_replay_error(error, caller_retries=request.overrides.caller_retries):
+            return None
+        if not replays_encrypted_state(request_replay(self.wire, request)):
+            return None
+        return replace(request, messages=without_encrypted_state(request.messages))
 
     def native_compaction_settings(
         self,

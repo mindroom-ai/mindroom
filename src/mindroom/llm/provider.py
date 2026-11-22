@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
     from pydantic import BaseModel
 
+    from mindroom.llm.errors import ProviderError
     from mindroom.llm.messages import Message
     from mindroom.llm.usage import MessageMetrics
 
@@ -52,7 +53,8 @@ class Capabilities:
     the URLs of every other kind (``providers/pipeline/remote_media.py``). ``system_updates`` is set on a route that
     sends a system prompt update (``providers/pipeline/prompt_hold.py``) as a system message where it stands in the
     conversation, which its model follows over the earlier system prompt; it tells whether a request caches its system
-    prompt, without which an update keeps no prefix.
+    prompt, without which an update keeps no prefix. ``sticky_replay_recovery`` returns a copy of a failed request
+    without provider-encrypted replay state when the route can retry once after a sticky-upstream failure, else None.
     """
 
     structured_output: StructuredOutput = "json_mode"
@@ -62,6 +64,7 @@ class Capabilities:
     native_compaction: bool = False
     provider_default_sampling: bool = False
     system_updates: Callable[[ModelRequest], bool] | None = None
+    sticky_replay_recovery: Callable[[ModelRequest, ProviderError], ModelRequest | None] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

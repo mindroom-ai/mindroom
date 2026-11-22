@@ -8,15 +8,18 @@ is rebuilt from its canonical text and calls.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.native_compaction import checkpoint_items
+from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, checkpoint_items
 from mindroom.providers.openai.legacy_response_replay import legacy_tool_search_items
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.llm.messages import Message
 
-__all__ = ["RESPONSE_OUTPUT_KEY", "assistant_replay_items", "recorded_output"]
+__all__ = ["RESPONSE_OUTPUT_KEY", "assistant_replay_items", "recorded_output", "without_encrypted_state"]
 
 RESPONSE_OUTPUT_KEY = "mindroom_response_output"
 _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
@@ -120,3 +123,28 @@ def _rebuilt(
     else:
         text = [{"role": "assistant", "content": content if content is not None else ""}]
     return [{key: value for key, value in item.items() if key != "id"} for item in (*search_items, *text, *calls)]
+
+
+def without_encrypted_state(messages: Sequence[Message]) -> list[Message]:
+    """Return copies of ``messages`` without provider-encrypted compaction or reasoning replay state.
+
+    Dropping checkpoints replays the full stored history so another upstream can compact it itself; dropping recorded
+    reasoning items makes ``assistant_replay_items`` rebuild each assistant turn from its canonical text and calls
+    without provider item IDs, while keeping hosted tool-search items. Dropping ``response_id`` prevents chaining to a
+    stored response on another upstream.
+    """
+    stripped: list[Message] = []
+    for message in messages:
+        data = message.provider_data
+        if message.role != "assistant" or not data:
+            stripped.append(message)
+            continue
+        cleaned = {key: value for key, value in data.items() if key not in {NATIVE_CHECKPOINT_KEY, "response_id"}}
+        if isinstance(output := cleaned.get(RESPONSE_OUTPUT_KEY), list):
+            cleaned[RESPONSE_OUTPUT_KEY] = [
+                item
+                for item in output
+                if isinstance(item, dict) and item.get("type") != "reasoning" and not item.get("encrypted_content")
+            ]
+        stripped.append(replace(message, provider_data=cleaned))
+    return stripped

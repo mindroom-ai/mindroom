@@ -1856,6 +1856,273 @@ async def test_openrouter_responses_native_compaction_wire_send(tmp_path: Path) 
     assert turn.message.provider_data["mindroom_native_compaction"]["route"] == native.route
 
 
+_STICKY_400_BODY = {
+    "error": {
+        "message": (
+            "Your request contains encrypted reasoning or compaction content that can only be processed by the "
+            "provider that created it (azure), but your request's provider.order preference with allow_fallbacks "
+            "disabled excludes that provider. Allow azure or start a new conversation without the encrypted items."
+        ),
+        "code": 400,
+    },
+}
+_UPSTREAM_429_BODY = {
+    "error": {
+        "message": "openai/gpt-6.2-sol is temporarily rate-limited upstream. Please retry shortly.",
+        "code": 429,
+    },
+}
+
+
+def _encrypted_history(native: NativeCompactionReplay) -> list[Message]:
+    """Return stored history with an earlier turn, a compacted checkpoint turn, and an encrypted-reasoning turn."""
+    checkpoint_output = [
+        {"id": "rs_old", "type": "reasoning", "summary": [], "encrypted_content": "enc-reason-azure-1"},
+        {
+            "id": "msg_old",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Compacted answer", "annotations": []}],
+        },
+    ]
+    tail_output = [
+        {"id": "rs_tail", "type": "reasoning", "summary": [], "encrypted_content": "enc-reason-azure-2"},
+        {
+            "id": "msg_tail",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Follow-up answer", "annotations": []}],
+        },
+    ]
+    return [
+        Message(role="user", content="Earliest question before compaction"),
+        Message(role="assistant", content="Earliest answer before compaction"),
+        Message(role="user", content="Question that triggered compaction"),
+        Message(
+            role="assistant",
+            content="Compacted answer",
+            provider_data={
+                "response_id": "resp_cmp",
+                "mindroom_response_stored": False,
+                RESPONSE_OUTPUT_KEY: checkpoint_output,
+                "mindroom_native_compaction": {
+                    "route": native.route,
+                    "threshold": native.threshold,
+                    "checkpoint_prefix": True,
+                    "items": [
+                        {"id": "cmp_azure", "type": "compaction", "encrypted_content": "enc-compaction-azure"},
+                        checkpoint_output[1],
+                    ],
+                },
+            },
+        ),
+        Message(role="user", content="Tail question"),
+        Message(
+            role="assistant",
+            content="Follow-up answer",
+            provider_data={
+                "response_id": "resp_tail",
+                "mindroom_response_stored": False,
+                RESPONSE_OUTPUT_KEY: tail_output,
+                "mindroom_native_compaction": {
+                    "route": native.route,
+                    "threshold": native.threshold,
+                    "checkpoint_prefix": True,
+                },
+            },
+        ),
+        Message(role="user", content="Next question after provider change"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_recovers_once_from_sticky_400_and_stores_new_checkpoint(tmp_path: Path) -> None:
+    new_output = [
+        {"id": "cmp_openai", "type": "compaction", "encrypted_content": "enc-compaction-openai"},
+        {"id": "rs_openai", "type": "reasoning", "summary": [], "encrypted_content": "enc-reason-openai"},
+        {
+            "id": "msg_new",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Recovered", "annotations": []}],
+        },
+    ]
+    replies = [
+        _json_reply(_STICKY_400_BODY, status=400),
+        _responses_reply(*_text_events("Recovered"), _completed(new_output)),
+    ]
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(replies[len(sent) - 1])
+
+    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    provider = pipeline_provider(adapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+    messages = _encrypted_history(native)
+    original_snapshot = deepcopy(messages)
+
+    with capture_logs() as logs:
+        turn = await complete(provider, ModelRequest(messages=messages, native_compaction=native))
+
+    assert (turn.content, len(sent)) == ("Recovered", 2)
+    first_body, second_body = json.loads(sent[0].content), json.loads(sent[1].content)
+    # First attempt sent the compaction checkpoint and encrypted reasoning.
+    assert any(item.get("type") == "compaction" for item in first_body["input"])
+    assert "enc-compaction-azure" in json.dumps(first_body["input"])
+    assert "enc-reason-azure-2" in json.dumps(first_body["input"])
+    # Second attempt drops all compaction items and encrypted_content and replays the full stored history.
+    assert not any(item.get("type") == "compaction" for item in second_body["input"])
+    assert "encrypted_content" not in json.dumps(second_body["input"])
+    assert "Earliest question before compaction" in json.dumps(second_body["input"])
+    assert second_body["store"] is False
+    assert second_body["include"] == ["reasoning.encrypted_content"]
+    assert second_body["context_management"] == [{"type": "compaction", "compact_threshold": 50_000}]
+    # New checkpoint and reasoning are stored normally; original messages were not mutated.
+    assert turn.message.provider_data["mindroom_native_compaction"]["items"][0]["encrypted_content"] == (
+        "enc-compaction-openai"
+    )
+    assert turn.message.provider_data[RESPONSE_OUTPUT_KEY][0]["encrypted_content"] == "enc-reason-openai"
+    assert messages == original_snapshot
+    assert any(
+        entry.get("log_level") == "warning" and "provider-encrypted replay state" in str(entry.get("event"))
+        for entry in logs
+    )
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_sticky_400_retries_at_most_once(tmp_path: Path) -> None:
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(_json_reply(_STICKY_400_BODY, status=400))
+
+    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    provider = pipeline_provider(adapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+
+    with pytest.raises(InvalidRequest, match="can only be processed by the provider that created it"):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert len(sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_direct_openai_responses_does_not_retry_sticky_400(tmp_path: Path) -> None:
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(_json_reply(_STICKY_400_BODY, status=400))
+
+    adapter = openai_family_adapter(_OPENAI_RESPONSES, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    provider = pipeline_provider(adapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+
+    with pytest.raises(InvalidRequest, match="can only be processed by the provider that created it"):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_429_after_retries_recovers_only_when_encrypted_items_were_sent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    transient_attempts = 1 + retry_stage._MAX_TRANSIENT_RETRIES
+    sent_encrypted: list[httpx2.Request] = []
+
+    def respond_encrypted(request: httpx2.Request) -> httpx.Response:
+        sent_encrypted.append(request)
+        if len(sent_encrypted) <= transient_attempts:
+            return encoded_response(_json_reply(_UPSTREAM_429_BODY, status=429))
+        return encoded_response(_responses_reply(*_text_events("Fallback ok"), _completed()))
+
+    (tmp_path / "encrypted").mkdir()
+    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path / "encrypted", respond_encrypted)
+    assert isinstance(adapter, ResponsesAdapter)
+    provider = pipeline_provider(adapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+
+    turn = await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert (turn.content, len(sent_encrypted)) == ("Fallback ok", transient_attempts + 1)
+    recovered_body = json.loads(sent_encrypted[-1].content)
+    assert not any(item.get("type") == "compaction" for item in recovered_body["input"])
+    assert "encrypted_content" not in json.dumps(recovered_body["input"])
+
+    # A plain 429 on a fresh request (no encrypted items) stops after the normal transient retries.
+    sent_fresh: list[httpx2.Request] = []
+
+    def respond_fresh(request: httpx2.Request) -> httpx.Response:
+        sent_fresh.append(request)
+        return encoded_response(_json_reply(_UPSTREAM_429_BODY, status=429))
+
+    (tmp_path / "fresh").mkdir()
+    fresh_provider = pipeline_provider(openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path / "fresh", respond_fresh))
+    with pytest.raises(RateLimited):
+        await complete(fresh_provider, ModelRequest(messages=[_user()], native_compaction=native))
+
+    assert len(sent_fresh) == transient_attempts
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_recovers_when_only_encrypted_reasoning_is_replayed(tmp_path: Path) -> None:
+    replies = [
+        _json_reply(_STICKY_400_BODY, status=400),
+        _responses_reply(*_text_events("Rebuilt ok"), _completed()),
+    ]
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(replies[len(sent) - 1])
+
+    config = {**_OPENROUTER_RESPONSES, "extra_kwargs": {"base_url": "https://openrouter.ai/api/v1", "store": False}}
+    provider = pipeline_provider(openai_family_adapter(config, tmp_path, respond))
+    messages = [
+        Message(role="user", content="First question"),
+        Message(
+            role="assistant",
+            content="First answer",
+            provider_data={
+                "mindroom_response_stored": False,
+                RESPONSE_OUTPUT_KEY: [
+                    {"id": "rs_1", "type": "reasoning", "summary": [], "encrypted_content": "enc-reason-azure"},
+                    {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "First answer", "annotations": []}],
+                    },
+                ],
+            },
+        ),
+        Message(role="user", content="Second question"),
+    ]
+
+    turn = await complete(provider, ModelRequest(messages=messages))
+
+    assert (turn.content, len(sent)) == ("Rebuilt ok", 2)
+    assert "enc-reason-azure" in json.dumps(json.loads(sent[0].content)["input"])
+    assert "encrypted_content" not in json.dumps(json.loads(sent[1].content)["input"])
+
+
 # --- Request settings -----------------------------------------------------------------------------------------
 
 

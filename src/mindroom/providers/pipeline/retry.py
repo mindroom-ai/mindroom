@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
 
-__all__ = ["STREAM_STALLED", "retrying_stream"]
+__all__ = ["STREAM_STALLED", "retrying_stream", "sticky_replay_stream"]
 
 logger = get_logger(__name__)
 
@@ -151,3 +151,29 @@ def retrying_stream(
     reissue = partial(_reissue, request=request, budget=_RetryBudget(), model_id=inner.identity.id)
     next_event = partial(_next_event, idle_timeout_seconds=idle_timeout_seconds, provider=inner.identity.provider)
     return attempts(inner, request, reissue, next_event=next_event)
+
+
+def sticky_replay_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+    """Stream ``request``, retrying once without provider-sticky encrypted state when the route recovers from it."""
+    recover = inner.capabilities.sticky_replay_recovery
+    if recover is None:
+        return inner.stream(request)
+    retried = False
+
+    def retry_without_encrypted(error: ProviderError) -> Retry | None:
+        nonlocal retried
+        if retried or (recovered := recover(request, error)) is None:
+            return None
+        retried = True
+        identity = inner.identity
+        logger.warning(
+            "Retrying model request without provider-encrypted replay state",
+            provider=identity.provider,
+            model_id=identity.id,
+            status_code=error.status_code,
+            error_type=type(error).__name__,
+            error=redact_sensitive_text(str(error), max_length=500),
+        )
+        return Retry(recovered)
+
+    return attempts(inner, request, retry_without_encrypted)

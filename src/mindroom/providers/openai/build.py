@@ -556,7 +556,19 @@ def _build_responses(
                 runtime=runtime,
             ),
         )
-    return ResponsesAdapter(identity=identity, capabilities=capabilities, wire=wire, settings=settings, clients=clients)
+    adapter = ResponsesAdapter(
+        identity=identity,
+        capabilities=capabilities,
+        wire=wire,
+        settings=settings,
+        clients=clients,
+    )
+    if route_key == "openai" and endpoint == OPENROUTER_BASE_URL_DEFAULT:
+        return replace(
+            adapter,
+            capabilities=replace(capabilities, sticky_replay_recovery=adapter.recover_sticky_replay),
+        )
+    return adapter
 
 
 def _responses_route(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Literal["openai", "codex"] | None:
