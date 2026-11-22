@@ -530,7 +530,7 @@ async def test_roster_follows_the_binding_after_steward_handover(room_state: Roo
                 assert duties._room_state_reruns[ROOM_ID] == {"accounts"}
                 assert (ACCOUNTS_EVENT_TYPE, steward_id) not in events
                 await asyncio.wait_for(duties._room_state_retries[ROOM_ID], timeout=3)
-            assert not duties._room_state_reruns
+            assert duties._room_state_reruns == ({ROOM_ID: {"accounts"}} if binding == "members_forbidden" else {})
     finally:
         duties.stopping()
 
@@ -567,7 +567,8 @@ def _assert_bound_writer_refused(
     event_name = (
         "matrix_room_members_fetch_failed" if binding == "members_forbidden" else "room_accounts_publish_failed"
     )
-    assert [log["log_level"] for log in logs if log["event"] == event_name] == ["debug"]
+    expected_level = "warning" if binding == "members_forbidden" else "debug"
+    assert [log["log_level"] for log in logs if log["event"] == event_name] == [expected_level]
 
 
 def _roster_successor(room_state: RoomState, owner: MagicMock) -> StewardDuties:
@@ -660,15 +661,39 @@ async def test_bound_writer_draining_during_equal_roster_get_retries(room_state:
 
 
 @pytest.mark.asyncio
-async def test_steward_forbidden_members_read_is_terminal_at_debug(room_state: RoomState) -> None:
-    """A forbidden joined_members read on the steward is terminal and logged at debug."""
-    config, paths, _, _, client = room_state
-    client.joined_members.side_effect = None
-    client.joined_members.return_value = nio.JoinedMembersError("Forbidden", "M_FORBIDDEN", room_id=ROOM_ID)
-    with capture_logs() as logs:
-        assert await reconcile_room_accounts(client, config, paths, ROOM_ID) is True
-    assert [log["log_level"] for log in logs if log["event"] == "matrix_room_members_fetch_failed"] == ["debug"]
-    client.room_put_state.assert_not_awaited()
+@pytest.mark.parametrize(
+    ("writer_kind", "response_kind"),
+    [
+        ("bound", "forbidden_503"),
+        ("steward", "forbidden_503"),
+        ("steward", "forbidden_403"),
+    ],
+)
+async def test_forbidden_members_read_retries_without_writing(
+    room_state: RoomState,
+    writer_kind: str,
+    response_kind: str,
+) -> None:
+    """Any failed joined_members read retries for either writer, even with an M_FORBIDDEN body."""
+    config, paths, ids, _, _ = room_state
+    steward_id, bound_id = ids[ROUTER_AGENT_NAME].full_id, ids["agent1"].full_id
+    puts: list[str] = []
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        if request.method == "PUT":
+            puts.append(request.path)
+            return web.json_response({"event_id": "$put"})
+        if ROUTER_EVENT_TYPE in request.path:
+            return web.json_response({"user_id": bound_id})
+        return _error_http_response(response_kind)
+
+    async with _http_state_clients(handle, steward_id, bound_id) as (steward, bound):
+        alternates = (lambda: {bound_id: bound}) if writer_kind == "bound" else dict
+        with capture_logs() as logs:
+            result = await reconcile_room_accounts(steward, config, paths, ROOM_ID, get_alternate_clients=alternates)
+    assert result is False
+    assert puts == []
+    assert [log["log_level"] for log in logs if log["event"] == "matrix_room_members_fetch_failed"] == ["warning"]
 
 
 @asynccontextmanager
