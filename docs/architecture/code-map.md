@@ -259,6 +259,13 @@ Matrix sync callback
 | `script_runs/worker_client.py` | The primary's HTTP client for a worker's script routes |
 | `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
 | `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through, and the listener helper the second listeners beside the API share |
+| `tailnet_ssh/store.py` | Primary-only ledger of link IDs, hostnames, and host keys by worker key |
+| `tailnet_ssh/projection.py` | The `sshd_config`, `authorized_keys`, and host key the primary writes into a worker's read-only `.runtime/ssh/` |
+| `tailnet_ssh/links.py` | Lists authorized shell targets by worker, admits connections to the exact worker, and records SSH activity |
+| `tailnet_ssh/session.py` | The worker's sshd `ForceCommand` for interactive shells, commands, and SFTP |
+| `api/tailnet_ssh_gateway.py` | Separate bearer-only listener for link listing, connection admission, and activity reports |
+| `api/worker_ssh.py` | Authenticated runner `/ssh/start` route that stores the worker's shell launch and starts sshd on port 2222 |
+| `config/tailnet_ssh.py` | The operator's exact tailnet login and SSH public keys per Matrix user, including public key validation |
 | `script_sdk.py` | The standard-library `MindRoomTools` client a script calls tools with |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
@@ -703,4 +710,5 @@ A database converted from the Agno layout keeps its pre-conversion copy beside i
 `tracking/personal_agents.json` is the roster of agents generated from `personal_agents` templates, read on every config load.
 `tracking/contacts.json` holds the contacts between personal agents and people, written only by the primary.
 `tracking/listening_markers.json` holds where each listening agent has heard each listened room up to.
+`tracking/tailnet_ssh.json` holds link IDs, hostnames, and host private keys by worker key; only the primary writes it, and no worker mounts it.
 `call_transcripts/calls.db` holds live and recently ended calls between people, each call's lines until its transcript message is posted, what each call's row was last edited to say, who paused each call and since when, and when each person's app last checked in to each call.
