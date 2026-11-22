@@ -33,7 +33,15 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.native_compaction import checkpoint_summary, replay_basis
+from mindroom.native_compaction import (
+    ENCRYPTED_REPLAY_RESET_KEY,
+    NATIVE_CHECKPOINT_KEY,
+    NativeReplay,
+    checkpoint_summary,
+    native_replay,
+    native_replay_messages,
+    replay_basis,
+)
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.providers.openai.responses_wire import conversation_digest
 from mindroom.providers.registry import build_model_provider
@@ -975,3 +983,32 @@ def test_a_replayed_checkpoint_sizes_its_ciphertext_by_its_length_not_its_tokens
     assert model.request_tokens(request(ciphertext)) - model.request_tokens(request("x")) == (
         (len(ciphertext) + 3) // 4 - 1
     )
+
+
+def test_native_replay_starts_over_at_the_later_of_a_checkpoint_and_a_reset() -> None:
+    """One projection decides what a request replays, which its wire, its size, and its usage anchor all read."""
+    system, question = Message(role="system", content="You help."), Message(role="user", content="Go")
+    checkpoint = Message(
+        role="assistant",
+        content="Ready",
+        provider_data={NATIVE_CHECKPOINT_KEY: {"route": "route-1", "items": [{"type": "compaction", "content": "S"}]}},
+    )
+    reset = Message(role="assistant", content="Recovered", provider_data={ENCRYPTED_REPLAY_RESET_KEY: "scope-1"})
+    follow_up = Message(role="user", content="Continue")
+    checkpoint_first = [system, question, checkpoint, follow_up, reset, follow_up]
+    reset_first = [system, question, reset, follow_up, checkpoint, follow_up]
+
+    def replayed(messages: list[Message], **kwargs: Any) -> NativeReplay:  # noqa: ANN401
+        return native_replay(messages, "route-1", **kwargs)
+
+    # A reset after the checkpoint gives the checkpoint up: everything goes, rebuilt before the reset.
+    assert replayed(checkpoint_first, reset_scope="scope-1") == NativeReplay(checkpoint_first, 4, 4)
+    # A checkpoint after the reset stands for what precedes it, the reset included.
+    after_checkpoint = [system, checkpoint, follow_up]
+    assert replayed(reset_first, reset_scope="scope-1") == NativeReplay(after_checkpoint, 0, 4)
+    # Another route's reset, or a route that records none, leaves the checkpoint standing.
+    assert replayed(checkpoint_first, reset_scope="scope-2") == NativeReplay([system, *checkpoint_first[2:]], 0, 2)
+    assert replayed(checkpoint_first).messages == native_replay_messages(checkpoint_first, "route-1")
+    # A request resent without encrypted state replays everything rebuilt, and no earlier usage sizes it.
+    assert replayed(checkpoint_first, reset_scope="scope-1", stripped=True) == NativeReplay(checkpoint_first, 6, 6)
+    assert native_replay(checkpoint_first, None) == NativeReplay(checkpoint_first)
