@@ -257,8 +257,10 @@ async def test_stop_of_the_run_ends_an_agent_that_still_waits_to_be_resumed(gate
 
     saved, run = cards.saved(), await _paused_run(gated)
     assert (saved["c2"][1], saved["c3"][1], gated.counting_tool.lines) == ("denied", "denied", ["a"])
-    # Only a stop of MindRoom leaves a turn paused: a cancelled agent's turn is over.
-    assert (_node(gated).state, run is not None and run.status) == (WorkflowNodeState.CANCELLED, RunStatus.cancelled)
+    # Only a stop of MindRoom leaves a turn paused: a cancelled agent's turn is over. It had appended its first
+    # line, so no resume runs it again without `rerun`.
+    ended = (_node(gated).state, run is not None and run.status)
+    assert ended == (WorkflowNodeState.INDETERMINATE, RunStatus.cancelled)
 
 
 @pytest.mark.asyncio

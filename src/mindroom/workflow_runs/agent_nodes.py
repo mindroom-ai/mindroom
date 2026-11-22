@@ -289,7 +289,7 @@ async def await_child(  # noqa: C901
         # Nothing was read, so nothing is this wait's to save: the outcome is the next reader's.
         await jobs.release_wait(job_id, claim)
         raise
-    if timed_out and outcome[0] == "cancelled":
+    if timed_out and job.status == "cancelled":
         outcome = ("timeout", "The agent did not finish in time and was stopped.")
     return outcome, usage, claim
 
@@ -300,8 +300,8 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
     The answer is the run's, whole and as the child wrote it: not the job's text, which adds a receipt. The usage is
     that of every run of the job: the ones restarts cut short, and the one it ended with. What the subagents the
     turn itself ran cost is an entry of its own, and no part of the turn's, so no sum holds it twice. A turn that
-    a restart or a configuration reload stopped is no answer: it is safe to run again while none of its runs called
-    a tool.
+    a restart, a configuration reload or a Stop ended is no answer: it is safe to run again while none of its runs
+    called a tool.
     """
     child = delegation_child(job)
     spent = [replace(child, run_id=run_id) for run_id in job.adapter.get(SPENT_RUNS_KEY, ())]
@@ -321,13 +321,15 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
         if theirs is not None:
             usage[f"sub:{child.delegation_id}"] = {"cost_usd": theirs}
     stopped = record is not None and reload_stopped_child_result(child, record) is not None
-    if job.status == "interrupted" or stopped:
+    if job.status in ("interrupted", "cancelled") or stopped:
         # A run is saved before its first tool call starts, so a turn none of whose runs holds a call made none. A
         # call that waited for a person's decision when the restart came had not started, and its run says so. A
-        # run that cannot be found, the turn's last one included, may have made some.
+        # run that cannot be found may have made some. Only the last run of a turn that a Stop ended is none: the
+        # process lived on, so a run it never saved never reached a call.
         made = [tool for run in records for tool in run.tools or () if tool.confirmed or not _never_started(tool)]
-        called = len(records) <= len(spent) or bool(made)
-        return ("indeterminate", text) if called else ("interrupted", _INTERRUPTED), usage
+        called = None in cut_short or (record is None and job.status != "cancelled") or bool(made)
+        unused = ("cancelled", text) if job.status == "cancelled" else ("interrupted", _INTERRUPTED)
+        return ("indeterminate", text) if called else unused, usage
     if job.status == "completed":
         # A turn that completed without a record to read its answer from did what nobody can say.
         return ("indeterminate", _NO_ANSWER) if record is None else ("completed", record.handover_content or ""), usage

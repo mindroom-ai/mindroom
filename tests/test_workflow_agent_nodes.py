@@ -377,6 +377,84 @@ async def test_cancelled_run_stops_its_agents_and_a_resume_runs_them_again(stack
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stopped_in", ["its next request", "the call itself"])
+async def test_a_stopped_agent_that_made_a_call_is_not_run_again_without_rerun(
+    stack: WorkflowStack,
+    stopped_in: str,
+) -> None:
+    """A Stop waits for the agent's job to end and reads what its turn did: a turn that called a tool may have written.
+
+    The agent appended its line, or was still inside the call that appends it, when the run was stopped. A resume
+    raises for its node until `rerun` names it, as it does for a tool call whose end nobody saw.
+    """
+    wrote, gate = asyncio.Event(), asyncio.Event()
+
+    async def held() -> None:
+        wrote.set()
+        await gate.wait()
+
+    if stopped_in == "the call itself":
+        stack.counting_tool.after_effect = held
+    stack.child_script(calls(tool_call("append", "c1", line="a")), [Await(held), *answer("done")])
+    await stack.submit("@0", "agent", _PROMPT)
+    await asyncio.wait_for(wrote.wait(), 5)
+
+    await stack.engine.cancel(stack.run_id, reason="Stopped.")
+
+    node = _node(stack)
+    assert (node.state, node.error and node.error["kind"]) == (WorkflowNodeState.INDETERMINATE, "indeterminate")
+    assert stack.node_job("@0").status == "cancelled"
+    stack.counting_tool.after_effect = None
+    await stack.resume(stack.run_id)
+    stack.child_script(calls(tool_call("append", "c2", line="a")), answer("again"))
+    with pytest.raises(NodeFailed) as refused:
+        await stack.result("@0", "agent", _PROMPT)
+    assert (refused.value.kind, stack.counting_tool.lines, _node(stack).generation) == ("indeterminate", ["a"], 1)
+
+
+@pytest.mark.asyncio
+async def test_a_stop_does_not_wait_forever_for_an_agent_that_does_not_end(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run ends after a bounded wait, and the node of a turn nobody could read is not one to run again."""
+    monkeypatch.setattr(engine_module, "_STOP_SECONDS", 0.1)
+    _hanging(stack)
+    await stack.submit("@0", "agent", _PROMPT)
+    job_id = stack.node_job("@0").job_id
+    asked: list[str] = []
+
+    async def ignored(job_id: str) -> None:
+        asked.append(job_id)
+
+    monkeypatch.setattr(stack.jobs, "request_cancel", ignored)
+
+    ended = await asyncio.wait_for(stack.engine.cancel(stack.run_id, reason="Stopped."), 5)
+
+    assert (ended.state, asked, _node(stack).state) == (
+        WorkflowRunState.CANCELLED,
+        [job_id],
+        WorkflowNodeState.INDETERMINATE,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_replaces_a_working_agent_that_made_a_call_is_not_run_unasked(stack: WorkflowStack) -> None:
+    """An edit changed the call of an agent that still works: its job is stopped, and what it did decides the rest."""
+    gate = asyncio.Event()
+    stack.child_script(calls(tool_call("append", "c1", line="a")), [Await(gate.wait), *answer("done")])
+    await stack.submit("@0", "agent", _PROMPT)
+    await stack.until(lambda: stack.counting_tool.lines == ["a"])
+    await _replayed(stack)
+
+    stack.child_script(calls(tool_call("append", "c2", line="a")), answer("edited"))
+    with pytest.raises(NodeFailed) as refused:
+        await stack.result("@0", "agent", {"prompt": "An edited prompt."})
+
+    assert (refused.value.kind, stack.counting_tool.lines, _node(stack).generation) == ("indeterminate", ["a"], 1)
+
+
+@pytest.mark.asyncio
 async def test_cancelling_one_node_job_fails_only_that_node(stack: WorkflowStack) -> None:
     """Stop on one agent ends that agent: its call raises `cancelled`, and the run goes on."""
     _hanging(stack)
