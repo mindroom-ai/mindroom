@@ -228,6 +228,12 @@ def test_dashboard_schema_snapshot_is_current() -> None:
     assert snapshot == dashboard_config_schema(), "Run .venv/bin/python .github/scripts/generate_config_schema.py"
 
 
+def test_voice_transcript_schema_title() -> None:
+    """The visible_router_echo field keeps its wire key while exposing the Voice Transcript label."""
+    voice_properties = dashboard_config_schema()["$defs"]["VoiceConfig"]["properties"]
+    assert voice_properties["visible_router_echo"]["title"] == "Voice Transcript"
+
+
 def test_the_automation_union_is_chosen_by_name_with_plugin_automations_as_the_fallback() -> None:
     """Built-in branches pin their name, and the plugin branch accepts any other name but never a built-in one."""
     schema = dashboard_config_schema()

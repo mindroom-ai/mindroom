@@ -35,6 +35,8 @@ from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
+    KUBERNETES_POD_CPU_LIMIT_ENV,
+    KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     VENDOR_TELEMETRY_ENV_VALUES,
@@ -121,6 +123,16 @@ LABEL_WORKER_ID = "mindroom.ai/worker-id"
 # limit, instead of the node running out of ephemeral storage.
 _WORKER_TMP_SIZE_LIMIT = "1Gi"
 _CONTAINER_NAME = SANDBOX_RUNNER_CONTAINER_NAME
+# Container resource limits exposed via the downward API under Kubernetes-only names
+# (already excluded from startup manifests, isolated env, and extra_env); without a
+# configured limit, Kubernetes reports the node's allocatable resource, which is acceptable.
+# Tool vars (MINDROOM_WORKER_CPUS, MINDROOM_WORKER_MEMORY_BYTES, OMP_NUM_THREADS,
+# PYTHON_CPU_COUNT, PYTEST_XDIST_AUTO_NUM_WORKERS) are derived only for worker subprocesses
+# and hooks so the runner process keeps its own default thread pool budget.
+_WORKER_RESOURCE_LIMIT_ENV_SPECS: tuple[tuple[str, str, str], ...] = (
+    (KUBERNETES_POD_CPU_LIMIT_ENV, "limits.cpu", "1"),
+    (KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV, "limits.memory", "1"),
+)
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"
 _CREDENTIALS_ENCRYPTION_KEY_SECRET_SUFFIX = "credentials-encryption-key"  # noqa: S105
@@ -1428,12 +1440,26 @@ class KubernetesResourceManager:
             {"name": name, "value": value}
             for name, value in dedicated_worker_runner_env(layout, worker_key=worker_key).items()
         ]
+        extra_env = worker_extra_env(self.config.extra_env)
         env: list[dict[str, object]] = [
             *runner_env,
             {"name": "HOME", "value": layout.dedicated_root},
             self._worker_token_env(worker_id=worker_id),
+            *(
+                {
+                    "name": name,
+                    "valueFrom": {
+                        "resourceFieldRef": {
+                            "containerName": _CONTAINER_NAME,
+                            "resource": resource,
+                            "divisor": divisor,
+                        },
+                    },
+                }
+                for name, resource, divisor in _WORKER_RESOURCE_LIMIT_ENV_SPECS
+            ),
         ]
-        for name, value in sorted(worker_extra_env(self.config.extra_env).items()):
+        for name, value in sorted(extra_env.items()):
             env.append({"name": name, "value": value})
         for name, value in sorted(VENDOR_TELEMETRY_ENV_VALUES.items()):
             env.append({"name": name, "value": value})

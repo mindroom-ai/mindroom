@@ -5,17 +5,23 @@ from __future__ import annotations
 __all__ = ["main", "parse_arguments", "read_call_arguments"]
 
 import argparse
+import base64
+import errno
 import json
 import os
-import re
+import signal
 import sys
+import threading
 import time
-from contextlib import suppress
+from contextlib import closing, contextmanager, suppress
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import UUID, uuid4
 
-from mindroom.agent_cli.client import AgentCliClient, AgentCliUnavailableError
+if TYPE_CHECKING:
+    from collections.abc import Generator, Iterator
+
+from mindroom.agent_cli.client import AgentCliClient, AgentCliRefusedError, AgentCliUnavailableError
 from mindroom.agent_cli.json_io import MAX_ENVELOPE_BYTES, canonical_json, read_json
 from mindroom.script_runs.launch_contract import RUN_ID_ENV
 from mindroom.script_sdk import MindRoomToolCallError, MindRoomTools
@@ -24,15 +30,22 @@ _CALL_TIMEOUT_SECONDS = 30
 # How long a command in a named worker may run when `workers run` names no limit.
 _WORKER_COMMAND_TIMEOUT_SECONDS = 3600
 # `workers run` exits with its command's exit code, so its own failures use codes commands rarely do, as `timeout` and
-# `docker run` do: the command was stopped at its time limit, or it never ran or its outcome is unknown.
+# `docker run` do: 124 for timeout, 125 when the command never ran, and 255 when its outcome is unknown.
 _EXIT_TIMED_OUT = 124
 _EXIT_NOT_RUN = 125
-# How long `workers run` keeps reading a result it cannot reach before it gives up on a command that may still run.
-_RESULT_UNREACHABLE_SECONDS = 60
-# How a shell result leads when its command failed (`format_shell_completion`): its exit code, negative for the
-# signal that killed it, then the streams it kept under their labels. A command that succeeds while printing exactly
-# these lines first reads as failed, which the shell result cannot tell apart.
-_FAILED_COMMAND = re.compile(r"Exit code (-?[1-9][0-9]*)(?:\n(?=(?:Output|Stderr):\n)|\Z)")
+_EXIT_UNKNOWN = 255
+# How long `workers run` keeps trying to reach its command's output before it gives up on a command that may run.
+_OUTPUT_UNREACHABLE_SECONDS = 60
+# What a command whose reader left exits with when SIGPIPE ends it, which is how `workers run` exits then.
+_EXIT_STDOUT_CLOSED = 128 + signal.SIGPIPE
+_CANCEL_TIMEOUT_SECONDS = 8.0
+# The most bytes of stdin sent to the command at once, and the longest wait until a chunk it has not taken is sent
+# again.
+_STDIN_CHUNK_BYTES = 32 * 1024
+_STDIN_RETRY_SECONDS = 1.0
+_WORKER_SIGNALS = tuple(
+    sig for name in ("SIGINT", "SIGTERM", "SIGHUP") if (sig := getattr(signal, name, None)) is not None
+)
 # Parsed options the CLI handles itself instead of sending in the operation payload.
 _LOCAL_ARGUMENTS = frozenset(
     {"group", "action", "json", "json_argument", "json_file", "json_stdin", "call_id", "timeout"},
@@ -148,7 +161,7 @@ def _add_workers_run(groups: argparse._SubParsersAction[argparse.ArgumentParser]
         default=_WORKER_COMMAND_TIMEOUT_SECONDS,
         help=f"Seconds after which the command is stopped (default: {_WORKER_COMMAND_TIMEOUT_SECONDS})",
     )
-    run.add_argument("--tail", type=int, default=100, help="Positive number of lines to print (default: 100)")
+    run.add_argument("--tail", type=int, default=100, help="Ignored: the command's whole output is streamed")
 
 
 def _select_tool(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
@@ -208,125 +221,403 @@ def _wait(client: AgentCliClient, call_id: str, result: dict[str, object], timeo
     return result
 
 
-def _settled(client: AgentCliClient, call_id: str, result: dict[str, object] | None) -> dict[str, object]:
-    """Read a submitted call's receipt until it settles, however long its command runs.
+class _WorkerSignal(BaseException):
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
 
-    The command runs on in its worker. The retry budget starts at the first failed read's start (or after a lost
-    submission response) and includes time spent in HTTP as well as between attempts.
+
+class _WorkerSignals:
+    """What SIGINT, SIGTERM and SIGHUP do while `workers run` submits its command and waits for it.
+
+    The first signal raises `_WorkerSignal`, which cancels the command. It is held instead until the command is
+    submitted, since a cancel must not overtake the submit, and once the outcome is known. A second signal ends
+    the CLI at once, as a signal without a handler does.
     """
-    delay = 0.2
-    deadline = time.monotonic() + _RESULT_UNREACHABLE_SECONDS if result is None else None
-    read_error: AgentCliUnavailableError | None = None
-    while result is None or _exit_code(result) == 3:
-        sleep_for = delay if deadline is None else min(delay, deadline - time.monotonic())
-        if sleep_for > 0:
-            time.sleep(sleep_for)
-        now = time.monotonic()
-        if deadline is None:
-            deadline = now + _RESULT_UNREACHABLE_SECONDS
-        remaining = deadline - now
-        if remaining <= 0:
-            if read_error is not None:
-                raise read_error
-            msg = "Timed out waiting for a call receipt"
-            raise AgentCliUnavailableError(msg)
-        # A long command is polled less often, so many of them at once stay cheap for MindRoom.
-        delay = min(delay * 1.5, 2.0)
+
+    def __init__(self) -> None:
+        self.held = True
+        self.first: int | None = None
+
+    def handle(self, signum: int, _frame: object) -> None:
+        """Raise the first signal unless it is held, and let a second one end the CLI."""
+        if self.first is not None:
+            signal.signal(signum, signal.SIG_DFL)
+            signal.raise_signal(signum)
+        self.first = signum
+        if not self.held:
+            raise _WorkerSignal(signum)
+
+    def release(self) -> None:
+        """Stop holding signals, and raise one that arrived meanwhile."""
+        self.held = False
+        if self.first is not None:
+            raise _WorkerSignal(self.first)
+
+
+@contextmanager
+def _worker_signal_handlers() -> Iterator[_WorkerSignals]:
+    """Handle SIGINT, SIGTERM and SIGHUP on the main thread, and restore their previous handlers on exit."""
+    signals = _WorkerSignals()
+    if threading.current_thread() is not threading.main_thread():
+        yield signals
+        return
+    previous = [(signum, signal.signal(signum, signals.handle)) for signum in _WORKER_SIGNALS]
+    try:
+        yield signals
+    finally:
+        signals.held = True
+        for signum, handler in previous:
+            signal.signal(signum, handler)
+
+
+class _WorkerStderr:
+    """Best-effort stderr writer for `workers run`; rewrites progress in place on a TTY.
+
+    With stderr closed, `print` would use stdout. A stderr that fails a write is dropped for the rest of the run:
+    flushing what it kept at exit would fail again and change the exit code.
+    """
+
+    def __init__(self) -> None:
+        self._progress_open = False
+
+    def _write(self, text: str) -> bool:
+        if sys.stderr is None:
+            return False
         try:
-            result = client.receipt(call_id, timeout=remaining)
-        except AgentCliUnavailableError as exc:
-            read_error = exc
+            sys.stderr.write(text)
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            sys.stderr = None
+            self._progress_open = False
+            return False
+        return True
+
+    def finish_progress(self) -> None:
+        """End an in-place TTY progress line before any other CLI line, command output, or exit."""
+        if self._progress_open:
+            self._progress_open = False
+            self._write("\n")
+
+    def progress(self, message: str) -> None:
+        """Write one warmup progress message, rewriting in place on a TTY."""
+        is_tty = False
+        if sys.stderr is not None:
+            with suppress(OSError, ValueError):
+                is_tty = bool(sys.stderr.isatty())
+        if is_tty:
+            # A line wider than the terminal wraps, and the next rewrite would clear only its last row.
+            columns = 0
+            with suppress(OSError, ValueError):
+                columns = os.get_terminal_size(sys.stderr.fileno()).columns
+            self._progress_open = True
+            if not self._write(f"\r\x1b[K{message[: columns - 1] if columns > 1 else message}"):
+                self._progress_open = False
+            return
+        self.note(message)
+
+    def note(self, message: str) -> None:
+        """Write one complete `workers run` line on stderr, closing any open progress line first."""
+        self.finish_progress()
+        self._write(f"{message}\n")
+
+    def command_output(self, data: bytes) -> None:
+        """Write the command's stderr where the CLI's own lines go, and as they do: if it can be."""
+        self.finish_progress()
+        if sys.stderr is None:
+            return
+        try:
+            sys.stderr.buffer.write(data)
+            sys.stderr.buffer.flush()
+        except (OSError, ValueError, AttributeError):
+            sys.stderr = None
+
+
+class _StdoutClosedError(Exception):
+    """The CLI's stdout takes no more of the command's output; its argument says why, unless it is closed."""
+
+
+def _write_stdout(data: bytes) -> None:
+    try:
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+    except (OSError, ValueError, AttributeError) as exc:
+        # Only a stdout that is closed, or whose reader left, ends the CLI as SIGPIPE ends a program.
+        closed = not isinstance(exc, OSError) or exc.errno in (errno.EPIPE, errno.EBADF)
+        raise _StdoutClosedError(None if closed else exc.strerror) from None
+
+
+def _discard_stdout() -> None:
+    """Point stdout nowhere, so output it still holds for a reader that left or stalled cannot hold up the exit."""
+    with suppress(OSError, ValueError, AttributeError):
+        nowhere = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(nowhere, sys.stdout.fileno())
+        os.close(nowhere)
+
+
+def _forward_stdin(client: AgentCliClient, call_id: str, done: threading.Event, refused: list[str]) -> None:
+    """Send the CLI's stdin to the command in order as it arrives, then its end; a terminal sends its end at once.
+
+    Each chunk is answered once the command took it, so a command that reads slowly slows this down. It runs in a
+    daemon thread until ``done``: a command that ends without reading its stdin does not wait for it. A chunk that
+    is refused for good is noted in ``refused``, which ends the relay, and the command that would wait is cancelled.
+    """
+    seq = 0
+    while True:
+        try:
+            piped = sys.stdin is not None and not sys.stdin.isatty()
+            data = os.read(sys.stdin.fileno(), _STDIN_CHUNK_BYTES) if piped else b""
+        except (OSError, ValueError):
+            data = b""
+        taking_more, delay = None, _STDIN_RETRY_SECONDS / 4
+        while taking_more is None:
+            if done.is_set():
+                return
+            try:
+                taking_more = bool(client.stdin(call_id, seq, data, eof=not data).get("open"))
+            except ValueError as exc:
+                refused.append(str(exc))
+                with suppress(AgentCliUnavailableError, ValueError):
+                    client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
+                return
+            except AgentCliUnavailableError:
+                # The command has not read yet, or the answer was lost: the same chunk again is written once.
+                done.wait(delay)
+                delay = min(2 * delay, _STDIN_RETRY_SECONDS)
+        if not data or not taking_more:
+            return
+        seq += 1
+
+
+def _frames(client: AgentCliClient, call_id: str) -> Generator[dict[str, object]]:
+    """Yield a streamed call's frames as they arrive.
+
+    The command runs on in its worker, so a stream that cannot be reached is tried again for a minute. Once its
+    first frame arrived it is not: MindRoom keeps no output for a second reader, and cancels the call of one that left.
+    """
+    delay, give_up = 0.2, None
+    while True:
+        started, reached = time.monotonic(), False
+        try:
+            for frame in client.stream(call_id):
+                reached = True
+                yield frame
+        except AgentCliUnavailableError:
+            give_up = started + _OUTPUT_UNREACHABLE_SECONDS if give_up is None else give_up
+            if reached or (remaining := give_up - time.monotonic()) <= 0:
+                raise
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 1.5, 2.0)
         else:
-            deadline = None
-            read_error = None
-    return result
+            return
+
+
+def _relay(
+    client: AgentCliClient,
+    call_id: str,
+    worker: str,
+    ended: dict[str, object],
+    stderr: _WorkerStderr,
+) -> dict[str, object]:
+    """Write a command's output as it arrives, stdout to stdout and stderr to stderr, and return its call's receipt.
+
+    The command's exit, which follows the last of its output, is kept in ``ended``, so a signal that then stops
+    the relay loses nothing. A stream that ends before the exit or the receipt leaves the command's outcome unknown.
+    """
+    done = threading.Event()
+    refused: list[str] = []
+    forwarding = threading.Thread(target=_forward_stdin, args=(client, call_id, done, refused), daemon=True)
+    # Leaving closes the stream at once, which cancels the call of a reader that left, whatever became of a cancel.
+    with closing(_frames(client, call_id)) as frames:
+        try:
+            return _relay_frames(frames, forwarding, refused, worker, ended, stderr)
+        except _StdoutClosedError:
+            with suppress(AgentCliUnavailableError, ValueError):
+                client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
+            _discard_stdout()
+            raise
+        finally:
+            done.set()
+
+
+def _relay_frames(  # noqa: C901 - One branch for each kind of frame.
+    frames: Iterator[dict[str, object]],
+    forwarding: threading.Thread,
+    refused: list[str],
+    worker: str,
+    ended: dict[str, object],
+    stderr: _WorkerStderr,
+) -> dict[str, object]:
+    for frame in frames:
+        kind = frame.get("t")
+        if refused:
+            # The cancel for the refused chunk goes out before the CLI writes anything more.
+            forwarding.join(_CANCEL_TIMEOUT_SECONDS + 1)
+            msg = f"the command's stdin was refused ({refused[0]})"
+            raise AgentCliUnavailableError(msg)
+        if kind is None:
+            return frame
+        if kind == "out":
+            stderr.finish_progress()
+            _write_stdout(base64.b64decode(str(frame.get("b"))))
+        elif kind == "err":
+            stderr.command_output(base64.b64decode(str(frame.get("b"))))
+        elif kind == "progress":
+            stderr.progress(f"mindroom-agent: {frame.get('text')}")
+        elif kind == "started":
+            if frame.get("header") == f"[worker: {worker}, started]":
+                stderr.note(f"mindroom-agent: started worker {worker}")
+            forwarding.start()
+        elif kind == "exit":
+            ended.update(frame)
+    if ended:
+        return {}
+    msg = "The command's output stream ended early"
+    raise AgentCliUnavailableError(msg)
+
+
+def _cancel_notice(worker: str, call_id: str, signum: int, receipt: dict[str, object] | None) -> str:
+    """Say what became of a command a signal cancelled; ``receipt`` is None when it was never submitted."""
+    cancelled = f"mindroom-agent: cancelled by {signal.Signals(signum).name}"
+    if receipt is None:
+        return f"{cancelled} (call {call_id})"
+    status = receipt.get("status")
+    if status == "cancelled" and receipt.get("cancel_outcome") == "never_ran":
+        return f"{cancelled}; the command never ran in worker {worker}"
+    if status == "cancelled" and receipt.get("cancel_outcome") == "stopped":
+        # The command's exit followed the stop, so nothing is left to look up under a call ID.
+        return f"{cancelled}; stopped the command in worker {worker}"
+    if status == "failed" and receipt.get("error_kind") == "named_worker_refusal":
+        what = f"command never ran ({receipt.get('outcome')})"
+    elif status == "waiting":
+        what = "the command was waiting for approval and has not run"
+    elif status == "completed":
+        what = "the command had ended, and the rest of its output was not read"
+    else:
+        what = f"the command may still be running in worker {worker}"
+    return f"{cancelled}; {what} (call {call_id})"
+
+
+def _submit_once(client: AgentCliClient, payload: dict[str, object]) -> dict[str, object] | None:
+    """Submit a command once: a second submission after an unknown outcome could run it twice.
+
+    None means the server may have accepted the command even though it could not return the receipt. A refusal is
+    raised, since the server then accepted nothing.
+    """
+    try:
+        return client.operation(payload)
+    except AgentCliRefusedError:
+        raise
+    except AgentCliUnavailableError:
+        return None
 
 
 def _run_in_worker(args: argparse.Namespace) -> int:
-    """Run one command in a named worker, print its output, and return its exit code.
+    """Run one command in a named worker with its output streamed as it arrives, and return its exit code.
 
     The command is a call of the agent's own shell tool that names the worker, so it runs under the same rules as
-    every other call. It is waited for however long it runs, since its own time limit stops it.
+    every other call. It is read however long it runs, since its own time limit stops it. A signal while it is
+    submitted or read cancels it, and so does a stdout that takes no more; the CLI's own closing lines are printed
+    under the signal handlers it started with.
     """
+    stderr = _WorkerStderr()
     if os.environ.get(RUN_ID_ENV):
-        print(
+        stderr.note(
             "mindroom-agent: A named worker belongs to a reply in a conversation; "
             "it cannot run from a background script.",
-            file=sys.stderr,
         )
         return _EXIT_NOT_RUN
-    arguments: dict[str, object] = {
-        "args": args.command,
-        "worker": args.name,
-        "timeout": args.timeout,
-        "tail": args.tail,
-    }
+    arguments: dict[str, object] = {"args": args.command, "worker": args.name, "timeout": args.timeout}
+    # `tail` stays an argument, as before output was streamed, so approval, hooks and audit see the same call.
+    arguments["tail"] = args.tail
     if args.resource_profile is not None:
         arguments["resource_profile"] = args.resource_profile
     call_id = str(uuid4())
-    submitted = False
+    client: AgentCliClient | None = None
+    result: dict[str, object] | None = None
+    ended: dict[str, object] = {}
+    error: Exception | None = None
+    signum: int | None = None
     try:
-        client = AgentCliClient()
-        # Sent once: a second submission after an unknown outcome could run the command twice.
-        try:
-            result = client.operation(
-                {
-                    "operation": "tools.call",
-                    "toolkit": "shell",
-                    "function": "run_shell_command",
-                    "call_id": call_id,
-                    "arguments": arguments,
-                },
-            )
-        except AgentCliUnavailableError:
-            # The server may have accepted the command even though it could not return the receipt.
-            result = None
-        submitted = True
-        result = _settled(client, call_id, result)
-    except (AgentCliUnavailableError, ValueError) as exc:
-        running = f"; the command may still be running in worker {args.name}" if submitted else ""
-        print(f"mindroom-agent: {exc}{running} (call {call_id})", file=sys.stderr)
+        with _worker_signal_handlers() as signals:
+            try:
+                try:
+                    # Signals are held until the submit returns: a cancel that overtook it would find no call.
+                    submitting = AgentCliClient()
+                    result = _submit_once(
+                        submitting,
+                        {
+                            "operation": "tools.call",
+                            "toolkit": "shell",
+                            "function": "run_shell_command",
+                            "call_id": call_id,
+                            "arguments": arguments,
+                            "stream": True,
+                        },
+                    )
+                    client = submitting
+                    signals.release()
+                    result = _relay(client, call_id, args.name, ended, stderr)
+                except (_StdoutClosedError, AgentCliUnavailableError, ValueError) as exc:
+                    error = exc
+                # A signal held through a refused submit is raised now; after that nothing is left to cancel.
+                signals.release()
+                signals.held = True
+            except _WorkerSignal as exc:
+                signum, error, result = exc.signum, None, None
+                if client is not None:
+                    result = {}
+                    with suppress(AgentCliUnavailableError, ValueError):
+                        result = client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
+    finally:
+        # From here on the CLI prints under the signal handlers it started with.
+        stderr.finish_progress()
+    if ended or signum is not None or error is None:
+        return _worker_exit_code(args, call_id, ended, signum, result, stderr)
+    if isinstance(error, _StdoutClosedError):
+        if error.args[0] is not None:
+            stderr.note(f"mindroom-agent: cannot write the command's output: {error.args[0]} (call {call_id})")
+        return _EXIT_STDOUT_CLOSED if error.args[0] is None else 1
+    if client is None:
+        stderr.note(f"mindroom-agent: {error}")
         return _EXIT_NOT_RUN
-    return _print_worker_result(args, result)
+    stderr.note(f"mindroom-agent: {error}; the command may still be running in worker {args.name} (call {call_id})")
+    return _EXIT_UNKNOWN
 
 
-def _print_worker_result(args: argparse.Namespace, result: dict[str, object]) -> int:
-    """Print a command's output or a tool error, and return its CLI exit code."""
-    outcome = result.get("outcome")
-    saved_path = None
-    saved = cast("dict[str, object]", outcome).get("mindroom_tool_output") if isinstance(outcome, dict) else None
-    if isinstance(saved, dict):
-        receipt = cast("dict[str, object]", saved)
-        if receipt.get("status") == "error":
-            print(f"mindroom-agent: {receipt.get('error', 'Could not save command output')}", file=sys.stderr)
-            return _EXIT_NOT_RUN
-        # A long result arrives as its start and the workspace file that holds all of it.
-        outcome, saved_path = receipt.get("preview"), receipt.get("path")
-    text = outcome if isinstance(outcome, str) else canonical_json(outcome)
-    header, _, body = text.partition("\n")
-    if result.get("status") != "completed" or header not in (
-        f"[worker: {args.name}]",
-        f"[worker: {args.name}, started]",
-    ):
-        # The call failed, or its shell ran it without a worker of that name.
-        print(f"mindroom-agent: {text}", file=sys.stderr)
-        return _EXIT_NOT_RUN
-    failed = _FAILED_COMMAND.match(body)
-    output = body[failed.end() :] if failed is not None else body
-    if output:
-        print(output)
-    if saved_path is not None:
-        print(f"mindroom-agent: full output saved to {saved_path}", file=sys.stderr)
-    if failed is not None:
-        code = int(failed[1])
+def _worker_exit_code(
+    args: argparse.Namespace,
+    call_id: str,
+    ended: dict[str, object],
+    signum: int | None,
+    receipt: dict[str, object] | None,
+    stderr: _WorkerStderr,
+) -> int:
+    """Return the exit code of a command that ended, of a signal that cancelled it, or of a call that ended unrun."""
+    if ended:
+        # The command ended and all of its output is written, whatever came after.
+        if ended.get("timed_out"):
+            stderr.note(f"mindroom-agent: stopped after {args.timeout:g}s")
+            return _EXIT_TIMED_OUT
+        code = cast("int", ended.get("code"))
         # A command a signal killed exits as a shell reports it: 128 plus the signal.
         return code if code >= 0 else 128 - code
-    # `format_shell_timeout` gives an exact line, then only output and stderr sections if present.
-    first_line, newline, streams = body.partition("\n")
-    stopped = first_line == f"Stopped after {args.timeout:g}s." and (
-        not newline or streams.startswith(("Output:\n", "Stderr:\n"))
-    )
-    return _EXIT_TIMED_OUT if stopped else 0
+    if signum is not None:
+        _discard_stdout()
+        stderr.note(_cancel_notice(args.name, call_id, signum, receipt))
+        return 128 + signum
+    # The call ended without its command's exit: it was refused, failed, or was cancelled.
+    outcome = (receipt or {}).get("outcome")
+    text = outcome if isinstance(outcome, str) else canonical_json(outcome)
+    # Reserve 125 for typed named-worker refusals; everything else after submit is 255 with call id.
+    if (
+        receipt is not None
+        and receipt.get("status") == "failed"
+        and receipt.get("error_kind") == "named_worker_refusal"
+    ):
+        stderr.note(f"mindroom-agent: {text}")
+        return _EXIT_NOT_RUN
+    stderr.note(f"mindroom-agent: {text} (call {call_id})")
+    return _EXIT_UNKNOWN
 
 
 def _script_tool_call(args: argparse.Namespace) -> dict[str, object]:
@@ -349,10 +640,11 @@ def _script_tool_call(args: argparse.Namespace) -> dict[str, object]:
 
 def _parsed_or_exit_code(argv: list[str] | None) -> argparse.Namespace | int:
     """Return the parsed arguments, or the exit code of a command line that asked for help or is invalid."""
+    raw_argv = sys.argv[1:] if argv is None else argv
     try:
         return parse_arguments(argv)
     except SystemExit as exc:
-        if exc.code:
+        if exc.code and raw_argv[:1] != ["workers"]:
             print(canonical_json({"error": "Invalid CLI arguments"}))
         return int(exc.code or 0)
 

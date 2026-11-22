@@ -422,6 +422,7 @@ async def _register_user_with_synapse_shared_secret(
                         password=password,
                     ),
                     "displayname": display_name,
+                    "inhibit_login": True,
                 },
             )
     except httpx.HTTPError as exc:

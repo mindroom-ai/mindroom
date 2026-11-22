@@ -20,7 +20,7 @@ from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks, leader_loop_hooks
 from mindroom.mid_turn import MidTurnGate, MidTurnMode
 from mindroom.participation import ParticipationGate
-from mindroom.response_lifecycle import QueuedHumanNoticeReservation, _QueuedMessageState
+from mindroom.response_lifecycle import QueuedHumanNoticeReservation, _Conversation
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.teams.members import BuiltTeam
 from mindroom.tool_jobs.execution import JobActor
@@ -204,7 +204,7 @@ async def test_delegated_child_keeps_owner_steer_for_parent_batch(tmp_path: Path
     parent = agent_loop_hooks(build, turn, steering=True)
     child = agent_loop_hooks(child_build, turn)
     leader = leader_loop_hooks(_built_team(model), turn)
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.bind_active_requester("@alice:localhost")
     judged: list[JudgmentRequest] = []
 
@@ -263,7 +263,7 @@ async def test_a_childs_pause_notice_leaves_the_owner_its_cannot_wait(tmp_path: 
     build = _agent_build(model)
     parent = agent_loop_hooks(build, turn, steering=True)
     child = agent_loop_hooks(replace(build, tool_jobs=JobActor(name="general", team=False, depth=1, tools={})), turn)
-    queue = _QueuedMessageState()
+    queue = _Conversation()
     queue.bind_active_requester("@alice:localhost")
     judged: list[JudgmentRequest] = []
 

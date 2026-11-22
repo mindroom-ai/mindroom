@@ -41,7 +41,7 @@ if TYPE_CHECKING:
             default=False,
             description=(
                 "Let the agent show interactive web pages in the Canvas panel. "
-                "MindRoom Chat must also turn canvases on (mindroom.canvas.enabled)."
+                "MindRoom Chat shows them unless its deployment turns canvases off (mindroom.canvas.enabled)."
             ),
         ),
         ConfigField(

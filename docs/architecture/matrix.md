@@ -31,22 +31,21 @@ Informational notices stay unmarked.
 
 ## Room Accounts List
 
-A room's steward, the MindRoom account with the highest power level there, publishes which joined members of the room are MindRoom accounts, so clients can recognize agents and teams whose user names do not start with `mindroom_`, such as personal agents with a custom `matrix_username`.
-The room state event has type `io.mindroom.accounts`, the publisher's own user ID as its state key, and the sorted user IDs of the joined owner, agent, and team accounts of the publisher's installation:
+A room's steward, the MindRoom account with the highest power level there, triggers roster reconciliation at startup, after every config reload, and when one of its installation's accounts joins or leaves the room.
+The account named by the `io.mindroom.router` binding normally publishes the roster, so clients can recognize agents and teams whose user names do not start with `mindroom_`.
+The `io.mindroom.accounts` state event uses the publisher's own user ID as its state key and lists the sorted user IDs of the installation's joined owner, agent, and team accounts:
 
 ```json
 {"accounts":["@alice.mind:example.org","@mindroom_research:example.org","@mindroom_router:example.org"]}
 ```
 
-The steward publishes it on startup and after every config reload, and updates it when one of those accounts joins or leaves the room.
-Matrix accepts a state key that starts with `@` only from that user, but any member allowed to send the type can send it under another state key.
-So a client reads only an event keyed by its sender's user ID.
-The steward is often the MindRoom owner account (`@mindroom_router:<server>`, or `@mindroom_router_<namespace>:<server>` for a namespaced installation), but can be any MindRoom account, so the owner's localpart does not identify every valid publisher.
-A client must trust the publisher itself before it uses a list.
-MindRoom Chat does not read the list today.
-It recognizes agent IDs by their `mindroom_` prefix; trust-sensitive checks also require the viewer's homeserver.
-Each MindRoom installation in a room has its own steward, which lists only its own accounts.
-The steward can send the event only where the room's power levels allow it, which the rooms MindRoom creates do; managed rooms regain that power level at every startup, personal rooms regain it at startup while their owner is still in an onboarding room, other rooms keep the power levels they were created with, and a client that creates rooms should give the type power level 0 too.
+For a state key that starts with `@`, Matrix requires the key to match the sender's user ID, but a permitted sender can also use a key without that prefix.
+MindRoom Chat trusts only a roster whose sender and state key both match the account named in a trusted `io.mindroom.router` binding.
+When no bound account is eligible, the steward publishes under its own key.
+If the selected writer's roster read or roster write is forbidden, reconciliation stops without retrying or writing under another key.
+A failed member read retries.
+Each MindRoom installation in a room has its own steward, which reconciles only its own accounts.
+The publisher can send the event only where the room's power levels allow it, which the rooms MindRoom creates do; managed rooms regain that power level at every startup, personal rooms regain it at startup while their owner is still in an onboarding room, other rooms keep the power levels they were created with, and a client that creates rooms should give the type power level 0 too.
 
 ## Model Selection Protocol
 
@@ -90,7 +89,7 @@ The response omits `thread_id` when the request did.
 `selection.override` is always present and is `null` for absent or deleted model overrides.
 It names a thread override only when every requester-visible responding entity uses that override, and is `null` when those entities have different thread overrides or some have none.
 `inherited` lists requester-visible responding entities with their room-level model, ignoring thread overrides.
-Each `inherited[].user_id` is that agent's or team's own Matrix account, and each `inherited[].source` names what chose that model: `room` for a saved `!room_model` override, `room_config` for the room's authored `room_models` entry, or `agent` for the entity's own configured model.
+Each `inherited[].user_id` is that agent's or team's own Matrix account, and each `inherited[].source` names what chose that model: `room` for the room's `model` setting, `room_config` for the room's authored `room_models` entry, or `agent` for the entity's own configured model.
 `reasoning_levels` and `reasoning_default` appear only on models with [reasoning levels](../configuration/models.md#reasoning-levels).
 `selection.override` and each `inherited[].model` are catalog keys; when the chosen reference is `key@level`, a `reasoning` field beside them carries the level, and it is absent otherwise.
 This explains what resetting the thread will use, including different defaults across agents and teams.

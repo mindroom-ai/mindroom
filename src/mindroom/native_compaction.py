@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.provider import NativeCompactionReplay
@@ -23,6 +24,9 @@ logger = get_logger(__name__)
 
 # The ``provider_data`` key under which a completed assistant response stores its native-compaction state.
 NATIVE_CHECKPOINT_KEY = "mindroom_native_compaction"
+# The ``provider_data`` key under which the answer to a request resent without provider-encrypted replay state stores
+# its route's ``Capabilities.replay_reset_scope``: a reset, before which that route replays no such state.
+ENCRYPTED_REPLAY_RESET_KEY = "mindroom_encrypted_replay_reset"
 
 
 def native_compaction_route(*, provider: str, model_id: str, endpoint: str, history_generation: str) -> str:
@@ -161,12 +165,47 @@ def checkpoint_tail(messages: Sequence[Message], checkpoint: int) -> list[Messag
     return [message for index, message in enumerate(messages) if index >= checkpoint or message.role == "system"]
 
 
+@dataclass(frozen=True, slots=True)
+class NativeReplay:
+    """What a request replays of its messages: the one projection its wire, its size, and its usage anchor read.
+
+    ``messages`` are the latest checkpoint with its tail and the system messages, or every message when none stands.
+    Those before ``encrypted_from`` go without provider-encrypted state. ``boundary`` indexes the request's message
+    the replay starts over at, -1 for none: usage an answer up to it reported sized another replay.
+    """
+
+    messages: list[Message]
+    encrypted_from: int = 0
+    boundary: int = -1
+
+
+def native_replay(
+    messages: Sequence[Message],
+    route: str | None,
+    *,
+    reset_scope: str | None = None,
+    stripped: bool = False,
+) -> NativeReplay:
+    """Project ``messages`` from the latest checkpoint on ``route`` or reset on ``reset_scope``, whichever is later.
+
+    A checkpoint stands for what precedes it. A reset keeps every message and sends those before it without encrypted
+    state, as a ``stripped`` request sends them all.
+    """
+    if stripped:
+        return NativeReplay(list(messages), encrypted_from=len(messages), boundary=len(messages))
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if checkpoint_items(message, route):
+            return NativeReplay(checkpoint_tail(messages, index), boundary=index)
+        if (
+            reset_scope is not None
+            and message.role == "assistant"
+            and (message.provider_data or {}).get(ENCRYPTED_REPLAY_RESET_KEY) == reset_scope
+        ):
+            return NativeReplay(list(messages), encrypted_from=index, boundary=index)
+    return NativeReplay(list(messages))
+
+
 def native_replay_messages(messages: Sequence[Message], route: str | None) -> list[Message]:
     """Project the latest checkpoint plus tail, retaining current system messages."""
-    last = next(
-        (index for index in range(len(messages) - 1, -1, -1) if checkpoint_items(messages[index], route)),
-        None,
-    )
-    if last is None:
-        return list(messages)
-    return checkpoint_tail(messages, last)
+    return native_replay(messages, route).messages

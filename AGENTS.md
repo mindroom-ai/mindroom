@@ -295,7 +295,7 @@ The reasons behind turn handling are in `docs/architecture/bot-runtime.md`, and 
 MindRoom also maintains related repositories under `github.com/mindroom-ai`, many of them cloned in the parent directory (`../`) of this dev environment:
 - `synapse` - Synapse fork with optional compact-edit collapsing for superseded `m.replace` events, advertised in `/versions` as `org.mindroom.compact_edits` (see `README.md` and `FORK_CHANGES.md`).
 - `mindroom-librechat` - LibreChat fork that renders MindRoom inline `<tool>` / `<tool-group>` tags as native `ToolCall` cards (see `README.md` and `.mindroom/fork-context.md` and `.mindroom/tool-tag-rendering.md`).
-- `mindroom-chat` - MindRoom Chat, the Cinny-based Matrix client for MindRoom on the web, iOS, and Android (see `README.md` and `FORK_CHANGES.md`).
+- `mindroom-chat` - MindRoom Chat, the Apache-2.0 Matrix client for MindRoom on the web, iOS, macOS, and Android, built on `matrix-js-sdk` (see `README.md`, `AGENTS.md`, and `docs/architecture.md`).
 - `mindroom-stack` - Docker Compose reference stack with the published MindRoom backend and frontend, a Tuwunel homeserver, and MindRoom Chat.
 
 ### Configuration Model

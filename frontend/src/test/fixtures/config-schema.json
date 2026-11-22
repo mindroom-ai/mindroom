@@ -5760,7 +5760,7 @@
         "visible_router_echo": {
           "default": true,
           "description": "Post the transcript of a voice message before the reply",
-          "title": "Visible Router Echo",
+          "title": "Voice Transcript",
           "type": "boolean"
         },
         "stt": {

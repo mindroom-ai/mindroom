@@ -24,6 +24,9 @@ from mindroom.egress_broker.env import (
 )
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import (
+    KUBERNETES_POD_CPU_LIMIT_ENV,
+    KUBERNETES_POD_LIMIT_ENV_NAMES,
+    KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SHARED_CREDENTIALS_PATH_ENV,
@@ -50,6 +53,13 @@ _WORKSPACE_ENV_HOOK_MAX_VALUE_BYTES = 32 * 1024
 _WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES = 128 * 1024
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
+_WORKER_CPUS_ENV = "MINDROOM_WORKER_CPUS"
+_WORKER_MEMORY_BYTES_ENV = "MINDROOM_WORKER_MEMORY_BYTES"
+_DERIVED_WORKER_CPU_ENV_NAMES = (
+    "OMP_NUM_THREADS",
+    "PYTEST_XDIST_AUTO_NUM_WORKERS",
+    "PYTHON_CPU_COUNT",
+)
 EXECUTION_ENV_TOOL_NAMES = constants.EXECUTION_ENV_TOOL_NAMES
 
 
@@ -168,6 +178,7 @@ def request_execution_env(
             # The primary's HOME is a host path; a dedicated worker keeps its own HOME until the
             # workspace HOME contract replaces it, so only the incoming request env drops it.
             protected_env_names |= {"HOME"}
+        protected_env_names |= KUBERNETES_POD_LIMIT_ENV_NAMES
         env = {key: value for key, value in execution_env.items() if key not in protected_env_names}
         apply_runner_ca_bundle(env, Path(tempfile.gettempdir()) / "mindroom-egress-broker")
         return env
@@ -295,9 +306,39 @@ def worker_tmp_dir(paths: LocalWorkerStatePaths) -> Path:
     return paths.tmp_dir
 
 
+def _positive_int_env_value(value: str | None) -> str | None:
+    """Return a canonical positive integer string, or None when unset or invalid."""
+    if value is None or not value.isascii() or not value.isdigit():
+        return None
+    parsed = int(value)
+    return str(parsed) if parsed > 0 else None
+
+
+def worker_resource_limit_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return worker CPU/memory limit vars derived from a Kubernetes worker container's env.
+
+    Active only when the runner process has a positive integer ``MINDROOM_KUBERNETES_POD_CPU_LIMIT``
+    from the downward API. Operator overrides in the runner env win by key presence (even when empty).
+    Local, Docker, and in-process runners return an empty mapping.
+    """
+    source = os.environ if environ is None else environ
+    cpus = _positive_int_env_value(source.get(KUBERNETES_POD_CPU_LIMIT_ENV))
+    if cpus is None:
+        return {}
+    limits = {_WORKER_CPUS_ENV: source.get(_WORKER_CPUS_ENV, cpus)}
+    if _WORKER_MEMORY_BYTES_ENV in source:
+        limits[_WORKER_MEMORY_BYTES_ENV] = source[_WORKER_MEMORY_BYTES_ENV]
+    elif (memory_bytes := _positive_int_env_value(source.get(KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV))) is not None:
+        limits[_WORKER_MEMORY_BYTES_ENV] = memory_bytes
+    for name in _DERIVED_WORKER_CPU_ENV_NAMES:
+        limits[name] = source.get(name, cpus)
+    return limits
+
+
 def worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     """Build the subprocess env for one prepared local worker."""
     env = generic_subprocess_env()
+    env.update(worker_resource_limit_env())
     env["HOME"] = str(paths.root)
     env["XDG_CACHE_HOME"] = str(paths.cache_dir)
     env["PIP_CACHE_DIR"] = str(paths.cache_dir / "pip")

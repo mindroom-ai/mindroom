@@ -231,6 +231,7 @@ visibility = [
 from = ["mindroom.agent_cli.client"]
 expose = [
     "AgentCliClient",
+    "AgentCliRefusedError",
     "AgentCliUnavailableError",
 ]
 
@@ -420,6 +421,7 @@ expose = [
 [[modules]]
 path = "mindroom.agent_cli.turn"
 depends_on = [
+    "mindroom.tool_system.runtime_context",
     "mindroom.agent_cli.approval",
     "mindroom.agent_cli.delegation",
     "mindroom.agent_cli.events",
@@ -575,6 +577,7 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.reaction_dispatch",
     "mindroom.reply_scope",
+    "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.follow_ups",
@@ -838,7 +841,7 @@ depends_on = [
     "mindroom.helper_usage",
     "mindroom.history.interrupted_replay",
     "mindroom.history.run_checkpoint",
-    "mindroom.history.storage",
+    "mindroom.history.session_context",
     "mindroom.history.turn_recorder",
     "mindroom.llm",
     "mindroom.streaming",
@@ -3352,7 +3355,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.orchestration.thread_snooze_runtime"
 depends_on = [
-    "mindroom.room_reply_modes",
+    "mindroom.room_settings",
     "mindroom.room_steward",
     "mindroom.thread_snooze",
     "mindroom.thread_tags",
@@ -3561,12 +3564,12 @@ depends_on = [
     "mindroom.contacts.turns",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
+    "mindroom.event_journal",
     "mindroom.history.reply_compactions",
     "mindroom.history.storage",
     "mindroom.history.turn_recorder",
     "mindroom.judgment.cold_cache",
     "mindroom.matrix.guarded_rooms",
-    "mindroom.mid_turn",
     "mindroom.mid_turn_judgment",
     "mindroom.orchestration.runtime",
     "mindroom.participation",
@@ -3800,8 +3803,7 @@ depends_on = [
     "mindroom.matrix_identifiers",
     "mindroom.prompt_templates",
     "mindroom.prompts",
-    "mindroom.room_reply_modes",
-    "mindroom.room_thread_modes",
+    "mindroom.room_settings",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.worker_routing",
@@ -4974,19 +4976,13 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.room_model_overrides"
+path = "mindroom.room_settings"
 depends_on = [
-    "mindroom.constants",
+    "mindroom.legacy_room_settings",
 ]
 
 [[modules]]
-path = "mindroom.room_thread_modes"
-depends_on = [
-    "mindroom.constants",
-]
-
-[[modules]]
-path = "mindroom.room_reply_modes"
+path = "mindroom.legacy_room_settings"
 depends_on = [
     "mindroom.constants",
 ]
@@ -4994,13 +4990,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.room_steward"
 depends_on = ["mindroom.constants"]
-
-[[modules]]
-path = "mindroom.room_modes"
-depends_on = [
-    "mindroom.matrix.room_thread_mode",
-    "mindroom.room_thread_modes",
-]
 
 [[modules]]
 path = "mindroom.matrix.thread_membership"
@@ -5285,7 +5274,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.reply_turn.locked_turn",
     "mindroom.thread_tags",
-    "mindroom.room_reply_modes",
+    "mindroom.room_settings",
 ]
 
 [[modules]]
@@ -5587,7 +5576,7 @@ path = "mindroom.commands.room_model_commands"
 depends_on = [
     "mindroom.commands.model_commands",
     "mindroom.matrix.client_room_admin",
-    "mindroom.room_model_overrides",
+    "mindroom.room_settings",
 ]
 visibility = ["mindroom.commands.handler"]
 
@@ -5595,8 +5584,8 @@ visibility = ["mindroom.commands.handler"]
 path = "mindroom.commands.thread_mode_commands"
 depends_on = [
     "mindroom.matrix.client_room_admin",
-    "mindroom.room_modes",
-    "mindroom.room_thread_modes",
+    "mindroom.room_settings",
+    "mindroom.matrix.room_thread_mode",
 ]
 visibility = ["mindroom.commands.handler"]
 
@@ -5604,7 +5593,7 @@ visibility = ["mindroom.commands.handler"]
 path = "mindroom.commands.reply_mode_commands"
 depends_on = [
     "mindroom.matrix.client_room_admin",
-    "mindroom.room_reply_modes",
+    "mindroom.room_settings",
 ]
 visibility = ["mindroom.commands.handler"]
 
@@ -6247,7 +6236,7 @@ depends_on = [
 path = "mindroom.turn_model"
 depends_on = [
     "mindroom.entity_resolution",
-    "mindroom.room_model_overrides",
+    "mindroom.room_settings",
     "mindroom.thread_models",
     "mindroom.config.resolution",
 ]
@@ -6309,6 +6298,7 @@ depends_on = [
     "mindroom.providers.registry",
     "mindroom.agent_loop.helper",
     "mindroom.llm",
+    "mindroom.room_settings",
     "mindroom.thread_tag_vocabulary",
     "mindroom.thread_tags",
     "mindroom.tool_system.events",
@@ -6383,6 +6373,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.event_journal.legacy_turn_rows",
+    "mindroom.history.session_context",
     "mindroom.history.storage",
     "mindroom.turn_record",
 ]
@@ -6491,7 +6482,7 @@ visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.turns.queued_notice"
-depends_on = ["mindroom.mid_turn"]
+depends_on = []
 visibility = [
     "mindroom.turns.ingress",
     "mindroom.voice.ingress",
@@ -6595,7 +6586,7 @@ depends_on = [
     "mindroom.matrix.room_membership",
     "mindroom.matrix.rooms",
     "mindroom.responder_availability",
-    "mindroom.room_reply_modes",
+    "mindroom.room_settings",
     "mindroom.runtime_protocols",
     "mindroom.teams",
 ]
@@ -7514,6 +7505,12 @@ expose = [
     "current_plugins",
     "detached_tool_scope",
     "emit_custom_event",
+    "call_progress_sink_scope",
+    "note_call_refusal",
+    "note_call_cancelled_never_ran",
+    "get_call_progress_sink",
+    "get_call_output_stream",
+    "CallOutputStream",
     "get_worker_progress_pump",
     "get_tool_runtime_context",
     "get_tool_runtime_media_attachment",
@@ -8445,6 +8442,8 @@ visibility = [
     "mindroom.history.manual",
     "mindroom.teams",
     "mindroom.delegation.recovery",
+    "mindroom.response_turn",
+    "mindroom.turn_store",
 ]
 
 [[modules]]
@@ -8939,10 +8938,9 @@ depends_on = [
     "mindroom.plugin_worker_relay",
     "mindroom.response_admission",
     "mindroom.room_agent_access",
-    "mindroom.room_modes",
-    "mindroom.room_reply_modes",
+    "mindroom.room_settings",
+    "mindroom.matrix.room_thread_mode",
     "mindroom.room_steward",
-    "mindroom.room_thread_modes",
     "mindroom.terminal.client",
     "mindroom.terminal.session",
     "mindroom.tool_system.agent_tools",
@@ -9979,9 +9977,7 @@ visibility = [
     "mindroom.ai_runtime",
     "mindroom.mid_turn_judgment",
     "mindroom.response_lifecycle",
-    "mindroom.response_runner",
     "mindroom.turns.ingress",
-    "mindroom.turns.queued_notice",
 ]
 
 [[modules]]
@@ -10693,7 +10689,7 @@ path = "mindroom.matrix.room_thread_mode"
 depends_on = [
     "mindroom.matrix.room_membership",
     "mindroom.entity_resolution",
-    "mindroom.room_thread_modes",
+    "mindroom.room_settings",
 ]
 
 [[modules]]

@@ -23,8 +23,8 @@
           "mindroom.ai/worker-status": "starting",
           "mindroom.ai/last-started-at": "10.0",
           "mindroom.ai/failure-reason": "",
-          "mindroom.ai/template-hash": "c506f5952d6a59fdde6a5bc9905813488c3e5b5e22b7102ca7ae81acff369f52",
-          "mindroom.ai/workspace-template-hash": "c506f5952d6a59fdde6a5bc9905813488c3e5b5e22b7102ca7ae81acff369f52",
+          "mindroom.ai/template-hash": "e217358fb8a2dabc29d85e3cbb153b40af53724900edcb5c0a2ac1299b7bc434",
+          "mindroom.ai/workspace-template-hash": "e217358fb8a2dabc29d85e3cbb153b40af53724900edcb5c0a2ac1299b7bc434",
           "mindroom.ai/private-agent-names": "[\"mind\"]"
         }
       },
@@ -131,6 +131,26 @@
                       "secretKeyRef": {
                         "name": "mindroom-worker-978ceeda0d0083522928a272",
                         "key": "MINDROOM_SANDBOX_PROXY_TOKEN"
+                      }
+                    }
+                  },
+                  {
+                    "name": "MINDROOM_KUBERNETES_POD_CPU_LIMIT",
+                    "valueFrom": {
+                      "resourceFieldRef": {
+                        "containerName": "sandbox-runner",
+                        "resource": "limits.cpu",
+                        "divisor": "1"
+                      }
+                    }
+                  },
+                  {
+                    "name": "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES",
+                    "valueFrom": {
+                      "resourceFieldRef": {
+                        "containerName": "sandbox-runner",
+                        "resource": "limits.memory",
+                        "divisor": "1"
                       }
                     }
                   },
@@ -322,8 +342,8 @@
             "mindroom.ai/worker-status": "ready",
             "mindroom.ai/last-started-at": "10.0",
             "mindroom.ai/failure-reason": "",
-            "mindroom.ai/template-hash": "c506f5952d6a59fdde6a5bc9905813488c3e5b5e22b7102ca7ae81acff369f52",
-            "mindroom.ai/workspace-template-hash": "c506f5952d6a59fdde6a5bc9905813488c3e5b5e22b7102ca7ae81acff369f52",
+            "mindroom.ai/template-hash": "e217358fb8a2dabc29d85e3cbb153b40af53724900edcb5c0a2ac1299b7bc434",
+            "mindroom.ai/workspace-template-hash": "e217358fb8a2dabc29d85e3cbb153b40af53724900edcb5c0a2ac1299b7bc434",
             "mindroom.ai/private-agent-names": "[\"mind\"]"
           }
         }

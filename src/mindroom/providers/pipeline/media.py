@@ -19,6 +19,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import (
+    ENCRYPTED_REPLAY_REJECTED,
     MALFORMED_TOOL_CALL,
     QUOTA_EXHAUSTED,
     SAFEGUARD_REFUSAL,
@@ -54,7 +55,9 @@ _UNSUPPORTED_VIEW_MESSAGE = (
 _ATTACHMENT_ID_PREFIX = "att_"
 _IMAGES: frozenset[MediaKind] = frozenset({"image"})
 # A retried media-free request must not repeat a failure the media cannot have caused.
-_NOT_MEDIA_RELATED_CODES = frozenset({SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL, QUOTA_EXHAUSTED})
+_NOT_MEDIA_RELATED_CODES = frozenset(
+    {SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL, QUOTA_EXHAUSTED, ENCRYPTED_REPLAY_REJECTED},
+)
 _PAYLOAD_TOO_LARGE_STATUS = 413
 # Provider errors naming a capability are short; capping the scan keeps the list patterns cheap on huge errors.
 _MAX_SCANNED_ERROR_CHARS = 2000

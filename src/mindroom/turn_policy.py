@@ -24,7 +24,7 @@ from mindroom.managed_room_notice import managed_room_notice, responder_display_
 from mindroom.matrix.room_membership import cached_joined_member_ids
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.responder_availability import filter_materializable_responders
-from mindroom.room_reply_modes import ReplyModeRead, refresh_room_reply_mode
+from mindroom.room_settings import REPLY_MODE, SettingRead, event_read_failed, refresh_room_setting
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.steward_duties import room_state_response_as_steward
 from mindroom.teams.formation import (
@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.authorization import ResponderCandidatePermissions
     from mindroom.commands.parsing import Command
+    from mindroom.config.agent import RoomReplyMode
     from mindroom.config.participation import ParticipationConfig
     from mindroom.conversation_resolver import MessageContext
     from mindroom.hooks import MessageEnvelope
@@ -661,9 +662,13 @@ class TurnPolicy:
         wrote follow the room's ordinary rules.
         """
         context = dispatch.context
-        read = None
-        if (client := self.deps.runtime.client) is not None:
-            read = await refresh_room_reply_mode(
+        read, client = None, self.deps.runtime.client
+        # A room whose read before this turn's event failed is not waited for again: the runtime's copy decides. It
+        # does for a bot that left the room too, which would read the room as it left it.
+        failed = event_read_failed(self.deps.runtime_paths, dispatch.target.room_id)
+        if not failed and client is not None and dispatch.target.room_id in client.rooms:
+            read = await refresh_room_setting(
+                REPLY_MODE,
                 client,
                 self.deps.runtime_paths,
                 dispatch.target.room_id,
@@ -749,7 +754,7 @@ class TurnPolicy:
         envelope: MessageEnvelope,
         *,
         mentions_an_agent: bool,
-        read: ReplyModeRead | None = None,
+        read: SettingRead[RoomReplyMode] | None = None,
     ) -> bool:
         """Return whether this is a person's message that mentions no agent or team in a `mentions` room.
 

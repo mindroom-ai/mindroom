@@ -28,19 +28,25 @@ def recorded_output(message: Message) -> list[dict[str, Any]] | None:
     return items if isinstance(items, list) else None
 
 
-def assistant_replay_items(message: Message, native_route: str | None) -> list[dict[str, Any]]:
+def assistant_replay_items(
+    message: Message,
+    native_route: str | None,
+    *,
+    encrypted: bool = True,
+) -> list[dict[str, Any]]:
     """Return the input items that replay one assistant message, whose calls carry the request's tool-call ids.
 
     A checkpoint on ``native_route`` stands for the message, and a recorded output carrying encrypted reasoning goes
-    as recorded while canonical history still holds what it records; any other message is rebuilt.
+    as recorded while canonical history still holds what it records; any other message is rebuilt, as is every
+    message of a replay that sends no provider-encrypted state (``encrypted`` false).
     """
-    if checkpoint := checkpoint_items(message, native_route):
+    if encrypted and (checkpoint := checkpoint_items(message, native_route)):
         return checkpoint
     calls = _function_call_items(message)
     output = recorded_output(message)
     if output is None:
         return _rebuilt(message, legacy_tool_search_items(message), calls)
-    if (replayed := _as_recorded(message, output, calls)) is not None:
+    if encrypted and (replayed := _as_recorded(message, output, calls)) is not None:
         return replayed
     return _rebuilt(message, [item for item in output if item.get("type") in _TOOL_SEARCH_ITEM_TYPES], calls)
 

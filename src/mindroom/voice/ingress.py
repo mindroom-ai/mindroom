@@ -13,7 +13,7 @@ from mindroom.constants import VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.thread_utils import mentions_another_participant
-from mindroom.turns.queued_notice import mark_waiting_for_approval, queued_notice_reservation_if_busy
+from mindroom.turns.queued_notice import mark_waiting_for_approval
 
 if TYPE_CHECKING:
     import nio
@@ -136,10 +136,10 @@ class VoiceIngress:
             # transcript. Without one, what the message says and whom it mentions stay unknown.
             transcribed = normalized_event.source["content"].get(VOICE_RAW_AUDIO_FALLBACK_KEY) is not True
             if may_be_for_me:
-                queued_notice_reservation = queued_notice_reservation_if_busy(
-                    self.deps.response_runner,
+                conversations = self.deps.response_runner.lifecycle_coordinator
+                queued_notice_reservation = conversations.reserve_waiting_human_message(
                     target=voice_target,
-                    envelope=envelope,
+                    response_envelope=envelope,
                     mentions_nobody=transcribed and for_another_participant is None,
                     transcript=normalized_event.body if transcribed else None,
                 )

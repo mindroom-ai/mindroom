@@ -899,10 +899,10 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
             side_effect=spy_build_execution_identity,
         ):
             async with coordinator.deps.replies.span_scope():
+                request = _response_request(prompt="Campground opened", user_id="@owner:localhost")
                 fate = await coordinator._run_locked_turn(
-                    _response_request(prompt="Campground opened", user_id="@owner:localhost"),
+                    replace(request, response_envelope=replace(request.response_envelope, target=target)),
                     team=None,
-                    resolved_target=target,
                     participation=None,
                 )
 
@@ -988,7 +988,6 @@ async def test_locked_turn_finalizes_cancelled_task_before_delivery(
             resolution = await coordinator._run_locked_turn(
                 _thread_request(),
                 team=None,
-                resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
                 participation=None,
             )
 
@@ -1085,7 +1084,6 @@ async def test_locked_turn_unhandled_delivery_outcome_does_not_persist_tool_repl
             resolution = await coordinator._run_locked_turn(
                 _thread_request(),
                 team=None,
-                resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
                 participation=None,
             )
 
@@ -1547,7 +1545,6 @@ async def test_a_judged_turn_that_fails_ends_quietly_only_until_its_settlement_b
         turn = coordinator._run_locked_turn(
             request,
             team=None,
-            resolved_target=MessageTarget.resolve("!test:localhost", None, "$user_msg"),
             participation=_participation_for_request(request, config, runtime_paths),
         )
         if settlement_began:

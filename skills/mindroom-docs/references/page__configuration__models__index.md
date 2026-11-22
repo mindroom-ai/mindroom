@@ -563,6 +563,37 @@ models:
       api_key: ${OPENROUTER_API_KEY}
 ```
 
+## GPT Through OpenRouter Responses
+
+Use `provider: openai` with `api: responses`, OpenRouter's `https://openrouter.ai/api/v1` endpoint, an `openai/` GPT model ID (GPT-5.3 Codex, GPT-5.4, or GPT-6), and `context_window` to enable OpenAI Responses [native compaction](https://docs.mindroom.chat/configuration/history/#native-compaction) through OpenRouter.
+Always set a model-specific OpenRouter `api_key`; without it, MindRoom can send your shared OpenAI key to OpenRouter.
+OpenRouter rejects `store: true` on this endpoint, so MindRoom sends `store: false` unless you set `store` yourself.
+OpenRouter binds encrypted compaction checkpoints and encrypted reasoning to the upstream provider that created them (for example OpenAI, Azure, or Amazon Bedrock).
+OpenRouter's routing answers HTTP 400 when the request's `provider` preferences exclude the upstream that created earlier encrypted items, and HTTP 429 while that upstream is rate-limited.
+After such a 400, or a 429 that outlasts the transient retries, MindRoom drops the encrypted state once and resends the full history with the same `provider` preferences, and the upstream that answers may compact it again.
+A transient failure of that resend is retried only as often as the request has transient retries left.
+On a very long thread whose full stored history exceeds the context window, you may need `/compact` after an upstream switch.
+To restrict routing to one provider at the cost of failover, set `provider: {only: [openai]}` under `extra_kwargs.request_params.extra_body` (`order` with `allow_fallbacks: false` can still admit other providers). One provider slug can still match several of that provider's endpoints.
+Model-rerouting fields (`models`, `model`, `route`, `preset`, or `@preset/` model IDs) turn native compaction off.
+The `provider: openrouter` route uses Chat Completions and keeps text compaction.
+
+```yaml
+models:
+  sol_native:
+    provider: openai
+    api: responses
+    id: openai/gpt-6.2-sol
+    api_key: ${OPENROUTER_API_KEY}
+    context_window: 1050000
+    extra_kwargs:
+      base_url: https://openrouter.ai/api/v1
+      # Optional: restrict routing to one provider at the cost of failover
+      # request_params:
+      #   extra_body:
+      #     provider:
+      #       only: [openai]
+```
+
 ## Extra Kwargs
 
 `extra_kwargs` sets provider-specific options for the model's requests and API client.
@@ -773,7 +804,7 @@ Users can change that per thread or per room, and the most specific choice wins:
 
 1. An explicit model for one run, such as a delegated child run.
 2. The thread override set with `!model`, the `thread_model` tool, or a client's model picker.
-3. The runtime room default set with `!room_model`.
+3. The room's `model` [room setting](https://docs.mindroom.chat/configuration/threads/#room-settings), set with `!room_model` or in a client's room settings.
 4. The authored room default in `room_models`.
 5. The entity's configured model.
 
@@ -813,11 +844,12 @@ Show or switch the default model for every agent and team, and for routing, in t
 !room_model reset
 ```
 
-`!room_model` and `!room_model list` show the current runtime override and available model names to authorized room members.
+`!room_model` and `!room_model list` show the current override and available model names to authorized room members.
 Setting and resetting require a Matrix room admin; other users get `❌ Room admin only.`
-`!room_model opus` stores a room override without modifying `config.yaml`, keyed by Matrix room ID, so it survives restarts and room-alias changes.
+`!room_model opus` sets the room's `model` [room setting](https://docs.mindroom.chat/configuration/threads/#room-settings) without modifying `config.yaml`, so it survives restarts and room-alias changes.
+When no MindRoom account in the room may send state events, the command changes nothing and answers `I need moderator rights in this room to change the room model.`
 The new default applies to later turns; a turn in progress or waiting for approval keeps the model it started with.
-`!room_model reset` removes the runtime override so `room_models` or each entity's configured model applies again.
+`!room_model reset` removes the override so `room_models` or each entity's configured model applies again.
 
 To set an authored room default in `config.yaml`, map room keys or Matrix room IDs to model names with `room_models` (default `{}`):
 
