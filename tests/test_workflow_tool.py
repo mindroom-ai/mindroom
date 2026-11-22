@@ -1622,6 +1622,8 @@ Every agent, tool and shell call is saved with its result. The Python between th
 so do writes (files, git, HTTP) through shell(), tool() or an agent, never with plain Python.
 resume_workflow reuses saved calls: in each sequence of calls, those before the first changed call are reused; that call and the
 calls after it run again, and so does everything after a foreach or parallel in which an item ran again. Unchanged items are reused.
+Resume retries only calls proven not to have started. A call that may have written (a tool that raised, an agent that made
+tool calls) is indeterminate: check its effect, then name it in rerun.
 Use now() and random() from the SDK instead of time and random when the value goes into a prompt.
 shell(..., cached=False) and tool(..., cached=False) run again on every resume: use it for a check of something outside the run.
 The call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.

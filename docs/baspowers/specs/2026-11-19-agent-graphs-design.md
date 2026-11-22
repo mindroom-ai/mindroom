@@ -634,7 +634,7 @@ On a node request the gateway decides in this order.
 4. **A saved node with the same digest, in a lane that is not dirty here:**
    - `completed`: the saved result returns at once, marked `cached`, so nothing runs and nothing is paid.
    - still live (an open question, a job that survived): the call attaches to it through its handle.
-   - `failed` or `cancelled`: the call runs again as the next generation.
+   - `failed` or `cancelled`: the call runs again as the next generation when its record proves that its work never started; otherwise the node is `indeterminate`, as in 3 (amended 2026-11-22).
 5. **Otherwise** (a different digest, no saved node, a dirty lane, a node named in `rerun`): the call runs as the next generation, and any live work of the node it replaces is cancelled and its open card closed.
 
 **Dirty lanes.** When a node at index i runs in this attempt instead of hitting, its lane is dirty from index i + 1: later calls in that lane run again, because the earlier call's effects may have changed what they would see.
@@ -698,7 +698,7 @@ A turn that changes in the middle starts a fresh child whose first prompt carrie
 - **Knowledge and history.** The child runs under the owner's room, thread and requester identity, so its knowledge bases, memory and Matrix tools reach what the owner's reach; the thread is not preloaded, because a fresh context is the point.
 - **Model.** Any configured model per call; the requester's budget may still swap in its fallback, as for every child.
 - **Result.** The node stores the child's raw final answer; a child that a config reload stopped ends with a notice instead of an answer today, and the engine treats that as interrupted, not as a result.
-- **Timeout.** A node timeout cancels its job and waits for it to end before the node fails.
+- **Timeout.** A node timeout cancels its job and waits for it to end before the node fails, or is `indeterminate` when the turn started a tool call (amended 2026-11-22).
 - **Nesting.** A child that calls `start_workflow` is not a job caller, so the call runs inline: it reserves a child run that names its parent run and node, waits, and returns the report.
   The child run's key is its parent run, node and generation plus the source digest and the args, not a call ID, because an agent continued after a restart repeats its call under a new ID: the same call attaches to the live child run or returns its stored report.
   The child run shows as a group under that agent, Stop on the parent or on the agent cancels it, its cost is counted once (below), and it has its own `max_concurrent`, so a parent at limit one cannot deadlock on its own child.

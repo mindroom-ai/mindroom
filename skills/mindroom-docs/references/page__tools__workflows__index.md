@@ -279,6 +279,8 @@ def main(args):
 `resume_workflow(run_id)` works on a run that ended in any state: `failed`, `cancelled`, `interrupted`, or `completed`.
 A run that has not ended is refused with `Run <id> is still running. Cancel it first.`
 The next attempt runs the script from the top, and each call gets its saved result instead of running again.
+Resume retries only calls proven not to have started.
+A call that may have written (a tool that raised, an agent that made tool calls) is `indeterminate`: check its effect, then name it in `rerun`.
 
 - A call that completed with the same arguments returns its saved result at once.
 - A call that failed or was cancelled before its tool was started, or an agent before it started a tool call, runs again.
