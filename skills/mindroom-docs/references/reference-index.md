@@ -98,6 +98,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Deployment | Docker | `deployment/docker.md` | `deployment/docker/index.md` | `page__deployment__docker__index.md` |
 | Deployment | Kubernetes | `deployment/kubernetes.md` | `deployment/kubernetes/index.md` | `page__deployment__kubernetes__index.md` |
 | Deployment | Workers & Sandboxing | `deployment/sandbox-proxy.md` | `deployment/sandbox-proxy/index.md` | `page__deployment__sandbox-proxy__index.md` |
+| Deployment | Tailnet SSH | `tailnet-ssh.md` | `tailnet-ssh/index.md` | `page__tailnet-ssh__index.md` |
 | Deployment | Agent Keys | `deployment/egress-broker.md` | `deployment/egress-broker/index.md` | `page__deployment__egress-broker__index.md` |
 | Deployment | Approved Egress | `deployment/approved-egress.md` | `deployment/approved-egress/index.md` | `page__deployment__approved-egress__index.md` |
 | Deployment | Trusted Upstream Auth | `deployment/trusted-upstream-auth.md` | `deployment/trusted-upstream-auth/index.md` | `page__deployment__trusted-upstream-auth__index.md` |

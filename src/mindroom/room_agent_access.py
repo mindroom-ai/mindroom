@@ -26,8 +26,6 @@ from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.declarations import ToolFileAccess
-from mindroom.tool_system.filters import tool_name_allowed
-from mindroom.tool_system.metadata import normalize_string_array_override, resolve_tool_settings
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
@@ -35,7 +33,7 @@ from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Iterator
     from pathlib import Path
 
     from fastapi.requests import HTTPConnection
@@ -45,7 +43,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.plugin_http import RoomPower
     from mindroom.tool_system.agent_tools import AgentTools
-    from mindroom.tool_system.declarations import ToolMetadata
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -240,37 +237,6 @@ def _toolkit_host(
     return "scratch_worker"
 
 
-def offered_functions(
-    metadata: ToolMetadata,
-    settings: Mapping[str, object],
-) -> tuple[frozenset[str] | None, bool]:
-    """Return the toolkit's functions its settings leave on, and whether one it names as writing is among them.
-
-    A function stays on by Agno's ``all`` or ``enable_<function>``, then the filters. The functions are None when the
-    toolkit declares no function names, as a plugin or MCP server may, and no allowlist names them. A toolkit that
-    names no writing functions writes when it runs code.
-    """
-    values = {config_field.name: config_field.default for config_field in metadata.config_fields or ()} | dict(settings)
-    include, exclude = (
-        normalize_string_array_override(values.get(name), preserve_empty_list=True)
-        for name in ("include_tools", "exclude_tools")
-    )
-
-    def offered(names: Iterable[str]) -> frozenset[str]:
-        return frozenset(
-            function
-            for function in names
-            if (values.get("all") or values.get(f"enable_{function}", True))
-            and tool_name_allowed(function, include=include, exclude=exclude)
-        )
-
-    available = metadata.function_names or include
-    functions = None if available is None else offered(available)
-    if not metadata.workspace_writers:
-        return functions, metadata.executes_code
-    return functions, bool(offered(metadata.workspace_writers))
-
-
 def _workspace(
     name: str,
     user_id: str,
@@ -303,18 +269,8 @@ def _workspace(
         # Code a toolkit runs works in the workspace whatever paths the toolkit takes.
         if metadata is None or (metadata.file_access is ToolFileAccess.NONE and not metadata.executes_code):
             continue
-        settings = resolve_tool_settings(
-            entry.name,
-            runtime_paths,
-            tools=tools,
-            worker_target=storage.execution.worker_target,
-            allowed_shared_services=(
-                config.get_worker_grantable_credentials() if storage.execution.execution_scope is not None else None
-            ),
-            tool_config_overrides=entry.tool_config_overrides,
-        )
         # A toolkit whose functions only its build could tell offers what it builds.
-        functions, writes = offered_functions(metadata, settings.values)
+        functions, writes = agent_tools.functions_for(entry, runtime_paths, storage.execution.worker_target)
         if functions is not None and not functions:
             continue
         # On a runner that sees only its own storage, a toolkit writes there, not in the workspace.

@@ -1530,6 +1530,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `tool_approval` | Human approval for tool calls | [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval) |
 | `email_invites` | Chat link, expiry, and approvers of invites to a room by email | [Email Invites](#email-invites) |
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) |
+| `tailnet_ssh` | Tailnet logins and SSH public keys for access to dedicated agent workers | [Tailnet SSH](https://docs.mindroom.chat/tailnet-ssh/) |
 | `background_tool_jobs` | Background execution of tool calls, on by default | [Background Jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](https://docs.mindroom.chat/personal-rooms/#personal-rooms) |
 | `personal_agents` | Templates that give each onboarded user their own agent | [Personal Agents](https://docs.mindroom.chat/personal-agents/#personal-agents) |
@@ -2665,6 +2666,37 @@ models:
       api_key: ${OPENROUTER_API_KEY}
 ```
 
+## GPT Through OpenRouter Responses
+
+Use `provider: openai` with `api: responses`, OpenRouter's `https://openrouter.ai/api/v1` endpoint, an `openai/` GPT model ID (GPT-5.3 Codex, GPT-5.4, or GPT-6), and `context_window` to enable OpenAI Responses [native compaction](https://docs.mindroom.chat/configuration/history/#native-compaction) through OpenRouter.
+Always set a model-specific OpenRouter `api_key`; without it, MindRoom can send your shared OpenAI key to OpenRouter.
+OpenRouter rejects `store: true` on this endpoint, so MindRoom sends `store: false` unless you set `store` yourself.
+OpenRouter binds encrypted compaction checkpoints and encrypted reasoning to the upstream provider that created them (for example OpenAI, Azure, or Amazon Bedrock).
+OpenRouter's routing answers HTTP 400 when the request's `provider` preferences exclude the upstream that created earlier encrypted items, and HTTP 429 while that upstream is rate-limited.
+After such a 400, or a 429 that outlasts the transient retries, MindRoom drops the encrypted state once and resends the full history with the same `provider` preferences, and the upstream that answers may compact it again.
+A transient failure of that resend is retried only as often as the request has transient retries left.
+On a very long thread whose full stored history exceeds the context window, you may need `/compact` after an upstream switch.
+To restrict routing to one provider at the cost of failover, set `provider: {only: [openai]}` under `extra_kwargs.request_params.extra_body` (`order` with `allow_fallbacks: false` can still admit other providers). One provider slug can still match several of that provider's endpoints.
+Model-rerouting fields (`models`, `model`, `route`, `preset`, or `@preset/` model IDs) turn native compaction off.
+The `provider: openrouter` route uses Chat Completions and keeps text compaction.
+
+```yaml
+models:
+  sol_native:
+    provider: openai
+    api: responses
+    id: openai/gpt-6.2-sol
+    api_key: ${OPENROUTER_API_KEY}
+    context_window: 1050000
+    extra_kwargs:
+      base_url: https://openrouter.ai/api/v1
+      # Optional: restrict routing to one provider at the cost of failover
+      # request_params:
+      #   extra_body:
+      #     provider:
+      #       only: [openai]
+```
+
 ## Extra Kwargs
 
 `extra_kwargs` sets provider-specific options for the model's requests and API client.
@@ -3666,8 +3698,8 @@ Choose a model with a larger context window or shorten the prompt; MindRoom neve
 
 MindRoom supports automatic [OpenAI Responses compaction](https://developers.openai.com/api/docs/guides/compaction) and [Claude threshold compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-threshold).
 
-- **OpenAI**: GPT-5.3 Codex, GPT-5.4, and GPT-6 model families on the official Responses endpoint or the Codex login backend.
-  An explicit `store: true`, background mode, an alternate OpenAI endpoint, or a custom context-management request keeps the model on text compaction.
+- **OpenAI**: GPT-5.3 Codex, GPT-5.4, and GPT-6 model families on the official Responses endpoint, the Codex login backend, or [OpenRouter's Responses endpoint](https://docs.mindroom.chat/configuration/models/#gpt-through-openrouter-responses) (with `openai/` model IDs).
+  An explicit `store: true`, background mode, another OpenAI-compatible endpoint, OpenRouter model-rerouting fields (`models`, `model`, `route`, `preset`, or `@preset/` IDs), or a custom context-management request keeps the model on text compaction.
 - **Claude**: direct Anthropic, [OpenRouter's Messages endpoint](https://docs.mindroom.chat/configuration/models/#claude-through-openrouter), and Vertex AI Claude on Sonnet 4.6 and later, Opus 4.6 and later, Haiku 5.5 and later, Fable, and Mythos models.
   This is a provider beta and needs a trigger of at least 50,000 tokens.
   Other Anthropic gateways, and OpenRouter models with a `models` or `fallbacks` list, use text compaction; an authored `compact_20260112` policy is sent as written.
@@ -3677,7 +3709,7 @@ MindRoom supports automatic [OpenAI Responses compaction](https://developers.ope
 Native compaction also requires compaction to be enabled, replay of all history (no `num_history_runs` or `num_history_messages`), no `max_tool_calls_from_history`, and a trigger above the current prompt size and below the replay window minus `reserve_tokens`.
 An explicit `compaction.model`, a [scheduled task](https://docs.mindroom.chat/scheduling/) with a `history_limit`, or a request already over the replay window minus `reserve_tokens` uses text compaction instead.
 Native checkpoints survive restarts and are tied to their provider, configured model `id`, and endpoint; after a switch to another `id` or endpoint, the conversation is rebuilt from its full stored history.
-Changing only a `request_params` model override keeps the checkpoint.
+Changing only a `request_params` model override keeps the checkpoint stored; on OpenRouter Responses the override turns native compaction off, so the checkpoint is not replayed while the override is present.
 When that history then needs text compaction, it starts from the latest Claude checkpoint's summary instead of summarizing everything that checkpoint covers again, as long as the summary and turns before it are still the ones its request replayed and leave room for its turn; OpenAI checkpoints are encrypted, so they are skipped.
 If a reply's request still would not fit, for example after a very large tool result, native compaction stays off for the rest of that reply and it [compacts as text](#compaction-during-a-reply).
 A completed response that carries a provider checkpoint logs a `Native compaction checkpoint` event with the trigger (`threshold_tokens`, `null` for an authored policy) and the checkpoint's serialized size in characters (`checkpoint_chars`).
@@ -5842,7 +5874,7 @@ Without `api_key` or `credentials_service`, MindRoom sends a non-secret placehol
 | Field | Default | Description |
 |-------|---------|-------------|
 | `voice.enabled` | `false` | Transcribe voice messages; when `false`, voice messages use the [raw-audio fallback](#voice-fallback-no-stt-available). |
-| `voice.visible_router_echo` | `true` | Post the transcript of a voice message before the reply; see [Voice Message Processing](#voice-message-processing). |
+| `voice.visible_router_echo` | `true` | Post the transcript of a voice message before the reply ("Voice Transcript" in the dashboard); see [Voice Message Processing](#voice-message-processing). |
 | `voice.stt.provider` | `openai` | `openai` or `openai_compatible`. |
 | `voice.stt.model` | `gpt-transcribe` | STT model name. |
 | `voice.stt.host` | none | Service root or `/v1` base URL; must be an HTTP(S) URL. Required for `openai_compatible`. |
@@ -18584,6 +18616,25 @@ CORS for `/api/client-sessions`, `/api/plugins`, `/api/plugins/`, `/api/call-tra
 Browsers let only those origins read these paths' responses, with credentials off, and every response carries `Cache-Control: no-store`; behind a proxy that serves MindRoom under a root path, the paths are matched below that root path.
 CORS limits which pages may read a response, not which requests reach MindRoom: a simple request from any origin still reaches a public plugin route.
 
+## Tailnet SSH
+
+[Tailnet SSH](https://docs.mindroom.chat/tailnet-ssh/) grants the reach of the opted-in agent's shell, including shared workers and all files their shells can see.
+It uses the worker-routed shell's responder access predicate without a conversation room; grants only through `access.current_room_members` do not apply.
+The gateway enrolls one persistent node per worker key; its node state and reusable tailnet auth key never reach workers.
+
+A permissive tailnet policy can let any member reach a node's TCP port 22, so the gateway checks the exact `WhoIs` login before contacting the primary and refuses tagged or unmatched peers.
+The primary rechecks the login and agent access before and after waking the exact worker and returns its marked endpoint, never one supplied by the peer.
+The separate gateway listener checks its bearer token before routing or reading a body; only the primary and gateway hold that token.
+The gateway never calls the Docker or Kubernetes control plane.
+
+The primary projects `sshd_config`, the worker's Ed25519 host private key, and `authorized_keys` into the worker read-only; the worker UID can read its host key.
+OpenSSH accepts the union of current admitted requesters' keys for that worker, not a login/key pair, with `restrict,pty` on every key and forwarding disabled.
+Worker code runs as the same UID as the SSH session, so do not forward credentials or trust code from the worker.
+
+Revocation refuses new gateway admissions but does not end established sessions or clear the projection; every admitted connect refreshes the keys.
+Docker never publishes SSH on a wildcard host address, but workers on the same bridge can reach one another's port `2222` directly, where only the projected keys are checked.
+On Kubernetes, the gateway policy denies pod-network ingress and restricts egress; the primary and worker ingress policies are also needed to deny direct access from unrelated pods.
+
 ## Known gaps
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
@@ -24125,6 +24176,172 @@ To deploy that backend without Helm, see [Worker settings](https://docs.mindroom
 | `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution, except for a background job's call, which has none; a `run_shell_command` call gets at least its `timeout` plus 30 seconds, a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds, and, job or not, a `browser` call in a dedicated worker that keeps a [browser session](#browsers-in-workers) or runs Worker Computer at least 150 seconds; it also limits every `browser_mcp` call in a dedicated worker, job or not | `120` |
 | `MINDROOM_STORAGE_PATH` | Writable directory for the tool registry and worker-local caches, such as `/app/workspace/.mindroom`; startup fails if it is not writable | `mindroom_data` next to the config |
 | `MINDROOM_CONFIG_PATH` | Config used for requests that carry no [live config snapshot](#live-config-snapshots) | _(optional)_ |
+
+# Tailnet SSH
+
+Use ordinary SSH (not Tailscale SSH) for a shell, remote commands, or file transfer in a MindRoom worker on one operator-managed Tailscale or Headscale tailnet.
+The gateway owns the tailnet nodes and keeps their state outside the workers, which do not join the tailnet.
+
+## Who can reach what
+
+**SSH reach is agent shell reach.**
+With the gateway enabled and an agent opted in, a requester who passes the agent's [access check](https://docs.mindroom.chat/authorization/#responder-access) can reach the dedicated Docker or Kubernetes worker that agent's `shell` tool would use for them.
+This includes shared agents and workers reused across agents; `static_runner` and local execution have no SSH target.
+SSH has no conversation room, so a grant only through `access.current_room_members` does not give SSH access.
+
+The `mindroom` account can read or change anything the worker's shell can, including shared workspaces, joined directories, and mounted knowledge, subject to the worker's existing read-only mounts and permissions.
+The session starts in a workspace selected for that worker, which may serve more than one agent, and does not receive credentials injected for a particular tool call or response.
+The gateway checks the device's tailnet login, and OpenSSH checks its key against the current authorized keys for the whole worker, not a login/key pair.
+
+## Configure MindRoom
+
+In `config.yaml`, `tailnet_ssh.logins` maps concrete Matrix user IDs to distinct, exact Tailscale or Headscale logins (nonempty, no surrounding whitespace).
+Headscale users created with bare names (for example `alice`) report that bare username rather than an email address; verify the exact login with `tailscale status --json` (`User[].LoginName`) on a joined client.
+`tailnet_ssh.authorized_keys` maps those IDs to lists of OpenSSH `.pub` lines, without key options or private keys.
+Both maps default to empty; each requester needs a login and at least one key, and tagged client devices are not admitted.
+Set the agent's `tailnet_ssh` boolean to `true` (default `false`) and make sure its `shell` tool runs on the worker.
+MindRoom refuses the opt-in if any non-MCP toolkits listed before `shell` declare `run_shell_command` or do not declare their functions.
+List `shell` first in the agent's `tools` list, even if tool settings disable the conflicting function.
+MCP toolkits do not block this opt-in, regardless of their order.
+Merge these settings into your existing config and replace the sample login and public key:
+
+```yaml
+tailnet_ssh:
+  logins:
+    "@alice:example.org": alice@example.org
+  authorized_keys:
+    "@alice:example.org":
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP5zSLtckJO5Wu2ZS5l7FHIxSmdRXKUf0SRAzn4Vl5s2 alice-laptop
+
+agents:
+  research:
+    display_name: Research
+    tools: [shell]
+    worker_tools: [shell]
+    worker_scope: shared
+    access:
+      users: ["@alice:example.org"]
+    tailnet_ssh: true
+```
+
+## Deploy the gateway
+
+Use the full MindRoom worker image (it includes OpenSSH, SFTP, rsync, and the `mindroom` user) and the gateway image for the matching release.
+Create a reusable, non-ephemeral tailnet auth key that can enroll multiple nodes and apply any tags you configure.
+For Headscale, use a reusable pre-auth key and your Headscale URL; leave the login server unset for Tailscale.
+With a tagged Headscale pre-auth key (for example `--tags tag:mindroom-worker`), leave `TAILNET_SSH_TAGS` and `tailnetSsh.tags` unset so the key's tag applies—Headscale 0.29.7 rejects enrollment when advertised tags are also set.
+Configure `tagOwners` in your Headscale policy when using tags.
+Keep the enrollment key in the gateway only and the listener token in the primary and gateway only.
+
+### Docker
+
+Enable the primary's internal listener with a strong random `MINDROOM_TAILNET_SSH_GATEWAY_TOKEN`.
+The listener binds the primary's `--api-host` on `MINDROOM_TAILNET_SSH_PORT` (default `8769`), which must differ from the API and script gateway ports.
+With the full image, run the primary and worker as UID `1000` so sshd (with `StrictModes yes`) can accept the projected host key, `authorized_keys`, and their parent directory (a host mount owned by another UID, such as macOS UID `501`, fails `StrictModes`).
+
+The gateway must reach that listener and the worker endpoints: [Docker](https://docs.mindroom.chat/deployment/sandbox-proxy/#optional-docker-worker-isolation) maps worker port `2222` to a host port on `MINDROOM_DOCKER_WORKER_PUBLISH_HOST` (default `127.0.0.1`) and advertises `MINDROOM_DOCKER_WORKER_ENDPOINT_HOST` (defaults to the publish host).
+Use a specific IP for the publish host, not a hostname or wildcard, and keep these ports private.
+
+Put the gateway settings in a restricted env file:
+
+| Variable | Value |
+| --- | --- |
+| `TAILNET_SSH_GATEWAY_TOKEN` | Same token as on the primary |
+| `TAILNET_SSH_AUTH_KEY` | Tailnet enrollment key |
+| `TAILNET_SSH_PRIMARY_URL` | Internal listener URL (default `http://127.0.0.1:8769`) |
+| `TAILNET_SSH_LOGIN_SERVER` | Optional Headscale URL |
+| `TAILNET_SSH_TAGS` | Optional tags for enrolled nodes, separated by commas or spaces (leave unset with a tagged Headscale pre-auth key) |
+| `TAILNET_SSH_STATE_DIR` | Persistent node state directory (default `/state`) |
+| `HTTPS_PROXY` | Optional proxy for tailnet control and relay traffic; internal calls stay direct |
+
+For a primary on the Docker host on Linux, use host networking to reach the default loopback endpoints:
+
+```bash
+docker run -d --name mindroom-tailnet-ssh --network host \
+  --env-file /secure/path/tailnet-gateway.env \
+  --mount type=volume,source=mindroom-tailnet-ssh,target=/state \
+  ghcr.io/mindroom-ai/mindroom-tailnet-gateway:"$MINDROOM_VERSION"
+```
+
+**Docker bridge limit:** Workers on the same bridge can reach one another's sshd on `2222` directly, even if the published host port binds to loopback.
+That path checks only the projected SSH keys, not the tailnet login, and may still accept a removed key until the next projection or until the worker stops.
+
+### Kubernetes
+
+Create the enrollment Secret in the runtime release namespace with the key under `auth-key` (no trailing newline in the file):
+
+```bash
+kubectl -n mindroom create secret generic mindroom-tailnet-key \
+  --from-file=auth-key=/secure/path/tailnet-auth-key
+```
+
+```yaml
+workers:
+  backend: kubernetes
+  kubernetes:
+    networkPolicy:
+      create: true
+networkPolicy:
+  create: true
+tailnetSsh:
+  enabled: true
+  authKeySecret: mindroom-tailnet-key
+  # loginServer: https://headscale.example.org
+  # tags: ["tag:mindroom-worker"] # leave unset with a tagged Headscale pre-auth key
+```
+
+Use a cluster that enforces NetworkPolicies and keep both ingress policies shown above, or equivalent isolation, so unrelated pods cannot reach the private listener or worker sshd.
+Each release's SSH policies admit only its own gateway and workers, even when releases share a worker namespace.
+On upgrade to release-scoped policies, recycle existing SSH-enabled workers if they have not picked up the new pod label and SSH is unavailable.
+The chart creates a PVC for node state and, by default, a Secret for the shared listener token; keep both across restarts.
+Offline Helm renders regenerate the token, so GitOps and `helm template` users should set `tailnetSsh.existingSecret` to an operator-managed Secret in the release namespace.
+Both the primary and gateway read the `token` key by default; set `tailnetSsh.key` if your Secret uses a different key.
+To keep your current token when switching, copy it from the chart-managed Secret into the new Secret first.
+If you rotate the token, restart both the primary and gateway so they read the same value.
+`tailnetSsh.port` defaults to `8769` and must differ from `runtime.apiPort`, `scriptGateway.port`, and `egressBroker.port`.
+The gateway policy allows DNS, internal endpoints, and outbound TCP 443 to public IPv4 by default; use `tailnetSsh.extraEgress` to admit private Headscale or relay endpoints, or the proxy if you set `tailnetSsh.httpsProxy`.
+
+## Find the hostname and connect
+
+The gateway enrolls one node per eligible worker, even before it has started, so there is no need to run a tool first.
+Find the worker's node in the tailnet control plane and use its actual MagicDNS hostname.
+For `user` and `user_agent` workers, the hostname is derived from a key containing the Matrix user ID and can expose it to the operator's tailnet.
+The operator can derive its public host key from `.links[].host_key` for that worker in the primary's `<storage_path>/tracking/tailnet_ssh.json`; share only the public key and pin it to the hostname in `~/.ssh/known_hosts`:
+
+```bash
+jq -r --arg host "v1-default-shared-research" '.links[] | select(.hostname == $host) | .host_key' \
+  <storage_path>/tracking/tailnet_ssh.json | ssh-keygen -y -f /dev/stdin
+```
+
+```bash
+ssh -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519_mindroom mindroom@v1-default-shared-research.tail1234.ts.net
+```
+
+Connect from a device signed in as the configured tailnet login, using port `22`, not the internal `2222`.
+Use a client timeout long enough for startup; the gateway may report `MindRoom: waking worker` while it waits.
+Active sessions normally keep the worker from idling out, even when a bad config reload temporarily blocks new connections and link listings.
+With idle cleanup enabled, set the worker idle timeout to at least 150 seconds (the default is 1,800 seconds).
+The gateway waits 75 seconds before counting a connection and reports every 30 seconds; leave extra time for slow startup or delayed reports.
+Password authentication and forwarding are disabled; do not use clients that forward credentials or trust and execute code from the worker.
+
+## Revoke access
+
+Remove a user's login, their keys, or their access through every opted-in agent that routes them to the worker.
+Set an agent's `tailnet_ssh: false` to stop granting access through that agent.
+Once the change takes effect, new gateway connections using the revoked login or access are refused.
+When no authorized login with a key remains, the primary stops listing the link and the gateway takes the node offline after open connections drain, retaining its state.
+A removed key cannot authenticate on a new gateway connection unless it is still authorized for that worker through another entry.
+Existing sessions last until closed or the worker stops, unless the transport itself fails.
+Removal does not clear the worker's `authorized_keys`; the next admitted gateway connection rewrites it from current config.
+
+## Troubleshooting
+
+- **No node:** Check the matching gateway token, agent opt-in, dedicated shell routing, requester access, login and key, and enrollment key validity.
+  If access depends on room membership, retry after membership has resolved; check gateway logs and the tailnet control plane for enrollment or policy problems.
+- **Node visible but SSH closes or stalls:** Check that the tailnet policy permits TCP `22` from the client and the gateway can reach the primary and worker endpoints.
+  On Docker, a wildcard or non-IP publish host can leave the link listed without a worker SSH endpoint.
+  After repeated attempts, wait a minute before retrying; the per-worker connection limit is shared by all tailnet logins for that worker.
+- **`Permission denied (publickey)`:** Use the private key matching a configured `.pub` line for the worker; check the SSH username is `mindroom`.
 
 # Agent Keys
 
