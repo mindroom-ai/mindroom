@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -16,7 +17,7 @@ from mindroom.matrix.message_builder import build_message_content, markdown_to_h
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.reactive_triggers.matching import REACTIVE_TRIGGER_DEDUPE_KEY, REACTIVE_TRIGGER_ID_KEY
 from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
-from mindroom.requester_identity import equivalent_requester_ids
+from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
 
 if TYPE_CHECKING:
     import nio
@@ -40,6 +41,15 @@ class DispatchResult:
     status: Literal["delivered", "retry", "skipped"]
     matrix_event_id: str | None = None
     reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedTargetThread:
+    """Resolved thread placement for one reactive trigger dispatch."""
+
+    thread_event_id: str | None
+    per_fire_root: bool
+    save_thread_key: bool
 
 
 def build_reactive_trigger_body(
@@ -114,28 +124,31 @@ async def dispatch_reactive_trigger(
     assert target_bot is not None
     assert target_bot.client is not None
 
-    thread_event_id, per_fire_root, save_thread_key = _resolve_target_thread(
+    resolved_thread = _resolve_target_thread(
         rule=rule,
         firing=firing,
         store=store,
     )
+    if isinstance(resolved_thread, DispatchResult):
+        return resolved_thread
+
     latest_thread_event_id: str | None = None
-    if thread_event_id is not None:
+    if resolved_thread.thread_event_id is not None:
         latest_thread_event_id = (
             await target_bot.conversation_reader.latest_thread_event_id(
                 room_id=rule.target.room_id,
-                thread_id=thread_event_id,
+                thread_id=resolved_thread.thread_event_id,
             )
-            or thread_event_id
+            or resolved_thread.thread_event_id
         )
 
     content = _build_dispatch_content(
         rule=rule,
         firing=firing,
         triage_reason=triage_reason,
-        thread_event_id=thread_event_id,
+        thread_event_id=resolved_thread.thread_event_id,
         latest_thread_event_id=latest_thread_event_id,
-        per_fire_root=per_fire_root,
+        per_fire_root=resolved_thread.per_fire_root,
         config=config,
         runtime_paths=runtime_paths,
     )
@@ -143,7 +156,7 @@ async def dispatch_reactive_trigger(
     if delivered is None:
         return DispatchResult(status="retry", reason="matrix_send_failed")
 
-    if save_thread_key and rule.target.thread_key is not None:
+    if resolved_thread.save_thread_key and rule.target.thread_key is not None:
         _persist_thread_key_binding(
             store=store,
             trigger_id=rule.trigger_id,
@@ -178,6 +191,10 @@ async def _check_dispatch_preconditions(
     if auth_rejection is not None:
         return auth_rejection
 
+    rooms = getattr(target_bot.client, "rooms", None)
+    if not isinstance(rooms, Mapping) or rule.target.room_id not in rooms:
+        return DispatchResult(status="retry", reason="target_bot_not_joined")
+
     owner_joined = await _is_owner_joined_target_room(
         target_bot.client,
         owner_user_id=rule.owner_user_id,
@@ -197,7 +214,9 @@ def _check_owner_reply_authorization(
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
 ) -> DispatchResult | None:
-    """Verify that the trigger owner is allowed to address the target agent in the target room."""
+    """Verify that the trigger owner is human and allowed to address the target agent in the target room."""
+    if not is_human_requester_id(rule.owner_user_id, config, runtime_paths):
+        return DispatchResult(status="skipped", reason="owner_not_human")
     try:
         allowed = is_sender_allowed_for_agent_reply_in_room(
             rule.owner_user_id,
@@ -304,18 +323,38 @@ def _resolve_target_thread(
     rule: ReactiveTriggerRecord,
     firing: FiringRecord,
     store: ReactiveTriggerStore,
-) -> tuple[str | None, bool, bool]:
-    """Return (thread_event_id, per_fire_root, should_save_thread_key)."""
+) -> _ResolvedTargetThread | DispatchResult:
+    """Resolve thread placement or return a skip/retry DispatchResult on mismatch or store failure."""
     if rule.target.new_thread:
-        if rule.target.thread_key is not None:
-            existing_root = store.get_thread_key_binding(rule.trigger_id, rule.target.thread_key)
-            if existing_root is not None:
-                return existing_root, False, False
-            return None, True, True
-        return None, True, False
+        return _resolve_new_thread_target(rule=rule, store=store)
     if rule.target.thread_id == "origin":
-        return firing.event.thread_id or firing.event.event_id, False, False
-    return rule.target.thread_id, False, False
+        if firing.event.room_id != rule.target.room_id:
+            return DispatchResult(status="skipped", reason="origin_room_mismatch")
+        return _ResolvedTargetThread(firing.event.thread_id or firing.event.event_id, False, False)
+    return _ResolvedTargetThread(rule.target.thread_id, False, False)
+
+
+def _resolve_new_thread_target(
+    *,
+    rule: ReactiveTriggerRecord,
+    store: ReactiveTriggerStore,
+) -> _ResolvedTargetThread | DispatchResult:
+    """Resolve per-fire or thread_key-grouped thread placement for new_thread targets."""
+    if rule.target.thread_key is None:
+        return _ResolvedTargetThread(None, True, False)
+    try:
+        existing_root = store.get_thread_key_binding(rule.trigger_id, rule.target.thread_key)
+    except ReactiveTriggerStoreError:
+        logger.warning(
+            "Failed to read reactive trigger thread_key binding",
+            trigger_id=rule.trigger_id,
+            thread_key=rule.target.thread_key,
+            exc_info=True,
+        )
+        return DispatchResult(status="retry", reason="store_error")
+    if existing_root is not None:
+        return _ResolvedTargetThread(existing_root, False, False)
+    return _ResolvedTargetThread(None, True, True)
 
 
 def _truncate_text(value: str | None, *, limit: int = _MAX_DISPATCH_TEXT_CHARS) -> str | None:

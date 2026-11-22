@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig
@@ -26,6 +27,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SO
 from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND, REACTIVE_TRIGGER_SOURCE_KIND
 from mindroom.entity_resolution import current_entity_id
 from mindroom.judgment.answers import JudgmentResult
+from mindroom.judgment.state import MAX_REQUEST_BYTES
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 from mindroom.reactive_triggers import (
@@ -36,6 +38,7 @@ from mindroom.reactive_triggers import (
     FiringRecord,
     ReactiveTriggerRecord,
     ReactiveTriggerStore,
+    ReactiveTriggerStoreError,
     RoomMessageSourceSpec,
     TriageOutcome,
     TriageSpec,
@@ -47,11 +50,12 @@ from mindroom.reactive_triggers import (
     is_reactive_trigger_event_content,
     matches_external_event,
     matches_room_message,
+    validate_safe_regex_pattern,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Collection
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -71,6 +75,7 @@ def _config(
     policy: ExternalTriggerPolicyConfig | None = None,
     aliases: dict[str, list[str]] | None = None,
     agent_users: list[str] | None = None,
+    bot_accounts: list[str] | None = None,
 ) -> Config:
     return bind_runtime_paths(
         Config(
@@ -84,6 +89,7 @@ def _config(
                 "default": ModelConfig(provider="openai", id="gpt-test"),
                 "cheap": ModelConfig(provider="openai", id="gpt-mini"),
             },
+            bot_accounts=bot_accounts or [],
             authorization=AuthorizationConfig(aliases=aliases or {}),
             external_trigger_policy=policy or ExternalTriggerPolicyConfig(enabled=True, reactive_enabled=True),
         ),
@@ -190,13 +196,17 @@ def _bot(
     running: bool = True,
     client: object | None = None,
     latest_thread_event_id: str | None = "$latest-in-thread",
+    joined_rooms: Collection[str] = (_ROOM_A, _ROOM_B),
 ) -> SimpleNamespace:
     conversation_reader = SimpleNamespace(
         latest_thread_event_id=AsyncMock(return_value=latest_thread_event_id),
     )
+    resolved_client = AsyncMock() if client is None else client
+    if client is None:
+        resolved_client.rooms = {room_id: SimpleNamespace(room_id=room_id) for room_id in joined_rooms}
     return SimpleNamespace(
         running=running,
-        client=AsyncMock() if client is None else client,
+        client=resolved_client,
         conversation_reader=conversation_reader,
     )
 
@@ -1109,3 +1119,245 @@ async def test_dispatch_reactive_trigger_new_thread_and_thread_key_binding(
     content3 = send_mock.await_args.args[2]
     assert content3["m.relates_to"]["event_id"] == "$bound-root"
     assert PER_FIRE_THREAD_ROOT_KEY not in content3
+
+
+# ---------------------------------------------------------------------------
+# Fix Round 1 tests: ReDoS guard, UTF-8 triage budget, origin room & guards
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "unsafe_pattern",
+    [
+        r"(a+)+$",
+        r"(\w+\s?)+$",
+        r"(a|aa)+$",
+        r"(?=foo)",
+        r"(?!foo)",
+        r"(?<=foo)",
+        r"(?<!foo)",
+        r"(foo)\1",
+        r"(?P<x>foo)(?P=x)",
+        r"(?:a|b){2,5}",
+        r"((?:a+))+$",
+    ],
+)
+def test_unsafe_regex_patterns_rejected_by_model_and_matching(
+    tmp_path: Path,
+    unsafe_pattern: str,
+) -> None:
+    """ReDoS-prone patterns, backreferences, and lookarounds are rejected at model and match time."""
+    expected_msg = "Pattern is unsafe: nested quantifiers, backreferences, and lookarounds are not allowed"
+    with pytest.raises(ValueError, match=re.escape(expected_msg)):
+        validate_safe_regex_pattern(unsafe_pattern)
+
+    with pytest.raises(ValidationError, match=re.escape(expected_msg)):
+        RoomMessageSourceSpec(room_id=_ROOM_A, pattern=unsafe_pattern)
+
+    # Defensive guard in matches_room_message refuses unsafe patterns even if constructed bypassing validation.
+    config = _config(tmp_path)
+    spec = RoomMessageSourceSpec.model_construct(room_id=_ROOM_A, pattern=unsafe_pattern, senders=[])
+    assert not matches_room_message(
+        spec,
+        _room_event(room_id=_ROOM_A, text="a" * 80 + "!"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+
+
+def test_safe_regex_patterns_pass_and_text_is_clipped_to_4096_chars(tmp_path: Path) -> None:
+    """Safe patterns compile and match within the 4,096-character search window."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+
+    spec_alt = RoomMessageSourceSpec(room_id=_ROOM_A, pattern=r"urgent|outage|sev[12]")
+    assert matches_room_message(
+        spec_alt,
+        _room_event(room_id=_ROOM_A, text="SEV1 incident opened"),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    spec_deploy = RoomMessageSourceSpec(room_id=_ROOM_A, pattern=r"\bdeploy\s+failed\b")
+    assert matches_room_message(
+        spec_deploy,
+        _room_event(room_id=_ROOM_A, text="prod deploy   failed at step 3"),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    # Text past the 4,096-char prefix is not searched.
+    long_tail_event = _room_event(room_id=_ROOM_A, text=("x" * 4_100) + " deploy failed")
+    assert not matches_room_message(spec_deploy, long_tail_event, config=config, runtime_paths=runtime_paths)
+
+    # Match within the first 4,096 chars succeeds.
+    in_window_event = _room_event(room_id=_ROOM_A, text=("x" * 4_000) + " deploy failed")
+    assert matches_room_message(spec_deploy, in_window_event, config=config, runtime_paths=runtime_paths)
+
+
+def test_origin_target_requires_same_source_and_target_room() -> None:
+    """ReactiveTriggerRecord rejects target.thread_id=origin across different rooms."""
+    with pytest.raises(ValidationError, match=r"target\.room_id to match source\.room_id"):
+        ReactiveTriggerRecord(
+            trigger_id="cross_room_origin",
+            owner_user_id=_OWNER,
+            source=RoomMessageSourceSpec(room_id=_ROOM_A),
+            target=TriggerTargetSpec(
+                agent="research",
+                room_id=_ROOM_B,
+                thread_id="origin",
+                prompt="Reply in origin.",
+            ),
+            created_at=1000.0,
+            updated_at=1000.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_evaluate_triage_budgets_multibyte_cjk_and_emoji_by_utf8_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-kilobyte CJK and emoji payloads stay under MAX_REQUEST_BYTES so request.complete is True."""
+    config = _config(tmp_path)
+    captured_requests: list[JudgmentRequest] = []
+
+    async def fake_evaluator(request: JudgmentRequest) -> JudgmentResult[bool]:
+        captured_requests.append(request)
+        return JudgmentResult(
+            decision=True,
+            probability=None,
+            failure=None,
+            model_id="gpt-mini",
+            latency_ms=4,
+            input_tokens=30,
+            output_tokens=2,
+            state_bytes=request.state_bytes,
+        )
+
+    monkeypatch.setattr(
+        "mindroom.reactive_triggers.triage.create_judgment_evaluator",
+        lambda *_args, **_kwargs: fake_evaluator,
+    )
+
+    multibyte_event = _external_event(
+        title="🔥" * 3_000,
+        summary="日本語アラート" * 2_000,
+        text="🚨緊急障害発生テスト" * 3_000,
+        data={"detail": "🚀本番環境エラー" * 2_000},
+    )
+    rule = _rule(triage=TriageSpec(instructions="Act on production outages.", provider="llm", model="cheap"))
+    outcome = await evaluate_triage(rule, multibyte_event, config=config, runtime_paths=runtime_paths_for(config))
+
+    assert outcome.act is True
+    assert len(captured_requests) == 1
+    assert captured_requests[0].complete is True
+    assert captured_requests[0].state_bytes <= MAX_REQUEST_BYTES
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_dispatch_rejects_non_human_owner_unjoined_bot_origin_mismatch_and_store_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dispatch enforces human owner, bot room membership, origin room match, and thread_key store errors."""
+    bot_owner = "@ci_bot:localhost"
+    config = _config(tmp_path, agent_users=[_OWNER, bot_owner], bot_accounts=[bot_owner])
+    runtime_paths = runtime_paths_for(config)
+    store = ReactiveTriggerStore(runtime_paths)
+    memberships = AgentReplyMembershipIndex()
+
+    read_state_mock = AsyncMock(return_value=_joined_room_state(_ROOM_B, _OWNER))
+    send_mock = AsyncMock(return_value=DeliveredMatrixEvent(event_id="$never", content_sent={}))
+    monkeypatch.setattr("mindroom.reactive_triggers.dispatch.read_room_state", read_state_mock)
+    monkeypatch.setattr("mindroom.reactive_triggers.dispatch.send_matrix_message", send_mock)
+
+    # 1. Non-human owner (configured bot account) -> skipped / owner_not_human.
+    res_bot_owner = await dispatch_reactive_trigger(
+        rule=_rule(owner_user_id=bot_owner),
+        firing=_firing(),
+        triage_reason=None,
+        store=store,
+        target_bot=_bot(),
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=memberships,
+    )
+    assert res_bot_owner == DispatchResult(status="skipped", reason="owner_not_human")
+    read_state_mock.assert_not_awaited()
+    send_mock.assert_not_awaited()
+
+    # 2. Target bot not joined to target room -> retry / target_bot_not_joined without calling read_room_state.
+    res_not_joined = await dispatch_reactive_trigger(
+        rule=_rule(owner_user_id=_OWNER),
+        firing=_firing(),
+        triage_reason=None,
+        store=store,
+        target_bot=_bot(joined_rooms=(_ROOM_A,)),
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=memberships,
+    )
+    assert res_not_joined == DispatchResult(status="retry", reason="target_bot_not_joined")
+    read_state_mock.assert_not_awaited()
+    send_mock.assert_not_awaited()
+
+    # 3. Defensive origin room mismatch -> skipped / origin_room_mismatch.
+    monkeypatch.setattr(
+        "mindroom.reactive_triggers.dispatch.read_room_state",
+        AsyncMock(return_value=_joined_room_state(_ROOM_A, _OWNER)),
+    )
+    origin_rule = _rule(
+        trigger_id="origin_same_room",
+        source=RoomMessageSourceSpec(room_id=_ROOM_A),
+        target=TriggerTargetSpec(agent="research", room_id=_ROOM_A, thread_id="origin", prompt="Reply."),
+    )
+    res_origin_mismatch = await dispatch_reactive_trigger(
+        rule=origin_rule,
+        firing=_firing(
+            trigger_id="origin_same_room",
+            event=_room_event(room_id=_ROOM_B, event_id="$other-room-evt"),
+        ),
+        triage_reason=None,
+        store=store,
+        target_bot=_bot(),
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=memberships,
+    )
+    assert res_origin_mismatch == DispatchResult(status="skipped", reason="origin_room_mismatch")
+    send_mock.assert_not_awaited()
+
+    # 4. ReactiveTriggerStoreError on get_thread_key_binding -> retry / store_error.
+    monkeypatch.setattr(
+        "mindroom.reactive_triggers.dispatch.read_room_state",
+        AsyncMock(return_value=_joined_room_state(_ROOM_B, _OWNER)),
+    )
+    monkeypatch.setattr(
+        store,
+        "get_thread_key_binding",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ReactiveTriggerStoreError("db locked")),
+    )
+    keyed_rule = _rule(
+        trigger_id="store_err_rule",
+        target=TriggerTargetSpec(
+            agent="research",
+            room_id=_ROOM_B,
+            new_thread=True,
+            thread_key="deploy-1",
+            prompt="Track deploy.",
+        ),
+    )
+    res_store_err = await dispatch_reactive_trigger(
+        rule=keyed_rule,
+        firing=_firing(trigger_id="store_err_rule"),
+        triage_reason=None,
+        store=store,
+        target_bot=_bot(),
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=memberships,
+    )
+    assert res_store_err == DispatchResult(status="retry", reason="store_error")
+    send_mock.assert_not_awaited()

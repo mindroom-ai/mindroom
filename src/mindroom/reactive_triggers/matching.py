@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND, REACTIVE_TRIGGER_SOURCE_KIND
+from mindroom.logging_config import get_logger
+from mindroom.reactive_triggers.models import validate_safe_regex_pattern
 from mindroom.requester_identity import equivalent_requester_ids
 
 if TYPE_CHECKING:
@@ -19,9 +21,12 @@ if TYPE_CHECKING:
         TriggerEvent,
     )
 
+logger = get_logger(__name__)
+
 REACTIVE_TRIGGER_ID_KEY = "io.mindroom.reactive_trigger.id"
 REACTIVE_TRIGGER_DEDUPE_KEY = "io.mindroom.reactive_trigger.dedupe_key"
 _EXTERNAL_TRIGGER_ID_KEY = "io.mindroom.external_trigger.id"
+_MAX_PATTERN_SEARCH_CHARS = 4_096
 _MISSING = object()
 
 
@@ -44,16 +49,16 @@ def matches_room_message(
         return False
     if spec.thread_id is not None and event.thread_id != spec.thread_id:
         return False
-    if spec.senders:
-        if event.actor is None:
-            return False
-        actor_ids = {event.actor, *equivalent_requester_ids(event.actor, config, runtime_paths)}
-        if not any(
-            sender in actor_ids or bool(actor_ids & equivalent_requester_ids(sender, config, runtime_paths))
-            for sender in spec.senders
-        ):
-            return False
-    return not (spec.pattern is not None and re.search(spec.pattern, event.text or "", re.IGNORECASE) is None)
+    if spec.senders and not _matches_configured_senders(
+        spec.senders,
+        event.actor,
+        config=config,
+        runtime_paths=runtime_paths,
+    ):
+        return False
+    if spec.pattern is not None:
+        return _matches_safe_pattern(spec.pattern, event.text or "")
+    return True
 
 
 def matches_external_event(spec: ExternalEventSourceSpec, event: TriggerEvent) -> bool:
@@ -65,6 +70,33 @@ def matches_external_event(spec: ExternalEventSourceSpec, event: TriggerEvent) -
         if actual is _MISSING or type(actual) is not type(expected) or actual != expected:
             return False
     return True
+
+
+def _matches_configured_senders(
+    senders: list[str],
+    actor: str | None,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether actor matches any configured sender or its equivalent bridge aliases."""
+    if actor is None:
+        return False
+    actor_ids = {actor, *equivalent_requester_ids(actor, config, runtime_paths)}
+    return any(
+        sender in actor_ids or bool(actor_ids & equivalent_requester_ids(sender, config, runtime_paths))
+        for sender in senders
+    )
+
+
+def _matches_safe_pattern(pattern: str, text: str) -> bool:
+    """Defensively validate pattern safety and search a bounded text prefix."""
+    try:
+        validate_safe_regex_pattern(pattern)
+        return re.search(pattern, text[:_MAX_PATTERN_SEARCH_CHARS], re.IGNORECASE) is not None
+    except (ValueError, re.error):
+        logger.warning("Rejected unsafe or invalid reactive trigger regex pattern during matching", exc_info=True)
+        return False
 
 
 def _lookup_data_key(data: Mapping[str, Any], key: str) -> object:

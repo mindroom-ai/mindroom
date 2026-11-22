@@ -38,8 +38,10 @@ _WHEN_FALSE = "The event does not satisfy the trigger condition; stay silent and
 _DEFAULT_LLM_TIMEOUT_SECONDS = 5.0
 _DEFAULT_PROBABILITY_THRESHOLD = 0.8
 _DEFAULT_PROBABILITY_TIMEOUT_SECONDS = 1.5
-_MAX_TRIAGE_DATA_CHARS = 2_000
-_MAX_TRIAGE_BLOCK_CHARS = 10_000
+_MAX_TRIAGE_FIELD_BYTES = 2_000
+_MAX_TRIAGE_DATA_BYTES = 2_000
+_MAX_TRIAGE_BLOCK_BYTES = 10_000
+_BYTE_CLIP_MARKER = "\n[... truncated for byte budget ...]\n"
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,7 +149,9 @@ def _build_judgment_config(
             LLMJudgmentConfig(
                 provider="llm",
                 model=triage.model,
-                timeout_seconds=triage.timeout_seconds or _DEFAULT_LLM_TIMEOUT_SECONDS,
+                timeout_seconds=(
+                    _DEFAULT_LLM_TIMEOUT_SECONDS if triage.timeout_seconds is None else triage.timeout_seconds
+                ),
             ),
             None,
         )
@@ -167,12 +171,35 @@ def _build_judgment_config(
     ), None
 
 
+def _clip_triage_text(text: str | None, *, max_bytes: int = _MAX_TRIAGE_FIELD_BYTES) -> str | None:
+    """Clip a text field by characters and UTF-8 byte budget."""
+    if text is None:
+        return None
+    return _clip_utf8_bytes(clip_judgment_text(text), max_bytes=max_bytes)
+
+
+def _clip_utf8_bytes(text: str, *, max_bytes: int) -> str:
+    """Clip text to at most max_bytes UTF-8 bytes while preserving start and end."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    marker_bytes = len(_BYTE_CLIP_MARKER.encode("utf-8"))
+    budget = max_bytes - marker_bytes
+    if budget <= 0:
+        return encoded[:max_bytes].decode("utf-8", errors="ignore")
+    head_budget = budget // 2
+    tail_budget = budget - head_budget
+    head = encoded[:head_budget].decode("utf-8", errors="ignore")
+    tail = encoded[-tail_budget:].decode("utf-8", errors="ignore") if tail_budget > 0 else ""
+    return f"{head}{_BYTE_CLIP_MARKER}{tail}"
+
+
 def _format_triage_event(event: TriggerEvent) -> str:
-    """Format one trigger event inside explicit untrusted-data boundaries."""
+    """Format one trigger event inside explicit UTF-8 byte-bounded untrusted-data boundaries."""
     data_value: Any = event.data
     data_json = json.dumps(event.data, ensure_ascii=False, sort_keys=True, default=str)
-    if len(data_json) > _MAX_TRIAGE_DATA_CHARS:
-        data_value = clip_judgment_text(data_json)
+    if len(data_json.encode("utf-8")) > _MAX_TRIAGE_DATA_BYTES:
+        data_value = _clip_triage_text(data_json, max_bytes=_MAX_TRIAGE_DATA_BYTES)
 
     payload = {
         "source_type": event.source_type,
@@ -181,16 +208,15 @@ def _format_triage_event(event: TriggerEvent) -> str:
         "actor": event.actor,
         "room_id": event.room_id,
         "thread_id": event.thread_id,
-        "title": clip_judgment_text(event.title) if event.title is not None else None,
-        "summary": clip_judgment_text(event.summary) if event.summary is not None else None,
-        "text": clip_judgment_text(event.text) if event.text is not None else None,
+        "title": _clip_triage_text(event.title),
+        "summary": _clip_triage_text(event.summary),
+        "text": _clip_triage_text(event.text),
         "data": data_value,
     }
     serialized = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str)
-    if len(serialized) > _MAX_TRIAGE_BLOCK_CHARS:
-        serialized = clip_judgment_text(serialized)
     safe_serialized = serialized.replace("</", r"<\/")
-    return f"<untrusted_event_data>\n{safe_serialized}\n</untrusted_event_data>"
+    bounded_serialized = _clip_utf8_bytes(safe_serialized, max_bytes=_MAX_TRIAGE_BLOCK_BYTES)
+    return f"<untrusted_event_data>\n{bounded_serialized}\n</untrusted_event_data>"
 
 
 def _format_triage_reason(provider: str, model_id: str | None, probability: float | None) -> str:

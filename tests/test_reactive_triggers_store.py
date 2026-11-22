@@ -327,12 +327,19 @@ def test_target_and_record_origin_validations() -> None:
     )
     assert valid_new_thread.thread_key == "pr-4198"
 
-    # origin allowed for room_message
+    # origin allowed for same-room room_message
     room_record = _make_record(
         source=RoomMessageSourceSpec(room_id=_ROOM_A),
         target=TriggerTargetSpec(agent="watcher", room_id=_ROOM_A, thread_id="origin", prompt="reply"),
     )
     assert room_record.target.thread_id == "origin"
+
+    # origin rejected when target room differs from source room
+    with pytest.raises(ValidationError, match=r"target\.room_id to match source\.room_id"):
+        _make_record(
+            source=RoomMessageSourceSpec(room_id=_ROOM_A),
+            target=TriggerTargetSpec(agent="watcher", room_id=_ROOM_B, thread_id="origin", prompt="reply"),
+        )
 
     # origin rejected for thread_tag and external_event
     with pytest.raises(ValidationError):
