@@ -292,7 +292,7 @@ A worker that was to import plugins ahead of its calls gives that up too, and al
 
 Alert on any record.
 Check the worker's storage and its CPU limit, and how many workers started at once.
-A worker image without `uv`, or whose Python lacks a bundled pip wheel, logs this on every start, because only `uv` creates the Python environment within a time limit; the first call then creates it, as before.
+A worker image without `uv`, or whose Python lacks a bundled pip wheel, logs this whenever a worker has to create its Python environment, because only `uv` creates it within a time limit; the first call then creates it, as before.
 
 ### `sandbox_forkserver_plugin_preload_failed`
 

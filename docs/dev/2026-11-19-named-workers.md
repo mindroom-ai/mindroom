@@ -84,6 +84,8 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   Importing in the template runs a plugin before the call's working directory and environment apply, and shares its threads, open files, and state with every call, which is only correct for a plugin that promises it, so `worker_preload` in the plugin manifest defaults to off.
   The primary lists the plugins that opt in in the worker's startup manifest, because a worker pod has no config file and would otherwise learn its plugins only from the first request; listing every enabled plugin would recreate all workers whenever any plugin is added or disabled.
   It lists only the opt-in plugins that lead the plugin list, and the template imports them only when the worker's own manifests opt in too, because the primary and a worker can hold different copies of a plugin.
+  A plugin configured by a path under `~` or relative to the config file is not listed, because the template resolves such a path under the worker's HOME and a call under its workspace's.
+  A caller that only shows a worker, such as the Computer viewer, does not wait for the worker's setup, because it needs the worker to answer and not to run tools.
   A request whose plugins do not begin with what the template imported runs in a second, plain template that never imported them, started on the first such request: an import's global effects, such as a registered YAML constructor, cannot be undone in the process that ran it, and starting an interpreter per call would cost the whole tool import each time.
   So no request replaces a template another request is about to fork from, at the price of a second template's memory in a worker that serves both kinds of request.
   The runner chooses the template before it dispatches, so each request is dispatched once and keeps one deadline; a child that decided for itself needed a second dispatch.
@@ -120,6 +122,7 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
 - Each named worker starts with empty package caches and costs a cold start, and nodes the autoscaler adds can take longer than `readyTimeoutSeconds`.
 - An opt-in plugin's edited files and upgraded packages are not reloaded until the worker restarts.
 - A worker whose preloading template ends, or whose venv is rebuilt, imports its plugins in every call until it restarts.
+- A worker told to stop ends its preload at once, but a venv creation or the start of the plain template that its setup already began runs to its end first.
 - The first call that the preload does not suit waits for the plain template to start, as the first call of a worker did before.
 - A plugin that opts in after the config was applied is preloaded only by workers started after the config is applied again.
 - The runner process still imports a request's plugins itself on its first request, and admission still lists the worker Deployments once per new worker under one lock.
