@@ -159,6 +159,9 @@ def _create_local_worker_venv(venv_dir: Path, timeout_seconds: float | None = No
     uv_path = shutil.which("uv")
     bundled_pip_dir = Path(sysconfig.get_path("stdlib")) / "ensurepip" / "_bundled"
     if uv_path is None or not any(bundled_pip_dir.glob("pip-*.whl")):
+        if timeout_seconds is not None:
+            msg = "Only uv with a bundled pip creates a worker environment within a time limit."
+            raise WorkerBackendError(msg)
         venv.EnvBuilder(with_pip=True, system_site_packages=True).create(venv_dir)
         return
     _create_uv_worker_venv(venv_dir, uv_path=uv_path, bundled_pip_dir=bundled_pip_dir, timeout_seconds=timeout_seconds)

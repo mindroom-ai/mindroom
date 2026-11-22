@@ -1033,30 +1033,27 @@ class KubernetesResourceManager:
         """Return the first successful ``/healthz`` answer from one worker through its Service."""
         healthz_url = f"{service_host(worker_id, self.config.namespace, self.config.worker_port)}/healthz"
         deadline = time.time() + timeout_seconds
-        answer_timeout = min(_HEALTHZ_TIMEOUT_SECONDS, timeout_seconds)
         # A Service drops connections until its Endpoints propagate, so the first try gives up on connecting fast,
         # and each later one allows a slower handshake, up to the time a whole answer may take.
         connect_timeout = _HEALTHZ_FIRST_CONNECT_TIMEOUT_SECONDS
-        with httpx.Client(timeout=answer_timeout) as client:
+        with httpx.Client(timeout=min(_HEALTHZ_TIMEOUT_SECONDS, timeout_seconds)) as client:
             while True:
-                # A try that leaves no time for another one may take as long as the single try it replaces.
-                if deadline - time.time() <= connect_timeout + _HEALTHZ_RETRY_INTERVAL_SECONDS:
-                    connect_timeout = answer_timeout
+                remaining = deadline - time.time()
+                # No try outlasts the time that is left, and one that leaves no time for another may use all of it.
+                answer_timeout = min(_HEALTHZ_TIMEOUT_SECONDS, remaining)
+                last = remaining <= connect_timeout + _HEALTHZ_RETRY_INTERVAL_SECONDS
+                timeout = httpx.Timeout(answer_timeout, connect=answer_timeout if last else connect_timeout)
                 try:
-                    response = client.get(
-                        healthz_url,
-                        timeout=httpx.Timeout(answer_timeout, connect=min(connect_timeout, answer_timeout)),
-                    )
+                    response = client.get(healthz_url, timeout=timeout)
                 except httpx.HTTPError:
                     response = None
                 if response is not None and response.is_success:
                     return response
-                remaining = deadline - time.time()
-                if remaining <= 0:
+                if last or deadline - time.time() <= _HEALTHZ_RETRY_INTERVAL_SECONDS:
                     msg = f"Kubernetes worker '{worker_id}' did not answer its health check within {timeout_seconds:.0f}s."
                     raise WorkerStartTimeoutError(msg)
-                connect_timeout *= 2
-                time.sleep(min(_HEALTHZ_RETRY_INTERVAL_SECONDS, remaining))
+                connect_timeout = min(connect_timeout * 2, _HEALTHZ_TIMEOUT_SECONDS)
+                time.sleep(_HEALTHZ_RETRY_INTERVAL_SECONDS)
 
     def _apply_object(
         self,

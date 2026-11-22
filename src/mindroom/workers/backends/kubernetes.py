@@ -460,10 +460,16 @@ class KubernetesWorkerBackend:
         """
         reporter.preparing()
         deadline = time.monotonic() + self.config.setup_timeout_seconds
-        while (setup := _reported_setup(health)) == "preparing" and time.monotonic() < deadline:
-            time.sleep(_SETUP_POLL_INTERVAL_SECONDS)
+        while (setup := _reported_setup(health)) == "preparing":
+            time.sleep(min(_SETUP_POLL_INTERVAL_SECONDS, max(deadline - time.monotonic(), 0.0)))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
-                health = self._resources.read_worker_health(worker_id, timeout_seconds=_SETUP_HEALTH_TIMEOUT_SECONDS)
+                health = self._resources.read_worker_health(
+                    worker_id,
+                    timeout_seconds=min(_SETUP_HEALTH_TIMEOUT_SECONDS, remaining),
+                )
             except WorkerBackendError:
                 break
         if setup is not None and setup != "ready":
