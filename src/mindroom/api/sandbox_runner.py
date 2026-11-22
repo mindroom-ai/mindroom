@@ -71,6 +71,7 @@ from mindroom.script_runs.models import script_run_id_from_worker_key
 from mindroom.shell import supervisor as shell_supervisor
 from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.terminal.session import SupportsTerminalLaunch, TerminalError, TerminalLaunch
+from mindroom.timing import elapsed_ms_between, elapsed_ms_since
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
 from mindroom.tool_system.agno_toolkits import requires_connect, toolkit_function
 from mindroom.tool_system.catalog import (
@@ -445,7 +446,7 @@ async def _eager_worker_setup(app: FastAPI, runtime_paths: RuntimePaths, preload
         if (preloading := sandbox_forkserver.preloading_forkserver()) is not None:
             preloading.serves = preloaded
         app.state.worker_setup = "ready"
-        logger.info("sandbox_worker_eager_setup_ready", setup_ms=round((time.monotonic() - started_at) * 1000, 1))
+        logger.info("sandbox_worker_eager_setup_ready", setup_ms=elapsed_ms_since(started_at))
 
 
 def _warm_forkserver_template(paths: LocalWorkerStatePaths, budget_seconds: float) -> None:
@@ -1635,7 +1636,7 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
         stage_ends.append(time.monotonic())
 
     stages = zip(("config_ms", "plugins_ms", "tool_ms"), stage_ends, stage_ends[1:], strict=False)
-    timing: dict[str, object] = {stage: round((end - start) * 1000, 1) for stage, start, end in stages}
+    timing: dict[str, object] = {stage: elapsed_ms_between(start, end) for stage, start, end in stages}
     tool_output = captured_out.getvalue() + captured_err.getvalue()
     return 0, tool_output, sandbox_protocol.response_marker_payload(response.model_dump_json(), timing=timing)
 
