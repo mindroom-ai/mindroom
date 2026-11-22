@@ -217,7 +217,7 @@ export function VoiceConfig() {
             <Info className="h-4 w-4" />
             <AlertDescription>
               {voiceConfig.enabled
-                ? "Voice messages will be automatically transcribed and processed. The router agent handles all voice messages to avoid duplicates."
+                ? "Voice messages will be automatically transcribed and answered by one agent or team."
                 : "Voice message handling is currently disabled. You can still review and edit settings below."}
             </AlertDescription>
           </Alert>
