@@ -195,7 +195,9 @@ def _admit(  # noqa: C901 - keep the before/after wake and projection checks tog
             terminals = agent_terminals(identity.agent_name, config, paths, identity, create=True)
             if terminals is None:
                 raise _ConnectRefused(409, _NO_SHELL)
-            ready = manager.ensure_worker(WorkerSpec(key, private_agent_names=target.private_agent_names))
+            # sshd needs a worker that answers, not the tool runtime that its setup prepares.
+            spec = WorkerSpec(key, private_agent_names=target.private_agent_names, wait_for_setup=False)
+            ready = manager.ensure_worker(spec)
     except (WorkerBackendError, OSError):
         raise _ConnectRefused(503, "The worker did not start.") from None
     if ready.status != "ready":
