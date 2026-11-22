@@ -10,7 +10,6 @@ import signal
 import sys
 import threading
 from contextlib import contextmanager
-from io import StringIO
 from typing import TYPE_CHECKING, Self
 from uuid import uuid4
 
@@ -32,9 +31,11 @@ from tests.test_workers_run_control import (
     SETTLE_TIMEOUT_SECONDS,
     _make_app,
     _make_owner,
+    _NoStdin,
     capture_bash_batch,
     response_cli_lifetime,
 )
+from tests.workers_run_frames import FakeStream, command_frames
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterator
@@ -69,18 +70,19 @@ def _shell_entrypoint(
     return shell.functions["run_shell_command"]
 
 
-def _cli_with_completed(
-    monkeypatch: pytest.MonkeyPatch,
-    outcome: str,
-    **extra: object,
-) -> list[str]:
+def _cli_with_stream(monkeypatch: pytest.MonkeyPatch, frames: list[dict[str, object]]) -> list[str]:
+    """Answer the CLI's submit with a running call whose stream is ``frames``."""
     submitted: list[str] = []
 
-    class Client:
+    class Client(_NoStdin):
         def operation(self, payload: dict[str, object]) -> dict[str, object]:
             call_id = str(payload["call_id"])
             submitted.append(call_id)
-            return {"status": "completed", "call_id": call_id, "outcome": outcome, **extra}
+            return {"status": "running", "call_id": call_id}
+
+        def stream(self, call_id: str) -> Iterator[dict[str, object]]:
+            del call_id
+            return iter(frames)
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     return submitted
@@ -108,17 +110,20 @@ async def test_item7_program_that_cannot_start_exits_as_a_shell_reports_it(
     exit_code: int,
     reason: str,
 ) -> None:
-    """A missing or non-executable program ends as a command that failed with a shell's exit code and words."""
+    """A missing or non-executable program ends as a command that failed with a shell's exit code and words.
+
+    The shell call's own result keeps them under ``Stderr:``; `workers run`, which streams, writes them to stderr.
+    """
     (tmp_path / "not-executable.txt").write_text("hello\n")
     program = program.format(tmp_path=tmp_path)
     shell_result = await _shell_entrypoint(tmp_path, monkeypatch)([program], worker="w1")
     assert shell_result == format_shell_completion("", f"{program}: {reason}", return_code=exit_code)
 
-    _cli_with_completed(monkeypatch, f"[worker: w1]\n{shell_result}")
+    said = f"{program}: {reason}\n"
+    _cli_with_stream(monkeypatch, command_frames(stderr=said.encode(), code=exit_code, header="[worker: w1]"))
     assert main(["workers", "run", "w1", "--", program]) == exit_code
     output = capsys.readouterr()
-    assert output.out == f"Stderr:\n{program}: {reason}\n"
-    assert output.err == ""
+    assert (output.out, output.err) == ("", said)
 
 
 @pytest.mark.asyncio
@@ -153,21 +158,14 @@ def _run_signalled_cli(
         installed[signum] = handler
         return prev
 
-    class Client:
+    class Client(_NoStdin):
         def operation(self, payload: dict[str, object]) -> dict[str, object]:
             call_id = str(payload["call_id"])
             submitted.append(call_id)
             return {"status": "running", "call_id": call_id}
 
-        def receipt(
-            self,
-            call_id: str,
-            *,
-            timeout: float = 30,
-            wait: float | None = None,
-            after_progress: int | None = None,
-        ) -> dict[str, object]:
-            del call_id, timeout, wait, after_progress
+        def stream(self, call_id: str) -> Iterator[dict[str, object]]:
+            del call_id
             handler = installed[int(sig)]
             assert callable(handler)
             handler(int(sig), None)
@@ -199,6 +197,23 @@ def test_item10_never_ran_cancel_prints_never_ran_notice_without_call_id(
     assert code == 128 + int(signal.SIGTERM)
     assert output.out == ""
     assert output.err == "mindroom-agent: cancelled by SIGTERM; the command never ran in worker f2\n"
+    assert call_id not in output.err
+
+
+def test_item10_confirmed_cancel_says_the_command_was_stopped(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel the command's exit confirmed says the command was stopped, which needs no call id to follow up."""
+    code, call_id = _run_signalled_cli(
+        monkeypatch,
+        worker="f2",
+        cancel_response={"status": "cancelled", "cancel_outcome": "stopped"},
+    )
+    output = capsys.readouterr()
+    assert code == 128 + int(signal.SIGTERM)
+    assert output.out == ""
+    assert output.err == "mindroom-agent: cancelled by SIGTERM; stopped the command in worker f2\n"
     assert call_id not in output.err
 
 
@@ -401,21 +416,20 @@ async def test_item10_server_cancel_in_flight_leaves_cancel_outcome_none(
 # ---------------------------------------------------------------------------
 
 
-class _FakeTtyStderr(StringIO):
+class _FakeTtyStderr(FakeStream):
     def __init__(self, *, is_tty: bool, fail_after: int | None = None) -> None:
-        super().__init__()
-        self._is_tty = is_tty
+        super().__init__(is_tty=is_tty)
         self._fail_after = fail_after
         self._writes = 0
-
-    def isatty(self) -> bool:
-        return self._is_tty
 
     def write(self, s: str) -> int:
         self._writes += 1
         if self._fail_after is not None and self._writes > self._fail_after:
             raise OSError(errno.EPIPE, "broken pipe")
         return super().write(s)
+
+
+_PROGRESS = ("starting worker f1...", "starting worker f1... (5s)", "worker f1 ready (7s)")
 
 
 def _run_progress_cli(
@@ -425,33 +439,14 @@ def _run_progress_cli(
     header: str = "[worker: f1, started]",
     body: str = "done",
 ) -> tuple[int, str, str]:
-    receipts = iter(
+    stdout_stream = FakeStream()
+    _cli_with_stream(
+        monkeypatch,
         [
-            {"status": "running", "progress": "starting worker f1...", "progress_revision": 1},
-            {"status": "running", "progress": "starting worker f1... (5s)", "progress_revision": 2},
-            {"status": "running", "progress": "worker f1 ready (7s)", "progress_revision": 3},
-            {"status": "completed", "outcome": f"{header}\n{format_shell_completion(body, None, return_code=0)}"},
+            *({"t": "progress", "text": text} for text in _PROGRESS),
+            *command_frames(f"{body}\n".encode(), header=header),
         ],
     )
-
-    class Client:
-        def operation(self, payload: dict[str, object]) -> dict[str, object]:
-            return {"status": "queued", "call_id": payload["call_id"]}
-
-        def receipt(
-            self,
-            call_id: str,
-            *,
-            timeout: float = 30,
-            wait: float | None = None,
-            after_progress: int | None = None,
-        ) -> dict[str, object]:
-            del call_id, timeout, wait, after_progress
-            return next(receipts)
-
-    stdout_stream = StringIO()
-    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
-    monkeypatch.setattr("mindroom.agent_cli.main._POLL_FLOOR_SECONDS", 0.0)
     monkeypatch.setattr(sys, "stderr", stderr_stream)
     monkeypatch.setattr(sys, "stdout", stdout_stream)
     code = main(["workers", "run", "f1", "--", "echo", "done"])
@@ -496,56 +491,19 @@ def test_item11_tty_progress_ends_with_newline_before_command_output_without_oth
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     r"""When there are no further CLI lines after progress, the progress line still ends with \n before stdout."""
-    events: list[tuple[str, str]] = []
-
-    class _RecordingStream(StringIO):
-        def __init__(self, name: str, *, is_tty: bool = False) -> None:
-            super().__init__()
-            self._name = name
-            self._is_tty = is_tty
-
-        def isatty(self) -> bool:
-            return self._is_tty
-
-        def write(self, s: str) -> int:
-            events.append((self._name, s))
-            return super().write(s)
-
-    receipts = iter(
-        [
-            {"status": "running", "progress": "starting worker f1...", "progress_revision": 1},
-            {"status": "completed", "outcome": "[worker: f1]\nhello"},
-        ],
+    events: list[tuple[str, bytes]] = []
+    _cli_with_stream(
+        monkeypatch,
+        [{"t": "progress", "text": "starting worker f1..."}, *command_frames(b"hello\n", header="[worker: f1]")],
     )
-
-    class Client:
-        def operation(self, payload: dict[str, object]) -> dict[str, object]:
-            return {"status": "queued", "call_id": payload["call_id"]}
-
-        def receipt(
-            self,
-            call_id: str,
-            *,
-            timeout: float = 30,
-            wait: float | None = None,
-            after_progress: int | None = None,
-        ) -> dict[str, object]:
-            del call_id, timeout, wait, after_progress
-            return next(receipts)
-
-    err_stream = _RecordingStream("err", is_tty=True)
-    out_stream = _RecordingStream("out")
-    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
-    monkeypatch.setattr("mindroom.agent_cli.main._POLL_FLOOR_SECONDS", 0.0)
-    monkeypatch.setattr(sys, "stderr", err_stream)
-    monkeypatch.setattr(sys, "stdout", out_stream)
+    monkeypatch.setattr(sys, "stderr", FakeStream(is_tty=True, name="err", log=events))
+    monkeypatch.setattr(sys, "stdout", FakeStream(name="out", log=events))
 
     assert main(["workers", "run", "f1", "--", "echo", "hello"]) == 0
     assert events == [
-        ("err", "\r\x1b[Kmindroom-agent: starting worker f1..."),
-        ("err", "\n"),
-        ("out", "hello"),
-        ("out", "\n"),
+        ("err", b"\r\x1b[Kmindroom-agent: starting worker f1..."),
+        ("err", b"\n"),
+        ("out", b"hello\n"),
     ]
 
 
@@ -584,24 +542,13 @@ def test_item11_tty_progress_ends_with_newline_before_cancel_notice(monkeypatch:
         installed[signum] = handler
         return prev
 
-    class Client:
+    class Client(_NoStdin):
         def operation(self, payload: dict[str, object]) -> dict[str, object]:
-            return {
-                "status": "running",
-                "call_id": payload["call_id"],
-                "progress": "starting worker f1...",
-                "progress_revision": 1,
-            }
+            return {"status": "running", "call_id": payload["call_id"]}
 
-        def receipt(
-            self,
-            call_id: str,
-            *,
-            timeout: float = 30,
-            wait: float | None = None,
-            after_progress: int | None = None,
-        ) -> dict[str, object]:
-            del call_id, timeout, wait, after_progress
+        def stream(self, call_id: str) -> Iterator[dict[str, object]]:
+            del call_id
+            yield {"t": "progress", "text": "starting worker f1..."}
             handler = installed[int(signal.SIGTERM)]
             assert callable(handler)
             handler(int(signal.SIGTERM), None)

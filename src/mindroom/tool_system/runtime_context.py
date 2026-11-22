@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -28,7 +29,6 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.placements import placement_for_session
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from pathlib import Path
 
@@ -460,6 +460,51 @@ _CALL_CANCEL_NEVER_RAN_HOOK: ContextVar[Callable[[], None] | None] = ContextVar(
 )
 
 
+class CallOutputStream:
+    """The frames of one streamed CLI call on their way to its one reader, and the way to its command's stdin.
+
+    ``frames`` is short: the worker call's thread waits while it is full, which stops the command once its pipes
+    fill, so a slow reader never makes MindRoom hold a command's output.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, *, queued_frames: int = 16) -> None:
+        self._loop = loop
+        self.frames: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=queued_frames)
+        # Whether the call's one reader was claimed, and whether what it has not read was dropped by a cancel.
+        self.attached = self.closed = False
+        # Set once the command's exit arrived. ``stopped`` says that the runner ended it for a cancel and saw its
+        # whole process group gone; a command that ended on its own may have left processes running.
+        self.ended = asyncio.Event()
+        self.stopped = False
+        # Writes one chunk (its number, base64 bytes, and whether stdin ends after it) to the command's stdin and
+        # returns whether stdin takes more; set once the call's worker request is on its way.
+        self.write_stdin: Callable[[int, str, bool], Awaitable[bool]] | None = None
+
+    def put(self, frame: dict[str, object]) -> None:
+        """Queue one frame from the worker call's thread; the frames of a call nobody reads any more are dropped."""
+        if frame.get("t") == "exit":
+            self.stopped = bool(frame.get("cancelled"))
+            self._loop.call_soon_threadsafe(self.ended.set)
+            if self.stopped:
+                return
+        queued = asyncio.run_coroutine_threadsafe(self.frames.put(frame), self._loop)
+        with suppress(asyncio.QueueShutDown):
+            # An event loop that stopped never answers, so the thread waits only while it runs.
+            while not queued.done() and self._loop.is_running():
+                with suppress(TimeoutError):
+                    queued.result(timeout=1.0)
+            if queued.done():
+                queued.result()
+
+    def close(self) -> None:
+        """Drop the frames nobody reads any more, which also wakes the worker call's thread that waits to add one."""
+        self.closed = True
+        self.frames.shutdown(immediate=True)
+
+
+_CALL_OUTPUT_STREAM: ContextVar[CallOutputStream | None] = ContextVar("call_output_stream", default=None)
+
+
 def get_tool_runtime_context() -> ToolRuntimeContext | None:
     """Get the current shared tool runtime context."""
     return _TOOL_RUNTIME_CONTEXT.get()
@@ -502,6 +547,11 @@ def get_worker_progress_pump() -> WorkerProgressPump | None:
 def get_call_progress_sink() -> Callable[[str], None] | None:
     """Return the active CLI call's progress sink, if any."""
     return _CALL_PROGRESS_SINK.get()
+
+
+def get_call_output_stream() -> CallOutputStream | None:
+    """Return where the active CLI call's command streams its output, if the call asked for that."""
+    return _CALL_OUTPUT_STREAM.get()
 
 
 def note_call_refusal() -> None:
@@ -764,14 +814,17 @@ def call_progress_sink_scope(
     *,
     on_refused: Callable[[], None] | None = None,
     on_cancelled_never_ran: Callable[[], None] | None = None,
+    stream: CallOutputStream | None = None,
 ) -> Iterator[None]:
-    """Bind per-call progress, refusal, and cancel hooks for the lifetime of one CLI tool call."""
+    """Bind per-call progress, refusal, and cancel hooks, and its output stream, for the lifetime of one CLI tool call."""
     progress_token = _CALL_PROGRESS_SINK.set(sink)
     refusal_token = _CALL_REFUSAL_HOOK.set(on_refused)
     cancel_token = _CALL_CANCEL_NEVER_RAN_HOOK.set(on_cancelled_never_ran)
+    stream_token = _CALL_OUTPUT_STREAM.set(stream)
     try:
         yield
     finally:
+        _CALL_OUTPUT_STREAM.reset(stream_token)
         _CALL_CANCEL_NEVER_RAN_HOOK.reset(cancel_token)
         _CALL_REFUSAL_HOOK.reset(refusal_token)
         _CALL_PROGRESS_SINK.reset(progress_token)
