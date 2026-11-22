@@ -6,7 +6,13 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.matrix.client_room_admin import room_admin_power_user
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
-from mindroom.room_settings import ROOM_THREAD_MODES, THREAD_MODE, refresh_room_setting, write_room_setting
+from mindroom.room_settings import (
+    ROOM_THREAD_MODES,
+    THREAD_MODE,
+    refresh_room_setting,
+    request_thread_mode_republish,
+    write_room_setting,
+)
 from mindroom.steward_duties import moderator_rights_message, setting_write_failure_message
 
 if TYPE_CHECKING:
@@ -80,6 +86,9 @@ async def handle_thread_mode_command(
             return setting_write_failure_message(taken, "change the thread mode")
     # The room took the setting, which agents follow from here on whether or not clients can be shown the mode.
     published = await reconcile_room_thread_mode(client, config, runtime_paths, room_id, put_state=put_state)
+    if published is False:
+        # Nothing else republishes a mode whose change this bot's sync does not show: the room's steward retries.
+        request_thread_mode_republish(runtime_paths, room_id)
     if mode is not None:
         reply = (
             f"This room now uses `{mode}` thread mode for future agent replies.\n\n"

@@ -7,7 +7,7 @@ from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock, call
 
 import nio
 import pytest
@@ -24,7 +24,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.constants import primary_records_dir
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.message_target import MessageTarget
-from mindroom.room_settings import THREAD_MODE, resolve_room_setting
+from mindroom.room_settings import THREAD_MODE, on_thread_mode_change, resolve_room_setting
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.steward_duties import room_state_response_as_steward
@@ -676,7 +676,12 @@ async def test_a_thread_mode_the_room_took_stays_set_when_it_cannot_be_published
     status_code: str,
     advice: str,
 ) -> None:
-    """The room's setting is what agents follow, so a failed publication of the mode clients show undoes nothing."""
+    """The room's setting is what agents follow, so a failed publication of the mode clients show undoes nothing.
+
+    A publication that failed for now is left to the room's steward to retry; one the room refuses is not.
+    """
+    retry = Mock()
+    on_thread_mode_change(room_state[1], retry)
     steward = AsyncMock(spec=nio.AsyncClient)
     write = room_state[4].room_put_state.side_effect
 
@@ -694,3 +699,4 @@ async def test_a_thread_mode_the_room_took_stays_set_when_it_cannot_be_published
     assert reply.endswith(advice)
     assert resolve_room_setting(THREAD_MODE, room_state[1], THREAD_MODE_ROOM_ID) == "room"
     assert ("io.mindroom.thread_mode", "") not in room_state[3]
+    assert retry.call_args_list == ([call(THREAD_MODE_ROOM_ID)] if status_code == "M_UNKNOWN" else [])

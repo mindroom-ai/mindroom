@@ -120,6 +120,8 @@ _writes: WeakValueDictionary[_Key, asyncio.Lock] = WeakValueDictionary()
 _stale_models_logged: set[_Key] = set()
 # What a runtime has tell a room's steward that a read found the room's `thread_mode` changed.
 _thread_mode_changed: dict[Path, Callable[[str], object]] = {}
+# The first read of a setting that a caller waited for: later callers wait for it too, and none repeats it.
+_first_reads: dict[_Key, asyncio.Task[object]] = {}
 
 
 def _key(setting: RoomSetting[Any], runtime_paths: RuntimePaths, room_id: str) -> _Key:
@@ -200,6 +202,12 @@ def on_thread_mode_change(runtime_paths: RuntimePaths, changed: Callable[[str], 
     nothing: its steward publishes the mode when it starts or joins.
     """
     _thread_mode_changed[runtime_paths.storage_root] = changed
+
+
+def request_thread_mode_republish(runtime_paths: RuntimePaths, room_id: str) -> None:
+    """Have the room's steward republish the thread mode clients see, the way the runtime registered."""
+    if (changed := _thread_mode_changed.get(runtime_paths.storage_root)) is not None:
+        changed(room_id)
 
 
 def resolve_room_setting[T: str](setting: RoomSetting[T], runtime_paths: RuntimePaths, room_id: str | None) -> T | None:
@@ -325,10 +333,32 @@ async def refresh_room_setting[T: str](  # noqa: PLR0911 - one outcome per answe
     if content is not None:
         # The room's own event, even an empty one, decides over the override an older runtime stored.
         _drop_legacy_override(setting, runtime_paths, room_id)
-    changed = held is not None and held.order < started and held.value != value
-    if changed and setting is THREAD_MODE and (tell := _thread_mode_changed.get(key[0])) is not None:
-        tell(room_id)
+    if setting is THREAD_MODE and held is not None and held.order < started and held.value != value:
+        request_thread_mode_republish(runtime_paths, room_id)
     return SettingRead(ok=True, value=value)
+
+
+async def await_first_room_setting_read[T: str](
+    setting: RoomSetting[T],
+    client: nio.AsyncClient,
+    runtime_paths: RuntimePaths,
+    room_id: str,
+) -> None:
+    """Wait, a few seconds at most, for the room's setting to be read once when the runtime has no copy of it.
+
+    After a restart nothing may have read the room yet, and a caller that acts on the copy before a turn's read,
+    as the one that chooses a message's conversation does, would act on no setting. Callers at once share one read.
+    A read that fails is not repeated here: the caller acts on what the runtime knows, as it did before.
+    """
+    key = _key(setting, runtime_paths, room_id)
+    if key in _known:
+        return
+    read = _first_reads.get(key)
+    if read is None:
+        first = refresh_room_setting(setting, client, runtime_paths, room_id, put_state=None)
+        read = _first_reads[key] = asyncio.ensure_future(first)
+    # The read outlives a caller that stops waiting or is cancelled, for the callers still waiting.
+    await asyncio.wait({read}, timeout=_REQUEST_TIMEOUT_SECONDS)
 
 
 async def refresh_room_settings(

@@ -180,8 +180,8 @@ class StewardDuties:
     _room_state_retrying: set[str] = field(default_factory=set, init=False, repr=False)
     # Pending operations, including fresh failures that race an in-flight retry.
     _room_state_reruns: dict[str, set[str]] = field(default_factory=dict, init=False, repr=False)
-    # Rooms whose thread mode is being republished after a change to the setting.
-    _thread_mode_republishes: set[str] = field(default_factory=set, init=False, repr=False)
+    # Each room's latest republish of its thread mode after a change to the setting.
+    _thread_mode_republishes: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
 
     @property
     def _is_owner(self) -> bool:
@@ -234,15 +234,11 @@ class StewardDuties:
         waits for it, and one republish serves every change told while it runs: it ends only once the mode it
         published is the setting the runtime holds.
         """
-        if room_id not in self._thread_mode_republishes:
-            self._thread_mode_republishes.add(room_id)
-            self._publish_in_background(self._republish_thread_mode(room_id), "steward_thread_mode")
-
-    async def _republish_thread_mode(self, room_id: str) -> None:
-        try:
-            await self._publish_room_state(room_id, {"mode"})
-        finally:
-            self._thread_mode_republishes.discard(room_id)
+        running = self._thread_mode_republishes.get(room_id)
+        # A republish that ended, or was cancelled before it ran, serves no later change.
+        if running is None or running.done():
+            republish = self._publish_room_state(room_id, {"mode"})
+            self._thread_mode_republishes[room_id] = self._publish_in_background(republish, "steward_thread_mode")
 
     async def power_levels_event(self, room: nio.MatrixRoom, _event: nio.PowerLevelsEvent) -> None:
         """Publish a room's state after its power levels changed, which can change its steward."""
@@ -261,10 +257,11 @@ class StewardDuties:
         if room_ids:
             self._publish_in_background(self._publish_rooms(room_ids), "steward_joined_room_state")
 
-    def _publish_in_background(self, publish: Coroutine[Any, Any, None], name: str) -> None:
+    def _publish_in_background(self, publish: Coroutine[Any, Any, None], name: str) -> asyncio.Task[None]:
         task = create_background_task(publish, name=name, owner=self.deps.runtime)
         self._room_state_publishes.add(task)
         task.add_done_callback(self._room_state_publishes.discard)
+        return task
 
     async def _publish_rooms(self, room_ids: set[str]) -> None:
         await asyncio.gather(*(self._publish_room_state(room_id) for room_id in room_ids))

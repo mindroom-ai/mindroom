@@ -11,7 +11,7 @@ import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated, Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, call
 from urllib.parse import quote
 
 import nio
@@ -26,7 +26,13 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.plugin_http import RoomModes, RoomReader, require_room_reader
-from mindroom.room_settings import REPLY_MODE, THREAD_MODE, resolve_room_setting, write_room_setting
+from mindroom.room_settings import (
+    REPLY_MODE,
+    THREAD_MODE,
+    on_thread_mode_change,
+    resolve_room_setting,
+    write_room_setting,
+)
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import entity_ids
 
@@ -277,7 +283,12 @@ async def test_a_thread_mode_the_steward_cannot_publish_stays_set(
     status_code: str,
     expected: tuple[int, str],
 ) -> None:
-    """When the room takes the setting and refuses the mode clients read, the setting stays and the route says so."""
+    """When the room takes the setting and refuses the mode clients read, the setting stays and the route says so.
+
+    A publication that failed for now is left to the room's steward to retry; one the room refuses is not.
+    """
+    retry = Mock()
+    on_thread_mode_change(room.paths, retry)
     write = room.client.room_put_state.side_effect
 
     async def settings_only(room_id: str, event_type: str, content: dict[str, Any], state_key: str = "") -> object:
@@ -293,6 +304,7 @@ async def test_a_thread_mode_the_steward_cannot_publish_stays_set(
     assert room.stored() == ("room", None)
     assert room.events[THREAD_SETTING] == {"value": "room"}
     assert room.published() is None
+    assert retry.call_args_list == ([call(ROOM_ID)] if status_code == "M_UNKNOWN" else [])
 
 
 @pytest.mark.asyncio

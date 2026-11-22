@@ -55,6 +55,7 @@ from mindroom.room_settings import (
     THREAD_MODE,
     RoomSetting,
     RoomThreadMode,
+    request_thread_mode_republish,
     resolve_room_setting,
     write_room_setting,
 )
@@ -373,6 +374,8 @@ class RoomReader:
         if published is None:
             raise HTTPException(403, moderator_rights_message("show clients this room's thread mode"))
         if not published:
+            # Nothing else republishes a mode whose change the steward's sync does not show: the steward retries.
+            request_thread_mode_republish(paths, self._room_id)
             raise HTTPException(
                 503,
                 "The modes were saved, but the room's thread mode is not published yet; try again.",

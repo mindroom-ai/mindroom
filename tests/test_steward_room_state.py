@@ -1436,9 +1436,13 @@ async def test_changes_told_while_a_thread_mode_republish_runs_share_it(room_sta
 
     assert [call.args[1] for call in client.room_get_state_event.await_args_list].count(SETTING[0]) == 1
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
+    # A republish cancelled before it ran serves no change either: the next one told starts another.
     duties._thread_mode_setting_changed(ROOM_ID)
-    assert len(duties._room_state_publishes) == 1
+    duties.stopping()
+    await asyncio.gather(*duties._room_state_publishes, return_exceptions=True)
+    duties._thread_mode_setting_changed(ROOM_ID)
     await asyncio.gather(*duties._room_state_publishes)
+    assert [call.args[1] for call in client.room_get_state_event.await_args_list].count(SETTING[0]) == 2
 
 
 @pytest.mark.asyncio

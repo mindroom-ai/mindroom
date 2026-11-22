@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -30,7 +31,9 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import ConversationReader
+from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
+from mindroom.matrix.thread_membership import ThreadResolution, ThreadResolutionState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.router.relay import execute_router_relay
@@ -62,6 +65,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.room_settings_helpers import RoomStateHomeserver
 from tests.streaming_helpers import FakeReplyRecords
 from tests.threading_helpers import seed_thread_history
 
@@ -681,6 +685,57 @@ class TestRoomModeThreadDecision:
         assert ctx.is_thread is False
         assert ctx.thread_id is None
         assert ctx.thread_history == ()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("read", ["answers", "hangs"])
+    async def test_the_first_messages_after_a_restart_wait_for_the_rooms_thread_mode(
+        self,
+        room_mode_config: Config,
+        coder_user: AgentMatrixUser,
+        monkeypatch: pytest.MonkeyPatch,
+        read: str,
+    ) -> None:
+        """After a restart nothing has read the room, and its restoration may still run when messages are released.
+
+        The room's `thread_mode` setting is read, once, before the first messages' conversation is chosen, so the
+        reply to a threaded message goes to the main timeline. A read that hangs is given up in time, not repeated,
+        and the messages are placed by the configured mode as before.
+        """
+        monkeypatch.setattr("mindroom.room_settings._REQUEST_TIMEOUT_SECONDS", 0.05)
+        bot = _agent_bot(config=room_mode_config, agent_user=coder_user)
+        homeserver = RoomStateHomeserver()
+        homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "thread_mode"] = {"value": "room"}
+        bot.client = homeserver.client()
+        if read == "hangs":
+            bot.client.room_get_state_event.side_effect = lambda *_args, **_kwargs: asyncio.sleep(3600)
+        room = _matrix_room("!room:localhost", name="Test Room")
+        source = {
+            "event_id": "$event123",
+            "sender": "@user:localhost",
+            "content": {
+                "body": "hello",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread123"},
+            },
+            "type": "m.room.message",
+        }
+        event = MagicMock(spec=nio.RoomMessageText, event_id="$event123", sender="@user:localhost", source=source)
+        resolver = bot._conversation_resolver
+        threaded = ThreadResolution(ThreadResolutionState.THREADED, thread_id="$thread123")
+        monkeypatch.setattr(resolver, "_coalescing_thread_resolution", AsyncMock(return_value=threaded))
+
+        first, second = await asyncio.gather(*(resolver.coalescing_thread_id(room, event) for _ in range(2)))
+        third = await resolver.coalescing_thread_id(room, event)
+        target = resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=first,
+            reply_to_event_id=event.event_id,
+            event_source=source,
+        )
+
+        expected = None if read == "answers" else "$thread123"
+        assert (first, second, third, target.resolved_thread_id) == (expected,) * 4
+        assert bot.client.room_get_state_event.await_count == 1
 
     @pytest.mark.asyncio
     async def test_room_override_skips_derive_only_for_matching_room(
