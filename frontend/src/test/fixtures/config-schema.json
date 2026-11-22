@@ -624,6 +624,13 @@
           "description": "Let authorized users SSH from the operator's tailnet to the dedicated worker this agent's shell uses",
           "title": "Tailnet Ssh",
           "type": "boolean"
+        },
+        "named_workers": {
+          "default": 0,
+          "description": "How many named workers this agent's shell calls may have at once for one requester on the kubernetes worker backend, for an agent whose workers are per requester and agent; 0 turns them off",
+          "minimum": 0,
+          "title": "Named Workers",
+          "type": "integer"
         }
       },
       "required": [

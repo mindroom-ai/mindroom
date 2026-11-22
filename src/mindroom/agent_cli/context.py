@@ -20,10 +20,12 @@ def minimal_system_message(
     skill_names: Sequence[str] = (),
     memory_root: Path | None = None,
     runtime_context: str = "",
+    named_workers: bool = False,
 ) -> str:
     """Identify the same agent's workspace, memory, and discoverable CLI tools.
 
-    An authored subagent's ``identity`` replaces the agent's own identity line.
+    An authored subagent's ``identity`` replaces the agent's own identity line. ``named_workers`` says the agent's
+    shell commands may run in workers it names, which Bash reaches only through the CLI.
     """
     names = sorted(set(toolkit_names))
     roster = "Toolkits callable through mindroom-agent: " + ", ".join(names)
@@ -47,6 +49,11 @@ def minimal_system_message(
     if memory_root is not None:
         guidance.append(
             f"File memory: `{(memory_root / 'MEMORY.md').as_posix()}`, `{(memory_root / 'memory').as_posix()}/`.",
+        )
+    if named_workers:
+        guidance.append(
+            "Named workers: `mindroom-agent workers run NAME -- COMMAND` runs a command in a separate worker of its "
+            "own on the same workspace; `mindroom-agent tools describe shell.run_shell_command` explains them.",
         )
     return "\n".join(
         part.strip()

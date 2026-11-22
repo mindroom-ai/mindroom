@@ -10,6 +10,7 @@ import httpx
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import (
+    WorkerBackendDefaults,
     WorkerBackendError,
     effective_idle_status,
     filter_and_sort_worker_handles,
@@ -46,7 +47,7 @@ def _read_runner_health(runner_root: str) -> httpx.Response:
         return client.get(f"{runner_root}/healthz")
 
 
-class StaticSandboxRunnerBackend:
+class StaticSandboxRunnerBackend(WorkerBackendDefaults):
     """Worker backend representing the current shared sandbox-runner deployment."""
 
     backend_name = WorkerBackendKind.STATIC_RUNNER.value
@@ -174,9 +175,10 @@ class StaticSandboxRunnerBackend:
         *,
         now: float | None = None,
         startup_count: int | None = None,
+        incarnation: str | None = None,
     ) -> WorkerHandle:
         """Persist one shared-runner worker failure."""
-        del startup_count  # This backend never replaces a worker behind an in-flight request.
+        del startup_count, incarnation  # This backend never replaces a worker behind an in-flight request.
         timestamp = time.time() if now is None else now
         with self._lock:
             # The runner may have been replaced by one from another release, so the next call asks again.

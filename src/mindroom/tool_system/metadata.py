@@ -39,6 +39,7 @@ from mindroom.tool_system.worker_routing import (
     supports_tool_name_for_worker_scope,
     unsupported_shared_only_integration_message,
 )
+from mindroom.workers.named import named_workers_refusal
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping
@@ -912,6 +913,9 @@ def get_tool_by_name(
                 proxy_tool_init_overrides["shell_path_prepend"] = shell_path_prepend
             init_kwargs["allow_without_worker"] = (
                 runtime_config is not None and runtime_config.defaults.allow_shell_without_worker
+            )
+            init_kwargs["named_workers"] = (
+                routed and named_workers_refusal(routing_agent_name, runtime_config, runtime_paths) is None
             )
         init_kwargs.update(
             _build_managed_tool_init_kwargs(

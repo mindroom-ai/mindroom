@@ -1485,7 +1485,19 @@ async def test_claude_native_tools_cannot_execute_during_decision(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpoint(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("base_url", "host", "path"),
+    [
+        ("https://api.anthropic.com", "api.anthropic.com", "/v1/messages"),
+        ("https://openrouter.ai/api", "openrouter.ai", "/api/v1/messages"),
+    ],
+)
+async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpoint(
+    tmp_path: Path,
+    base_url: str,
+    host: str,
+    path: str,
+) -> None:
     """The request asks Claude to compact; the checkpoint it returns replaces the earlier prefix next time."""
     checkpoint = {"type": "compaction", "content": "Summary so far.", "encrypted_content": "opaque"}
     usage = {
@@ -1512,7 +1524,7 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
         sse_reply([checkpoint, {"type": "text", "text": "Done."}], usage=usage),
         sse_reply([{"type": "text", "text": "Next."}]),
     )
-    provider = route_provider("anthropic", tmp_path, wire)
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"base_url": base_url})
     replay = native_settings(provider, history_generation="gen-1")
     assert replay is not None
     assert replay.threshold == 60000
@@ -1527,6 +1539,7 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
         ),
     )
     request = wire.requests[0]
+    assert (request.url.host, request.url.path) == (host, path)
     assert request.headers["anthropic-beta"] == f"compact-2026-01-12,{_THINKING_BINDING_BETA}"
     edit = wire.body(0)["context_management"]["edits"][0]
     assert (edit["type"], edit["trigger"], edit["pause_after_compaction"]) == (
@@ -1558,6 +1571,107 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
     # The canonical history is untouched: the stored message still starts with its compaction block.
     assert (first.message.provider_data or {})["claude_blocks"][0]["type"] == "compaction"
     assert messages[0].content == "Be brief."
+
+
+def test_native_compaction_checkpoints_are_bound_to_the_endpoint(tmp_path: Path) -> None:
+    """Two Messages endpoints do not share a checkpoint, even for the same Claude ID."""
+    wire = Wire(sse_reply([]))
+    direct = native_settings(route_provider("anthropic", tmp_path, wire))
+    proxied = native_settings(
+        route_provider("anthropic", tmp_path, wire, extra_kwargs={"base_url": "https://openrouter.ai/api"}),
+    )
+    assert direct is not None
+    assert proxied is not None
+    assert direct.route != proxied.route
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_params", "sent_id", "supported"),
+    [
+        ({"model": "claude-haiku-5-5"}, "claude-haiku-5-5", True),
+        ({"model": "claude-haiku-4-5-20251001"}, "claude-haiku-4-5-20251001", False),
+        ({"extra_body": {"model": "claude-haiku-4-5-20251001"}}, "claude-haiku-4-5-20251001", False),
+        (
+            {"model": "claude-haiku-4-5-20251001", "extra_body": {"model": "claude-haiku-5-5"}},
+            "claude-haiku-5-5",
+            True,
+        ),
+    ],
+)
+async def test_native_compaction_eligibility_uses_the_sent_model_id(
+    tmp_path: Path,
+    request_params: dict[str, Any],
+    sent_id: str,
+    *,
+    supported: bool,
+) -> None:
+    """The model override determines eligibility without changing the configured model's checkpoint route."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
+    endpoint = {"base_url": "https://openrouter.ai/api"}
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={**endpoint, "request_params": request_params})
+    replay = native_settings(provider)
+    await claude_turn(provider, ModelRequest(messages=_user(), native_compaction=replay))
+    body = wire.body()
+    assert body["model"] == sent_id
+    assert provider.capabilities.native_compaction is supported
+    assert ("context_management" in body) is supported
+    if supported:
+        assert replay is not None
+        configured_model = route_provider("anthropic", tmp_path, wire, extra_kwargs=endpoint)
+        assert replay == native_settings(configured_model)
+    else:
+        assert replay is None
+
+
+def test_null_model_override_keeps_the_configured_checkpoint_id(tmp_path: Path) -> None:
+    """A raw null cannot become a literal model name in the checkpoint route."""
+    wire = Wire(sse_reply([]))
+    direct = route_provider("anthropic", tmp_path, wire)
+    override = route_provider("anthropic", tmp_path, wire, extra_kwargs={"request_params": {"model": None}})
+    assert native_settings(direct) is not None
+    assert native_settings(override) == native_settings(direct)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routing", [{"fallbacks": [{"model": "claude-opus-4-6"}]}, {"models": ["claude-opus-4-6"]}])
+async def test_openrouter_model_fallbacks_are_sent_without_managed_compaction(
+    tmp_path: Path,
+    routing: dict[str, Any],
+) -> None:
+    """Messages requests preserve OpenRouter's routing fields without sending a managed edit."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
+    provider = route_provider(
+        "anthropic",
+        tmp_path,
+        wire,
+        id="claude-sonnet-4-6",
+        extra_kwargs={"base_url": "https://openrouter.ai/api", "request_params": {"extra_body": routing}},
+    )
+    replay = native_settings(provider)
+    assert replay is None
+    await claude_turn(provider, ModelRequest(messages=_user(), native_compaction=replay))
+    body = wire.body()
+    assert routing.items() <= body.items()
+    assert "context_management" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["anthropic", "vertexai_claude"])
+async def test_anthropic_and_vertex_fallbacks_keep_managed_compaction(tmp_path: Path, route: str) -> None:
+    """Sonnet 4.6 needs the managed edit to select the beta SDK method, which accepts `fallbacks`."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
+    fallbacks = [{"model": "claude-opus-4-6"}]
+    provider = route_provider(
+        route,
+        tmp_path,
+        wire,
+        id="claude-sonnet-4-6",
+        extra_kwargs={"request_params": {"fallbacks": fallbacks}},
+    )
+    await claude_turn(provider, ModelRequest(messages=_user(), native_compaction=native_settings(provider)))
+    assert wire.body()["fallbacks"] == fallbacks
+    assert wire.body()["context_management"]["edits"][0]["type"] == "compact_20260112"
 
 
 @pytest.mark.asyncio
@@ -1797,6 +1911,7 @@ async def test_the_direct_endpoint_is_client_params_then_base_url_then_anthropic
     wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
     params = {"client_params": {"base_url": "https://params-gateway.example"}}
     own = {"base_url": "https://gateway.example/anthropic/"}
+    openrouter = {"base_url": "https://openrouter.ai/api/"}
     unset = (
         {"base_url": ""},
         {"base_url": None},
@@ -1809,7 +1924,7 @@ async def test_the_direct_endpoint_is_client_params_then_base_url_then_anthropic
                 ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k", extra_kwargs=extra_kwargs),
                 runtime_paths,
             )
-            for extra_kwargs in (None, params, own, {**own, **params}, *unset)
+            for extra_kwargs in (None, params, own, {**own, **params}, openrouter, *unset)
         ]
         for provider in providers:
             await claude_turn(replace(provider, http_client=wire.client), ModelRequest(messages=_user()))
@@ -1819,6 +1934,7 @@ async def test_the_direct_endpoint_is_client_params_then_base_url_then_anthropic
         ("params-gateway.example", "/v1/messages"),
         ("gateway.example", "/anthropic/v1/messages"),
         ("params-gateway.example", "/v1/messages"),
+        ("openrouter.ai", "/api/v1/messages"),
         *[("env-gateway.example", "/v1/messages")] * len(unset),
     ]
     assert [provider.identity.endpoint for provider in providers] == [
@@ -1826,11 +1942,24 @@ async def test_the_direct_endpoint_is_client_params_then_base_url_then_anthropic
         "https://params-gateway.example",
         "https://gateway.example/anthropic",
         "https://params-gateway.example",
+        "https://openrouter.ai/api",
         *["https://env-gateway.example"] * len(unset),
     ]
     assert providers[1].settings.client_params == params["client_params"]
-    # MindRoom adds its compaction trigger only on Anthropic's own endpoint.
+    # MindRoom allows its own compaction trigger on OpenRouter's Messages root, not arbitrary gateways.
     assert providers[2].capabilities.native_compaction is False
+    assert providers[4].capabilities.native_compaction is True
+
+
+def test_openrouter_versioned_base_url_does_not_enable_native_compaction(tmp_path: Path) -> None:
+    """The Chat Completions base URL is not the Anthropic SDK's Messages root."""
+    provider = route_provider(
+        "anthropic",
+        tmp_path,
+        Wire(sse_reply([])),
+        extra_kwargs={"base_url": "https://openrouter.ai/api/v1"},
+    )
+    assert provider.capabilities.native_compaction is False
 
 
 def test_a_blank_exported_anthropic_base_url_keeps_the_direct_route_on_anthropics_api(

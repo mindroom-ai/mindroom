@@ -538,6 +538,7 @@ Matrix sync callback
 | `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it |
 | `tool_system/dedicated_threads.py` | One thread per blocking call of a background job or worker proxy call, outside the bounded shared pools |
 | `workers/in_flight.py` | Workers with a call in flight, which idle cleanup refreshes before it runs |
+| `workers/named.py` | The workers a reply's shell calls name: the reply's ownership of them until it and its background jobs end, the limits a new one is admitted under, and their removal |
 | `workers/placements.py` | The sessions whose worker-routed calls run in a dedicated subagent worker, bound for each attempt of such a child |
 | `workers/protocol.py` | The typed requests and responses the primary and its sandbox runners exchange, and the worker protocol version both check |
 | `workers/backend_kinds.py` | The worker backends `MINDROOM_WORKER_BACKEND` can select, the one table of its accepted values, and which backends are dedicated |

@@ -32,6 +32,7 @@ from mindroom.shell.output_capture import (
     ShellOutputCapture,
     ShellOutputDestination,
     format_shell_completion,
+    format_shell_timeout,
 )
 from mindroom.tool_jobs.control import job_owns_execution
 
@@ -222,6 +223,7 @@ class ShellRunResult:
     message: str
     handle: str | None = None
     output_file_handled: bool = False
+    execution_error: bool = False
 
 
 def shell_call_timeout(timeout: float | None) -> float | None:
@@ -373,7 +375,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
     except Exception as exc:
         if capture is not None:
             capture.close()
-        return ShellRunResult(message=f"Error: {exc}")
+        return ShellRunResult(message=f"Error: {exc}", execution_error=True)
     # A busy command, such as a build, must not take the CPU from the process that runs MindRoom; processes the
     # command starts later inherit the priority.
     with contextlib.suppress(OSError):
@@ -499,12 +501,12 @@ async def _stop_timed_out_process(
     """Stop a command at its timeout and report its output so far; a stopped command saves no output file."""
     await _terminate_process_group(process)
     await _await_reader_tasks_with_grace(stdout_reader, stderr_reader, grace_seconds=_POST_EXIT_READER_GRACE_SECONDS)
-    lines = [f"Stopped after {timeout:g}s." + (" No output file was saved." if output_capture is not None else "")]
-    if output := stdout_buf.render(tail=tail):
-        lines += ["Output:", output]
-    if stderr_buf:
-        lines += ["Stderr:", stderr_buf.render()]
-    message = "\n".join(lines)
+    message = format_shell_timeout(
+        stdout_buf.render(tail=tail),
+        stderr_buf.render() if stderr_buf else None,
+        timeout=timeout,
+        no_output_file=output_capture is not None,
+    )
     if output_capture is None:
         return ShellRunResult(message=message)
     output_capture.incomplete = True

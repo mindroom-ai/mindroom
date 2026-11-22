@@ -31,7 +31,7 @@ from mindroom.room_model_overrides import set_room_model_override
 from mindroom.room_steward import room_poster
 from mindroom.thread_models import set_thread_model_override
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
-from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_client, picker_setup
+from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_client, picker_setup, root_event
 from tests.test_olm_to_device import olm_transport
 
 if TYPE_CHECKING:
@@ -118,7 +118,7 @@ async def test_authenticated_catalog_reply_and_live_config(tmp_path: Path, monke
     assert sent.call_args.args[1].device_id == "REQUESTER"
     content = reply["content"]
     assert content["agent_user_ids"] == [agent]
-    assert content["capabilities"] == ["model_selection"]
+    assert content["capabilities"] == ["model_selection", "thread_model_on_root"]
     assert content["selection"] == {
         "override": None,
         "inherited": [{"entity": "helper", "user_id": agent, "model": "default", "source": "agent"}],
@@ -131,6 +131,76 @@ async def test_authenticated_catalog_reply_and_live_config(tmp_path: Path, monke
     assert sent.call_args.kwargs["content"]["models"][0]["display_name"] == "Updated label"
     assert sent.call_args.kwargs["content"]["catalog_revision"] != old_revision
     client.verify_device.assert_not_called()
+
+
+@pytest.mark.parametrize("threaded", [False, True], ids=["room", "thread"])
+@pytest.mark.asyncio
+async def test_catalog_reads_only_the_scope_needed_for_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    threaded: bool,
+) -> None:
+    """Probe a thread root on both sides of catalog preparation, before the final membership read."""
+    callback, client, current, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    Image.new("RGB", (1, 1)).save(tmp_path / "icon.png")
+    current[0].models["default"].icon = "icon.png"
+    client.upload.return_value = (nio.UploadResponse("mxc://localhost/image"), None)
+    event = request()
+    if not threaded:
+        del event.source["content"]["thread_id"]
+
+    await callback(event)
+
+    sent.assert_awaited_once()
+    reads = [call[0] for call in client.mock_calls if call[0] in {"joined_members", "room_get_event", "upload"}]
+    root = ["room_get_event"] if threaded else []
+    assert reads == ["joined_members", *root, "upload", *root, "joined_members"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_drops_when_the_root_read_changes_eligible_agents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent added after the initial scope proof must not silently change the answer's scope."""
+    callback, client, current, sent, router, agent = receiver_setup(tmp_path, monkeypatch)
+    config = current[0]
+    config.agents["second"] = AgentConfig(display_name="Second", access=ResponderAccessConfig(users=[USER]))
+    paths = runtime_paths_for(config)
+    current[0] = bind_runtime_paths(config, paths)
+    second = entity_identity_registry(current[0], paths).current_id("second").full_id
+
+    async def fetch_root(*_args: str) -> nio.RoomGetEventResponse:
+        client.joined_members.return_value = joined_response(USER, router, agent, second)
+        return client.room_get_event.return_value
+
+    client.room_get_event.side_effect = fetch_root
+    with capture_logs() as logs:
+        await callback(request())
+    sent.assert_not_awaited()
+    assert dropped(logs) == ["scope_changed"]
+
+
+@pytest.mark.parametrize("root_read", [1, 2], ids=["initial-root", "handoff-root"])
+@pytest.mark.asyncio
+async def test_requester_departure_during_root_read_prevents_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root_read: int,
+) -> None:
+    """The final membership check must still catch a requester leaving during either root read."""
+    callback, client, _, sent, router, agent = receiver_setup(tmp_path, monkeypatch)
+
+    async def fetch_root(*_args: str) -> nio.RoomGetEventResponse:
+        if client.room_get_event.await_count == root_read:
+            client.joined_members.return_value = joined_response(router, agent)
+        return client.room_get_event.return_value
+
+    client.room_get_event.side_effect = fetch_root
+    with capture_logs() as logs:
+        await callback(request())
+    sent.assert_not_awaited()
+    assert dropped(logs) == ["not_joined"]
 
 
 @pytest.mark.parametrize(
@@ -292,8 +362,8 @@ async def test_duplicates_and_capacity_are_bounded_before_task_queue(
     assert dropped(logs) == ["duplicate_in_flight"] * 49
     with capture_logs() as logs:
         await asyncio.gather(*(callback(request(request_id=str(i))) for i in range(50)))
-    assert len(queued) <= 8
-    assert dropped(logs) == ["rate_limited_user_inflight"] * (50 - len(queued) + 1)
+    assert len(queued) == 4
+    assert dropped(logs) == ["rate_limited_user_inflight"] * 47
 
 
 @pytest.mark.asyncio
@@ -354,7 +424,7 @@ async def test_one_account_with_many_devices_leaves_capacity_for_other_users(tmp
         await callback(device_request(USER, name, name))
     await callback(device_request(other, "OTHER", "other"))
 
-    assert [event.sender for event in queued].count(USER) < 8
+    assert [event.sender for event in queued].count(USER) == 4
     assert [event.sender for event in queued][-1] == other
 
 
@@ -745,7 +815,7 @@ async def test_queued_request_cannot_repin_replaced_device(tmp_path: Path, monke
     assert dropped(logs) == ["sender_device_changed"]
 
 
-@pytest.mark.parametrize("change", ["blocked", "left", "config"])
+@pytest.mark.parametrize("change", ["blocked", "left", "config", "redacted"])
 @pytest.mark.asyncio
 async def test_final_authorization_rechecks_after_selection_work(
     tmp_path: Path,
@@ -765,6 +835,12 @@ async def test_final_authorization_rechecks_after_selection_work(
             client.olm.device_store[USER]["REQUESTER"].trust_state = TrustState.blacklisted
         elif change == "left":
             client.joined_members.return_value = joined_response(router, agent)
+        elif change == "redacted":
+            redacted = root_event(
+                content={},
+                unsigned={"redacted_because": {"type": "m.room.redaction", "sender": USER, "content": {}}},
+            )
+            client.room_get_event.return_value = nio.RoomGetEventResponse.from_dict(redacted.source)
         else:
             current[0] = current[0].model_copy(deep=True)
         return result
@@ -775,7 +851,12 @@ async def test_final_authorization_rechecks_after_selection_work(
     assert prepared
     sent.assert_not_awaited()
     assert dropped(logs) == [
-        {"blocked": "sender_device_changed", "left": "not_joined", "config": "config_changed"}[change],
+        {
+            "blocked": "sender_device_changed",
+            "left": "not_joined",
+            "config": "config_changed",
+            "redacted": "thread_root_unreadable",
+        }[change],
     ]
 
 
@@ -793,8 +874,7 @@ async def test_config_reload_during_final_scope_await_prevents_delivery(
     async def joined_members(*_args: object) -> nio.JoinedMembersResponse:
         nonlocal membership_reads
         membership_reads += 1
-        # Each scope proof reads membership before and after the root event.
-        if membership_reads == 5:
+        if membership_reads == 2:
             await asyncio.sleep(0)
             current[0] = original_config.model_copy(deep=True)
         return membership
@@ -802,7 +882,7 @@ async def test_config_reload_during_final_scope_await_prevents_delivery(
     client.joined_members.side_effect = joined_members
     with capture_logs() as logs:
         await callback(request())
-    assert membership_reads == 6
+    assert membership_reads == 2
     assert current[0] is not original_config
     sent.assert_not_awaited()
     assert dropped(logs) == ["config_changed"]
@@ -840,7 +920,8 @@ async def test_catalog_receiver_delivers_through_public_nio_transport(
             peer_keys["keys"]["ed25519:DESKTOP"],
         )
         await registered.call_args.args[0](event)
-        assert scope_client.joined_members.await_count == 6
+        assert scope_client.joined_members.await_count == 2
+        assert scope_client.room_get_event.await_count == 2
         deliveries = [item for item in requests if "/sendToDevice/" in item["path"]]
         assert len(deliveries) == 1
         messages = deliveries[0]["body"]["messages"]

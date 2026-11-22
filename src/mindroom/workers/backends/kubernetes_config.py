@@ -74,6 +74,9 @@ _DEFAULT_MEMORY_LIMIT = "1Gi"
 _DEFAULT_CPU_REQUEST = "100m"
 _DEFAULT_CPU_LIMIT = "500m"
 _DEFAULT_SCRIPT_RESOURCE_PROFILE = "small"
+_DEFAULT_NAMED_WORKER_IDLE_TIMEOUT_SECONDS = 600.0
+_DEFAULT_NAMED_WORKER_MAX_AGE_SECONDS = 4 * 60 * 60.0
+_DEFAULT_NAMED_WORKERS_MAX = 16
 _IN_CLUSTER_TOKEN_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 _IN_CLUSTER_CERT_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
 
@@ -110,6 +113,9 @@ _DEFAULT_SCRIPT_RESOURCE_PROFILE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_K
 _ENABLE_SERVICE_LINKS_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["enable_service_links"]
 _AUTH_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["auth_secret_name"]
 _SECCOMP_PROFILE_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["seccomp_profile_json"]
+_NAMED_WORKER_IDLE_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["named_worker_idle_timeout"]
+_NAMED_WORKER_MAX_AGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["named_worker_max_age"]
+NAMED_WORKERS_MAX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["named_workers_max"]
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
 _EXTRA_CONTAINER_ALLOWED_KEYS = frozenset(
     {
@@ -484,9 +490,17 @@ class KubernetesWorkerBackendConfig:
     tmp_size_limit: str | None = None
     user_resources: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
     image_pull_secrets: tuple[str, ...] = ()
+    # A named worker is removed once no call has run in it for the idle timeout, or once it reaches the maximum age.
+    named_worker_idle_timeout_seconds: float = _DEFAULT_NAMED_WORKER_IDLE_TIMEOUT_SECONDS
+    named_worker_max_age_seconds: float = _DEFAULT_NAMED_WORKER_MAX_AGE_SECONDS
+    # How many named workers may run at once for every requester and agent together.
+    named_workers_max: int = _DEFAULT_NAMED_WORKERS_MAX
 
     def __post_init__(self) -> None:
-        """Validate worker settings, including those that must stay under MindRoom's control."""
+        """Validate and normalize Kubernetes configuration."""
+        if self.named_workers_max < 0:
+            msg = f"{NAMED_WORKERS_MAX_ENV} must be non-negative."
+            raise WorkerBackendError(msg)
         if reserved_names := TAILNET_SSH_SECRET_ENV_NAMES.intersection(self.extra_env):
             msg = f"{_EXTRA_ENV_JSON_ENV} cannot set reserved env vars: {', '.join(sorted(reserved_names))}."
             raise WorkerBackendError(msg)
@@ -617,7 +631,27 @@ class KubernetesWorkerBackendConfig:
             reconcile_pod_templates=read_bool_env(env, _RECONCILE_POD_TEMPLATES_ENV, default=True),
             tmp_size_limit=read_env(env, _TMP_SIZE_LIMIT_ENV) or None,
             user_resources=_read_user_resources_env(env),
+            named_worker_idle_timeout_seconds=read_float_env(
+                env,
+                _NAMED_WORKER_IDLE_TIMEOUT_ENV,
+                _DEFAULT_NAMED_WORKER_IDLE_TIMEOUT_SECONDS,
+            ),
+            named_worker_max_age_seconds=read_float_env(
+                env,
+                _NAMED_WORKER_MAX_AGE_ENV,
+                _DEFAULT_NAMED_WORKER_MAX_AGE_SECONDS,
+            ),
+            named_workers_max=configured_named_workers_max(runtime_paths),
         )
+
+
+def configured_named_workers_max(runtime_paths: RuntimePaths) -> int:
+    """Read the named worker limit without loading the full Kubernetes backend configuration."""
+    raw = runtime_paths.env_value(NAMED_WORKERS_MAX_ENV, default=str(_DEFAULT_NAMED_WORKERS_MAX))
+    try:
+        return int(raw)
+    except ValueError:
+        return _DEFAULT_NAMED_WORKERS_MAX
 
 
 def kubernetes_backend_config_signature(
@@ -682,6 +716,17 @@ def kubernetes_backend_config_signature(
         signature = (*signature, f"user-resources:{stable_signature_json(config.user_resources)}")
     if config.image_pull_secrets:
         signature = (*signature, f"image-pull-secrets:{stable_signature_json(config.image_pull_secrets)}")
+    named_workers = (
+        config.named_worker_idle_timeout_seconds,
+        config.named_worker_max_age_seconds,
+        config.named_workers_max,
+    )
+    if named_workers != (
+        _DEFAULT_NAMED_WORKER_IDLE_TIMEOUT_SECONDS,
+        _DEFAULT_NAMED_WORKER_MAX_AGE_SECONDS,
+        _DEFAULT_NAMED_WORKERS_MAX,
+    ):
+        signature = (*signature, f"named-workers:{stable_signature_json(named_workers)}")
     return signature
 
 

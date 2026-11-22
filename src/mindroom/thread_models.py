@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from mindroom.constants import ROUTER_AGENT_NAME, tracking_dir
@@ -26,6 +25,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+THREAD_MODEL_STORAGE_ERROR = "Thread model storage is unavailable. Please try again."
+
 _THREAD_MODELS_FILENAME = "thread_models.json"
 _MAX_TRACKED_THREADS = 1000
 # Each entity's selection is one record field, so a thread holds different models for entities with different setters.
@@ -33,6 +34,9 @@ _ENTITY_MODEL_PREFIX = "model:"
 # Names the parent a fork's record was first taken from. It outlives the fork's own selections and resets, so the
 # fork copies its parent's selections only once, even when the parent had none to copy.
 _INHERITED_FROM_FIELD = "inherited_from"
+_OPENING_CONSUMED_FIELD = "opening_model_consumed"
+_OPENING_WINDOW = timedelta(days=7)
+_OPENING_CLOCK_SKEW = timedelta(minutes=5)
 
 
 def _store_path(runtime_paths: RuntimePaths) -> Path:
@@ -55,24 +59,15 @@ def _entity_models(record: OverrideRecord) -> dict[str, str]:
 def _is_valid_override(_thread_id: str, record: dict[object, object]) -> bool:
     """Return whether one persisted thread-model record has the required shape."""
     return all(isinstance(value, str) for value in record.values()) and any(
-        isinstance(field, str) and (field.startswith(_ENTITY_MODEL_PREFIX) or field == _INHERITED_FROM_FIELD)
+        isinstance(field, str)
+        and (field.startswith(_ENTITY_MODEL_PREFIX) or field in {_INHERITED_FROM_FIELD, _OPENING_CONSUMED_FIELD})
         for field in record
     )
 
 
-def _load_overrides(path: Path) -> dict[str, OverrideRecord]:
-    """Load persisted overrides, treating a missing or unreadable file as empty."""
-    return load_cached_override_records(path, _is_valid_override)
-
-
-def _store_is_unreadable(path: Path) -> bool:
-    """Return whether the store exists but cannot be read as records, which ``_load_overrides`` reads as empty."""
-    try:
-        return not isinstance(json.loads(path.read_text(encoding="utf-8")), dict)
-    except FileNotFoundError:
-        return False
-    except (OSError, ValueError):
-        return True
+def _load_overrides(path: Path, *, for_update: bool = False) -> dict[str, OverrideRecord]:
+    """Load overrides, requiring a readable snapshot for a write."""
+    return load_cached_override_records(path, _is_valid_override, for_update=for_update)
 
 
 def _save_thread_record(
@@ -81,8 +76,8 @@ def _save_thread_record(
     thread_id: str,
     record: OverrideRecord,
 ) -> None:
-    """Store one thread's record, dropping it once no entity selection or fork inheritance remains."""
-    if _entity_models(record) or _INHERITED_FROM_FIELD in record:
+    """Keep a thread's model fields and initialization markers under the usual thread quota."""
+    if _entity_models(record) or not {_INHERITED_FROM_FIELD, _OPENING_CONSUMED_FIELD}.isdisjoint(record):
         overrides[thread_id] = record
     else:
         overrides.pop(thread_id, None)
@@ -157,22 +152,27 @@ def set_thread_model_override(
     model_name: str,
     entity_names: Iterable[str],
     config: Config,
+    consume_opening: bool = False,
 ) -> None:
     """Persist one thread's model override for the entities its setter may address.
 
     Other configured entities keep theirs. Overrides of entities that are no
     longer configured go, so a name configured again starts without one.
+    Only `!model` consumes a pending opening; in-turn switches already follow it.
     """
     path = _store_path(runtime_paths)
     with _store_lock(path):
-        overrides = _load_overrides(path)
+        overrides = _load_overrides(path, for_update=True)
         current = overrides.get(thread_id, {})
         unconfigured = _unconfigured_entity_fields(current, config)
+        fields = _entity_fields(entity_names)
         record = {
             **{field: value for field, value in current.items() if field not in unconfigured},
-            **dict.fromkeys(_entity_fields(entity_names), model_name),
+            **dict.fromkeys(fields, model_name),
             "set_at": datetime.now(UTC).isoformat(),
         }
+        if consume_opening and fields:
+            record[_OPENING_CONSUMED_FIELD] = "1"
         _save_thread_record(path, overrides, thread_id, record)
 
 
@@ -182,28 +182,67 @@ def clear_thread_model_override(
     *,
     entity_names: Iterable[str],
     config: Config,
+    consume_opening: bool = False,
 ) -> bool:
     """Remove one thread's model override for the given entities; return whether any was present.
 
     Overrides of entities that are no longer configured go too, so a name configured again starts without one.
+    Only `!model` consumes a pending opening; in-turn clears already follow it.
     """
     path = _store_path(runtime_paths)
     with _store_lock(path):
-        overrides = _load_overrides(path)
-        record = overrides.get(thread_id)
-        if record is None:
-            return False
+        overrides = _load_overrides(path, for_update=True)
+        record = overrides.get(thread_id, {})
         fields = _entity_fields(entity_names)
         removed = fields | _unconfigured_entity_fields(record, config)
-        if removed.isdisjoint(record):
+        consume = consume_opening and bool(fields) and _OPENING_CONSUMED_FIELD not in record
+        if removed.isdisjoint(record) and not consume:
             return False
-        _save_thread_record(
-            path,
-            overrides,
-            thread_id,
-            {field: value for field, value in record.items() if field not in removed},
-        )
+        updated = {field: value for field, value in record.items() if field not in removed}
+        if consume:
+            updated[_OPENING_CONSUMED_FIELD] = "1"
+            updated.setdefault("set_at", datetime.now(UTC).isoformat())
+        _save_thread_record(path, overrides, thread_id, updated)
     return not fields.isdisjoint(record)
+
+
+def apply_root_thread_model(
+    runtime_paths: RuntimePaths,
+    *,
+    thread_id: str,
+    root_timestamp_ms: float | None,
+    model_name: str,
+    entity_names: Iterable[str],
+    parent_thread_id: str | None = None,
+) -> None:
+    """Record the opening pick once per thread, in one locked write.
+
+    The first eligible opening sets the pick for addressable responders without an existing choice. A handled
+    `!model` set or reset instead consumes the opening without applying it. Later handling is a no-op while that
+    marker is retained. The age limit rejects old roots even after eviction.
+    """
+    path = _store_path(runtime_paths)
+    with _store_lock(path):
+        now = datetime.now(UTC)
+        if root_timestamp_ms is None or not (
+            (now - _OPENING_WINDOW).timestamp() * 1000
+            < root_timestamp_ms
+            <= (now + _OPENING_CLOCK_SKEW).timestamp() * 1000
+        ):
+            logger.info("Ignoring root thread model choice", thread_id=thread_id, reason="root_outside_opening_window")
+            return
+        overrides = _load_overrides(path, for_update=True)
+        record = overrides.get(thread_id, {})
+        if _OPENING_CONSUMED_FIELD in record:
+            return
+        record.update(dict.fromkeys(_entity_fields(entity_names).difference(record), model_name))
+        if parent_thread_id is not None and _INHERITED_FROM_FIELD not in record:
+            # A valid fork pick beats the parent's choices only for the responders it governs.
+            for name, model in _entity_models(overrides.get(parent_thread_id, {})).items():
+                record.setdefault(f"{_ENTITY_MODEL_PREFIX}{name}", model)
+            record[_INHERITED_FROM_FIELD] = parent_thread_id
+        record.update({_OPENING_CONSUMED_FIELD: "1", "set_at": now.isoformat()})
+        _save_thread_record(path, overrides, thread_id, record)
 
 
 def copy_thread_model_override(runtime_paths: RuntimePaths, source_thread_id: str, target_thread_id: str) -> None:
@@ -215,12 +254,9 @@ def copy_thread_model_override(runtime_paths: RuntimePaths, source_thread_id: st
     """
     path = _store_path(runtime_paths)
     with _store_lock(path):
-        # Saving over a store read as empty would drop every thread's selections, so a fork copies nothing then.
-        if _store_is_unreadable(path):
-            logger.warning("Thread model store is unreadable; the fork does not inherit", thread_id=target_thread_id)
-            return
-        overrides = _load_overrides(path)
-        if (own := overrides.get(target_thread_id)) is not None:
+        overrides = _load_overrides(path, for_update=True)
+        own = overrides.get(target_thread_id, {})
+        if _INHERITED_FROM_FIELD in own or _entity_models(own):
             # The fork's own selection, made before this first copy, stands; marking it keeps a later reset from
             # letting a delayed copy take the parent's.
             if _INHERITED_FROM_FIELD not in own:
@@ -228,6 +264,7 @@ def copy_thread_model_override(runtime_paths: RuntimePaths, source_thread_id: st
             return
         parent = overrides.get(source_thread_id, {})
         record = {
+            **own,
             **{field: value for field, value in parent.items() if field.startswith(_ENTITY_MODEL_PREFIX)},
             _INHERITED_FROM_FIELD: source_thread_id,
             "set_at": datetime.now(UTC).isoformat(),

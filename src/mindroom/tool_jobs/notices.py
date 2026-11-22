@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.hooks.types import EnrichmentItem
-from mindroom.tool_jobs.conversation import current_conversation
+from mindroom.tool_jobs.conversation import current_conversation, current_ended_jobs
 from mindroom.tool_jobs.runtime import describe_job
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -55,12 +55,10 @@ def _job_notice_text(jobs: Sequence[BackgroundJob], notice: str) -> str:
 
 async def _unnoticed_notice(notices: JobNotices) -> str | None:
     """Describe this reply's ended jobs it was not told about yet, and count them as told."""
-    current = current_conversation()
     context = get_tool_runtime_context()
-    if current is None or context is None:
+    if context is None:
         return None
-    runtime, key = current
-    jobs = [job for job in await runtime.ended_jobs(key) if job.job_id not in notices.noticed]
+    jobs = [job for job in await current_ended_jobs() if job.job_id not in notices.noticed]
     if not jobs:
         return None
     notices.noticed.update(job.job_id for job in jobs)

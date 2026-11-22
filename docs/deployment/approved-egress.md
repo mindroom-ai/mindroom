@@ -65,6 +65,7 @@ Who a grant covers depends on the agent's effective [worker scope](sandbox-proxy
 | `user` | Not supported, except from a subagent's dedicated worker; the request fails with `approved egress is not supported for worker_scope=user` |
 
 A grant that a subagent running in a [dedicated worker](../tools/agent-orchestration.md#dedicated-workers) requests applies to that dedicated worker alone, whatever its agent's scope, and grants made for the agent or its normal worker do not apply there, so the subagent requests its own.
+No grant applies to a [named worker](../tools/execution-and-coding.md#named-workers), which reaches only the hostnames the static allowlist allows.
 
 ### Temporary Full Access
 

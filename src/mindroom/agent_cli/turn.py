@@ -744,7 +744,7 @@ class LiveTurnTools(TurnToolBridge):
                         call.receipt = call.receipt.model_copy(update={"status": "running"})
                     else:
                         status = "failed" if event.call.is_error else "completed"
-                        result = event.call.result
+                        result = event.saved_output if event.saved_output is not None else event.call.result
         except _StaleAttemptError as exc:
             status = "cancelled"
             result = str(exc)

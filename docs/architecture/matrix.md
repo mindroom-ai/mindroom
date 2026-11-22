@@ -56,7 +56,7 @@ Discovery uses Olm-encrypted to-device events, including for unencrypted rooms, 
 One MindRoom account per room answers discovery on its own device: the owner account where it is joined, else the joined agent or team with the lowest Matrix ID.
 A room without the owner account therefore has a catalog, and a client sees one runtime per room.
 The answering account authenticates the actual requesting device and requires the requester and itself to be currently joined, plus at least one configured, joined agent the requester may address.
-An included thread must be a readable, unredacted root in that room, whether or not it is encrypted.
+An included thread must be a readable, unredacted root in that room both before the reply is prepared and when it is rechecked for handoff, whether or not it is encrypted.
 Replies go only to the authenticated device, and sending a catalog never verifies a previously untrusted device.
 Blocked devices, malformed requests, and unauthorized room or thread scopes receive no response.
 
@@ -78,7 +78,7 @@ The private reply type is `io.mindroom.models.response`:
   "request_id": "random-uuid",
   "room_id": "!room:example.org",
   "thread_id": "$root",
-  "capabilities": ["model_selection"],
+  "capabilities": ["model_selection", "thread_model_on_root"],
   "agent_user_ids": ["@mindroom_helper:example.org"],
   "catalog_revision": "sha256-of-published-entries",
   "models": [{"key":"fast","display_name":"Quick helper","provider":"openai","id":"gpt-6-astra","icon_url":"mxc://example.org/image","reasoning_levels":["low","high"],"reasoning_default":"low"}],
@@ -101,14 +101,45 @@ Display names may repeat and fall back to the key.
 Icons use Matrix `mxc://` URIs only; other local icon rules are on the [model configuration page](../configuration/models.md).
 
 The answering account stops processing a request after 12 seconds, but a response already handed to nio is not retracted.
-Admission caps queued/in-flight requests at eight, and at two per Matrix user across all of that user's devices, and accepts at most eight fresh requests per user in 12 seconds; concurrent duplicate requests share the active request.
-Authorization is last checked when the response is handed to nio, so a requester who loses room access while nio prepares or retries the send can still receive that already-authorized catalog.
+Admission caps queued/in-flight requests at eight, and at four per Matrix user across all of that user's devices, and accepts at most eight fresh requests per user in 12 seconds; concurrent duplicate requests share the active request.
+Threaded discovery makes four scope reads: joined membership and the root before preparing the reply, then the root and joined membership at handoff.
+Room-only discovery makes two joined-membership reads and no root reads; neither count includes retries.
+Before handing the response to nio, the answering account drops changes to scope, config, or requesting-device authorization.
+A requester who loses room access while nio prepares or retries the send can still receive that already-authorized catalog.
 Clients must independently enforce current joined-agent eligibility and discard expired responses.
 
 Clients register their response listener before sending, correlate request, room, thread, and actual authenticated runtime device, and independently check returned agent membership.
 Candidate runtime accounts are hints; clients require an owner-signed runtime device.
 Multiple runtime devices remain separate choices.
 Refresh on picker opening; expire requests after 12 seconds and discard late results.
+
+### Model Choice on a New Thread
+
+A catalog advertising `thread_model_on_root` supports an optional pick on the requester's own opening `m.room.message`, including a media upload:
+
+```json
+{"io.mindroom.thread_model":{"version":1,"runtime_user_id":"@mindroom_helper:example.org","runtime_device_id":"DEVICE","model":"fast@high"}}
+```
+
+Use the account and device that answered authenticated discovery for `runtime_user_id` and `runtime_device_id`, and a catalog key or `key@level` for `model`.
+The device must still be running in this runtime, but it need not still be the room's elected catalog poster.
+The values must be nonempty, unpadded strings: up to 255 characters for the device ID and 1024 each for the account ID and model.
+Omit the key to inherit the defaults; it is not a room-wide setting or a separate event.
+For a coalesced opening turn, the latest direct source from the requester carrying the key supplies the choice.
+Edits and runtime relays cannot supply or replace a choice.
+The resolved thread root must be among that turn's source events and no more than seven days old, so ordinary replies and old replays cannot seed it.
+A root timestamp more than five minutes in the future is ignored.
+An opening pick uses the same sender rule as `!model`, including reply-authorized bridge accounts.
+At opening, the pick applies only to responders the sender may address that do not already have an explicit choice, and it takes precedence over fork inheritance for those responders.
+The opening pick is stored before `message:received` hooks, so a hook can suppress the reply without discarding the pick.
+A handled `!model` set or reset consumes the opening pick for the entire thread, even if the reset found no override to remove.
+While the thread's bounded record is retained, later handling does not reapply the pick, even after a reset or expanded access.
+Known limit: more than 1,000 thread model records within the seven-day window can evict a consumed marker and let a still-eligible pick apply again on replay.
+A `!model reset` handled before a fork's first turn does not stop that turn from inheriting the parent's models.
+The pick applies when the opening turn is prepared, not when the opening event arrives: a reply in the new thread that an agent handles before that (for example while a voice opener is still being transcribed, or while all root-preparation slots are busy) uses the inherited model; the opener and later replies use the pick once it is applied.
+If the runtime cannot save an opening pick, it logs a warning and the reply uses the inherited model without a separate acknowledgement.
+Invalid or unauthorized picks are ignored without an acknowledgement, and the reply uses the inherited model.
+The key has the same visibility as the message it travels in.
 
 ### Thread Changes and Acknowledgements
 

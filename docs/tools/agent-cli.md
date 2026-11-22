@@ -44,6 +44,7 @@ If shell permissions or deployment settings change after minimal mode was select
 The minimal prompt identifies the agent, lists its loaded workspace context files, and names the toolkits available through `mindroom-agent`.
 When the agent has skills, it names them; the agent reads one with `mindroom-agent context read skill:<name>`, which also gives the skill's directory.
 With file memory, it also names the workspace-relative `MEMORY.md` and `memory/` locations.
+When the agent may run [named workers](execution-and-coding.md#named-workers), it names [`mindroom-agent workers run`](#run-commands-in-named-workers), because Bash itself takes no `worker`.
 File contents, the role, ordinary instructions, and tool guidance are not in the prompt; the agent reads them through `mindroom-agent context` when it needs them.
 
 `minimal_instructions` (list of strings, default `[]`) is appended to the minimal prompt on every minimal request:
@@ -93,6 +94,7 @@ mindroom-agent calls get CALL_ID
 mindroom-agent calls wait CALL_ID
 mindroom-agent context list
 mindroom-agent context read NAME --offset 0 --limit 8000
+mindroom-agent workers run NAME -- COMMAND
 ```
 
 Tool names are qualified by toolkit, and `TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
@@ -137,6 +139,51 @@ Images, audio, and files are handled like ordinary response attachments.
 
 Scripts using `set -e` must handle exit code `3` explicitly.
 After exit code `4`, check the original call ID before retrying, because submitting with a fresh ID may repeat a side effect.
+`workers run` has [exit codes of its own](#run-commands-in-named-workers).
+
+## Run commands in named workers
+
+`workers run` runs one command in a [named worker](execution-and-coding.md#named-workers) of the current reply, so one shell script can spread work over several workers.
+It is the agent's own `run_shell_command` call with `worker` set, under the same approval rules and limits as every other CLI call, and it is available only where the agent is offered `worker`.
+
+```bash
+mindroom-agent workers run NAME [--resource-profile small|standard|large] [--timeout SECONDS] [--tail LINES] -- COMMAND [ARG...]
+```
+
+The command is everything after `--`. Multiple arguments run as the exact argument list. A single argument runs as an executable unless it contains whitespace or shell syntax, in which case Bash interprets it as a command line.
+For shell builtins or syntax, pass Bash explicitly, for example `mindroom-agent workers run build -- bash -c 'cd src && pwd'`.
+The CLI waits until the command ends. `--tail` (default 100) selects the last lines of stdout, and of stderr when the command succeeds; for a failed or timed-out command, the result puts stdout under `Output:` and all of stderr under `Stderr:`.
+If the shell result is [auto-saved](execution-and-coding.md#workspace-and-tool-output-files), the CLI prints its preview to stdout and the saved file's path to stderr. The preview may not include the last lines.
+`--timeout` (default 3600 seconds) stops the command, and `--resource-profile` sizes the worker when its name is first used.
+If the CLI loses the submission response or cannot read a running command’s receipt, it retries reading the receipt for up to a minute. It never submits the command twice.
+Stopping `workers run` itself, with Ctrl-C or at the `timeout` of the shell command it runs in, does not stop its command, which runs on in its worker until it ends or reaches `--timeout`.
+
+| Code | Meaning |
+| --- | --- |
+| The command's exit code | The command ran in the named worker; a command a signal killed exits with 128 plus the signal's number, such as `137` |
+| `124` | The command was stopped at `--timeout` |
+| `125` | The command did not run in the named worker, or its outcome is unknown: the call was refused, its command could not start, the call was cancelled, or its result stayed unreadable for a minute while the command may still be running; the reason is on stderr |
+| `2` | Invalid CLI arguments |
+
+Run this script from the shared workspace. It runs eight shards at once and fails if any shard fails.
+Each shard writes its full log to the shared workspace from inside its worker, so the log keeps the final summary even when CLI output would be previewed. CLI diagnostics go to a separate log.
+
+```bash
+out="runs/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$out"
+pids=()
+for i in $(seq 0 7); do
+  mindroom-agent workers run "shard-$i" --resource-profile large -- \
+    bash -c 'bash ci/shard.sh "$1" 8 > "$2" 2>&1' _ "$i" "$out/$i.log" \
+    > "$out/$i.cli.log" 2>&1 &
+  pids+=("$!")
+done
+failed=0
+for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+exit "$failed"
+```
+
+Run such a script as a [background job](agent-orchestration.md#background-jobs) or with a `timeout` that covers it, because a script stopped at its time limit no longer collects its workers' results.
 
 ## Approvals, shells, and limits
 

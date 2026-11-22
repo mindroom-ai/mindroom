@@ -166,6 +166,9 @@ class _KubernetesMetadata(Protocol):
     @property
     def uid(self) -> str | None: ...
 
+    @property
+    def deletion_timestamp(self) -> object | None: ...
+
 
 class _KubernetesDeploymentSpec(Protocol):
     @property
@@ -200,6 +203,8 @@ class _DeploymentMetadataSnapshot:
     labels: dict[str, str]
     generation: int | None
     uid: str | None
+    # Set while the object is being deleted, as during a foreground deletion that waits for its pods.
+    deletion_timestamp: object | None = None
 
 
 @dataclass(slots=True)
@@ -235,7 +240,7 @@ class _KubernetesRawResponse(Protocol):
 
 
 class _AppsApiProtocol(Protocol):
-    def read_namespaced_deployment(self, name: str, namespace: str) -> KubernetesDeployment: ...
+    def read_namespaced_deployment(self, name: str, namespace: str, **kwargs: object) -> KubernetesDeployment: ...
 
     def create_namespaced_deployment(self, namespace: str, body: dict[str, object]) -> KubernetesDeployment: ...
 
@@ -554,6 +559,7 @@ def _deployment_snapshot(payload: object) -> KubernetesDeployment:
             labels=_string_mapping(metadata.get("labels"), field_name="metadata.labels"),
             generation=_optional_int(metadata.get("generation"), field_name="metadata.generation"),
             uid=uid,
+            deletion_timestamp=metadata.get("deletionTimestamp"),
         ),
         spec=_DeploymentSpecSnapshot(
             replicas=_optional_int(spec.get("replicas"), field_name="spec.replicas"),
@@ -701,10 +707,10 @@ class KubernetesResourceManager:
             raise WorkerBackendError(msg)
         return [_deployment_snapshot(item) for item in payload["items"]]
 
-    def read_deployment(self, deployment_name: str) -> KubernetesDeployment | None:
+    def read_deployment(self, name: str, *, request_timeout: float | None = None) -> KubernetesDeployment | None:
         """Read one Deployment, returning ``None`` for 404s."""
         try:
-            return self._apps.read_namespaced_deployment(deployment_name, self.config.namespace)
+            return self._apps.read_namespaced_deployment(name, self.config.namespace, _request_timeout=request_timeout)
         except self.api_exception as exc:
             if exc.status == 404:
                 return None
@@ -841,6 +847,35 @@ class KubernetesResourceManager:
             if exc.status != 404:
                 raise
         self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
+
+    def worker_is_orphaned(self, worker_id: str) -> bool:
+        """Only confirm an orphan when its Deployment, ReplicaSets, and non-terminal Pods are absent."""
+        try:
+            if self.read_deployment(worker_id) is not None:
+                return False
+            for list_resources, filters in (
+                (self._apps.list_namespaced_replica_set, {}),
+                (self._core.list_namespaced_pod, {"field_selector": "status.phase!=Failed,status.phase!=Succeeded"}),
+            ):
+                response = list_resources(
+                    self.config.namespace,
+                    label_selector=f"{LABEL_WORKER_ID}={worker_id}",
+                    limit=1,
+                    _preload_content=False,
+                    _request_timeout=5.0,
+                    **filters,
+                )
+                try:
+                    payload = json.loads(response.data)
+                finally:
+                    response.release_conn()
+                metadata = payload.get("metadata", {})
+                if payload["items"] != [] or not isinstance(metadata, dict) or metadata.get("continue"):
+                    return False
+        except Exception:  # An API or inventory error is not evidence of absence.
+            logger.warning("kubernetes_worker_orphan_check_failed", worker_id=worker_id, exc_info=True)
+            return False
+        return True
 
     def check_workers_absent_for_storage_upgrade(self, *, timeout_seconds: float) -> None:
         """Require all worker controllers and Pods absent throughout this namespace."""
@@ -1322,7 +1357,7 @@ class KubernetesResourceManager:
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
     ) -> dict[str, object]:
-        startup_manifest_hash = self._write_startup_manifest(
+        startup_manifest_hash = self.write_startup_manifest(
             worker_key=worker_key,
             state_subpath=state_subpath,
             tool_validation_snapshot=launch.tool_validation_snapshot,
@@ -1435,7 +1470,7 @@ class KubernetesResourceManager:
             tool_validation_snapshot=tool_validation_snapshot,
         )
 
-    def _write_startup_manifest(
+    def write_startup_manifest(
         self,
         *,
         worker_key: str,

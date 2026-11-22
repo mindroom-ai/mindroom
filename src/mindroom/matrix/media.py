@@ -19,6 +19,8 @@ from mindroom.constants import RETAINED_MEDIA_MAX_BYTES, SUBMISSION_CONTENT_KEY
 from mindroom.llm.media import canonical_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_file import encrypted_file_content
+from mindroom.matrix.event_info import EventInfo
+from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
 
 logger = get_logger(__name__)
 
@@ -413,8 +415,7 @@ def extract_media_caption(
 def carried_media_content(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> dict[str, Any]:
     """Return what a text event rebuilt from this media event keeps of its content.
 
-    That is its mentions, its relation, and its composer submission marker, copied
-    unchanged; ``coalescing.policy.submission_marker`` validates the marker.
+    Mentions, relation, and composer metadata are carried unchanged; consumers validate them.
     """
     source = event.source
     content = source.get("content") if isinstance(source, dict) else None
@@ -423,6 +424,9 @@ def carried_media_content(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) 
     carried = {key: content[key] for key in ("m.mentions", "m.relates_to") if isinstance(content.get(key), dict)}
     if SUBMISSION_CONTENT_KEY in content:
         carried[SUBMISSION_CONTENT_KEY] = content[SUBMISSION_CONTENT_KEY]
+    # A voice event rebuilt for dispatch can get a new relation; check the original.
+    if THREAD_MODEL_CONTENT_KEY in content and not EventInfo.from_event(source).is_edit:
+        carried[THREAD_MODEL_CONTENT_KEY] = content[THREAD_MODEL_CONTENT_KEY]
     return carried
 
 

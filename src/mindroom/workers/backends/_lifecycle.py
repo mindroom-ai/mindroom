@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, replace
+from weakref import WeakValueDictionary
 
 from mindroom.workers.models import WorkerHandle, WorkerSshEndpoint, WorkerStatus
 
@@ -40,6 +41,7 @@ def worker_handle(
     backend_name: str,
     debug_metadata: dict[str, str],
     ssh_endpoint: WorkerSshEndpoint | None = None,
+    incarnation: str | None = None,
 ) -> WorkerHandle:
     """Build one worker's handle from its lifecycle state and the backend's effective status and endpoint."""
     return WorkerHandle(
@@ -57,6 +59,7 @@ def worker_handle(
         failure_reason=lifecycle.failure_reason,
         debug_metadata=debug_metadata,
         ssh_endpoint=ssh_endpoint,
+        incarnation=incarnation,
     )
 
 
@@ -145,7 +148,8 @@ class WorkerLocks:
     """One lock per worker, created on first use, that serializes that worker's lifecycle in this process."""
 
     def __init__(self) -> None:
-        self._locks: dict[str, threading.Lock] = {}
+        # Holders and waiters keep strong references; finished worker keys need no permanent lock.
+        self._locks: WeakValueDictionary[str, threading.Lock] = WeakValueDictionary()
         self._guard = threading.Lock()
 
     def for_key(self, key: str) -> threading.Lock:

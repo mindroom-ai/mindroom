@@ -83,8 +83,9 @@ class FakeCli:
 
 
 def left_behind(cli: FakeCli) -> list[Path]:
-    """Return any files the route left in its private directory."""
-    return sorted(path for path in (cli.storage_root / "claude_code").rglob("*") if path.is_file())
+    """Return files the route left in its private directory, apart from the reusable launcher."""
+    home = cli.storage_root / "claude_code"
+    return sorted(path for path in home.rglob("*") if path.is_file() and path != home / "exec-claude")
 
 
 def fake_cli(tmp_path: Path, *processes: dict[str, Any]) -> FakeCli:

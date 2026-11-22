@@ -9,7 +9,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.attachments.storage import parse_attachment_ids_from_event_source
-from mindroom.authorization import is_requester_joined_to_room
+from mindroom.authorization import addressable_responder_names, is_requester_joined_to_room
 from mindroom.background_tasks import create_background_task
 from mindroom.bot_runtime_view import RunPhase
 from mindroom.constants import (
@@ -38,6 +38,7 @@ from mindroom.dispatch_source import (
     ScheduledHistoryBudget,
     scheduled_history_limit_from_content,
 )
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import MessageEnvelope, hook_ingress_policy
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.event_info import EventInfo
@@ -55,7 +56,7 @@ from mindroom.response_payload_preparation import (
 from mindroom.response_sources import ResponseSources
 from mindroom.router.relay import execute_router_relay
 from mindroom.teams.formation import TeamIntent, select_ad_hoc_team_mode
-from mindroom.thread_models import copy_thread_model_override
+from mindroom.thread_models import apply_root_thread_model, copy_thread_model_override
 from mindroom.thread_summary.automatic import maybe_generate_prompt_summary
 from mindroom.thread_summary.schedule import first_reply_reaches_first_threshold
 from mindroom.thread_utils import mentions_another_participant
@@ -115,6 +116,54 @@ def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
 _SCHEDULED_RUN_INTENTS = frozenset({TurnIntent.SCHEDULED_FIRE, TurnIntent.ROUTER_HANDOFF, TurnIntent.ROUTER_NOTICE})
 # Hook dispatches come only from managed senders, such as automations choosing a model for their prompt.
 _PER_RUN_MODEL_INTENTS = _SCHEDULED_RUN_INTENTS | {TurnIntent.HOOK_DISPATCH}
+
+
+def _apply_root_thread_model(
+    deps: TurnDispatchDeps,
+    turn: PreparedTurn,
+    thread_id: str | None,
+    thread_history: Sequence[ResolvedVisibleMessage],
+) -> None:
+    """Seed the opening pick before inheriting any remaining fork models."""
+    choice = turn.thread_model_choice
+    if choice is None:
+        return
+    config, paths = deps.runtime.config, deps.runtime_paths
+    entity = entity_identity_registry(config, paths).current_entity_name_for_user_id(choice.runtime_user_id)
+    if entity is None:
+        return  # The pick is for another runtime.
+    client = deps.runtime.orchestrator.running_entity_client(entity)
+    reason = None
+    if client is None or (client.user_id, client.device_id) != (choice.runtime_user_id, choice.runtime_device_id):
+        reason = "other_runtime_device"
+    elif turn.command is not None or turn.facts.sender_is_managed or turn.facts.acts_for_requester:
+        reason = "not_direct_opening_prompt"
+    elif choice.model not in config.models:
+        reason = "unknown_model"
+    if reason is not None or thread_id is None or thread_id not in turn.handled_turn.source_event_ids:
+        deps.logger.info("Ignoring root thread model choice", thread_id=thread_id, reason=reason or "not_opening_turn")
+        return
+    # Use the same sender rule as `!model`, including reply-authorized bridge accounts.
+    names = addressable_responder_names(
+        turn.facts.run_requester_id,
+        turn.room.room_id,
+        config,
+        paths,
+        deps.runtime.agent_reply_memberships,
+    )
+    if not names:
+        deps.logger.info("Ignoring root thread model choice", thread_id=thread_id, reason="no_addressable_responder")
+        return
+    root = (turn.handled_turn.source_event_metadata or {}).get(thread_id)
+    timestamp_ms = turn.event.server_timestamp if turn.event.event_id == thread_id else None
+    apply_root_thread_model(
+        paths,
+        thread_id=thread_id,
+        root_timestamp_ms=timestamp_ms if root is None else root.timestamp_ms,
+        model_name=choice.model,
+        entity_names=names,
+        parent_thread_id=fork_parent_thread_id(thread_history, thread_id),
+    )
 
 
 def _inherit_fork_thread_models(
@@ -484,6 +533,9 @@ class TurnDispatcher:
         may_be_superseded = (
             prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
             and prepared.handled_turn.sources_all_from_requester(requester_user_id)
+            # A later turn's history shows a voice message only as a file: its transcript is posted,
+            # and read, only by the turn that answers it.
+            and not (prepared.turn.payload.voice_transcript or prepared.turn.payload.raw_audio_fallback)
             # While another run still waits in the queue, whether another
             # requester's follow-ups, an entity's reply written for this
             # requester, or this requester's message for another participant, a
@@ -893,6 +945,10 @@ class TurnDispatcher:
             extract_context_start,
             path=context_path,
         )
+        try:
+            _apply_root_thread_model(self.deps, turn, target.resolved_thread_id, context.thread_history)
+        except OSError:
+            self.deps.logger.warning("Opening model storage failed", thread_id=target.resolved_thread_id, exc_info=True)
         _inherit_fork_thread_models(self.deps, turn, target.resolved_thread_id, context.thread_history)
         envelope_start = time.monotonic()
         envelope = self.deps.resolver.build_envelope(

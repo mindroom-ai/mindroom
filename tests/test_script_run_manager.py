@@ -52,6 +52,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends.local import _LocalWorkerBackend
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import (
     ScriptResourceProfile,
@@ -837,6 +838,19 @@ async def test_static_worker_backend_rejects_script_before_creating_any_state(tm
     assert manager.store.list_runs() == []
     assert static_backend.list_workers() == []
     assert client.launched_run_ids == []
+
+
+def test_script_backend_must_actually_support_exact_retirement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cleanup locator is not enough without a real method that can retire a worker."""
+    backend = _LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=10.0,
+    )
+    monkeypatch.setattr(backend, "cleanup_locator", "cleanup-locator")
+
+    with pytest.raises(ScriptRunManagerError, match="does not support exact worker retirement"):
+        manager_module._require_script_worker_backend(backend)
 
 
 @pytest.mark.asyncio

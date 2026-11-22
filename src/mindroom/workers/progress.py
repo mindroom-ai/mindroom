@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING
 from mindroom.logging_config import get_logger
 from mindroom.timing import elapsed_ms_between
 from mindroom.tool_system.worker_routing import (
+    pinned_worker_kind,
     resolved_worker_key_scope,
-    subagent_worker_state_scope_key,
     worker_key_agent_name,
     worker_log_id,
 )
@@ -219,8 +219,9 @@ class WorkerStartReporter:
 
 
 def _worker_kind(spec: WorkerSpec) -> str:
-    if subagent_worker_state_scope_key(spec.worker_key) is not None:
-        return "subagent"
+    pinned = pinned_worker_kind(spec.worker_key)
+    if pinned is not None:
+        return pinned
     # Otherwise only a background script's run-pinned worker borrows the state of another worker's scope.
     return "script" if spec.state_scope_worker_key is not None else "tool"
 

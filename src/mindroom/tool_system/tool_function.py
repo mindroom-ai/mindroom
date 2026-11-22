@@ -203,6 +203,7 @@ class ToolOutcome(ToolValue):
     stop_after_call: bool = False
     is_error: bool = False
     refused_by: Literal["plugin_hook", "approval"] | None = None
+    saved_output: dict[str, object] | None = None
 
 
 def media_reference(kind: MediaKind, medium: Image | Audio | Video | File) -> dict[str, object]:

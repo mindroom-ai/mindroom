@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
 _RESOURCES: ContextVar[ExecutionResources | None] = ContextVar("tool_job_resources", default=None)
+_RESPONSE_RESOURCES: ContextVar[ExecutionResources | None] = ContextVar("response_resources", default=None)
 
 
 class ExecutionResourceReference:
@@ -59,6 +60,18 @@ class ExecutionResources:
                     self._keys.add(id(resource))
             return True
 
+    def retain(self, resource: object, callback: Callable[[], Awaitable[None]]) -> bool | None:
+        """Register lifetime cleanup once; None means the response and its jobs already settled."""
+        with self._lock:
+            if self._references == 0:
+                return None
+            key = id(resource)
+            if key in self._keys:
+                return False
+            self._keys.add(key)
+            self._callbacks.append(callback)
+            return True
+
     async def release_parent(self) -> None:
         """Release the response without blocking on its detached operations."""
         with self._lock:
@@ -81,21 +94,39 @@ def current_execution_resources() -> ExecutionResources | None:
     return _RESOURCES.get()
 
 
+def current_response_resources() -> ExecutionResources | None:
+    """Return the reply's resources, even inside a job with its own execution resources."""
+    return _RESPONSE_RESOURCES.get() or _RESOURCES.get()
+
+
 @contextmanager
-def bind_execution_resources(resources: ExecutionResources) -> Iterator[None]:
-    """Bind only one operation or stream pull, never across a stream yield."""
-    token = _RESOURCES.set(resources)
+def bind_execution_resources(
+    resources: ExecutionResources,
+    *,
+    response: bool = False,
+    jobs_enabled: bool = True,
+) -> Iterator[None]:
+    """Bind one operation or stream pull, keeping the response owner reachable inside its jobs."""
+    response_token = _RESPONSE_RESOURCES.set(resources) if response else None
+    token = _RESOURCES.set(resources) if jobs_enabled else None
     try:
         yield
     finally:
-        _RESOURCES.reset(token)
+        if token is not None:
+            _RESOURCES.reset(token)
+        if response_token is not None:
+            _RESPONSE_RESOURCES.reset(response_token)
 
 
 @asynccontextmanager
-async def execution_resources() -> AsyncIterator[ExecutionResources]:
+async def execution_resources(
+    *,
+    response: bool = False,
+    jobs_enabled: bool = True,
+) -> AsyncIterator[ExecutionResources]:
     """Own response resources while accepted children retain independent refs."""
     resources = ExecutionResources()
-    with bind_execution_resources(resources):
+    with bind_execution_resources(resources, response=response, jobs_enabled=jobs_enabled):
         try:
             yield resources
         finally:

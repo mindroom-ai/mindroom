@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "ANTHROPIC_BASE_URL_DEFAULT",
+    "ANTHROPIC_OPENROUTER_BASE_URL",
     "AZURE_OPENAI_API_VERSION_DEFAULT",
     "CARTESIA_TTS",
     "CEREBRAS_HOST_DEFAULT",
@@ -112,6 +113,7 @@ CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES = (
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-opus-5",
+    "claude-haiku-5",
     "claude-fable-5",
     "claude-mythos-5",
     "claude-mythos-preview",
@@ -269,6 +271,8 @@ OPENAI_BASE_URL_DEFAULT = "https://api.openai.com/v1"
 # stable, checked 2026-10-27); Azure's later GA releases are the undated v1 API.
 AZURE_OPENAI_API_VERSION_DEFAULT = "2024-10-21"
 ANTHROPIC_BASE_URL_DEFAULT = "https://api.anthropic.com"
+# Messages endpoint root; the Anthropic SDK appends /v1.
+ANTHROPIC_OPENROUTER_BASE_URL = "https://openrouter.ai/api"
 DEEPSEEK_BASE_URL_DEFAULT = "https://api.deepseek.com"
 GROQ_HOST_DEFAULT = "https://api.groq.com"
 CEREBRAS_HOST_DEFAULT = "https://api.cerebras.ai"

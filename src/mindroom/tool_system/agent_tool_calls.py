@@ -33,6 +33,7 @@ from mindroom.tool_system.tool_function import (
     connect_toolkits,
 )
 from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
+from mindroom.workers.named import named_workers_refusal
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
@@ -104,6 +105,7 @@ class AgentToolCallStep:
     kind: Literal["started", "continuation_required", "completed"]
     key: ToolKey
     call: ReportedCall
+    saved_output: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,6 +332,19 @@ def _failure(
     return AgentToolCallStep("completed", binding.key, call)
 
 
+def _invalid_arguments_reason(binding: PreparedAgentToolBinding, arguments: dict[str, object]) -> str:
+    """Explain an explicitly requested but unavailable named worker without opening the shell's schema."""
+    if (
+        binding.key == ToolKey("shell", SHELL_FUNCTION)
+        and "worker" in arguments
+        and "worker" not in binding.function.parameters.get("properties", {})
+    ):
+        context = binding.catalog.runtime_context
+        reason = named_workers_refusal(context.agent_name, context.config, context.runtime_paths)
+        return reason or "Named workers need a shell that runs in a worker."
+    return "Invalid tool arguments"
+
+
 def _check_resolves(
     requirement: RunRequirement,
     binding: PreparedAgentToolBinding,
@@ -421,7 +436,7 @@ async def _execute_agent_tool_call(
         try:
             validate_tool_arguments(dict(binding.function.parameters), arguments)
         except ValueError:
-            yield _failure(binding, call_id, arguments, "Invalid tool arguments")
+            yield _failure(binding, call_id, arguments, _invalid_arguments_reason(binding, arguments))
             return
         limit = catalog.max_tool_calls_per_turn
         if limit is not None and catalog._call_count >= limit:
@@ -466,7 +481,12 @@ async def _execute_agent_tool_call(
         if outcome.images or outcome.audios or outcome.videos or outcome.files:
             yield AgentToolCallMedia(outcome)
         kind = "continuation_required" if outcome.stop_after_call else "completed"
-        yield AgentToolCallStep(kind, binding.key, replace(call, result=outcome.content, is_error=outcome.is_error))
+        yield AgentToolCallStep(
+            kind,
+            binding.key,
+            replace(call, result=outcome.content, is_error=outcome.is_error),
+            outcome.saved_output,
+        )
 
 
 __all__ = [

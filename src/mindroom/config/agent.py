@@ -482,6 +482,11 @@ class AgentConfig(BaseModel):
             "Let authorized users SSH from the operator's tailnet to the dedicated worker this agent's shell uses"
         ),
     )
+    named_workers: int = Field(
+        default=0,
+        ge=0,
+        description="How many named workers this agent's shell calls may have at once for one requester on the kubernetes worker backend, for an agent whose workers are per requester and agent; 0 turns them off",
+    )
 
     @property
     def tool_names(self) -> list[str]:

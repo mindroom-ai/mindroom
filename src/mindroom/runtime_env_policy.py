@@ -174,6 +174,9 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
         "enable_service_links": "MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS",
         "auth_secret_name": "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME",
         "seccomp_profile_json": "MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON",
+        "named_worker_idle_timeout": "MINDROOM_KUBERNETES_NAMED_WORKER_IDLE_TIMEOUT_SECONDS",
+        "named_worker_max_age": "MINDROOM_KUBERNETES_NAMED_WORKER_MAX_AGE_SECONDS",
+        "named_workers_max": "MINDROOM_KUBERNETES_NAMED_WORKERS_MAX",
     },
 )
 

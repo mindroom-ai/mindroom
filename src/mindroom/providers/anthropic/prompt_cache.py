@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mindroom.model_defaults import TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
+from mindroom.model_defaults import ANTHROPIC_OPENROUTER_BASE_URL, TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
 from mindroom.providers.anthropic.repairs import (
     BEDROCK_MAX_INLINE_MEDIA_BYTES,
     MAX_INLINE_IMAGE_BYTES,
@@ -173,6 +173,7 @@ def prepare_request_body(
     tool_choice: ToolChoice | None,
     extended_cache_time: bool,
     cache_system_prompt: bool,
+    endpoint: str | None = None,
 ) -> dict[str, Any]:
     """Return the request body as it goes on the wire.
 
@@ -182,10 +183,14 @@ def prepare_request_body(
     """
     prepared = without_unavailable_tool_references(body)
     prepared = with_leading_tool_results(prepared)
+    # OpenRouter can serve the request on Bedrock, which has the smallest inline media budget.
+    use_bedrock_budget = route == "bedrock_claude" or endpoint == ANTHROPIC_OPENROUTER_BASE_URL
     prepared = with_supported_inline_media(
         prepared,
-        max_inline_bytes=BEDROCK_MAX_INLINE_MEDIA_BYTES if route == "bedrock_claude" else MAX_INLINE_MEDIA_BYTES,
-        max_image_bytes=MAX_INLINE_IMAGE_BYTES if route == "anthropic" else PARTNER_MAX_INLINE_IMAGE_BYTES,
+        max_inline_bytes=BEDROCK_MAX_INLINE_MEDIA_BYTES if use_bedrock_budget else MAX_INLINE_MEDIA_BYTES,
+        max_image_bytes=MAX_INLINE_IMAGE_BYTES
+        if route == "anthropic" and not use_bedrock_budget
+        else PARTNER_MAX_INLINE_IMAGE_BYTES,
     )
     prepared = _with_deferred_tool_search(prepared, deferred_tool_names)
     prepared = _with_tool_choice(prepared, tool_choice)

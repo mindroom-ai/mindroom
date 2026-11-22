@@ -81,6 +81,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.tools.filesystem import with_view_file_hint
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
+from mindroom.workers.named import named_workers_refusal
 from mindroom.workspaces import MIND_TEMPLATE_CONTEXT_FILES, MIND_WORKSPACE_TEMPLATE, ensure_workspace_template
 
 if TYPE_CHECKING:
@@ -152,6 +153,7 @@ class _AgentToolAssembly:
     local_tool_names: tuple[str, ...]
     worker_routed_tool_names: tuple[str, ...]
     cli_deferred: tuple[DeferredAgentToolkit, ...]
+    named_workers: bool
     # The tool-call policy the loop runs around every call, the hook bridge; a browser's computer announcement is
     # its functions' own.
     tool_middleware: tuple[ToolMiddleware, ...]
@@ -1235,6 +1237,19 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         entries=offered,
         instructions=toolkit_instructions(entry.adapted for entry in offered),
         cli_deferred=tuple(cli_deferred),
+        named_workers=any(
+            function.registered_toolkit == "shell" and "worker" in function.parameters.get("properties", {})
+            for entry in offered
+            for function in entry.adapted.functions
+        )
+        or (
+            # A deferred shell is not built yet; use the same routing and policy checks as its schema.
+            not disable_runtime_capabilities
+            and "shell" in deferred_configs
+            and agent_tools.runs_in_worker("shell", placement)
+            and (target := agent_runtime.execution.worker_target) is not None
+            and named_workers_refusal(target.routing_agent_name, config, runtime_paths) is None
+        ),
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),
         tool_middleware=(hook_middleware,),
@@ -1791,6 +1806,8 @@ def create_agent(
                 else None
             ),
             runtime_context=_get_mind_runtime_context(agent_name, config, runtime_paths),
+            # Minimal Bash has no `worker` argument, so its prompt names the CLI command where the shell offers one.
+            named_workers=tool_assembly.named_workers,
             minimal_instructions=tuple(agent_config.minimal_instructions) if persona is None else (),
             interactive_prompt=config.get_prompt("INTERACTIVE_QUESTION_PROMPT")
             if include_interactive_questions

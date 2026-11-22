@@ -101,6 +101,9 @@ class WorkerHandle:
     failure_reason: str | None = None
     debug_metadata: dict[str, str] = field(default_factory=dict)
     ssh_endpoint: WorkerSshEndpoint | None = None
+    # What the backend runs the worker as, when it can tell one from its replacement under the same key, which may
+    # count its starts from one again; a failure names it, so a late one never stops the replacement.
+    incarnation: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
