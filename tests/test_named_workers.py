@@ -947,15 +947,22 @@ async def test_workers_run_prints_saved_output_from_its_named_worker(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("named_workers", "scope"), [(0, "user_agent"), (2, "shared")])
+@pytest.mark.parametrize("hidden", [{"worker": "build"}, {"resource_profile": "large"}])
 async def test_cli_catalog_explains_why_named_workers_are_not_offered(
+    hidden: dict[str, str],
+    named_workers: int,
+    scope: str,
     tmp_path: Path,
     runtime_paths: RuntimePaths,
     backend: _FakeBackend,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The real CLI dispatch refuses a hidden worker argument without running the shell."""
+    """The real CLI dispatch refuses a hidden named-worker argument as such a refusal, so `workers run` exits 125."""
     from uuid import uuid4  # noqa: PLC0415
 
+    from mindroom.agent_cli.main import main  # noqa: PLC0415
     from mindroom.agent_cli.protocol import ToolCallOperation  # noqa: PLC0415
     from mindroom.agent_cli.session import CliTurnOwner  # noqa: PLC0415
     from mindroom.agent_cli.shell_contract import AgentCliShellEnv  # noqa: PLC0415
@@ -965,8 +972,8 @@ async def test_cli_catalog_explains_why_named_workers_are_not_offered(
     from tests.minimal_agent_fixtures import settled_receipt  # noqa: PLC0415
     from tests.test_agent_tool_calls import _catalog  # noqa: PLC0415
 
-    config = Config(agents={"code": AgentConfig(display_name="Code", named_workers=0, worker_scope="user_agent")})
-    target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
+    config = Config(agents={"code": AgentConfig(display_name="Code", named_workers=named_workers, worker_scope=scope)})
+    target = resolve_worker_target(scope, "code", _identity(), private_agent_names=frozenset())
     shell = get_tool_by_name(
         "shell",
         runtime_paths,
@@ -1001,7 +1008,7 @@ async def test_cli_catalog_explains_why_named_workers_are_not_offered(
                     call_id=uuid4(),
                     toolkit="shell",
                     function="run_shell_command",
-                    arguments={"args": ["true"], "worker": "build", "timeout": 3600, "tail": 100},
+                    arguments={"args": ["true"], "timeout": 3600, "tail": 100} | hidden,
                 ),
             )
             receipt = await settled_receipt(owner, queued["call_id"])
@@ -1009,8 +1016,17 @@ async def test_cli_catalog_explains_why_named_workers_are_not_offered(
         await owner.close()
 
     assert receipt["status"] == "failed"
-    assert receipt["outcome"] == "Named workers are off for this agent; named_workers in its config allows them."
+    assert receipt["outcome"] == named_workers_refusal("code", config, runtime_paths)
+    assert receipt["error_kind"] == "named_worker_refusal"
     assert not posts
+
+    class Client:
+        def operation(self, _payload: object) -> dict[str, object]:
+            return receipt
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    assert main(["workers", "run", "build", "--", "true"]) == 125
+    assert capsys.readouterr().err == f"mindroom-agent: {receipt['outcome']}\n"
 
 
 @pytest.mark.asyncio
