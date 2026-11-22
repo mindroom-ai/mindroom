@@ -10751,3 +10751,20 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.state_failures"
 depends_on = []
+
+[[modules]]
+path = "mindroom.reactive_triggers"
+depends_on = [
+    "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.store",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers.models"
+depends_on = []
+
+[[modules]]
+path = "mindroom.reactive_triggers.store"
+depends_on = [
+    "mindroom.reactive_triggers.models",
+]
