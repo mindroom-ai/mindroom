@@ -640,34 +640,90 @@ def test_only_the_opt_in_plugins_that_lead_the_plugin_list_are_preloaded(tmp_pat
     assert preloaded(missing, first) == ()
 
 
-def test_only_plugins_configured_by_an_absolute_path_or_as_a_package_are_preloaded(
+@pytest.mark.parametrize(
+    ("path", "is_preloaded"),
+    [
+        ("./plugins/named", True),
+        ("plugins/named", True),
+        ("../beside/plugins/named", True),
+        ("${MINDROOM_STORAGE_PATH}/plugins/named", True),
+        ("python:packaged", True),
+        ("packaged", True),
+        ("~/plugins/named", False),
+        ("./~/plugins/named", False),
+    ],
+)
+def test_a_plugin_is_preloaded_however_it_is_configured_except_under_the_home_directory(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    path: str,
+    is_preloaded: bool,
 ) -> None:
-    """A path under ``~`` or beside the config can name another directory in a call than when the worker started."""
-    runtime_paths = _runtime(tmp_path)
+    """Only ``~`` depends on the HOME of the process that reads it; every other path names one directory."""
+    config_dir = tmp_path / "beside"
+    runtime_paths = _runtime(config_dir)
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     absolute = _write_plugin(tmp_path, "absolute", worker_preload=True)
-    _write_plugin(home / "plugins", "under_home", worker_preload=True)
-    _write_plugin(tmp_path, "beside_config", worker_preload=True)
+    for parent in (config_dir, runtime_paths.storage_root, home):
+        _write_plugin(parent / "plugins", "named", worker_preload=True)
     _write_plugin(tmp_path / "packages", "packaged", worker_preload=True)
     (tmp_path / "packages" / "packaged" / "__init__.py").write_text("", encoding="utf-8")
     monkeypatch.syspath_prepend(str(tmp_path / "packages"))
-    under_home = PluginEntryConfig(path="~/plugins/under_home")
-    beside_config = PluginEntryConfig(path="./beside_config")
-    packaged = PluginEntryConfig(path="python:packaged")
 
-    def preloaded(*plugins: PluginEntryConfig) -> tuple[str, ...]:
-        return worker_preload_plugin_paths(Config(plugins=list(plugins)), runtime_paths)
+    # The entry resolves and opts in, so only how it is configured can keep it out.
+    root = plugin_imports._resolve_plugin_root(path, runtime_paths)
+    assert plugin_imports._load_plugin_base(root).worker_preload is True
+    config = Config(plugins=[absolute, PluginEntryConfig(path=path)])
+    assert worker_preload_plugin_paths(config, runtime_paths) == (
+        (absolute.path, path) if is_preloaded else (absolute.path,)
+    )
 
-    # Each of them resolves and opts in, so only how it is configured keeps it out.
-    for entry in (under_home, beside_config, packaged):
-        root = plugin_imports._resolve_plugin_root(entry.path, runtime_paths)
-        assert plugin_imports._load_plugin_base(root).worker_preload is True
-    assert preloaded(absolute, packaged) == (absolute.path, "python:packaged")
-    assert preloaded(under_home, absolute) == ()
-    assert preloaded(absolute, beside_config, packaged) == (absolute.path,)
+
+def test_a_plugin_beside_the_config_is_the_same_one_in_a_call_with_another_home_and_working_directory(
+    manager: _SandboxForkserver,
+    tmp_path: Path,
+) -> None:
+    """A relative path is read against the config's directory by the template and by each call it serves."""
+    runtime_paths = _runtime(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    for name in ("dotted", "bare"):
+        _write_plugin(tmp_path / "plugins", name, worker_preload=True)
+        # The call's HOME and working directory hold another plugin under the same relative path.
+        _write_plugin(elsewhere / "plugins", name, worker_preload=True)
+        (elsewhere / "plugins" / name / "data.txt").write_text("elsewhere", encoding="utf-8")
+    plugins = [PluginEntryConfig(path="./plugins/dotted"), PluginEntryConfig(path="plugins/bare")]
+    assert worker_preload_plugin_paths(Config(plugins=plugins), runtime_paths) == ("./plugins/dotted", "plugins/bare")
+    _serve_preload(runtime_paths, plugins)
+
+    response: ExecuteResponse = sandbox_runner_module._execute_request_subprocess_sync(
+        execute_call(
+            runtime_paths,
+            Config(plugins=plugins),
+            tool_name="python",
+            function_name="run_python_code",
+            args=[
+                "import os, sys\n"
+                "data = sorted(m.DATA for n, m in sys.modules.items() if n.startswith('mindroom_plugin_') and"
+                " hasattr(m, 'DATA'))\n"
+                "result = f\"{os.environ['HOME']}|{os.getcwd()}|{os.getpid()}|{','.join(data)}\"",
+                "result",
+            ],
+            kwargs={},
+            base_dir=str(elsewhere),
+            execution_env={"HOME": str(elsewhere)},
+        ),
+    )
+
+    assert response.ok is True, response.error
+    home, cwd, call_pid, data = str(response.result).split("|")
+    assert (home, cwd, data) == (str(elsewhere), str(elsewhere), "v1,v1")
+    assert manager.dispatched == [True]
+    template_pid = manager.spawned[0].process.pid
+    assert int(call_pid) != template_pid
+    for name in ("dotted", "bare"):
+        assert [pid for pid, _cwd, _data in _imports(tmp_path / "plugins", name)] == [template_pid]
+        assert _imports(elsewhere / "plugins", name) == []
 
 
 def test_worker_preload_in_a_manifest_must_be_a_boolean(tmp_path: Path) -> None:
