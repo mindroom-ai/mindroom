@@ -35,6 +35,8 @@ from mindroom.workers.protocol import (
     LeaseResponse,
     SaveAttachmentRequest,
     SaveAttachmentResponse,
+    StdinRequest,
+    StdinResponse,
     ViewFileRequest,
     ViewFileResponse,
     WorkerFailure,
@@ -42,11 +44,14 @@ from mindroom.workers.protocol import (
 
 if TYPE_CHECKING:
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.tool_system.runtime_context import CallOutputStream
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
     from mindroom.workers.backend import WorkerBackend
 
 _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _EXECUTE_CANCEL_TIMEOUT_SECONDS = 10.0
+# How long one chunk of a streamed command's stdin may wait for the command to read; its sender then repeats it.
+_EXECUTE_STDIN_TIMEOUT_SECONDS = 25.0
 # The runner streams at least one line this often while a call runs; a longer silence means the runner is gone.
 EXECUTE_KEEPALIVE_SECONDS = 5.0
 
@@ -373,6 +378,21 @@ def _post_execute_cancel(
         logger.warning("worker_execute_cancel_failed", url=url, exc_info=True)
 
 
+async def _post_execute_stdin(url: str, headers: dict[str, str], seq: int, data: str, eof: bool) -> bool:
+    """Write one chunk to the stdin of a streamed call's command, and return whether its stdin takes more."""
+    request = StdinRequest(protocol=WORKER_PROTOCOL_VERSION, seq=seq, b=data, eof=eof)
+    try:
+        async with httpx.AsyncClient(timeout=_EXECUTE_STDIN_TIMEOUT_SECONDS) as client:
+            response = await client.post(url, json=request.model_dump(mode="json"), headers=headers)
+    except httpx.TimeoutException:
+        # The command has not read what it was sent; its sender repeats the chunk.
+        raise TimeoutError from None
+    if response.is_client_error:
+        raise ValueError(_proxy_http_error_message(response))
+    response.raise_for_status()
+    return StdinResponse.model_validate(response.json()).open
+
+
 def _ndjson_lines(chunks: Iterator[bytes]) -> Iterator[str]:
     """Split a streamed body on newlines alone, since JSON text may hold other Unicode line separators."""
     pending = bytearray()
@@ -393,16 +413,19 @@ def _read_execute_stream(
     *,
     deadline: float | None,
     cancellation: WorkerCallCancellation | None,
+    on_frame: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object] | None:
     """Relay a call's progress until its result line; None when that line is not a JSON object.
 
     Dropping the stream stops the call at the runner, so a cancelled call stops reading at its next line.
+    ``on_frame`` takes each frame of a streamed command (a line with ``t``) as it arrives, and reads no further
+    until it returns.
     """
     for line in _ndjson_lines(response.iter_bytes()):
         if not line:
             continue
         frame = _json_object(json.loads(line))
-        if frame is None or ("progress" not in frame and frame.get("keepalive") is not True):
+        if frame is None or ("progress" not in frame and "t" not in frame and frame.get("keepalive") is not True):
             return frame
         if cancellation is not None and cancellation.cancelled:
             raise asyncio.CancelledError
@@ -411,6 +434,8 @@ def _read_execute_stream(
             raise httpx.ReadTimeout(msg)
         if "progress" in frame:
             report_tool_progress(str(frame["progress"]))
+        elif "t" in frame and on_frame is not None:
+            on_frame(frame)
     msg = "Sandbox proxy stream ended without a result."
     raise RuntimeError(msg)
 
@@ -427,12 +452,15 @@ def execute_worker_proxy_request(
     primary_built_service: Callable[[str], bool] | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
     cancellation: WorkerCallCancellation | None = None,
+    stream: CallOutputStream | None = None,
+    on_frame: Callable[[dict[str, object]], None] | None = None,
 ) -> object:
     """Execute one tool call through the sandbox proxy or selected dedicated worker.
 
     ``primary_built_service`` names leased services whose settings live in primary stores.
     ``worker_grantable_credentials`` names shared services a scoped call may lease.
     ``cancellation`` lets the caller stop the call at the runner once it stops waiting for it.
+    ``stream`` is given the way to the stdin of a call's streamed command, whose frames ``on_frame`` takes.
     """
     if worker_handle is None and config.proxy_url is None:
         msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
@@ -467,6 +495,9 @@ def execute_worker_proxy_request(
                         cancellation.request_id,
                     ),
                 )
+                if stream is not None:
+                    stdin_url = f"{cancel_url.removesuffix('/cancel')}/{cancellation.request_id}/stdin"
+                    stream.write_stdin = functools.partial(_post_execute_stdin, stdin_url, headers)
             lease_id = _create_credential_lease(
                 client,
                 config=config,
@@ -503,7 +534,12 @@ def execute_worker_proxy_request(
                 except httpx.HTTPStatusError as exc:
                     response.read()
                     raise _WorkerHttpError(exc.response) from exc
-                data = _read_execute_stream(response, deadline=deadline, cancellation=cancellation)
+                data = _read_execute_stream(
+                    response,
+                    deadline=deadline,
+                    cancellation=cancellation,
+                    on_frame=on_frame,
+                )
     except Exception as exc:
         _record_proxy_exception_for_worker(
             exc,

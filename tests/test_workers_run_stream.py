@@ -1,6 +1,6 @@
 """`workers run` streams its command's bytes: a real CLI process, the primary's CLI routes, and a real sandbox runner."""
 
-# ruff: noqa: ANN001, ANN202
+# ruff: noqa: ANN001
 from __future__ import annotations
 
 import asyncio
@@ -77,7 +77,17 @@ class _Stack:
         env.update({AGENT_CLI_URL_ENV: self.url, AGENT_CLI_TOKEN_ENV: self.token, AGENT_CLI_WINDOW_ENV: _WINDOW})
         popen = {"stdin": asyncio.subprocess.DEVNULL, "stdout": asyncio.subprocess.PIPE, **popen}
         popen.setdefault("stderr", asyncio.subprocess.PIPE)
-        return await asyncio.create_subprocess_exec(sys.executable, "-c", _CLI, "workers", "run", "w", *argv, env=env, **popen)
+        return await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            _CLI,
+            "workers",
+            "run",
+            "w",
+            *argv,
+            env=env,
+            **popen,
+        )
 
     async def run(self, *argv: str, stdin: bytes | None = None) -> tuple[int | None, bytes, bytes]:
         """Run `workers run w ARGV` to its end, and return its exit code, stdout and stderr."""
@@ -121,7 +131,10 @@ async def _stack(tmp_path: Path, mode: str = "forkserver") -> AsyncIterator[_Sta
     reset_primary_worker_manager()
     runner, runner_serving, runner_url = await serve_runner(tmp_path, mode)
     config = Config(agents={"code": AgentConfig(display_name="Code", tools=["shell"])})
-    function = toolkit_function(agent_toolkit("shell", config, primary_paths(tmp_path, runner_url)), "run_shell_command")
+    function = toolkit_function(
+        agent_toolkit("shell", config, primary_paths(tmp_path, runner_url)),
+        "run_shell_command",
+    )
     assert function is not None
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -169,7 +182,7 @@ async def _stack(tmp_path: Path, mode: str = "forkserver") -> AsyncIterator[_Sta
 def _alive(pid: int) -> bool:
     """Return whether ``pid`` still runs; a process that ended and waits to be reaped does not."""
     try:
-        with open(f"/proc/{pid}/stat", encoding="utf-8") as stat:  # noqa: PTH123, ASYNC230
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as stat:  # noqa: PTH123
             return stat.read().rpartition(")")[2].split()[0] != "Z"
     except OSError:
         return False
@@ -188,7 +201,7 @@ async def _pid(path: Path) -> int:
 
 
 def _running_calls(owner: LiveTurnTools) -> int:
-    """Return how many of the reply's CLI calls still run, which is how many of its 64 slots they hold."""
+    """Return how many CLI calls of the reply still run, each of which holds one of its 64 slots."""
     return sum(not task.done() for task in owner._active)
 
 
@@ -202,10 +215,10 @@ async def test_stdout_and_stderr_arrive_apart_with_the_exit_code(tmp_path: Path,
 @_RUNNER_MODES
 async def test_five_megabytes_arrive_whole_whatever_tail_says(tmp_path: Path, mode: str) -> None:
     """Output has no cap, and `--tail` no longer cuts it."""
-    expected = "".join(f"{number}\n" for number in range(1, 750_001)).encode()
+    expected = "".join(f"{number}\n" for number in range(1, 800_001)).encode()
     assert len(expected) > 5 * 1024 * 1024
     async with _stack(tmp_path, mode) as stack:
-        code, stdout, stderr = await stack.run("--tail", "10", "--", "seq", "1", "750000")
+        code, stdout, stderr = await stack.run("--tail", "10", "--", "seq", "1", "800000")
     assert (code, stderr) == (0, b"")
     assert (len(stdout), hashlib.sha256(stdout).hexdigest()) == (len(expected), hashlib.sha256(expected).hexdigest())
 
@@ -214,7 +227,10 @@ async def test_binary_output_arrives_byte_for_byte_on_both_streams(tmp_path: Pat
     """Bytes that are no text, such as random ones, arrive unchanged on stdout and on stderr."""
     random = tmp_path / "random.bin"
     async with _stack(tmp_path) as stack:
-        code, stdout, stderr = await stack.run("--", f"head -c 1000 /dev/urandom > {random}; cat {random}; cat {random} >&2")
+        code, stdout, stderr = await stack.run(
+            "--",
+            f"head -c 1000 /dev/urandom > {random}; cat {random}; cat {random} >&2",
+        )
     assert code == 0
     assert len(random.read_bytes()) == 1000
     assert (stdout, stderr) == (random.read_bytes(), random.read_bytes())
@@ -322,7 +338,10 @@ async def test_frames_carry_at_most_32_kib_and_the_exit_follows_the_last_output(
     assert kinds[0] == "started"
     assert kinds[-2:] == ["exit", None]
     assert frames[-2] == {"t": "exit", "code": 3, "timed_out": False}
-    output = {kind: b"".join(base64.b64decode(frame["b"]) for frame in frames if frame.get("t") == kind) for kind in ("out", "err")}
+    output = {
+        kind: b"".join(base64.b64decode(frame["b"]) for frame in frames if frame.get("t") == kind)
+        for kind in ("out", "err")
+    }
     assert output == {"out": bytes(200000), "err": b"late\n"}
     assert max(len(base64.b64decode(frame["b"])) for frame in frames if "b" in frame) <= 32 * 1024
     assert (frames[-1]["status"], frames[-1]["call_id"]) == ("completed", operation["call_id"])
@@ -343,10 +362,11 @@ async def test_a_reader_that_hangs_up_stops_the_command_and_frees_its_slot(tmp_p
             async for frame in _frames(response):
                 if frame.get("t") == "out":
                     break
-        pids = [await _pid(leader), await _pid(child)]
-        assert _running_calls(stack.owner) == 2
+            pids = [await _pid(leader), await _pid(child)]
+            assert all(map(_alive, pids))
+            assert _running_calls(stack.owner) == 1
         await _until(lambda: not any(map(_alive, pids)), what="the command outlived its reader")
-        await _until(lambda: _running_calls(stack.owner) == 1, what="the call kept its slot")
+        await _until(lambda: _running_calls(stack.owner) == 0, what="the call kept its slot")
         assert (await http.get(route, headers=stack.headers)).json()["status"] == "cancelled"
 
 
@@ -362,7 +382,7 @@ async def test_sigterm_to_the_cli_stops_the_command_and_exits_143(tmp_path: Path
             process.send_signal(signal.SIGTERM)
             assert await process.wait() == 128 + signal.SIGTERM
         await _until(lambda: not any(map(_alive, pids)), what="the command outlived the CLI")
-        await _until(lambda: _running_calls(stack.owner) == 1, what="the call kept its slot")
+        await _until(lambda: _running_calls(stack.owner) == 0, what="the call kept its slot")
 
 
 async def test_a_closed_stdout_stops_the_command_and_exits_141(tmp_path: Path) -> None:
@@ -391,7 +411,7 @@ async def test_only_the_calls_own_reply_reads_its_stream_or_writes_its_stdin(tmp
         operation = stack.submit("cat", stream=True)
         assert (await http.post("/api/agent-cli/operations", headers=stack.headers, json=operation)).status_code == 200
         route = f"/api/agent-cli/calls/{operation['call_id']}"
-        chunk = {"seq": 0, "b": base64.b64encode(b"hi\n").decode(), "eof": True}
+        chunk = {"seq": 0, "b": base64.b64encode(b"hi\n").decode(), "eof": False}
         try:
             for token in (other_token, "no-grant"):
                 refused = {"Authorization": f"Bearer {token}"}
@@ -404,9 +424,9 @@ async def test_only_the_calls_own_reply_reads_its_stream_or_writes_its_stdin(tmp
                 # A chunk ahead of its turn is refused, and one sent twice is written once.
                 ahead = await http.post(f"{route}/stdin", headers=stack.headers, json={**chunk, "seq": 1})
                 assert ahead.status_code == 409
-                for _ in range(2):
-                    written = await http.post(f"{route}/stdin", headers=stack.headers, json=chunk)
-                    assert (written.status_code, written.json()) == (200, {"open": True})
+                for sent, still_open in ((chunk, True), (chunk, True), ({"seq": 1, "b": "", "eof": True}, False)):
+                    written = await http.post(f"{route}/stdin", headers=stack.headers, json=sent)
+                    assert (written.status_code, written.json()) == (200, {"open": still_open})
                 rest = [frame async for frame in frames if frame.get("t") != "keepalive"]
             assert [frame.get("t") for frame in rest] == ["out", "exit", None]
             assert base64.b64decode(rest[0]["b"]) == b"hi\n"
@@ -445,7 +465,11 @@ async def test_a_call_that_does_not_stream_answers_as_it_did(tmp_path: Path, mod
         assert (await http.post("/api/agent-cli/operations", headers=stack.headers, json=long)).status_code == 200
         async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             while receipt.get("call_id") != long["call_id"] or receipt["status"] in ("queued", "running"):
-                receipt = (await http.get(f"/api/agent-cli/calls/{long['call_id']}?wait=5", headers=stack.headers)).json()
-        assert receipt["outcome"] == "[Showing the last 10 of 150 lines. Pass a larger tail, or narrow the command.]\n" + "".join(
+                receipt = (
+                    await http.get(f"/api/agent-cli/calls/{long['call_id']}?wait=5", headers=stack.headers)
+                ).json()
+        assert receipt[
+            "outcome"
+        ] == "[Showing the last 10 of 150 lines. Pass a larger tail, or narrow the command.]\n" + "".join(
             f"{number}\n" for number in range(141, 151)
         ).rstrip("\n")

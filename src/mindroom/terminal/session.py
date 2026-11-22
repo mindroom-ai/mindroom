@@ -74,6 +74,15 @@ class SupportsTerminalLaunch(Protocol):
         """Return the shell to start in ``cwd``; ``process_environ`` is the environment its commands run from."""
         ...
 
+    def command_launch(
+        self,
+        *args: object,
+        process_environ: Mapping[str, str] | None,
+        **kwargs: object,
+    ) -> tuple[TerminalLaunch, float | None]:
+        """Return how a shell call with these arguments starts its command, and after how long it is stopped."""
+        ...
+
 
 @dataclass(frozen=True)
 class TerminalInfo:

@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
-__all__ = ["bind_agent_cli_registry", "cancel_call", "get_call", "router", "submit_operation"]
+__all__ = [
+    "bind_agent_cli_registry",
+    "cancel_call",
+    "get_call",
+    "router",
+    "stream_call",
+    "submit_operation",
+    "write_call_stdin",
+]
 
 import math
 import time
+from contextlib import aclosing
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from pydantic import ValidationError
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
 from mindroom.agent_cli.json_io import MAX_ENVELOPE_BYTES, canonical_json, read_json
 from mindroom.agent_cli.protocol import parse_operation
@@ -25,6 +34,8 @@ from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER
 from mindroom.api.app_state import ensure_app_state
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mindroom.agent_cli.session import CliOperationOwner, TurnToolRegistry
 
 router = APIRouter(prefix="/api/agent-cli", tags=["agent-cli"])
@@ -56,17 +67,22 @@ def _waited_response(request: Request, receipt: dict[str, object]) -> Response:
     return _response(receipt)
 
 
-@router.post("/operations")
-async def submit_operation(request: Request) -> Response:
-    """Authenticate before streaming/parsing any untrusted discriminated body."""
-    owner = _owner(request)
+async def _bounded_body(request: Request) -> bytes:
     body = bytearray()
     async for chunk in request.stream():
         if len(body) + len(chunk) > MAX_ENVELOPE_BYTES:
             raise HTTPException(status_code=413, detail="Agent CLI request exceeds 64 KiB")
         body.extend(chunk)
+    return bytes(body)
+
+
+@router.post("/operations")
+async def submit_operation(request: Request) -> Response:
+    """Authenticate before streaming/parsing any untrusted discriminated body."""
+    owner = _owner(request)
+    body = await _bounded_body(request)
     try:
-        operation = parse_operation(read_json(bytes(body)))
+        operation = parse_operation(read_json(body))
         return _response(await owner.operation(operation, window=request.headers.get(AGENT_CLI_WINDOW_HEADER)))
     except CliAuthenticationError:
         raise HTTPException(status_code=401, detail="Agent CLI authority is unavailable") from None
@@ -105,3 +121,55 @@ async def cancel_call(request: Request, call_id: str) -> Response:
     except (CliAuthenticationError, ValueError):
         raise HTTPException(status_code=401, detail="Agent CLI authority is unavailable") from None
     return _waited_response(request, receipt)
+
+
+@router.get("/calls/{call_id}/stream")
+async def stream_call(request: Request, call_id: str) -> Response:
+    """Stream one owned call's command output to its only reader as it arrives, then the call's receipt.
+
+    One JSON object per line. The reader sets the pace: MindRoom holds a few frames, and the command waits to
+    write more. A reader that leaves cancels the call.
+    """
+    owner = _owner(request)
+    try:
+        frames = owner.stream_call(str(UUID(call_id)))
+    except CliCallConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except (CliAuthenticationError, ValueError):
+        raise HTTPException(status_code=401, detail="Agent CLI authority is unavailable") from None
+
+    async def lines() -> AsyncIterator[bytes]:
+        async with aclosing(frames):
+            async for frame in frames:
+                yield canonical_json(frame).encode() + b"\n"
+
+    # Proxies must pass each line on as it comes instead of collecting the response.
+    headers = {"X-Accel-Buffering": "no", "Cache-Control": "no-store"}
+    return StreamingResponse(lines(), media_type="application/x-ndjson", headers=headers)
+
+
+@router.post("/calls/{call_id}/stdin")
+async def write_call_stdin(request: Request, call_id: str) -> Response:
+    """Write the next chunk ``{seq, b, eof}`` to the stdin of one owned streamed call's command.
+
+    Answers once the chunk has left for the command, with whether its stdin takes more; 504 means the command
+    has not read yet and the same chunk should be sent again.
+    """
+    owner = _owner(request)
+    try:
+        match read_json(await _bounded_body(request)):
+            case {"seq": int(seq), "b": str(data), "eof": bool(eof)} if seq >= 0:
+                pass
+            case _:
+                raise ValueError  # noqa: TRY301 - Every malformed chunk gets the one answer.
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid stdin chunk") from None
+    try:
+        still_open = await owner.write_stdin(str(UUID(call_id)), seq, data, eof=eof)
+    except CliAuthenticationError:
+        raise HTTPException(status_code=401, detail="Agent CLI authority is unavailable") from None
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="The command has not read its stdin yet") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return _waited_response(request, {"open": still_open})

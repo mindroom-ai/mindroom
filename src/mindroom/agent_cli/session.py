@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mindroom.agent_cli.protocol import AgentCliOperation
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -203,6 +205,14 @@ class CliOperationOwner(Protocol):
 
     async def cancel_call(self, call_id: str) -> dict[str, object]:
         """Idempotently cancel one exact-owner call without requiring a free capacity slot."""
+        ...
+
+    def stream_call(self, call_id: str) -> AsyncIterator[dict[str, object]]:
+        """Return the frames of one exact-owner streamed call for its only reader, ending with its receipt."""
+        ...
+
+    async def write_stdin(self, call_id: str, seq: int, data: str, *, eof: bool) -> bool:
+        """Write one numbered base64 chunk to the stdin of a streamed call's command; False once it takes no more."""
         ...
 
 

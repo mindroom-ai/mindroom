@@ -68,6 +68,9 @@ class ToolCallOperation(_Operation):
     toolkit: _TOOLKIT
     function: _SELECTOR
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
+    # Set by `mindroom-agent workers run` alone: the command of this shell call streams its raw output and takes
+    # stdin through the call's stream and stdin routes. No argument, so approval and hooks see the same call.
+    stream: bool = False
 
     @property
     def canonical_arguments_json(self) -> str:

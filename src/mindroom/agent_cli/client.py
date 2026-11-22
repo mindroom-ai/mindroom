@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import os
+from contextlib import contextmanager
 from http import HTTPStatus
 from http.client import HTTPException
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -18,6 +20,10 @@ from mindroom.agent_cli.shell_contract import (
     AGENT_CLI_WINDOW_ENV,
     AGENT_CLI_WINDOW_HEADER,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from http.client import HTTPResponse
 
 _HTTP_TIMEOUT_SECONDS = 30
 _MAX_LONG_POLL_SECONDS = 25
@@ -44,6 +50,14 @@ def _rejection(error: HTTPError) -> ValueError:
             return ValueError(f"{msg}: {detail}")
         case _:
             return ValueError(msg)
+
+
+def _envelope(payload: bytes) -> dict[str, object]:
+    result = read_json(payload)
+    if not isinstance(result, dict):
+        msg = "Agent CLI returned an invalid envelope"
+        raise AgentCliUnavailableError(msg)
+    return cast("dict[str, object]", result)
 
 
 class _NoRedirects(HTTPRedirectHandler):
@@ -111,6 +125,17 @@ class AgentCliClient:
             timeout=min(timeout, _HTTP_TIMEOUT_SECONDS),
         )
 
+    def stdin(self, call_id: str, seq: int, data: bytes, *, eof: bool) -> dict[str, object]:
+        """Write chunk ``seq`` to the stdin of a streamed call's command; repeating a chunk writes it once."""
+        chunk = {"seq": seq, "b": base64.b64encode(data).decode("ascii"), "eof": eof}
+        return self._request(f"/api/agent-cli/calls/{UUID(call_id)}/stdin", canonical_json(chunk).encode("utf-8"))
+
+    def stream(self, call_id: str) -> Iterator[dict[str, object]]:
+        """Yield a streamed call's frames as they arrive: one JSON object per line, the last one its receipt."""
+        with self._response(f"/api/agent-cli/calls/{UUID(call_id)}/stream") as response:
+            while line := response.readline(MAX_ENVELOPE_BYTES + 2):
+                yield _envelope(line.rstrip(b"\n"))
+
     def _request(
         self,
         route: str,
@@ -118,6 +143,18 @@ class AgentCliClient:
         *,
         timeout: float = _HTTP_TIMEOUT_SECONDS,
     ) -> dict[str, object]:
+        with self._response(route, data, timeout=timeout) as response:
+            return _envelope(response.read(MAX_ENVELOPE_BYTES + 1))
+
+    @contextmanager
+    def _response(
+        self,
+        route: str,
+        data: bytes | None = None,
+        *,
+        timeout: float = _HTTP_TIMEOUT_SECONDS,
+    ) -> Iterator[HTTPResponse]:
+        """Open one request and report whatever fails while its response is read as the CLI's own errors."""
         headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
         if self._window:
             headers[AGENT_CLI_WINDOW_HEADER] = self._window
@@ -128,7 +165,7 @@ class AgentCliClient:
         )
         try:
             with self._opener.open(request, timeout=timeout) as response:
-                result = read_json(response.read(MAX_ENVELOPE_BYTES + 1))
+                yield response
         except HTTPError as exc:
             if exc.code in {400, 409, 413, 422}:
                 raise _rejection(exc) from None
@@ -139,7 +176,3 @@ class AgentCliClient:
             # Name the address so a blocked route back to MindRoom is diagnosable from the shell.
             msg = f"Agent CLI transport outcome is unknown; check that this shell can reach {self._url}"
             raise AgentCliUnavailableError(msg) from exc
-        if not isinstance(result, dict):
-            msg = "Agent CLI returned an invalid envelope"
-            raise AgentCliUnavailableError(msg)
-        return cast("dict[str, object]", result)

@@ -34,6 +34,7 @@ from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
+    get_call_output_stream,
     get_call_progress_sink,
     get_tool_runtime_context,
     get_worker_progress_pump,
@@ -915,6 +916,18 @@ def _call_proxy_sync(
             progress_sink=progress_sink,
             named=named,
         )
+        # A CLI call that asked for its command's raw output (`workers run`) gets it as frames while it runs.
+        stream = get_call_output_stream() if tool_name == "shell" else None
+        header = None
+        on_frame = None
+        if stream is not None:
+            request = request.model_copy(update={"stream_io": True})
+            # The frame that says the command runs also says whether its worker is a new start, as the result does.
+            header = named.header(worker_handle) if named is not None and worker_handle is not None else None
+
+            def on_frame(frame: dict[str, object]) -> None:
+                stream.put({**frame, "header": header} if frame.get("t") == "started" else frame)
+
         result = execute_worker_proxy_request(
             config=worker_proxy_client_config(
                 proxy_config,
@@ -943,6 +956,8 @@ def _call_proxy_sync(
                 else None
             ),
             cancellation=cancellation,
+            stream=stream,
+            on_frame=on_frame,
         )
         # Deferred: it loads the attachment store and the provider registry, which the slim tool registry must not.
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
@@ -951,8 +966,9 @@ def _call_proxy_sync(
             decoded = decode_media_result(result)
             return finalize_tool_media(decoded) if isinstance(decoded, ToolValue) else decoded
         if named is not None and worker_handle is not None:
+            header = header or named.header(worker_handle)
             if isinstance(result, str):
-                return f"{named.header(worker_handle)}\n{result}"
+                return f"{header}\n{result}"
             # The runner can save its shell result before it gets here. The preview has the same exit line.
             saved = result.get("mindroom_tool_output") if isinstance(result, dict) else None
             if isinstance(saved, dict) and saved.get("status") == "saved_to_file":
@@ -960,7 +976,7 @@ def _call_proxy_sync(
                 if isinstance(preview, str):
                     return {
                         **result,
-                        "mindroom_tool_output": {**saved, "preview": f"{named.header(worker_handle)}\n{preview}"},
+                        "mindroom_tool_output": {**saved, "preview": f"{header}\n{preview}"},
                     }
         return result
 

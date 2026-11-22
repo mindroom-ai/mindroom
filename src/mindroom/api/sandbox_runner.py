@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import ctypes
 import inspect
 import io
@@ -67,7 +68,7 @@ from mindroom.runtime_env_policy import (
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.shell import supervisor as shell_supervisor
-from mindroom.shell.execution import shell_request_budget_seconds
+from mindroom.shell.execution import CommandStdin, shell_request_budget_seconds, stream_command
 from mindroom.terminal.session import SupportsTerminalLaunch, TerminalError, TerminalLaunch
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
 from mindroom.tool_system.agno_toolkits import requires_connect, toolkit_function
@@ -124,6 +125,8 @@ from mindroom.workers.protocol import (
     LeaseResponse,
     SaveAttachmentRequest,
     SaveAttachmentResponse,
+    StdinRequest,
+    StdinResponse,
     ViewFileRequest,
     ViewFileResponse,
     WorkerFailure,
@@ -1111,8 +1114,7 @@ async def _execute_request_inprocess(call: _ExecuteCall) -> ExecuteResponse:
 def prepare_terminal_launch(app: FastAPI, payload: ExecuteRequest, cwd: str | None) -> TerminalLaunch:
     """Return the interactive shell of a terminal opened with ``payload``, a shell call's request, in ``cwd``.
 
-    The request is prepared as ``/execute`` prepares it and the shell toolkit the call would run is built from it,
-    so the shell gets the environment, workspace and ``PATH`` the call's command would. Blocking.
+    Blocking.
     """
     if payload.tool_name != "shell":
         raise TerminalError(400, "A terminal opens only with a shell call's request.")
@@ -1122,28 +1124,44 @@ def prepare_terminal_launch(app: FastAPI, payload: ExecuteRequest, cwd: str | No
     tools = refresh_plugins(route.config, route.runtime_paths).tools
     try:
         request = _validated_execute_request(payload, tool_metadata=tools.entries)
-        prepared = _prepare_execute_request(_ExecuteCall(request=request, route=route, tools=tools))
-        shell = prepared.request
-        toolkit, _ = _resolve_entrypoint(
-            runtime_paths=prepared.runtime_paths,
-            config=route.config,
-            tools=tools,
-            tool_name=shell.tool_name,
-            function_name=shell.function_name,
-            execution_identity=route.identity,
-            credential_overrides=shell.credential_overrides or None,
-            tool_config_overrides=shell.tool_config_overrides or None,
-            tool_init_overrides=shell.tool_init_overrides or None,
-            runtime_overrides=shell.runtime_overrides or None,
-            worker_scope=shell.worker_scope,
-            routing_agent_name=shell.routing_agent_name,
-            private_agent_names=_freeze_private_agent_names(shell.private_agent_names),
-            tool_output_workspace_root=route.workspace,
+        return _shell_launch(
+            _ExecuteCall(request=request, route=route, tools=tools),
+            lambda toolkit, process_environ: toolkit.terminal_launch(cwd, process_environ=process_environ),
         )
     except HTTPException as exc:
         raise TerminalError(400, str(exc.detail)) from None
     except sandbox_worker_prep.WorkerRequestPreparationError as exc:
         raise TerminalError(400, str(exc)) from None
+
+
+def _shell_launch[Launch](
+    call: _ExecuteCall,
+    launch: Callable[[SupportsTerminalLaunch, Mapping[str, str] | None], Launch],
+) -> Launch:
+    """Return what ``launch`` starts from the shell toolkit ``call``, a shell call, would run.
+
+    The request is prepared as ``/execute`` prepares it and the toolkit is built from it, so what starts gets the
+    environment, workspace and ``PATH`` the call's command would. Blocking.
+    """
+    route = call.route
+    prepared = _prepare_execute_request(call)
+    shell = prepared.request
+    toolkit, _ = _resolve_entrypoint(
+        runtime_paths=prepared.runtime_paths,
+        config=route.config,
+        tools=call.tools,
+        tool_name=shell.tool_name,
+        function_name=shell.function_name,
+        execution_identity=route.identity,
+        credential_overrides=shell.credential_overrides or None,
+        tool_config_overrides=shell.tool_config_overrides or None,
+        tool_init_overrides=shell.tool_init_overrides or None,
+        runtime_overrides=shell.runtime_overrides or None,
+        worker_scope=shell.worker_scope,
+        routing_agent_name=shell.routing_agent_name,
+        private_agent_names=_freeze_private_agent_names(shell.private_agent_names),
+        tool_output_workspace_root=route.workspace,
+    )
     if not isinstance(toolkit, SupportsTerminalLaunch):
         raise TerminalError(400, "This shell cannot start a terminal.")
     # Where /execute runs a shell call in a subprocess, the command sees that subprocess's environment.
@@ -1151,7 +1169,68 @@ def prepare_terminal_launch(app: FastAPI, payload: ExecuteRequest, cwd: str | No
     process_environ = _prepare_subprocess_context(prepared).subprocess_env if in_subprocess else None
     call_environment = ToolEnvironment(values=shell.call_environment, path_prepend=tuple(shell.call_path_prepend))
     with collected_tool_environment(call_environment):
-        return toolkit.terminal_launch(cwd, process_environ=process_environ)
+        return launch(toolkit, process_environ)
+
+
+# The stdin of each running command whose output streams, by its request's ID.
+_command_stdins: dict[str, CommandStdin] = {}
+# A streamed command waits to write more while this many reads of its output wait for the primary.
+_STREAM_QUEUED_FRAMES = 4
+
+
+async def _execute_streamed(call: _ExecuteCall, frames: asyncio.Queue[bytes]) -> ExecuteResponse:
+    """Run a shell call's command, putting its raw output and its exit into ``frames`` as lines of the stream.
+
+    The runner starts the command itself, as it starts a terminal's shell, so the bytes pass no text formatting.
+    The result is what the reply's tool trace shows of the call, and holds none of the output.
+    """
+    request = call.request
+    try:
+        launch, stop_after = await asyncio.to_thread(
+            _shell_launch,
+            call,
+            lambda toolkit, process_environ: toolkit.command_launch(
+                *request.args,
+                process_environ=process_environ,
+                **request.kwargs,
+            ),
+        )
+    except (TerminalError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    stdin = CommandStdin()
+    sent = {"out": 0, "err": 0}
+
+    def line(**frame: object) -> bytes:
+        return json.dumps(frame).encode() + b"\n"
+
+    async def on_start() -> None:
+        if request.request_id is not None:
+            _command_stdins[request.request_id] = stdin
+        await frames.put(line(t="started"))
+
+    async def on_output(kind: str, chunk: bytes) -> None:
+        sent[kind] += len(chunk)
+        await frames.put(line(t=kind, b=base64.b64encode(chunk).decode("ascii")))
+
+    try:
+        code, timed_out = await stream_command(
+            list(launch.argv),
+            launch.env,
+            launch.cwd,
+            timeout=stop_after,
+            stdin=stdin,
+            on_start=on_start,
+            on_output=on_output,
+        )
+    except OSError as exc:
+        return ExecuteResponse(ok=False, error=f"Error: {exc}", failure_kind="tool")
+    finally:
+        if request.request_id is not None:
+            _command_stdins.pop(request.request_id, None)
+    await frames.put(line(t="exit", code=code, timed_out=timed_out))
+    ended = f"Stopped after {stop_after:g}s." if timed_out and stop_after is not None else f"Exit code {code}"
+    streamed = f"Streamed {sent['out']} bytes of stdout and {sent['err']} bytes of stderr to the caller."
+    return ExecuteResponse(ok=True, result=f"{ended}\n{streamed}" if timed_out or code else streamed)
 
 
 def _cancelled_response() -> ExecuteResponse:
@@ -1831,12 +1910,28 @@ async def cancel_tool_call(payload: CancelRequest) -> CancelResponse | WorkerFai
     return CancelResponse(cancelled=sandbox_request_cancellation.cancel_request(payload.request_id))
 
 
+@router.post("/execute/{request_id}/stdin")
+async def write_command_stdin(request_id: str, payload: StdinRequest) -> StdinResponse | WorkerFailure:
+    """Write the next chunk of a streamed command's stdin, answering once it has left for the command."""
+    if (failure := _protocol_failure(payload.protocol)) is not None:
+        return failure
+    stdin = _command_stdins.get(request_id)
+    if stdin is None:
+        return StdinResponse(open=False)
+    try:
+        return StdinResponse(open=await stdin.write(payload.seq, base64.b64decode(payload.b), eof=payload.eof))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+
 @dataclass(frozen=True)
 class _PreparedToolCall:
     execute: Callable[[], Coroutine[object, object, ExecuteResponse]]
     # Persistent browser actions are short and keep their own deadline, and cancelling one closes the shared
     # browser, so they answer in one response that neither a dropped connection nor /execute/cancel stops.
     streamed: bool = True
+    # The lines a call that streams its command's output sends before its result.
+    frames: asyncio.Queue[bytes] | None = None
 
 
 @router.post("/execute", response_model=None)
@@ -1866,6 +1961,7 @@ async def execute_tool_call(request: Request, payload: ExecuteRequest) -> Respon
             call.execute,
             keepalive_seconds=EXECUTE_KEEPALIVE_SECONDS,
             failure=_worker_failure,
+            frames=call.frames,
         ),
         media_type="application/x-ndjson",
     )
@@ -1907,7 +2003,15 @@ def _prepare_tool_call(app: FastAPI, payload: ExecuteRequest, route: _PreparedRo
     if (computer := _persistent_browser_runtime(app, request)) is not None:
         return _PreparedToolCall(partial(_execute_worker_browser, computer, call), streamed=False)
 
+    frames: asyncio.Queue[bytes] | None = None
+    if request.stream_io:
+        if (request.tool_name, request.function_name) != ("shell", "run_shell_command"):
+            raise HTTPException(status_code=400, detail="Only a shell command's output streams.")
+        frames = asyncio.Queue(maxsize=_STREAM_QUEUED_FRAMES)
+
     async def dispatch() -> ExecuteResponse:
+        if frames is not None:
+            return await _run_cancellable(_execute_streamed(call, frames))
         # Worker-routed calls also take the subprocess path, so the per-worker virtualenv and worker-specific
         # process environment stay authoritative even when this pod is itself a dedicated worker runtime.
         if (
@@ -1927,7 +2031,7 @@ def _prepare_tool_call(app: FastAPI, payload: ExecuteRequest, route: _PreparedRo
         with job_control_context(JobControl()) if request.run_as_job else nullcontext():
             return await dispatch()
 
-    return _PreparedToolCall(execute)
+    return _PreparedToolCall(execute, frames=frames)
 
 
 async def _run_cancellable(

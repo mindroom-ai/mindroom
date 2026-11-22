@@ -53,7 +53,7 @@ from mindroom.tool_system.agent_tool_calls import (
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.invocation import tool_outcome
-from mindroom.tool_system.runtime_context import call_progress_sink_scope
+from mindroom.tool_system.runtime_context import CallOutputStream, call_progress_sink_scope
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, search_tool_metadata, tool_definition
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 
@@ -80,6 +80,10 @@ _MAX_LONG_POLL_SECONDS = 25.0
 _MAX_LONG_POLL_WAITERS = 64
 _CANCEL_SETTLE_TIMEOUT_SECONDS = 5.0
 _MAX_PROGRESS_LENGTH = 256
+# How long a streamed call waits for the reader of its output before it is cancelled, and how often its stream
+# sends a line while the command is quiet.
+_STREAM_ATTACH_SECONDS = 60.0
+_STREAM_KEEPALIVE_SECONDS = 5.0
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 
@@ -109,6 +113,8 @@ class _Call:
     # The approval layer owns a call that waits for approval, so a cancel then takes effect when that wait ends.
     awaiting_approval: bool = False
     changed: asyncio.Event = field(default_factory=asyncio.Event)
+    # Where the command of a call that streams its output (`workers run`) puts it for the call's reader.
+    stream: CallOutputStream | None = None
 
     def notify(self) -> None:
         """Wake all active long-poll and cancel waiters for this call."""
@@ -291,6 +297,11 @@ class LiveTurnTools(TurnToolBridge):
                 status="queued",
             ),
         )
+        if operation.stream:
+            loop = asyncio.get_running_loop()
+            call.stream = stream = CallOutputStream(loop)
+            # Nobody reads the output of a call whose reader never comes, so it does not run on.
+            loop.call_later(_STREAM_ATTACH_SECONDS, lambda: stream.attached or self._request_cancel(call))
         self._calls[call_id] = call
         self._admit(_Queued(operation.model_copy(deep=True)), window)
         return call.receipt.model_dump(mode="json")
@@ -386,25 +397,91 @@ class LiveTurnTools(TurnToolBridge):
         if call is None:
             msg = "Agent CLI authority is unavailable"
             raise CliAuthenticationError(msg)
-        if call.receipt.status not in _TERMINAL_STATUSES:
-            first, call.cancel_requested = not call.cancel_requested, True
-            if call.receipt.status == "queued":
-                call.receipt = call.receipt.model_copy(
-                    update={"status": "cancelled", "outcome": "Call cancelled before dispatch"},
-                )
-                call.notify()
-            # Only the request that cancels the task waits for it, so repeats hold no waiters.
-            if call.awaiting_approval or not first:
-                return call.receipt.model_dump(mode="json")
-            if call.task is not None and not call.task.done():
-                request_task_cancel(call.task, process_shutdown=self._is_shutdown())
-            if call.task is not None and call.receipt.status not in _TERMINAL_STATUSES:
-                await self._wait_for_call(
-                    call,
-                    _CANCEL_SETTLE_TIMEOUT_SECONDS,
-                    keep_waiting=lambda: call.receipt.status not in _TERMINAL_STATUSES,
-                )
+        if self._request_cancel(call):
+            await self._wait_for_call(
+                call,
+                _CANCEL_SETTLE_TIMEOUT_SECONDS,
+                keep_waiting=lambda: call.receipt.status not in _TERMINAL_STATUSES,
+            )
         return call.receipt.model_dump(mode="json")
+
+    def _request_cancel(self, call: _Call) -> bool:
+        """Cancel a call that has not ended; return whether this request cancelled its task, which then ends soon."""
+        if call.receipt.status in _TERMINAL_STATUSES:
+            return False
+        first, call.cancel_requested = not call.cancel_requested, True
+        if call.receipt.status == "queued":
+            call.receipt = call.receipt.model_copy(
+                update={"status": "cancelled", "outcome": "Call cancelled before dispatch"},
+            )
+            call.notify()
+        # Only the request that cancels the task waits for it, so repeats hold no waiters.
+        if call.awaiting_approval or not first:
+            return False
+        if call.task is not None and not call.task.done():
+            request_task_cancel(call.task, process_shutdown=self._is_shutdown())
+        return call.task is not None and call.receipt.status not in _TERMINAL_STATUSES
+
+    def _streamed_call(self, call_id: str) -> tuple[_Call, CallOutputStream]:
+        self._check_live()
+        call = self._calls.get(call_id)
+        if call is None or call.stream is None:
+            msg = "Agent CLI authority is unavailable"
+            raise CliAuthenticationError(msg)
+        return call, call.stream
+
+    def stream_call(self, call_id: str) -> AsyncIterator[dict[str, object]]:
+        """Return the frames of one streamed call for its only reader; a reader that leaves cancels the call.
+
+        Each frame has a ``t``: the call's ``progress``, then its command's ``started``, ``out`` and ``err`` bytes
+        and ``exit`` as the worker sent them, and ``keepalive`` while it is quiet. The last line, without ``t``, is
+        the call's settled receipt.
+        """
+        call, stream = self._streamed_call(call_id)
+        if stream.attached:
+            msg = "This call's output already has its reader"
+            raise CliCallConflictError(msg)
+        stream.attached = True
+        return self._relay(call, stream)
+
+    async def _relay(self, call: _Call, stream: CallOutputStream) -> AsyncIterator[dict[str, object]]:
+        revision = 0
+        try:
+            while not self._closed and not self._revoked:
+                receipt = call.receipt
+                if receipt.progress is not None and receipt.progress_revision > revision:
+                    revision = receipt.progress_revision
+                    yield {"t": "progress", "text": receipt.progress}
+                elif not stream.frames.empty():
+                    yield stream.frames.get_nowait()
+                elif receipt.status in _TERMINAL_STATUSES:
+                    yield receipt.model_dump(mode="json")
+                    return
+                else:
+                    frame = asyncio.ensure_future(stream.frames.get())
+                    changed = asyncio.ensure_future(call.changed.wait())
+                    done, pending = await asyncio.wait(
+                        {frame, changed},
+                        timeout=_STREAM_KEEPALIVE_SECONDS,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for waiting in pending:
+                        waiting.cancel()
+                    if frame in done and frame.exception() is None:
+                        yield frame.result()
+                    elif not done:
+                        yield {"t": "keepalive"}
+        finally:
+            # The frames nobody reads are dropped, and the thread that waits to add one stops.
+            stream.frames.shutdown(immediate=True)
+            self._request_cancel(call)
+
+    async def write_stdin(self, call_id: str, seq: int, data: str, *, eof: bool) -> bool:
+        """Write one numbered chunk to the stdin of a streamed call's command; False once it takes no more."""
+        call, stream = self._streamed_call(call_id)
+        if stream.write_stdin is None or call.receipt.status in _TERMINAL_STATUSES:
+            return False
+        return await stream.write_stdin(seq, data, eof)
 
     @staticmethod
     def _progress_reporter(call: _Call, loop: asyncio.AbstractEventLoop) -> Callable[[str], None]:
@@ -870,6 +947,7 @@ class LiveTurnTools(TurnToolBridge):
             with call_progress_sink_scope(
                 self._progress_reporter(call, asyncio.get_running_loop()),
                 on_refused=mark_refused,
+                stream=call.stream,
             ):
                 events = self._execute(
                     binding,
@@ -938,6 +1016,9 @@ class LiveTurnTools(TurnToolBridge):
                     },
                 )
             finally:
+                if call.stream is not None:
+                    # The reader still takes the frames it holds; the worker call's thread stops waiting to add one.
+                    call.stream.frames.shutdown()
                 call.notify()
 
     def end_run_for_reload(self) -> None:

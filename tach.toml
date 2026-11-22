@@ -7481,6 +7481,8 @@ expose = [
     "call_progress_sink_scope",
     "note_call_refusal",
     "get_call_progress_sink",
+    "get_call_output_stream",
+    "CallOutputStream",
     "get_worker_progress_pump",
     "get_tool_runtime_context",
     "get_tool_runtime_media_attachment",
