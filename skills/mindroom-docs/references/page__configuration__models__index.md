@@ -156,9 +156,9 @@ Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces th
 An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
 
 Azure, Bedrock, Codex, and Kimi examples are in their own sections below.
-Claude Fable 5.2 uses `claude-fable-5-2` on Anthropic and Vertex AI and `anthropic/claude-fable-5.2` on OpenRouter.
+Claude Fable 5.2 uses `claude-fable-5-2` on Anthropic and Vertex AI and `anthropic/claude-fable-5.2` on `provider: openrouter`.
 `bedrock_claude` calls Claude in Amazon Bedrock (the bedrock-mantle endpoint), which does not serve Fable 5.2, so it uses Fable 5.1 as `anthropic.claude-fable-5-1`.
-Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on OpenRouter.
+Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on `provider: openrouter`; [Claude through OpenRouter's Messages endpoint](#claude-through-openrouter) uses the Anthropic ids.
 For the direct DeepSeek API, use `deepseek-flash` for V4.1 Flash or `deepseek-v4-pro` for Pro; the older `deepseek-v4-flash` name is a [temporary compatibility route to V4.1 Flash](https://api-docs.deepseek.com/updates/#date-2026-09-10).
 OpenRouter serves the current V4.1 Flash release as `deepseek/deepseek-v4.1-flash-1017`.
 [GLM 5.3](https://docs.z.ai/guides/llm/glm-5.3) is available through the GLM Coding Plan endpoint shown above.
@@ -467,7 +467,7 @@ models:
 Provider slugs are in the `tag` field of `https://openrouter.ai/api/v1/models/<model-id>/endpoints`.
 Account-level OpenRouter settings (ignored providers, data-policy filters) still apply, so pinning an upstream your account excludes fails with `No endpoints found`.
 Verify a new pin with a direct API request and check the `provider` field in the response.
-MindRoom's `LLM usage` log line names the upstream that served each OpenRouter response in `served_provider`.
+For `provider: openrouter` (Chat Completions), MindRoom's `LLM usage` log line names the upstream in `served_provider`.
 
 ## Azure OpenAI
 
@@ -539,6 +539,29 @@ Tag `@load_test` in Lobby to receive a streamed synthetic reply.
 Set `tool_call_probability` to `1` to call the shell tool on every turn or `0` to disable tool calls.
 Set `chars_per_second` to `0` to stream without pacing delays for maximum throughput.
 Changing `seed` changes the response length, split point, and tool-call choice, which stay the same for a given conversation history.
+
+## Claude Through OpenRouter
+
+Use `provider: anthropic` with OpenRouter's Messages endpoint and set `context_window` to enable planning for Claude [native compaction](https://docs.mindroom.chat/configuration/history/#native-compaction).
+Use Anthropic's ID (`claude-opus-5-5`), not OpenRouter's slug (`anthropic/claude-opus-5.5`), so MindRoom selects the correct Claude capabilities.
+Set `base_url` to `https://openrouter.ai/api` without `/v1` because the Anthropic SDK appends it.
+Always set a model-specific OpenRouter `api_key`; without it, MindRoom can send your shared Anthropic key to OpenRouter.
+Any `ANTHROPIC_CUSTOM_HEADERS` are also sent to OpenRouter, even with a model-specific key.
+Put OpenRouter routing fields (`provider`, `models`, and `fallbacks`) under `extra_kwargs.request_params.extra_body`.
+Do not change an existing thread's OpenRouter `provider.order` or `provider.only` pin to an upstream that cannot read earlier signed thinking: OpenRouter returns HTTP 400 in that case, while unpinned requests stay on a compatible upstream.
+This route uses the partner limits of 5 MiB per base64 image and 16 MB of inline media per request.
+The `provider: openrouter` route uses Chat Completions and keeps text compaction.
+
+```yaml
+models:
+  openrouter_claude:
+    provider: anthropic
+    id: claude-opus-5-5
+    context_window: 1000000
+    extra_kwargs:
+      base_url: https://openrouter.ai/api
+      api_key: ${OPENROUTER_API_KEY}
+```
 
 ## Extra Kwargs
 
@@ -750,7 +773,7 @@ Users can change that per thread or per room, and the most specific choice wins:
 
 1. An explicit model for one run, such as a delegated child run.
 2. The thread override set with `!model`, the `thread_model` tool, or a client's model picker.
-3. The runtime room default set with `!room_model`.
+3. The room's `model` [room setting](https://docs.mindroom.chat/configuration/threads/#room-settings), set with `!room_model` or in a client's room settings.
 4. The authored room default in `room_models`.
 5. The entity's configured model.
 
@@ -790,11 +813,12 @@ Show or switch the default model for every agent and team, and for routing, in t
 !room_model reset
 ```
 
-`!room_model` and `!room_model list` show the current runtime override and available model names to authorized room members.
+`!room_model` and `!room_model list` show the current override and available model names to authorized room members.
 Setting and resetting require a Matrix room admin; other users get `❌ Room admin only.`
-`!room_model opus` stores a room override without modifying `config.yaml`, keyed by Matrix room ID, so it survives restarts and room-alias changes.
+`!room_model opus` sets the room's `model` [room setting](https://docs.mindroom.chat/configuration/threads/#room-settings) without modifying `config.yaml`, so it survives restarts and room-alias changes.
+When no MindRoom account in the room may send state events, the command changes nothing and answers `I need moderator rights in this room to change the room model.`
 The new default applies to later turns; a turn in progress or waiting for approval keeps the model it started with.
-`!room_model reset` removes the runtime override so `room_models` or each entity's configured model applies again.
+`!room_model reset` removes the override so `room_models` or each entity's configured model applies again.
 
 To set an authored room default in `config.yaml`, map room keys or Matrix room IDs to model names with `room_models` (default `{}`):
 

@@ -631,6 +631,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                     on_timeout="kill",
                     on_progress=report_tool_progress,
                     output_destination=output_destination,
+                    launch_failure_exits=worker is not None,
                 )
             else:
                 result = await run_command(
@@ -646,6 +647,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                     on_timeout="kill",
                     on_progress=report_tool_progress,
                     output_destination=output_destination,
+                    launch_failure_exits=worker is not None,
                 )
             if worker is not None and result.execution_error:
                 raise ValueError(result.message)

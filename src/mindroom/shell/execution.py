@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
+import errno
 import functools
 import itertools
 import os
@@ -280,6 +281,7 @@ async def run_command(
     stderr: int = asyncio.subprocess.PIPE,
     kill_group_after_exit: bool = False,
     register_finished: bool = False,
+    launch_failure_exits: bool = False,
 ) -> ShellRunResult:
     """Run one shell command; return output, an error message, or a background handle.
 
@@ -299,7 +301,9 @@ async def run_command(
     ``kill_group_after_exit``, whatever remains of the process group is killed
     once the foreground process exits or is cancelled. With ``register_finished``,
     a command that finishes within ``timeout`` is also registered, as a finished
-    record whose handle the caller can check or discard later.
+    record whose handle the caller can check or discard later. With
+    ``launch_failure_exits``, a program that is missing or cannot be executed
+    ends the call as a shell ends it: exit code 127 or 126, the reason on stderr.
     """
     _sweep_stale_records(registry)
     if handle is not None:
@@ -329,6 +333,7 @@ async def run_command(
             stderr=stderr,
             kill_group_after_exit=kill_group_after_exit,
             register_finished=register_finished,
+            launch_failure_exits=launch_failure_exits,
         )
     finally:
         if handle is not None and handle_reservations is not None:
@@ -475,6 +480,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
     stderr: int,
     kill_group_after_exit: bool,
     register_finished: bool,
+    launch_failure_exits: bool,
 ) -> ShellRunResult:
     """Spawn one command after any caller-supplied handle is reserved."""
     capture = output_capture
@@ -482,7 +488,6 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
         if capture is None and output_destination is not None:
             capture = ShellOutputCapture(output_destination)
         started_at = time.monotonic()
-        process = await _start_command(argv, env, cwd, stdin=stdin, stderr=stderr)
     except asyncio.CancelledError:
         if capture is not None:
             capture.close()
@@ -491,6 +496,19 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
         if capture is not None:
             capture.close()
         return ShellRunResult(message=f"Error: {exc}", execution_error=True)
+    try:
+        process = await _start_command(argv, env, cwd, stdin=stdin, stderr=stderr)
+    except asyncio.CancelledError:
+        if capture is not None:
+            capture.close()
+        raise
+    except Exception as exc:
+        try:
+            exited = _launch_failure(argv, env, cwd, exc, capture) if launch_failure_exits else None
+            return exited or ShellRunResult(message=f"Error: {exc}", execution_error=True)
+        finally:
+            if capture is not None:
+                capture.close()
 
     stdout_buf = _OutputBuffer()
     stderr_buf = _OutputBuffer()
@@ -918,6 +936,67 @@ def _idle_launcher() -> str | None:
     return None
 
 
+def _find_program(program: str, env: dict[str, str], cwd: str | None, mode: int = os.F_OK | os.X_OK) -> str | None:
+    """Like Popen, look a bare name up on the command's PATH and a path with a slash up, both from the command's directory."""
+    program = str(Path(cwd, program)) if cwd and os.sep in program else program
+    search = [str(Path(cwd, entry)) if cwd else entry for entry in os.get_exec_path(env)]
+    return shutil.which(program, mode=mode, path=os.pathsep.join(search))
+
+
+# Bash's exit code and words for the spawn errors that are a shell's own exit: of a program named by a path, of a bare
+# name no PATH entry holds, and of a bare name found on PATH. Every other error stays a failed call.
+_PATH_LAUNCH_FAILURES = {
+    errno.ENOENT: (127, "No such file or directory"),
+    errno.ENOTDIR: (126, "Not a directory"),
+    errno.EACCES: (126, "Permission denied"),
+}
+_MISSING_NAME_LAUNCH_FAILURES = dict.fromkeys((errno.ENOENT, errno.ENOTDIR), (127, "command not found"))
+_FOUND_NAME_LAUNCH_FAILURES = {
+    # A file the program needs to start, such as its interpreter, is missing.
+    errno.ENOENT: (127, "cannot execute: required file not found"),
+    errno.ENOTDIR: (127, "cannot execute: required file not found"),
+    errno.EACCES: (126, "Permission denied"),
+}
+
+
+def _launch_failure(
+    argv: list[str],
+    env: dict[str, str],
+    cwd: str | None,
+    exc: Exception,
+    capture: ShellOutputCapture | None,
+) -> ShellRunResult | None:
+    """Return a spawn error of a program that is missing or cannot be executed as Bash reports it, else None.
+
+    The result is the one of a command that exited 127 or 126 with Bash's words on stderr, so everything that reads a
+    failed command's result reads this one. A working directory the command cannot enter fails before any program.
+    The error number and the program's name as given decide alone: the program file is never opened.
+    """
+    if (
+        not isinstance(exc, OSError)
+        or not argv
+        or exc.filename != argv[0]
+        or (cwd is not None and not (Path(cwd).is_dir() and os.access(cwd, os.X_OK)))
+    ):
+        return None
+    program = argv[0]
+    if os.sep in program:
+        failures = _PATH_LAUNCH_FAILURES
+    elif (found := _find_program(program, env, cwd, os.F_OK)) is None:
+        failures = _MISSING_NAME_LAUNCH_FAILURES
+    else:
+        # Bash names a program it found on PATH by where it found it.
+        program, failures = found, _FOUND_NAME_LAUNCH_FAILURES
+    if (failure := failures.get(exc.errno or 0)) is None:
+        return None
+    return_code, said = failure[0], f"{program}: {failure[1]}"
+    if capture is None:
+        return ShellRunResult(message=format_shell_completion("", said, return_code=return_code))
+    capture.stderr.append(f"{said}\n")
+    capture.stdout.reached_eof = capture.stderr.reached_eof = True
+    return ShellRunResult(message=capture.publish(return_code), output_file_handled=True)
+
+
 def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> list[str]:
     """Return *argv* behind ``chrt -i 0`` on Linux, so the command and everything it starts run at ``SCHED_IDLE``.
 
@@ -929,10 +1008,7 @@ def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> 
     """
     if sys.platform != "linux" or not argv or (chrt := _idle_launcher()) is None:
         return argv
-    # Like Popen, look a bare name up on the command's PATH and a path with a slash up, both from the command's directory.
-    program = str(Path(cwd, argv[0])) if cwd and os.sep in argv[0] else argv[0]
-    search = [str(Path(cwd, entry)) if cwd else entry for entry in os.get_exec_path(env)]
-    if shutil.which(program, path=os.pathsep.join(search)) is None:
+    if _find_program(argv[0], env, cwd) is None:
         return argv
     return [chrt, "-i", "0", *argv]
 

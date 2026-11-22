@@ -268,18 +268,66 @@ def _worker_signal_handlers() -> Iterator[_WorkerSignals]:
             signal.signal(signum, handler)
 
 
-def _note(message: str) -> None:
-    """Print one of `workers run`'s own lines on stderr if it can be; losing one changes nothing else.
+class _WorkerStderr:
+    """Best-effort stderr writer for `workers run`; rewrites progress in place on a TTY.
 
     With stderr closed, `print` would use stdout. A stderr that fails a write is dropped for the rest of the run:
     flushing what it kept at exit would fail again and change the exit code.
     """
-    if sys.stderr is None:
-        return
-    try:
-        print(message, file=sys.stderr, flush=True)
-    except (OSError, ValueError):
-        sys.stderr = None
+
+    def __init__(self) -> None:
+        self._progress_open = False
+
+    def _write(self, text: str) -> bool:
+        if sys.stderr is None:
+            return False
+        try:
+            sys.stderr.write(text)
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            sys.stderr = None
+            self._progress_open = False
+            return False
+        return True
+
+    def finish_progress(self) -> None:
+        """End an in-place TTY progress line before any other CLI line, command output, or exit."""
+        if self._progress_open:
+            self._progress_open = False
+            self._write("\n")
+
+    def progress(self, message: str) -> None:
+        """Write one warmup progress message, rewriting in place on a TTY."""
+        is_tty = False
+        if sys.stderr is not None:
+            with suppress(OSError, ValueError):
+                is_tty = bool(sys.stderr.isatty())
+        if is_tty:
+            # A line wider than the terminal wraps, and the next rewrite would clear only its last row.
+            columns = 0
+            with suppress(OSError, ValueError):
+                columns = os.get_terminal_size(sys.stderr.fileno()).columns
+            self._progress_open = True
+            if not self._write(f"\r\x1b[K{message[: columns - 1] if columns > 1 else message}"):
+                self._progress_open = False
+            return
+        self.note(message)
+
+    def note(self, message: str) -> None:
+        """Write one complete `workers run` line on stderr, closing any open progress line first."""
+        self.finish_progress()
+        self._write(f"{message}\n")
+
+    def command_output(self, data: bytes) -> None:
+        """Write the command's stderr where the CLI's own lines go, and as they do: if it can be."""
+        self.finish_progress()
+        if sys.stderr is None:
+            return
+        try:
+            sys.stderr.buffer.write(data)
+            sys.stderr.buffer.flush()
+        except (OSError, ValueError, AttributeError):
+            sys.stderr = None
 
 
 class _StdoutClosedError(Exception):
@@ -292,17 +340,6 @@ def _write_stdout(data: bytes) -> None:
         sys.stdout.buffer.flush()
     except (OSError, ValueError, AttributeError):
         raise _StdoutClosedError from None
-
-
-def _write_stderr(data: bytes) -> None:
-    """Write the command's stderr where the CLI's own lines go, and as they do: if it can be."""
-    if sys.stderr is None:
-        return
-    try:
-        sys.stderr.buffer.write(data)
-        sys.stderr.buffer.flush()
-    except (OSError, ValueError, AttributeError):
-        sys.stderr = None
 
 
 def _discard_stdout() -> None:
@@ -363,7 +400,13 @@ def _frames(client: AgentCliClient, call_id: str) -> Iterator[dict[str, object]]
             return
 
 
-def _relay(client: AgentCliClient, call_id: str, worker: str, ended: dict[str, object]) -> dict[str, object]:
+def _relay(
+    client: AgentCliClient,
+    call_id: str,
+    worker: str,
+    ended: dict[str, object],
+    stderr: _WorkerStderr,
+) -> dict[str, object]:
     """Write a command's output as it arrives, stdout to stdout and stderr to stderr, and return its call's receipt.
 
     The command's exit, which follows the last of its output, is kept in ``ended``, so a signal that then stops
@@ -371,7 +414,7 @@ def _relay(client: AgentCliClient, call_id: str, worker: str, ended: dict[str, o
     """
     done = threading.Event()
     try:
-        return _relay_frames(client, call_id, worker, ended, done)
+        return _relay_frames(client, call_id, worker, ended, done, stderr)
     finally:
         done.set()
 
@@ -382,20 +425,22 @@ def _relay_frames(
     worker: str,
     ended: dict[str, object],
     done: threading.Event,
+    stderr: _WorkerStderr,
 ) -> dict[str, object]:
     for frame in _frames(client, call_id):
         kind = frame.get("t")
         if kind is None:
             return frame
         if kind == "out":
+            stderr.finish_progress()
             _write_stdout(base64.b64decode(str(frame.get("b"))))
         elif kind == "err":
-            _write_stderr(base64.b64decode(str(frame.get("b"))))
+            stderr.command_output(base64.b64decode(str(frame.get("b"))))
         elif kind == "progress":
-            _note(f"mindroom-agent: {frame.get('text')}")
+            stderr.progress(f"mindroom-agent: {frame.get('text')}")
         elif kind == "started":
             if frame.get("header") == f"[worker: {worker}, started]":
-                _note(f"mindroom-agent: started worker {worker}")
+                stderr.note(f"mindroom-agent: started worker {worker}")
             threading.Thread(target=_forward_stdin, args=(client, call_id, done), daemon=True).start()
         elif kind == "exit":
             ended.update(frame)
@@ -411,6 +456,8 @@ def _cancel_notice(worker: str, call_id: str, signum: int, receipt: dict[str, ob
     if receipt is None:
         return f"{cancelled} (call {call_id})"
     status = receipt.get("status")
+    if status == "cancelled" and receipt.get("cancel_outcome") == "never_ran":
+        return f"{cancelled}; the command never ran in worker {worker}"
     if status == "failed" and receipt.get("error_kind") == "named_worker_refusal":
         what = f"command never ran ({receipt.get('outcome')})"
     elif status == "waiting":
@@ -444,8 +491,9 @@ def _run_in_worker(args: argparse.Namespace) -> int:
     submitted or read cancels it, and so does a stdout that takes no more; the CLI's own closing lines are printed
     under the signal handlers it started with.
     """
+    stderr = _WorkerStderr()
     if os.environ.get(RUN_ID_ENV):
-        _note(
+        stderr.note(
             "mindroom-agent: A named worker belongs to a reply in a conversation; "
             "it cannot run from a background script.",
         )
@@ -459,48 +507,51 @@ def _run_in_worker(args: argparse.Namespace) -> int:
     ended: dict[str, object] = {}
     error: Exception | None = None
     signum: int | None = None
-    with _worker_signal_handlers() as signals:
-        try:
+    try:
+        with _worker_signal_handlers() as signals:
             try:
-                # Signals are held until the submit returns: a cancel that overtook it would find no call.
-                submitting = AgentCliClient()
-                result = _submit_once(
-                    submitting,
-                    {
-                        "operation": "tools.call",
-                        "toolkit": "shell",
-                        "function": "run_shell_command",
-                        "call_id": call_id,
-                        "arguments": arguments,
-                        "stream": True,
-                    },
-                )
-                client = submitting
+                try:
+                    # Signals are held until the submit returns: a cancel that overtook it would find no call.
+                    submitting = AgentCliClient()
+                    result = _submit_once(
+                        submitting,
+                        {
+                            "operation": "tools.call",
+                            "toolkit": "shell",
+                            "function": "run_shell_command",
+                            "call_id": call_id,
+                            "arguments": arguments,
+                            "stream": True,
+                        },
+                    )
+                    client = submitting
+                    signals.release()
+                    result = _relay(client, call_id, args.name, ended, stderr)
+                except _StdoutClosedError:
+                    with suppress(AgentCliUnavailableError, ValueError):
+                        submitting.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
+                    _discard_stdout()
+                    return _EXIT_STDOUT_CLOSED
+                except (AgentCliUnavailableError, ValueError) as exc:
+                    error = exc
+                # A signal held through a refused submit is raised now; after that nothing is left to cancel.
                 signals.release()
-                result = _relay(client, call_id, args.name, ended)
-            except _StdoutClosedError:
-                with suppress(AgentCliUnavailableError, ValueError):
-                    submitting.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
-                _discard_stdout()
-                return _EXIT_STDOUT_CLOSED
-            except (AgentCliUnavailableError, ValueError) as exc:
-                error = exc
-            # A signal held through a refused submit is raised now; after that nothing is left to cancel.
-            signals.release()
-            signals.held = True
-        except _WorkerSignal as exc:
-            signum, error, result = exc.signum, None, None
-            if client is not None:
-                result = {}
-                with suppress(AgentCliUnavailableError, ValueError):
-                    result = client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
-    # From here on the CLI prints under the signal handlers it started with.
+                signals.held = True
+            except _WorkerSignal as exc:
+                signum, error, result = exc.signum, None, None
+                if client is not None:
+                    result = {}
+                    with suppress(AgentCliUnavailableError, ValueError):
+                        result = client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
+    finally:
+        # From here on the CLI prints under the signal handlers it started with.
+        stderr.finish_progress()
     if ended or signum is not None or error is None:
-        return _worker_exit_code(args, call_id, ended, signum, result)
+        return _worker_exit_code(args, call_id, ended, signum, result, stderr)
     if client is None:
-        _note(f"mindroom-agent: {error}")
+        stderr.note(f"mindroom-agent: {error}")
         return _EXIT_NOT_RUN
-    _note(f"mindroom-agent: {error}; the command may still be running in worker {args.name} (call {call_id})")
+    stderr.note(f"mindroom-agent: {error}; the command may still be running in worker {args.name} (call {call_id})")
     return _EXIT_UNKNOWN
 
 
@@ -510,19 +561,20 @@ def _worker_exit_code(
     ended: dict[str, object],
     signum: int | None,
     receipt: dict[str, object] | None,
+    stderr: _WorkerStderr,
 ) -> int:
     """Return the exit code of a command that ended, of a signal that cancelled it, or of a call that ended unrun."""
     if ended:
         # The command ended and all of its output is written, whatever came after.
         if ended.get("timed_out"):
-            _note(f"mindroom-agent: stopped after {args.timeout:g}s")
+            stderr.note(f"mindroom-agent: stopped after {args.timeout:g}s")
             return _EXIT_TIMED_OUT
         code = cast("int", ended.get("code"))
         # A command a signal killed exits as a shell reports it: 128 plus the signal.
         return code if code >= 0 else 128 - code
     if signum is not None:
         _discard_stdout()
-        _note(_cancel_notice(args.name, call_id, signum, receipt))
+        stderr.note(_cancel_notice(args.name, call_id, signum, receipt))
         return 128 + signum
     # The call ended without its command's exit: it was refused, failed, or was cancelled.
     outcome = (receipt or {}).get("outcome")
@@ -533,9 +585,9 @@ def _worker_exit_code(
         and receipt.get("status") == "failed"
         and receipt.get("error_kind") == "named_worker_refusal"
     ):
-        _note(f"mindroom-agent: {text}")
+        stderr.note(f"mindroom-agent: {text}")
         return _EXIT_NOT_RUN
-    _note(f"mindroom-agent: {text} (call {call_id})")
+    stderr.note(f"mindroom-agent: {text} (call {call_id})")
     return _EXIT_UNKNOWN
 
 

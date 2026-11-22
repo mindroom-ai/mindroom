@@ -353,13 +353,15 @@ class WorkerCallCancellation:
         with self._lock:
             return self._cancelled
 
-    def cancel(self) -> None:
-        """Ask the runner to stop the call in the background, so the caller's cancellation stays prompt."""
+    def cancel(self) -> bool:
+        """Ask the runner to stop the call in the background; return True if cancelled before dispatch."""
         with self._lock:
             self._cancelled = True
             stop = self._stop
         if stop is not None:
             threading.Thread(target=stop, name="mindroom-worker-cancel", daemon=True).start()
+            return False
+        return True
 
 
 def _post_execute_cancel(

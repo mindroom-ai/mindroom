@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from contextvars import copy_context
@@ -860,16 +861,37 @@ async def test_a_shell_call_runs_in_the_worker_it_names(
     assert await _retired(backend) == [named_spec.worker_key]
 
 
+_MISSING = "/missing-program-xyz"
+_LONG_MISSING = "/" + "/".join(["d" * 200] * 15)
+_NEVER_SAVED = 1_000_000
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("exit_code", [0, 17])
+@pytest.mark.parametrize(
+    ("command", "exit_code", "threshold", "printed"),
+    [
+        (["bash", "-c", "printf '%100s' shard-output"], 0, 32, "shard-output"),
+        (["bash", "-c", "printf '%100s' shard-output; exit 17"], 17, 32, "shard-output"),
+        # A program the worker cannot start ends as a command that failed with a shell's words, saved or not.
+        ([_MISSING], 127, 1, f"Stderr:\n{_MISSING}: No such file or directory\n"),
+        ([_MISSING], 127, 32, f"Stderr:\n{_MISSING}: No such file or directory\n"),
+        ([_MISSING], 127, _NEVER_SAVED, f"Stderr:\n{_MISSING}: No such file or directory\n"),
+        (["missing-program-xyz"], 127, _NEVER_SAVED, "Stderr:\nmissing-program-xyz: command not found\n"),
+        ([_LONG_MISSING], 127, _NEVER_SAVED, f"Stderr:\n{_LONG_MISSING}: No such file or directory\n"),
+        (["/etc/passwd"], 126, 32, "Stderr:\n/etc/passwd: Permission denied\n"),
+    ],
+)
 async def test_a_cli_call_reads_saved_output_from_its_named_worker(
     runtime_paths: RuntimePaths,
     backend: _FakeBackend,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    command: list[str],
     exit_code: int,
+    threshold: int,
+    printed: str,
 ) -> None:
-    """A CLI call's receipt keeps the real exit status and saved output path after the runner auto-saves a result."""
+    """A CLI call's receipt keeps the real exit status and saved output path, whether or not the runner saves it."""
     from uuid import uuid4  # noqa: PLC0415
 
     from mindroom.agent_cli.protocol import ToolCallOperation  # noqa: PLC0415
@@ -891,15 +913,17 @@ async def test_a_cli_call_reads_saved_output_from_its_named_worker(
         tools=builtin_tool_registry(),
         runs_in_worker=False,
         tool_output_workspace_root=tmp_path,
-        tool_output_auto_save_threshold_bytes=32,
+        tool_output_auto_save_threshold_bytes=threshold,
         worker_target=None,
     )
-    command = ["bash", "-c", f"printf '%100s' shard-output; exit {exit_code}"]
-    saved = await _offered_entrypoint(runner_shell, "run_shell_command")(command, worker="shard")
-    receipt = saved["mindroom_tool_output"]
-    assert receipt["auto_saved"] is True
-    assert "shard-output" in (tmp_path / receipt["path"]).read_text()
-    _route_through(monkeypatch, backend, responder=lambda _url, _payload: {"ok": True, "result": saved})
+    result = await _offered_entrypoint(runner_shell, "run_shell_command")(command, worker="shard")
+    saved_path = None
+    if threshold != _NEVER_SAVED:
+        receipt = result["mindroom_tool_output"]
+        assert receipt["auto_saved"] is True
+        saved_path = receipt["path"]
+        assert printed.strip() in (tmp_path / saved_path).read_text()
+    _route_through(monkeypatch, backend, responder=lambda _url, _payload: {"ok": True, "result": result})
     shell, _target = _shell(runtime_paths)
 
     async def run_shell_command(args: list[str], worker: str) -> object:
@@ -915,7 +939,7 @@ async def test_a_cli_call_reads_saved_output_from_its_named_worker(
         CliTurnOwner(catalog.runtime_context.execution_identity, _TURN, "run"),
         catalog=catalog,
         authorize=authorize,
-        output_file_policy=ToolOutputFilePolicy(workspace_root=tmp_path, auto_save_threshold_bytes=32),
+        output_file_policy=ToolOutputFilePolicy(workspace_root=tmp_path, auto_save_threshold_bytes=threshold),
     )
     owner.shell_env = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
     async with execution_resources(response=True), owner._window("driver"):
@@ -932,14 +956,17 @@ async def test_a_cli_call_reads_saved_output_from_its_named_worker(
         cli_receipt = await settled_receipt(owner, queued["call_id"])
     await owner.close()
 
-    # `workers run` streams its command's output instead, so only a `tools call` reads a saved result.
+    # `workers run` streams its command's output instead, so only a `tools call` reads a result the runner formatted.
     assert cli_receipt["status"] == "completed"
-    saved_to = cli_receipt["outcome"]["mindroom_tool_output"]
-    assert saved_to["path"] == receipt["path"]
-    header, _, preview = saved_to["preview"].partition("\n")
+    outcome = cli_receipt["outcome"]
+    if saved_path is not None:
+        saved_to = outcome["mindroom_tool_output"]
+        assert saved_to["path"] == saved_path
+        outcome = saved_to["preview"]
+    header, _, body = outcome.partition("\n")
     assert header == "[worker: shard, started]"
-    assert preview.startswith(f"Exit code {exit_code}\n") is bool(exit_code)
-    assert "shard-output" in preview
+    assert body.startswith(f"Exit code {exit_code}\n") is bool(exit_code)
+    assert printed.strip() in body
 
 
 @pytest.mark.asyncio
@@ -1276,12 +1303,51 @@ async def test_named_shell_launch_errors_fail_the_tool_without_matching_command_
     )
     call = _offered_entrypoint(shell, "run_shell_command")
     command = ["definitely-not-a-binary-xyz", "arg"]
-    diagnostic = "Shell supervisor is unavailable" if supervised else "definitely-not-a-binary-xyz"
-    assert diagnostic in await call(command)
-    with pytest.raises(ValueError, match=diagnostic):
-        await call(command, worker="build")
-    if not supervised:
+    if supervised:
+        diagnostic = "Shell supervisor is unavailable"
+        assert diagnostic in await call(command)
+        with pytest.raises(ValueError, match=diagnostic):
+            await call(command, worker="build")
+    else:
+        assert "definitely-not-a-binary-xyz" in await call(command)
+        # A program that cannot start ends as a command that printed a shell's words and exited with its code.
+        said = "definitely-not-a-binary-xyz: command not found"
+        failed = await call(command, worker="build")
+        assert failed == f"Exit code 127\nStderr:\n{said}"
+        assert failed == await call(["bash", "-c", f"echo '{said}' >&2; exit 127"], worker="build")
         assert await call(["printf", "Error: ordinary output"], worker="build") == "Error: ordinary output"
+
+
+@pytest.mark.asyncio
+async def test_a_named_launch_failure_saves_to_an_output_path_as_a_failed_command_does(tmp_path: Path) -> None:
+    """A program that cannot start replaces an existing output file with what a command that failed so would save."""
+    runner_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
+    )
+    shell = get_tool_by_name(
+        "shell",
+        runner_paths,
+        tools=builtin_tool_registry(),
+        runs_in_worker=False,
+        tool_output_workspace_root=tmp_path,
+        worker_target=None,
+    )
+    call = _offered_entrypoint(shell, "run_shell_command")
+    said = f"{_MISSING}: No such file or directory"
+    for name in ("launch.txt", "failed.txt"):
+        (tmp_path / name).write_text("previous contents")
+
+    launch = json.loads(await call([_MISSING], worker="build", mindroom_output_path="launch.txt"))
+    command = ["bash", "-c", f"echo '{said}' >&2; exit 127"]
+    failed = json.loads(await call(command, worker="build", mindroom_output_path="failed.txt"))
+
+    assert launch["mindroom_tool_output"] == {**failed["mindroom_tool_output"], "path": "launch.txt"}
+    assert launch["mindroom_tool_output"]["exit_code"] == 127
+    assert launch["mindroom_tool_output"]["overwritten"] is True
+    saved = (tmp_path / "launch.txt").read_text()
+    assert saved == (tmp_path / "failed.txt").read_text() == f"Exit code 127\nStderr:\n{said}\n"
 
 
 @pytest.mark.asyncio

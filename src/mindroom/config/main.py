@@ -149,8 +149,7 @@ from mindroom.matrix_identifiers import (
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
-from mindroom.room_reply_modes import resolve_room_reply_mode_override
-from mindroom.room_thread_modes import resolve_room_thread_mode_override
+from mindroom.room_settings import REPLY_MODE, THREAD_MODE, resolve_room_setting
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
@@ -164,7 +163,7 @@ if TYPE_CHECKING:
     from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
     from mindroom.config.agent import RoomReplyMode
     from mindroom.config.personal_agents import PersonalAgentRoster
-    from mindroom.room_reply_modes import ReplyModeRead
+    from mindroom.room_settings import RoomThreadMode, SettingRead
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -1734,15 +1733,20 @@ class Config(BaseModel):
         entity_name: str,
         runtime_paths: RuntimePaths,
         room_id: str | None = None,
+        read: SettingRead[RoomThreadMode] | None = None,
     ) -> Literal["thread", "room"]:
         """Get effective thread mode for an agent, team, or router.
 
-        Agents use their explicit per-agent setting.
+        The room's `thread_mode` setting decides for every entity when set: ``read`` is the setting a refresh just
+        found, to decide by; without it, the runtime's copy of the setting.
+        Otherwise agents use their explicit per-agent setting.
         Teams inherit a mode only when all member agents share it.
         Router inherits a mode only when all relevant configured agents share it.
         In ambiguous cases, default to "thread".
         """
-        runtime_room_override = resolve_room_thread_mode_override(runtime_paths, room_id)
+        runtime_room_override = (
+            resolve_room_setting(THREAD_MODE, runtime_paths, room_id) if read is None else read.value
+        )
         if runtime_room_override is not None:
             return runtime_room_override
 
@@ -1762,13 +1766,13 @@ class Config(BaseModel):
         self,
         runtime_paths: RuntimePaths,
         room_id: str,
-        read: ReplyModeRead | None = None,
+        read: SettingRead[RoomReplyMode] | None = None,
     ) -> RoomReplyMode:
         """Return one room's reply mode: its `reply_mode` room setting, else its `rooms` entry, else `auto`.
 
         ``read`` is the setting a refresh just found, to decide by; without it, the runtime's copy of the setting.
         """
-        runtime_room_override = resolve_room_reply_mode_override(runtime_paths, room_id) if read is None else read.mode
+        runtime_room_override = resolve_room_setting(REPLY_MODE, runtime_paths, room_id) if read is None else read.value
         if runtime_room_override is not None:
             return runtime_room_override
         room = resolve_room_scoped_value(self.rooms, room_id, runtime_paths)
