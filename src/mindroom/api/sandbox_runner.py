@@ -95,7 +95,7 @@ from mindroom.tool_system.output_files import (
     validate_output_path_syntax,
     write_bytes_to_output_path,
 )
-from mindroom.tool_system.plugins import preload_plugins, preloaded_plugins_suit, refresh_plugins
+from mindroom.tool_system.plugins import preload_plugins, refresh_plugins, worker_preload_plugin_paths
 from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
 from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
@@ -390,8 +390,7 @@ def start_eager_worker_setup(app: FastAPI) -> asyncio.Task[None] | None:
     """Start preparing this dedicated worker in the background when its startup manifest asks for that.
 
     Only the Kubernetes backend asks, and never for a script worker. ``/healthz`` answers meanwhile and reports the
-    setup's state, and a request prepares whatever is still missing itself, so a setup that fails or outlasts its
-    budget costs the first command its speed and nothing else.
+    setup's state, and a request prepares whatever a setup that failed or outlasted its budget left undone.
     """
     app.state.worker_setup = None
     runtime_paths = app_runtime_paths(app)
@@ -415,11 +414,14 @@ def start_eager_worker_setup(app: FastAPI) -> asyncio.Task[None] | None:
         }
         sandbox_forkserver.start_preloading_forkserver(json.dumps(preload))
     app.state.worker_setup = "preparing"
-    return asyncio.create_task(_eager_worker_setup(app, runtime_paths))
+    return asyncio.create_task(_eager_worker_setup(app, runtime_paths, tuple(plugin_paths)))
 
 
-async def _eager_worker_setup(app: FastAPI, runtime_paths: RuntimePaths) -> None:
-    """Create the worker's venv, then start its shell supervisor and forkserver template together."""
+async def _eager_worker_setup(app: FastAPI, runtime_paths: RuntimePaths, preloaded: tuple[str, ...] = ()) -> None:
+    """Create the worker's venv, then start its shell supervisor and forkserver template together.
+
+    Requests run in the template that preloaded the plugins ``preloaded`` only once all of this succeeded.
+    """
     started_at = time.monotonic()
     try:
         async with asyncio.timeout(_EAGER_SETUP_BUDGET_SECONDS):
@@ -436,8 +438,12 @@ async def _eager_worker_setup(app: FastAPI, runtime_paths: RuntimePaths) -> None
             await asyncio.gather(*steps)
     except Exception as exc:  # Whatever failed, the first request prepares it and reports its error.
         app.state.worker_setup = "failed"
-        logger.warning("sandbox_worker_eager_setup_failed", error=str(exc) or type(exc).__name__)
+        error = str(exc) or type(exc).__name__
+        logger.warning("sandbox_worker_eager_setup_failed", error=error)
+        sandbox_forkserver.abandon_preload(f"The worker's setup failed: {error}")
     else:
+        if (preloading := sandbox_forkserver.preloading_forkserver()) is not None:
+            preloading.serves = preloaded
         app.state.worker_setup = "ready"
         logger.info("sandbox_worker_eager_setup_ready", setup_ms=round((time.monotonic() - started_at) * 1000, 1))
 
@@ -1285,6 +1291,7 @@ def _parse_subprocess_response(
 def _execute_request_forkserver(
     worker_key: str | None,
     runtime_paths: RuntimePaths,
+    config: Config,
     *,
     subprocess_context: _PreparedSandboxSubprocessContext,
     envelope: str,
@@ -1292,31 +1299,35 @@ def _execute_request_forkserver(
 ) -> ExecuteResponse | None:
     """Dispatch one prepared request via the warm template; None means fall back to spawn-per-call.
 
-    A worker that preloads plugins tries its preloading template first. The request runs there only when the preload
-    suits it exactly; otherwise, and once the preload is given up, it runs in the plain template, as without a preload.
+    The request runs in the template that preloaded plugins only when those are exactly the plugins of ``config`` that
+    opt in, as configured; any other request runs in the plain template, as without a preload. When the preloading
+    template is gone, which no request has reached then, the plain one runs the request in the time that is left.
     """
+    started_at = time.monotonic()
 
     def execute(forkserver: sandbox_forkserver._SandboxForkserver) -> subprocess.CompletedProcess[str]:
+        spent = time.monotonic() - started_at
         return forkserver.execute(
             python_executable=subprocess_context.python_executable,
             template_env=subprocess_context.template_env,
             request_env=subprocess_context.subprocess_env,
             request_cwd=subprocess_context.subprocess_cwd,
             envelope=envelope,
-            timeout_seconds=timeout_seconds,
-            startup_timeout_seconds=sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths),
+            timeout_seconds=None if timeout_seconds is None else timeout_seconds - spent,
+            startup_timeout_seconds=sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths) - spent,
             bind_stop=sandbox_request_cancellation.bind_request_stop,
             on_progress=report_tool_progress,
         )
 
     try:
         completed = None
-        if (preloading := sandbox_forkserver.preloading_forkserver()) is not None:
+        preloading = sandbox_forkserver.preloading_forkserver()
+        if preloading is not None and preloading.serves == worker_preload_plugin_paths(config, runtime_paths):
             try:
                 completed = execute(preloading)
             except sandbox_forkserver.ForkserverStartupError as exc:
                 sandbox_forkserver.abandon_preload(str(exc))
-        if completed is None or completed.returncode == sandbox_protocol.PRELOAD_UNSUITED_RETURNCODE:
+        if completed is None:
             completed = execute(sandbox_forkserver.get_sandbox_forkserver())
     except sandbox_forkserver.ForkserverTimeoutError:
         return _subprocess_failure_response(worker_key, "Sandbox subprocess timed out.", runtime_paths)
@@ -1411,6 +1422,7 @@ def _execute_request_subprocess_sync(call: _ExecuteCall) -> ExecuteResponse:
         forkserver_response = _execute_request_forkserver(
             worker_key,
             runtime_paths,
+            call.route.config,
             subprocess_context=subprocess_context,
             envelope=envelope,
             timeout_seconds=timeout_seconds,
@@ -1574,14 +1586,7 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
         )
         return 1, "", sandbox_protocol.response_marker_payload(response.model_dump_json())
 
-    timing: dict[str, object] = {}
-    stage_started_at = time.monotonic()
-
-    def stage_done(stage: str) -> None:
-        nonlocal stage_started_at
-        now = time.monotonic()
-        timing[f"{stage}_ms"] = round((now - stage_started_at) * 1000, 1)
-        stage_started_at = now
+    stage_ends = [time.monotonic()]
 
     try:
         envelope = sandbox_protocol.parse_subprocess_envelope(payload)
@@ -1600,11 +1605,7 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
         return 1, "", sandbox_protocol.response_marker_payload(response.model_dump_json())
     if sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
         config = _config_with_available_plugins(config, runtime_paths, log_skipped_plugins=True)
-    preloaded = preloaded_plugins_suit(config, runtime_paths)
-    if preloaded is False:
-        # Only a process that never imported those plugins may run this request, so the runner sends it to one.
-        return sandbox_protocol.PRELOAD_UNSUITED_RETURNCODE, "", ""
-    stage_done("config")
+    stage_ends.append(time.monotonic())
 
     # Redirect stdout/stderr during tool execution so tool output doesn't
     # interfere with the protocol marker in the returned response text.
@@ -1615,13 +1616,14 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
         sys.path.append(str(Path.cwd()))
     job = job_control_context(JobControl()) if request.run_as_job else nullcontext()
     with redirect_stdout(captured_out), redirect_stderr(captured_err), tool_progress_reporter(report_progress), job:
-        # A fresh child loads the request's plugins itself, except the ones its template preloaded for this config.
-        timing["preloaded"] = preloaded is True
+        # A fresh child loads the request's plugins itself, except the ones its template preloaded.
         tools = refresh_plugins(config, runtime_paths).tools
-        stage_done("plugins")
+        stage_ends.append(time.monotonic())
         response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config, tools))
-        stage_done("tool")
+        stage_ends.append(time.monotonic())
 
+    stages = zip(("config_ms", "plugins_ms", "tool_ms"), stage_ends, stage_ends[1:], strict=False)
+    timing: dict[str, object] = {stage: round((end - start) * 1000, 1) for stage, start, end in stages}
     tool_output = captured_out.getvalue() + captured_err.getvalue()
     return 0, tool_output, sandbox_protocol.response_marker_payload(response.model_dump_json(), timing=timing)
 

@@ -109,6 +109,8 @@ class _Template:
     runtime_dir: Path
     # Set once the socket accepts connections; mutated only under the key lock.
     ready: bool = False
+    # A template that preloads plugins leads a process group of its own, which holds whatever their import started.
+    leads_group: bool = False
 
 
 @dataclass(frozen=True)
@@ -162,6 +164,10 @@ def _stderr_tail(stderr_path: Path) -> str:
 
 def _terminate_template(template: _Template) -> None:
     process = template.process
+    if template.leads_group:
+        # The group outlives a leader that ended already, such as one its preload timer ended.
+        with suppress(OSError):
+            os.killpg(process.pid, signal.SIGKILL)
     if process.poll() is None:
         process.terminate()
         try:
@@ -216,6 +222,10 @@ class _SandboxForkserver:
         self._templates: dict[str, _Template] = {}
         self._failed_fingerprints: dict[str, tuple[str, float]] = {}
         self._template_preload = template_preload
+        self._may_spawn = True
+        # The plugin paths a request must opt in to, exactly, to run in a preloading manager's template: None until
+        # the worker's setup succeeded, so that no request waits for a preload or runs beside a failed setup.
+        self.serves: tuple[str, ...] | None = None
 
     def warm(self, python_executable: str | None, template_env: dict[str, str] | None, timeout_seconds: float) -> None:
         """Start one template ahead of the first request and wait until it serves."""
@@ -261,6 +271,7 @@ class _SandboxForkserver:
             templates = list(self._templates.values())
             self._templates.clear()
             self._failed_fingerprints.clear()
+            self._may_spawn = self._template_preload is None
         for template in templates:
             _terminate_template(template)
 
@@ -310,8 +321,14 @@ class _SandboxForkserver:
             self._discard(key, template)
             template = None
         if template is None:
-            template = self._spawn_template(key=key, fingerprint=fingerprint, template_env=template_env)
+            # Under the lock that shutting down takes, so that no template starts beside or after a shutdown's last.
             with self._lock:
+                if not self._may_spawn:
+                    msg = "The template that preloaded plugins ended, and a preload is tried once."
+                    raise ForkserverStartupError(msg)
+                # A preloading manager starts one template in its life: no preload runs twice or under a request.
+                self._may_spawn = self._template_preload is None
+                template = self._spawn_template(key=key, fingerprint=fingerprint, template_env=template_env)
                 self._templates[key] = template
         try:
             self._wait_template_ready(key=key, template=template, deadline=deadline)
@@ -319,7 +336,7 @@ class _SandboxForkserver:
             with self._lock:
                 if self._templates.get(key) is template:
                     self._templates.pop(key)
-            shutil.rmtree(template.runtime_dir, ignore_errors=True)
+            _terminate_template(template)
             self._failed_fingerprints[fingerprint] = (str(exc), time.monotonic())
             logger.warning("sandbox_forkserver_template_startup_failed", error=str(exc))
             raise
@@ -355,6 +372,7 @@ class _SandboxForkserver:
                     stdout=subprocess.DEVNULL,
                     stderr=stderr_file,
                     env=template_env,
+                    process_group=None if self._template_preload is None else 0,
                 )
         except OSError as exc:
             shutil.rmtree(runtime_dir, ignore_errors=True)
@@ -367,6 +385,7 @@ class _SandboxForkserver:
             socket_path=socket_path,
             stderr_path=stderr_path,
             runtime_dir=runtime_dir,
+            leads_group=self._template_preload is not None,
         )
 
     def _wait_template_ready(self, *, key: str, template: _Template, deadline: float) -> None:
@@ -519,12 +538,12 @@ def get_sandbox_forkserver() -> _SandboxForkserver:
         return _forkserver
 
 
-# The manager whose templates import the worker's opt-in plugins first, until that preload is given up.
+# The manager whose one template imports the worker's opt-in plugins first, until that preload is given up.
 _preloading_forkserver: _SandboxForkserver | None = None
 
 
-def start_preloading_forkserver(template_preload: str) -> None:
-    """Add this process's manager of templates that import ``template_preload`` before they serve.
+def start_preloading_forkserver(template_preload: str) -> _SandboxForkserver:
+    """Add and return this process's manager of the one template that imports ``template_preload`` before it serves.
 
     The plain manager's templates never import it, for the requests it does not suit and once it is given up.
     """
@@ -532,15 +551,16 @@ def start_preloading_forkserver(template_preload: str) -> None:
     with _forkserver_lock:
         _preloading_forkserver = _SandboxForkserver(template_preload=template_preload)
         atexit.register(_preloading_forkserver.shutdown)
+        return _preloading_forkserver
 
 
 def preloading_forkserver() -> _SandboxForkserver | None:
-    """Return the manager of preloading templates, or None when there is no preload or it was given up."""
+    """Return the manager of the preloading template, or None when there is no preload or it was given up."""
     return _preloading_forkserver
 
 
 def abandon_preload(error: str) -> None:
-    """Give the preload up for this process's lifetime, killing the templates that tried or hold it."""
+    """Give the preload up for this process's lifetime, killing the template that tried or holds it and its group."""
     global _preloading_forkserver
     with _forkserver_lock:
         forkserver, _preloading_forkserver = _preloading_forkserver, None

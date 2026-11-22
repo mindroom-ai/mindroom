@@ -9,7 +9,6 @@ generations.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import inspect
 import itertools
 import json
@@ -170,8 +169,6 @@ class _ConfiguredPlugin:
 
 
 _PUBLISHED = PluginGeneration()
-# The fingerprint of the plugins a forkserver template preloaded, which the processes forked from it inherit.
-_PRELOADED: str | None = None
 
 # Each plugin's ``PluginLifecycle.process_state`` by plugin name, kept for the process, so it outlives reloads.
 _PROCESS_STATE: dict[str, dict[str, Any]] = {}
@@ -602,82 +599,29 @@ def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
     return config_plugins(config, runtime_paths)
 
 
-def _worker_preload_roots(config: Config, runtime_paths: RuntimePaths) -> list[tuple[PluginEntryConfig, Path]]:
-    """Return ``config``'s enabled plugins whose manifests set ``worker_preload``, each with its root."""
-    opted: list[tuple[PluginEntryConfig, Path]] = []
+def worker_preload_plugin_paths(config: Config, runtime_paths: RuntimePaths) -> tuple[str, ...]:
+    """Return the configured paths of ``config``'s enabled plugins whose manifests set ``worker_preload``."""
+    opted: list[str] = []
     for entry in config.plugins:
         try:
             root = plugin_imports._resolve_plugin_root(entry.path, runtime_paths)
             if entry.enabled and plugin_imports._load_plugin_base(root).worker_preload:
-                opted.append((entry, root))
+                opted.append(entry.path)
         except Exception:  # noqa: S112 - the load that follows reports a plugin that does not resolve.
             continue
-    return opted
-
-
-def worker_preload_plugin_paths(config: Config, runtime_paths: RuntimePaths) -> tuple[str, ...]:
-    """Return the configured paths of ``config``'s enabled plugins whose manifests set ``worker_preload``."""
-    return tuple(entry.path for entry, _root in _worker_preload_roots(config, runtime_paths))
-
-
-def _worker_preload_plugins(config: Config, runtime_paths: RuntimePaths) -> tuple[list[PluginEntryConfig], str]:
-    """Return ``config``'s plugins that opt in to a worker preload, and a fingerprint of them and all their files.
-
-    The fingerprint reads no file: each one's size, times, inode, and device change whenever it is rewritten or
-    replaced, also by a copy that keeps its size and modification time. Linked directories count as the plugin's own.
-    """
-    opted = _worker_preload_roots(config, runtime_paths)
-    stamps: list[tuple[str, int, int, int, int, int]] = []
-    for _entry, root in opted:
-        # A directory reached a second time is a link back into the tree.
-        visited = {(root.stat().st_dev, root.stat().st_ino)}
-        for directory, subdirectories, filenames in root.walk(follow_symlinks=True):
-            for path in sorted(directory / name for name in filenames):
-                with suppress(OSError):
-                    stat = path.stat()
-                    stamps.append(
-                        (str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino, stat.st_dev),
-                    )
-            followed: list[str] = []
-            # Importing writes bytecode caches and reading a checkout's status rewrites its index: neither changes it.
-            for name in sorted(set(subdirectories) - {"__pycache__", ".git"}):
-                with suppress(OSError):
-                    stat = (directory / name).stat()
-                    if (stat.st_dev, stat.st_ino) not in visited:
-                        visited.add((stat.st_dev, stat.st_ino))
-                        followed.append(name)
-            subdirectories[:] = followed
-    payload = json.dumps([[str(root) for _entry, root in opted], stamps])
-    return [entry for entry, _root in opted], hashlib.sha256(payload.encode()).hexdigest()
+    return tuple(opted)
 
 
 def preload_plugins(config: Config, runtime_paths: RuntimePaths) -> bool:
-    """Import ``config``'s plugins whose manifests set ``worker_preload``, for the processes forked from this one.
+    """Import ``config``'s plugins for the processes forked from this one, which reuse them as long as it runs.
 
     Returns False when one of them did not load, which leaves this process unfit to fork from.
     """
-    global _PRELOADED
-    entries, fingerprint = _worker_preload_plugins(config, runtime_paths)
-    if entries:
-        preloaded = config.model_copy(update={"plugins": entries})
-        with _PLUGIN_LOCK:
-            plugins, skipped, _ = _load_plugins(preloaded, runtime_paths, previous=None, primary_modules=False)
-            if skipped:
-                return False
+    with _PLUGIN_LOCK:
+        plugins, skipped, _ = _load_plugins(config, runtime_paths, previous=None, primary_modules=False)
+        if not skipped:
             publish_plugins(_installed_generation(plugins))
-        _PRELOADED = fingerprint
-    return True
-
-
-def preloaded_plugins_suit(config: Config, runtime_paths: RuntimePaths) -> bool | None:
-    """Return whether the plugins this process inherited from its template suit ``config``; None when it has none.
-
-    They suit only while they are exactly ``config``'s plugins that opt in and no file of theirs changed since.
-    A process they do not suit must not run the request: what their import left behind cannot be undone.
-    """
-    if _PRELOADED is None:
-        return None
-    return _worker_preload_plugins(config, runtime_paths)[1] == _PRELOADED
+    return not skipped
 
 
 def candidate_tool_registry(

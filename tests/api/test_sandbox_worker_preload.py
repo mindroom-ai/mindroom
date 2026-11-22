@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,7 +19,7 @@ import mindroom.api.sandbox_forkserver as sandbox_forkserver_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.workers.backends.local as local_worker_module
 from mindroom import constants
-from mindroom.api import sandbox_runner_app
+from mindroom.api import sandbox_exec, sandbox_runner_app
 from mindroom.api.sandbox_forkserver import _SandboxForkserver
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
@@ -141,6 +143,12 @@ def _preload_spec(runtime_paths: RuntimePaths, plugins: list[PluginEntryConfig],
     )
 
 
+def _warm(preloading: _SandboxForkserver) -> None:
+    """Start ``preloading``'s template for the interpreter and environment that this test's requests name."""
+    python_executable, template_env, _cwd = sandbox_exec.resolve_subprocess_worker_context(None)
+    preloading.warm(python_executable, template_env, 30.0)
+
+
 def _serve_preload(
     runtime_paths: RuntimePaths,
     plugins: list[PluginEntryConfig],
@@ -152,7 +160,7 @@ def _serve_preload(
         _preload_spec(runtime_paths, plugins, budget_seconds=budget_seconds),
     )
     try:
-        preloading.warm(None, None, 30.0)
+        _warm(preloading)
     except sandbox_forkserver_module.ForkserverError as exc:
         sandbox_forkserver_module.abandon_preload(str(exc) or "The preload outlasted the worker's setup budget.")
     else:
@@ -170,7 +178,7 @@ def _runs(pid: int) -> bool:
 
 
 @pytest.fixture
-def manager(monkeypatch: pytest.MonkeyPatch) -> Iterator[_SandboxForkserver]:
+def manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[_SandboxForkserver]:
     """Return this test's plain forkserver, which records what every forkserver of the test does.
 
     ``spawned`` lists each template started, and ``dispatched`` tells for each request handed to a forkserver whether
@@ -203,6 +211,10 @@ def manager(monkeypatch: pytest.MonkeyPatch) -> Iterator[_SandboxForkserver]:
         if (preloading := sandbox_forkserver_module._preloading_forkserver) is not None:
             preloading.shutdown()
         sandbox_forkserver_module._preloading_forkserver = None
+        # A call that imports a plugin itself leaves what that import started, as it always did.
+        for pid in _started_processes(tmp_path):
+            with suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
 
 
 def _call(
@@ -233,17 +245,20 @@ def _report(runtime_paths: RuntimePaths, plugins: list[PluginEntryConfig], name:
 
 
 # Starts a process of its own at import, as a plugin that launches a helper does, and notes its PID.
+# This test process plays the runner, which imports a request's plugins too, and must not leave one behind.
 _STARTS_A_PROCESS = (
     "import subprocess\n"
-    "_helper = subprocess.Popen(['sleep', '600'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,"
+    f"if os.getpid() != {os.getpid()}:\n"
+    "    _helper = subprocess.Popen(['sleep', '600'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,"
     " stderr=subprocess.DEVNULL)\n"
-    "Path({started_log!r}).open('a').write(f'{{_helper.pid}}\\n')"
+    "    Path({started_log!r}).open('a').write(f'{{_helper.pid}}\\n')"
 )
 
 
 def _started_processes(root: Path) -> list[int]:
     """Return the PIDs of the processes that plugins written with ``_STARTS_A_PROCESS`` started."""
-    return [int(pid) for pid in (root / "started.log").read_text(encoding="utf-8").split()]
+    log = root / "started.log"
+    return [int(pid) for pid in log.read_text(encoding="utf-8").split()] if log.exists() else []
 
 
 def _write_hanging_plugin(root: Path) -> PluginEntryConfig:
@@ -365,7 +380,7 @@ def test_no_request_runs_in_the_preloading_template_before_the_setup_succeeded(
     preloading = sandbox_forkserver_module.start_preloading_forkserver(_preload_spec(runtime_paths, [opted]))
 
     _report(runtime_paths, [opted], "opted")
-    preloading.warm(None, None, 30.0)
+    _warm(preloading)
     _report(runtime_paths, [opted], "opted")
 
     assert manager.dispatched == [False, False]
@@ -468,10 +483,11 @@ def test_a_plugin_whose_import_hangs_is_given_up_with_all_it_started_and_other_c
     assert manager.spawned[0].process.poll() is not None
     assert manager.dispatched == [False] * 3
     # The timer ended only the template, so the runner ended what the import had started.
+    assert _started_processes(tmp_path)
     assert not any(_runs(pid) for pid in _started_processes(tmp_path))
     # A preload that was given up starts no template again, whoever asks.
     with pytest.raises(sandbox_forkserver_module.ForkserverStartupError):
-        preloading.warm(None, None, 30.0)
+        _warm(preloading)
     assert len(manager.spawned) == 2
 
 
@@ -702,6 +718,7 @@ def test_a_setup_that_outlasts_its_budget_ends_the_preload_and_calls_run(
         assert time.monotonic() - started_at < 25
         assert manager.spawned[0].process.poll() is not None
         assert manager.dispatched == [False, False]
+        assert _started_processes(tmp_path)
         assert not any(_runs(pid) for pid in _started_processes(tmp_path))
     assert (tmp_path / "tried.log").read_text(encoding="utf-8") == "tried\n"
 

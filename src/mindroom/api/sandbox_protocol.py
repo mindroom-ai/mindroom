@@ -9,8 +9,6 @@ from pydantic import BaseModel, Field
 
 _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
 _TIMING_MARKER = "__SANDBOX_TIMING__"
-# A child forked from a preloading template exits with this instead of running a request the preload does not suit.
-PRELOAD_UNSUITED_RETURNCODE = 75
 
 
 class SandboxSubprocessEnvelope(BaseModel):
