@@ -724,6 +724,15 @@ class ResponseLifecycleCoordinator:
         self._consume_queued_human_notice(notice=notice, queued_signal=queued_signal)
         queued_signal.finish_response_turn()
 
+    async def _wait_for_approval_release(
+        self,
+        key: ResponseLifecycleKey,
+        wait: Callable[[Coroutine[None, None, object]], Awaitable[bool]] | None,
+    ) -> None:
+        while wait is not None and key in self._approval_holds.values():
+            if not await wait(self._approval_released.wait()):
+                raise ResponseAdmissionRefusedError
+
     @asynccontextmanager
     async def exclusive_conversation(
         self,
@@ -741,19 +750,16 @@ class ResponseLifecycleCoordinator:
         self._exclusive_users[key] += 1
         try:
             while True:
-                while wait_for_approval_release is not None and key in self._approval_holds.values():
-                    if not await wait_for_approval_release(self._approval_released.wait()):
-                        raise ResponseAdmissionRefusedError
+                await self._wait_for_approval_release(key, wait_for_approval_release)
                 async with AsyncExitStack() as stack:
                     if admit is not None:
                         await stack.enter_async_context(admit())
                     if pipeline_timing is not None:
                         pipeline_timing.mark("lock_wait_start")
                     await self._acquire_response_turn_lock(lock, reservation)
-                    if reservation is not None:
-                        stack.push_async_callback(reservation.release)
-                    else:
-                        stack.callback(lock.release)
+                    stack.push_async_callback(reservation.release) if reservation is not None else stack.callback(
+                        lock.release,
+                    )
                     if wait_for_approval_release is not None and key in self._approval_holds.values():
                         continue
                     if pipeline_timing is not None:

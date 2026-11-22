@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.constants import ATTACHMENT_IDS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.matrix.typing import typing_indicator
@@ -19,8 +20,10 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.config.participation import ParticipationConfig
+    from mindroom.constants import RuntimePaths
     from mindroom.contacts.store import ContactRecord, SideName
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.hooks import EnrichmentItem, MessageEnvelope
@@ -56,6 +59,29 @@ def reply_authorization_entity_names(
     if owner_entity_name in config.teams:
         return (owner_entity_name,)
     return tuple(dict.fromkeys((owner_entity_name, *team_member_names)))
+
+
+def requester_remains_authorized(
+    requester_id: str,
+    room_id: str,
+    owner_entity_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+    *,
+    reply_entity_names: Sequence[str] = (),
+) -> bool:
+    """Recheck one requester under serialized ownership with resolved membership."""
+    entity_names = reply_authorization_entity_names(config, owner_entity_name, reply_entity_names)
+    return is_sender_allowed_for_entity_replies_in_room(
+        requester_id,
+        entity_names,
+        config,
+        room_id,
+        runtime_paths,
+        membership_index,
+        require_resolved_membership=True,
+    )
 
 
 @dataclass(frozen=True)

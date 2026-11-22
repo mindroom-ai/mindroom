@@ -14,11 +14,11 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom import reply_lifecycle as rl
 from mindroom.ai_runtime import bind_mid_turn_conversation_context
-from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import memory_backend
 from mindroom.contacts.turns import contact_room
+from mindroom.conversation_resolver import DegradedThreadHistoryError, read_fresh_thread_history
 from mindroom.conversation_state_writer import session_started_on_creation
 from mindroom.delivery_gateway import ResponseIdentity
 from mindroom.entity_resolution import current_internal_sender_ids
@@ -36,13 +36,13 @@ from mindroom.final_delivery import (
     TurnProgress,
 )
 from mindroom.judgment.conversation import conversation_context_before_sources
-from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.memory import store_conversation_memory
 from mindroom.orchestration.runtime import classify_cancel_source, current_task_is_process_shutdown
 from mindroom.reply_scope import current_span, release_decision, suppress_decision
 from mindroom.reply_turn.request import (
     correlation_id_for_request,
     reply_authorization_entity_names,
+    requester_remains_authorized,
 )
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
@@ -70,7 +70,6 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_reads import ThreadHistoryResult
     from mindroom.message_target import MessageTarget
     from mindroom.participation import ParticipationGate
     from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport, ResponseOutcome
@@ -80,14 +79,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
-
-
-class DegradedThreadHistoryError(RuntimeError):
-    """Raised when a strict post-lock thread-history read returned degraded history."""
-
-    def __init__(self, target: MessageTarget, history: ThreadHistoryResult) -> None:
-        self.target, self.history = target, history
-        super().__init__(f"Thread history degraded for {target.room_id}/{target.resolved_thread_id}")
 
 
 def existing_event(request: ResponseRequest) -> tuple[str | None, bool]:
@@ -284,26 +275,6 @@ class LockedTurns:
 
         return queue
 
-    def requester_remains_authorized(
-        self,
-        requester_id: str,
-        room_id: str,
-        *,
-        reply_entity_names: Sequence[str] = (),
-    ) -> bool:
-        """Recheck one requester under the conversation lock with resolved membership."""
-        config = self.deps.runtime.config
-        entity_names = reply_authorization_entity_names(config, self.deps.agent_name, reply_entity_names)
-        return is_sender_allowed_for_entity_replies_in_room(
-            requester_id,
-            entity_names,
-            config,
-            room_id,
-            self.deps.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
-            require_resolved_membership=True,
-        )
-
     async def request_remains_authorized(
         self,
         request: ResponseRequest,
@@ -312,17 +283,24 @@ class LockedTurns:
     ) -> bool:
         """Recheck one requester after serialized lifecycle admission."""
         requester_id = request.response_envelope.requester_id
-        if self.requester_remains_authorized(requester_id, request.room_id, reply_entity_names=reply_entity_names):
+        config = self.deps.runtime.config
+        deps = self.deps
+        if requester_remains_authorized(
+            requester_id,
+            request.room_id,
+            deps.agent_name,
+            config,
+            deps.runtime_paths,
+            deps.runtime.agent_reply_memberships,
+            reply_entity_names=reply_entity_names,
+        ):
             return True
-        entity_names = reply_authorization_entity_names(
-            self.deps.runtime.config, self.deps.agent_name, reply_entity_names
-        )
         self.deps.logger.info(
             "response_suppressed_after_authorization_revocation",
             source_event_id=request.response_envelope.source_event_id,
             requester_id=requester_id,
             room_id=request.room_id,
-            entity_names=entity_names,
+            entity_names=reply_authorization_entity_names(config, self.deps.agent_name, reply_entity_names),
         )
         return False
 
@@ -346,17 +324,6 @@ class LockedTurns:
 
         return persist_response_event_id
 
-    async def read_fresh_thread_history(
-        self, target: MessageTarget, *, strict: bool = False
-    ) -> ThreadHistoryResult | None:
-        """Read fresh, fork-aware thread history for one locked target; None for a room-mode target."""
-        if target.resolved_thread_id is None:
-            return None
-        history = await self.deps.resolver.fetch_thread_history(target.room_id, target.resolved_thread_id)
-        if strict and is_thread_history_degraded(history):
-            raise DegradedThreadHistoryError(target, history)
-        return history
-
     async def refresh_model_history(
         self,
         request: ResponseRequest,
@@ -365,7 +332,11 @@ class LockedTurns:
     ) -> ResponseRequest:
         """Refresh model-facing thread history once this turn owns the lifecycle lock."""
         try:
-            refreshed_history = await self.read_fresh_thread_history(request.response_envelope.target)
+            refreshed_history = await read_fresh_thread_history(
+                self.deps.resolver, request.response_envelope.target, strict=True
+            )
+        except DegradedThreadHistoryError as degraded:
+            refreshed_history = degraded.history
         except Exception as exc:
             if request.requires_model_history_refresh:
                 raise

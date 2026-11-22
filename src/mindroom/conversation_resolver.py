@@ -673,3 +673,26 @@ class ConversationResolver:
             thread_id=thread_id,
             limit=limit,
         )
+
+
+class DegradedThreadHistoryError(RuntimeError):
+    """Raised when a strict post-lock thread-history read returned degraded history."""
+
+    def __init__(self, target: MessageTarget, history: ThreadHistoryResult) -> None:
+        self.target, self.history = target, history
+        super().__init__(f"Thread history degraded for {target.room_id}/{target.resolved_thread_id}")
+
+
+async def read_fresh_thread_history(
+    resolver: ConversationResolver,
+    target: MessageTarget,
+    *,
+    strict: bool = False,
+) -> ThreadHistoryResult | None:
+    """Read fresh, fork-aware thread history for one locked target; None for a room-mode target."""
+    if target.resolved_thread_id is None:
+        return None
+    history = await resolver.fetch_thread_history(target.room_id, target.resolved_thread_id)
+    if strict and is_thread_history_degraded(history):
+        raise DegradedThreadHistoryError(target, history)
+    return history

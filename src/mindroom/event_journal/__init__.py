@@ -105,9 +105,9 @@ from .views import (
 __all__ = [
     "JOB_ENDED_REASON",
     "REPLY_STOPPED_REASON",
+    "RUNTIME_SOURCE_KINDS",
     "SCHEDULED_APPROVAL_WINDOW_NS",
     "TIMEOUT_REASON",
-    "RUNTIME_SOURCE_KINDS",
     "TURN_BACKED_KINDS",
     "AdmissionFacts",
     "AdmissionResult",

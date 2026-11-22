@@ -62,9 +62,7 @@ class BotRuntimeView(Protocol):
     @property
     def phase(self) -> RunPhase: ...  # noqa: D102
 
-    def admission_fence(
-        self, *, on_deferred: Callable[[], None] | None = None, on_refused: Callable[[], None] | None = None
-    ) -> AbstractAsyncContextManager[None]: ...  # noqa: D102
+    def admission_fence(self) -> AbstractAsyncContextManager[None]: ...  # noqa: D102
 
     async def wait_for_admission_or_shutdown(self, ready: Coroutine[None, None, object] | None = None) -> bool: ...  # noqa: D102
 

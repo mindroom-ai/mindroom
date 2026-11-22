@@ -2,23 +2,59 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
 
+from mindroom import turn_store as turn_store_module
 from mindroom.authorization import ReplyMembershipPendingError
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.conversation_resolver import DegradedThreadHistoryError, read_fresh_thread_history
+from mindroom.event_journal import (
+    RUNTIME_SOURCE_KINDS,
+    EventClass,
+    EventJournalStore,
+    EventKind,
+    InboundEvent,
+    approval_signals,
+)
+from mindroom.event_journal.approval_signals import PausedReply
+from mindroom.history.session_context import (
+    ScopeSessionContext,
+    load_scope_session_from_storage,
+    load_scrubbed_scope_session,
+)
+from mindroom.history.types import HistoryScope
+from mindroom.llm.runs import RunRecord
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
+from mindroom.matrix.thread_history_result import thread_history_result
+from mindroom.message_target import MessageTarget
+from mindroom.reply_turn.request import requester_remains_authorized
+from mindroom.response_admission import ResponseAdmissionRefusedError
+from mindroom.response_lifecycle import ResponseLifecycleCoordinator
+from mindroom.response_sources import Owned
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_jobs.conversation import ConversationKey
+from mindroom.tool_jobs.follow_ups import follow_up_event
+from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import refresh_memberships
-from tests.conftest import unwrap_extracted_collaborator
+from tests.conftest import request_envelope, unwrap_extracted_collaborator
 from tests.matrix_state_helpers import save_matrix_state
 from tests.response_runner_helpers import _bot, _plain_request, _target
+from tests.test_turn_store import _store_with_storage
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
 
@@ -33,9 +69,17 @@ async def test_requester_remains_authorized_checks_resolved_membership_and_pendi
     state.add_room("grant", "!grant:localhost", "#grant:localhost", "Grant")
     save_matrix_state(state, bot.runtime_paths)
     request = _plain_request(_target())
+    memberships = runner.deps.runtime.agent_reply_memberships
 
     with pytest.raises(ReplyMembershipPendingError):
-        runner.locked.requester_remains_authorized("@user:localhost", request.room_id)
+        requester_remains_authorized(
+            "@user:localhost",
+            request.room_id,
+            "general",
+            bot.config,
+            bot.runtime_paths,
+            memberships,
+        )
     with pytest.raises(ReplyMembershipPendingError):
         await runner.locked.request_remains_authorized(request)
 
@@ -45,27 +89,34 @@ async def test_requester_remains_authorized_checks_resolved_membership_and_pendi
         members=[nio.RoomMember("@user:localhost", None, None)],
         room_id="!grant:localhost",
     )
-    await refresh_memberships(
-        runner.deps.runtime.agent_reply_memberships,
-        bot.config,
-        bot.runtime_paths,
-        membership_client,
-    )
+    await refresh_memberships(memberships, bot.config, bot.runtime_paths, membership_client)
 
-    assert runner.locked.requester_remains_authorized("@user:localhost", request.room_id) is True
+    assert (
+        requester_remains_authorized(
+            "@user:localhost",
+            request.room_id,
+            "general",
+            bot.config,
+            bot.runtime_paths,
+            memberships,
+        )
+        is True
+    )
     assert await runner.locked.request_remains_authorized(request) is True
 
-    membership_client.joined_members.return_value = nio.JoinedMembersResponse(
-        members=[],
-        room_id="!grant:localhost",
+    membership_client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id="!grant:localhost")
+    await refresh_memberships(memberships, bot.config, bot.runtime_paths, membership_client)
+    assert (
+        requester_remains_authorized(
+            "@user:localhost",
+            request.room_id,
+            "general",
+            bot.config,
+            bot.runtime_paths,
+            memberships,
+        )
+        is False
     )
-    await refresh_memberships(
-        runner.deps.runtime.agent_reply_memberships,
-        bot.config,
-        bot.runtime_paths,
-        membership_client,
-    )
-    assert runner.locked.requester_remains_authorized("@user:localhost", request.room_id) is False
     assert await runner.locked.request_remains_authorized(request) is False
 
 
@@ -85,20 +136,28 @@ async def test_requester_remains_authorized_uses_configured_team_policy(tmp_path
         access=ResponderAccessConfig(users=["@alice:localhost"]),
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    runner.locked.deps = replace(runner.deps, agent_name="crew")
+    memberships = runner.deps.runtime.agent_reply_memberships
 
     assert (
-        runner.locked.requester_remains_authorized(
+        requester_remains_authorized(
             "@alice:localhost",
             "!room:localhost",
+            "crew",
+            bot.config,
+            bot.runtime_paths,
+            memberships,
             reply_entity_names=("member",),
         )
         is True
     )
     assert (
-        runner.locked.requester_remains_authorized(
+        requester_remains_authorized(
             "@only-member:localhost",
             "!room:localhost",
+            "crew",
+            bot.config,
+            bot.runtime_paths,
+            memberships,
             reply_entity_names=("member",),
         )
         is False
@@ -108,16 +167,6 @@ async def test_requester_remains_authorized_uses_configured_team_policy(tmp_path
 @pytest.mark.asyncio
 async def test_load_scrubbed_scope_session_drains_load_on_cancel_and_scrubs_redactions(tmp_path: Path) -> None:
     """Loading a scrubbed scope drains cancellation during blocking I/O and removes redacted runs."""
-    import asyncio
-    import threading
-    from functools import partial
-
-    from mindroom.history.session_context import load_scope_session_from_storage, load_scrubbed_scope_session
-    from mindroom.history.types import HistoryScope
-    from mindroom.session_storage.agent_storage import create_state_storage
-    from mindroom.llm.runs import RunRecord
-    from mindroom.session_storage.types import ConversationSession
-
     scope = HistoryScope(kind="agent", scope_id="general")
     storage = create_state_storage("general", tmp_path, scope)
     session = ConversationSession(kind="agent", session_id="sess-1", owner_id="general")
@@ -136,15 +185,11 @@ async def test_load_scrubbed_scope_session_drains_load_on_cancel_and_scrubs_reda
     release = threading.Event()
     finished = threading.Event()
 
-    def blocking_load():
+    def blocking_load() -> ScopeSessionContext:
         entered.set()
         release.wait(timeout=5)
         try:
-            return load_scope_session_from_storage(
-                scope=scope,
-                session_id="sess-1",
-                storage_factory=lambda: storage,
-            )
+            return load_scope_session_from_storage(scope, "sess-1", lambda: storage)
         finally:
             finished.set()
 
@@ -162,7 +207,7 @@ async def test_load_scrubbed_scope_session_drains_load_on_cancel_and_scrubs_reda
         return {"$gone": None} if "$gone" in event_ids else {}
 
     scope_context = await load_scrubbed_scope_session(
-        partial(load_scope_session_from_storage, scope=scope, session_id="sess-1", storage_factory=lambda: storage),
+        partial(load_scope_session_from_storage, scope, "sess-1", lambda: storage),
         redactions,
     )
     assert scope_context.session is not None
@@ -175,17 +220,6 @@ async def test_edit_cut_scrubs_redacted_history_through_load_scrubbed_scope_sess
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """TurnStore.remove_stale_runs_for_edit delegates load+scrub to load_scrubbed_scope_session."""
-    from mindroom import turn_store as turn_store_module
-    from mindroom.event_journal import EventJournalStore
-    from mindroom.history.session_context import load_scrubbed_scope_session
-    from mindroom.history.types import HistoryScope
-    from mindroom.message_target import MessageTarget
-    from mindroom.session_storage.agent_storage import create_state_storage
-    from mindroom.llm.runs import RunRecord
-    from mindroom.session_storage.types import ConversationSession
-    from mindroom.turn_record import TurnRecord
-    from tests.test_turn_store import _store_with_storage
-
     target = MessageTarget.resolve("!room:example.org", "$thread", "$edited")
     scope = HistoryScope(kind="agent", scope_id="agent")
     storage = create_state_storage("agent", tmp_path, scope)
@@ -215,7 +249,10 @@ async def test_edit_cut_scrubs_redacted_history_through_load_scrubbed_scope_sess
 
         calls = 0
 
-        async def spy(load_scope, redactions):
+        async def spy(
+            load_scope: Callable[[], ScopeSessionContext],
+            redactions: Callable[[tuple[str, ...]], Awaitable[Mapping[str, str | None]]] | None,
+        ) -> ScopeSessionContext:
             nonlocal calls
             calls += 1
             return await load_scrubbed_scope_session(load_scope, redactions)
@@ -234,18 +271,13 @@ async def test_edit_cut_scrubs_redacted_history_through_load_scrubbed_scope_sess
 @pytest.mark.asyncio
 async def test_read_fresh_thread_history_handles_room_mode_normal_and_strict_degraded(tmp_path: Path) -> None:
     """Post-lock thread history read returns None in room mode and rejects degraded reads only when strict."""
-    from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
-    from mindroom.message_target import MessageTarget
-    from mindroom.reply_turn.locked_turn import DegradedThreadHistoryError
-    from mindroom.matrix.thread_history_result import thread_history_result
-
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
 
     room_target = MessageTarget.resolve("!room:localhost", None, "$src", room_mode=True)
     fetch = AsyncMock()
     runner.deps.resolver.fetch_thread_history = fetch
-    assert await runner.locked.read_fresh_thread_history(room_target, strict=True) is None
+    assert await read_fresh_thread_history(runner.deps.resolver, room_target, strict=True) is None
     fetch.assert_not_awaited()
 
     thread_target = MessageTarget.resolve("!room:localhost", "$thread", "$src")
@@ -253,16 +285,16 @@ async def test_read_fresh_thread_history_handles_room_mode_normal_and_strict_deg
     degraded = thread_history_result([], is_full_history=False, diagnostics={THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True})
 
     runner.deps.resolver.fetch_thread_history = AsyncMock(return_value=healthy)
-    assert await runner.locked.read_fresh_thread_history(thread_target, strict=True) is healthy
+    assert await read_fresh_thread_history(runner.deps.resolver, thread_target, strict=True) is healthy
 
     runner.deps.resolver.fetch_thread_history = AsyncMock(return_value=degraded)
-    assert await runner.locked.read_fresh_thread_history(thread_target, strict=False) is degraded
+    assert await read_fresh_thread_history(runner.deps.resolver, thread_target, strict=False) is degraded
     with pytest.raises(DegradedThreadHistoryError) as exc_info:
-        await runner.locked.read_fresh_thread_history(thread_target, strict=True)
+        await read_fresh_thread_history(runner.deps.resolver, thread_target, strict=True)
     assert exc_info.value.target == thread_target
     assert exc_info.value.history is degraded
 
-    # Reply fallback keeps degraded history when not strict and falls back on fetch failure.
+    # Reply fallback keeps degraded history and falls back on fetch failure.
     refreshed = await runner.locked.refresh_model_history(_plain_request(thread_target))
     assert refreshed.thread_history is degraded
     assert refreshed.requires_model_history_refresh is False
@@ -275,15 +307,6 @@ async def test_read_fresh_thread_history_handles_room_mode_normal_and_strict_deg
 @pytest.mark.asyncio
 async def test_exclusive_conversation_waits_for_approval_without_admission_or_reply_signal(tmp_path: Path) -> None:
     """Lock-only exclusive_conversation waits out approvals without admission and does not look like a reply."""
-    import asyncio
-
-    from mindroom.bot_runtime_view import BotRuntimeState
-    from mindroom.event_journal import EventJournalStore, approval_signals
-    from mindroom.event_journal.approval_signals import PausedReply
-    from mindroom.message_target import MessageTarget
-    from mindroom.response_lifecycle import ResponseLifecycleCoordinator
-    from tests.conftest import request_envelope
-
     bot = _bot(tmp_path)
     runtime = BotRuntimeState(orchestrator=bot.orchestrator)
     gate = runtime.response_admission_gate
@@ -298,7 +321,10 @@ async def test_exclusive_conversation_waits_for_approval_without_admission_or_re
     try:
         coordinator.follow_approval_holds(store.approval_signals, "agent@general", lambda _room_id: None)
         await store.backend.write(
-            lambda tx: approval_signals.paused(tx, PausedReply("agent@general", "appr-1", "!room:localhost", "$thread")),
+            lambda tx: approval_signals.paused(
+                tx,
+                PausedReply("agent@general", "appr-1", "!room:localhost", "$thread"),
+            ),
         )
 
         async def run_exclusive() -> None:
@@ -315,18 +341,15 @@ async def test_exclusive_conversation_waits_for_approval_without_admission_or_re
         task = asyncio.create_task(run_exclusive())
         await asyncio.sleep(0)
         assert not entered.is_set()
-        # No admission slot is held while waiting for approval, so replacement can close idle admission.
         assert gate.in_flight_response_count == 0
         assert gate.close_if_idle() is True
         gate.reopen()
 
-        # Release the approval; exclusive work now acquires admission and the lock.
         await store.backend.write(lambda tx: approval_signals.ended(tx, "agent@general", "appr-1", None))
         await asyncio.wait_for(entered.wait(), timeout=2)
         assert gate.in_flight_response_count == 1
         assert coordinator.has_active_response_for_target(target) is False
 
-        # A normal reply queues behind the exclusive holder on the same FIFO lock.
         envelope = request_envelope(target=target, prompt="follow", user_id="@user:localhost")
 
         async def locked_reply(_target: MessageTarget) -> str:
@@ -360,16 +383,6 @@ async def test_exclusive_conversation_rewaits_when_hold_appears_while_queued_and
     tmp_path: Path,
 ) -> None:
     """A hold appearing while queued releases both lock and admission; draining refuses the wait."""
-    import asyncio
-
-    from mindroom.bot_runtime_view import BotRuntimeState
-    from mindroom.event_journal import EventJournalStore, approval_signals
-    from mindroom.event_journal.approval_signals import PausedReply
-    from mindroom.message_target import MessageTarget
-    from mindroom.response_admission import ResponseAdmissionRefusedError
-    from mindroom.response_lifecycle import ResponseLifecycleCoordinator
-    from tests.conftest import request_envelope
-
     bot = _bot(tmp_path)
     runtime = BotRuntimeState(orchestrator=bot.orchestrator)
     gate = runtime.response_admission_gate
@@ -418,11 +431,9 @@ async def test_exclusive_conversation_rewaits_when_hold_appears_while_queued_and
         await asyncio.wait_for(reply_task, timeout=2)
         await asyncio.sleep(0)
 
-        # The preceding reply paused for approval, so exclusive_conversation released admission and re-waited.
         assert not exclusive_entered.is_set()
         assert gate.in_flight_response_count == 0
 
-        # Draining the runtime while parked refuses admission cleanly.
         runtime.begin_draining()
         with pytest.raises(ResponseAdmissionRefusedError):
             await asyncio.wait_for(exclusive_task, timeout=2)
@@ -433,13 +444,7 @@ async def test_exclusive_conversation_rewaits_when_hold_appears_while_queued_and
 
 @pytest.mark.asyncio
 async def test_reply_admission_fence_logs_deferred_and_refused_events(tmp_path: Path) -> None:
-    """Reply lifecycle admission logs deferral and refusal through the shared admission_fence."""
-    import asyncio
-    from unittest.mock import MagicMock
-
-    from mindroom.response_admission import ResponseAdmissionRefusedError
-    from mindroom.response_sources import Owned
-
+    """Reply lifecycle admission logs deferral and refusal through the shared admission fence."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     logger_spy = MagicMock()
@@ -472,10 +477,6 @@ async def test_reply_admission_fence_logs_deferred_and_refused_events(tmp_path: 
 @pytest.mark.asyncio
 async def test_runtime_source_handoff_dispatches_by_kind_and_settles_unclaimed(tmp_path: Path) -> None:
     """Runtime sources dispatch via RUNTIME_SOURCE_KINDS and handoff_runtime_source's kind table."""
-    from mindroom.event_journal import EventClass, EventKind, InboundEvent, RUNTIME_SOURCE_KINDS
-    from mindroom.tool_jobs.conversation import ConversationKey
-    from mindroom.tool_jobs.follow_ups import follow_up_event
-
     assert EventKind.JOB_FOLLOW_UP in RUNTIME_SOURCE_KINDS
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -493,10 +494,8 @@ async def test_runtime_source_handoff_dispatches_by_kind_and_settles_unclaimed(t
     await runner.handoff_runtime_source(event)
     await runner.inbox.drain_inbox_responses()
     assert not await store.is_pending("job-follow-up:seam-1")
-    # A second drain finds no remaining inbox work.
     await runner.inbox.drain_inbox_responses()
 
-    # An unregistered kind settles cleanly instead of wedging the lane.
     await store.admit(
         InboundEvent(
             event_id="unknown-runtime:1",

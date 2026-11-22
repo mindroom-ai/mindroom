@@ -141,7 +141,6 @@ from mindroom.turn_model import (
 from mindroom.turn_origin import SenderKind, TurnIntent
 from mindroom.turn_record import RevisionSnapshotChangedError
 
-from .event_journal import EventKind
 from .delivery_gateway import (
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
@@ -150,6 +149,7 @@ from .delivery_gateway import (
     SendTextRequest,
     StreamingDeliveryRequest,
 )
+from .event_journal import EventKind
 from .media_inputs import MediaInputs
 from .response_activity import ActiveResponseIdentity
 from .response_admission import ResponseAdmissionRefusedError, admitted_response_decision
@@ -835,7 +835,7 @@ class ResponseRunner:
         await self._settle_if_unclaimed(event.event_id, fate)
 
     _RUNTIME_SOURCE_HANDLERS: ClassVar[
-        Mapping[EventKind, tuple[str, Callable[[ResponseRunner, JournalEvent], Awaitable[None]]]]
+        dict[EventKind, tuple[str, Callable[[ResponseRunner, JournalEvent], Coroutine[Any, Any, None]]]]
     ] = {EventKind.JOB_FOLLOW_UP: ("job_follow_up", _run_job_follow_up)}
 
     async def _follow_up_due(self, request: ResponseRequest) -> bool:

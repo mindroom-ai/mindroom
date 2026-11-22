@@ -130,10 +130,9 @@ async def admitted_response_decision(
     """Reserve replacement admission around one final authorization decision and its effects."""
     deferred = False
     while not gate.admit():
-        if not deferred:
-            deferred = True
-            if on_deferred is not None:
-                on_deferred()
+        if not deferred and on_deferred is not None:
+            on_deferred()
+        deferred = True
         if not await wait_for_admission_or_shutdown():
             if on_refused is not None:
                 on_refused()
