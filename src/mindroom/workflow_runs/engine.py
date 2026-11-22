@@ -8,6 +8,7 @@ import secrets
 import time
 from collections import Counter, deque
 from contextlib import suppress
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -37,10 +38,12 @@ from mindroom.script_runs.store import (
 )
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
 from mindroom.workflow_runs.agent_nodes import (
+    FRESH_AGENT_FUNCTION,
     AgentNodeError,
     AgentNotReadyError,
     AgentRuntime,
     await_child,
+    delegated_request,
     launch_child,
 )
 from mindroom.workflow_runs.faults import hold
@@ -101,6 +104,16 @@ _NAME_LABELS = 'name="{name}" only labels the node. Use agent="{name}" to run th
 _STOPPED_JOB_STATUSES = frozenset({"cancel_requested", "cancelled", "denied"})
 _NOT_CONTINUED_YET = "The agent of this call has not been continued yet after a restart. Try again in a moment."
 _RUN_ENDED = "The run ended before the agent did."
+_NO_SESSIONS = 'A workflow script cannot call delegate.{function} yet. Start a fresh agent with agent() or tool("delegate", "run_subagent", ...).'
+# The node of the script's tool call that the current task runs, for a call of the `workflow` toolkit made in it.
+_CALLING_NODE: ContextVar[tuple[str, str, int] | None] = ContextVar("workflow_calling_node", default=None)
+
+
+def calling_node() -> tuple[str, str, int] | None:
+    """Return the run, the key and the generation of the script's tool call this context runs in, if it runs in one."""
+    return _CALLING_NODE.get()
+
+
 # How long a waiter sleeps before it reads the store again, with or without a wake.
 _RECHECK_SECONDS = 1.0
 # How long a tool call above its attempt's calls per minute waits before it asks for room again.
@@ -491,6 +504,24 @@ class WorkflowEngine:
         """Return whether a call of this primary waits for the run it owns as *owner*, and so starts its attempts."""
         return self._attending[owner] > 0
 
+    def run_usage(self, run_id: str) -> dict[str, Any]:
+        """Return what a run used so far and what its current attempt cost, with the runs inside it, each once.
+
+        A nested run is part of the attempt that started it.
+        """
+        run = self.store.get_run(run_id)
+        used: dict[str, Any] = dict(self.store.usage_totals(run_id))
+        used["attempt_cost_usd"] = self.store.usage_totals(run_id, attempt=run.attempt)["cost_usd"]
+        for child in self.store.child_runs(run_id):
+            inner = self.run_usage(child.run_id)
+            for name in ("input_tokens", "output_tokens", "tool_calls", "cost_usd"):
+                used[name] += inner[name]
+            used["cost_unknown"] = used["cost_unknown"] or inner["cost_unknown"]
+            group = self.store.get_node(run_id, f"{child.parent_node_key}/{child.run_id}")
+            if group is not None and group.attempt == run.attempt:
+                used["attempt_cost_usd"] += inner["cost_usd"]
+        return used
+
     def status(self, run_id: str) -> tuple[WorkflowRun, list[WorkflowNode]]:
         """Return the run and its current nodes."""
         return self.store.get_run(run_id), self.store.nodes(run_id)
@@ -606,20 +637,23 @@ class WorkflowEngine:
             await asyncio.to_thread(self.store.append_log, run.run_id, epoch, notice)
         lane, index = split_key(key)
         generation = 1 if saved is None else saved.generation + 1
+        # A script's `tool("delegate", ...)` is the agent call it stands for, with a gate before it.
+        delegated = kind == "tool" and request.args.get("toolkit") == "delegate"
+        shown, asked = ("agent", delegated_request(_tool_grant(request.args)[1])) if delegated else (kind, request.args)
         node = WorkflowNode(
             run_id=run.run_id,
             key=key,
-            kind=kind,
+            kind=shown,
             lane=lane,
             idx=index,
             digest=digest,
-            request=request.args,
+            request=asked,
             generation=generation,
             state=WorkflowNodeState.COMPLETED,
             attempt=run.attempt,
             # The label goes into the job, the room and the run's view: redacted whole, then cut.
             label=redact_sensitive_text(
-                str(meta.get("label") or _default_label(kind, request.args)),
+                str(meta.get("label") or _default_label(shown, asked)),
                 max_length=_MAX_LABEL_CHARS,
             ),
             name=cast("str | None", meta.get("name")),
@@ -628,6 +662,10 @@ class WorkflowEngine:
             cached=cached,
             started_at=utc_timestamp(),
         )
+        if shown == "agent":
+            lanes.mark(key)
+            start = partial(self._enter, run, node, partial(self._dispatch_agent, run, timeout=_timeout(meta)))
+            return await (self._ask_gate(run, attempt, node, *_tool_grant(request.args)) if delegated else start())
         if kind == "tool":
             same_as = None
             if previous is not None and not cached:
@@ -635,9 +673,6 @@ class WorkflowEngine:
                 same_as = result_digest(await asyncio.to_thread(self.store.whole_result, previous))
             start = partial(self._dispatch_tool, run, attempt, lanes=lanes, same_as=same_as)
             return await self._enter(run, node, start, dirty_after=same_as is None)
-        if kind == "agent":
-            lanes.mark(key)
-            return await self._enter(run, node, partial(self._dispatch_agent, run, timeout=_timeout(meta)))
         if kind == "value":
             node = replace(node, result=_value(request.args))
         elif kind == "error":
@@ -678,7 +713,7 @@ class WorkflowEngine:
                     self._leave(run.run_id, node.key)
                 raise
         if node.kind == "tool":
-            _tool_grant(node)
+            _tool_grant(node.request)
         queued = replace(node, state=WorkflowNodeState.QUEUED)
         queued = await asyncio.to_thread(partial(self.store.put_node, queued, run.epoch, dirty_after=dirty_after))
         places.queued.append((queued.key, partial(dispatch, queued, queued=True)))
@@ -718,6 +753,87 @@ class WorkflowEngine:
             raise
         await self._notify(run_id)
 
+    async def _ask_gate(
+        self,
+        run: WorkflowRun,
+        attempt: ScriptRunRecord,
+        node: WorkflowNode,
+        grant: ScriptToolGrant,
+        arguments: dict[str, object],
+    ) -> NodeReceipt:
+        """Save the agent call a script made through `tool()`, and ask the broker whether that tool call may be made.
+
+        The node is saved as a queued one is, with no handle: nothing is started before the gate answers, so a
+        restart or a stop meanwhile finds a call that never ran. The caller holds the run's lock.
+        """
+        if grant.function_name != FRESH_AGENT_FUNCTION:
+            refused = {"kind": "refused", "message": _NO_SESSIONS.format(function=grant.function_name)}
+            node = replace(node, state=WorkflowNodeState.FAILED, error=refused, ended_at=node.started_at)
+            return _receipt(await asyncio.to_thread(partial(self.store.put_node, node, run.epoch, dirty_after=True)))
+        node = replace(node, state=WorkflowNodeState.QUEUED)
+        node = await asyncio.to_thread(partial(self.store.put_node, node, run.epoch, dirty_after=True))
+        gate = partial(
+            self.broker.execute_for_workflow,
+            attempt,
+            call_id=uuid5(NAMESPACE_OID, f"{run.run_id}:{node.key}:{node.generation}").hex,
+            grant=grant,
+            arguments=arguments,
+            waits=partial(self._node_waits, node, run.epoch),
+            gate_only=True,
+        )
+        self._spawn(run.run_id, self._start_gated(run, node, gate))
+        return _receipt(node)
+
+    async def _start_gated(
+        self,
+        run: WorkflowRun,
+        node: WorkflowNode,
+        gate: Callable[[], Awaitable[ScriptCallRecord]],
+    ) -> None:
+        """Start the agent of a call the broker let pass, in its turn among the run's calls; a refusal is its end."""
+        try:
+            outcome = _call_outcome(node, await gate())
+        except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
+            outcome = WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(exc)}
+        async with self._condition(run.run_id):
+            if outcome[0] is WorkflowNodeState.COMPLETED:
+                places = self._places.setdefault(run.run_id, _Places(max(1, run.max_concurrent)))
+                # A call whose approval came counts as working since then, and has no place yet.
+                places.working.discard(node.key)
+                start = partial(self._dispatch_agent, run, node, timeout=None, queued=True)
+                places.queued.append((node.key, start))
+                self._leave(run.run_id, None)
+            else:
+                settle = partial(self.store.settle_node, run.run_id, node.key, node.generation, run.epoch)
+                with suppress(SupersededAttemptError):
+                    await asyncio.to_thread(partial(settle, state=outcome[0], error=outcome[2]))
+        await self._notify(run.run_id)
+
+    async def nest(self, child: WorkflowRun) -> None:
+        """Show the nested run *child* in the run it is in, as a group under the call that started it.
+
+        The group names the run, so the end of the outer run ends it, and it is part of the attempt it began in.
+        """
+        outer = self.store.get_run(str(child.parent_run_id))
+        group = WorkflowNode(
+            run_id=outer.run_id,
+            key=f"{child.parent_node_key}/{child.run_id}",
+            kind="group",
+            lane=str(child.parent_node_key),
+            idx=0,
+            digest=child.source_digest,
+            request={"op": "workflow"},
+            state=WorkflowNodeState.RUNNING,
+            handle=DispatchHandle("run", child.run_id, dispatched=True),
+            attempt=outer.attempt,
+            label=child.title or "workflow",
+            group_key=child.parent_node_key,
+            started_at=utc_timestamp(),
+            links={"child_run_id": child.run_id},
+        )
+        with suppress(SupersededAttemptError):
+            await asyncio.to_thread(self.store.put_node, group, outer.epoch)
+
     async def _dispatch_tool(
         self,
         run: WorkflowRun,
@@ -734,7 +850,7 @@ class WorkflowEngine:
         without, it ran because a rule said so, and its lane is dirty whatever it answers. The attempt's epoch is
         the run's here, and the call's task keeps it. A *queued* node is saved already and gets its handle.
         """
-        grant, arguments = _tool_grant(node)
+        grant, arguments = _tool_grant(node.request)
         call_id = uuid5(NAMESPACE_OID, f"{run.run_id}:{node.key}:{node.generation}").hex
         if same_as is None:
             lanes.mark(node.key)
@@ -856,7 +972,7 @@ class WorkflowEngine:
         except Exception as exc:
             logger.exception("workflow_agent_outcome_unreadable", run_id=node.run_id, key=node.key)
             # What the turn did is unknown, so its call is not one to run again without being asked to.
-            (kind, text), usage, claim = ("indeterminate", str(exc)), None, None
+            (kind, text), usage, claim = ("indeterminate", str(exc)), {}, None
         outcome: _Outcome = WorkflowNodeState.FAILED, None, {"kind": kind, "message": text}
         if kind == "completed":
             outcome = WorkflowNodeState.COMPLETED, text, None
@@ -865,8 +981,8 @@ class WorkflowEngine:
         state, result, error = outcome
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
         try:
-            if usage is not None:
-                add = partial(self.store.add_usage, node.run_id, node.key, node.generation, 1, run.attempt, usage)
+            for turn, used in usage.items():
+                add = partial(self.store.add_usage, node.run_id, node.key, node.generation, turn, run.attempt, used)
                 await asyncio.to_thread(add)
             with suppress(SupersededAttemptError):
                 await asyncio.to_thread(partial(settle, state=state, result=result, error=error))
@@ -904,10 +1020,13 @@ class WorkflowEngine:
         run's lock.
         """
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
-        if node.handle is None:
-            # Still queued for a place when its attempt or its run ended: it started nothing.
+        if node.handle is None or node.handle.kind == "run":
+            # Still queued for a place when its attempt or its run ended: it started nothing. Or the group of a run
+            # inside this one, which does not outlive it and is reached only as it ends: the end of that run
+            # settles the group, or this does.
             end = WorkflowNodeState.CANCELLED if stop else WorkflowNodeState.FAILED
             error = {"kind": "cancelled", "message": _RUN_ENDED} if stop else _INTERRUPTED
+            await (self.cancel(node.handle.ref, reason=_RUN_ENDED) if node.handle else asyncio.sleep(0))
             await asyncio.to_thread(partial(settle, state=end, error=error))
             return False
         if node.handle.kind != "job":
@@ -1090,6 +1209,8 @@ class WorkflowEngine:
     ) -> None:
         """Run one tool call and settle its node; *kept* is the tool list of the narrowed agent that started the run."""
         outcome: _Outcome | None = None
+        # A `start_workflow` this call makes starts a run inside this one, under this node.
+        _CALLING_NODE.set((node.run_id, node.key, node.generation))
         try:
             _require_kept(kept, grant)
             while outcome is None:
@@ -1190,8 +1311,8 @@ class WorkflowEngine:
             current = self.store.get_run(run.run_id)
             nodes = self.store.nodes(run.run_id, include_stale=True)
             for node in nodes:
-                # An agent's job outlives an attempt: the next one waits for it. It does not outlive its run.
-                waits_for_job = node.handle is not None and node.handle.kind == "job"
+                # An agent's job outlives an attempt, and so does a nested run: neither outlives its run.
+                waits_for_job = node.handle is not None and node.handle.kind in ("job", "run")
                 if node.state in _LIVE_NODE_STATES and (ended or not waits_for_job):
                     await self._reconcile(current, node, run.epoch, stop=ended)
             if state is WorkflowRunState.COMPLETED:
@@ -1215,7 +1336,27 @@ class WorkflowEngine:
             self._charged.pop(run.run_id, None)
             self._refused.discard(run.run_id)
             condition.notify_all()
+            if ended.state in TERMINAL_RUN_STATES and ended.parent_run_id is not None:
+                await self._settle_group(ended)
         return ended
+
+    async def _settle_group(self, child: WorkflowRun) -> None:
+        """Show how the nested run *child* ended on its group in the run it is in.
+
+        Only the group's row is written, under the outer run's epoch and without its lock, which the end of the
+        outer run holds while it ends this one.
+        """
+        ends = {
+            WorkflowRunState.COMPLETED: WorkflowNodeState.COMPLETED,
+            WorkflowRunState.CANCELLED: WorkflowNodeState.CANCELLED,
+        }
+        end = ends.get(child.state, WorkflowNodeState.FAILED)
+        error = None if end is WorkflowNodeState.COMPLETED else {"kind": child.state.value, "message": child.error}
+        with suppress(SupersededAttemptError, WorkflowRunStoreError):
+            outer = self.store.get_run(str(child.parent_run_id))
+            key = f"{child.parent_node_key}/{child.run_id}"
+            settle = partial(self.store.settle_node, outer.run_id, key, 1, outer.epoch, state=end, error=error)
+            await asyncio.to_thread(settle)
 
 
 def _changed(node: WorkflowNode, outcome: _Outcome) -> bool:
@@ -1229,9 +1370,8 @@ def _changed(node: WorkflowNode, outcome: _Outcome) -> bool:
     return same_as is not None and not (state is WorkflowNodeState.COMPLETED and result_digest(result) == same_as)
 
 
-def _tool_grant(node: WorkflowNode) -> tuple[ScriptToolGrant, dict[str, object]]:
-    """Return the function a tool node calls and its arguments; a request that names neither is refused."""
-    request = node.request
+def _tool_grant(request: dict[str, object]) -> tuple[ScriptToolGrant, dict[str, object]]:
+    """Return the function a tool call's request names and its arguments; a request that names neither is refused."""
     arguments = request.get("arguments")
     if not isinstance(arguments, dict) or not all(
         isinstance(request.get(name), str) for name in ("toolkit", "function")

@@ -516,7 +516,7 @@ async def test_a_narrowed_childs_run_calls_the_tools_its_persona_keeps_and_no_ot
     with workflow_stack(tmp_path, extra_tools=("workflow",), require_approval=()) as stack:
         stack.context.config.background_tool_jobs = BackgroundToolJobsConfig(enabled=False)
         persona = SubagentPersona("inline", "counter", "Count.", tools=("workflow", "counter.text"))
-        child = SimpleNamespace(delegation_id="child-1", depth=1)
+        child = SimpleNamespace(delegation_id="child-1", depth=1, workflow_run_id=None)
         token = lifecycle._CHILD_RUN.set(lifecycle.ChildRunObservation(child, None))  # type: ignore[arg-type]
         try:
             call = asyncio.create_task(
@@ -1532,6 +1532,7 @@ shell(..., cached=False) and tool(..., cached=False) run again on every resume: 
 The call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.
 Where the call cannot be a background job, it waits and returns the report itself.
 A run that completed although calls failed says so in the first line of the report.
+get_workflow(run_id) shows each call and what the run cost: cost_usd for the whole run, attempt_cost_usd for this attempt.
 An agent that needs an approval waits for the user; it does not fail.
 
 Models: haiku, opus (add an effort as in opus@high).

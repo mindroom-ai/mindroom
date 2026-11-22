@@ -28,7 +28,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
-from mindroom.workflow_runs.engine import WorkflowLimits
+from mindroom.workflow_runs.engine import WorkflowLimits, calling_node
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
     WorkflowNodeState,
@@ -102,6 +102,7 @@ shell(..., cached=False) and tool(..., cached=False) run again on every resume: 
 The call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.
 Where the call cannot be a background job, it waits and returns the report itself.
 A run that completed although calls failed says so in the first line of the report.
+get_workflow(run_id) shows each call and what the run cost: cost_usd for the whole run, attempt_cost_usd for this attempt.
 An agent that needs an approval waits for the user; it does not fail.
 """
 _ONE_SOURCE = "Give exactly one of source or path."
@@ -193,8 +194,9 @@ class WorkflowTools(Toolkit):
             "resource_profile": resource_profile,
         }
         engine, context = _waiting_runtime()
-        origin = _inline_origin(context)
-        reserve = partial(self._reserve, engine, context, origin, arguments)
+        outer = _outer_call()
+        origin = _inline_origin(context) if outer is None else await _nested_origin(engine, context, outer, arguments)
+        reserve = partial(self._reserve, engine, context, origin, arguments, outer=outer)
         return await _delivery(engine, await engine.attend(origin, reserve, context, self.limits))
 
     async def get_workflow(self, run_id: str, nodes: Literal["active", "failed", "all"] = "active") -> str:
@@ -209,13 +211,15 @@ class WorkflowTools(Toolkit):
         run = _owned(engine, context, run_id)
         listed = await asyncio.to_thread(engine.store.nodes, run.run_id)
         shown = {"active": _ACTIVE, "failed": _FAILED, "all": frozenset(WorkflowNodeState)}[nodes]
+        # What each call used, over every time it ran; a call that asked no model has none.
+        used = await asyncio.to_thread(engine.store.node_usage, run.run_id)
         status = {
             "run_id": run.run_id,
             "title": run.title,
             "status": run.state.value,
             "attempt": run.attempt,
             "counts": dict(Counter(node.state.value for node in listed)),
-            "usage": await asyncio.to_thread(engine.store.usage_totals, run.run_id),
+            "usage": await asyncio.to_thread(engine.run_usage, run.run_id),
             "waiting": [
                 {"id": f"n{node.seq}", "label": node.label, "waiting_on": node.waiting_on}
                 for node in listed
@@ -226,7 +230,11 @@ class WorkflowTools(Toolkit):
                 for node in listed
                 if node.state in _FAILED
             ],
-            "nodes": [_public_node(node) for node in listed if node.state in shown],
+            "nodes": [
+                _public_node(node) | ({"usage": used[node.key]} if node.key in used else {})
+                for node in listed
+                if node.state in shown
+            ],
         }
         if run.state in TERMINAL_RUN_STATES:
             # The report, or why there is none, also for a run whose caller is gone.
@@ -354,10 +362,12 @@ class WorkflowTools(Toolkit):
         origin: str,
         arguments: Mapping[str, Any],
         job_id: str | None = None,
+        outer: tuple[str, str, int] | None = None,
     ) -> tuple[WorkflowRun, bool]:
         """Check one start and write its intent, or return the run *origin* reserved before; a refusal raises.
 
-        *job_id* names the job the run is reserved for, which no call that waits for its run itself has.
+        *job_id* names the job the run is reserved for, which no call that waits for its run itself has. *outer* is
+        the call of a run that this start is made in: the new run is a run inside that one, under that call.
         """
         source, path, title = arguments.get("source"), arguments.get("path"), arguments.get("title")
         max_concurrent = arguments.get("max_concurrent", 16)
@@ -392,8 +402,15 @@ class WorkflowTools(Toolkit):
             origin_job_id=origin,
             owner=origin,
             job_id=job_id,
-            # The agents the run runs are subagents of the one that starts it, one level below it.
-            depth=child.child.depth if (child := running_child_run()) is not None else 0,
+            parent_run_id=outer[0] if outer else None,
+            parent_node_key=outer[1] if outer else None,
+            # The agents the run runs are subagents of the one that starts it, one level below it. A script that
+            # starts a run is no agent: its run's agents are as deep as its own.
+            depth=child.child.depth
+            if (child := running_child_run()) is not None
+            else engine.store.get_run(outer[0]).depth
+            if outer
+            else 0,
         )
         store = engine.store
 
@@ -404,7 +421,10 @@ class WorkflowTools(Toolkit):
         # On a thread, where it waits for the store's writer. A call cancelled meanwhile takes back the intent it
         # wrote; the engine keeps an inline caller's cancellation away from here and ends the run itself.
         reserve = partial(store.reserve_run, intent, max_active=self.limits.max_concurrent_runs)
-        return await run_blocking_or_compensate(reserve, take_back)
+        reserved = await run_blocking_or_compensate(reserve, take_back)
+        if outer is not None and reserved[1]:
+            await engine.nest(reserved[0])
+        return reserved
 
 
 def _run_job(
@@ -604,6 +624,39 @@ def _owned(engine: WorkflowEngine, context: ToolRuntimeContext, run_id: str) -> 
 def _jobs_enabled(context: ToolRuntimeContext) -> bool:
     config, paths = context.config, context.runtime_paths
     return background_tool_jobs_enabled(config, paths) and not toolkit_is_background_excluded("workflow", config, paths)
+
+
+def _outer_call() -> tuple[str, str, int] | None:
+    """Return the run, the node and its generation of the workflow call this call is made in, if it is made in one.
+
+    That is the turn of an agent a run started, or a script's own `tool()` call.
+    """
+    child = running_child_run()
+    if child is None or child.child.workflow_run_id is None:
+        return calling_node()
+    return child.child.workflow_run_id, str(child.child.workflow_node_key), child.child.workflow_generation or 1
+
+
+async def _nested_origin(
+    engine: WorkflowEngine,
+    context: ToolRuntimeContext,
+    outer: tuple[str, str, int],
+    arguments: Mapping[str, Any],
+) -> str:
+    """Return the key of a run inside a run: the call it is made in, its script and its arguments, and no call ID.
+
+    An agent that a restart cut short makes its call again under a new ID, and finds the run it started by this key:
+    it waits for a run that still runs, and gets the report of one that ended.
+    """
+    source, path = arguments.get("source"), arguments.get("path")
+    # A call that names no one script is refused where its run is reserved.
+    text = (
+        b""
+        if (source is None) == (path is None)
+        else await engine.scripts.resolve_source(context, source=source, path=path)
+    )
+    identity = [*outer, hashlib.sha256(text).hexdigest(), arguments.get("args")]
+    return "nested:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
 def _inline_origin(context: ToolRuntimeContext) -> str:

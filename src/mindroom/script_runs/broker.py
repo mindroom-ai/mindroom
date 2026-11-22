@@ -94,6 +94,8 @@ __all__ = [
 _CALL_UNAVAILABLE = "Background script call is unavailable."
 # What a workflow's call tells when it starts and stops waiting for a person; a plain script's call tells nobody.
 _APPROVAL_WAIT: ContextVar[Callable[[str | None], Awaitable[object]] | None] = ContextVar("approval_wait", default=None)
+# Whether the call being accepted stops where its tool would run: its caller starts the work the call stands for.
+_GATE_ONLY: ContextVar[bool] = ContextVar("gate_only", default=False)
 _OWNER_RUNTIME_UNAVAILABLE = "Background script owner runtime is temporarily unavailable."
 _INDETERMINATE_ERROR = {
     "kind": "indeterminate",
@@ -446,8 +448,12 @@ class ScriptToolBroker:
         grant: ScriptToolGrant,
         arguments: dict[str, object],
         waits: Callable[[str | None], Awaitable[object]] | None = None,
+        gate_only: bool = False,
     ) -> ScriptCallRecord:
         """Claim one call of the workflow attempt *run*, which its gateway authenticated, and await its receipt.
+
+        With *gate_only* the call takes every step before its tool, the owner's live grant, the hooks and the
+        operator's approval rule, and its tool is not called: a completed receipt says the call may be made.
 
         The stored receipt holds the tool's whole result, whatever its size, so the node can be settled from it later.
         *waits* is told `approval` when the call starts to wait for a person's decision, and None when it has one.
@@ -457,13 +463,14 @@ class ScriptToolBroker:
         request = ScriptToolCallRequest(run.run_id, call_id, grant, arguments)
         self._run_locks.setdefault(run.run_id, asyncio.Semaphore(sys.maxsize))
         # The call's task is created in here and keeps the context it is created in.
-        token = _APPROVAL_WAIT.set(waits)
+        token, gate = _APPROVAL_WAIT.set(waits), _GATE_ONLY.set(gate_only)
         try:
             await run_coroutine_until_complete(
                 self._accept_prepared_call(request, authorization=None, authenticated=True),
             )
         finally:
             _APPROVAL_WAIT.reset(token)
+            _GATE_ONLY.reset(gate)
         task = self._tasks.get((run.run_id, call_id))
         if task is None:
             return await asyncio.to_thread(self.get_call, run.run_id, call_id)
@@ -649,6 +656,9 @@ class ScriptToolBroker:
             )
 
             async def mark_effect_started(tool_call: ToolCall, call_next: ToolNext) -> object:
+                if _GATE_ONLY.get():
+                    # Past hooks and approval, which is all that was asked: the tool has no effect to start here.
+                    return None
                 # Past hooks and approval: from here a crash leaves the call's outcome unknown.
                 await asyncio.to_thread(self.store.mark_call_effect_started, run.run_id, call.call_id)
                 return await call_next(tool_call.arguments)

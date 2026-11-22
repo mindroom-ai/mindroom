@@ -41,6 +41,8 @@ if TYPE_CHECKING:
     from mindroom.workflow_runs.models import WorkflowNode, WorkflowRun
     from mindroom.workflow_runs.store import WorkflowRunStore
 
+# The function of `delegate` a script's `tool()` call may name: it starts a fresh agent, as the SDK's `agent()` does.
+FRESH_AGENT_FUNCTION = RUN_SUBAGENT
 # The options of the SDK's `agent()` as the arguments of `run_subagent`, whose rules resolve them.
 _RENAMED = {"prompt": "task", "agent": "agent_name", "system": "system_prompt", "output_path": OUTPUT_PATH_ARGUMENT}
 _OPTIONS = (
@@ -62,6 +64,8 @@ _RECHECK_SECONDS = 1.0
 
 # How one agent turn ended: `completed` and its answer, or the kind of its error and what to tell the script.
 type ChildOutcome = tuple[str, str]
+# What one agent turn adds to its run's ledger, by the turn each entry is saved under.
+type TurnUsage = dict[int | str, dict[str, object]]
 
 
 class AgentNodeError(Exception):
@@ -79,6 +83,12 @@ class AgentRuntime:
     jobs: ToolJobRuntime
     config: Config
     paths: RuntimePaths
+
+
+def delegated_request(arguments: dict[str, object]) -> dict[str, object]:
+    """Return the arguments of a `run_subagent` call as the request of the `agent()` call they stand for."""
+    names = {theirs: ours for ours, theirs in _RENAMED.items()}
+    return {names.get(name, name): value for name, value in arguments.items()}
 
 
 def turn_job_id(run: WorkflowRun, key: str, generation: int, turn: int) -> str:
@@ -225,7 +235,7 @@ async def await_child(  # noqa: C901
     runtime: AgentRuntime,
     *,
     on_waiting: Callable[[str | None, float | None], Awaitable[object]] | None,
-) -> tuple[ChildOutcome, dict[str, object] | None, JobClaim | None]:
+) -> tuple[ChildOutcome, TurnUsage, JobClaim | None]:
     """Wait for the job of *node* to end; return how the turn ended, what it used, and the claim on the job's outcome.
 
     The wait is on the saved job ID and starts nothing. *on_waiting* is told when the job starts to wait for a
@@ -240,7 +250,7 @@ async def await_child(  # noqa: C901
     if all(job.job_id != job_id for job in jobs.retained_jobs()):
         # A job the runtime never admitted did nothing. One it has since deleted may have done anything.
         kind = "indeterminate" if node.handle.dispatched else "interrupted"
-        return (kind, _INTERRUPTED), None, None
+        return (kind, _INTERRUPTED), {}, None
     # What the turn has left of its working time, as the node's handle says: an earlier wait may have used some.
     handle, loop, timed_out, claim = node.handle, asyncio.get_running_loop(), False, None
     # Whether the node shows the wait for a person that an earlier wait saw begin, which this one must see end.
@@ -253,7 +263,7 @@ async def await_child(  # noqa: C901
             waited = await wait(**times) if on_waiting is not None else await wait(timeout=0)
         except JobAccessError as exc:
             # A read that is denied says nothing of what the turn did, so its call is not one to run again.
-            return ("indeterminate" if handle.dispatched else "denied", str(exc)), None, None
+            return ("indeterminate" if handle.dispatched else "denied", str(exc)), {}, None
         job, claim = waited.job, waited.claim
         if left is not None and not waiting:
             left -= loop.time() - since
@@ -284,26 +294,32 @@ async def await_child(  # noqa: C901
     return outcome, usage, claim
 
 
-async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[ChildOutcome, dict[str, object] | None]:
+async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[ChildOutcome, TurnUsage]:
     """Return how the turn of an ended *job* ended and what it used, read from the child's own runs.
 
     The answer is the run's, whole and as the child wrote it: not the job's text, which adds a receipt. The usage is
-    that of every run of the job: the ones restarts cut short, and the one it ended with. A turn that a restart or
-    a configuration reload stopped is no answer: it is safe to run again while none of its runs called a tool.
+    that of every run of the job: the ones restarts cut short, and the one it ended with. What the subagents the
+    turn itself ran cost is an entry of its own, and no part of the turn's, so no sum holds it twice. A turn that
+    a restart or a configuration reload stopped is no answer: it is safe to run again while none of its runs called
+    a tool.
     """
     child = delegation_child(job)
     spent = [replace(child, run_id=run_id) for run_id in job.adapter.get(SPENT_RUNS_KEY, ())]
     *cut_short, record = [await read_child_run(turn, runtime.config, runtime.paths) for turn in (*spent, child)]
     text = (record.handover_content if record is not None else None) or job.result or _NO_ANSWER
-    usage: dict[str, object] | None = None
+    usage: TurnUsage = {}
     if records := [run for run in (*cut_short, record) if run is not None]:
         used = [turn_usage(prior_usage_of(run), run.metrics) for run in records]
-        usage = {
+        # The child's cost is its own and its subagents' together: a cost that is theirs alone prices none of its own.
+        cost, theirs = child.cost_usd, child.subagents_cost_usd
+        usage[1] = {
             "input_tokens": sum(metrics.tokens.input_tokens for metrics in used if metrics is not None),
             "output_tokens": sum(metrics.tokens.output_tokens for metrics in used if metrics is not None),
             "tool_calls": sum(len(run.tools or ()) for run in records),
-            "cost_usd": child.cost_usd,
+            "cost_usd": cost if cost is None or theirs is None else None if cost == theirs else cost - theirs,
         }
+        if theirs is not None:
+            usage[f"sub:{child.delegation_id}"] = {"cost_usd": theirs}
     stopped = record is not None and reload_stopped_child_result(child, record) is not None
     if job.status == "interrupted" or stopped:
         # A run is saved before its first tool call starts, so a turn none of whose runs holds a call made none. A

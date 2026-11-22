@@ -34,11 +34,12 @@ from mindroom.approval.tool_approval import ToolApprovalDecision
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths
 from mindroom.custom_tools.workflow import WorkflowTools, workflow_job_admission, workflow_job_standing
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
+from mindroom.providers.identity import model_identity
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker
 from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, RUN_ID_ENV, TOKEN_PATH_ENV
 from mindroom.script_runs.manager import ScriptRunManager
@@ -511,12 +512,14 @@ def owner_context(
     thread_id: str = "$thread:example.test",
     delegate_to: tuple[str, ...] = (),
     other_agents: tuple[str, ...] = (),
+    pricing: ModelPricing | None = None,
 ) -> ToolRuntimeContext:
     """Return the tool context of the stack's owner: the agent `watcher` with `counter` and `shell`, for Alice.
 
     The operator allows shell on this machine and approves by default; only the functions in *require_approval* ask.
     *process_env* is the primary's environment, which says for example where its sandbox runner listens.
     *other_agents* are configured beside the owner, with `counter` only; the owner may delegate to *delegate_to*.
+    *pricing* is what the one model costs per million tokens; without it the model has no price.
     """
     defaults = DefaultsConfig(tools=[], allow_shell_without_worker=True)
     runtime_paths = RuntimePaths(
@@ -540,7 +543,7 @@ def owner_context(
             defaults=defaults,
             # No agent recalls memories, unless a test gives the owner the `memory` toolkit.
             memory=MemoryConfig() if "memory" in extra_tools else MemoryConfig(backend="none"),
-            models={"default": ModelConfig(provider="openai", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model", pricing=pricing)},
             tool_approval={
                 "default": "auto_approve",
                 "rules": [{"match": name, "action": "require_approval"} for name in require_approval],
@@ -679,6 +682,8 @@ class WorkflowStack:
             },
         )
         self.context = replace(self.context, orchestrator=orchestrator)  # type: ignore[arg-type]
+        # A script's tool call runs in the same live context, so a call of the `workflow` toolkit finds the engine.
+        self.resolver.context = self.context
 
     def _agents(self) -> AgentRuntime | None:
         """Answer as the live runtime does: the job runtime once `open_jobs` started it, with the owner's config."""
@@ -691,7 +696,9 @@ class WorkflowStack:
 
     def child_script(self, *turns: Any, agent: str = "watcher") -> ScriptedModel:  # noqa: ANN401 - scripted steps.
         """Give the model of *agent* its next turns, one per request, and return it with the requests it gets."""
-        self.models[agent] = ScriptedModel(list(turns))
+        # As the model the agents are configured with, so its usage is priced as the operator priced that model.
+        identity = model_identity(self.context.config.models["default"])
+        self.models[agent] = ScriptedModel(list(turns), identity=identity)
         return self.models[agent]
 
     async def continue_agents(self, *, joined: bool = True) -> None:

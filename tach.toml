@@ -2548,7 +2548,15 @@ depends_on = [
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.agent_nodes"]
-expose = ["AgentNodeError", "AgentNotReadyError", "AgentRuntime", "await_child", "launch_child"]
+expose = [
+    "FRESH_AGENT_FUNCTION",
+    "AgentNodeError",
+    "AgentNotReadyError",
+    "AgentRuntime",
+    "await_child",
+    "delegated_request",
+    "launch_child",
+]
 
 [[modules]]
 path = "mindroom.workflow_runs.engine"
@@ -2565,7 +2573,7 @@ depends_on = [
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.engine"]
-expose = ["ResumeAccess", "SupersededAttemptError", "WorkflowEngine", "WorkflowLimits"]
+expose = ["ResumeAccess", "SupersededAttemptError", "WorkflowEngine", "WorkflowLimits", "calling_node"]
 
 [[modules]]
 path = "mindroom.orchestration.workflow_runtime"

@@ -363,11 +363,15 @@ class WorkflowRunStore:
         run_id: str,
         key: str,
         generation: int,
-        turn: int,
+        turn: int | str,
         attempt: int,
         usage: dict[str, object],
     ) -> bool:
-        """Append one model turn's usage; a repeat of the same turn changes nothing and returns false."""
+        """Append one model turn's usage; a repeat of the same turn changes nothing and returns false.
+
+        *turn* is a number for a turn of the node's own agent, and `sub:<delegation id>` for what the subagents of
+        that agent's turn cost.
+        """
         with self._write_transaction() as connection:
             inserted = connection.execute(
                 "INSERT OR IGNORE INTO workflow_usage (run_id, key, generation, turn, attempt, usage_json) "

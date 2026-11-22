@@ -61,6 +61,7 @@ resume_workflow(run_id, source=None, path=None, rerun=None)
   The report reaches the agent through the [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) of the run, in full; a failed run delivers the last 4 KiB of the script's output and traceback.
 - `get_workflow` returns the run's status, attempt, node counts, usage, waiting and failed calls, and the calls `nodes` selects: `active`, `failed`, or `all`.
   For a run that has ended it also returns `result`: the report, or why the run has none.
+  See [Cost](#cost) for `usage`.
 - `cancel_workflow` stops the run's script and ends the run `cancelled`; its finished calls stay saved.
   Cancelling the run's job, for example with `!cancel_job`, does the same.
 - `resume_workflow` starts the next attempt of a run that has ended and returns the same handle, with the ID of a new job; see [Resume A Run](#resume-a-run).
@@ -91,6 +92,7 @@ def main(args):
 - `shell(command)` runs a command with the agent's `shell` tool and returns `.ok`, `.exit_code`, and `.output`.
   It returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - `tool(toolkit, function, **arguments)` calls any other tool of the agent and returns its result.
+  `tool("delegate", "run_subagent", ...)` and `tool("workflow", "start_workflow", ...)` start an agent and a run; see [Runs Inside Runs](#runs-inside-runs).
 - `foreach(items, fn)` and `parallel([fn1, fn2])` run calls in parallel; see [Fan-Out](#fan-out).
 - `phase(title)` groups the calls that follow, and `log(text)` adds a progress line to the run.
 - `now()` returns the current UTC time and `random()` a float in `[0, 1)`; both are saved, so a resumed run gets the same values again.
@@ -142,10 +144,52 @@ Time the run spends `waiting` is not charged to its [working time](#working-time
 A denied card, and one that expired after `tool_approval.timeout_days`, denies that one tool call, and the agent goes on with its turn.
 A `tool()` or `shell()` call of the script that needs an approval shows `waiting` in the same way, and a denial raises `ToolError` with kind `denied`.
 
+An agent of a run acts in the room and the thread the run was started in, for the run's requester.
+A message it sends with `matrix_message` and no other target lands in that thread.
+
 The agents of a run are not listed among the conversation's background jobs: the run reports them, and `get_workflow` shows each as a node whose `links` hold the IDs of its job and subagent and the agent and model it ran as.
 An agent keeps running when the attempt that asked for it ends, and the next attempt waits for the same turn instead of starting another.
 Cancelling the run stops its agents, and a call whose prompt or options changed stops the agent of the old call.
 `schema` is not available yet.
+
+## Runs Inside Runs
+
+An agent of a run has the `workflow` tool of its agent, so it can call `start_workflow` itself.
+That call waits for the new run and returns its report to the agent.
+
+- The new run is a run inside the agent's run: it names that run and the agent's call, and the outer run shows it as a group under that call.
+- It has its own `max_concurrent`, so an outer run that works on one call at a time does not wait for itself.
+- It does not count toward `max_concurrent_runs`.
+- Cancelling the outer run, or stopping the agent, cancels it.
+- Its cost is part of the outer run's cost, once; see [Cost](#cost).
+- It is found by the call it was made in, its script and its `args`, and not by the ID of the model's tool call.
+  So an agent that makes the same call again in the same turn waits for the same run, or gets the report that run ended with, and starts no second one.
+  To run the same script twice from one agent call, give it different `args`.
+- The agents a run starts are one level deeper than the agent that started the run, and the limit is 3 levels.
+  At the limit `agent()` is refused with `Cannot delegate: the maximum delegation depth was reached.`
+
+A script can start agents and runs through `tool()` as well.
+
+- `tool("delegate", "run_subagent", task=..., agent_name=..., system_prompt=...)` is the same as `agent()`: the run shows an agent call, with a job of its own, and the call returns the agent's answer.
+- `tool("workflow", "start_workflow", source=...)` starts a run inside the script's run and returns its report.
+  Its agents are as deep as the script's own.
+- Both first pass what every `tool()` call passes: the tool must still be the agent's, the hooks run, and the operator's approval rule for `run_subagent` or `start_workflow` applies.
+  While the call waits for an approval it shows `waiting`, nothing is started before the decision, and a denial raises `ToolError` with kind `denied`.
+- `tool("delegate", "continue_subagent", ...)` is refused with `A workflow script cannot call delegate.continue_subagent yet. Start a fresh agent with agent() or tool("delegate", "run_subagent", ...).`
+
+## Cost
+
+`get_workflow` returns `usage` with `input_tokens`, `output_tokens`, `tool_calls`, `cost_usd`, `attempt_cost_usd` and `cost_unknown`.
+
+- `cost_usd` is what the run cost so far, over every attempt, and `attempt_cost_usd` is what the current attempt cost.
+  After a resume the second number shows what the resume itself spent.
+- Every model turn is counted once, however often MindRoom restarted while it ran.
+- A call that runs again is paid again, and the run keeps what its earlier turn cost.
+- A saved answer that a resume reuses adds nothing.
+- What the subagents of a run's agent cost is counted beside the agent's own turn, once, as cost only: their tokens are not in the token counts.
+- A run inside the run is in both sums, once, and it is part of the attempt it was started in.
+- A turn on a model without a price in the configuration adds its tokens and sets `cost_unknown`; `cost_usd` is then a lower bound.
+- Each call that asked a model shows its own `usage` in `nodes`.
 
 ## Fan-Out
 
@@ -277,6 +321,10 @@ A run whose script had already returned its report ends with that report and get
 - After 5 attempts in a row that finish no call, the run ends `interrupted` with `Stopped resuming after 5 attempts that finished nothing. Fix the script and call resume_workflow.`
 - A run with no job, which is one that `start_workflow` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.
   When the call that waited for it is gone, nothing delivers the report; `get_workflow(run_id)` returns it in `result`.
+- A run inside a run goes on by itself after a restart, as the same run.
+  The agent that was inside its `start_workflow` call when MindRoom stopped is not continued, as an agent inside any tool call is not: its call ends `indeterminate`.
+  The run it started stays under that call, its report is in `get_workflow` of that run, and cancelling the outer run cancels it.
+  A script's own `tool("workflow", "start_workflow", ...)` call ends `indeterminate` in the same way.
 - A run that MindRoom stopped while its script process was starting stays `starting`, and the next start launches it.
 - A run whose job was stopped gets no further attempt, and `resume_workflow` continues it.
   After a Stop the run ends `cancelled`; when the job was stopped because the requester's access is gone, the run ends `interrupted` with `The requester no longer has access.`
