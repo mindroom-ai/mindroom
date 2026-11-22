@@ -159,7 +159,7 @@ def graph_rows(
                 "id": ids[node.key],
                 "kind": node.kind,
                 "label": node.label,
-                "name": node.name,
+                "name": redact_sensitive_text(node.name, max_length=_NAME_CHARS) if node.name else None,
                 "phase": phases.index(node.phase) if node.phase else None,
                 "group": ids.get(parent_group(node.lane) or "") if parent_group(node.lane) in groups else None,
                 "status": node.state.value,

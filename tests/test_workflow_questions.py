@@ -320,9 +320,7 @@ async def test_answer_command_answers_by_id_by_number_and_alone(stack: WorkflowS
     here = {"room_id": _ROOM, "thread_id": _THREAD, "sender": _ALICE}
 
     several = await answer_command(stack.engine, text="2", **here)
-    assert several == (
-        f"Several questions are open: {first} (Deploy?), {second} (When shall it run?). Use !answer <id> <answer>."
-    )
+    assert several == f"Several questions are open: {first}, {second}. Use !answer <id> <answer>."
     assert _node_state(stack) == (WorkflowNodeState.WAITING, "user")
     assert await answer_command(stack.engine, text=f"{first} 3", **here) == "Answer with one of: 1. Yes 2. No."
     assert await answer_command(stack.engine, text=f"{first} 2", **here) == f"Answered {first}: No."
@@ -335,6 +333,30 @@ async def test_answer_command_answers_by_id_by_number_and_alone(stack: WorkflowS
     )
     assert await stack.result("@0", "ask", _DEPLOY) == "No"
     assert await stack.result("@1", "ask", _WHEN) == "after lunch"
+
+
+@pytest.mark.asyncio
+async def test_answer_command_takes_no_id_alone_no_endless_number_and_no_id_two_questions_share(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`!answer` guesses nothing: an ID without an answer, a number no option has, or an ID that names two questions."""
+    await _ask(stack, "@0", _WHEN)
+    qid = question_id(stack.run_id, 1, 1)
+    here = {"room_id": _ROOM, "thread_id": _THREAD, "sender": _ALICE}
+
+    assert await answer_command(stack.engine, text=qid, **here) == "Use !answer <id> <answer>."
+    assert _node_state(stack) == (WorkflowNodeState.WAITING, "user")
+    await _ask(stack, "@1")
+    second = question_id(stack.run_id, 2, 1)
+    assert await answer_command(stack.engine, text=f"{second} {'9' * 5000}", **here) == (
+        "Answer with one of: 1. Yes 2. No."
+    )
+    monkeypatch.setattr("mindroom.workflow_runs.answers.question_id", lambda *_call: "q000000")
+    assert await answer_command(stack.engine, text="q000000 Yes", **here) == (
+        "Several questions are open. Answer on the card of the one you mean."
+    )
+    assert _node_state(stack, "@1") == (WorkflowNodeState.WAITING, "user")
 
 
 @pytest.mark.asyncio

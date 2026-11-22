@@ -126,8 +126,8 @@ _CORRECTING = "The agent of this call is correcting its answer. Try again in a m
 _NOT_ASKED = "The question could not be posted in the run's thread yet. Try again in a moment."
 _NOT_ANSWERED = "The run ended before the question was answered."
 _BUDGET = "$budget:"
-_BUDGET_QUESTION = "This run has spent ${spent:.2f} of its ${limit:.2f} limit. Continue?"
-_BUDGET_CONTINUE = "Continue with ${amount:.2f} more"
+_BUDGET_QUESTION = "This run has spent ${spent} of its ${limit} limit. Continue?"
+_BUDGET_CONTINUE = "Continue with ${amount} more"
 _BUDGET_STOP = "Stop"
 _OVER_BUDGET = "Stopped at the run's cost limit."
 _HELD = "The run waits at its cost limit. Try again in a moment."
@@ -1272,8 +1272,8 @@ class WorkflowEngine:
         waits = asked is not None and asked.state is WorkflowNodeState.WAITING
         places.held = waits or spent >= run.max_cost_usd * number
         if places.held and not waits:
-            options = [_BUDGET_CONTINUE.format(amount=run.max_cost_usd), _BUDGET_STOP]
-            text = _BUDGET_QUESTION.format(spent=spent, limit=run.max_cost_usd * number)
+            options = [_BUDGET_CONTINUE.format(amount=_usd(run.max_cost_usd)), _BUDGET_STOP]
+            text = _BUDGET_QUESTION.format(spent=_usd(spent), limit=_usd(run.max_cost_usd * number))
             request: dict[str, object] = {"question": text, "options": options}
             asked = WorkflowNode(
                 run_id=run.run_id,
@@ -1922,6 +1922,11 @@ def _receipt(node: WorkflowNode) -> NodeReceipt:
         error=node.error,
         result_ref=f"results/{node_id}" if spilled else None,
     )
+
+
+def _usd(amount: float) -> str:
+    """Return an amount of money as a person reads it: two decimal places, and more for one under a cent."""
+    return f"{amount:.2f}" if amount >= 0.01 or amount == 0 else f"{amount:.6f}".rstrip("0")
 
 
 def _indeterminate(node: WorkflowNode, said: object = None) -> _Outcome:

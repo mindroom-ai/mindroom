@@ -153,9 +153,11 @@ async def launch_child(
     whether an earlier turn started a tool call, which the node keeps.
     """
     owner = parse_tool_execution_identity_payload(run.execution_identity)
-    prompt = correction or _first_prompt(node)
     earlier = node.handle.ref if turn > 1 and node.handle is not None else None
     previous = next((delegation_child(job) for job in jobs.retained_jobs() if job.job_id == earlier), None)
+    # A further turn whose first child is no longer kept starts an agent that never saw the task.
+    prompt = _first_prompt(node) if correction is None else correction
+    prompt = prompt if correction is None or previous is not None else f"{_first_prompt(node)}\n\n{correction}"
     config, paths, caller = context.current_config, context.runtime_paths, run.agent_name
     arguments = {_RENAMED.get(name, name): value for name, value in node.request.items() if name in _OPTIONS}
     cap = SubagentPersona.from_dict(run.persona) if run.persona else None

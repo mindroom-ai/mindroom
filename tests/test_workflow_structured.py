@@ -300,8 +300,45 @@ async def test_schema_that_cannot_be_applied_to_an_answer_ends_the_call_and_save
 
     assert failed.value.kind == "schema"
     assert str(failed.value).startswith("schema cannot be applied: ")
-    assert (len(model.requests), stack.jobs.awaited_job_ids()) == (1, set())
+    # The call has its end first, and then the wait that read the turn gives the job back.
+    await stack.until(lambda: not stack.jobs.awaited_job_ids())
+    assert len(model.requests) == 1
     assert stack.engine.run_usage(stack.run_id)["cost_usd"] == pytest.approx(0.1)
+
+
+class _Forgetful:
+    """A job runtime that no longer keeps any job, as after the retention of the first turn's."""
+
+    def __init__(self, jobs: object) -> None:
+        self._jobs = jobs
+
+    def retained_jobs(self) -> tuple[()]:
+        return ()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._jobs, name)
+
+
+@pytest.mark.asyncio
+async def test_further_turn_whose_first_child_is_gone_is_told_the_task_again(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A further turn continues the first turn's child. Without it the agent starts anew, and needs the task too."""
+    model = stack.child_script(answer("no json here"), answer(_GOOD))
+    launch = engine_module.launch_child
+
+    async def forgetful(*args: object, **options: object) -> object:
+        jobs = _Forgetful(options.pop("jobs")) if options.get("turn", 1) > 1 else options.pop("jobs")  # type: ignore[operator]
+        return await launch(*args, jobs=jobs, **options)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(engine_module, "launch_child", forgetful)
+
+    assert await stack.result("@0", "agent", _ASK) == {"ok": True}
+
+    said = _last_said(model)
+    assert schema_prompt("Does it hold?", _OK) in said
+    assert "Reply with only the corrected fenced json block." in said
 
 
 async def _provider_fails() -> None:

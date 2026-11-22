@@ -120,6 +120,14 @@ def test_label_is_name_or_first_prompt_line_redacted_and_cut() -> None:
     assert "sk-invented" not in secret
 
 
+def test_row_shows_a_name_as_it_shows_a_label() -> None:
+    """A row's name is what a person reads, as its label is: without a credential and in 80 characters at most."""
+    named = [_node(1, name="reader api_key=sk-inventedinventedinvented1234"), _node(2, name="x" * 500), _node(3)]
+    secret, long, plain = graph_rows(_RUN, named, {}, [], []).nodes
+
+    assert ("sk-invented" in secret["name"], len(long["name"]), plain["name"]) == (False, 80, None)
+
+
 def test_meta_has_exactly_the_pinned_fields_and_true_counts() -> None:
     """The meta of a frame names the run, where it stands, and counts every call, a cancelled one as failed."""
     nodes = [

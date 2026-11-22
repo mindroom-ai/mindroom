@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.event_types import WORKFLOW_ANSWER_REJECTED_EVENT_TYPE
@@ -57,8 +57,8 @@ async def answer_question(
         run = engine.store.get_run(run_id)
     except WorkflowRunNotFoundError:
         return "no_longer_open"
-    seq = int(node_id[1:]) if node_id[:1] == "n" and node_id[1:].isdecimal() else 0
-    node = engine.store.node_by_seq(run_id, seq) if seq < 2**63 else None
+    seq = int(node_id[1:]) if node_id[:1] == "n" and len(node_id) < 20 and node_id[1:].isdecimal() else 0
+    node = engine.store.node_by_seq(run_id, seq)
     if sender != run.owner_user_id or (room_id, thread_id) != (run.room_id, run.thread_root_event_id):
         return "not_for_you" if sender != run.owner_user_id else "wrong_place"
     if node is None or node.kind != "ask" or card_event_id != node.links.get("event_id"):
@@ -121,32 +121,45 @@ async def handle_workflow_answer(
     return outcome
 
 
+def _chosen(found: dict[str, tuple[str, str] | None], text: str) -> tuple[str, tuple[str, str], str] | str:
+    """Return the ID and the place of the open question that `!answer`'s *text* answers, and the answer; else why none."""
+    match = _ANSWER.fullmatch(text)
+    named, answer = (match.group(1), match.group(2).strip()) if match else (None, "")
+    if not answer or (named is None and _ANSWER.fullmatch(f"{answer} x").group(1)):  # type: ignore[union-attr]
+        # No answer at all, or an ID alone: an ID is no answer to the only open question.
+        return "Use !answer <id> <answer>."
+    if named is None and len(found) != 1:
+        several = f"Several questions are open: {', '.join(found)}. Use !answer <id> <answer>."
+        return several if found else "No open question for you in this thread."
+    qid = named or next(iter(found))
+    if (asked := found.get(qid)) is None:
+        shared = "Several questions are open. Answer on the card of the one you mean."
+        return shared if qid in found else f"Question {qid} is no longer open."
+    return qid, asked, answer
+
+
 async def answer_command(engine: WorkflowEngine, *, room_id: str, thread_id: str | None, sender: str, text: str) -> str:
     """Answer an open question of *sender* in this thread for `!answer [id] <answer>`, and return the reply.
 
     The ID names one question; without it the answer goes to the sender's only open question here. An option is
     answered by its number or its text.
     """
-    found: dict[str, tuple[str, WorkflowNode]] = {}
+    found: dict[str, tuple[str, str] | None] = {}
     runs = engine.store.list_runs(owner_user_id=sender, room_id=room_id, include_finished=False)
     for run in runs:
-        for node in engine.store.nodes(run.run_id) if run.thread_root_event_id == thread_id else ():
+        for node in engine.store.nodes(run.run_id, light=True) if run.thread_root_event_id == thread_id else ():
             if _open(node):
-                found[question_id(run.run_id, node.seq, node.generation)] = (run.run_id, node)
-    match = _ANSWER.fullmatch(text.strip())
-    named, answer = (match.group(1), match.group(2).strip()) if match else (None, "")
-    if named is None and len(found) > 1:
-        asked = ", ".join(f"{qid} ({node.label})" for qid, (_, node) in found.items())
-        return f"Several questions are open: {asked}. Use !answer <id> <answer>."
-    if named is None and not found:
-        return "No open question for you in this thread."
-    qid = named or next(iter(found))
-    if qid not in found:
-        return f"Question {qid} is no longer open."
-    run_id, node = found[qid]
+                qid = question_id(run.run_id, node.seq, node.generation)
+                # An ID that two open questions share names neither: nothing is answered by a guess.
+                found[qid] = None if qid in found else (run.run_id, node.key)
+    chosen = _chosen(found, text.strip())
+    if isinstance(chosen, str):
+        return chosen
+    qid, (run_id, key), answer = chosen
+    node = cast("WorkflowNode", engine.store.get_node(run_id, key))
     options = [str(option) for option in node.request.get("options") or ()]
     if options:
-        number = int(answer) if answer.isdecimal() else 0
+        number = int(answer) if len(answer) <= 6 and answer.isdecimal() else 0
         answer = options[number - 1] if 0 < number <= len(options) else answer
         if answer not in options:
             return f"Answer with one of: {options_text(options)}"

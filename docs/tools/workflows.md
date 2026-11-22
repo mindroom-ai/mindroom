@@ -220,7 +220,8 @@ The run shows `waiting` once nothing else of it works, and that time is not char
   `status` is `open`, `answered` or `cancelled`, and the card is edited when it changes.
 - Its text for other clients is `Question q3fa91c: <text> 1. Yes 2. No. Answer with !answer q3fa91c <number or text>.`
 - `!answer q3fa91c 2` answers with an option's number or its text, and `!answer q3fa91c after lunch` with free text.
-  Without the ID, `!answer` answers the requester's only open question in the thread; with several open it lists them and answers none.
+  Without the ID, `!answer` answers the requester's only open question in the thread; with several open it lists their IDs and answers none.
+  An ID without an answer answers nothing, and neither does an ID that two open questions happen to share: answer that one on its card.
 - MindRoom Chat answers with the event `io.mindroom.workflow_answer`, `{"run", "node", "option"}` or `{"run", "node", "text"}`, sent in the run's thread as a reply to the card.
 - An answer counts only from the run's requester, in the run's room and thread, for the card as it is now, and only while the requester still has access to the run's agent there.
   A question whose card could not be posted yet takes no answer.
@@ -288,6 +289,7 @@ Nothing caps what a run costs unless its start names a limit: `start_workflow(..
 - When `cost_usd`, the sum over every attempt and every run inside the run, reaches the limit, no further agent or tool call starts.
   Calls that already run finish, and calls the script makes meanwhile wait as `queued`.
 - The run's requester is asked once, as with [`ask_user`](#questions): `This run has spent $5.20 of its $5.00 limit. Continue?` with the options `Continue with $5.00 more` and `Stop`.
+  An amount under a cent is written with up to six decimal places.
 - `Continue with $5.00 more` adds the original amount to the limit and starts the waiting calls; at the next limit the run asks again.
   `Stop` cancels the run, and its finished calls stay saved.
 - The run shows `waiting` once nothing of it works any more.

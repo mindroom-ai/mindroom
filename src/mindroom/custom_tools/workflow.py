@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 from collections import Counter
 from dataclasses import asdict, fields, replace
 from functools import partial
@@ -91,7 +92,8 @@ The script defines `def main(args):` and returns the final report, a string or a
 - agent(prompt, *, schema=None, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
         profile=None, minimal=False, timeout=None, output_path=None, dedicated_worker=False, resource_profile=None)
   runs one agent turn and returns its answer: text, or parsed JSON when schema (a JSON Schema dict) is given.
-  With schema the agent is asked again until its answer matches, up to 5 turns; then AgentError with kind "schema".
+  With schema the agent is asked again until its answer matches, up to 5 turns; then AgentError with kind "schema",
+  or "indeterminate" when one of its turns used a tool. schema and output_path cannot be used together.
   The agent is a fresh copy of you with all your tools and no memory of this conversation: put everything it needs in the prompt.
   agent="other" runs that configured agent with its own tools. name is only a label; it does not pick an agent.
   model: one of the models below. system: replaces the system prompt. tools, skills, knowledge: lists that narrow a copy of you.
@@ -372,7 +374,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             raise WorkflowRunStoreError(msg)
         max_cost = arguments.get("max_cost_usd")
         if max_cost is not None and (
-            isinstance(max_cost, bool) or not isinstance(max_cost, (int, float)) or max_cost <= 0
+            isinstance(max_cost, bool) or not isinstance(max_cost, (int, float)) or not 0 < max_cost < math.inf
         ):
             msg = "max_cost_usd must be a positive amount in USD."
             raise WorkflowRunStoreError(msg)

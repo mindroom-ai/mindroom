@@ -225,7 +225,8 @@ async def test_cost_question_whose_card_could_not_be_posted_is_posted_without_a_
     assert _questions(stack) == []
 
     stack.room.refuse_sends = False
-    await stack.until(lambda: bool(_questions(stack)))
+    # The card is in the room first, and then named by the question it is the card of.
+    await stack.until(lambda: "event_id" in stack.store.get_node(stack.run_id, "$budget:1").links)
     await stack.views.close()
 
     assert (_questions(stack)[-1]["status"], _states(stack)["@1"]) == ("open", "queued")
@@ -308,13 +309,25 @@ async def test_without_a_limit_nothing_pauses(stack: WorkflowStack) -> None:
 
 
 @pytest.mark.asyncio
+async def test_question_of_a_limit_under_a_cent_says_the_amounts(stack: WorkflowStack) -> None:
+    """Two decimal places would say `$0.00 of its $0.00 limit`: an amount under a cent keeps its digits."""
+    await stack.start(max_cost_usd=0.000001, max_concurrent=1)
+    stack.child_script(_turn(0.00042))
+    assert await stack.result("@0", "agent", {"prompt": "Look into part 0."}) == "done"
+    await stack.until(lambda: bool(_questions(stack)))
+
+    assert _questions(stack)[-1]["text"] == "This run has spent $0.00042 of its $0.000001 limit. Continue?"
+    assert _questions(stack)[-1]["options"] == ["Continue with $0.000001 more", "Stop"]
+
+
+@pytest.mark.asyncio
 async def test_start_workflow_saves_the_limit_and_refuses_one_that_is_no_amount(stack: WorkflowStack) -> None:
     """`max_cost_usd` is the run's, and anything but a positive number is refused before a run exists."""
     source = "def main(args):\n    return 'counted'\n"
     handle = json.loads(await stack.call("start_workflow", source=source, max_cost_usd=2.5))
 
     assert stack.store.get_run(handle["run_id"]).max_cost_usd == 2.5
-    for wrong in (0, -1, "much"):
+    for wrong in (0, -1, "much", float("inf"), float("nan")):
         with pytest.raises(CallFailed, match="max_cost_usd must be a positive amount in USD"):
             await stack.call("start_workflow", source=source, max_cost_usd=wrong, call_id=f"wrong-{wrong}")
     assert len(stack.store.list_runs()) == 1
