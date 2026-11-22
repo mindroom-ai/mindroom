@@ -17,6 +17,7 @@ import nio
 
 from mindroom import constants, interactive
 from mindroom import reply_lifecycle as rl
+from mindroom.ai_run_metadata import build_terminal_note_ai_run_metadata_content, model_payload
 from mindroom.cancellation import classify_cancel_source
 from mindroom.constants import ACTING_REQUESTER_KEY, ROUTE_EVENT_TYPE, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
@@ -323,6 +324,24 @@ def _with_note(shown: Presentation, note: Segment) -> Presentation:
     return with_trailing_note(shown, note)
 
 
+def _ensure_terminal_ai_run_metadata(
+    extra_content: dict[str, Any],
+    *,
+    reply_model: Mapping[str, str] | None,
+    edited_existing: bool,
+) -> None:
+    """Guarantee that a finalized write never leaves ``io.mindroom.ai_run`` status-less or drops an earlier one."""
+    ai_run = extra_content.get(constants.AI_RUN_METADATA_KEY)
+    if isinstance(ai_run, dict) and "status" not in ai_run:
+        updated_ai_run = dict(ai_run)
+        if "model" not in updated_ai_run and reply_model is not None:
+            updated_ai_run["model"] = dict(reply_model)
+        updated_ai_run["status"] = constants.STREAM_STATUS_COMPLETED
+        extra_content[constants.AI_RUN_METADATA_KEY] = updated_ai_run
+    elif edited_existing and constants.AI_RUN_METADATA_KEY not in extra_content and reply_model is not None:
+        extra_content.update(build_terminal_note_ai_run_metadata_content("completed", model=reply_model))
+
+
 @dataclass(frozen=True)
 class _NoteRow:
     """One note row composed from its reply as the reply stands: the write, how it renders, and where it goes."""
@@ -331,6 +350,7 @@ class _NoteRow:
     write: ReplyWrite
     rendered: RenderedReply
     target: MessageTarget
+    model: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -501,6 +521,8 @@ class StreamingDeliveryRequest:
     tool_trace_collector: list[ToolTraceEntry] | None = None
     # The automatic compactions the reply runs, which its writes carry.
     compactions: ReplyCompactions | None = None
+    # Reads the active model payload for provisional streaming metadata; defaults to the span's reply_model.
+    active_model: Callable[[], Mapping[str, str] | None] | None = None
     streaming_cls: type[StreamingResponse] = StreamingResponse
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
@@ -1187,6 +1209,7 @@ class DeliveryGateway:
                     row.target,
                     row.rendered,
                     event_id=row.reply.event_id,
+                    model=row.model,
                 )
             except ReplyWriteRefusedError as refused:
                 if refused.transition.outcome is ReplyOutcome.RECOMPUTE:
@@ -1203,13 +1226,20 @@ class DeliveryGateway:
         rendered: RenderedReply,
         *,
         event_id: str | None,
+        model: Mapping[str, str] | None = None,
     ) -> str | None:
         """Send one rendered reply row as an edit of the reply's event, or as its create.
 
         Raises ``ReplyWriteRefusedError`` when the reply's rule writes no row. A running span's note keeps listing
         the compactions its answer ran, a running one included, which the client shows as interrupted.
         """
-        extra_content: dict[str, Any] = {constants.STREAM_STATUS_KEY: rendered.stream_status}
+        resolved_model = (
+            model if model is not None else (write.handle.reply_model if write.handle is not None else None)
+        )
+        extra_content: dict[str, Any] = {
+            constants.STREAM_STATUS_KEY: rendered.stream_status,
+            **build_terminal_note_ai_run_metadata_content(rendered.stream_status, model=resolved_model),
+        }
         compactions = write.handle.compactions.content() if write.handle is not None else None
         if compactions is not None:
             extra_content[constants.COMPACTIONS_CONTENT_KEY] = compactions
@@ -1333,6 +1363,7 @@ class DeliveryGateway:
         note: NoteKind,
         text: str,
         target: MessageTarget,
+        model_name: str | None = None,
     ) -> bool:
         """Show a failed approval's note on the reply it paused; ``text`` is an error note's.
 
@@ -1368,7 +1399,8 @@ class DeliveryGateway:
             )
             state = ReplyState.CANCELLED if shown_note is NoteKind.CANCELLED else ReplyState.FAILED
             write = approval_note_write(reply, span, shown, approval_id=approval_id, state=state)
-            return _NoteRow(reply, write, render(shown, state=state), target)
+            model = model_payload(self.deps.runtime.config, model_name) if model_name is not None else None
+            return _NoteRow(reply, write, render(shown, state=state), target, model=model)
 
         sent = await self._send_note(compose)
         if isinstance(sent, bool):
@@ -1769,6 +1801,11 @@ class DeliveryGateway:
         if edited_event_id is not None:
             # The answer replaces an earlier visible message, so mark it finished as a streamed final does.
             delivery_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
+        _ensure_terminal_ai_run_metadata(
+            delivery_extra_content,
+            reply_model=handle.reply_model,
+            edited_existing=edited_event_id is not None,
+        )
         try:
             event_id = await self._send_reply_write(
                 reply_write,
@@ -2039,6 +2076,7 @@ class DeliveryGateway:
             ),
             tool_trace_collector=request.tool_trace_collector,
             compactions=request.compactions,
+            active_model=(request.active_model if request.active_model is not None else (lambda: handle.reply_model)),
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,
             visible_progress_callback=request.visible_progress_callback,
@@ -2214,6 +2252,7 @@ class DeliveryGateway:
             event_id=event_id,
             show_tool_calls=show_tool_calls,
             extra_content=extra_content,
+            active_model=lambda: handle.reply_model,
             visible_progress_callback=visible_progress_callback,
             transport_is_current=self._stream_transport_gate(
                 identity.response_envelope.source_event_id,

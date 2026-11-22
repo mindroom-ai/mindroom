@@ -402,6 +402,8 @@ class _TeamTurn:
         self,
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
+        *,
+        on_model_resolved: Callable[[str], None] | None = None,
     ) -> tuple[TeamAttempt, AsyncIterator[TeamRunEvent]]:
         """Build the attempt's team and prepared input, and return its state with the run's event stream."""
         members = self.members_for_attempt(continuation_state)
@@ -448,6 +450,8 @@ class _TeamTurn:
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
             pipeline_timing=self.ctx.pipeline_timing,
         )
+        if on_model_resolved is not None:
+            on_model_resolved(prepared.runtime_model_name)
         run.run_metadata = prepared.run_metadata
         run.turn_input = TurnInput(context=prepared.turn.context)
         presentation = TeamStreamPresentation.new(
@@ -522,9 +526,15 @@ class _TeamTurn:
         self,
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
+        *,
+        on_model_resolved: Callable[[str], None] | None = None,
     ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved]:
         """Stream one team attempt as its document grows, ending with its ``AttemptResolved`` sentinel."""
-        attempt, events = await self.start_attempt(run, continuation_state)
+        attempt, events = await self.start_attempt(
+            run,
+            continuation_state,
+            on_model_resolved=on_model_resolved,
+        )
         prior_usage = tuple(run.prior_usage.values())
         shown: str | None = None
         try:
@@ -771,7 +781,7 @@ async def team_response_stream(
 
     adapter = TurnAdapter[TeamStreamChunk](
         load_scope=turn.load_scope,
-        run_attempt=turn.run_attempt,
+        run_attempt=partial(turn.run_attempt, on_model_resolved=sinks.on_model_resolved),
         make_text_chunk=lambda text: text,
         user_message=ctx.prompt,
         unexpected_error_text=turn.error_text,

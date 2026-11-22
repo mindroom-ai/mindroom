@@ -4313,6 +4313,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     assert edit_request.tool_trace == list(committed_trace)
     assert edit_request.extra_content == {
         STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING if expected_text else STREAM_STATUS_PENDING,
+        "io.mindroom.ai_run": {"version": 1, "model": {"config": "large"}},
     }
     assert [
         awaited.kwargs["tool_name"] for awaited in approval_store.prepare_reply_card.await_args_list

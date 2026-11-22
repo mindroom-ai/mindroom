@@ -129,9 +129,18 @@ def _observed(bot: AgentBot) -> Iterator[_Observer]:
         note: NoteKind,
         text: str,
         target: MessageTarget,
+        model_name: str | None = None,
     ) -> bool:
         observer.notes.append((note, text if note is NoteKind.ERROR else None))
-        return await write_note(gateway, event_id, approval_id=approval_id, note=note, text=text, target=target)
+        return await write_note(
+            gateway,
+            event_id,
+            approval_id=approval_id,
+            note=note,
+            text=text,
+            target=target,
+            model_name=model_name,
+        )
 
     with (
         patch.object(DeliveryGateway, "write_approval_failure_note", new=record_note),

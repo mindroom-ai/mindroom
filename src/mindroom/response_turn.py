@@ -453,6 +453,8 @@ class TurnSinks:
     on_failed: Callable[[HandledAttempt], None] | None = None
     # Receives each attempt's run id and configured model name before the attempt starts.
     on_attempt_start: Callable[[str, str], None] | None = None
+    # Receives each attempt's resolved configured model name before streaming starts.
+    on_model_resolved: Callable[[str], None] | None = None
     # Whether the driver stores an interrupted turn in its scope's history; a delegated child's interruption belongs
     # to delegation recovery, and a voice call stores what it spoke.
     persist_interrupted: bool = True

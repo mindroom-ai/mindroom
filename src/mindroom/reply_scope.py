@@ -89,6 +89,8 @@ class SpanHandle:
     reply_shown: asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
     # The automatic compactions this span's answer ran, which every write of it carries, its terminal note included.
     compactions: ReplyCompactions = field(default_factory=ReplyCompactions, repr=False, compare=False)
+    # The active model payload this span's writes carry until settled run metadata replaces it.
+    reply_model: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         """Know from the start whether the claimed reply already shows an event."""

@@ -13,6 +13,11 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits, CliWaiters
+from mindroom.ai_run_metadata import (
+    build_streaming_ai_run_metadata_content,
+    model_payload,
+    streaming_ai_run_content,
+)
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.continuation_rules import (
     CliExit,
@@ -447,6 +452,23 @@ class ApprovalContinuationRunner:
                 return handoff
             raise
 
+    def _pause_extra_content(
+        self,
+        stream_status: str,
+        *,
+        runtime_model_name: str | None,
+        handle: SpanHandle,
+    ) -> dict[str, Any]:
+        """Build pause write metadata carrying stream status and provisional active model."""
+        extra_content: dict[str, Any] = {STREAM_STATUS_KEY: stream_status}
+        if runtime_model_name is not None:
+            model = model_payload(self.deps.runtime.config, runtime_model_name)
+            handle.reply_model = model
+            extra_content.update(streaming_ai_run_content(model))
+        elif handle.reply_model is not None:
+            extra_content.update(streaming_ai_run_content(handle.reply_model))
+        return extra_content
+
     async def _show_pause(
         self,
         paused: PausedAttempt,
@@ -458,15 +480,19 @@ class ApprovalContinuationRunner:
         visible_tool_trace: tuple[ToolTraceEntry, ...],
     ) -> _ShownPause:
         """Show a pause before its continuation exists, or prepare the reply row that shows it."""
+        handle = current_span()
+        assert handle is not None, "a pause runs in its reply's span"
         shows_text = waiting_text is not None or bool(paused.response_text)
         initial = SendTextRequest(
             target=target,
             response_text=visible_text,
-            extra_content={STREAM_STATUS_KEY: stream_status},
+            extra_content=self._pause_extra_content(
+                stream_status,
+                runtime_model_name=paused.runtime_model_name,
+                handle=handle,
+            ),
             tool_trace=list(visible_tool_trace) or None,
         )
-        handle = current_span()
-        assert handle is not None, "a pause runs in its reply's span"
         # The reply's records show the pause; its row is written with the continuation.
         reply_pause = _paused_presentation(handle, paused, waiting_text=waiting_text)
         reply = await handle.runtime.store.replies.load(handle.reply_id)
@@ -637,7 +663,11 @@ class ApprovalContinuationRunner:
                 target=target,
                 event_id=event_id,
                 new_text=text,
-                extra_content={STREAM_STATUS_KEY: stream_status},
+                extra_content=self._pause_extra_content(
+                    stream_status,
+                    runtime_model_name=hold.runtime_model_name,
+                    handle=handle,
+                ),
                 tool_trace=list(tool_trace) or None,
                 reply_write=pause_write(
                     handle,
@@ -830,6 +860,13 @@ class ApprovalContinuationRunner:
     ) -> tuple[FinalDeliveryOutcome, ApprovalContinuation]:
         """Deliver execution output against the latest native continuation generation."""
         tool_trace: list[ToolTraceEntry] = []
+        provisional_ai_run = (
+            build_streaming_ai_run_metadata_content(self.deps.runtime.config, claimed.runtime_model_name)
+            if claimed.runtime_model_name is not None
+            else None
+        )
+        if claimed.runtime_model_name is not None and (handle := current_span()) is not None:
+            handle.reply_model = model_payload(self.deps.runtime.config, claimed.runtime_model_name)
         # Streaming requesters watch the resumed work in the reply it continues, unless the turn is quiet.
         # Progress closes before any terminal edit, which stays owned below.
         progress_scope: AbstractAsyncContextManager[ProgressPublisher | None] = (
@@ -838,7 +875,7 @@ class ApprovalContinuationRunner:
                 event_id=claimed.response_event_id,
                 identity=identity,
                 show_tool_calls=claimed.show_tool_calls,
-                extra_content=merge_response_extra_content(None, claimed.attachment_ids),
+                extra_content=merge_response_extra_content(provisional_ai_run, claimed.attachment_ids),
                 visible_progress_callback=self.lifecycle_coordinator.visible_progress_callback(target),
             )
             if not request.quiet
@@ -1541,6 +1578,7 @@ class ApprovalContinuationRunner:
             note=_FAILURE_NOTES.get(failure.kind, NoteKind.ERROR),
             text=failure.reason,
             target=continuation_target(current),
+            model_name=current.runtime_model_name,
         )
         # The reply's records show the note; the finish ends the reply.
         return written and await self.deps.replies.finish_approval(current.approval_id)

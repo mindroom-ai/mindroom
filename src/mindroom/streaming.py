@@ -12,7 +12,9 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, Protocol
 
 from mindroom import interactive
+from mindroom.ai_run_metadata import build_terminal_note_ai_run_metadata_content, streaming_ai_run_content
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     COMPACTIONS_CONTENT_KEY,
     REASONING_CONTENT_KEY,
     STREAM_STATUS_COMPLETED,
@@ -611,6 +613,8 @@ class StreamingResponse:
     resumed_tool_trace: tuple[ToolTraceEntry, ...] = ()
     # The reply's automatic compactions, which every write and frame shows.
     compactions: ReplyCompactions | None = None
+    # Reads the active model payload for provisional streaming metadata until settled run metadata arrives.
+    active_model: Callable[[], Mapping[str, str] | None] | None = None
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     # Reuse only the last Markdown render; mentions and delivery metadata stay fresh.
     _render_markdown: Callable[[str], str] = field(
@@ -1187,14 +1191,44 @@ class StreamingResponse:
             chars_since_last_update=self.chars_since_last_update,
         )
 
+    def _active_model_payload(self) -> dict[str, str] | None:
+        """Return the reply's current active model payload, if any."""
+        if self.active_model is None:
+            return None
+        model = self.active_model()
+        return dict(model) if model is not None else None
+
+    def _apply_ai_run_metadata(self, extra_content: dict[str, Any], *, is_final: bool) -> None:
+        """Attach provisional or terminal ``io.mindroom.ai_run`` metadata without masking settled run metadata."""
+        ai_run = extra_content.get(AI_RUN_METADATA_KEY)
+        if not isinstance(ai_run, dict):
+            model = self._active_model_payload()
+            if model is None:
+                return
+            if is_final:
+                extra_content.update(build_terminal_note_ai_run_metadata_content("completed", model=model))
+            else:
+                extra_content.update(streaming_ai_run_content(model))
+            return
+        if "status" in ai_run:
+            return
+        model = self._active_model_payload()
+        updated = dict(ai_run)
+        if model is not None and (not is_final or "model" not in updated):
+            updated["model"] = model
+        if is_final:
+            updated["status"] = STREAM_STATUS_COMPLETED
+        extra_content[AI_RUN_METADATA_KEY] = updated
+
     def _delivery_extra_content(self, *, is_final: bool) -> dict[str, Any]:
-        """Return the extra content of one durable write: the caller's, the live watermark, compactions, and reasoning.
+        """Return the extra content of one durable write: the caller's, active model, live watermark, compactions, and reasoning.
 
         Reasoning rides the terminal write, and every edit made while live frames do not carry the reply's progress
         (no relay, frames switched off, or frames stopped), so the reply keeps showing its reasoning. The first send
         leaves it to frames or the next edit. A still-open segment counts its time so far.
         """
         extra_content = dict(deepcopy(self.extra_content)) if self.extra_content is not None else {}
+        self._apply_ai_run_metadata(extra_content, is_final=is_final)
         checkpoint = self.live.checkpoint() if self.live is not None else None
         if checkpoint is not None:
             extra_content[LIVE_CHECKPOINT_KEY] = checkpoint
@@ -2217,6 +2251,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     extra_content: Mapping[str, Any] | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     compactions: ReplyCompactions | None = None,
+    active_model: Callable[[], Mapping[str, str] | None] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     visible_event_id_callback: Callable[[str], None] | None = None,
     visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
@@ -2261,6 +2296,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         resumed_text=resumed.resumed_text if resumed is not None else "",
         resumed_tool_trace=resumed.tool_trace if resumed is not None else (),
         compactions=compactions,
+        active_model=active_model,
         initial_send=initial_send,
         progress_write_ahead=progress_write_ahead,
         progress_delivered=progress_delivered,
@@ -2377,6 +2413,7 @@ async def stream_progress_edits(
     progress_write_ahead: ProgressWriteAhead,
     progress_delivered: ProgressDelivered,
     extra_content: dict[str, Any] | None = None,
+    active_model: Callable[[], Mapping[str, str] | None] | None = None,
     visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
     transport_is_current: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[ProgressPublisher]:
@@ -2407,6 +2444,7 @@ async def stream_progress_edits(
         max_idle=stream_config.max_idle,
         show_tool_calls=show_tool_calls,
         extra_content=extra_content,
+        active_model=active_model,
         visible_progress_callback=visible_progress_callback,
         transport_is_current=transport_is_current,
         progress_write_ahead=progress_write_ahead,

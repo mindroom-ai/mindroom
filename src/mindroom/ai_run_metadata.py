@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
 from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_BY_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
@@ -338,6 +338,31 @@ def model_payload(
     if provider is not None:
         payload["provider"] = provider
     return payload
+
+
+def streaming_ai_run_content(model: Mapping[str, str]) -> dict[str, Any]:
+    """Build provisional, status-less ``io.mindroom.ai_run`` metadata for a live reply."""
+    return {AI_RUN_METADATA_KEY: {"version": _AI_RUN_METADATA_VERSION, "model": dict(model)}}
+
+
+def build_streaming_ai_run_metadata_content(config: Config, model_name: str) -> dict[str, Any]:
+    """Build provisional, status-less ``io.mindroom.ai_run`` metadata for ``model_name``."""
+    return streaming_ai_run_content(model_payload(config, model_name))
+
+
+def build_terminal_note_ai_run_metadata_content(
+    status: Literal["completed", "cancelled", "error"],
+    *,
+    model: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build terminal ``io.mindroom.ai_run`` metadata for a note or finalized reply without full run metrics."""
+    payload: dict[str, Any] = {
+        "version": _AI_RUN_METADATA_VERSION,
+        "status": status,
+    }
+    if model is not None:
+        payload["model"] = dict(model)
+    return {AI_RUN_METADATA_KEY: payload}
 
 
 def build_ai_run_metadata_content(

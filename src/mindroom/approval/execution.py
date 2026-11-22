@@ -14,7 +14,7 @@ from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_c
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
 from mindroom.ai import agent_run_metadata_content, run_delegated_child_response, stream_agent_response
-from mindroom.ai_run_metadata import prior_usage_by_run
+from mindroom.ai_run_metadata import model_payload, prior_usage_by_run
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeRunner
 from mindroom.approval.tool_owners import (
@@ -29,7 +29,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.reply_scope import current_reply_event_id, current_span_stopped
+from mindroom.reply_scope import current_reply_event_id, current_span, current_span_stopped
 from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
@@ -367,6 +367,11 @@ async def _stream_continuation_turn(
         sinks=TurnSinks(
             run_metadata_collector=run_metadata,
             on_completed=completed.append,
+            on_model_resolved=lambda model_name: (
+                setattr(span_handle, "reply_model", model_payload(config, model_name))
+                if (span_handle := current_span()) is not None
+                else None
+            ),
             subagent_cost=subagent_cost,
             response_event_id=current_reply_event_id,
             stopped_by_user=current_span_stopped,

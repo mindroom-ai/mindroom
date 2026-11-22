@@ -1317,11 +1317,14 @@ async def _stream_agent_attempt_chunks(
     storage: RunStorage,
     state: _StreamingAttemptState,
     on_attempt_start: Callable[[str, str], None] | None,
+    on_model_resolved: Callable[[str], None] | None,
 ) -> AsyncGenerator[AIStreamChunk]:
     """Start and consume one streaming agent attempt."""
     show_tool_calls = run_context.turn.show_tool_calls
     pipeline_timing = run_context.turn.pipeline_timing
     try:
+        if on_model_resolved is not None:
+            on_model_resolved(run_context.prepared_run.runtime_model_name)
         if on_attempt_start is not None:
             on_attempt_start(attempt.run_id, run_context.prepared_run.runtime_model_name)
         request_context = _attempt_request_log_context(run_context)
@@ -1409,6 +1412,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             storage=storage,
             state=state,
             on_attempt_start=sinks.on_attempt_start,
+            on_model_resolved=sinks.on_model_resolved,
         )
         async with closing_async_stream(attempt_stream):
             async for stream_chunk in attempt_stream:

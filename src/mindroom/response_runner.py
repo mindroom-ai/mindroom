@@ -14,7 +14,12 @@ from mindroom import reply_lifecycle as rl
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import stream_agent_response
-from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata, with_prior_usage
+from mindroom.ai_run_metadata import (
+    ai_run_extra_content_from_metadata,
+    model_payload,
+    streaming_ai_run_content,
+    with_prior_usage,
+)
 from mindroom.ai_runtime import reply_ended_for_follow_up
 from mindroom.approval.response import continuation_response_kind, continuation_target
 from mindroom.authorization import ReplyMembershipPendingError
@@ -410,6 +415,29 @@ class ResponseRunner:
             monitor=self.deps.runtime.orchestrator.budgets,
             requester_id=request.response_envelope.requester_id,
         )
+
+    def _set_span_reply_model(self, model_name: str | None) -> None:
+        """Record the active model payload on the running span, if any."""
+        if model_name is not None and (handle := current_span()) is not None:
+            handle.reply_model = model_payload(self.deps.runtime.config, model_name)
+
+    def _agent_placeholder_model_name(self, request: ResponseRequest, *, runtime_model: TurnModel) -> str:
+        """Apply the requester's budget without logging fallback to pick the agent placeholder's model."""
+        budget = self._turn_budget(request)
+        if budget is None:
+            return runtime_model.model_name
+        target = request.response_envelope.target
+        return resolve_turn_model(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            ModelScope(
+                entity=self.deps.agent_name,
+                room_id=target.room_id,
+                thread_id=target.resolved_thread_id,
+                explicit=runtime_model.model_name,
+            ),
+            replace(budget, log_fallback=False),
+        ).model_name
 
     @property
     def in_flight_response_count(self) -> int:
@@ -1188,6 +1216,7 @@ class ResponseRunner:
         history_scope: HistoryScope,
         execution_identity: ToolExecutionIdentity,
         placeholder_message: str | None,
+        model_name: str | None = None,
     ) -> str | None:
         """Send a claimed reply's placeholder as its create, unless it shows something or compacts first; return it."""
         target = request.response_envelope.target
@@ -1203,12 +1232,16 @@ class ResponseRunner:
             return None
         handle = current_span()
         assert handle is not None, "a placeholder is its reply's create"
+        extra_content: dict[str, Any] = {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
+        model = model_payload(self.deps.runtime.config, model_name) if model_name is not None else handle.reply_model
+        if model is not None:
+            extra_content.update(streaming_ai_run_content(model))
         try:
             placeholder_event_id = await self.deps.delivery_gateway.send_text(
                 SendTextRequest(
                     target=target,
                     response_text=placeholder_message,
-                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+                    extra_content=extra_content,
                     # A streamed answer creates its visible message here and
                     # only edits it afterwards, so this send is the one a crash
                     # could duplicate into two answers in the room.
@@ -1498,6 +1531,10 @@ class ResponseRunner:
                 ),
                 None,
             )
+            placeholder_model_name: str | None = self._agent_placeholder_model_name(
+                request,
+                runtime_model=runtime_model,
+            )
         else:
             team_models = (
                 None
@@ -1515,6 +1552,8 @@ class ResponseRunner:
                     self._turn_budget(request),
                 )
             )
+            placeholder_model_name = team_models.team_model_name if team_models is not None else None
+        self._set_span_reply_model(placeholder_model_name)
         placeholder_event_id = await self._send_placeholder(
             request,
             history_scope=history_scope,
@@ -1641,6 +1680,7 @@ class ResponseRunner:
             show_tool_calls=show_tool_calls,
             tool_context=replace(tool_context, tool_calls_shown=show_tool_calls and not request.quiet),
         )
+        self._set_span_reply_model(runtime.active_model_name)
         run_id = str(uuid4())
         mode = TeamMode(team.team_mode)
         team_spec = TeamTurnSpec(
@@ -1860,9 +1900,14 @@ class ResponseRunner:
         # The caller-owned collectors stay live: the gateway snapshots the run metadata as the stream ends.
         run_metadata_content: dict[str, Any] = {}
         tool_trace: list[ToolTraceEntry] = []
+
+        def note_resolved_model(model_name: str) -> None:
+            handle.reply_model = model_payload(self.deps.runtime.config, model_name)
+
         sinks = TurnSinks(
             turn_recorder=recorder,
             run_metadata_collector=run_metadata_content,
+            on_model_resolved=note_resolved_model,
             response_event_id=current_reply_event_id,
             stopped_by_user=current_span_stopped,
         )
@@ -2253,6 +2298,7 @@ class ResponseRunner:
             active_model_name=active_model_name,
             participation=participation,
         )
+        self._set_span_reply_model(runtime.active_model_name)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
         # The other side drives a contact turn, so it writes no long-term memory.
