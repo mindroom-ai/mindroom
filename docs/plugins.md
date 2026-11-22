@@ -816,7 +816,7 @@ Calling `toolkit.functions[name]` directly skips all of that: the validation, th
 A tool call that runs in a Kubernetes worker imports the configured plugins in a fresh process, so every call pays for those imports again.
 A plugin whose manifest sets `"worker_preload": true` is imported once when the worker starts, and the calls in that worker reuse it.
 Plugins import in the order of `plugins:`, so list the plugins that set it first: one that follows an enabled plugin without the setting is imported by each call.
-Configure such a plugin with an absolute `path` or as a package, such as `python:my_plugin`: a path under `~` or relative to the config file can name another directory in a call than when the worker started, so MindRoom imports that plugin, and every plugin listed after it, in each call.
+A plugin configured by a path under `~` is not imported once: a call can run with another home directory than the worker started with, so MindRoom imports that plugin, and every plugin listed after it, in each call.
 Setting it promises that the plugin's files and the packages it uses do not change while a worker runs, and that importing its tools, hooks, and OAuth modules:
 
 - Reads nothing a call sets: the import runs before any call, in the worker's own working directory and environment, without the call's `.mindroom/worker-env.sh` values or per-call environment.
