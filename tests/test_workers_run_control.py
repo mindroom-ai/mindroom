@@ -41,7 +41,7 @@ from mindroom.tool_system.tool_access import ToolKey
 from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, live_turn_tools_for_test
 from tests.minimal_agent_fixtures import capture_bash_batch
-from tests.test_agent_tool_calls import _catalog, _toolkit
+from tests.test_agent_tool_calls import _catalog, _function, _toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -1389,11 +1389,8 @@ async def test_cancel_during_approval_is_deferred_and_approving_the_card_runs_no
     from functools import partial  # noqa: PLC0415
     from unittest.mock import AsyncMock, patch  # noqa: PLC0415
 
-    from agno.tools.toolkit import Toolkit  # noqa: PLC0415
-
     from mindroom.event_journal import CallKey  # noqa: PLC0415
     from mindroom.final_delivery import TurnProgress  # noqa: PLC0415
-    from mindroom.tool_system.agno_toolkits import adapt_toolkit  # noqa: PLC0415
     from tests.conftest import unwrap_extracted_collaborator  # noqa: PLC0415
     from tests.test_response_runner_focused import (  # noqa: PLC0415
         _admit_approval_source,
@@ -1450,8 +1447,8 @@ async def test_cancel_during_approval_is_deferred_and_approving_the_card_runs_no
         ran.append(label)
         return f"approved:{label}"
 
-    gated_toolkit = Toolkit(name="gated", tools=[gated], requires_confirmation_tools=["gated"])
-    catalog = await _catalog(tmp_path / "cli", [_toolkit("shell", run_shell_command), adapt_toolkit(gated_toolkit)])
+    gated_toolkit = replace(_function(gated, requires_confirmation=True), name="gated")
+    catalog = await _catalog(tmp_path / "cli", [_toolkit("shell", run_shell_command), gated_toolkit])
     catalog.store = create_agent_state_storage("helper", tmp_path / "cli")
 
     async def authorize(key, arguments) -> None:
