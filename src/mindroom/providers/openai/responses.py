@@ -147,7 +147,8 @@ class ResponsesAdapter:
         Images count by their visual patches on a model priced by them, read from each image's header; an image file
         that cannot be read is sent as the media fallback's note, so it counts the media allowance instead.
         """
-        size = partial(route_request_tokens, self.token_counter, request, start, self._parts)
+        counter, scope = self.token_counter, self.wire.reset_scope
+        size = partial(route_request_tokens, counter, request, start, self._parts, reset_scope=scope)
         if not responses_replay_uses_visual_tokens(self.identity.id):
             return size()
         try:

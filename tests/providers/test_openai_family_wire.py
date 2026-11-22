@@ -26,6 +26,7 @@ from structlog.testing import capture_logs
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.history.request_size import RequestSizer
 from mindroom.llm.errors import (
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -36,7 +37,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.llm.media import Audio, File, Image
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.provider import (
     DeferredTools,
     ModelRequest,
@@ -49,6 +50,7 @@ from mindroom.llm.provider import (
     UsageReported,
     complete,
 )
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import native_compaction_route
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.openai import build as openai_build
@@ -62,6 +64,9 @@ from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import ResponsesStream
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.media import FALLBACK_MARKER
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
+from tests.history_helpers import stamp_request_identity
 from tests.providers.golden_support import PacedBytes, encoded_response, httpx2_transport, pipeline_provider
 from tests.providers.openai_family_support import (
     golden_provider,
@@ -1865,6 +1870,7 @@ def test_codex_native_compaction_follows_the_endpoint_and_never_recovers_sticky_
     assert isinstance(adapter, ResponsesAdapter)
     assert adapter.capabilities.native_compaction is expected
     assert adapter.capabilities.sticky_replay_recovery is None
+    assert adapter.capabilities.replay_reset_scope is None
 
 
 @pytest.mark.asyncio
@@ -1903,6 +1909,9 @@ async def test_openrouter_responses_native_compaction_wire_send(tmp_path: Path) 
     assert turn.message.provider_data["mindroom_native_compaction"]["route"] == native.route
 
 
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+)
 _STICKY_400_BODY = {
     "error": {
         "message": (
@@ -2250,6 +2259,72 @@ async def test_openrouter_responses_recovery_boundary_persists_to_following_requ
         assert not any(item.get("type") == "compaction" for item in third_input)
         assert "Earliest question before compaction" in third_json
         assert "enc-reason-openai" in third_json
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_request_after_recovery_is_sized_as_the_wire_sends_it(tmp_path: Path) -> None:
+    """Without a replacement checkpoint the next request replays the whole history, which its size must cover.
+
+    The answer after the old checkpoint reported the small request that checkpoint left, and the attachment before
+    the checkpoint went unsent then; neither describes the request after the reset.
+    """
+    recovered_output = [
+        {"id": "rs_openai", "type": "reasoning", "summary": [], "encrypted_content": "enc-reason-openai"},
+        {
+            "id": "msg_new",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Recovered", "annotations": []}],
+        },
+    ]
+    replies = [
+        _json_reply(_STICKY_400_BODY, status=400),
+        _responses_reply(*_text_events("Recovered"), _completed(recovered_output)),
+        _responses_reply(*_text_events("Next ok"), _completed()),
+    ]
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(replies[len(sent) - 1])
+
+    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    provider = pipeline_provider(adapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+    history = _encrypted_history(native)
+    early_text = "Earliest question before compaction. " + "The long trip notes go on. " * 4_000
+    history[0] = replace(
+        history[0],
+        content=early_text,
+        images=[Image(id="att_map", content=_PNG, mime_type="image/png")],
+    )
+    # The answer after the checkpoint anchors a request that still replays the checkpoint, at the size it reported.
+    anchor = history[5]
+    anchor.metrics = MessageMetrics(tokens=TokenCounts(input_tokens=150, output_tokens=5))
+    anchor.provider_data = {**anchor.provider_data, **model_provenance(adapter.identity.id, adapter.identity.provider)}
+    stamp_request_identity(anchor, provider, ModelRequest(messages=history[:5], native_compaction=native))
+    sizer = RequestSizer(provider, "openai")
+    before = ModelRequest(messages=history, native_compaction=native)
+    assert sizer.size(before).reported
+    assert sizer.size(before).tokens < 1_000
+
+    recovered = await complete(provider, before)
+    follow_up = ModelRequest(
+        messages=[*history, recovered.message, Message(role="user", content="Follow-up after recovery")],
+        native_compaction=native,
+    )
+    size = sizer.size(follow_up)
+    await complete(provider, follow_up)
+
+    third_input = json.loads(sent[2].content)["input"]
+    assert early_text in json.dumps(third_input)
+    assert any(part.get("type") == "input_image" for part in third_input[0]["content"])
+    assert not size.reported
+    assert size.tokens >= count(adapter.token_counter, early_text) + MEDIA_ALLOWANCE_TOKENS
+    assert size.tokens == provider.request_tokens(follow_up)
 
 
 @pytest.mark.asyncio

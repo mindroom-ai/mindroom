@@ -30,20 +30,16 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import (
+    ENCRYPTED_REPLAY_RESET_KEY,
     NATIVE_CHECKPOINT_KEY,
-    checkpoint_items,
-    checkpoint_tail,
     native_checkpoint_state,
+    native_replay,
 )
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
-from mindroom.providers.openai.response_replay import (
-    ENCRYPTED_REPLAY_RESET_KEY,
-    RESPONSE_OUTPUT_KEY,
-    assistant_replay_items,
-)
+from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY, assistant_replay_items
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
@@ -202,24 +198,12 @@ def responses_replay(
     """Decide whether a request with storage setting ``store`` continues the latest stored response in ``messages``.
 
     Portable replay, an unstored request, a history without a stored response, and one whose latest response was not
-    stored or holds another conversation send the history explicitly. A persisted reset boundary on ``reset_scope``
-    (or ``strip_encrypted``) rebuilds earlier turns without encrypted state until a newer checkpoint supersedes it.
+    stored or holds another conversation send the history explicitly. The history is ``native_replay``'s projection,
+    which a reset on ``reset_scope`` or a request that sends no encrypted state (``strip_encrypted``) starts over.
     """
     route = native_compaction.route if native_compaction is not None else None
-    history, encrypted_from = list(messages), len(messages) if strip_encrypted else 0
-    if not strip_encrypted:
-        for i in range(len(messages) - 1, -1, -1):
-            msg = messages[i]
-            if checkpoint_items(msg, route):
-                history = checkpoint_tail(messages, i)
-                break
-            if (
-                reset_scope is not None
-                and msg.role == "assistant"
-                and (msg.provider_data or {}).get(ENCRYPTED_REPLAY_RESET_KEY) == reset_scope
-            ):
-                encrypted_from = i
-                break
+    projected = native_replay(messages, route, reset_scope=reset_scope, stripped=strip_encrypted)
+    history, encrypted_from = projected.messages, projected.encrypted_from
     latest = _latest_response(history)
     continues = (
         latest is not None
@@ -283,15 +267,6 @@ def _call_ids(messages: Sequence[Message]) -> dict[str, str]:
     return call_ids
 
 
-def _assistant_items(replay: ResponsesReplay, index: int, message: Message) -> list[dict[str, Any]]:
-    allow_encrypted = index >= replay.encrypted_from
-    return assistant_replay_items(
-        message,
-        replay.native_route if allow_encrypted else None,
-        encrypted_reasoning=allow_encrypted,
-    )
-
-
 def _input_items(replay: ResponsesReplay, provider: str) -> list[Any]:
     """Convert the messages a request sends to Responses input items, under the tool-call ids the request sends.
 
@@ -310,7 +285,7 @@ def _input_items(replay: ResponsesReplay, provider: str) -> list[Any]:
                 call_id = call_ids.get(result.call_id, result.call_id)
                 items.append({"type": "function_call_output", "call_id": call_id, "output": result.content})
         else:
-            items.extend(_assistant_items(replay, index, message))
+            items.extend(assistant_replay_items(message, replay.native_route, encrypted=index >= replay.encrypted_from))
     return items
 
 
@@ -336,7 +311,7 @@ def replays_encrypted_state(replay: ResponsesReplay) -> bool:
         item.get("encrypted_content")
         for index, message in enumerate(canonical[replay.sent_from :], start=replay.sent_from)
         if message.role == "assistant"
-        for item in _assistant_items(replay, index, message)
+        for item in assistant_replay_items(message, replay.native_route, encrypted=index >= replay.encrypted_from)
     )
 
 

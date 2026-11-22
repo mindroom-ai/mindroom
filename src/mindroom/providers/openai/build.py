@@ -529,6 +529,8 @@ def _build_responses(
     identity = model_identity(model_config, endpoint=endpoint)
     model_id = identity.id
     openrouter = route_key == "openai" and endpoint == OPENROUTER_BASE_URL_DEFAULT
+    # Only OpenRouter binds encrypted replay state to the upstream that created it, so only this route resets it.
+    reset_scope = f"{identity.provider}:{model_id}:{endpoint}" if openrouter else None
     capabilities = Capabilities(
         structured_output="native",
         omitted_media=frozenset({"audio", "video"}),
@@ -536,13 +538,14 @@ def _build_responses(
         native_tool_search=openai_native_tool_search_supported(route_key, model_id, base_url=base_url),
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings, openrouter=openrouter),
         provider_default_sampling=_provider_default_sampling(model_id),
+        replay_reset_scope=reset_scope,
     )
     wire = ResponsesWire(
         route=route_key,
         store=store,
         explicit_breakpoint=route_key == "openai" and _supports_explicit_breakpoint(model_id, endpoint),
         default_instructions=settings.default_instructions or runtime.codex_default_instructions,
-        reset_scope=f"{identity.provider}:{model_id}:{endpoint}" if openrouter else None,
+        reset_scope=reset_scope,
     )
     http_client = runtime.http_client
     options = _client_options(settings, base_url=base_url)

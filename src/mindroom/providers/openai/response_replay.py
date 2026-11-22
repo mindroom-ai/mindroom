@@ -16,12 +16,9 @@ from mindroom.providers.openai.legacy_response_replay import legacy_tool_search_
 if TYPE_CHECKING:
     from mindroom.llm.messages import Message
 
-__all__ = ["ENCRYPTED_REPLAY_RESET_KEY", "RESPONSE_OUTPUT_KEY", "assistant_replay_items", "recorded_output"]
+__all__ = ["RESPONSE_OUTPUT_KEY", "assistant_replay_items", "recorded_output"]
 
 RESPONSE_OUTPUT_KEY = "mindroom_response_output"
-# Provider-data marker recording the route scope on a response that recovered from sticky encrypted replay;
-# turns before the latest matching marker rebuild from canonical text and calls without encrypted state.
-ENCRYPTED_REPLAY_RESET_KEY = "mindroom_encrypted_replay_reset"
 _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 
 
@@ -35,22 +32,21 @@ def assistant_replay_items(
     message: Message,
     native_route: str | None,
     *,
-    encrypted_reasoning: bool = True,
+    encrypted: bool = True,
 ) -> list[dict[str, Any]]:
     """Return the input items that replay one assistant message, whose calls carry the request's tool-call ids.
 
     A checkpoint on ``native_route`` stands for the message, and a recorded output carrying encrypted reasoning goes
-    as recorded while canonical history still holds what it records; any other message—or one with
-    ``encrypted_reasoning=False``—falls through to ``_rebuilt``, dropping reasoning and provider item IDs while
-    keeping canonical text, calls, and hosted tool-search items.
+    as recorded while canonical history still holds what it records; any other message is rebuilt, as is every
+    message of a replay that sends no provider-encrypted state (``encrypted`` false).
     """
-    if checkpoint := checkpoint_items(message, native_route):
+    if encrypted and (checkpoint := checkpoint_items(message, native_route)):
         return checkpoint
     calls = _function_call_items(message)
     output = recorded_output(message)
     if output is None:
         return _rebuilt(message, legacy_tool_search_items(message), calls)
-    if encrypted_reasoning and (replayed := _as_recorded(message, output, calls)) is not None:
+    if encrypted and (replayed := _as_recorded(message, output, calls)) is not None:
         return replayed
     return _rebuilt(message, [item for item in output if item.get("type") in _TOOL_SEARCH_ITEM_TYPES], calls)
 
