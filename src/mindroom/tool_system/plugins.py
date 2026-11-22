@@ -614,9 +614,9 @@ def _worker_preload_plugins(config: Config, runtime_paths: RuntimePaths) -> tupl
         except Exception:  # noqa: S112 - the load that follows reports a plugin that does not resolve.
             continue
         entries.append(entry)
-        # Importing writes bytecode caches, so they are no change to the plugin.
+        # Importing writes bytecode caches and reading a checkout's status rewrites its index: neither changes the plugin.
         for directory, subdirectories, filenames in root.walk():
-            subdirectories[:] = sorted(name for name in subdirectories if name != "__pycache__")
+            subdirectories[:] = sorted(name for name in subdirectories if name not in {"__pycache__", ".git"})
             for filename in sorted(filenames):
                 with suppress(OSError):
                     stat = (directory / filename).stat()

@@ -71,6 +71,17 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   An orphan sweep only trusts manifests and markers for subagent and named workers. A script worker’s run retries its own removal.
   After a subagent worker's Deployment disappears for any reason (including operator deletion), its directory is removed once the sweep has seen it absent for five minutes and no dependent ReplicaSet or non-terminal pod remains; that costs a cold start and caches, not workspace data.
 - **The worker protocol moves to 9 with an unchanged wire schema**, as 8 did, because a runner must map a `named=` key to its normal key.
+- **A Kubernetes worker prepares itself behind its health check, and the call waits for that separately.**
+  A production profile of `workers run` found 90 to 95 % of a warm call in the worker's per-call child, which imported every plugin again, and a cold start that reported ready at 20 s but ran its command at 72 s, after a lazy venv (12 s), shell supervisor (2 s), and forkserver template (26 s).
+  Doing that work before the health check answers would put it inside `readyTimeoutSeconds`, which already covers scheduling, the image pull, and the pod start: 32 to 49 s in a burst of 32 workers, where the preparation itself takes about three times as long, so workers would be marked failed on a busy node.
+  The worker therefore answers as on a lazy start and reports the setup's state in the same answer, and the primary waits for it with its own budget and reports `preparing`, so "ready" still means a command runs at once.
+  Every failure of the eager setup falls back to the lazy path a first request always had, which also reports the real error.
+  The health answer gained an optional field and the startup manifest an optional key, both ignored by the other release, so the worker protocol stays at 9.
+- **A forkserver template imports only plugins that opt in, once, and is never changed afterwards.**
+  Importing in the template runs a plugin before the call's working directory and environment apply, and shares its threads, open files, and state with every call, which is only correct for a plugin that promises it, so `worker_preload` in the plugin manifest defaults to off.
+  The primary lists the enabled plugins in the worker's startup manifest, because a worker pod has no config file and would otherwise learn its plugins only from the first request.
+  A request whose opt-in plugins or their files differ from what the template imported drops the inherited plugins in its own child and imports them there, so no request replaces a template another request is about to fork from.
+  The preload reaches the template through its environment, and the template has no control channel, because tool code runs under the same user and could otherwise change what later calls inherit.
 
 ## Rejected alternatives
 
@@ -95,7 +106,9 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
 - A closed stdout pipe is not handled by `workers run` yet; that comes with the change to how output travels.
 - A subagent owns the named workers its own turn starts, not its caller's, and only when its own agent sets `named_workers`.
 - Background scripts, OpenAI-compatible API requests, and other calls without a reply's turn cannot name a worker.
-- Each named worker starts with empty package caches and costs a cold start, and nodes the autoscaler adds can take longer than `readyTimeoutSeconds`. Dedicated workers now warm their venv, shell supervisor, and forkserver template before `/healthz` reports ready, the post-ready health check uses a 0.5 s connect timeout with fast retries, and the forkserver template preloads plugins once (in place for the first request's snapshot) so warm calls do not re-import them. Burst admission still lists Deployments under `_admission_lock` to keep the per-agent and deployment limits exact.
+- Each named worker starts with empty package caches and costs a cold start, and nodes the autoscaler adds can take longer than `readyTimeoutSeconds`.
+- A worker whose opt-in plugin changed on disk imports it in every call until the worker restarts, and a package upgraded in the worker's venv is not picked up by plugins the template already imported.
+- The runner process still imports a request's plugins itself on its first request, and admission still lists the worker Deployments once per new worker under one lock.
 - With a `ReadWriteOnce` storage claim every worker runs on the runtime's node, so named workers add isolation and their own resource limits there, not capacity.
 - Dedicated subagent workers are still not counted against any limit.
 - The Docker backend runs no named workers and does not retry a failed removal from the worker's files.

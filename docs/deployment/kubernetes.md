@@ -158,7 +158,8 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 | `storage.mountPath` | `MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH` | Chart: `/app/agent_data`; otherwise `/app/worker` | Where workers mount storage |
 | `workers.kubernetes.storageSubpathPrefix` | `MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX` | `workers` | Storage directory for worker-local caches |
 | `workers.kubernetes.port` | `MINDROOM_KUBERNETES_WORKER_PORT` | `8766` | Internal Service and container port |
-| `workers.kubernetes.readyTimeoutSeconds` | `MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS` | `60` | How long the primary waits for a worker pod to finish eager startup (venv, shell supervisor, forkserver template) and answer `/healthz` |
+| `workers.kubernetes.readyTimeoutSeconds` | `MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS` | `60` | How long the primary waits for a worker to become ready |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_SETUP_TIMEOUT_SECONDS` | `180` | How long a call then waits for a worker that just started to finish preparing itself, before it runs anyway |
 | `workers.kubernetes.idleTimeoutSeconds` | `MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS` | `1800` | Idle time before a worker may scale to zero |
 | `workers.cleanupIntervalSeconds` | `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` | Chart: `30`; otherwise `0` (no automatic cleanup) | How often idle-worker cleanup runs |
 | `workers.kubernetes.reconcilePodTemplates` | `MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES` | `true` | Recreate workers whose image, env, or resources changed |
@@ -177,6 +178,10 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 Changing the image, environment, resources, or RuntimeClass recreates scaled-down workers on the next cleanup pass and running workers on their next use, so no manual recycling is needed; finish active work before changing them.
 Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior.
 
+A worker that just started is ready as soon as it answers, and then prepares its Python environment, shell, and tool runtime in the background.
+The call that started it shows `worker <name>: preparing (<n>s)` while it waits for that, for at most the setup timeout; a preparation that fails or takes longer never fails the worker, and the call then prepares what is missing itself.
+The tool runtime imports the plugins that set [`worker_preload`](../plugins.md#importing-once-per-worker) once for all the worker's calls.
+
 Each worker's `/tmp` is disk-backed, and exceeding its size limit evicts that worker pod rather than refusing writes.
 `MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT` (for example `4Gi`) also requests and limits the same amount of container `ephemeral-storage`, which clusters such as GKE Autopilot otherwise cap at 1 GiB.
 Tool subprocesses already get a `TMPDIR` on persistent storage, so only explicit `/tmp` paths use this space.
@@ -187,7 +192,7 @@ Because `free` cannot be constrained through environment variables and still rep
 Precedence from lowest to highest is: primary/manifest/`extra_env_passthrough` values < derived pod values < operator `workers.kubernetes.extraEnv` (`MINDROOM_KUBERNETES_WORKER_ENV_JSON`; setting `PYTHON_CPU_COUNT` or `OMP_NUM_THREADS` there also affects the runner process itself) < `.mindroom/worker-env.sh` exports < explicit per-call shell environment (`tool:environment` set or unset).
 The hook step applies only where the hook is sourced (shell commands, background scripts, and the Python tool); plugin services get the derived and operator values without it. A hook overrides by exporting a value: its `unset` does not remove an inherited one, as for any other variable, while a per-call unset does.
 A `.mindroom/worker-env.sh` hook that sets only `MINDROOM_WORKER_CPUS` does not re-derive `OMP_NUM_THREADS`, `PYTHON_CPU_COUNT`, or `PYTEST_XDIST_AUTO_NUM_WORKERS`.
-In `forkserver` mode (production Kubernetes workers), `run_python_code` runs in a Python process started before `.mindroom/worker-env.sh`, so a hook's `PYTHON_CPU_COUNT` updates `os.environ` there without changing `os.cpu_count()`; in `subprocess` mode (and in Python processes started from shell commands), a fresh interpreter starts after the hook and honors its `PYTHON_CPU_COUNT`. Each dedicated worker prepares its Python venv, shell supervisor, and forkserver template before `/healthz` answers ready, and the post-ready health check probes with a 0.5 s connect timeout and fast retries while Service Endpoints propagate. The forkserver template preloads plugins once (or in place on the first request's snapshot when no config file is mounted) and recycles when plugin files change, falling back safely if a plugin starts threads during import.
+In `forkserver` mode (production Kubernetes workers), `run_python_code` runs in a Python process started before `.mindroom/worker-env.sh`, so a hook's `PYTHON_CPU_COUNT` updates `os.environ` there without changing `os.cpu_count()`; in `subprocess` mode (and in Python processes started from shell commands), a fresh interpreter starts after the hook and honors its `PYTHON_CPU_COUNT`.
 
 `MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON` maps a Matrix user ID to `requests` and/or `limits` with `cpu` and/or `memory`, for example `{"@alice:example.org": {"limits": {"memory": "4Gi"}}}`.
 Listed quantities replace the global values for that requester's `user` and `user_agent` workers; shared and unscoped workers, other requesters, and background-script profiles are unchanged.

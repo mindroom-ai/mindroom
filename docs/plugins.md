@@ -265,7 +265,8 @@ Other `mindroom` modules can change in any release.
   "lifecycle_module": "lifecycle.py",
   "origin_module": "origin.py",
   "skills": ["skills"],
-  "reserved_namespaces": ["com.example.my_plugin."]
+  "reserved_namespaces": ["com.example.my_plugin."],
+  "worker_preload": false
 }
 ```
 
@@ -281,6 +282,7 @@ Other `mindroom` modules can change in any release.
 | `origin_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served on the plugin's own hosts, and optionally `async def serves(label)`; see [Origins of your own](#origins-of-your-own) |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
 | `reserved_namespaces` | list of non-empty strings | no | Prefixes of the Matrix event types and content keys that only the plugin writes; see [Reserved namespaces](#reserved-namespaces) |
+| `worker_preload` | boolean | no | `true` imports the plugin once per Kubernetes worker instead of in every tool call; default `false`; see [Importing once per worker](#importing-once-per-worker) |
 
 Every declared module file and skill directory must exist.
 Unknown fields are ignored.
@@ -808,6 +810,21 @@ Call a sub-toolkit's functions through `toolkit_functions(toolkit)` from `mindro
 A function that runs in a worker is async, so await a function `inspect.iscoroutinefunction` reports and run any other off the event loop, for example with `asyncio.to_thread`.
 A tool that calls other tools this way must itself be async.
 Calling `toolkit.functions[name]` directly skips all of that: the validation, the output file, and the worker.
+
+### Importing once per worker
+
+A tool call that runs in a Kubernetes worker imports the configured plugins in a fresh process, so every call pays for those imports again.
+A plugin whose manifest sets `"worker_preload": true` is imported once when the worker starts, and the calls in that worker reuse it.
+Setting it promises that importing the plugin's tools, hooks, and OAuth modules:
+
+- Reads nothing a call sets: the import runs before any call, in the worker's own working directory and environment, without the call's `.mindroom/worker-env.sh` values or per-call environment.
+- Leaves no thread running and no file, socket, or database connection open, because every later call would share it.
+- Keeps no state that must differ between calls, such as a cache, a counter, or a seeded random generator other than Python's `random`.
+- Does not need a package installed or upgraded in the worker afterwards, because the packages it imported stay as imported until the worker restarts.
+
+MindRoom checks the second promise after the import: when the plugin left a thread or an open file behind, or failed to import, the worker logs a warning and its calls import the plugin themselves, as without the setting.
+The calls also import the plugin themselves once any file under its directory changes, other than under `.git` and `__pycache__`, or when a config change enables or disables a plugin that sets `worker_preload`; workers started after the change import once again.
+Every other plugin, and every plugin in a Docker worker or the shared sandbox runner, is imported by each call.
 
 ## OAuth providers
 
