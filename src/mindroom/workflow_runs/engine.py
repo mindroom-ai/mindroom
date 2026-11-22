@@ -1650,9 +1650,12 @@ class WorkflowEngine:
         with suppress(SupersededAttemptError):
             while left is not None and left > 0:
                 await asyncio.sleep(min(_CHARGE_SECONDS, left))
-                run = self.store.get_run(run_id)
-                if charge := self._time_left(run):
-                    run = await asyncio.to_thread(partial(self.store.update_run, run_id, epoch, **charge))
+                # Under the run's lock, as a change of the run's state charges it: the time left is read and written
+                # by one of them at a time, so neither takes the same time off twice or writes back an older time.
+                async with self._condition(run_id):
+                    run = self.store.get_run(run_id)
+                    if charge := self._time_left(run):
+                        run = await asyncio.to_thread(partial(self.store.update_run, run_id, epoch, **charge))
                 left = run.runtime_seconds_left
             if left is not None:
                 # An attempt that had ended already is judged as the pass judges it, before the run is stopped.

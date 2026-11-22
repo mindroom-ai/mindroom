@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
+from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -612,6 +613,8 @@ def _left(stack: WorkflowStack) -> float | None:
 
 
 _OUT_OF_TIME = "The run used its 1 hours of working time. resume_workflow continues it."
+# The write of the watch that charges the first ten minutes of the run's hour.
+_CHARGED = {"runtime_seconds_left": 3000.0}
 
 
 @pytest.mark.asyncio
@@ -736,6 +739,37 @@ async def test_working_time_is_read_and_charged_on_the_event_loop_only(
     await timed.until(lambda: timed.store.get_run(timed.run_id).state is WorkflowRunState.RUNNING)
 
     assert (seen, _left(timed)) == ({threading.current_thread()}, 3000)
+
+
+@pytest.mark.asyncio
+async def test_time_charged_while_the_run_starts_to_wait_stays_charged(
+    timed: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run's time has one writer at a time: the look that shows it waiting does not write back an older time.
+
+    The watch charged ten minutes and its write is on its way. A look at the run that read the run before that write
+    landed, and wrote after it, would give the ten minutes back.
+    """
+    charge = HeldWrite(timed.store, "update_run", monkeypatch, when=lambda *_args, **changes: changes == _CHARGED)
+    timed.now += 600
+    await charge.reached()
+    waits = lambda *_args, **changes: changes.get("state") is WorkflowRunState.WAITING  # noqa: E731
+    shown = HeldWrite(timed.store, "update_run", monkeypatch, when=waits)
+    timed.resolver.hold_approvals = asyncio.Event()
+    call = asyncio.create_task(timed.submit("@0", "tool", _A))
+    # A look that does not wait for the charge reads the run meanwhile and stands before its own write.
+    with suppress(TimeoutError):
+        async with asyncio.timeout(1):
+            await timed.until(lambda: shown.stands)
+
+    await charge.release()
+    await shown.reached()
+    await shown.release()
+    await call
+
+    run = timed.store.get_run(timed.run_id)
+    assert (run.state, run.runtime_seconds_left) == (WorkflowRunState.WAITING, 3000)
 
 
 @pytest.mark.asyncio

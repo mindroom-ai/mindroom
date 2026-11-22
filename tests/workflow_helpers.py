@@ -599,6 +599,11 @@ class HeldWrite:
 
         monkeypatch.setattr(store, name, held)
 
+    @property
+    def stands(self) -> bool:
+        """Whether the call got as far as its write."""
+        return self._entered.is_set()
+
     async def reached(self) -> None:
         """Wait until the call stands before its write."""
         assert await asyncio.to_thread(self._entered.wait, SETTLE_TIMEOUT_SECONDS)
