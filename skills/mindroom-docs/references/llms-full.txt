@@ -24100,6 +24100,7 @@ The gateway checks the device's tailnet login, and OpenSSH checks its key agains
 ## Configure MindRoom
 
 In `config.yaml`, `tailnet_ssh.logins` maps concrete Matrix user IDs to distinct, exact Tailscale or Headscale logins (nonempty, no surrounding whitespace).
+Headscale users created with bare names (for example `alice`) report that bare username rather than an email address; verify the exact login with `tailscale status --json` (`User[].LoginName`) on a joined client.
 `tailnet_ssh.authorized_keys` maps those IDs to lists of OpenSSH `.pub` lines, without key options or private keys.
 Both maps default to empty; each requester needs a login and at least one key, and tagged client devices are not admitted.
 Set the agent's `tailnet_ssh` boolean to `true` (default `false`) and make sure its `shell` tool runs on the worker.
@@ -24132,13 +24133,15 @@ agents:
 Use the full MindRoom worker image (it includes OpenSSH, SFTP, rsync, and the `mindroom` user) and the gateway image for the matching release.
 Create a reusable, non-ephemeral tailnet auth key that can enroll multiple nodes and apply any tags you configure.
 For Headscale, use a reusable pre-auth key and your Headscale URL; leave the login server unset for Tailscale.
+With a tagged Headscale pre-auth key (for example `--tags tag:mindroom-worker`), leave `TAILNET_SSH_TAGS` and `tailnetSsh.tags` unset so the key's tag applies—Headscale 0.29.7 rejects enrollment when advertised tags are also set.
+Configure `tagOwners` in your Headscale policy when using tags.
 Keep the enrollment key in the gateway only and the listener token in the primary and gateway only.
 
 ### Docker
 
 Enable the primary's internal listener with a strong random `MINDROOM_TAILNET_SSH_GATEWAY_TOKEN`.
 The listener binds the primary's `--api-host` on `MINDROOM_TAILNET_SSH_PORT` (default `8769`), which must differ from the API and script gateway ports.
-With the full image, run the primary and worker as UID `1000` so sshd can read the projected host key.
+With the full image, run the primary and worker as UID `1000` so sshd (with `StrictModes yes`) can accept the projected host key, `authorized_keys`, and their parent directory (a host mount owned by another UID, such as macOS UID `501`, fails `StrictModes`).
 
 The gateway must reach that listener and the worker endpoints: [Docker](https://docs.mindroom.chat/deployment/sandbox-proxy/#optional-docker-worker-isolation) maps worker port `2222` to a host port on `MINDROOM_DOCKER_WORKER_PUBLISH_HOST` (default `127.0.0.1`) and advertises `MINDROOM_DOCKER_WORKER_ENDPOINT_HOST` (defaults to the publish host).
 Use a specific IP for the publish host, not a hostname or wildcard, and keep these ports private.
@@ -24151,7 +24154,7 @@ Put the gateway settings in a restricted env file:
 | `TAILNET_SSH_AUTH_KEY` | Tailnet enrollment key |
 | `TAILNET_SSH_PRIMARY_URL` | Internal listener URL (default `http://127.0.0.1:8769`) |
 | `TAILNET_SSH_LOGIN_SERVER` | Optional Headscale URL |
-| `TAILNET_SSH_TAGS` | Optional tags for enrolled nodes, separated by commas or spaces |
+| `TAILNET_SSH_TAGS` | Optional tags for enrolled nodes, separated by commas or spaces (leave unset with a tagged Headscale pre-auth key) |
 | `TAILNET_SSH_STATE_DIR` | Persistent node state directory (default `/state`) |
 | `HTTPS_PROXY` | Optional proxy for tailnet control and relay traffic; internal calls stay direct |
 
@@ -24188,7 +24191,7 @@ tailnetSsh:
   enabled: true
   authKeySecret: mindroom-tailnet-key
   # loginServer: https://headscale.example.org
-  # tags: ["tag:mindroom-worker"]
+  # tags: ["tag:mindroom-worker"] # leave unset with a tagged Headscale pre-auth key
 ```
 
 Use a cluster that enforces NetworkPolicies and keep both ingress policies shown above, or equivalent isolation, so unrelated pods cannot reach the private listener or worker sshd.
@@ -24207,7 +24210,12 @@ The gateway policy allows DNS, internal endpoints, and outbound TCP 443 to publi
 The gateway enrolls one node per eligible worker, even before it has started, so there is no need to run a tool first.
 Find the worker's node in the tailnet control plane and use its actual MagicDNS hostname.
 For `user` and `user_agent` workers, the hostname is derived from a key containing the Matrix user ID and can expose it to the operator's tailnet.
-The operator can derive its public host key from the Ed25519 key for that worker in the primary's `tracking/tailnet_ssh.json`; share only the public key and pin it to the hostname in `~/.ssh/known_hosts`.
+The operator can derive its public host key from `.links[].host_key` for that worker in the primary's `<storage_path>/tracking/tailnet_ssh.json`; share only the public key and pin it to the hostname in `~/.ssh/known_hosts`:
+
+```bash
+jq -r --arg host "v1-default-shared-research" '.links[] | select(.hostname == $host) | .host_key' \
+  <storage_path>/tracking/tailnet_ssh.json | ssh-keygen -y -f /dev/stdin
+```
 
 ```bash
 ssh -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519_mindroom mindroom@v1-default-shared-research.tail1234.ts.net
