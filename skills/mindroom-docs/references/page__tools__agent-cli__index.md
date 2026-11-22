@@ -153,14 +153,14 @@ All CLI-originated messages go to stderr as `mindroom-agent:` lines, never stdou
 If the shell result is [auto-saved](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files), the CLI prints its preview to stdout and the saved file's path to stderr. The preview may not include the last lines.
 `--timeout` (default 3600 seconds) stops the command, and `--resource-profile` sizes the worker when its name is first used.
 If the CLI loses the submission response or cannot read a running command’s receipt, it retries reading the receipt for up to a minute. It never submits the command twice.
-Sending `SIGINT`, `SIGTERM`, or `SIGHUP` to `workers run`, or closing its stdout pipe, asks MindRoom to cancel the remote command and its process tree (with a 5-second confirmation budget) before exiting with `128 + signal`. If cancellation cannot be confirmed, stderr warns that the command may still be running with its call ID.
+Sending `SIGINT`, `SIGTERM`, or `SIGHUP` to `workers run`, or closing its stdout pipe, asks MindRoom to cancel the remote command and its process tree (with an 8-second client budget over the server's 5-second settle wait, retrying once on `401` if cancel overtook submit) before exiting with `128 + signal`. Unless cancellation happened before dispatch, stderr warns that cancellation was requested and the command may still be running with its call ID. If a `SIGINT`, `SIGTERM`, or `SIGHUP` arrives after the command already completed, stderr notes that it had already finished and `workers run` exits with the command's own exit code.
 
 | Code | Meaning |
 | --- | --- |
 | The command's exit code | The command ran in the named worker; a command a signal killed exits with 128 plus the signal's number, such as `137` |
 | `124` | The command was stopped at `--timeout`; `mindroom-agent: stopped after Ns` is on stderr |
-| `125` | The command never ran in the named worker: the call was refused, hit a limit, could not start the worker, or was cancelled server-side; the reason is on stderr |
-| `255` | The command's outcome is unknown and it may still be running (for example, the receipt stayed unreadable for a minute); the reason and call ID are on stderr |
+| `125` | Known not to have run in the named worker: refusal, limits, validation error, worker failed to start before the command was sent, or cancelled before dispatch; the reason is on stderr (safe to retry) |
+| `255` | Outcome unknown or the command may have run: cancelled after dispatch, worker transport failure after launch, output auto-save failure, or receipt stayed unreadable for a minute; the reason and call ID are on stderr |
 | `128 + signal` | `workers run` itself was stopped by `SIGINT` (`130`), `SIGTERM` (`143`), `SIGHUP` (`129`), or a broken stdout pipe (`141`) after requesting cancellation; the notice and call ID are on stderr |
 | `2` | Invalid CLI arguments (reported on stderr only) |
 
