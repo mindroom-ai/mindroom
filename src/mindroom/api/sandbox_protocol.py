@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 from pydantic import BaseModel, Field
 
 _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
+_TIMING_MARKER = "__SANDBOX_TIMING__"
 
 
 class SandboxSubprocessEnvelope(BaseModel):
@@ -36,9 +41,28 @@ def parse_subprocess_envelope(payload: str) -> SandboxSubprocessEnvelope:
     return SandboxSubprocessEnvelope.model_validate_json(payload)
 
 
-def response_marker_payload(response_json: str) -> str:
-    """Prefix one response payload with the stderr marker."""
-    return _RESPONSE_MARKER + response_json
+def response_marker_payload(response_json: str, *, timing: Mapping[str, object] | None = None) -> str:
+    """Prefix one response payload with optional timing and the stderr marker."""
+    if timing is None:
+        return _RESPONSE_MARKER + response_json
+    return f"{_TIMING_MARKER}{json.dumps(dict(timing), sort_keys=True)}\n{_RESPONSE_MARKER}{response_json}"
+
+
+def extract_timing(stderr: str) -> dict[str, object] | None:
+    """Extract the trailing marked child-timing JSON object from subprocess stderr."""
+    response_pos = stderr.rfind(_RESPONSE_MARKER)
+    search_end = len(stderr) if response_pos == -1 else response_pos
+    marker_pos = stderr.rfind(_TIMING_MARKER, 0, search_end)
+    if marker_pos == -1:
+        return None
+    line_start = marker_pos + len(_TIMING_MARKER)
+    line_end = stderr.find("\n", line_start, search_end)
+    raw = stderr[line_start : search_end if line_end == -1 else line_end].strip()
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def extract_response_json(stderr: str) -> str | None:

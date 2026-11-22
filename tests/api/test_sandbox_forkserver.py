@@ -789,3 +789,89 @@ def test_forkserver_startup_failure_falls_back_to_spawn_per_call(
 
     assert response.ok is True
     assert response.result == "spawned"
+
+
+def _capture_log_events(
+    monkeypatch: pytest.MonkeyPatch,
+    logger_obj: object,
+    method: str,
+    target_event: str,
+) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    original = getattr(logger_obj, method)
+
+    def _wrapper(event: str, **kwargs: object) -> object:
+        if event == target_event:
+            events.append(dict(kwargs))
+        return original(event, **kwargs)
+
+    monkeypatch.setattr(logger_obj, method, _wrapper)
+    return events
+
+
+@pytest.mark.parametrize("execution_mode", ["forkserver", "subprocess"])
+def test_child_and_forkserver_emit_stage_timing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """Runner child and forkserver start emit structured per-stage timing."""
+    runtime_paths, config = _forkserver_runtime(tmp_path)
+    if execution_mode == "subprocess":
+        runtime_paths = resolve_primary_runtime_paths(
+            config_path=runtime_paths.config_path,
+            storage_path=runtime_paths.storage_root,
+            process_env={
+                "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
+                "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "60",
+            },
+        )
+
+    child_events = _capture_log_events(
+        monkeypatch,
+        sandbox_runner_module.logger,
+        "debug",
+        "sandbox_subprocess_child_timing",
+    )
+    fs_request_events = _capture_log_events(
+        monkeypatch,
+        sandbox_forkserver_module.logger,
+        "debug",
+        "sandbox_forkserver_request_timing",
+    )
+    fs_ready_events = _capture_log_events(
+        monkeypatch,
+        sandbox_forkserver_module.logger,
+        "info",
+        "sandbox_forkserver_template_ready",
+    )
+
+    manager = _SandboxForkserver()
+    monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: manager)
+    try:
+        response = sandbox_runner_module._execute_request_subprocess_sync(
+            execute_call(runtime_paths, config, tool_name="calculator", function_name="add", args=[1, 2], kwargs={}),
+        )
+    finally:
+        manager.shutdown()
+
+    assert response.ok is True, response.error
+    assert len(child_events) == 1
+    timing = child_events[0]
+    expected_child_keys = (
+        "parse_ms",
+        "config_validate_ms",
+        "available_plugins_ms",
+        "refresh_plugins_ms",
+        "execute_ms",
+        "total_ms",
+    )
+    assert all(isinstance(timing.get(k), float) and timing[k] >= 0.0 for k in expected_child_keys), timing
+    if execution_mode == "forkserver":
+        assert len(fs_ready_events) == 1
+        assert isinstance(fs_ready_events[0].get("startup_ms"), float)
+        assert fs_ready_events[0]["startup_ms"] >= 0.0
+        assert len(fs_request_events) == 1
+        assert all(
+            isinstance(fs_request_events[0].get(k), float) for k in ("template_wait_ms", "request_ms", "total_ms")
+        )

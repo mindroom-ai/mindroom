@@ -105,6 +105,7 @@ class _Template:
     socket_path: str
     stderr_path: Path
     runtime_dir: Path
+    spawned_at: float = field(default_factory=time.monotonic)
     # Set once the socket accepts connections; mutated only under the key lock.
     ready: bool = False
 
@@ -251,7 +252,8 @@ class _SandboxForkserver:
             )
         finally:
             key_lock.release()
-        return self._request(
+        template_ready_at = time.monotonic()
+        completed = self._request(
             key,
             template,
             request_env=request_env,
@@ -261,6 +263,15 @@ class _SandboxForkserver:
             bind_stop=bind_stop,
             on_progress=on_progress,
         )
+        finished_at = time.monotonic()
+        logger.debug(
+            "sandbox_forkserver_request_timing",
+            python_executable=key,
+            template_wait_ms=round((template_ready_at - now) * 1000, 1),
+            request_ms=round((finished_at - template_ready_at) * 1000, 1),
+            total_ms=round((finished_at - now) * 1000, 1),
+        )
+        return completed
 
     def shutdown(self) -> None:
         """Terminate all template processes and clear cached state."""
@@ -384,6 +395,7 @@ class _SandboxForkserver:
                     "sandbox_forkserver_template_ready",
                     python_executable=key,
                     template_pid=template.process.pid,
+                    startup_ms=round((time.monotonic() - template.spawned_at) * 1000, 1),
                 )
                 return
 

@@ -109,6 +109,7 @@ from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
     serialize_tool_execution_identity,
     visible_workspace_roots,
+    worker_log_id,
 )
 from mindroom.trafilatura_call_limit import trafilatura_request_budget_seconds
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
@@ -1178,6 +1179,13 @@ def _parse_subprocess_response(
     # The worker writes the JSON response to stderr after a marker line so that
     # tool stdout (e.g. print() inside python tools) does not corrupt the protocol.
     stderr = completed.stderr or ""
+    child_timing = sandbox_protocol.extract_timing(stderr)
+    if child_timing is not None:
+        logger.debug(
+            "sandbox_subprocess_child_timing",
+            worker=worker_log_id(worker_key) if worker_key is not None else None,
+            **child_timing,
+        )
     response_json = sandbox_protocol.extract_response_json(stderr)
     if response_json:
         try:
@@ -1471,14 +1479,17 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
         )
         return 1, "", sandbox_protocol.response_marker_payload(response.model_dump_json())
 
+    started_at = time.monotonic()
     try:
         envelope = sandbox_protocol.parse_subprocess_envelope(payload)
         request = PreparedSandboxRunnerExecuteRequest.model_validate(envelope.request)
         runtime_paths = constants.deserialize_runtime_paths(envelope.runtime_paths)
+        parsed_at = time.monotonic()
         config = Config.model_validate(
             yaml_io.safe_load(envelope.config_yaml),
             context={"runtime_paths": runtime_paths},
         )
+        config_validated_at = time.monotonic()
     except (TypeError, ValidationError, yaml.YAMLError) as exc:
         response = ExecuteResponse(
             ok=False,
@@ -1488,6 +1499,7 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
         return 1, "", sandbox_protocol.response_marker_payload(response.model_dump_json())
     if sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
         config = _config_with_available_plugins(config, runtime_paths, log_skipped_plugins=True)
+    available_plugins_at = time.monotonic()
 
     # Redirect stdout/stderr during tool execution so tool output doesn't
     # interfere with the protocol marker in the returned response text.
@@ -1498,12 +1510,23 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
         sys.path.append(str(Path.cwd()))
     job = job_control_context(JobControl()) if request.run_as_job else nullcontext()
     with redirect_stdout(captured_out), redirect_stderr(captured_err), tool_progress_reporter(report_progress), job:
-        # A fresh child loads the request's plugins itself.
         tools = refresh_plugins(config, runtime_paths).tools
+        plugins_refreshed_at = time.monotonic()
         response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config, tools))
+        executed_at = time.monotonic()
 
+    child_timing: dict[str, object] = {
+        "tool_name": request.tool_name,
+        "function_name": request.function_name,
+        "parse_ms": round((parsed_at - started_at) * 1000, 1),
+        "config_validate_ms": round((config_validated_at - parsed_at) * 1000, 1),
+        "available_plugins_ms": round((available_plugins_at - config_validated_at) * 1000, 1),
+        "refresh_plugins_ms": round((plugins_refreshed_at - available_plugins_at) * 1000, 1),
+        "execute_ms": round((executed_at - plugins_refreshed_at) * 1000, 1),
+        "total_ms": round((executed_at - started_at) * 1000, 1),
+    }
     tool_output = captured_out.getvalue() + captured_err.getvalue()
-    return 0, tool_output, sandbox_protocol.response_marker_payload(response.model_dump_json())
+    return 0, tool_output, sandbox_protocol.response_marker_payload(response.model_dump_json(), timing=child_timing)
 
 
 def _spawned_progress_reporter() -> Callable[[str], None]:
@@ -1547,10 +1570,19 @@ def _run_forkserver_template() -> int:
     from mindroom.tool_system import plugins as tool_system_plugins  # noqa: PLC0415
     from mindroom.tool_system.agno_toolkits import warm_agno_tool_imports  # noqa: PLC0415
 
+    started_at = time.monotonic()
     warm_agno_tool_imports()
+    agno_done_at = time.monotonic()
     _ = mcp_registry, tool_system_plugins
     import mindroom.tools  # noqa: F401, PLC0415
 
+    tools_done_at = time.monotonic()
+    logger.debug(
+        "sandbox_forkserver_template_preload_timing",
+        agno_ms=round((agno_done_at - started_at) * 1000, 1),
+        tools_ms=round((tools_done_at - agno_done_at) * 1000, 1),
+        total_ms=round((tools_done_at - started_at) * 1000, 1),
+    )
     return sandbox_forkserver.serve_template(socket_path, _run_subprocess_worker_payload)
 
 
