@@ -382,7 +382,7 @@ def _post_execute_cancel(
 
 async def _post_execute_stdin(
     post: Callable[..., _WorkerProxyResponse],
-    failures: dict[int, int],
+    failing: list[int],
     seq: int,
     data: str,
     eof: bool,
@@ -392,16 +392,19 @@ async def _post_execute_stdin(
     ``post`` sends through the call's own client, which keeps one connection for the chunks. Only the runner's
     answer says that stdin is closed. TimeoutError says the chunk is to be sent again, which writes it once: the
     command has not read what it was sent, or the request or its answer was lost on the way. A call that ended
-    closed its client, and the chunk sent again finds no call to write to.
+    closed its client, and the chunk sent again finds no call to write to. ``failing`` holds the chunk that failed
+    last and how often, to log one that fails again.
     """
     request = StdinRequest(protocol=WORKER_PROTOCOL_VERSION, seq=seq, b=data, eof=eof)
     try:
         response = await asyncio.to_thread(post, json=request.model_dump(mode="json"))
-        if not (refused := httpx.codes.is_client_error(response.status_code)):
+        # A 408 or 429 passes, as a 5xx does, so that chunk is sent again too; any other 4xx is a refusal.
+        passing = response.status_code in (httpx.codes.REQUEST_TIMEOUT, httpx.codes.TOO_MANY_REQUESTS)
+        if not (refused := httpx.codes.is_client_error(response.status_code) and not passing):
             response.raise_for_status()
     except (httpx.HTTPError, RuntimeError) as exc:
-        failures[seq] = failures.get(seq, 0) + 1
-        if failures[seq] == 2:
+        failing[:] = [seq, failing[1] + 1 if failing[0] == seq else 1]
+        if failing[1] == 2:
             logger.warning("worker_stdin_chunk_not_written", seq=seq, error=repr(exc))
         raise TimeoutError from None
     if refused:
@@ -526,7 +529,7 @@ def execute_worker_proxy_request(
                 if stream is not None:
                     stdin_url = f"{cancel_url.removesuffix('/cancel')}/{cancellation.request_id}/stdin"
                     post_stdin = functools.partial(client.post, stdin_url, headers=headers)
-                    stream.write_stdin = functools.partial(_post_execute_stdin, post_stdin, {})
+                    stream.write_stdin = functools.partial(_post_execute_stdin, post_stdin, [-1, 0])
             lease_id = _create_credential_lease(
                 client,
                 config=config,
