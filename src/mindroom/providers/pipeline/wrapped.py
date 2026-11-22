@@ -160,6 +160,7 @@ async def attempts(
     ``retry`` sees only the failures of attempts that committed nothing, and returns how to reissue the request, or
     None to let the failure propagate; ``next_event`` reads each event, so a stage can bound the wait for it. A failed
     attempt's partial usage is settled before the retry, and the finished turn carries the failed attempts' usage.
+    A reissue after the failure of a request resent without provider-encrypted replay state goes without it too.
     An attempt whose stream ends without ``TurnCompleted`` ended before the provider finished the turn, on every
     route, and fails with the retryable ``incomplete_stream_error``.
     """
@@ -191,12 +192,20 @@ async def attempts(
         except ProviderError as error:
             if committed or (reissue := retry(error)) is None:
                 raise
+            reissue = _keeping_replay_stripped(reissue, error)
         if (report := usage.settle()) is not None:
             yield _with_carried_usage(report, carried)
         if reissue.delay_seconds:
             await asyncio.sleep(reissue.delay_seconds)
         carried = add_usage(carried, usage.settled)
         request = reissue.request
+
+
+def _keeping_replay_stripped(reissue: Retry, error: ProviderError) -> Retry:
+    """Return ``reissue`` without provider-encrypted replay state when the attempt ``error`` failed went without it."""
+    if not error.replay_stripped:
+        return reissue
+    return replace(reissue, request=replace(reissue.request, strip_encrypted_replay=True))
 
 
 def _commits_attempt(event: StreamEvent) -> bool:

@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.errors import InvalidRequest, ProviderError, RateLimited
+from mindroom.llm.errors import ENCRYPTED_REPLAY_REJECTED, InvalidRequest, ProviderError, RateLimited
 from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.llm.request_context import with_request_headers
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
@@ -55,14 +54,8 @@ if TYPE_CHECKING:
 
 __all__ = ["ResponsesAdapter"]
 
+# OpenRouter's rejection of encrypted replay items that its routing keeps from the upstream that created them.
 _STICKY_PROVIDER_ERROR = "can only be processed by the provider that created it"
-
-
-def _fallbacks_disabled(request_params: Mapping[str, Any], extra_body: object) -> bool:
-    provider = extra_body.get("provider") if isinstance(extra_body, Mapping) else None
-    if not isinstance(provider, Mapping):
-        provider = request_params.get("provider")
-    return isinstance(provider, Mapping) and provider.get("allow_fallbacks") is False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -94,24 +87,19 @@ class ResponsesAdapter:
         )
 
     def recover_sticky_replay(self, request: ModelRequest, error: ProviderError) -> ModelRequest | None:
-        """Return ``request`` without encrypted replay state after an OpenRouter sticky-upstream failure, else None."""
-        rp = self.settings.request_params or {}
-        nested = rp.get("extra_body")
-        effective_extra = nested if "extra_body" in rp else self.settings.extra_body
-        bodies = (rp, self.settings.extra_body or {}, nested if isinstance(nested, Mapping) else {})
-        if request.strip_encrypted_replay or any("input" in body for body in bodies):
+        """Return ``request`` without encrypted replay state after an OpenRouter sticky-upstream failure, else None.
+
+        That failure is a rejection of the encrypted items, or a rate limit left after the transient retries, of a
+        request that replayed such items. The resend keeps the request's routing preferences. An authored ``input``
+        the body sends in place of the replay would go unchanged, so such a request is not resent.
+        """
+        params = self.settings.request_params or {}
+        # ``request_params.extra_body`` replaces the settings' ``extra_body`` (``responses_request_kwargs``).
+        extra_body = params.get("extra_body", self.settings.extra_body)
+        sticky = error.code == ENCRYPTED_REPLAY_REJECTED or isinstance(error, RateLimited)
+        if not sticky or "input" in params or "input" in (extra_body or {}):
             return None
-        sticky_400 = (
-            isinstance(error, InvalidRequest)
-            and (error.status_code == 400 or error.provider_code == "400")
-            and _STICKY_PROVIDER_ERROR in str(error).casefold()
-        )
-        sticky_429 = (
-            isinstance(error, RateLimited)
-            and not request.overrides.caller_retries
-            and not _fallbacks_disabled(rp, effective_extra)
-        )
-        if not (sticky_400 or sticky_429) or not replays_encrypted_state(request_replay(self.wire, request)):
+        if not replays_encrypted_state(request_replay(self.wire, request)):
             return None
         return replace(request, strip_encrypted_replay=True)
 
@@ -225,6 +213,13 @@ class ResponsesAdapter:
                     yield event
         except sdk_failures() as error:
             failure = provider_error(error, provider=self.identity.provider)
+            if (
+                self.wire.reset_scope is not None
+                and isinstance(failure, InvalidRequest)
+                and (failure.status_code == 400 or failure.provider_code == "400")
+                and _STICKY_PROVIDER_ERROR in str(failure).casefold()
+            ):
+                failure.code = ENCRYPTED_REPLAY_REJECTED
             # A request that continues a stored response sends only the messages after it.
             replay = request_replay(self.wire, request)
             failure.rejected_media = rejected_media(error, kwargs, replay.history[replay.sent_from :], chat=False)

@@ -27,7 +27,7 @@ from mindroom.providers.pipeline.wrapped import Retry, attempts
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator
 
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
 
@@ -76,16 +76,10 @@ async def _next_event(
 class _RetryBudget:
     transient: int = 0
     stalls: int = 0
-    sticky_recovered: bool = False
 
 
-def _transient_retry(
-    error: ProviderError,
-    *,
-    request: ModelRequest,
-    budget: _RetryBudget,
-    model_id: str,
-) -> Retry | None:
+def _reissue(error: ProviderError, *, request: ModelRequest, budget: _RetryBudget, model_id: str) -> Retry | None:
+    """Return how to reissue ``request`` after ``error``, or None when the error must propagate."""
     if not error.retryable:
         return None
     if error.code == STREAM_STALLED:
@@ -119,34 +113,6 @@ def _transient_retry(
     return Retry(request, delay)
 
 
-def _reissue(
-    error: ProviderError,
-    *,
-    request: ModelRequest,
-    budget: _RetryBudget,
-    model_id: str,
-    provider: str,
-    recover_sticky: Callable[[ModelRequest, ProviderError], ModelRequest | None] | None,
-) -> Retry | None:
-    """Return how to reissue ``request`` after ``error``, or None when the error must propagate."""
-    if budget.sticky_recovered:
-        return None
-    if (retry := _transient_retry(error, request=request, budget=budget, model_id=model_id)) is not None:
-        return retry
-    if recover_sticky is None or (recovered := recover_sticky(request, error)) is None:
-        return None
-    budget.sticky_recovered = True
-    logger.warning(
-        "Retrying model request without provider-encrypted replay state",
-        provider=provider,
-        model_id=model_id,
-        status_code=error.status_code,
-        error_type=type(error).__name__,
-        error=redact_sensitive_text(str(error), max_length=500),
-    )
-    return Retry(recovered)
-
-
 def _log_retry(
     error: ProviderError,
     *,
@@ -178,17 +144,33 @@ def retrying_stream(
 ) -> AsyncIterator[StreamEvent]:
     """Stream ``request``, reissuing it after a retryable failure that came before the attempt committed.
 
-    A request whose caller retries it itself passes through unchanged, without the idle limit.
+    A request whose caller retries it itself passes through unchanged, without the idle limit. On a route with
+    ``sticky_replay_recovery``, a failure the transient retries did not resolve is resent once without
+    provider-encrypted replay state. That resend is final by design: its failure gets no further retry here, and is
+    marked so the stages that rewrite the request keep that state out (``attempts``).
     """
     if request.overrides.caller_retries:
         return inner.stream(request)
-    reissue = partial(
-        _reissue,
-        request=request,
-        budget=_RetryBudget(),
-        model_id=inner.identity.id,
-        provider=inner.identity.provider,
-        recover_sticky=inner.capabilities.sticky_replay_recovery,
-    )
-    next_event = partial(_next_event, idle_timeout_seconds=idle_timeout_seconds, provider=inner.identity.provider)
+    identity, recover = inner.identity, inner.capabilities.sticky_replay_recovery
+    transient = partial(_reissue, request=request, budget=_RetryBudget(), model_id=identity.id)
+    stripped = request.strip_encrypted_replay
+
+    def reissue(error: ProviderError) -> Retry | None:
+        nonlocal stripped
+        if stripped:
+            error.replay_stripped = True
+            return None
+        if (retry := transient(error)) is not None or recover is None or (recovered := recover(request, error)) is None:
+            return retry
+        stripped = True
+        logger.warning(
+            "Retrying model request without provider-encrypted replay state",
+            provider=identity.provider,
+            model_id=identity.id,
+            status_code=error.status_code,
+            error=redact_sensitive_text(str(error), max_length=500),
+        )
+        return Retry(recovered)
+
+    next_event = partial(_next_event, idle_timeout_seconds=idle_timeout_seconds, provider=identity.provider)
     return attempts(inner, request, reissue, next_event=next_event)

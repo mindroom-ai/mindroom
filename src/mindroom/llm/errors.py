@@ -26,6 +26,9 @@ TOKENS_PER_MINUTE = "tokens_per_minute"
 # The marker of a request the provider refused because the account has no credit left or reached its monthly spend or
 # usage limit: no retry passes until the account's billing or limits change, and the request's media did not cause it.
 QUOTA_EXHAUSTED = "quota_exhausted"
+# The marker of a request rejected because it replayed provider-encrypted state another upstream created: the request
+# pipeline resends it once without that state, and the request's media did not cause it.
+ENCRYPTED_REPLAY_REJECTED = "encrypted_replay_rejected"
 # The text of a safeguard refusal, which error runs store.
 MODEL_SAFEGUARD_REFUSAL_MESSAGE = "The model's safeguards refused the response"
 
@@ -40,7 +43,9 @@ class ProviderError(Exception):
     ``retry_after_seconds`` is how long the provider's ``Retry-After`` header asked to wait before a retry.
     ``rejected_media`` holds the ids of the request's media items the failure points to: an attachment MindRoom could
     not read or download, or the attachments a provider's rejection names. For an ``InvalidRequest`` the media fallback
-    leaves out only those, when the rest of the request's media can still go.
+    leaves out only those, when the rest of the request's media can still go. ``replay_stripped`` marks the failure
+    of a request the retry stage had resent without provider-encrypted replay state, which every later reissue of the
+    request keeps out (``providers/pipeline/wrapped.py`` ``attempts``).
     """
 
     retryable: ClassVar[bool] = False
@@ -63,6 +68,7 @@ class ProviderError(Exception):
         self.provider_code = provider_code
         self.retry_after_seconds = retry_after_seconds
         self.rejected_media = rejected_media
+        self.replay_stripped = False
 
 
 class AuthenticationFailed(ProviderError):  # noqa: N818
@@ -117,6 +123,7 @@ class ModelSafeguardRefusal(ProviderError):  # noqa: N818
 
 
 __all__ = [
+    "ENCRYPTED_REPLAY_REJECTED",
     "MALFORMED_TOOL_CALL",
     "MISSING_API_KEY",
     "MODEL_SAFEGUARD_REFUSAL_MESSAGE",
