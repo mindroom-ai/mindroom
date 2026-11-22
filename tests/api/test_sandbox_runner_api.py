@@ -5725,7 +5725,7 @@ def test_sandbox_runner_worker_shell_receives_resource_limit_env_and_allows_hook
         monkeypatch.delenv(name, raising=False)
     _refresh_runner_app_from_env()
     assert sandbox_exec_module.runner_uses_dedicated_worker(
-        sandbox_runner_module.app_runtime_paths(sandbox_runner_module.app),
+        sandbox_runner_module.app_runtime_paths(runner_client.app),
     )
 
     command = [

@@ -119,12 +119,11 @@ _WORKER_TMP_SIZE_LIMIT = "1Gi"
 _CONTAINER_NAME = SANDBOX_RUNNER_CONTAINER_NAME
 # Container resource limits exposed via the downward API; without a configured limit,
 # Kubernetes reports the node's allocatable resource, which is acceptable.
+# Tool thread vars (OMP_NUM_THREADS, PYTHON_CPU_COUNT, PYTEST_XDIST_AUTO_NUM_WORKERS) are
+# derived only for tool subprocesses so the runner keeps its default thread pool budget.
 _WORKER_RESOURCE_LIMIT_ENV_SPECS: tuple[tuple[str, str, str], ...] = (
     ("MINDROOM_WORKER_CPUS", "limits.cpu", "1"),
     ("MINDROOM_WORKER_MEMORY_BYTES", "limits.memory", "1"),
-    ("OMP_NUM_THREADS", "limits.cpu", "1"),
-    ("PYTEST_XDIST_AUTO_NUM_WORKERS", "limits.cpu", "1"),
-    ("PYTHON_CPU_COUNT", "limits.cpu", "1"),
 )
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"

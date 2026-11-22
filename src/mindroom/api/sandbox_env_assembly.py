@@ -128,4 +128,7 @@ def _workspace_env_overlay_base_env(
     if prepared is None:
         for key, value in sandbox_exec.generic_subprocess_env().items():
             base_env.setdefault(key, value)
+    else:
+        for key, value in sandbox_exec.worker_resource_limit_env().items():
+            base_env.setdefault(key, value)
     return base_env
