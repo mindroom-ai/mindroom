@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 
 # The broker runs exactly when its port is set; the API never starts it, so any port enables the routes.
 _BROKER_ON = {"MINDROOM_EGRESS_BROKER_PORT": "8768"}
+_BROKER_OFF = {"MINDROOM_EGRESS_BROKER_PORT": "off"}
 
 
 @pytest.fixture
@@ -110,7 +111,11 @@ def _admin_client(egress_config_file: Path, *, broker_on: bool = True, **env: st
 
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=egress_config_file,
-        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org", **(_BROKER_ON if broker_on else {}), **env},
+        process_env={
+            "MINDROOM_OWNER_USER_ID": "@owner:example.org",
+            **(_BROKER_ON if broker_on else _BROKER_OFF),
+            **env,
+        },
     )
     main.initialize_api_app(main.app, runtime_paths)
     bind_test_embedded_runtime(main.app)

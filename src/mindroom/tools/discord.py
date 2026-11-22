@@ -72,6 +72,13 @@ if TYPE_CHECKING:
             required=False,
             default=False,
         ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="number",
+            required=False,
+            default=30,
+        ),
     ],
     dependencies=["requests"],
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#discord",

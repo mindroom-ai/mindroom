@@ -19,11 +19,12 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
 
+import httpx2
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
-from httpx import AsyncClient, ConnectError, HTTPError, HTTPStatusError, MockTransport, Request, Response
+from httpx import AsyncClient, ConnectError, MockTransport, Request, Response
 from starlette.requests import Request as StarletteRequest
 
 from mindroom import constants
@@ -1394,6 +1395,9 @@ def test_provider_exchange_and_refresh_use_oauth_client(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
+            return None
+
         async def fetch_token(self, url: str, **kwargs: object) -> dict[str, Any]:
             seen["fetch"] = {"url": url, **kwargs}
             return {
@@ -1518,9 +1522,12 @@ def test_provider_refresh_token_data_sanitizes_terminal_error_body(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
+            return None
+
         async def refresh_token(self, url: str, **_kwargs: object) -> dict[str, Any]:
-            request = Request("POST", url)
-            response = Response(
+            request = httpx2.Request("POST", url)
+            response = httpx2.Response(
                 400,
                 json={
                     "error": oauth_error,
@@ -1531,7 +1538,7 @@ def test_provider_refresh_token_data_sanitizes_terminal_error_body(
                 request=request,
             )
             msg = "Bad Request"
-            raise HTTPStatusError(msg, request=request, response=response)
+            raise httpx2.HTTPStatusError(msg, request=request, response=response)
 
     monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
@@ -1585,11 +1592,14 @@ def test_provider_refresh_token_data_handles_non_utf8_oauth_error_body(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
+            return None
+
         async def refresh_token(self, url: str, **_kwargs: object) -> dict[str, Any]:
-            request = Request("POST", url)
-            response = Response(400, content=b"\xff", request=request)
+            request = httpx2.Request("POST", url)
+            response = httpx2.Response(400, content=b"\xff", request=request)
             msg = "Bad Request"
-            raise HTTPStatusError(msg, request=request, response=response)
+            raise httpx2.HTTPStatusError(msg, request=request, response=response)
 
     monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
@@ -1610,7 +1620,7 @@ def test_provider_refresh_token_data_handles_non_utf8_oauth_error_body(
         )
 
     assert str(exc_info.value) == "OAuth token refresh failed"
-    assert type(exc_info.value.__cause__).__name__ == "HTTPStatusError"
+    assert type(exc_info.value.__cause__) is httpx2.HTTPStatusError
 
 
 @pytest.mark.parametrize("returned_refresh_token", [None, ""], ids=["null", "empty"])
@@ -1633,6 +1643,9 @@ def test_provider_refresh_token_data_preserves_existing_refresh_token_when_respo
             return self
 
         async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
             return None
 
         async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, Any]:
@@ -1762,6 +1775,9 @@ def test_provider_refresh_token_data_stamps_core_metadata_for_custom_parser(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
+            return None
+
         async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, Any]:
             return {
                 "access_token": "refreshed-access-token",
@@ -1814,6 +1830,9 @@ def test_provider_refresh_token_data_preserves_verified_claims_for_default_parse
             return self
 
         async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
             return None
 
         async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, Any]:
@@ -1870,6 +1889,9 @@ def test_google_provider_refresh_preserves_verified_claim_summary(
             return self
 
         async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
             return None
 
         async def refresh_token(self, url: str, **kwargs: object) -> dict[str, Any]:
@@ -1947,6 +1969,9 @@ def test_pkce_provider_exchange_sends_code_verifier(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
+            return None
+
         async def fetch_token(self, url: str, **kwargs: object) -> dict[str, Any]:
             seen["fetch"] = {"url": url, **kwargs}
             return {
@@ -2014,6 +2039,9 @@ def test_custom_token_parser_exchange_receives_provider_payload_and_core_stamps_
             return self
 
         async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
             return None
 
         async def fetch_token(self, _url: str, **_kwargs: object) -> dict[str, Any]:
@@ -3761,6 +3789,9 @@ def test_generated_mcp_oauth_routes_follow_agent_scope_for_connect_status_and_di
             return self
 
         async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
             return None
 
         async def fetch_token(self, url: str, **kwargs: object) -> dict[str, object]:
@@ -6523,6 +6554,9 @@ def test_status_refreshes_expired_access_token_with_refresh_token(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
+            return None
+
         async def refresh_token(self, url: str, **kwargs: object) -> dict[str, Any]:
             seen["refresh"] = {"url": url, **kwargs}
             return {
@@ -6595,10 +6629,13 @@ def test_status_keeps_connected_when_proactive_refresh_fails_for_still_valid_tok
         async def __aexit__(self, *_args: object) -> None:
             return None
 
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
+            return None
+
         async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, Any]:
             seen["refresh"] = True
             msg = "transient refresh failure"
-            raise HTTPError(msg)
+            raise httpx2.HTTPError(msg)
 
     monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
@@ -6660,15 +6697,18 @@ def test_status_disconnects_after_terminal_refresh_rejection(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
+            return None
+
         async def refresh_token(self, url: str, **_kwargs: object) -> dict[str, Any]:
-            request = Request("POST", url)
-            response = Response(
+            request = httpx2.Request("POST", url)
+            response = httpx2.Response(
                 400,
                 request=request,
                 json={"error": " Invalid_Grant ", "error_description": "refresh grant rejected"},
             )
             message = "refresh rejected"
-            raise HTTPStatusError(message, request=request, response=response)
+            raise httpx2.HTTPStatusError(message, request=request, response=response)
 
     monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
@@ -6721,6 +6761,9 @@ def test_status_does_not_refresh_credentials_missing_required_scopes(
             return self
 
         async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
             return None
 
         async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, Any]:

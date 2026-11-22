@@ -101,7 +101,7 @@ def _responder_reply_authorization(
 
     A responder always admits its own account; other MindRoom accounts need a grant like any requester.
     ``observed_room`` is the answering bot's own synced view of ``room_id``. Its roster never grants
-    access; it only lets a same-room denial wait briefly for the router to apply a join.
+    access; it only lets a same-room denial wait briefly for the room's observer to apply a join.
     """
     allowed = _is_own_account(sender_id, entity_name, runtime_paths)
     resolved_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
@@ -134,7 +134,7 @@ def _responder_reply_authorization(
         room_id is not None
         and observed_room is not None
         and observed_room.room_id == room_id
-        and membership_index.awaits_router_join(
+        and membership_index.awaits_observer_join(
             resolved_sender,
             room_id,
             cached_joined_member_ids(observed_room),
@@ -144,7 +144,7 @@ def _responder_reply_authorization(
             runtime_paths=runtime_paths,
         )
     ):
-        logger.info("reply_authorization_awaits_router_join", room_id=room_id, entity_name=entity_name)
+        logger.info("reply_authorization_awaits_observer_join", room_id=room_id, entity_name=entity_name)
         return _ReplyAuthorizationDecision.PENDING
     return _ReplyAuthorizationDecision.DENIED
 

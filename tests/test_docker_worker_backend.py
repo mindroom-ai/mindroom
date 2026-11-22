@@ -6421,3 +6421,25 @@ def test_docker_worker_restarts_after_an_invitation_changes_its_mounts(
 
     assert existing_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
+
+
+def test_docker_worker_container_env_drops_kubernetes_pod_limit_markers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker worker container env drops Kubernetes-only downward-API pod limit markers from extra_env."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    backend.config = replace(
+        backend.config,
+        extra_env={
+            "EXTRA_ENV": "present",
+            "MINDROOM_KUBERNETES_POD_CPU_LIMIT": "4",
+            "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES": "8589934592",
+        },
+    )
+
+    container_env = backend._container_env(_shared_worker_key("general"))
+
+    assert container_env["EXTRA_ENV"] == "present"
+    assert "MINDROOM_KUBERNETES_POD_CPU_LIMIT" not in container_env
+    assert "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES" not in container_env

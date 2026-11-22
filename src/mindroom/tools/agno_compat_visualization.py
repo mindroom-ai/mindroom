@@ -53,7 +53,7 @@ class WorkspaceVisualizationTools(VisualizationTools):
         self._relative_output_dir = relative_output_dir
 
     # AGNO_COMPAT: VisualizationTools saves model-named charts by path below a working-directory folder.
-    # Reason: Agno 3.0.9 joins the model's filename to output_dir, which defaults to "charts" in the
+    # Reason: Agno 3.2.1 joins the model's filename to output_dir, which defaults to "charts" in the
     # process working directory, and saves there following links, so an absolute or "../" filename wrote
     # anywhere the process can write and a link planted in a shared workspace redirected the write.
     # Upstream issue: Tracking gap; no matching issue identified on October 3, 2026.

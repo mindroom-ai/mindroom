@@ -137,7 +137,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import PreparedHistoryState, ScopeSummary
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent
-    from mindroom.llm.provider import ModelProvider, ModelRequest, TokenCounter
+    from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import RunMetrics
     from mindroom.response_turn import TurnRunState
@@ -732,9 +732,8 @@ async def _prepare_turn_memory(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation: ConversationRef | None,
-    counter: TokenCounter,
 ) -> MemoryPromptParts:
-    """Recall memories for a configured agent turn whose model counts with ``counter``; a persona recalls none."""
+    """Recall memories for a configured agent turn; a persona recalls none."""
     if ctx.persona is not None:
         return MemoryPromptParts()
     return await build_memory_prompt_parts(
@@ -744,7 +743,6 @@ async def _prepare_turn_memory(
         runtime_paths,
         execution_identity=ctx.execution_identity,
         conversation=conversation,
-        counter=counter,
     )
 
 
@@ -771,7 +769,6 @@ async def _system_messages_after_compaction(
         runtime_paths,
         ctx.execution_identity,
         conversation=compacted,
-        counter=build.spec.model.token_counter,
     )
     return _turn_system_messages(build, ctx, fresh)
 
@@ -781,7 +778,7 @@ async def _turn_model_and_provider(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> tuple[TurnModel, ModelProvider]:
-    """Resolve the turn's model and build its provider once, before memory sizes the MEMORY.md preload with it.
+    """Resolve the turn's model and build its provider once.
 
     Both run off the event loop: resolution reads thread and room model overrides from disk (#1260).
     """
@@ -892,7 +889,6 @@ async def _prepare_agent_and_prompt(
                         config,
                         runtime_paths,
                         memory_conversation,
-                        provider.token_counter,
                     ),
                     build_agent=_build_agent,
                     agent_name=agent_name,
@@ -907,7 +903,6 @@ async def _prepare_agent_and_prompt(
             config,
             runtime_paths,
             memory_conversation,
-            provider.token_counter,
         )
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
         _mark_pipeline_timing(pipeline_timing, "agent_build_start")

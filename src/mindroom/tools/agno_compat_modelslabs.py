@@ -52,7 +52,7 @@ def _finite_provider_eta(value: object) -> int | float | None:
 
 
 # AGNO_COMPAT: ModelsLab polling loses provider identity and reports unsuccessful waits as success.
-# Reason: Agno 3.0.9 sends the artifact UUID to fetch and discards the wait outcome and completed URLs.
+# Reason: Agno 3.2.1 sends the artifact UUID to fetch and discards the wait outcome and completed URLs.
 # Upstream issue: Tracking gap; no matching issue found on September 22, 2026.
 # Upstream PR: No matching fix identified.
 # Remove when: Agno polls the provider ID and distinguishes completion, timeout,

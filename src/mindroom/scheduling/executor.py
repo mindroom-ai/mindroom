@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import typing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -258,8 +259,10 @@ async def _deliver_scheduled_trigger(
         target.room_id,
         content,
         message_type=scheduled_trigger_message_type(workflow),
-        # A one-time task fires once, so a send its stopped owner's replacement repeats stays one event.
-        transaction_id=occurrence.transaction_id if occurrence is not None else f"schedule_{target.room_id}_{task_id}",
+        # A one-time task fires once per saved workflow: a replacement's repeat stays one event, an edit posts anew.
+        transaction_id=occurrence.transaction_id
+        if occurrence is not None
+        else f"schedule_{target.room_id}_{task_id}_{hashlib.sha256(workflow.model_dump_json().encode()).hexdigest()[:16]}",
         content_is_prepared=occurrence is not None,
     )
     if isinstance(delivered, client_delivery.MatrixDeliveryFailure):

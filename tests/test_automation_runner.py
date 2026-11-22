@@ -415,7 +415,7 @@ async def test_the_fallback_hour_starts_when_the_prompt_is_delivered(tmp_path: P
         offset = timedelta(0)
 
         @classmethod
-        def now(cls, tz: tzinfo | None = None) -> datetime:
+        def now(cls, tz: tzinfo | None = None) -> datetime:  # ty: ignore[incompatible-method-override]  # test clock
             return datetime.now(tz) + cls.offset
 
     def slow(_ctx: AutomationContext) -> Ask | None:

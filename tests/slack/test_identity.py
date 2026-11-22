@@ -14,6 +14,7 @@ from mindroom.slack import identity
 from mindroom.slack.api import SlackApiError
 from mindroom.slack.identity import SlackAuthor, project_channel_refusal, slack_author, slack_channel
 from tests.conftest import test_runtime_paths
+from tests.matrix_state_helpers import persist_owner_account
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -40,7 +41,9 @@ def _empty_author_cache() -> Iterator[None]:
 @pytest.fixture
 def paths(tmp_path: Path) -> RuntimePaths:
     """Return a runtime on the `localhost` homeserver, whose router account is `@mindroom_router:localhost`."""
-    return test_runtime_paths(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    persist_owner_account(runtime_paths)
+    return runtime_paths
 
 
 def _user(email: str | None = "ada@example.com", **overrides: Any) -> dict[str, Any]:  # noqa: ANN401

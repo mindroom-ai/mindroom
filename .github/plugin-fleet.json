@@ -1,5 +1,7 @@
 [
   "mindroom-ai/deep-research-plugin",
+  "mindroom-ai/error-notifier-plugin",
+  "mindroom-ai/injection-guard-plugin",
   "mindroom-ai/location-enrich-plugin",
   "mindroom-ai/openviking-plugin",
   "mindroom-ai/ping-hook-plugin",

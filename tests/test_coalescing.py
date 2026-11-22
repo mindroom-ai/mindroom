@@ -47,6 +47,7 @@ from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.execution_preparation import _messages_with_current_prompt
 from mindroom.matrix.segmented_messages import SEGMENT_COUNT_KEY
 from mindroom.mid_turn import MID_TURN_MODE_KEY
+from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
 from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.timestamp_formatting import format_timestamp_ms
@@ -152,6 +153,54 @@ def _voice_pending(event_id: str, body: str, origin_server_ts: int) -> PendingEv
         nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
         source_kind=VOICE_SOURCE_KIND,
     )
+
+
+@pytest.mark.parametrize(
+    ("picks", "expected"),
+    [("first", "large"), ("both", "small"), ("malformed-last", None)],
+)
+def test_coalesced_turn_reads_the_latest_source_with_a_model_pick(picks: str, expected: str | None) -> None:
+    """The latest explicit pick wins, even when the last source has no pick at all."""
+    upload = _image_event("$upload", 1000)
+    choice = {"version": 1, "runtime_user_id": "@mindroom:localhost", "runtime_device_id": "DEVICE", "model": "large"}
+    upload.source["content"][THREAD_MODEL_CONTENT_KEY] = choice
+    caption = _text_event("$caption", "Caption", 1001)
+    if picks != "first":
+        caption.source["content"][THREAD_MODEL_CONTENT_KEY] = {
+            **choice,
+            "model": "small" if picks == "both" else None,
+        }
+    tail = _text_event("$tail", "One more thing", 1002)
+    turn = build_prepared_turn(
+        requester_coalescing_key("!room:localhost", None, "@user:localhost"),
+        [_pending(upload), _pending(caption), _pending(tail)],
+        queues_other_run=nothing_else_queued,
+    )
+    assert turn.event.event_id == "$tail"
+    assert (turn.thread_model_choice.model if turn.thread_model_choice else None) == expected
+
+
+@pytest.mark.parametrize("source_type", ["media-edit", "acting-for-requester"])
+def test_only_original_direct_sources_can_choose_a_thread_model(source_type: str) -> None:
+    """A media replacement and a proxy prompt can carry text but cannot select an opening model."""
+    event = _image_event("$image", 1000)
+    event.source["content"][THREAD_MODEL_CONTENT_KEY] = {
+        "version": 1,
+        "runtime_user_id": "@mindroom:localhost",
+        "runtime_device_id": "DEVICE",
+        "model": "large",
+    }
+    if source_type == "media-edit":
+        event.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$original"}
+    pending = _pending(event)
+    if source_type == "acting-for-requester":
+        pending.facts = replace(pending.facts, acting_requester_id="@requester:localhost")
+    turn = build_prepared_turn(
+        requester_coalescing_key(pending.room.room_id, None, pending.facts.run_requester_id),
+        [pending],
+        queues_other_run=nothing_else_queued,
+    )
+    assert turn.thread_model_choice is None
 
 
 def test_single_message_batch_is_not_structured() -> None:
@@ -1810,23 +1859,36 @@ async def test_an_edited_queued_caption_stays_in_its_submission() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("original_marker", [None, {"id": "upload-1", "more": False}])
-@pytest.mark.parametrize("edited_marker", [None, {"id": "upload-2", "more": True}])
-async def test_an_edit_of_a_queued_message_keeps_its_original_submission_marker(
-    original_marker: dict[str, object] | None,
-    edited_marker: dict[str, object] | None,
+@pytest.mark.parametrize(
+    ("key_name", "original_value", "edited_value"),
+    [
+        (SUBMISSION_CONTENT_KEY, {"id": "upload-1", "more": False}, {"id": "upload-2", "more": True}),
+        (
+            THREAD_MODEL_CONTENT_KEY,
+            {"version": 1, "runtime_user_id": "@mindroom:localhost", "runtime_device_id": "DEVICE", "model": "large"},
+            {"version": 1, "runtime_user_id": "@mindroom:localhost", "runtime_device_id": "DEVICE", "model": "small"},
+        ),
+    ],
+)
+@pytest.mark.parametrize("has_original", [False, True])
+@pytest.mark.parametrize("has_edit", [False, True])
+async def test_an_edit_of_a_queued_message_keeps_its_original_composer_metadata(
+    key_name: str,
+    original_value: dict[str, object],
+    edited_value: dict[str, object],
+    has_original: bool,
+    has_edit: bool,
 ) -> None:
-    """An edit can neither add, remove, nor change the submission a queued message was sent in."""
+    """An edit can neither add, remove, nor change submission membership or the original model pick."""
     gate, _batches = _recording_gate(60.0)
     key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
-    await _admit_ready(
-        gate,
-        key,
-        _pending(_text_event("$queued:localhost", "hi", 1_000_000, submission=original_marker)),
-    )
+    original = _text_event("$queued:localhost", "hi", 1_000_000)
+    if has_original:
+        original.source["content"][key_name] = original_value
+    await _admit_ready(gate, key, _pending(original))
     edited: dict[str, object] = {"msgtype": "m.text", "body": "hello"}
-    if edited_marker is not None:
-        edited[SUBMISSION_CONTENT_KEY] = edited_marker
+    if has_edit:
+        edited[key_name] = edited_value
 
     assert gate.apply_pending_edit(
         room_id="!room:localhost",
@@ -1838,7 +1900,38 @@ async def test_an_edit_of_a_queued_message_keeps_its_original_submission_marker(
     )
     (pending,) = gate.queued_pending_events(key)
     assert pending.event.body == "hello"
-    assert pending.event.source["content"].get(SUBMISSION_CONTENT_KEY) == original_marker
+    assert pending.event.source["content"].get(key_name) == (original_value if has_original else None)
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_edit_cannot_give_an_opening_model_pick_a_replacement_relation() -> None:
+    """Folding an edit cannot turn a relation-free opening pick into an ignored replacement."""
+    gate, _ = _recording_gate(60.0)
+    key = requester_coalescing_key("!room:localhost", None, "@user:localhost")
+    original = _text_event("$opening:localhost", "hi", 1_000_000)
+    original.source["content"][THREAD_MODEL_CONTENT_KEY] = {
+        "version": 1,
+        "runtime_user_id": "@mindroom:localhost",
+        "runtime_device_id": "DEVICE",
+        "model": "large",
+    }
+    await _admit_ready(gate, key, _pending(original))
+    assert gate.apply_pending_edit(
+        room_id=key.room_id,
+        source_event_id=original.event_id,
+        sender=original.sender,
+        body="edited",
+        new_content={
+            "msgtype": "m.text",
+            "body": "edited",
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$old"},
+        },
+        for_another_participant=None,
+    )
+    batch = build_prepared_turn(key, list(gate.queued_pending_events(key)), queues_other_run=nothing_else_queued)
+    assert batch.thread_model_choice is not None
+    assert batch.thread_model_choice.model == "large"
     await gate.drain_all()
 
 

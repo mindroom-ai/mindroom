@@ -11,7 +11,13 @@ from nio import crypto
 import mindroom.matrix.message_content as message_content_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import AGENT_AUTHORED_KEY, STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY, RuntimePaths
+from mindroom.constants import (
+    AGENT_AUTHORED_KEY,
+    ROUTE_REVISION_KEY,
+    STREAM_STATUS_KEY,
+    STREAM_WARMUP_SUFFIX_KEY,
+    RuntimePaths,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_visible_messages import (
     extract_visible_edit_body,
@@ -455,6 +461,43 @@ class TestResolvedMessageExtraction:
         assert event_info.original_event_id == "$original"
         assert event_info.thread_id is None
 
+    @pytest.mark.parametrize(
+        "preview",
+        [{}, {"io.mindroom.thread_model": None}, {"io.mindroom.thread_model": {"model": "fast"}}],
+    )
+    @pytest.mark.parametrize("has_sidecar_pick", [False, True])
+    @pytest.mark.asyncio
+    async def test_long_text_takes_its_model_pick_only_from_the_preview(
+        self,
+        preview: dict[str, object],
+        has_sidecar_pick: bool,
+    ) -> None:
+        """Hydration cannot add, replace, or remove an opening pick."""
+        key = "io.mindroom.thread_model"
+        downloaded = {"msgtype": "m.text", "body": "Full text"}
+        if has_sidecar_pick:
+            downloaded[key] = {"model": "other"}
+        client = _make_client()
+        client.download = AsyncMock(
+            return_value=MagicMock(spec=nio.DownloadResponse, body=json.dumps(downloaded).encode()),
+        )
+        source = await resolve_event_source_content(
+            {
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "Preview",
+                    "url": "mxc://server/long-text",
+                    "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+                    **preview,
+                },
+            },
+            client,
+        )
+        assert source["content"]["body"] == "Full text"
+        content = source["content"]
+        assert (key in content) == (key in preview)
+        assert content.get(key) == preview.get(key)
+
     @pytest.mark.asyncio
     async def test_hydration_cannot_give_a_relation_free_event_a_relation(self) -> None:
         """An event that relates to nothing still relates to nothing once its text arrives."""
@@ -527,6 +570,45 @@ class TestResolvedMessageExtraction:
         assert visible_content_from_content(resolved)["body"] == "Full text"
         assert resolved[AGENT_AUTHORED_KEY] == agent
         assert visible_content_from_content(resolved)[AGENT_AUTHORED_KEY] == agent
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("journaled", "filed"),
+        [
+            # A file its sender uploaded cannot say which edit the message is.
+            pytest.param(None, [9_007_199_254_740_991, "$future"], id="only-the-file-says"),
+            # The edit a waiting message took is on its journal row, and reading its file keeps it.
+            pytest.param([1_000_002, "$e2"], None, id="only-the-row-says"),
+            pytest.param([1_000_002, "$e2"], [9_007_199_254_740_991, "$future"], id="both-say"),
+        ],
+    )
+    async def test_hydration_takes_which_edit_a_message_is_from_the_event_alone(
+        self,
+        journaled: list[int | str] | None,
+        filed: list[int | str] | None,
+    ) -> None:
+        """Which edit a waiting message's text is, its journal row says: the file holds its text and no more."""
+        preview: dict[str, object] = {
+            "msgtype": "m.file",
+            "body": "Preview",
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            "url": "mxc://server/long-text",
+        }
+        payload: dict[str, object] = {"msgtype": "m.text", "body": "Full text"}
+        if journaled is not None:
+            preview[ROUTE_REVISION_KEY] = journaled
+        if filed is not None:
+            payload[ROUTE_REVISION_KEY] = filed
+        client = _make_client()
+        client.download = AsyncMock(
+            return_value=MagicMock(spec=nio.DownloadResponse, body=json.dumps(payload).encode("utf-8")),
+        )
+
+        event_source = await resolve_event_source_content({"type": "m.room.message", "content": preview}, client)
+
+        resolved = event_source["content"]
+        assert resolved["body"] == "Full text"
+        assert resolved.get(ROUTE_REVISION_KEY) == journaled
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("edit", [False, True], ids=["message", "edit"])
@@ -1078,7 +1160,7 @@ class TestDownloadMxcText:
     @pytest.mark.asyncio
     async def test_download_rejects_plaintext_over_byte_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Oversized sidecar bytes should not be decoded."""
-        monkeypatch.setattr(message_content_module, "_MXC_TEXT_MAX_BYTES", 5)
+        monkeypatch.setattr(message_content_module, "MXC_TEXT_MAX_BYTES", 5)
         client = _make_client()
         response = MagicMock(spec=nio.DownloadResponse)
         response.body = b"123456"
@@ -1094,7 +1176,7 @@ class TestDownloadMxcText:
         measure it, so any room member could point a sidecar at a file as large
         as the homeserver accepts and have every agent buffer all of it.
         """
-        limit = message_content_module._MXC_TEXT_MAX_BYTES
+        limit = message_content_module.MXC_TEXT_MAX_BYTES
         response = FakeMediaResponse(b"x" * (5 * limit))
         client = _make_client()
         client.send = AsyncMock(return_value=response)
@@ -1111,7 +1193,7 @@ class TestDownloadMxcText:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Oversized encrypted sidecars should be rejected before decryption allocates plaintext."""
-        monkeypatch.setattr(message_content_module, "_MXC_TEXT_MAX_BYTES", 5)
+        monkeypatch.setattr(message_content_module, "MXC_TEXT_MAX_BYTES", 5)
         client = _make_client()
         response = MagicMock(spec=nio.DownloadResponse)
         response.body = b"123456"

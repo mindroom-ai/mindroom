@@ -54,8 +54,11 @@ logger = get_logger(__name__)
 
 
 class _WorkerProxyResponse(Protocol):
-    status_code: int
-    text: str
+    @property
+    def status_code(self) -> int: ...
+
+    @property
+    def text(self) -> str: ...
 
     def raise_for_status(self) -> object: ...
 
@@ -204,7 +207,12 @@ def _record_proxy_exception_for_worker(
     if _is_request_level_proxy_transport_error(exc):
         worker_manager.touch_worker(worker_handle.worker_key)
         return
-    worker_manager.record_failure(worker_handle.worker_key, str(exc), startup_count=worker_handle.startup_count)
+    worker_manager.record_failure(
+        worker_handle.worker_key,
+        str(exc),
+        startup_count=worker_handle.startup_count,
+        incarnation=worker_handle.incarnation,
+    )
 
 
 def _is_request_level_proxy_transport_error(exc: Exception) -> bool:
@@ -230,7 +238,12 @@ def record_proxy_response_failure_for_worker(
     if failure_kind == "tool":
         worker_manager.touch_worker(worker_handle.worker_key)
         return
-    worker_manager.record_failure(worker_handle.worker_key, error, startup_count=worker_handle.startup_count)
+    worker_manager.record_failure(
+        worker_handle.worker_key,
+        error,
+        startup_count=worker_handle.startup_count,
+        incarnation=worker_handle.incarnation,
+    )
 
 
 def _checked_worker_answer[Answer: ExecuteResponse | SaveAttachmentResponse | ViewFileResponse](
@@ -335,13 +348,15 @@ class WorkerCallCancellation:
         with self._lock:
             return self._cancelled
 
-    def cancel(self) -> None:
-        """Ask the runner to stop the call in the background, so the caller's cancellation stays prompt."""
+    def cancel(self) -> bool:
+        """Ask the runner to stop the call in the background; return True if cancelled before dispatch."""
         with self._lock:
             self._cancelled = True
             stop = self._stop
         if stop is not None:
             threading.Thread(target=stop, name="mindroom-worker-cancel", daemon=True).start()
+            return False
+        return True
 
 
 def _post_execute_cancel(

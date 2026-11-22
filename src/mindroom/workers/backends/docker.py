@@ -28,7 +28,7 @@ from mindroom.credentials.manager import (
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.redaction import redact_sensitive_text
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.runtime_env_policy import KUBERNETES_POD_LIMIT_ENV_NAMES, SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,
@@ -38,6 +38,7 @@ from mindroom.tool_system.worker_routing import (
     worker_log_id,
 )
 from mindroom.workers.backend import (
+    WorkerBackendDefaults,
     WorkerBackendError,
     WorkerStartTimeoutError,
     filter_and_sort_worker_handles,
@@ -48,7 +49,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_workspace_mounts,
     plan_shared_directory_mounts,
     resolve_state_scope_worker_key,
-    retire_subagent_worker,
+    retire_pinned_worker,
     stable_json_digest,
     subagent_worker_expired,
     validate_dedicated_worker_extra_env,
@@ -444,7 +445,7 @@ class _WorkerContainerState:
     mounts: list[tuple[Path, str, bool]]
 
 
-class DockerWorkerBackend:
+class DockerWorkerBackend(WorkerBackendDefaults):
     """Docker-backed worker provider for dedicated local sandbox-runner containers."""
 
     backend_name = WorkerBackendKind.DOCKER.value
@@ -661,7 +662,7 @@ class DockerWorkerBackend:
                 running = self._container_is_running(container)
                 if expired_subagent_worker and not running:
                     # A subagent's own worker serves no one once it expires: it is stopped first, then removed.
-                    if retire_subagent_worker(self._retire_worker_locked, metadata.worker_key):
+                    if retire_pinned_worker(self._retire_worker_locked, metadata.worker_key):
                         cleaned.append(handle)
                 elif running and (handle.status == "idle" or expired_subagent_worker):
                     self._stop_container(container)
@@ -734,8 +735,11 @@ class DockerWorkerBackend:
         *,
         now: float | None = None,
         startup_count: int | None = None,
+        incarnation: str | None = None,
     ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
+        # A worker's record counts its starts for as long as its key exists, so the count tells them apart.
+        del incarnation
         timestamp = time.time() if now is None else now
         with self._worker_locks.for_key(worker_key):
             paths = self._worker_paths(worker_key)
@@ -1149,8 +1153,9 @@ class DockerWorkerBackend:
             del env["MINDROOM_CONFIG_PATH"]
         env["HOME"] = self._container_home_path(worker_key)
         env[_TOKEN_ENV_NAME] = self._control_token(worker_key)
-        # Operator env never replaces a backend-owned variable; the config rejects the names it could collide on.
-        return {**self.config.extra_env, **env}
+        # Operator env never replaces a backend-owned variable or Kubernetes-only pod limit markers.
+        extra_env = {k: v for k, v in self.config.extra_env.items() if k not in KUBERNETES_POD_LIMIT_ENV_NAMES}
+        return {**extra_env, **env}
 
     def _write_startup_manifest(
         self,

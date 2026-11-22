@@ -109,6 +109,9 @@ def participation_silence(participation: ParticipationGate) -> FinalDeliveryOutc
     """Return how a turn its participation gate kept quiet ended: declined by its decision, or failed by its check."""
     if participation.is_declined:
         return DECLINED
+    if participation.publication_failed:
+        # The turn chose to answer and showed nothing yet, so it ends interrupted and its sources retry.
+        return FinalDeliveryOutcome(ending=Cancelled("interrupted"))
     return FinalDeliveryOutcome(ending=Suppressed(Suppression.PARTICIPATION_FAILED))
 
 

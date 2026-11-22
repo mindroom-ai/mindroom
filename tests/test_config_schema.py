@@ -8,6 +8,7 @@ import typing
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+import pytest
 from pydantic import BaseModel
 
 from mindroom.config.main import Config, dashboard_config_schema
@@ -227,6 +228,12 @@ def test_dashboard_schema_snapshot_is_current() -> None:
     assert snapshot == dashboard_config_schema(), "Run .venv/bin/python .github/scripts/generate_config_schema.py"
 
 
+def test_voice_transcript_schema_title() -> None:
+    """The visible_router_echo field keeps its wire key while exposing the Voice Transcript label."""
+    voice_properties = dashboard_config_schema()["$defs"]["VoiceConfig"]["properties"]
+    assert voice_properties["visible_router_echo"]["title"] == "Voice Transcript"
+
+
 def test_the_automation_union_is_chosen_by_name_with_plugin_automations_as_the_fallback() -> None:
     """Built-in branches pin their name, and the plugin branch accepts any other name but never a built-in one."""
     schema = dashboard_config_schema()
@@ -237,3 +244,18 @@ def test_the_automation_union_is_chosen_by_name_with_plugin_automations_as_the_f
     names = [defs[branch["$ref"].removeprefix("#/$defs/")]["properties"]["name"] for branch in union["oneOf"]]
     assert [name.get("const") for name in names] == ["prompt_curation", "dreaming", "exploration", None]
     assert names[3]["not"] == {"enum": ["prompt_curation", "dreaming", "exploration"]}
+
+
+@pytest.mark.parametrize(
+    ("sections", "needed"),
+    [
+        ({"agents": {"general": {"display_name": "General", "model": "default", "rooms": ["lobby"]}}}, True),
+        ({"matrix_space": {"enabled": True}}, False),
+        ({"server_emoji": {"enabled": True}}, True),
+        ({}, False),
+    ],
+)
+def test_needs_owner_account(sections: dict[str, object], needed: bool) -> None:
+    """The owner account is needed for a configured room or the emoji room; an enabled Space with no room needs none."""
+    base = {"models": {"default": {"provider": "openai", "id": "test-model"}}, "matrix_space": {"enabled": False}}
+    assert Config.model_validate({**base, **sections}).needs_owner_account() is needed

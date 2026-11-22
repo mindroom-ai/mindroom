@@ -13,6 +13,7 @@ from mindroom.llm.media import File
 from mindroom.tool_system.output_files import (
     ToolOutputFileRequest,
     finalize_tool_output_file,
+    saved_output_envelope,
     write_bytes_to_output_path,
 )
 from mindroom.tool_system.tool_function import media_reference
@@ -33,12 +34,15 @@ def _encoded_size(value: object) -> int:
 
 def project_cli_result(result: object, policy: ToolOutputFilePolicy, tool_name: str) -> object:
     """Save large text through the normal output policy without changing execution status."""
-    # ToolExecution already separated media; only project its textual result.
+    # ToolExecution already separated media. Don't save an existing receipt as another output file.
     threshold = min(policy.auto_save_threshold_bytes, _INLINE_BUDGET)
     if isinstance(result, str) and _encoded_size(result) > _INLINE_BUDGET:
         threshold = 0
     bounded = replace(policy, auto_save_threshold_bytes=threshold)
-    projected = finalize_tool_output_file(ToolOutputFileRequest(bounded, tool_name, None), result)
+    projected = saved_output_envelope(result) or finalize_tool_output_file(
+        ToolOutputFileRequest(bounded, tool_name, None),
+        result,
+    )
     if isinstance(projected, dict):
         output = cast("dict[str, object]", projected).get("mindroom_tool_output")
         if isinstance(output, dict):

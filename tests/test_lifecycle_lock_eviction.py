@@ -101,7 +101,7 @@ async def test_an_approval_hold_keeps_its_conversation_busy_without_taking_its_l
     held = targets[0]
     paused = PausedReply(_PRINCIPAL, "approval-1", held.room_id, held.resolved_thread_id)
     try:
-        coordinator.follow_approval_holds(store.approval_signals, _PRINCIPAL)
+        coordinator.follow_approval_holds(store.approval_signals, _PRINCIPAL, lambda _room_id: None)
         await store.backend.write(lambda transaction: approval_signals.paused(transaction, paused))
         # An advance reports the paused reply again, which changes nothing: one end frees the conversation.
         await store.backend.write(lambda transaction: approval_signals.paused(transaction, paused))
@@ -140,7 +140,7 @@ async def test_a_coordinator_holds_only_the_paused_replies_of_the_principal_it_f
                 PausedReply(_PRINCIPAL, "approval-1", before.room_id, before.resolved_thread_id),
             ),
         )
-        coordinator.follow_approval_holds(store.approval_signals, _PRINCIPAL)
+        coordinator.follow_approval_holds(store.approval_signals, _PRINCIPAL, lambda _room_id: None)
         # The reply paused before it followed is held as soon as it follows.
         assert coordinator.approval_holds(before.room_id, before.resolved_thread_id) == ("approval-1",)
         await store.backend.write(

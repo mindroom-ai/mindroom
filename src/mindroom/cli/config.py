@@ -95,6 +95,7 @@ _ProviderPreset = Literal[
     "anthropic",
     "bedrock_claude",
     "azure",
+    "claude_code",
     "codex",
     "kimi",
     "llama_cpp",
@@ -142,6 +143,15 @@ class _PresetInfo:
     setup: _SetupHints | None = None
 
 
+def _login_hints(command: str) -> _SetupHints:
+    """Describe the same login step for each setup path."""
+    return _SetupHints(
+        first_run=f"Run {command} in another terminal",
+        hosted=f"Run {command} before starting MindRoom (Matrix homeserver is prefilled)",
+        self_hosted=f"Set your Matrix homeserver and run {command} before starting MindRoom",
+    )
+
+
 # Every provider preset in menu order, default first.
 _PROVIDER_PRESETS: dict[_ProviderPreset, _PresetInfo] = {
     "openai": _PresetInfo("OpenAI", "API key"),
@@ -150,20 +160,17 @@ _PROVIDER_PRESETS: dict[_ProviderPreset, _PresetInfo] = {
     "codex": _PresetInfo(
         "Codex",
         "ChatGPT sign-in through `codex login`",
-        setup=_SetupHints(
-            first_run="Run `codex login` in another terminal",
-            hosted="Run `codex login` before starting MindRoom (Matrix homeserver is prefilled)",
-            self_hosted="Set your Matrix homeserver and run `codex login` before starting MindRoom",
-        ),
+        setup=_login_hints("`codex login`"),
+    ),
+    "claude_code": _PresetInfo(
+        "Claude subscription",
+        "Claude sign-in through `claude auth login`",
+        setup=_login_hints("`claude auth login`"),
     ),
     "kimi": _PresetInfo(
         "Kimi Code",
         "Kimi sign-in through `kimi`",
-        setup=_SetupHints(
-            first_run="Run `kimi` and `/login` in another terminal",
-            hosted="Run `kimi` and `/login` before starting MindRoom (Matrix homeserver is prefilled)",
-            self_hosted="Set your Matrix homeserver and run `kimi` and `/login` before starting MindRoom",
-        ),
+        setup=_login_hints("`kimi` and `/login`"),
     ),
     "ollama": _PresetInfo(
         "Ollama",
@@ -1256,6 +1263,8 @@ agents:
         defer: true
       - name: temporary_secrets
         defer: true
+      - name: egress_credentials
+        defer: true
       - name: config_manager
         defer: true
       - name: duckduckgo
@@ -1310,7 +1319,6 @@ agents:
 
 router:
   model: {router_model}
-  accept_invites: true
 {mindroom_user_block}
 administrators:
   # MindRoom Chat pairing writes the paired owner's Matrix user ID here.
@@ -1339,8 +1347,6 @@ memory:
     provider: sentence_transformers
     config:
       model: {SENTENCE_TRANSFORMERS_DEFAULT}
-  file:
-    max_entrypoint_lines: 200
   search:
     mode: semantic
     include:
@@ -1365,10 +1371,10 @@ tool_approval:
       action: require_approval
 
 defaults:
-  # Execution tools (shell, file, python, coding, docker) run directly in the
+  # Execution tools (shell, filesystem, python, docker) run directly in the
   # MindRoom process. For isolation, run them in a sandboxed worker instead:
   # deploy the sandbox runner (Docker Compose or Kubernetes) and remove this
-  # line — or replace [] with the tools to route, e.g. [shell, file, python].
+  # line — or replace [] with the tools to route, e.g. [shell, filesystem, python].
   # See https://docs.mindroom.chat/deployment/sandbox-proxy/
   worker_tools: []
   # Lets the shell run in the MindRoom process while it has no worker.
@@ -1510,7 +1516,7 @@ def _preset_api_key_env(provider_preset: _ProviderPreset) -> str | None:
     return constants.env_key_for_provider(CONFIG_INIT_MODEL_PRESETS[provider_preset].provider)
 
 
-def _provider_env_template(  # noqa: PLR0911
+def _provider_env_template(  # noqa: C901, PLR0911
     provider_preset: _ProviderPreset,
     provider_api_key: str | None,
 ) -> str:
@@ -1524,6 +1530,13 @@ def _provider_env_template(  # noqa: PLR0911
         # Run `codex login` before starting MindRoom.
         # MindRoom reads ChatGPT OAuth tokens from ~/.codex/auth.json by default.
         # CODEX_HOME=~/.codex
+        """).rstrip()
+
+    if provider_preset == "claude_code":
+        return textwrap.dedent("""\
+        # Claude subscription through Claude Code
+        # Run `claude auth login` as the user that runs MindRoom before starting it.
+        # Claude Code keeps the sign-in; MindRoom needs no key and reads no Claude credential.
         """).rstrip()
 
     if provider_preset == "kimi":

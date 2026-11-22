@@ -10,18 +10,17 @@ from mindroom import authorization
 from mindroom.constants import (
     COPIED_MENTIONS_KEY,
     EXACT_MENTIONS_KEY,
-    ROUTER_AGENT_NAME,
     SKIP_MENTIONS_KEY,
     WAKE_MENTIONED_KEY,
 )
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry, persisted_owner_matrix_id
 from mindroom.matrix.mentions import resolve_mentioned_user_ids_from_text
 from mindroom.matrix.room_membership import room_membership_is_complete
 from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     import nio
 
@@ -76,12 +75,15 @@ def _extract_mentioned_user_ids(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[str]:
-    """Extract mentioned user IDs from message content, without managed entities when its mentions wake no agent."""
+    """Extract mentioned user IDs from message content, without agents and teams when its mentions wake no agent.
+
+    The owner account stays listed: it answers nobody, so a message aimed at it is aimed at no agent either way.
+    """
     user_ids = _listed_or_found_user_ids(content, config, runtime_paths)
     if content.get(WAKE_MENTIONED_KEY) is not False:
         return user_ids
     registry = entity_identity_registry(config, runtime_paths)
-    return [user_id for user_id in user_ids if not registry.is_managed_user_id(user_id)]
+    return [user_id for user_id in user_ids if not registry.is_managed_user_id(user_id, include_router=False)]
 
 
 def history_mentioned_user_ids(
@@ -128,22 +130,6 @@ def _listed_or_found_user_ids(
     return []
 
 
-def is_router_only_agent_mention(
-    mentioned_agents: Sequence[MatrixID],
-    *,
-    has_non_agent_mentions: bool,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    """Return whether the message only targeted the router managed account."""
-    if has_non_agent_mentions or not mentioned_agents:
-        return False
-
-    registry = entity_identity_registry(config, runtime_paths)
-    mentioned_agent_names = {registry.current_entity_name_for_user_id(agent.full_id) for agent in mentioned_agents}
-    return mentioned_agent_names == {ROUTER_AGENT_NAME}
-
-
 def check_agent_mentioned(
     event_source: dict,
     agent_id: MatrixID | None,
@@ -160,6 +146,7 @@ def check_agent_mentioned(
     ``config.bot_accounts``. While the member cache is unsynced (the
     authoritative refresh failed) every such mention counts, so a lost
     membership fetch degrades to silence rather than an interjection.
+    The owner account answers nobody, so a tag of it counts wherever it is.
     """
     raw_content = event_source.get("content", {})
     content = visible_content_from_content(raw_content) if isinstance(raw_content, dict) else {}
@@ -168,14 +155,26 @@ def check_agent_mentioned(
     mentioned_agents = _agents_from_user_ids(all_mentioned_ids, registry)
     am_i_mentioned = agent_id in mentioned_agents
     non_agent_mentions = [
-        uid for uid in all_mentioned_ids if not registry.is_managed_user_id(uid) and uid not in config.bot_accounts
+        uid
+        for uid in all_mentioned_ids
+        if not registry.is_managed_user_id(uid, include_router=False) and uid not in config.bot_accounts
     ]
-    has_non_agent_mentions = bool(non_agent_mentions) and (
-        not room_membership_is_complete(room)
-        or not authorization.cached_joined_member_ids(room).isdisjoint(non_agent_mentions)
+    has_non_agent_mentions = persisted_owner_matrix_id(runtime_paths) in all_mentioned_ids or (
+        bool(non_agent_mentions)
+        and (
+            not room_membership_is_complete(room)
+            or not authorization.cached_joined_member_ids(room).isdisjoint(non_agent_mentions)
+        )
     )
 
     return mentioned_agents, am_i_mentioned, has_non_agent_mentions
+
+
+def mentions_owner_alone(content: Mapping[str, Any], config: Config, runtime_paths: RuntimePaths) -> bool:
+    """Return whether a message's mentions, listed or found in its text, name the owner account and no agent or team."""
+    user_ids = _extract_mentioned_user_ids(visible_content_from_content(dict(content)), config, runtime_paths)
+    registry = entity_identity_registry(config, runtime_paths)
+    return persisted_owner_matrix_id(runtime_paths) in user_ids and not _agents_from_user_ids(user_ids, registry)
 
 
 def mentions_another_participant(
@@ -206,35 +205,20 @@ def get_agents_in_thread(
 ) -> list[MatrixID]:
     """Get list of unique agents that have participated in thread.
 
-    Note: Router agent is excluded from the participant list as it's not
+    Note: The owner account is excluded from the participant list as it's not
     a conversation participant.
 
     Preserves the order of first participation while preventing duplicates.
     """
-    agents: list[MatrixID] = []
-    seen_ids: set[str] = set()
     registry = entity_identity_registry(config, runtime_paths)
-
-    for msg in thread_history:
-        sender = msg.sender
-        agent_name = registry.current_entity_name_for_user_id(sender, include_router=False)
-
-        # Skip router agent and invalid senders
-        if agent_name is None:
-            continue
-
-        if sender not in seen_ids:
-            agents.append(registry.current_id(agent_name))
-            seen_ids.add(sender)
-
-    return agents
+    return _agents_from_user_ids(dict.fromkeys(msg.sender for msg in thread_history), registry)
 
 
-def _agents_from_user_ids(user_ids: list[str], registry: EntityIdentityRegistry) -> list[MatrixID]:
+def _agents_from_user_ids(user_ids: Iterable[str], registry: EntityIdentityRegistry) -> list[MatrixID]:
     """Return agent MatrixIDs from a list of raw Matrix user ID strings."""
     agents: list[MatrixID] = []
     for user_id in user_ids:
-        agent_name = registry.current_entity_name_for_user_id(user_id)
+        agent_name = registry.current_entity_name_for_user_id(user_id, include_router=False)
         if agent_name is not None:
             agents.append(registry.current_id(agent_name))
     return agents

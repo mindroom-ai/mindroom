@@ -19,7 +19,7 @@ from structlog.contextvars import merge_contextvars
 from structlog.testing import capture_logs
 
 from mindroom.mcp_gateway.execution import retain_execution_task
-from mindroom.mcp_gateway.server import GatewayServer
+from mindroom.mcp_gateway.server import GatewayServer, _input_schema
 from mindroom.mcp_gateway.types import GatewayPrincipal
 
 if TYPE_CHECKING:
@@ -1041,3 +1041,9 @@ async def test_request_id_must_be_serializable_as_utf8(method: str) -> None:
         response = await client.post("/mcp", content=body, headers={"Content-Type": "application/json"})
         assert response.status_code == 400
         assert response.json() == {"error": "request_rejected"}
+
+
+def test_input_schema_answers_none_for_an_unknown_tool() -> None:
+    """The SDK asks for the schema of every called tool, so an unknown name gets None rather than an exception."""
+    assert _input_schema("not-a-gateway-operation") is None
+    assert isinstance(_input_schema("search_tools"), dict)

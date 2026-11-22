@@ -108,12 +108,7 @@ def configured_bot_user_ids_for_room(
     if not configured_names:
         return set()
     config_ids = entity_identity_registry(config, runtime_paths).current_ids
-    configured_bots = {config_ids[entity_name].full_id for entity_name in configured_names}
-
-    if configured_bots:
-        configured_bots.add(config_ids[ROUTER_AGENT_NAME].full_id)
-
-    return configured_bots
+    return {config_ids[entity_name].full_id for entity_name in (*configured_names, ROUTER_AGENT_NAME)}
 
 
 def is_configured_room(
@@ -139,8 +134,6 @@ def configured_routable_entity_names_for_room(
     configured_names: list[str] = []
 
     for agent_name, agent_config in config.agents.items():
-        if agent_name == ROUTER_AGENT_NAME:
-            continue
         if not room_refs.isdisjoint(agent_config.rooms):
             configured_names.append(agent_name)
 
@@ -337,9 +330,11 @@ def prepared_entity_names_by_user_id(config: Config, runtime_paths: RuntimePaths
 
 
 def _persisted_entity_id_map(config: Config, domain: str, state: MatrixState) -> dict[str, MatrixID]:
+    # The owner account is prepared apart from the agents', only for a config that needs it: listed once persisted.
+    owner_known = state.get_account(managed_account_key(ROUTER_AGENT_NAME)) is not None
     return {
         entity_name: _persisted_entity_matrix_id(entity_name, domain, state)
-        for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]
+        for entity_name in [*([ROUTER_AGENT_NAME] if owner_known else ()), *config.agents, *config.teams]
     }
 
 
@@ -349,6 +344,19 @@ def _persisted_entity_matrix_id(entity_name: str, domain: str, state: MatrixStat
         msg = f"Matrix account for configured entity {entity_name!r} has not been prepared"
         raise MissingManagedEntityAccountError(msg)
     return MatrixID.parse(matrix_account_user_id(account, domain))
+
+
+def persisted_owner_matrix_id(runtime_paths: RuntimePaths) -> str | None:
+    """Return the owner account's Matrix ID once its account is persisted: the only ID that may gain privileges."""
+    account = matrix_state.matrix_state_for_runtime(runtime_paths).get_account(managed_account_key(ROUTER_AGENT_NAME))
+    return None if account is None else matrix_account_user_id(account, runtime_matrix_domain(runtime_paths))
+
+
+def owner_matrix_id(runtime_paths: RuntimePaths) -> str:
+    """Return the owner account's Matrix ID for bookkeeping: its persisted one, else its generated username's."""
+    domain = runtime_matrix_domain(runtime_paths)
+    generated = MatrixID.from_username(agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths), domain)
+    return persisted_owner_matrix_id(runtime_paths) or generated.full_id
 
 
 def _validate_unique_entity_ids(current_ids: dict[str, MatrixID]) -> None:

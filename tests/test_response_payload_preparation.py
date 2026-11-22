@@ -14,10 +14,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.ai import _compose_current_turn_prompt
+from mindroom.constants import UNREADABLE_EDIT_NOTICE, UNREADABLE_SIDECAR_NOTICE
 from mindroom.conversation_resolver import MessageContext
 from mindroom.final_delivery import Completed, FinalDeliveryOutcome
 from mindroom.hooks import EVENT_MESSAGE_ENRICH, HookRegistry, MessageEnrichContext, hook
 from mindroom.inbound_turn_normalizer import DispatchPayload
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.reply_turn.enrichment import prepare_memory_and_model_context
 from mindroom.reply_turn.locked_turn import LockedTurns
@@ -42,7 +44,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.dispatch_handoff import MediaDispatchEvent
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.message_target import MessageTarget
 
 
@@ -53,6 +54,7 @@ def _preparation(
     action_kind: str = "individual",
     message_attachment_ids: tuple[str, ...] = (),
     media_events: tuple[MediaDispatchEvent, ...] = (),
+    routed_revision: object = None,
 ) -> ResponsePayloadPreparation:
     return ResponsePayloadPreparation(
         dispatch=PreparedDispatch(
@@ -79,6 +81,7 @@ def _preparation(
         target_member_names=None,
         dispatch_started_at=1.0,
         context_ready_monotonic=2.0,
+        routed_revision=routed_revision,
     )
 
 
@@ -87,6 +90,7 @@ def _request(
     preparation: ResponsePayloadPreparation,
     *,
     thread_history: Sequence[ResolvedVisibleMessage],
+    prompt_source_event_ids: tuple[str, ...] = (),
 ) -> ResponseRequest:
     return ResponseRequest(
         sources=ResponseSources(
@@ -94,6 +98,7 @@ def _request(
             logical_source_event_ids=("$event",),
         ),
         thread_history=thread_history,
+        prompt_source_event_ids=prompt_source_event_ids,
         prompt=preparation.prompt,
         user_id="@user:localhost",
         response_envelope=_envelope(target),
@@ -133,6 +138,130 @@ async def test_prepare_builds_request_from_inputs_and_refreshed_history(tmp_path
     build_request = seen[0]
     assert build_request.thread_history is refreshed_history
     assert build_request.prompt == "raw prompt"
+
+
+def _held(
+    event_id: str,
+    body: str,
+    *,
+    revision: str | None = None,
+    edited_at: int = 2_000,
+    msgtype: str = "m.text",
+) -> ResolvedVisibleMessage:
+    """Return one message as this responder's thread holds it, at ``revision`` when its own sender edited it."""
+    content = {"msgtype": msgtype, "body": body}
+    message = ResolvedVisibleMessage.from_message_data(
+        {"sender": "@user:localhost", "body": body, "timestamp": 1, "event_id": event_id, "content": content},
+        thread_id="$thread",
+        latest_event_id=revision or event_id,
+    )
+    message.edited_timestamp = None if revision is None else edited_at
+    return message
+
+
+@pytest.mark.parametrize(
+    ("held", "routed", "answered"),
+    [
+        # The sender corrected the message while the steward selected: the route was written from the old text.
+        pytest.param([_held("$first", "the corrected text", revision="$edit")], ("$first",), "the corrected text"),
+        # No edit of its sender's: the route's prompt stands. A replacement someone else sent reads the same, as the
+        # thread holds the message as its sender wrote it (``test_a_replacement_from_another_sender_is_not_an_edit``).
+        pytest.param([_held("$first", "the first text")], ("$first",), "raw prompt"),
+        # A batch's prompt is its steward's, whatever its messages became since.
+        pytest.param(
+            [_held("$first", "the corrected text", revision="$edit"), _held("$second", "more")],
+            ("$first", "$second"),
+            "raw prompt",
+        ),
+        # An edit whose file, or whose own later edit, could not be read leaves the route's whole prompt standing:
+        # its text ends in the notice its read appended.
+        pytest.param(
+            [_held("$first", f"the preview\n\n{UNREADABLE_SIDECAR_NOTICE}", revision="$edit")],
+            ("$first",),
+            "raw prompt",
+        ),
+        pytest.param(
+            [_held("$first", f"an older edit\n\n{UNREADABLE_EDIT_NOTICE}", revision="$edit")],
+            ("$first",),
+            "raw prompt",
+        ),
+        # A voice message's transcript is not replaced by the filename of an audio edit.
+        pytest.param([_held("$first", "clip.ogg", revision="$edit", msgtype="m.audio")], ("$first",), "raw prompt"),
+        # Another message's edit is not the routed one's.
+        pytest.param([_held("$other", "an edited neighbour", revision="$edit")], ("$first",), "raw prompt"),
+        # An unrouted turn's prompt is its own.
+        pytest.param([_held("$event", "the corrected text", revision="$edit")], (), "raw prompt"),
+    ],
+    ids=[
+        "edited",
+        "unedited-or-replaced-by-another",
+        "batch",
+        "edit-file-unread",
+        "later-edit-unread",
+        "edit-not-text",
+        "neighbour-edited",
+        "unrouted",
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_lone_routed_message_is_answered_as_its_sender_last_edited_it(
+    tmp_path: Path,
+    held: list[ResolvedVisibleMessage],
+    routed: tuple[str, ...],
+    answered: str,
+) -> None:
+    """A route names one message its sender edited since: the responder answers the text its own thread holds."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread")
+    build = AsyncMock(return_value=DispatchPayload(prompt="built"))
+
+    with patch.object(bot._inbound_turn_normalizer, "build_dispatch_payload_with_attachments", new=build):
+        await bot._request_payload_preparer.prepare(
+            _request(target, _preparation(target), thread_history=held, prompt_source_event_ids=routed),
+        )
+
+    assert build.await_args.args[0].prompt == answered
+
+
+@pytest.mark.parametrize(
+    ("held_revision", "selected", "answered"),
+    [
+        # The steward read a later edit than this thread holds: its route's text is the newest known.
+        pytest.param((2_000, "$edit1"), [3_000, "$edit2"], "raw prompt", id="older-than-the-stewards"),
+        pytest.param((3_000, "$edit2"), [3_000, "$edit2"], "raw prompt", id="the-stewards-own"),
+        pytest.param((4_000, "$edit3"), [3_000, "$edit2"], "the thread's text", id="newer-than-the-stewards"),
+        # Revisions are ordered as the projection orders them, by time and then by event ID.
+        pytest.param((3_000, "$edit3"), [3_000, "$edit2"], "the thread's text", id="same-time-later-id"),
+        pytest.param((3_000, "$edit1"), [3_000, "$edit2"], "raw prompt", id="same-time-earlier-id"),
+        # A person can write the key into a message of their own: what is no revision names none.
+        pytest.param((2_000, "$edit1"), ["soon", 3], "the thread's text", id="malformed"),
+        pytest.param((2_000, "$edit1"), "$edit9", "the thread's text", id="not-a-list"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_lone_routed_message_is_answered_as_edited_only_past_the_edit_its_steward_read(
+    tmp_path: Path,
+    held_revision: tuple[int, str],
+    selected: object,
+    answered: str,
+) -> None:
+    """The route says which edit its text is: only a strictly newer one in the responder's thread stands in for it."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread")
+    build = AsyncMock(return_value=DispatchPayload(prompt="built"))
+    held = [_held("$first", "the thread's text", revision=held_revision[1], edited_at=held_revision[0])]
+
+    with patch.object(bot._inbound_turn_normalizer, "build_dispatch_payload_with_attachments", new=build):
+        await bot._request_payload_preparer.prepare(
+            _request(
+                target,
+                _preparation(target, routed_revision=selected),
+                thread_history=held,
+                prompt_source_event_ids=("$first",),
+            ),
+        )
+
+    assert build.await_args.args[0].prompt == answered
 
 
 @pytest.mark.asyncio

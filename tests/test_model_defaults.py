@@ -181,7 +181,14 @@ def test_anthropic_frontier_presets_use_current_models() -> None:
 
 def test_native_compaction_covers_current_claude_models() -> None:
     """Every current Claude default must take the native compaction path."""
-    for model_id in ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-2", "claude-opus-5", "claude-sonnet-5"):
+    for model_id in (
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-2",
+        "claude-opus-5",
+        "claude-sonnet-5",
+    ):
         assert model_id.startswith(model_defaults.CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES)
 
 
@@ -229,6 +236,7 @@ def test_current_google_and_openrouter_specialist_models() -> None:
     assert model_defaults.GOOGLE_VEO == "veo-3.1-generate-001"
     assert model_defaults.GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
         "gemini-4-carbon",
+        "gemini-4-neon",
         "gemini-4-argon",
         "gemini-4-hydrogen",
         "gemini-3.8-flash",
@@ -253,11 +261,8 @@ def test_current_google_and_openrouter_specialist_models() -> None:
         "google/gemini-4-hydrogen",
         1_048_576,
     )
-    assert openrouter_alternatives["gemini_lite"] == model_defaults.ModelPreset(
-        "openrouter",
-        "google/gemini-3.5-flash-lite",
-        1_048_576,
-    )
+    assert "gemini_lite" not in openrouter_alternatives
+    assert "gemini_lite" not in model_defaults.SAAS_MODEL_PRESETS
     assert openrouter_alternatives["kimi"] == model_defaults.ModelPreset(
         "openrouter",
         "moonshotai/kimi-k3.1-pro",
@@ -323,6 +328,15 @@ def test_openai_presets_use_current_models() -> None:
         "luna": model_defaults.ModelPreset("codex", "gpt-6-luna", 258_000, reasoning_effort="low", display_name="Luna"),
     }
     assert model_defaults.CONFIG_INIT_HELPER_MODELS["codex"] == "luna"
+    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["claude_code"] == model_defaults.ModelPreset(
+        "claude_code",
+        "claude-sonnet-5-5",
+        200_000,
+    )
+    assert dict(model_defaults.CONFIG_INIT_ADDITIONAL_MODELS["claude_code"]) == {
+        "haiku": model_defaults.ModelPreset("claude_code", "claude-haiku-5-5", 200_000),
+    }
+    assert model_defaults.CONFIG_INIT_HELPER_MODELS["claude_code"] == "haiku"
     assert dict(model_defaults.CONFIG_INIT_ADDITIONAL_MODELS["codex"])["luna"].to_config_dict() == {
         "provider": "codex",
         "id": "gpt-6-luna",

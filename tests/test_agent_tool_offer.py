@@ -123,9 +123,7 @@ def test_one_build_offers_the_toolkits_config_and_turn_decide(
 ) -> None:
     """Each config rule and per-turn input adds or drops exactly the toolkits it governs."""
     raw = {"defaults": {"tools": ["sleep"], "allow_self_config": False}} if "include_default_tools" in agent else {}
-    # A Matrix room turn always offers the room runtime tools.
-    in_room = ["invite_router"] if kwargs.get("room", True) else []
-    assert _offered(tmp_path, agent, **kwargs, **raw) == sorted({*expected, *in_room})
+    assert _offered(tmp_path, agent, **kwargs, **raw) == sorted(expected)
 
 
 @pytest.mark.parametrize("authored", [["/opt/a", "/opt/b"], "/opt/a, /opt/b"])

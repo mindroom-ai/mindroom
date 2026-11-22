@@ -22,7 +22,7 @@ from mindroom.workers import protocol
 # it adds, so every other body is byte for byte what it was, and a peer that predates the field refuses only the
 # calls that ask. Such a field is left out of the digest and needs no bump.
 _SCHEMA_DIGESTS = {
-    8: "d6320479ed4156c12809f20bf04ebe9252c180c7a7965f46a898680301c59cf3",
+    9: "d6320479ed4156c12809f20bf04ebe9252c180c7a7965f46a898680301c59cf3",
 }
 # The opt-in fields of each wire model, with the worker protocol that was current when each one was added.
 _OPT_IN_FIELDS = {

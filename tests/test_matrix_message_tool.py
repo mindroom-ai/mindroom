@@ -7,7 +7,7 @@ import json
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
@@ -35,6 +35,7 @@ from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_visible_messages import trusted_visible_sender_ids
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
+from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY, MatrixMessageExtra
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
@@ -68,11 +69,13 @@ from tests.conftest import (
 )
 from tests.identity_helpers import entity_ids
 from tests.matrix_state_helpers import save_matrix_state
+from tests.tool_position_helpers import _case, _sent, _wire
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from mindroom.config.models import FileAccess
+    from mindroom.event_journal import EventJournalStore
     from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 
 
@@ -2510,3 +2513,87 @@ async def test_matrix_message_read_drops_tool_markers_from_bodies() -> None:
 
     assert "All good." in payload["messages"][0]["body"]
     assert "🔧" not in json.dumps(payload, ensure_ascii=False)
+
+
+def _reply_with_a_separator_after_its_call() -> tuple[dict[str, object], dict[str, object]]:
+    """Return a reply as its agent built it and as Matrix holds it, where reading drops the separator with the marker."""
+    case = _case("a separator after a call and extra blank lines stay")
+    return _sent(case), _wire(case)
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_read_room_puts_tool_markers_back_in_an_agents_reply_and_in_no_other_message() -> None:
+    """A room read asks the homeserver, which holds a reply without its marker lines."""
+    marked, wire = _reply_with_a_separator_after_its_call()
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id=None)
+    senders = ["@mindroom_general:localhost", "@alice:localhost"]
+
+    async def read(content: dict[str, object]) -> list[dict[str, Any]]:
+        events = [
+            {
+                "type": "m.room.message",
+                "event_id": f"$m{at}",
+                "sender": sender,
+                "origin_server_ts": at,
+                "content": content,
+            }
+            for at, sender in enumerate(senders)
+        ]
+        ctx.client.room_messages.return_value = nio.RoomMessagesResponse.from_dict(
+            {"chunk": events[::-1], "start": "s", "end": "e"},
+            ctx.room_id,
+        )
+        with tool_runtime_context(ctx):
+            return json.loads(await tool.matrix_message(action="read", limit=5))["messages"]
+
+    as_built, as_held = await read(marked), await read(wire)
+
+    assert as_held[0] == as_built[0]
+    assert [message["body"] for message in as_held] == ["After.", wire["body"]]
+    assert [message["content"]["io.mindroom.tool_trace"]["version"] for message in as_held] == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_read_thread_is_the_same_for_a_reply_stored_as_matrix_got_it(
+    journal_store: EventJournalStore,
+) -> None:
+    """A whole thread read, edit options included, reads a reply Matrix holds without its markers as one with them."""
+    marked, wire = _reply_with_a_separator_after_its_call()
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    payloads = []
+    for principal, content in (("marked", marked), ("wire", wire)):
+        store = journal_store.principal(principal)
+        # As sync stores it: the content Matrix holds, read from an agent.
+        views = ingestion_timeline_views(
+            room_id=ctx.room_id,
+            source={
+                "type": "m.room.message",
+                "event_id": "$reply",
+                "sender": "@mindroom_general:localhost",
+                "origin_server_ts": 1,
+                "content": content,
+            },
+            self_sender="@mindroom_other:localhost",
+            provenance=nio.TimelineEventProvenance.LIVE,
+        )
+        assert views is not None
+        assert views[1] is not None
+        reply = replace(views[1], thread_id=ctx.thread_id)
+        assert await store.install_hydrated_conversation(
+            room_id=ctx.room_id,
+            thread_id=ctx.thread_id,
+            events=(reply,),
+            complete=True,
+            expected_membership_epoch=await store.membership_epoch(ctx.room_id),
+        )
+        page = await store.read_conversation(room_id=ctx.room_id, thread_id=ctx.thread_id, limit=10)
+        ctx.conversation_reader.read.return_value = page
+        ctx.conversation_reader.read_strict.return_value = page
+        with tool_runtime_context(ctx):
+            payloads.append(json.loads(await tool.matrix_message(action="read")))
+
+    assert payloads[0] == payloads[1]
+    assert payloads[1]["messages"][0]["body"] == "After."
+    assert payloads[1]["edit_options"][0]["body_preview"] == "After."

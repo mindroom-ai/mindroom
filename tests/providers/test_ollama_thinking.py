@@ -7,14 +7,14 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, ReasoningDelta, TextDelta, TurnCompleted
+from mindroom.llm.provider import ModelRequest, ReasoningDelta, TextDelta
+from tests.providers.bare_adapter import completed
 from tests.providers.gemini_ollama_support import ollama_ndjson, run_adapter
 from tests.providers.golden_support import hide_provider_environment
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.llm.provider import StreamEvent
 
 _OLLAMA = {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"}
 _REQUEST = ModelRequest(messages=[Message(role="user", content="Hi")])
@@ -37,12 +37,6 @@ def _chunk(*, done: bool = False, **message: str) -> dict[str, Any]:
     return chunk
 
 
-def _completed(events: list[StreamEvent]) -> TurnCompleted:
-    completed = events[-1]
-    assert isinstance(completed, TurnCompleted)
-    return completed
-
-
 @pytest.mark.asyncio
 async def test_ollama_streams_native_thinking_as_reasoning(tmp_path: Path) -> None:
     """A thinking model's ``thinking`` field streams and is stored as reasoning, apart from the answer."""
@@ -56,8 +50,8 @@ async def test_ollama_streams_native_thinking_as_reasoning(tmp_path: Path) -> No
 
     _, events = await run_adapter(_OLLAMA, _REQUEST, tmp_path, reply)
 
-    completed = _completed(events)
-    assert (completed.message.content, completed.message.reasoning_content) == ("Hi there", "Plan first.")
+    turn = completed(events)
+    assert (turn.message.content, turn.message.reasoning_content) == ("Hi there", "Plan first.")
     assert "".join(event.text for event in events if isinstance(event, ReasoningDelta)) == "Plan first."
     assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Hi there"
 

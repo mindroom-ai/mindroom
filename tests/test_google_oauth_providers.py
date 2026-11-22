@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import httpx2
 import pytest
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
@@ -284,17 +285,17 @@ def test_calendar_refresh_preserves_grant_without_requesting_new_scopes(
         extra_token_params={"scope": requested_scope} if requested_scope is not None else {},
     )
     granted_scopes = [*_GOOGLE_IDENTITY_SCOPES, "https://www.googleapis.com/auth/calendar"]
-    requests: list[httpx.Request] = []
+    requests: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         requests.append(request)
         response: dict[str, object] = {"access_token": "new-access-token", "expires_in": 3600}
         if response_scope is not None:
             response["scope"] = response_scope
-        return httpx.Response(200, json=response)
+        return httpx2.Response(200, json=response)
 
     def client_factory(**kwargs: object) -> AsyncOAuth2Client:
-        return AsyncOAuth2Client(transport=httpx.MockTransport(handler), **kwargs)
+        return AsyncOAuth2Client(transport=httpx2.MockTransport(handler), **kwargs)
 
     monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", client_factory)
     refreshed = asyncio.run(
@@ -345,8 +346,8 @@ def test_google_exchange_defaults_to_requested_scopes_when_response_omits_scope(
     def client_factory(**kwargs: object) -> AsyncOAuth2Client:
         assert kwargs["scope"] == provider.scopes
         return AsyncOAuth2Client(
-            transport=httpx.MockTransport(
-                lambda _request: httpx.Response(
+            transport=httpx2.MockTransport(
+                lambda _request: httpx2.Response(
                     200,
                     json={"access_token": "access-token", "id_token": "identity-token"},
                 ),

@@ -4,6 +4,8 @@ A saved key becomes the agent's Agent Keys key for the request's service in the 
 and the broker adds it only to requests to that service's hosts. Only the person the agent asked may answer, once,
 while the request is pending, and only while the config the API serves now still lets them set this agent's keys,
 still keeps them in that scope, and still gives the service the hosts the card showed.
+A card that proposes a new service adds it as the requester's own with the key, while that config would still let
+the Agent Keys page add it.
 A temporary secret goes to the conversation that asked, kept as the requester chooses: in memory, or also on disk.
 The value never appears in a response body or a log line.
 """
@@ -20,7 +22,12 @@ from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
 from mindroom.api import config_lifecycle
 from mindroom.api.egress_status import agent_services, key_save_refusal, resolve_agent_keys_scope
 from mindroom.egress_broker.secrets import egress_key_path, save_secret, validate_secret
-from mindroom.egress_broker.user_services import consistent_read
+from mindroom.egress_broker.user_services import (
+    UserServiceConflictError,
+    add_user_service,
+    consistent_read,
+    user_service_hosts_error,
+)
 from mindroom.logging_config import get_logger
 from mindroom.plugin_http import ClientUser, require_room_member
 from mindroom.secret_requests import (
@@ -34,6 +41,7 @@ from mindroom.secret_requests import (
 
 if TYPE_CHECKING:
     from mindroom.api.egress_status import AgentKeysScope
+    from mindroom.config.egress_broker import EgressService
     from mindroom.secret_requests import PendingSecretRequest, SecretRequestOutcome, TemporaryTarget
 
 logger = get_logger(__name__)
@@ -79,8 +87,9 @@ async def answer_secret_request(
     A key is stored in the agent's scope, a temporary secret is given to the conversation that asked, and a decline
     stores nothing.
     404 when the request is unknown, answered, expired, or asked in another room, and also when the config served now
-    keeps the agent's keys in another scope or changed the service; that ends the request as expired, so the agent
-    can ask again with a new card. 403 when the caller is not the requester or may no longer set the agent's keys; 422
+    keeps the agent's keys in another scope, changed the service, or would no longer add the service the card proposed;
+    that ends the request as expired, so the agent can ask again with a new card. 403 when the caller is not the
+    requester or may no longer set the agent's keys; 422
     with the reason when the value is refused, or when a key's answer names a keep. A 403 or 422 leaves the request
     pending.
     """
@@ -195,12 +204,51 @@ def _save_where_asked(
         return "expired"
     if not scope.can_manage:
         return "forbidden"
+    if target.new_service is not None:
+        return _add_service_and_save(scope, target, target.new_service, secret)
     with consistent_read():
         service = agent_services(scope.config, scope.manager, scope.target).get(target.service)
         if service is None or key_save_refusal(service) is not None or secret_request_hosts(service) != target.hosts:
             return "expired"
         save_secret(scope.manager, target.worker_target, target.service, secret)
     return "saved"
+
+
+def _add_service_and_save(
+    scope: AgentKeysScope,
+    target: KeyTarget,
+    service: EgressService,
+    secret: str,
+) -> Literal["saved", "expired"]:
+    """Add the card's proposed service as the requester's own, then store its key; never one without the other.
+
+    `expired` when the config served now or the scope no longer lets the Agent Keys page add it as a new service, or
+    when it changed before the key was stored. A refused value raises before anything is added.
+    """
+    validate_secret(secret)
+    operator = scope.config.egress_broker
+    if user_service_hosts_error(operator, service) is not None:
+        return "expired"
+
+    def save_key() -> bool:
+        # The service as this agent's requests now match it must be the whole one the card showed.
+        if agent_services(scope.config, scope.manager, scope.target).get(target.service) != service:
+            return False
+        save_secret(scope.manager, target.worker_target, target.service, secret)
+        return True
+
+    try:
+        added = add_user_service(
+            scope.manager,
+            target.worker_target,
+            target.service,
+            service,
+            config_services=operator.services,
+            then=save_key,
+        )
+    except (ValueError, UserServiceConflictError):
+        return "expired"
+    return "saved" if added else "expired"
 
 
 def _log_answer(pending: PendingSecretRequest, user: ClientUser, status: str) -> None:

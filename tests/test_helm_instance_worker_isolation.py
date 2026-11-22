@@ -3578,13 +3578,32 @@ def _broker_primary_env(docs: list[dict[str, Any]]) -> tuple[dict[str, Any], dic
 
 
 def test_runtime_chart_egress_broker_disabled_by_default() -> None:
-    """Without opting in, the chart renders no broker Service, policies, listener, or env."""
+    """Without opting in, the chart renders no broker Service, policies, or listener, and turns the broker off."""
     docs = _render_runtime_chart("networkPolicy.create=true", *_EGRESS_PROXY_VALUES)
     container, env = _broker_primary_env(docs)
 
     assert _egress_broker_resource_names(docs) == []
     assert [port["name"] for port in container["ports"]] == ["api"]
-    assert not [name for name in env if name.startswith("MINDROOM_EGRESS_BROKER_")]
+    assert {name: value for name, value in env.items() if name.startswith("MINDROOM_EGRESS_BROKER_")} == {
+        "MINDROOM_EGRESS_BROKER_PORT": "off",
+    }
+
+
+@pytest.mark.parametrize("backend", ["static_runner", "kubernetes"])
+def test_runtime_chart_turns_the_default_broker_off_for_every_worker_backend(backend: str) -> None:
+    """`egressBroker.enabled: false` means off on every backend, including the chart's default static runner."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        f"workers.backend={backend}",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        release_name="mindroom-runtime",
+    )
+    _, env = _broker_primary_env(docs)
+
+    assert {name: value for name, value in env.items() if name.startswith("MINDROOM_EGRESS_BROKER_")} == {
+        "MINDROOM_EGRESS_BROKER_PORT": "off",
+    }
 
 
 def test_runtime_chart_egress_broker_direct_mode_without_worker_egress_policy() -> None:
@@ -3838,7 +3857,9 @@ def test_runtime_chart_chain_requires_both_features() -> None:
     broker_only = _render_runtime_chart("egressBroker.enabled=true")
 
     assert not any(doc["metadata"]["name"] == _EGRESS_SQUID_CONFIG_NAME for doc in approved_only)
-    assert not [name for name in _broker_primary_env(approved_only)[1] if name.startswith("MINDROOM_EGRESS_BROKER_")]
+    assert {
+        name: value for name, value in _broker_primary_env(approved_only)[1].items() if "EGRESS_BROKER" in name
+    } == {"MINDROOM_EGRESS_BROKER_PORT": "off"}
     assert "checksum/squid-config" not in _resource(approved_only, "Deployment", _EGRESS_PROXY_NAME)["spec"][
         "template"
     ]["metadata"].get("annotations", {})
@@ -3945,9 +3966,11 @@ def test_instance_chart_egress_broker_env_on_primary_only() -> None:
 
 
 def test_instance_chart_egress_broker_disabled_by_default() -> None:
-    """Hosted tenants get no broker env unless the release opts in."""
+    """Hosted tenants get no broker unless the release opts in: MindRoom's default loopback broker is turned off."""
     deployment = _resource(_render_instance_chart(), "Deployment", "mindroom-demo")
 
-    for container in ("mindroom", "sandbox-runner"):
+    for container, expected in (("mindroom", {"MINDROOM_EGRESS_BROKER_PORT": "off"}), ("sandbox-runner", {})):
         env = _env_by_name(_container(deployment, container))
-        assert not [name for name in env if name.startswith("MINDROOM_EGRESS_BROKER_")]
+        assert {
+            name: entry.get("value") for name, entry in env.items() if name.startswith("MINDROOM_EGRESS_BROKER_")
+        } == expected

@@ -94,6 +94,7 @@ class SchedulerTools(Toolkit):
             history_limit=history_limit,
             silent=silent,
             model=model,
+            source_event_id=context.reply_to_event_id,
         )
 
     async def schedule_tool_call(
@@ -137,6 +138,7 @@ class SchedulerTools(Toolkit):
             arguments=arguments,
             execute_at=execute_at,
             description=description,
+            source_event_id=context.reply_to_event_id,
         )
 
     async def run_scheduled_call(

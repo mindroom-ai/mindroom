@@ -60,6 +60,7 @@ from mindroom.media_delivery import view_agent_image
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
+    KUBERNETES_POD_LIMIT_ENV_NAMES,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     sandbox_runner_startup_process_env,
@@ -131,6 +132,8 @@ from mindroom.workers.protocol import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
+
+    from pydantic.main import IncEx
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
@@ -936,7 +939,11 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
         for name in request.environment.set_names
         if name in request.execution_env and execution_env.get(name) == request.execution_env[name]
     ]
-    removed_names = [name for name in request.environment.unset_names if name not in execution_env]
+    removed_names = [
+        name
+        for name in request.environment.unset_names
+        if name not in execution_env and name not in KUBERNETES_POD_LIMIT_ENV_NAMES
+    ]
     execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared, execution_env) or execution_env
     # A kept name takes its value as the worker composed it, so its own PATH entries stay around a hook's PATH.
     call_environment: dict[str, str | None] = {name: execution_env[name] for name in kept_set_names}
@@ -1247,7 +1254,7 @@ def _shell_subprocess_dispatch_context(
 def _subprocess_config_yaml(config: Config, tool_name: str) -> str:
     """Serialize the validated config needed by one subprocess tool call."""
     builtin_metadata = builtin_tool_registry().get(tool_name)
-    include: dict[str, object] | None = None
+    include: dict[str, IncEx] | None = None
     if builtin_metadata is not None and ToolManagedInitArg.RUNTIME_CONFIG not in builtin_metadata.managed_init_args:
         default_fields = {"worker_grantable_credentials", "tool_output_auto_save_threshold_bytes"}
         # Plugin paths let the child register plugin tools; their settings stay out of the process running tool code.

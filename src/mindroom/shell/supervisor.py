@@ -170,6 +170,7 @@ async def _handle_run(
             handle=handle_payload,
             handle_reservations=handle_reservations,
             output_destination=output_destination,
+            launch_failure_exits=payload.get("launch_failure_exits") is True,
         ),
     )
     # EOF before the run response means the client (a per-request tool
@@ -303,7 +304,7 @@ async def _handle_connection(
         await writer.drain()
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         with suppress(OSError):
-            result = ShellRunResult(message=f"Error: Invalid shell supervisor request: {exc}")
+            result = ShellRunResult(message=f"Error: Invalid shell supervisor request: {exc}", execution_error=True)
             writer.write(json.dumps(asdict(result)).encode() + b"\n")
             await writer.drain()
     except OSError:
@@ -372,6 +373,7 @@ async def run_command_via_supervisor(
     handle: str | None = None,
     max_runtime_seconds: float | None = None,
     output_destination: ShellOutputDestination | None = None,
+    launch_failure_exits: bool = False,
 ) -> ShellRunResult:
     """Run one shell command and preserve its execution and output-file ownership; see ``run_command``."""
     request = {
@@ -383,6 +385,7 @@ async def run_command_via_supervisor(
         "tail": tail,
         "timeout": timeout,
         "on_timeout": on_timeout,
+        "launch_failure_exits": launch_failure_exits,
     }
     if handle is not None:
         request["handle"] = handle
@@ -395,7 +398,7 @@ async def run_command_via_supervisor(
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path, limit=_REQUEST_LIMIT_BYTES)
     except OSError as exc:
-        return ShellRunResult(message=f"Error: Shell supervisor is unavailable: {exc}")
+        return ShellRunResult(message=f"Error: Shell supervisor is unavailable: {exc}", execution_error=True)
     loop = asyncio.get_running_loop()
     deadline = None if timeout is None else loop.time() + timeout + _RUN_RESPONSE_GRACE_SECONDS
     try:
@@ -410,9 +413,9 @@ async def run_command_via_supervisor(
                 break
             on_progress(text)
     except TimeoutError:
-        return ShellRunResult(message="Error: Shell supervisor did not respond in time.")
+        return ShellRunResult(message="Error: Shell supervisor did not respond in time.", execution_error=True)
     except OSError as exc:
-        return ShellRunResult(message=f"Error: Shell supervisor request failed: {exc}")
+        return ShellRunResult(message=f"Error: Shell supervisor request failed: {exc}", execution_error=True)
     finally:
         writer.close()
         with suppress(OSError):
@@ -468,21 +471,35 @@ def _recv_line(conn: socket.socket) -> bytes:
 
 def _parse_supervisor_response(line: bytes) -> ShellRunResult:
     if not line.strip():
-        return ShellRunResult(message="Error: Shell supervisor closed the connection unexpectedly.")
+        return ShellRunResult(
+            message="Error: Shell supervisor closed the connection unexpectedly.",
+            execution_error=True,
+        )
     try:
         payload = json.loads(line)
         message, handle, output_file_handled = payload["message"], payload["handle"], payload["output_file_handled"]
+        execution_error = payload.get("execution_error", False)
         return_code = payload.get("return_code")
     except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as exc:
-        return ShellRunResult(message=f"Error: Invalid shell supervisor response: {exc}")
+        return ShellRunResult(message=f"Error: Invalid shell supervisor response: {exc}", execution_error=True)
     if (
         not isinstance(message, str)
         or (handle is not None and not isinstance(handle, str))
         or not isinstance(output_file_handled, bool)
+        or not isinstance(execution_error, bool)
         or (return_code is not None and not isinstance(return_code, int))
     ):
-        return ShellRunResult(message="Error: Invalid shell supervisor response: invalid result fields.")
-    return ShellRunResult(message, handle=handle, output_file_handled=output_file_handled, return_code=return_code)
+        return ShellRunResult(
+            message="Error: Invalid shell supervisor response: invalid result fields.",
+            execution_error=True,
+        )
+    return ShellRunResult(
+        message=message,
+        handle=handle,
+        output_file_handled=output_file_handled,
+        execution_error=execution_error,
+        return_code=return_code,
+    )
 
 
 # ---------------------------------------------------------------------------

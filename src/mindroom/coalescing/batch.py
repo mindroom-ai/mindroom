@@ -21,8 +21,11 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
+from mindroom.logging_config import get_logger
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.segmented_messages import SEGMENT_COUNT_KEY
+from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY, parse_thread_model_choice
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
@@ -32,10 +35,14 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.commands.parsing import Command
+    from mindroom.model_selection import ThreadModelChoice
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_store import TurnClaim
     from mindroom.turns.facts import IngressFacts, RunIdentity
     from mindroom.turns.interactive_selection import InteractiveSelectionDispatch
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -122,6 +129,7 @@ class PreparedTurn:
     facts: IngressFacts
     # The command the turn's text runs as; a turn of several sources has none.
     command: Command | None
+    thread_model_choice: ThreadModelChoice | None
     handled_turn: TurnRecord
     # The gate's batching scope; a key without a thread is a room-level conversation.
     coalescing_key: CoalescingKey
@@ -432,6 +440,29 @@ def _batch_source_event_metadata(ordered_pending_events: list[PendingEvent]) -> 
     }
 
 
+def _batch_thread_model_choice(events: list[PendingEvent]) -> ThreadModelChoice | None:
+    """Read the latest opening pick from a direct source, not from an edit or relay."""
+    for pending in reversed(events):
+        content = pending.event.source.get("content")
+        if not isinstance(content, Mapping) or THREAD_MODEL_CONTENT_KEY not in content:
+            continue
+        if EventInfo.from_event(pending.event.source).is_edit:
+            continue
+        if pending.facts.sender_is_managed or pending.facts.acts_for_requester:
+            logger.info(
+                "Ignoring root thread model choice",
+                event_id=pending.event.event_id,
+                reason="managed_or_proxied_source",
+            )
+            continue
+        choice = parse_thread_model_choice(content)
+        if choice is None:
+            logger.info("Ignoring root thread model choice", event_id=pending.event.event_id, reason="malformed")
+        # A newer malformed choice must not silently fall back to an older pick.
+        return choice
+    return None
+
+
 def build_prepared_turn(
     key: CoalescingKey,
     pending_events: list[PendingEvent],
@@ -465,7 +496,9 @@ def build_prepared_turn(
     source_event_ids = tuple(pending_event.event.event_id for pending_event in ordered_pending_events)
     source_event_prompts = _batch_source_event_prompts(ordered_pending_events)
     source_event_metadata = _batch_source_event_metadata(ordered_pending_events)
-    routed_aliases = tuple(filter(None, (item.discovery_event_id for item in source_event_metadata.values())))
+    routed_aliases = tuple(
+        alias for pending_event in ordered_pending_events for alias in pending_event.facts.discovery_event_ids
+    )
     facts = _batch_facts(ordered_pending_events)
     return PreparedTurn(
         room=primary_pending_event.room,
@@ -473,6 +506,7 @@ def build_prepared_turn(
         facts=facts,
         # One source's prompt is its own ``dispatch_prompt_for_event``, the command's canonical text.
         command=command_for(facts, prompt_rendering.prompt, len(source_event_ids)),
+        thread_model_choice=_batch_thread_model_choice(ordered_pending_events),
         handled_turn=TurnRecord.create(
             source_event_ids,
             discovery_event_ids=routed_aliases,

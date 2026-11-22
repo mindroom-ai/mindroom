@@ -11,12 +11,12 @@ import nio
 from fastapi import HTTPException
 
 from mindroom.api.app_state import ensure_app_state
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.history_visibility import read_room_history
 from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.rooms import is_dm_room
+from mindroom.room_steward import room_steward
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -39,30 +39,18 @@ _HISTORY_READ_FAILED = "Room history read failed; try again."
 _LOOKUP_TIMEOUT_SECONDS = 20
 
 
-def _client_in_room(bots: Mapping[str, AgentBot], room_id: str) -> nio.AsyncClient | None:
-    """Return the router's live client if it runs and is joined to the room, else any running bot's that is."""
-    router = bots.get(ROUTER_AGENT_NAME)
-    others = (bot for name, bot in bots.items() if name != ROUTER_AGENT_NAME)
-    for bot in (router, *others):
-        if bot is None or not bot.running:
-            continue
-        client = bot.client
-        if client is not None and room_id in client.rooms:
-            return client
-    return None
-
-
 async def _read_in_room[T](
     bots: Mapping[str, AgentBot],
     room_id: str,
     read: Callable[[nio.AsyncClient], Awaitable[T]],
     failed: str,
 ) -> T:
-    """Return ``read`` made through the client ``_client_in_room`` picks, else answer 503 with ``failed``.
+    """Return ``read`` made through the client of the room's steward, else answer 503 with ``failed``.
 
     It answers 503 too when no running bot is in the room, or when ``read`` raises or outlasts the lookup timeout.
     """
-    client = _client_in_room(bots, room_id)
+    steward = room_steward(bots, room_id)
+    client = None if steward is None else steward.client
     if client is None:
         raise HTTPException(503, _NO_BOT_IN_ROOM)
     try:
@@ -77,9 +65,9 @@ async def _read_in_room[T](
 def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
     """Publish readers of a room's joined users and names, its state and history, and whether it is a direct message.
 
-    Each read is answered by a running bot in that room, the router first. ``bots`` must be the orchestrator's live
-    mapping, read at each lookup, so a bot that stopped, left the room, or restarted with a new client counts as it is
-    now, and one binding lasts for as long as the API serves.
+    Each read is answered by the room's steward. ``bots`` must be the orchestrator's live mapping, read at each
+    lookup, so a bot that stopped, left the room, or restarted with a new client counts as it is now, and one binding
+    lasts for as long as the API serves.
     Callers that ask about a room's members while its lookup runs share that lookup, its answer or its failure, so a
     burst of requests makes one Matrix call; no answer is kept once its lookup ends, so a later caller asks again.
     """
@@ -118,6 +106,7 @@ def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
     state.room_state = partial(_room_state, bots)
     state.room_direct = partial(_room_direct, bots)
     state.room_history = partial(_room_history, bots)
+    state.room_bots = bots
 
 
 async def _room_state(bots: Mapping[str, AgentBot], room_id: str) -> RoomStateSnapshot:
@@ -150,3 +139,4 @@ def unbind_room_members(app: FastAPI) -> None:
     state.room_state = None
     state.room_direct = None
     state.room_history = None
+    state.room_bots = None

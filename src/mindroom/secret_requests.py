@@ -47,6 +47,9 @@ class KeyTarget:
     worker_target: ResolvedWorkerTarget
     # The service's hosts the card shows, which the key may only ever be sent to.
     hosts: tuple[str, ...]
+    # The service the agent proposed, which an answer adds as the requester's own before it stores the key; None
+    # for a service that exists.
+    new_service: EgressService | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +152,29 @@ def secret_request_hosts(service: EgressService) -> tuple[str, ...]:
     return tuple(sorted({rule.host for rule in service.rules}))
 
 
+def _new_service_content(name: str, service: EgressService) -> dict[str, object]:
+    """Return what a card shows of a proposed service for the requester to decide: where each rule sends the key, how.
+
+    Each rule's port only when it names one, and of its auth the header or parameter name or the basic username, never
+    a template; the placeholders' names and values, which are never secrets.
+    """
+    rules: list[dict[str, object]] = []
+    for rule in service.rules:
+        shown: dict[str, object] = {"host": rule.host, "path_prefix": rule.path_prefix}
+        if rule.port is not None:
+            shown["port"] = rule.port
+        if rule.auth is not None:
+            named = {"name": rule.auth.name, "username": rule.auth.username}
+            shown["auth"] = {"type": rule.auth.type} | {key: text for key, text in named.items() if text is not None}
+        rules.append(shown)
+    return {
+        "name": name,
+        "display_name": service.display_name or name,
+        "rules": rules,
+        "placeholder_env": dict(service.placeholder_env),
+    }
+
+
 def _where_to_get_it(url: str) -> str:
     """Return what a pending card's body says of the page the agent named, for a client that shows no button."""
     return f" Where to get it: {url}" if url else ""
@@ -210,7 +236,8 @@ def secret_request_content(
 ) -> dict[str, object]:
     """Return the `io.mindroom.secret_request` object: metadata only, never a value.
 
-    A key card says `replaces` when saving would replace a key the service already has in that store.
+    A key card says `replaces` when saving would replace a key the service already has in that store, and shows the
+    service the agent proposed as `new_service`, which saving adds.
 
     A temporary secret's card has no service fields, so a client that knows only key cards reads none in it; it
     names the variable, the keeps the requester chooses from with their lifetimes in seconds, and, once answered, the
@@ -229,6 +256,8 @@ def secret_request_content(
         content["env"] = target.name
     else:
         content |= {"service": target.service, "display_name": display_name, "hosts": list(target.hosts)}
+        if target.new_service is not None:
+            content["new_service"] = _new_service_content(target.service, target.new_service)
     content |= {"reason": reason, "status": status, "expires_at": int(request.expires_at * 1000)}
     if replaces:
         content["replaces"] = True

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 # AGNO_COMPAT: AirflowTools resolves DAG files from the process working directory and reaches them by path.
-# Reason: Agno 3.0.9 defaults dags_dir to the working directory, which can hold MindRoom's config.yaml
+# Reason: Agno 3.2.1 defaults dags_dir to the working directory, which can hold MindRoom's config.yaml
 # and .env, and reads and writes by path after a resolve-time check, so a link planted in a shared
 # workspace could redirect the call.
 # Upstream issue: Tracking gap; upstream tracking has not been verified.

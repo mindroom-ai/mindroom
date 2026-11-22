@@ -34,6 +34,8 @@ from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
+    KUBERNETES_POD_CPU_LIMIT_ENV,
+    KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     VENDOR_TELEMETRY_ENV_VALUES,
@@ -63,7 +65,7 @@ from mindroom.workers.backends.dedicated_launch import (
     dedicated_worker_startup_runtime_paths,
     write_dedicated_worker_startup_manifest,
 )
-from mindroom.workers.backends.kubernetes_config import resolve_kubeconfig_paths
+from mindroom.workers.backends.kubernetes_config import resolve_kubeconfig_paths, validated_kubernetes_object
 from mindroom.workers.backends.kubernetes_pod_names import (
     SANDBOX_RUNNER_CONTAINER_NAME,
     WORKER_STORAGE_VOLUME_NAME,
@@ -117,6 +119,16 @@ LABEL_WORKER_ID = "mindroom.ai/worker-id"
 # limit, instead of the node running out of ephemeral storage.
 _WORKER_TMP_SIZE_LIMIT = "1Gi"
 _CONTAINER_NAME = SANDBOX_RUNNER_CONTAINER_NAME
+# Container resource limits exposed via the downward API under Kubernetes-only names
+# (already excluded from startup manifests, isolated env, and extra_env); without a
+# configured limit, Kubernetes reports the node's allocatable resource, which is acceptable.
+# Tool vars (MINDROOM_WORKER_CPUS, MINDROOM_WORKER_MEMORY_BYTES, OMP_NUM_THREADS,
+# PYTHON_CPU_COUNT, PYTEST_XDIST_AUTO_NUM_WORKERS) are derived only for worker subprocesses
+# and hooks so the runner process keeps its own default thread pool budget.
+_WORKER_RESOURCE_LIMIT_ENV_SPECS: tuple[tuple[str, str, str], ...] = (
+    (KUBERNETES_POD_CPU_LIMIT_ENV, "limits.cpu", "1"),
+    (KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV, "limits.memory", "1"),
+)
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"
 _CREDENTIALS_ENCRYPTION_KEY_SECRET_SUFFIX = "credentials-encryption-key"  # noqa: S105
@@ -162,6 +174,9 @@ class _KubernetesMetadata(Protocol):
     @property
     def uid(self) -> str | None: ...
 
+    @property
+    def deletion_timestamp(self) -> object | None: ...
+
 
 class _KubernetesDeploymentSpec(Protocol):
     @property
@@ -186,7 +201,7 @@ class KubernetesDeployment(Protocol):
     def spec(self) -> _KubernetesDeploymentSpec: ...  # noqa: D102
 
     @property
-    def status(self) -> _KubernetesDeploymentStatus: ...  # noqa: D102
+    def status(self) -> _KubernetesDeploymentStatus | None: ...  # noqa: D102
 
 
 @dataclass(slots=True)
@@ -196,6 +211,8 @@ class _DeploymentMetadataSnapshot:
     labels: dict[str, str]
     generation: int | None
     uid: str | None
+    # Set while the object is being deleted, as during a foreground deletion that waits for its pods.
+    deletion_timestamp: object | None = None
 
 
 @dataclass(slots=True)
@@ -231,7 +248,7 @@ class _KubernetesRawResponse(Protocol):
 
 
 class _AppsApiProtocol(Protocol):
-    def read_namespaced_deployment(self, name: str, namespace: str) -> KubernetesDeployment: ...
+    def read_namespaced_deployment(self, name: str, namespace: str, **kwargs: object) -> KubernetesDeployment: ...
 
     def create_namespaced_deployment(self, namespace: str, body: dict[str, object]) -> KubernetesDeployment: ...
 
@@ -263,32 +280,7 @@ class _AppsApiProtocol(Protocol):
     def list_namespaced_replica_set(self, namespace: str, **kwargs: object) -> _KubernetesRawResponse: ...
 
 
-class _KubernetesApiClientProtocol(Protocol):
-    def select_header_accept(self, content_types: list[str]) -> str: ...
-
-    def call_api(
-        self,
-        resource_path: str,
-        method: str,
-        path_params: dict[str, str],
-        query_params: list[object],
-        header_params: dict[str, str],
-        *,
-        body: object,
-        post_params: list[object],
-        files: dict[str, object],
-        response_type: str,
-        auth_settings: list[str],
-        _return_http_data_only: bool,
-        _preload_content: bool,
-        _request_timeout: object | None,
-        collection_formats: dict[str, str],
-    ) -> object: ...
-
-
 class _CoreApiProtocol(Protocol):
-    api_client: _KubernetesApiClientProtocol
-
     def read_namespaced_service(self, name: str, namespace: str) -> object: ...
 
     def create_namespaced_service(self, namespace: str, body: dict[str, object]) -> object: ...
@@ -301,11 +293,26 @@ class _CoreApiProtocol(Protocol):
 
     def create_namespaced_secret(self, namespace: str, body: dict[str, object]) -> object: ...
 
+    def patch_namespaced_secret(
+        self,
+        name: str,
+        namespace: str,
+        body: dict[str, object],
+        *,
+        _content_type: str,
+    ) -> object: ...
+
     def delete_namespaced_secret(self, name: str, namespace: str) -> None: ...
 
     def list_namespaced_pod(self, namespace: str, **kwargs: object) -> _KubernetesRawResponse: ...
 
     def read_namespaced_pod(self, name: str, namespace: str) -> _KubernetesPod: ...
+
+
+def _validate_manifest(manifest: dict[str, object]) -> None:
+    """Fail before any request when the installed client's models reject one worker manifest."""
+    kind = cast("str", manifest["kind"])
+    validated_kubernetes_object(f"V1{kind}", manifest, what=f"The worker {kind} manifest")
 
 
 def service_host(service_name: str, namespace: str, port: int) -> str:
@@ -548,6 +555,7 @@ def _deployment_snapshot(payload: object) -> KubernetesDeployment:
             labels=_string_mapping(metadata.get("labels"), field_name="metadata.labels"),
             generation=_optional_int(metadata.get("generation"), field_name="metadata.generation"),
             uid=uid,
+            deletion_timestamp=metadata.get("deletionTimestamp"),
         ),
         spec=_DeploymentSpecSnapshot(
             replicas=_optional_int(spec.get("replicas"), field_name="spec.replicas"),
@@ -695,10 +703,10 @@ class KubernetesResourceManager:
             raise WorkerBackendError(msg)
         return [_deployment_snapshot(item) for item in payload["items"]]
 
-    def read_deployment(self, deployment_name: str) -> KubernetesDeployment | None:
+    def read_deployment(self, name: str, *, request_timeout: float | None = None) -> KubernetesDeployment | None:
         """Read one Deployment, returning ``None`` for 404s."""
         try:
-            return self._apps.read_namespaced_deployment(deployment_name, self.config.namespace)
+            return self._apps.read_namespaced_deployment(name, self.config.namespace, _request_timeout=request_timeout)
         except self.api_exception as exc:
             if exc.status == 404:
                 return None
@@ -724,6 +732,7 @@ class KubernetesResourceManager:
             )
             return
         manifest = self._auth_secret_manifest(worker_key=worker_key, worker_id=worker_id)
+        _validate_manifest(manifest)
         try:
             self._core.read_namespaced_secret(worker_id, self.config.namespace)
         except self.api_exception as exc:
@@ -832,6 +841,35 @@ class KubernetesResourceManager:
                 raise
         self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
 
+    def worker_is_orphaned(self, worker_id: str) -> bool:
+        """Only confirm an orphan when its Deployment, ReplicaSets, and non-terminal Pods are absent."""
+        try:
+            if self.read_deployment(worker_id) is not None:
+                return False
+            for list_resources, filters in (
+                (self._apps.list_namespaced_replica_set, {}),
+                (self._core.list_namespaced_pod, {"field_selector": "status.phase!=Failed,status.phase!=Succeeded"}),
+            ):
+                response = list_resources(
+                    self.config.namespace,
+                    label_selector=f"{LABEL_WORKER_ID}={worker_id}",
+                    limit=1,
+                    _preload_content=False,
+                    _request_timeout=5.0,
+                    **filters,
+                )
+                try:
+                    payload = json.loads(response.data)
+                finally:
+                    response.release_conn()
+                metadata = payload.get("metadata", {})
+                if payload["items"] != [] or not isinstance(metadata, dict) or metadata.get("continue"):
+                    return False
+        except Exception:  # An API or inventory error is not evidence of absence.
+            logger.warning("kubernetes_worker_orphan_check_failed", worker_id=worker_id, exc_info=True)
+            return False
+        return True
+
     def check_workers_absent_for_storage_upgrade(self, *, timeout_seconds: float) -> None:
         """Require all worker controllers and Pods absent throughout this namespace."""
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
@@ -913,27 +951,13 @@ class KubernetesResourceManager:
         self._delete_object(self._core.delete_namespaced_secret, secret_name)
 
     def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:
-        api_client = self._core.api_client
-        api_client.call_api(
-            "/api/v1/namespaces/{namespace}/secrets/{name}",
-            "PATCH",
-            {"name": secret_name, "namespace": self.config.namespace},
-            [],
-            {
-                "Accept": api_client.select_header_accept(
-                    ["application/json", "application/yaml", "application/vnd.kubernetes.protobuf", "application/cbor"],
-                ),
-                "Content-Type": "application/merge-patch+json",
-            },
-            body=body,
-            post_params=[],
-            files={},
-            response_type="V1Secret",
-            auth_settings=["BearerToken"],
-            _return_http_data_only=True,
-            _preload_content=True,
-            _request_timeout=None,
-            collection_formats={},
+        # A merge patch replaces the ownerReferences list and its nulls delete data keys;
+        # the client's default strategic merge patch would merge ownerReferences by uid instead.
+        self._core.patch_namespaced_secret(
+            secret_name,
+            self.config.namespace,
+            body,
+            _content_type="application/merge-patch+json",
         )
 
     def _recreate_deployment(
@@ -944,6 +968,8 @@ class KubernetesResourceManager:
         timeout_seconds: float,
     ) -> None:
         """Delete one Deployment, wait until it and its pods are gone, and create it again from the manifest."""
+        # Checked first: a manifest the client rejects must not cost the worker its running Deployment.
+        _validate_manifest(manifest)
         self.delete_deployment(deployment_name, timeout_seconds=timeout_seconds)
         deadline = time.time() + timeout_seconds
         while True:
@@ -1027,6 +1053,7 @@ class KubernetesResourceManager:
         resource_name: str,
         manifest: dict[str, object],
     ) -> None:
+        _validate_manifest(manifest)
         try:
             read_fn(resource_name, self.config.namespace)
         except self.api_exception as exc:
@@ -1321,7 +1348,7 @@ class KubernetesResourceManager:
         resource_profile: str | None = None,
     ) -> dict[str, object]:
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
-        startup_manifest_hash = self._write_startup_manifest(
+        startup_manifest_hash = self.write_startup_manifest(
             worker_key=worker_key,
             state_subpath=state_subpath,
             tool_validation_snapshot=launch.tool_validation_snapshot,
@@ -1388,12 +1415,26 @@ class KubernetesResourceManager:
             {"name": name, "value": value}
             for name, value in dedicated_worker_runner_env(layout, worker_key=worker_key).items()
         ]
+        extra_env = worker_extra_env(self.config.extra_env)
         env: list[dict[str, object]] = [
             *runner_env,
             {"name": "HOME", "value": layout.dedicated_root},
             self._worker_token_env(worker_id=worker_id),
+            *(
+                {
+                    "name": name,
+                    "valueFrom": {
+                        "resourceFieldRef": {
+                            "containerName": _CONTAINER_NAME,
+                            "resource": resource,
+                            "divisor": divisor,
+                        },
+                    },
+                }
+                for name, resource, divisor in _WORKER_RESOURCE_LIMIT_ENV_SPECS
+            ),
         ]
-        for name, value in sorted(worker_extra_env(self.config.extra_env).items()):
+        for name, value in sorted(extra_env.items()):
             env.append({"name": name, "value": value})
         for name, value in sorted(VENDOR_TELEMETRY_ENV_VALUES.items()):
             env.append({"name": name, "value": value})
@@ -1432,7 +1473,7 @@ class KubernetesResourceManager:
             tool_validation_snapshot=tool_validation_snapshot,
         )
 
-    def _write_startup_manifest(
+    def write_startup_manifest(
         self,
         *,
         worker_key: str,

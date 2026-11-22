@@ -124,6 +124,7 @@ const UNLISTED_KEYLESS_PROVIDER_IDS = new Set([
   "kimi",
   "kimi_code",
   "bedrock_claude",
+  "claude_code",
   "synthetic",
 ]);
 

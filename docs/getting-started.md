@@ -69,7 +69,7 @@ See [`mindroom service`](cli.md#service) for when the question is skipped.
 - **Preflight check:** `uvx mindroom doctor` checks config, API keys, Matrix connectivity, pairing, and storage in one pass; see [doctor](cli.md#doctor).
 
 See [Hosted Matrix + Local Backend](deployment/hosted-matrix.md) for what runs where and the credential and trust model.
-To run worker-routed execution tools such as `coding`, `docker`, `file`, `python`, and `shell` in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](deployment/sandbox-proxy.md).
+To run worker-routed execution tools such as `docker`, `filesystem`, `python`, and `shell` in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](deployment/sandbox-proxy.md).
 
 <a id="set-up-without-a-terminal"></a>
 
@@ -97,7 +97,7 @@ uvx mindroom run
 ```
 
 The generated `.env` lists the credentials the chosen preset needs; set them before running.
-See [`config init`](cli.md#config-init) for every option and the extra steps for the `codex`, `kimi`, `ollama`, and `llama.cpp` presets, and [Model Environment Variables](configuration/models.md#environment-variables) for each provider's credentials.
+See [`config init`](cli.md#config-init) for every option and the extra steps for the `codex`, `kimi`, `claude_code`, `ollama`, and `llama.cpp` presets, and [Model Environment Variables](configuration/models.md#environment-variables) for each provider's credentials.
 
 <a id="alternative-full-stack-docker-compose"></a>
 
@@ -175,7 +175,7 @@ Prerequisites:
     source .venv/bin/activate
     ```
 
-    Install Node.js 24 and [Bun](https://bun.sh/) to build missing dashboard assets on first run, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
+    Install Node.js 24 and [Bun](https://bun.sh/) 1.4 or newer to build missing dashboard assets on first run, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
     Without assets and Bun, the API is available but the dashboard is not.
 
 ### Configuration
@@ -241,7 +241,7 @@ See [Environment Variables](configuration/index.md#environment-variables) for ev
 
 ### Matrix account provisioning
 
-MindRoom creates a Matrix account for each agent, team, and the router.
+MindRoom creates a Matrix account for each agent and team, and one account of its own that administers the rooms in `config.yaml`.
 Configure one way for it to do so: hosted provisioning, `MATRIX_REGISTRATION_TOKEN`, `MATRIX_REGISTRATION_SHARED_SECRET`, an [application service](matrix.md#agent-users), or intentionally open registration.
 If registration fails, check the selected credentials and the homeserver's registration policy.
 

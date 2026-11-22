@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
-from collections.abc import Callable, Iterable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, MutableMapping
 from enum import StrEnum
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -48,8 +49,7 @@ _MANAGED_ROOM_EVENT_POWER_LEVELS = {
     # Matrix lets a user write a state key that starts with @ only when it is that user's own ID.
     BACKGROUND_JOBS_EVENT_TYPE: 0,
     MINDROOM_SERVER_EVENT_TYPE: 0,
-    # The router publishes the room's !auto_approve windows and MindRoom accounts; in a personal room an agent created
-    # it has no power.
+    # The room's steward publishes the room's !auto_approve windows and MindRoom accounts, with whatever power it has.
     AUTO_APPROVE_WINDOWS_EVENT_TYPE: 0,
     MINDROOM_ACCOUNTS_EVENT_TYPE: 0,
 }
@@ -280,12 +280,29 @@ async def ensure_room_encryption_enabled(
     Enabling encryption is irreversible; this helper never disables it.
     Returns whether the room is encrypted after the call.
     """
+    return await room_encryption_enable_failure(client, room_id, snapshot=snapshot) is None
+
+
+async def room_encryption_enable_failure(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    snapshot: RoomStateSnapshot | None = None,
+    put_state: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]] | None = None,
+) -> str | None:
+    """Enable encryption like `ensure_room_encryption_enabled`; return None once encrypted, or why not.
+
+    A client that only answers writes through ``put_state``, the room steward's, whose None (no steward) is the
+    empty reason. A refusal is the homeserver's errcode and reason, such as `M_FORBIDDEN: Encryption is disabled on
+    this homeserver.`, which tells a server that refuses encryption apart from missing room permission.
+    """
     enabled = await room_encryption_enabled(client, room_id, snapshot=snapshot)
     if enabled:
-        return True
+        return None
     if enabled is None:
-        return False
-    response = await client.room_put_state(room_id, _ROOM_ENCRYPTION_EVENT_TYPE, dict(_ROOM_ENCRYPTION_CONTENT))
+        return "the room's encryption state could not be read"
+    write = put_state or client.room_put_state
+    response = await write(room_id, _ROOM_ENCRYPTION_EVENT_TYPE, dict(_ROOM_ENCRYPTION_CONTENT))
     if isinstance(response, nio.RoomPutStateResponse):
         cached_room = client.rooms.get(room_id)
         if cached_room is not None:
@@ -294,9 +311,12 @@ async def ensure_room_encryption_enabled(
             # the sync window (e.g. the `!encrypt` confirmation) are not plaintext.
             cached_room.encrypted = True
         logger.info("matrix_room_encryption_enabled", room_id=room_id)
-        return True
-    logger.error("matrix_room_encryption_enable_failed", room_id=room_id, error=str(response))
-    return False
+        return None
+    # A refusal the homeserver states, such as an account without the power, is expected and told to the person.
+    refused = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
+    log = logger.warning if refused else logger.error
+    log("matrix_room_encryption_enable_failed", room_id=room_id, error=str(response))
+    return "" if response is None else _describe_matrix_response_error(response)
 
 
 def _with_event_power_level(
@@ -318,15 +338,13 @@ async def ensure_managed_room_power_levels(  # noqa: PLR0911 - each unsafe Matri
     room_id: str,
     admin_user_ids: Iterable[str] = (),
     *,
-    state_writer_ids: Iterable[str] = (),
     snapshot: RoomStateSnapshot | None = None,
     creators: frozenset[str] | None = None,
 ) -> bool:
     """Reconcile managed-room power levels with one read-modify-write.
 
-    Applies the PL0 state events used by MindRoom clients, grants configured
-    room admins power level 100, and raises ``state_writer_ids`` to the state
-    level 50 in one conditional PUT.
+    Applies the PL0 state events used by MindRoom clients and grants configured
+    room admins power level 100 in one conditional PUT.
     """
     current_response = await read_state_event(client, room_id, _POWER_LEVELS_EVENT_TYPE, snapshot=snapshot)
     if not isinstance(current_response, nio.RoomGetStateEventResponse):
@@ -354,13 +372,6 @@ async def ensure_managed_room_power_levels(  # noqa: PLR0911 - each unsafe Matri
         desired_content = _with_event_power_level(desired_content, event_type, power_level)
     concrete_admin_ids = {user_id for user_id in admin_user_ids if user_id}
     desired_content = _with_room_admin_power_levels(desired_content, concrete_admin_ids, creators)
-    concrete_writer_ids = {user_id for user_id in state_writer_ids if user_id}
-    desired_content = _with_room_admin_power_levels(
-        desired_content,
-        concrete_writer_ids,
-        creators,
-        power_level=_POWER_USER_POWER_LEVEL,
-    )
     if desired_content == current_content:
         logger.debug(
             "Managed room power levels already configured",
@@ -373,13 +384,7 @@ async def ensure_managed_room_power_levels(  # noqa: PLR0911 - each unsafe Matri
         # Topics and other policy operations may have awaited since this snapshot.
         # A required read-modify-write must preserve current grants, not restore old ones.
         # The create event is immutable, so the snapshot's creators stay current.
-        return await ensure_managed_room_power_levels(
-            client,
-            room_id,
-            concrete_admin_ids,
-            state_writer_ids=concrete_writer_ids,
-            creators=creators,
-        )
+        return await ensure_managed_room_power_levels(client, room_id, concrete_admin_ids, creators=creators)
 
     response = await client.room_put_state(
         room_id=room_id,
@@ -408,10 +413,8 @@ def _with_room_admin_power_levels(
     power_levels_content: dict[str, Any],
     user_ids: Iterable[str],
     creators: frozenset[str],
-    *,
-    power_level: int = ROOM_ADMIN_POWER_LEVEL,
 ) -> dict[str, Any]:
-    """Return power-level content with users promoted to ``power_level``, never lowering anyone.
+    """Return power-level content with users promoted to room admin, never lowering anyone.
 
     Privileged creators already have unlimited power, and listing them would be rejected.
     """
@@ -420,8 +423,8 @@ def _with_room_admin_power_levels(
     next_users = dict(existing_users) if isinstance(existing_users, dict) else {}
     for user_id in sorted(set(user_ids) - creators):
         current_level = next_users.get(user_id)
-        if not isinstance(current_level, int) or current_level < power_level:
-            next_users[user_id] = power_level
+        if not isinstance(current_level, int) or current_level < ROOM_ADMIN_POWER_LEVEL:
+            next_users[user_id] = ROOM_ADMIN_POWER_LEVEL
     next_content["users"] = next_users
     return next_content
 
@@ -579,6 +582,9 @@ def _describe_matrix_response_error(response: object) -> str:
     """Convert a Matrix response object into a concise error string."""
     if isinstance(response, nio.ErrorResponse):
         if response.status_code and response.message:
+            # Tuwunel already prefixes the errcode to its message.
+            if str(response.message).startswith(f"{response.status_code}:"):
+                return str(response.message)
             return f"{response.status_code}: {response.message}"
         if response.status_code:
             return str(response.status_code)
@@ -849,17 +855,21 @@ async def resolve_room_reference(
     return response.room_id if isinstance(response, nio.RoomResolveAliasResponse) else response
 
 
-async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str] | None:
+async def get_room_members(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    failure_level: Callable[[bool], int] = lambda _: logging.WARNING,
+) -> set[str] | None:
     """Get the current members of a room, or ``None`` when the fetch fails."""
     try:
         response = await read_joined_members(client, room_id)
     except nio.LocalProtocolError as error:
-        # The durable client refuses a member list, as one that concurrent membership changes kept making stale.
-        logger.warning("matrix_room_members_fetch_failed", room_id=room_id, error=str(error))
-        return None
+        # The durable client can refuse a roster that concurrent membership changes made stale.
+        response = error
     if isinstance(response, nio.JoinedMembersResponse):
         return {member.user_id for member in response.members}
-    logger.warning("matrix_room_members_fetch_failed", room_id=room_id, error=str(response))
+    logger.log(failure_level(False), "matrix_room_members_fetch_failed", room_id=room_id, error=str(response))
     return None
 
 
@@ -957,5 +967,6 @@ __all__ = [
     "names_canonical_parent",
     "resolve_room_reference",
     "room_admin_power_user",
+    "room_encryption_enable_failure",
     "room_encryption_enabled",
 ]

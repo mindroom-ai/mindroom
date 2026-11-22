@@ -15,7 +15,7 @@ import structlog
 import yaml
 
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SKIP_MENTIONS_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
 from mindroom.contacts import flow
 from mindroom.contacts.store import _contacts_path, contact_room_ids, update_contacts
 from mindroom.contacts.turns import _ContactAdmission, contact_admission, contact_room
@@ -165,9 +165,9 @@ def _room_lifecycle(
             send_response=AsyncMock(return_value=None),
             change_membership=AsyncMock(return_value=True),
             admit_response=MagicMock(),
-            refresh_memberships=AsyncMock(),
             on_configured_room_joined=AsyncMock(),
             on_room_joined=AsyncMock(),
+            publish_server_state=AsyncMock(),
             get_conversation_reader=MagicMock(),
             get_agent_bot=agent_bot,
         ),
@@ -718,14 +718,13 @@ async def test_room_cleanup_reads_the_contacts_store_only_for_a_personal_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A corrupt contacts store stops a personal agent's room cleanup, not the router's or an authored agent's."""
+    """A corrupt contacts store stops a personal agent's room cleanup, not an authored agent's."""
     config, paths = _setup(tmp_path)
     _contacts_path(paths).parent.mkdir(parents=True, exist_ok=True)
     _contacts_path(paths).write_text("not json", encoding="utf-8")
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=["!stale:localhost"]))
 
-    for name in (ROUTER_AGENT_NAME, "creator"):
-        assert await _room_lifecycle(config, paths, name)._rooms_to_leave() == ["!stale:localhost"]
+    assert await _room_lifecycle(config, paths, "creator")._rooms_to_leave() == ["!stale:localhost"]
     with pytest.raises(ValueError, match="Contacts file"):
         await _room_lifecycle(config, paths, "mind_alice")._rooms_to_leave()
 

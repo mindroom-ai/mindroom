@@ -101,7 +101,7 @@ class CallsConfig(BaseModel):
     )
     transcripts: CallTranscriptsConfig = Field(
         default_factory=CallTranscriptsConfig,
-        description="Transcripts of calls between people in rooms with the router",
+        description="Transcripts of calls between people in rooms with a MindRoom account",
     )
 
     def resolve_agent_config(self, agent_name: str) -> CallProfile:

@@ -8,10 +8,19 @@ of them added.
 from __future__ import annotations
 
 from dataclasses import fields
-from typing import Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, field_validator, model_serializer
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+)
 
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 # 2: workers mount only agent workspaces and never write private-instance identity records.
@@ -22,9 +31,10 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerSco
 #    protocol, so mixed releases fail instead of dropping fields; a request names its workspace in `base_dir`.
 # 7: a call's arguments arrive as the model sent them, and the worker validates and coerces them.
 # 8: a worker pinned to one subagent (`subagent=<id>` in its key) serves its normal worker's workspaces and credentials.
+# 9: so does a worker a reply's calls name (`named=<id>` in its key).
 # A wire model change bumps this, except an opt-in field (see ``_WireModel.opt_in_fields``);
 # `tests/test_worker_protocol_schema.py` pins each version's schema.
-WORKER_PROTOCOL_VERSION = 8
+WORKER_PROTOCOL_VERSION = 9
 
 FailureKind = Literal["tool", "worker"]
 
@@ -93,7 +103,7 @@ class CallEnvironment(_WireModel):
 class ExecuteRequest(WorkerRoute):
     """One tool call, with credentials by lease and the environment execution tools receive."""
 
-    tool_name: str
+    tool_name: Annotated[str, AfterValidator(canonical_tool_name)]
     function_name: str
     args: list[Any] = Field(default_factory=list)
     kwargs: dict[str, Any] = Field(default_factory=dict)
@@ -132,7 +142,7 @@ class LeaseRequest(_WireModel):
     """Credentials for one upcoming tool call, held by the worker until the call consumes them."""
 
     protocol: int
-    tool_name: str
+    tool_name: Annotated[str, AfterValidator(canonical_tool_name)]
     function_name: str
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
     ttl_seconds: int

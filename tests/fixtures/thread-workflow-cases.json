@@ -58,15 +58,14 @@
       }
     },
     {
-      "name": "question asked after the resolve",
+      "name": "a question in a resolved thread",
       "now": 1000,
       "status": {
         "is_resolved": true,
         "pending_question": true
       },
       "expected": {
-        "workflow": "needs_you",
-        "why": "question"
+        "workflow": "done"
       }
     },
     {

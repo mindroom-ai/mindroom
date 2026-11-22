@@ -15,7 +15,6 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import DepartureSource
 from mindroom.event_journal.approval_signals import EndedApproval
 from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, FinalDeliveryOutcome, Owed
@@ -669,22 +668,28 @@ async def test_a_paused_reply_whose_requester_lost_access_ends_its_turn_failed(t
     assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_PAUSED, None), (EVENT_TURN_ENDED, "failed")]
 
 
-async def test_a_paused_turn_ends_through_its_entity_s_bot_or_the_router_s_once_the_entity_is_gone(
+async def test_a_paused_turn_ends_through_its_entity_s_bot_or_a_running_bot_s_once_the_entity_is_gone(
     tmp_path: Path,
 ) -> None:
-    """A removed agent has no bot, so the router ends its paused turns."""
+    """An entity's own bot ends its paused turn; a removed agent has none, so another running bot ends its turn.
+
+    No owner account runs here.
+    """
     config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
-    general, router = MagicMock(), MagicMock()
-    orchestrator.fleet.add("general", general)
-    orchestrator.fleet.add(ROUTER_AGENT_NAME, router)
+    # The fleet's first running bot is the fallback, which is neither the stopped bot before it nor the turn's own.
+    bots = {"code": MagicMock(running=False), "fallback": MagicMock(running=True), "general": MagicMock(running=True)}
+    for name, bot in bots.items():
+        orchestrator.fleet.add(name, bot)
 
     for entity_name in ("general", "removed"):
         orchestrator._end_paused_turn(EndedApproval(approval_continuation(entity_name=entity_name), None))
 
-    general.end_paused_turn.assert_called_once()
-    router.end_paused_turn.assert_called_once()
-    assert router.end_paused_turn.call_args.args[0].continuation.entity_name == "removed"
+    ended = {
+        name: [call.args[0].continuation.entity_name for call in bot.end_paused_turn.call_args_list]
+        for name, bot in bots.items()
+    }
+    assert ended == {"code": [], "fallback": ["removed"], "general": ["general"]}
 
 
 async def test_the_turn_events_are_built_in_and_plugins_cannot_add_turn_events() -> None:

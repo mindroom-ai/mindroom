@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.authorization import responder_candidate_entities_from_cached_room
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.conversation_hydration import readable_event
 from mindroom.matrix.event_info import EventInfo
@@ -20,7 +19,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
-__all__ = ["ModelPickerScope", "validate_model_picker_scope"]
+__all__ = ["ModelPickerScope", "model_picker_thread_root_denial", "validate_model_picker_scope"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,12 +51,15 @@ async def _joined_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom 
     return room
 
 
-async def _root_denial(client: nio.AsyncClient, room_id: str, thread_id: str) -> str | None:
+async def model_picker_thread_root_denial(client: nio.AsyncClient, room_id: str, thread_id: str) -> str | None:
     """Return why the thread root is not a readable root of this room, or None."""
-    response = await client.room_get_event(room_id, thread_id)
-    if not isinstance(response, nio.RoomGetEventResponse):
-        return "thread_root_unavailable"
-    event = readable_event(client, response.event)
+    try:
+        response = await client.room_get_event(room_id, thread_id)
+        if not isinstance(response, nio.RoomGetEventResponse):
+            return "thread_root_unavailable"
+        event = readable_event(client, response.event)
+    except (nio.EncryptionError, OSError, TimeoutError):
+        return "scope_check_error"
     if not isinstance(event, nio.RoomMessage) or event.event_id != thread_id:
         return "thread_root_unreadable"
     source = event.source
@@ -77,29 +79,33 @@ async def validate_model_picker_scope(  # noqa: PLR0911
     room_id: str,
     requester_user_id: str,
     thread_id: str | None,
+    recheck_membership: bool = True,
 ) -> ModelPickerScope | str:
-    """Require actual joined requester/router/eligible agents and an optional root.
+    """Require the requester, the answering account and eligible agents actually joined, and an optional root.
 
+    If this check reads a root, pass ``recheck_membership=False`` only when the caller verifies membership
+    and scope again after its last root read and before acting on this result.
     A denied scope returns a short stable reason for diagnostic logs.
     """
     registry = entity_identity_registry(config, runtime_paths)
-    router_id = registry.current_id(ROUTER_AGENT_NAME).full_id
-    if client.user_id != router_id:
-        return "not_router"
+    required = {requester_user_id, client.user_id}
     try:
         before = await _joined_room(client, room_id)
         if before is None:
             return "room_unavailable"
-        if not {requester_user_id, router_id}.issubset(before.users):
+        if not required.issubset(before.users):
             return "not_joined"
-        if thread_id is not None and (denial := await _root_denial(client, room_id, thread_id)) is not None:
-            return denial
-        after = await _joined_room(client, room_id)
+        if thread_id is not None:
+            if (denial := await model_picker_thread_root_denial(client, room_id, thread_id)) is not None:
+                return denial
+            after = await _joined_room(client, room_id) if recheck_membership else before
+        else:
+            after = before
     except (nio.EncryptionError, OSError, TimeoutError):
         return "scope_check_error"
     if after is None:
         return "room_unavailable"
-    if not {requester_user_id, router_id}.issubset(after.users):
+    if not required.issubset(after.users):
         return "not_joined"
     candidates = responder_candidate_entities_from_cached_room(
         after,

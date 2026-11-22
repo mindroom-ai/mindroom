@@ -17,7 +17,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.state import MatrixState
-from mindroom.requester_identity import is_managed_entity_id
+from mindroom.requester_identity import is_human_requester_id, is_managed_entity_id, resolve_human_requester_alias
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.matrix_state_helpers import save_matrix_state
 
@@ -138,3 +138,32 @@ def test_managed_entity_ids_follow_renamed_accounts_and_added_agents(tmp_path: P
     registry = entity_identity_registry(config, runtime_paths)
     assert registry.current_entity_name_for_user_id("@renamed_helper:localhost") == "helper"
     assert registry.current_entity_name_for_user_id("@coder_account:localhost") == "coder"
+
+
+@pytest.mark.parametrize("owner_persisted", [False, True])
+def test_the_owners_generated_id_is_a_managed_bot_only_once_its_account_is_persisted(
+    tmp_path: Path,
+    *,
+    owner_persisted: bool,
+) -> None:
+    """Anyone may register the owner's generated name while no owner account exists, and is then a person."""
+    guess = "@mindroom_router:localhost"
+    config = bind_runtime_paths(
+        Config(
+            agents={"helper": AgentConfig(display_name="Helper")},
+            authorization={"aliases": {"@alice:localhost": [guess]}},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    if not owner_persisted:
+        state = MatrixState.load(runtime_paths=runtime_paths)
+        del state.accounts[f"agent_{ROUTER_AGENT_NAME}"]
+        save_matrix_state(state, runtime_paths)
+
+    assert is_managed_entity_id(guess, config, runtime_paths) is owner_persisted
+    assert is_human_requester_id(guess, config, runtime_paths) is not owner_persisted
+    granted = guess if owner_persisted else "@alice:localhost"
+    assert resolve_human_requester_alias(guess, config, runtime_paths) == granted
+    # Another entity's generated ID stays reserved before its account exists.
+    assert is_managed_entity_id("@mindroom_helper:localhost", config, runtime_paths)

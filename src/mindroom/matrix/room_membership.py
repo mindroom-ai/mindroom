@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
@@ -14,9 +15,11 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.joined_members import read_joined_members
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from nio.durable import SyncRecord
+
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 
@@ -141,6 +144,7 @@ async def ensure_room_membership_synced(
     room: nio.MatrixRoom,
     *,
     sender_id: str,
+    failure_level: Callable[[bool], int] = lambda _: logging.WARNING,
 ) -> bool:
     """Reuse or fetch application membership without certifying nio's crypto projection."""
     if room_membership_is_complete(room):
@@ -156,19 +160,16 @@ async def ensure_room_membership_synced(
             try:
                 response = await read_joined_members(client, room.room_id)
             except Exception as exc:
-                logger.warning(
-                    "authoritative_room_membership_fetch_failed",
-                    room_id=room.room_id,
-                    sender_id=sender_id,
-                    error=str(exc),
-                )
-                return False
+                response = exc
             if not isinstance(response, nio.JoinedMembersResponse):
-                logger.warning(
+                timed_out = isinstance(response, TimeoutError)
+                logger.log(
+                    failure_level(timed_out),
                     "authoritative_room_membership_fetch_failed",
                     room_id=room.room_id,
                     sender_id=sender_id,
-                    error=str(response),
+                    error="TimeoutError" if timed_out else str(response),
+                    **({"phase": "joined_members"} if timed_out else {}),
                 )
                 return False
             # An ordinary nio client can complete its own projection during lookup.
@@ -191,3 +192,21 @@ async def ensure_room_membership_synced(
             )
             return True
         return False
+
+
+def room_has_only(config: Config, room: nio.MatrixRoom, member_ids: set[str]) -> bool:
+    """Return whether complete membership, including every invite, is exactly ``member_ids``."""
+    # The joined-member refresh never lists invites, so invites come from the synced projection.
+    # MindRoom's classic sync filter never loads members lazily, so that projection holds every invite.
+    # Sliding sync loads members lazily, so only the server's joined and invited counts can reveal an unseen invite.
+    # Without both counts, nio's member_count falls back to the projection size.
+    summary = room.summary
+    has_server_counts = (
+        summary is not None and summary.joined_member_count is not None and summary.invited_member_count is not None
+    )
+    return (
+        room_membership_is_complete(room)
+        and (has_server_counts or config.matrix_sync.mode == "classic")
+        and room.member_count == len(member_ids)
+        and cached_member_ids(room) == member_ids
+    )

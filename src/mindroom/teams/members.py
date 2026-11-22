@@ -15,7 +15,6 @@ from mindroom.agent_loop.build import appended_context, prompt_for_turn, tool_ow
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import toolkit_instructions
 from mindroom.agents import create_agent, team_background_jobs
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
@@ -133,11 +132,6 @@ def resolve_exact_team_members(
     )
 
 
-def requested_team_agent_names(agent_names: Sequence[str]) -> list[str]:
-    """Return the requested team members, excluding router placeholders."""
-    return [name for name in agent_names if name != ROUTER_AGENT_NAME]
-
-
 def resolve_team_members(
     agent_names: Sequence[str],
     orchestrator: OrchestratorRuntime,
@@ -154,7 +148,7 @@ def resolve_team_members(
     The orchestrator says which shared agents are running now; a requested member that is not, or that this request
     may not reach, rejects the set with a ``ValueError`` naming it under ``reason_prefix``, before anything resolves.
     """
-    requested_agent_names = requested_team_agent_names(agent_names)
+    requested_agent_names = list(agent_names)
     materializable_agent_names = resolve_team_materializable_agent_names(
         config,
         resolve_live_shared_agent_names(orchestrator),
@@ -400,7 +394,6 @@ __all__ = [
     "allow_direct_private_team_agents",
     "build_team_spec",
     "materialized_team_label",
-    "requested_team_agent_names",
     "resolve_exact_team_members",
     "resolve_team_members",
 ]

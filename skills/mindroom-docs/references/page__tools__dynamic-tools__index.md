@@ -11,7 +11,7 @@ Use them for agents with many optional tools.
 | `initial` | bool | `false` | Send a deferred tool as an ordinary tool on every request; requires `defer: true`. |
 
 A tool with neither flag is eager and appears in every request.
-The starter Mind agent from `mindroom config init` keeps `shell`, `memory`, `scheduler`, `update_awareness`, `todo`, and `matrix_message` eager and defers its other tools.
+The starter Mind agent from `mindroom config init` keeps `shell`, `filesystem`, `memory`, `scheduler`, `update_awareness`, and `matrix_message` eager and defers its other tools.
 
 ```yaml
 agents:
@@ -20,7 +20,7 @@ agents:
     role: Help in chat
     tools:
       - shell
-      - coding: {defer: true, initial: true}
+      - filesystem: {defer: true, initial: true}
       - searxng: {defer: true, host: https://search.example.test, fixed_max_results: 10}
       - name: serper
         defer: true
@@ -32,7 +32,7 @@ These configurations fail validation:
 - `initial: true` without `defer: true` fails with `Tool entry initial=true requires defer=true`.
 - Deferral is per agent, so `defaults.tools` entries reject both flags with `defaults.tools does not support defer or initial flags: <tools>`.
 - Presets such as [`openclaw_compat`](https://docs.mindroom.chat/openclaw/) cannot be deferred; set the flags on the individual member tools instead.
-- The control-plane tools `agent_manager`, `contacts`, `delegate`, `dynamic_tools`, `external_trigger_manager`, `invite_router`, `self_config`, and `skill_manage` cannot be deferred and fail with `'<tool>' is a control-plane tool and cannot be deferred; defer/initial are only valid on runtime tools.`
+- The control-plane tools `agent_manager`, `contacts`, `delegate`, `dynamic_tools`, `external_trigger_manager`, `self_config`, and `skill_manage` cannot be deferred and fail with `'<tool>' is a control-plane tool and cannot be deferred; defer/initial are only valid on runtime tools.`
 
 ## Native Server-Side Tool Search
 

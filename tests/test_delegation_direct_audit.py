@@ -198,7 +198,7 @@ async def test_real_parent_tool_call_records_direct_provenance_without_schema_fi
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
     function = toolkit_offers(tools, "run_subagent")
     # Minimal mode is hidden here because no allowed subagent can run it.
-    assert set(function.parameters["properties"]) == {"agent_name", "task", "model"}
+    assert set(function.parameters["properties"]) == {"agent_name", "task", "title", "model"}
 
     async def complete_child(
         ctx: ResponseTurnContext,

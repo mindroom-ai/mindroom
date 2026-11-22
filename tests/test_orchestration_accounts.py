@@ -12,10 +12,12 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.matrix_identifiers import agent_username_localpart
-from mindroom.orchestration.accounts import prepare_managed_accounts
+from mindroom.orchestration.accounts import prepare_managed_accounts, prepare_owner_account
+from mindroom.orchestration.config_updates import configured_entity_names
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.requester_identity import mindroom_user_id
 from mindroom.startup_errors import PermanentStartupError
@@ -145,8 +147,8 @@ async def test_account_preparation_retries_transient_create_agent_user_failure(t
     ):
         users = await _prepare(config, [ROUTER_AGENT_NAME, "general"])
 
-    assert calls == [ROUTER_AGENT_NAME, ROUTER_AGENT_NAME, "general"]
-    assert users[ROUTER_AGENT_NAME].user_id == "@actual_router:localhost"
+    assert calls == ["general", "general"]
+    assert users[ROUTER_AGENT_NAME].user_id == "@mindroom_router:localhost"
     assert users["general"].user_id == "@actual_general:localhost"
 
 
@@ -161,7 +163,7 @@ async def test_account_preparation_requests_personal_agent_username(tmp_path: Pa
     with patch("mindroom.orchestration.accounts.create_agent_user", new=_recording_user(paths, requested)):
         await _prepare(config, [ROUTER_AGENT_NAME, "mind_alice_smith"], paths)
 
-    assert requested == {ROUTER_AGENT_NAME: None, "mind_alice_smith": "alice.mind"}
+    assert requested == {"mind_alice_smith": "alice.mind"}
 
 
 @pytest.mark.asyncio
@@ -189,7 +191,7 @@ async def test_account_preparation_requests_an_agents_configured_matrix_username
     with patch("mindroom.orchestration.accounts.create_agent_user", new=_recording_user(paths, requested)):
         await _prepare(config, [ROUTER_AGENT_NAME, "general", "crew"], paths)
 
-    assert requested == {ROUTER_AGENT_NAME: None, "general": "jarvis", "crew": None}
+    assert requested == {"general": "jarvis", "crew": None}
 
 
 @pytest.mark.asyncio
@@ -295,14 +297,14 @@ async def test_account_preparation_rejects_duplicate_persisted_matrix_ids(tmp_pa
     ):
         await _prepare(config, [ROUTER_AGENT_NAME, "general", "writer"])
 
-    assert _created(create) == [ROUTER_AGENT_NAME, "general", "writer"]
+    assert _created(create) == ["general", "writer"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("entity_names", "include_internal_user", "created"),
     [
-        pytest.param([ROUTER_AGENT_NAME, "general"], False, [ROUTER_AGENT_NAME, "general"], id="entities"),
+        pytest.param([ROUTER_AGENT_NAME, "general"], False, ["general"], id="entities"),
         pytest.param([], True, ["user"], id="internal-user"),
     ],
 )
@@ -348,7 +350,7 @@ async def test_account_preparation_validates_again_after_a_transient_validation_
 
     assert validations == ["validated", "validated"]
     assert users["general"].display_name == "GeneralAgent"
-    assert users[ROUTER_AGENT_NAME].display_name == "RouterAgent"
+    assert users[ROUTER_AGENT_NAME].display_name == "MindRoom"
 
 
 @pytest.mark.asyncio
@@ -481,3 +483,94 @@ async def test_internal_user_preparation_keeps_a_persisted_account_without_a_mat
     assert (account.username, account.password, account.domain) == (localpart, "existing_password", domain)
     assert mindroom_user_id(config, paths) == f"@{localpart}:{domain}"
     matrix_client.assert_not_called()
+
+
+def _roomless_config(paths: RuntimePaths, rooms: list[str]) -> Config:
+    """Return a config whose only agent lists ``rooms``, with no root Space or emoji room, and no account persisted."""
+    return Config.validate_with_runtime(
+        {
+            "agents": {"general": {"display_name": "GeneralAgent", "model": "default", "rooms": rooms}},
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "matrix_space": {"enabled": False},
+        },
+        paths,
+    )
+
+
+@pytest.mark.asyncio
+async def test_owner_display_name_is_mindroom(tmp_path: Path) -> None:
+    """The owner account is shown as "MindRoom"; its next login syncs the name to an account registered earlier."""
+    paths = test_runtime_paths(tmp_path)
+    config = _roomless_config(paths, ["lobby"])
+
+    with patch("mindroom.orchestration.accounts.create_agent_user", new=_recording_user(paths, {})):
+        users = await _prepare(config, configured_entity_names(config), paths)
+
+    assert users[ROUTER_AGENT_NAME].display_name == "MindRoom"
+    assert config.entity_display_name(ROUTER_AGENT_NAME) == "MindRoom"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rooms", [[], ["lobby"]])
+async def test_owner_account_is_prepared_apart_from_the_agents(tmp_path: Path, rooms: list[str]) -> None:
+    """The agents' accounts are prepared without the owner's; a needed owner is created at its own start and listed then."""
+    paths = test_runtime_paths(tmp_path)
+    config = _roomless_config(paths, rooms)
+    requested: dict[str, str | None] = {}
+
+    with patch("mindroom.orchestration.accounts.create_agent_user", new=_recording_user(paths, requested)):
+        users = await _prepare(config, configured_entity_names(config), paths)
+
+    assert list(requested) == ["general"]
+    assert list(entity_identity_registry(config, paths).current_ids) == ["general"]
+    assert (ROUTER_AGENT_NAME in users) is bool(rooms)
+    if not rooms:
+        return
+    owner = users[ROUTER_AGENT_NAME]
+    assert (owner.user_id, owner.password, owner.access_token) == ("@mindroom_router:localhost", None, None)
+
+    occupied = AsyncMock(side_effect=PermanentStartupError("localpart is taken"))
+    with (
+        patch("mindroom.orchestration.accounts.create_agent_user", new=occupied),
+        pytest.raises(PermanentStartupError, match="taken"),
+    ):
+        await prepare_owner_account(config, paths)
+    assert list(entity_identity_registry(config, paths).current_ids) == ["general"]
+
+    with patch("mindroom.orchestration.accounts.create_agent_user", new=_recording_user(paths, requested)):
+        prepared = await prepare_owner_account(config, paths)
+    # The homeserver registered another ID than the generated one, and the owner's bot is built from this account.
+    assert (prepared.user_id, prepared.password) == ("@actual_router:localhost", TEST_PASSWORD)
+    assert list(entity_identity_registry(config, paths).current_ids) == [ROUTER_AGENT_NAME, "general"]
+
+
+@pytest.mark.asyncio
+async def test_owner_localpart_taken_by_the_internal_user_fails_only_the_owner_account(tmp_path: Path) -> None:
+    """A localpart collision of the owner's account is found at its own preparation, before any account is created."""
+    paths = test_runtime_paths(tmp_path)
+    config = _roomless_config(paths, ["lobby"])
+    _persist_account(paths, "user", "mindroom_router")
+    create = AsyncMock(side_effect=_recording_user(paths, {}))
+
+    with patch("mindroom.orchestration.accounts.create_agent_user", new=create):
+        await _prepare(config, configured_entity_names(config), paths)
+        with pytest.raises(PermanentStartupError, match="localpart collision"):
+            await prepare_owner_account(config, paths)
+
+    assert _created(create) == ["general"]
+
+
+@pytest.mark.asyncio
+async def test_existing_owner_account_kept_when_not_needed(tmp_path: Path) -> None:
+    """A config that stops needing the owner account keeps its persisted account and identity, and asks for no new one."""
+    paths = test_runtime_paths(tmp_path)
+    _persist_account(paths, ROUTER_AGENT_NAME, "mindroom_router")
+    config = _roomless_config(paths, [])
+    requested: dict[str, str | None] = {}
+
+    with patch("mindroom.orchestration.accounts.create_agent_user", new=_recording_user(paths, requested)):
+        await _prepare(config, configured_entity_names(config), paths)
+
+    assert list(requested) == ["general"]
+    assert MatrixState.load(runtime_paths=paths).get_account(f"agent_{ROUTER_AGENT_NAME}") is not None
+    assert entity_identity_registry(config, paths).current_id(ROUTER_AGENT_NAME).full_id == "@mindroom_router:localhost"

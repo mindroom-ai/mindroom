@@ -10,7 +10,7 @@ One database holds every bot in a runtime, and its content rows are owned by a p
 The Matrix account alone is not a sufficient owner, because two agents can be configured onto one account and neither should read the other's conversations.
 Room membership is not the boundary either, because two bots joined to the same room can hold different encryption keys and therefore decrypt different subsets of it.
 
-Approval coordination is the one place that deliberately crosses principals, because the router owns approval cards while the responding entity owns the paused continuation.
+Approval coordination is the one place that deliberately crosses principals, because one principal keeps every approval card and grant while the responding entity owns the paused continuation.
 It does so only by validating persisted card-to-continuation relationships inside the runtime, and it is not a way for ordinary conversation readers to select another principal.
 Turn rows and redactions are scoped to the agent name alone, so a re-login under a new Matrix ID neither answers every outstanding message again nor forgets a deletion, and turn rows still hold conversation-derived text.
 A redaction one login observes is applied to the projection, pending journal rows, and replies of every login of that agent, and never to another agent's rows; the logins share the deletion fact, not content.
@@ -53,6 +53,7 @@ A redaction one login observes is applied to the projection, pending journal row
   `tool_jobs.result_payload_json` keeps the job's full result, including returned media bytes, up to 64 MiB of encoded JSON.
   An ended job, read or not, is deleted 30 days after its last change, or one day after it when the call that started the job returned its result inline, once its turn has finished and no approval in its session is pending; redacting the message that started it or the bot leaving the room does not delete it sooner.
   `tool_job_owner` holds only the runtime generation that owns the jobs.
+- `room_event_claims` holds room and event IDs with the name of the entity that runs one per-event job, such as a member hook, and no message text; a claim write removes the rows older than seven days.
 
 There is no plaintext table keyed by media URL, and no runtime-wide process-local plaintext cache shared across bots.
 

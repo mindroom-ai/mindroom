@@ -41,6 +41,8 @@ def build_request_execution_env(
     Raises :class:`sandbox_exec.WorkspaceEnvHookError` when the workspace hook
     exists but fails to source.
     """
+    if prepared is not None:
+        execution_env.update(sandbox_exec.worker_resource_limit_env())
     if request_workspace is None:
         execution_env.update(_worker_owned_env(prepared))
         return {}

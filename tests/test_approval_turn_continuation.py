@@ -184,6 +184,118 @@ def _approval_execution(tmp_path: Path, config: Config, paths: RuntimePaths) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_named_shell_call_gets_a_worker_after_approval_pauses_its_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approval executes the persisted command in a new fleet and retires it after the resumed reply."""
+    from mindroom.tool_system.runtime_context import tool_runtime_context  # noqa: PLC0415
+    from mindroom.workers import named  # noqa: PLC0415
+    from mindroom.workers.runtime import idle_worker_cleanup_owner  # noqa: PLC0415
+    from tests.test_named_workers import (  # noqa: PLC0415
+        _FakeBackend,
+        _retired,
+        _route_through,
+        _static_worker_manager_lease,
+    )
+
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "30",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+        },
+    )
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "memory": {"backend": "none"},
+                "agents": {
+                    "general": {
+                        "display_name": "General",
+                        "tools": ["shell"],
+                        "named_workers": 1,
+                        "worker_scope": "user_agent",
+                    },
+                },
+                "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
+                "tool_approval": {"rules": [{"match": "run_shell_command", "action": "require_approval"}]},
+            },
+        ),
+        paths,
+    )
+    identity = _identity("named-worker-approval")
+    args = {"args": ["printf", "approved"], "worker": "build"}
+    model = _CheckedModel([_call("run_shell_command", "approved", **args), answer("Done.")])
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", lambda *_args, **_kw: model)
+    backend = _FakeBackend()
+    posts = _route_through(monkeypatch, backend)
+    monkeypatch.setattr(
+        named,
+        "lease_configured_primary_worker_manager",
+        lambda _paths: _static_worker_manager_lease(backend),
+    )
+    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
+    execution = replace(runner.approvals._approval_execution, config=lambda: config, runtime_paths=paths)
+    context = runner.deps.tool_runtime.build_context(
+        MessageTarget(
+            identity.room_id,
+            identity.thread_id,
+            identity.resolved_thread_id,
+            "$source",
+            identity.session_id,
+        ),
+        user_id=identity.requester_id,
+        active_model_name="default",
+        turn_id="named-approval-turn",
+    )
+    assert context is not None
+    context = replace(context, config=config, config_provider=None, runtime_paths=paths)
+    with idle_worker_cleanup_owner():
+        with tool_runtime_context(context):
+            paused = await _paused_turn(config, paths, identity, "Run the named command.")
+        assert posts == []
+        continuation = approval_continuation(
+            run_id=paused.run_id,
+            session_id=identity.session_id,
+            room_id=identity.room_id,
+            thread_id=identity.thread_id,
+            requester_id=identity.requester_id,
+            state="claimed",
+            turn_id=context.turn_id,
+            calls=(
+                ApprovalCall(
+                    "approved",
+                    "run_shell_command",
+                    "general",
+                    2**62,
+                    decision=ApprovalDecision.APPROVED,
+                    toolkit_name="shell",
+                    arguments_digest=approval_arguments_digest(args),
+                ),
+            ),
+        )
+        result = await execution.continue_run(
+            continuation,
+            paused_answer=PausedAnswer(),
+            tool_context=context,
+            tool_trace_collector=[],
+            progress=None,
+            system_enrichment_items=(),
+            quiet=False,
+        )
+    assert isinstance(result, CompletedApprovalRun)
+    assert len(backend.specs) == 1, [msg.content for msg in model.requests[-1].messages if msg.role == "tool"]
+    [spec] = backend.specs
+    [(_, request)] = posts
+    assert request["worker_key"] == spec.worker_key
+    assert request["kwargs"]["worker"] == "build"
+    assert await _retired(backend) == [spec.worker_key]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("show_tool_calls", [False, True])
 async def test_deferred_call_through_call_tool_pauses_under_its_real_name(
     tmp_path: Path,
@@ -583,6 +695,14 @@ async def test_approval_settlement_preserves_tool_boundary(
     expected = "Before approval.\n\n" + ("🔧 `inspect` [1]\n\n" if show_tool_calls else "") + "After approval."
     assert result.response_text == expected
     assert len(trace) == (1 if show_tool_calls else 0)
+
+
+def test_a_resumed_turn_runs_as_an_answer_to_the_event_its_paused_turn_answered() -> None:
+    """A routed turn's source is its hidden route, and its resumed run still answers the person's message."""
+    continuation = approval_continuation(reply_to_event_id="$person")
+    context = _continuation_turn_context(continuation, model_name="default", metadata=None)
+    assert context.reply_to_event_id == "$person"
+    assert context.active_event_ids == frozenset({"$source"})
 
 
 async def _settle_scripted(
@@ -1688,7 +1808,7 @@ async def test_an_approval_resume_answers_its_original_requester_s_steer(
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
     execution = replace(runner.approvals._approval_execution, config=lambda: config, runtime_paths=paths)
-    target = continuation_target(continuation, reply_to_event_id=continuation.source_event_ids[0])
+    target = continuation_target(continuation)
     envelope = runner.approvals.approval_response_request(continuation, target=target).response_envelope
     context = runner.deps.tool_runtime.build_context(target, user_id=identity.requester_id, active_model_name="default")
     assert context is not None

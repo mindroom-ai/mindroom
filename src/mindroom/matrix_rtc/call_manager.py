@@ -17,7 +17,7 @@ import time
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
@@ -97,7 +97,7 @@ if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.config.calls import CallProfile, LiveCallProfile, RealtimeCallProfile
+    from mindroom.config.calls import CallProfile
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import TokenCounter
@@ -1663,7 +1663,7 @@ class CallManager:
         enable_responder = self._call_config.backend in {"cascaded", "live"}
         active_model_name = None
         if self._call_config.backend == "live":
-            active_model_name = cast("LiveCallProfile", self._call_config).agent_model
+            active_model_name = self._call_config.agent_model
         elif self._call_config.backend == "cascaded":
             active_model_name = self._call_config.model
         return await build_call_tools(
@@ -1752,7 +1752,7 @@ class CallManager:
             self._schedule_call_failure_notice(room.room_id, logical_call, message)
 
         if self._call_config.backend == "realtime":
-            realtime_config = cast("RealtimeCallProfile", self._call_config)
+            realtime_config = self._call_config
             if backend.realtime_api_key is None:
                 msg = "Realtime call API key was not resolved"
                 raise RuntimeError(msg)
@@ -1779,7 +1779,7 @@ class CallManager:
                 ),
             )
         if self._call_config.backend == "live":
-            live_config = cast("LiveCallProfile", self._call_config)
+            live_config = self._call_config
             get_system_prompt = tooling.get_system_prompt
             if backend.realtime_api_key is None or tooling.responder is None or get_system_prompt is None:
                 msg = "Live call agent was not fully materialized"

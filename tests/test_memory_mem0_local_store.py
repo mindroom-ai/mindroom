@@ -117,8 +117,10 @@ def _claude_reply(*, facts: list[str], thinking_first: bool) -> AnthropicMessage
 class _FakeAnthropicClient:
     """Answer every Messages API request with one canned reply, or raise it when it is an error."""
 
-    def __init__(self, reply: AnthropicMessage | Exception, prompts: list[str]) -> None:
+    def __init__(self, reply: AnthropicMessage | Exception, prompts: list[str], api_key: str | None) -> None:
         self.messages = self
+        self.api_key = api_key
+        self._custom_headers: dict[str, str] = {}
         self._reply = reply
         self._prompts = prompts
 
@@ -173,7 +175,11 @@ def offline_mem0(claude_reply: list[AnthropicMessage | Exception], extraction_pr
         patch("mindroom.embeddings.factory.create_configured_embedder", return_value=_TableEmbedder()),
         patch(
             "anthropic.Anthropic",
-            side_effect=lambda **_: _FakeAnthropicClient(claude_reply[0], extraction_prompts),
+            side_effect=lambda **kwargs: _FakeAnthropicClient(
+                claude_reply[0],
+                extraction_prompts,
+                kwargs.get("api_key"),
+            ),
         ),
     ):
         yield

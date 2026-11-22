@@ -151,9 +151,12 @@ class ScopedOAuthClientMixin:
     service: Any | None
     _google_credential_key: object | None
 
-    _adopt_google_credential_revision: Callable[[object], None]
     _reset_google_authorization_rejected: Callable[[], None]
     _consume_google_authorization_rejected: Callable[[], bool]
+
+    if TYPE_CHECKING:
+        # Provided by ThreadLocalGoogleServiceMixin; a method stub so the inherited signatures match.
+        def _adopt_google_credential_revision(self, value: object) -> None: ...
 
     def _apply_runtime_original_auth_kwargs(self, kwargs: dict[str, Any]) -> bool:
         """Populate upstream Google auth kwargs from the resolved runtime env."""

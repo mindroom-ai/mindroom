@@ -55,6 +55,7 @@ _MODEL_DEFAULTED_CHILD_FIELDS: dict[str, object] = {
     "subagents_cost_usd": None,
     "subagents_cost_unknown": False,
     "tool_started_at": {},
+    "title": "",
     "workflow_run_id": None,
     "workflow_node_key": None,
     "workflow_generation": None,

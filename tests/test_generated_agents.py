@@ -109,6 +109,21 @@ def test_the_tool_ceiling_is_the_effective_tool_names(tmp_path: Path) -> None:
     assert _config(tmp_path).tool_ceiling("creator") == ("calculator", "shell")
 
 
+def test_a_stored_choice_naming_filesystem_by_an_old_name_is_dropped(tmp_path: Path) -> None:
+    """A roster edit saved as file or coding is not read as the creator's filesystem toolkit."""
+    raw = deepcopy(BASE)
+    raw["agents"]["creator"]["tools"].append("coding")
+    config = Config.validate_with_runtime(raw, test_runtime_paths(tmp_path))
+    assert "filesystem" in config.tool_ceiling("creator")
+
+    stored = GeneratedAgentEdits.model_validate({"tools": ["coding", "file", "shell"]})
+    data, dropped = _generated_agent_data(config, "creator", stored)
+
+    assert stored.tools == ["coding", "file", "shell"]
+    assert dropped == ["coding", "file"]
+    assert [entry["name"] for entry in data["tools"]] == ["shell"]
+
+
 def test_chosen_tools_are_copied_whole_from_the_effective_list(tmp_path: Path) -> None:
     """A chosen tool keeps the creator's merged settings and lazy-loading flags, and the child no longer merges defaults."""
     data, dropped = _generated_agent_data(_config(tmp_path), "creator", GeneratedAgentEdits(tools=["shell"]))
@@ -628,6 +643,20 @@ def test_only_owners_may_change_a_created_agent(tmp_path: Path) -> None:
     with pytest.raises(_GeneratedAgentError, match="creator is not a generated agent"):
         _update(config, paths, {"role": "Spy"}, agent_name="creator")
     assert read_personal_agent_roster_file(paths).created == [_created()]
+
+
+def test_a_new_tool_choice_takes_filesystem_by_an_old_name_and_a_saved_one_is_kept(tmp_path: Path) -> None:
+    """An owner's change may say coding or file; an unrelated change leaves a saved old name as it was written."""
+    data = deepcopy(BASE)
+    data["agents"]["creator"]["tools"].append("coding")
+    saved = _created(edits=GeneratedAgentEdits(display_name="Research", tools=["coding"]))
+    config = _load(tmp_path, data, created=[saved])
+    paths = test_runtime_paths(tmp_path)
+
+    _update(config, paths, {"role": "Scout"})
+    assert read_personal_agent_roster_file(paths).created[0].edits.tools == ["coding"]
+    _update(config, paths, {"tools": ["coding", "shell", "file"]})
+    assert read_personal_agent_roster_file(paths).created[0].edits.tools == ["filesystem", "shell"]
 
 
 def test_co_owners_cannot_change_co_owners(tmp_path: Path) -> None:

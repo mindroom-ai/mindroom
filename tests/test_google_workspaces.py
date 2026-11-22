@@ -9,7 +9,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs
 
-import httpx
+import httpx2
 import pytest
 from authlib.integrations import httpx_client as authlib_httpx_client
 
@@ -286,9 +286,9 @@ async def test_workspace_refresh_and_reset_do_not_change_default_account(
         manager.save_credentials(name, {"client_id": client_id, "client_secret": f"{client_id}-secret"})
     requests = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         requests.append(parse_qs(request.content.decode()))
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"access_token": "refreshed-access", "token_type": "Bearer", "expires_in": 3600},
         )
@@ -297,7 +297,7 @@ async def test_workspace_refresh_and_reset_do_not_change_default_account(
     monkeypatch.setattr(
         authlib_httpx_client,
         "AsyncOAuth2Client",
-        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+        lambda **kwargs: real_client(transport=httpx2.MockTransport(handler), **kwargs),
     )
     plugins = publish_test_plugins(config, paths)
     providers = plugins.oauth_providers

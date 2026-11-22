@@ -17,6 +17,7 @@ from mindroom.api.connection_agents import (
     resolve_connection_user,
 )
 from mindroom.api.mcp_identity import resolve_gateway_connections_owner
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.mcp_gateway.selection import SelectionAccessDeniedError
 from mindroom.mcp_gateway.server import read_gateway_body
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
@@ -85,10 +86,16 @@ def _available_choices(
             for tool in resolve_agent_tools(context.config, name, registry).tool_names
             if registry.entries[tool].mcp_available
         }
+        if previous is not None:
+            # A newly chosen name may be a toolkit's other name; one echoed from the saved selection stays as saved.
+            saved = previous.get(name) or ()
+            chosen = tuple(tool if tool in saved else canonical_tool_name(tool) for tool in tools)
+        else:
+            chosen = tools
         previous_tools = previous.get(name, ()) if previous is not None else None
-        if previous_tools is not None and set(tools) - available - set(previous_tools):
+        if previous_tools is not None and set(chosen) - available - set(previous_tools):
             raise HTTPException(400, "Tool is not available for MCP")
-        selected = tuple(tool for tool in tools if tool in available)
+        selected = tuple(tool for tool in chosen if tool in available)
         if selected:
             result[name] = selected
     return result

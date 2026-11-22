@@ -40,6 +40,7 @@ If shell permissions or deployment settings change after minimal mode was select
 The minimal prompt identifies the agent, lists its loaded workspace context files, and names the toolkits available through `mindroom-agent`.
 When the agent has skills, it names them; the agent reads one with `mindroom-agent context read skill:<name>`, which also gives the skill's directory.
 With file memory, it also names the workspace-relative `MEMORY.md` and `memory/` locations.
+When the agent may run [named workers](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers), it names [`mindroom-agent workers run`](#run-commands-in-named-workers), because Bash itself takes no `worker`.
 File contents, the role, ordinary instructions, and tool guidance are not in the prompt; the agent reads them through `mindroom-agent context` when it needs them.
 
 `minimal_instructions` (list of strings, default `[]`) is appended to the minimal prompt on every minimal request:
@@ -89,6 +90,7 @@ mindroom-agent calls get CALL_ID
 mindroom-agent calls wait CALL_ID
 mindroom-agent context list
 mindroom-agent context read NAME --offset 0 --limit 8000
+mindroom-agent workers run NAME -- COMMAND
 ```
 
 Tool names are qualified by toolkit, and `TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
@@ -133,6 +135,58 @@ Images, audio, and files are handled like ordinary response attachments.
 
 Scripts using `set -e` must handle exit code `3` explicitly.
 After exit code `4`, check the original call ID before retrying, because submitting with a fresh ID may repeat a side effect.
+`workers run` has [exit codes of its own](#run-commands-in-named-workers).
+
+## Run commands in named workers
+
+`workers run` runs one command in a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) of the current reply, so one shell script can spread work over several workers.
+It is the agent's own `run_shell_command` call with `worker` set, under the same approval rules and limits as every other CLI call, and it is available only where the agent is offered `worker`.
+
+```bash
+mindroom-agent workers run NAME [--resource-profile small|standard|large] [--timeout SECONDS] [--tail LINES] -- COMMAND [ARG...]
+```
+
+The command is everything after `--`. Multiple arguments run as the exact argument list. A single argument runs as an executable unless it contains whitespace or shell syntax, in which case Bash interprets it as a command line.
+For shell builtins or syntax, pass Bash explicitly, for example `mindroom-agent workers run build -- bash -c 'cd src && pwd'`.
+The CLI long-polls until the command ends. `--tail` (default 100) selects the last lines of stdout, and of stderr when the command succeeds; for a failed or timed-out command, the result puts stdout under `Output:` and all of stderr under `Stderr:`.
+All CLI-originated messages go to stderr as `mindroom-agent:` lines, never stdout: cold-start warm-up progress (latest message only; intermediate updates between reads may be skipped; rewrites in place when stderr is a TTY and ends with a newline before any other CLI line or command output, or writes one line per update otherwise), `mindroom-agent: started worker NAME` when the call started a new worker, `mindroom-agent: stopped after Ns` on timeout, auto-saved output paths, cancellation notices, and error reasons. With stderr closed (`2>&-`) or failing its writes, these messages are dropped; the command's output and the exit code stay the same.
+If the shell result is [auto-saved](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files), the CLI prints its preview to stdout and the saved file's path to stderr. The preview may not include the last lines.
+`--timeout` (default 3600 seconds) stops the command, and `--resource-profile` sizes the worker when its name is first used.
+If the CLI loses the submission response or cannot read a running command’s receipt, it retries reading the receipt for up to a minute. It never submits the command twice.
+Sending `SIGINT`, `SIGTERM`, or `SIGHUP` to `workers run` while it submits the command or waits for it asks MindRoom to cancel the command and its process tree, and `workers run` exits with `128 + signal`. The cancel waits up to 8 seconds; a signal that arrives before the submission has returned takes effect once it returns, and cancels nothing if the submission was refused. A second signal ends `workers run` at once, without waiting for the cancel. If it arrives while the command is still being submitted, `workers run` ends before it can send the cancel and prints no call ID, so a command MindRoom admitted keeps running until it ends or reaches `--timeout`. When cancelled before the command was dispatched to the worker (while queued or during worker start-up), stderr says `mindroom-agent: cancelled by SIGNAL; the command never ran in worker NAME`. Otherwise stderr says the command may still be running, with its call ID, unless the call was refused as a named-worker refusal (it never ran), was waiting for approval (it has not run), or had already completed (nothing extra is printed, and `workers run` prints the result and exits with the command's own exit code).
+Cancelling a command that is waiting for approval does not withdraw its approval card: the card stays until it is decided or the reply ends, and approving it runs nothing. If the reply itself pauses for that approval, before or right after it is decided (for example because its grant expires while the approval is checked), the approved command runs when the reply resumes, as it would without the cancel.
+`workers run` prints the result, and the notice after a cancel, with its signal handling back to what it started with, so a signal then stops the CLI like any other program.
+
+| Code | Meaning |
+| --- | --- |
+| The command's exit code | The command ran in the named worker; a command a signal killed exits with 128 plus the signal's number, such as `137` |
+| `124` | The command was stopped at `--timeout`; `mindroom-agent: stopped after Ns` is on stderr |
+| `125` | Refused before any command ran: the CLI could not send the command (it runs in a background script, or has no MindRoom authority in its environment), the submission was answered with any `4xx` (also a `408` or `429` from a proxy in front of MindRoom), or the call was a named-worker refusal (a limit, scope, or size conflict, a call outside a reply, or an agent that named workers are not offered to); the reason is on stderr |
+| `126` | The command's program is in the named worker but may not be executed (no execute bit, or a directory), or its path goes through a file; the result's `Stderr:` says `PROGRAM: Permission denied` or `PROGRAM: Not a directory` |
+| `127` | The command's program was not found in the named worker, or a file it needs to start, such as a script's interpreter, is missing; the result's `Stderr:` says `NAME: command not found`, `PATH: No such file or directory`, or `PROGRAM: cannot execute: required file not found` |
+| `255` | Outcome unknown after submission — do not blindly retry: failed or cancelled receipts, projection failures, worker transport failures, output auto-save failures, or a receipt that stayed unreadable for a minute; the reason and call ID are on stderr |
+| `128 + signal` | `workers run` itself was stopped by `SIGINT` (`130`), `SIGTERM` (`143`), or `SIGHUP` (`129`) after asking MindRoom to cancel the command; the notice (with the call ID unless the command never ran) is on stderr |
+| `2` | Invalid CLI arguments (reported on stderr only) |
+
+Run this script from the shared workspace. It runs eight shards at once and fails if any shard fails.
+Each shard writes its full log to the shared workspace from inside its worker, so the log keeps the final summary even when CLI output would be previewed. CLI diagnostics go to a separate log.
+
+```bash
+out="runs/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$out"
+pids=()
+for i in $(seq 0 7); do
+  mindroom-agent workers run "shard-$i" --resource-profile large -- \
+    bash -c 'bash ci/shard.sh "$1" 8 > "$2" 2>&1' _ "$i" "$out/$i.log" \
+    > "$out/$i.cli.log" 2>&1 &
+  pids+=("$!")
+done
+failed=0
+for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+exit "$failed"
+```
+
+Run such a script as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) or with a `timeout` that covers it, because a script stopped at its time limit no longer collects its workers' results.
 
 ## Approvals, shells, and limits
 

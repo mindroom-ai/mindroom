@@ -48,7 +48,7 @@ def provider_reports_cache_tokens_outside_input(
     provider_key = (provider or configured_provider or "").lower()
     configured_provider_key = (configured_provider or "").lower()
     model_key = (model_id or "").lower()
-    if "anthropic" in provider_key or "bedrock" in provider_key:
+    if "anthropic" in provider_key or "bedrock" in provider_key or provider_key == "claude_code":
         return True
     if configured_provider_key == "vertexai_claude":
         return True

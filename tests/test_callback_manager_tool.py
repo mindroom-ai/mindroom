@@ -31,6 +31,7 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.matrix_state_helpers import persist_owner_account
 
 
 class _Client:
@@ -394,6 +395,7 @@ def test_manager_requires_live_tool_context() -> None:
 @pytest.mark.parametrize("requester_id", [_Client.user_id, "@mindroom_router:mindroom.chat"], ids=["own", "router"])
 def test_manager_refuses_a_requester_who_cannot_own_triggers(tmp_path: Path, requester_id: str) -> None:
     """A turn of one of MindRoom's own accounts mints no callback record or script, even for an administrator."""
+    persist_owner_account(_runtime_paths(tmp_path))
     with tool_runtime_context(_context(tmp_path, requester_id=requester_id)):
         payload = _payload(CallbackManagerTools().mint_callback("bot requester"))
 

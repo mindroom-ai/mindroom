@@ -729,40 +729,6 @@ def test_a_toolkit_whose_every_function_an_earlier_one_took_shows_no_instruction
     assert build.prompt.tool_instructions == ("Ping for calculator.",)
 
 
-@pytest.mark.parametrize(
-    ("claimed_async", "beside"),
-    [
-        (False, None),
-        (True, None),
-        (False, Function(name="lookup", entrypoint=ping, pre_hook=_no_hook)),
-        (False, Function(name="lookup")),
-    ],
-    ids=["alone", "async_only", "beside_a_refused_function", "beside_a_function_without_entrypoint"],
-)
-def test_a_toolkit_claiming_a_room_recovery_function_stops_the_build(
-    tmp_path: Path,
-    *,
-    claimed_async: bool,
-    beside: Function | None,
-) -> None:
-    """Only the registered room recovery tool may offer its function, whatever else the toolkit or the filters hold."""
-    config, runtime_paths = _config(tmp_path)
-
-    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
-        toolkit = Toolkit(name=tool_name)
-        claimed = toolkit.async_functions if claimed_async else toolkit.functions
-        claimed["invite_router"] = Function(name="invite_router", entrypoint=ping)
-        if beside is not None:
-            toolkit.functions[beside.name] = beside
-        return toolkit
-
-    with (
-        patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit),
-        pytest.raises(ValueError, match="reserved for Matrix room recovery tools"),
-    ):
-        _build(config, runtime_paths, tool_function_filter=lambda _function: False)
-
-
 def test_a_toolkit_that_cannot_be_adapted_drops_only_itself_and_its_deferral(tmp_path: Path) -> None:
     """A function adaptation refuses costs its own toolkit, deferred or not, and never the agent."""
     config, runtime_paths = _config(tmp_path, tools=["calculator", {"name": "wikipedia", "defer": True}])

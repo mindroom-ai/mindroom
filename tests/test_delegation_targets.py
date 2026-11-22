@@ -113,6 +113,9 @@ async def test_a_resumed_follow_up_naming_another_subagent_fails(tmp_path: Path)
     [
         ({"task": "Read.", "minimal": "yes"}, "Cannot delegate: minimal must be a boolean or null."),
         ({"task": 3}, "Cannot delegate: task must be a string and agent_name must be a string or null."),
+        # A call that names a title names something; only a call without the field runs untitled.
+        ({"task": "Read.", "title": "  \n "}, "Cannot delegate: title must name the task in a few words."),
+        ({"task": "Read.", "title": 3}, "Cannot delegate: title must name the task in a few words."),
     ],
 )
 def test_a_fresh_call_with_arguments_of_the_wrong_type_is_refused(
@@ -132,3 +135,20 @@ def test_a_fresh_call_with_arguments_of_the_wrong_type_is_refused(
     )
 
     assert result == refusal
+
+
+def test_a_fresh_call_stores_its_title_short_and_redacted(tmp_path: Path) -> None:
+    """The child records, persists, and hands its follow-ups the shown title, not the call's raw text."""
+    result = resolve_fresh_target(
+        {"task": "Read.", "title": "Measure cold start\n" * 500},
+        caller_name="leader",
+        config=_config(("file",)),
+        runtime_paths=_runtime_paths(tmp_path),
+        depth=0,
+        workspace_root=lambda: tmp_path,
+        cap=None,
+    )
+
+    assert not isinstance(result, str)
+    assert len(result.title) <= 80
+    assert result.title.startswith("Measure cold start Measure cold start")

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "ANTHROPIC_BASE_URL_DEFAULT",
+    "ANTHROPIC_OPENROUTER_BASE_URL",
     "AZURE_OPENAI_API_VERSION_DEFAULT",
     "CARTESIA_TTS",
     "CEREBRAS_HOST_DEFAULT",
@@ -102,6 +103,8 @@ _ANTHROPIC_FABLE = "claude-fable-5-2"
 _ANTHROPIC_OPUS = "claude-opus-5-5"
 _ANTHROPIC_SONNET = "claude-sonnet-5-5"
 _ANTHROPIC_HAIKU = "claude-haiku-5-5"
+# The context window Claude Code gives a model id without its ``[1m]`` suffix.
+_CLAUDE_CODE_CONTEXT_WINDOW = 200_000
 # Prefixes also cover newer point releases (claude-sonnet-5 matches claude-sonnet-5-5).
 CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES = (
     "claude-sonnet-4-6",
@@ -110,6 +113,7 @@ CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES = (
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-opus-5",
+    "claude-haiku-5",
     "claude-fable-5",
     "claude-mythos-5",
     "claude-mythos-preview",
@@ -173,13 +177,13 @@ OPENAI_AVATAR_PROMPT = _OPENAI_GPT
 _AZURE_OPENAI_DEFAULT_DEPLOYMENT = "your-azure-openai-deployment"
 
 _GOOGLE_GEMINI_HYDROGEN = "gemini-4-hydrogen"
-_GOOGLE_GEMINI_LITE = "gemini-3.5-flash-lite"
 GOOGLE_IMAGE = "gemini-nano-banana-2.1"
 GOOGLE_VEO = "veo-3.1-generate-001"
 # Direct Gemini API models whose requests keep the provider's sampling defaults. Literal ids, like the Claude lists
 # below, because a model keeps its sampling rule after the preferred defaults move on from it.
 GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
     "gemini-4-carbon",
+    "gemini-4-neon",
     "gemini-4-argon",
     "gemini-4-hydrogen",
     "gemini-3.8-flash",
@@ -249,7 +253,6 @@ _OPENROUTER_CLAUDE_SONNET = "anthropic/claude-sonnet-5.5"
 OPENROUTER_SYSTEM_UPDATE_MODELS = frozenset({"anthropic/claude-opus-5.5"})
 _OPENROUTER_CLAUDE_HAIKU = "anthropic/claude-haiku-5.5"
 _OPENROUTER_GEMINI_HYDROGEN = f"google/{_GOOGLE_GEMINI_HYDROGEN}"
-_OPENROUTER_GEMINI_LITE = f"google/{_GOOGLE_GEMINI_LITE}"
 _OPENROUTER_OPENAI_GPT = f"openai/{_OPENAI_GPT}"
 _OPENROUTER_OPENAI_SOL = f"openai/{OPENAI_GPT_SOL}"
 OPENROUTER_OPENAI_LUNA = f"openai/{OPENAI_GPT_LUNA}"
@@ -268,6 +271,8 @@ OPENAI_BASE_URL_DEFAULT = "https://api.openai.com/v1"
 # stable, checked 2026-10-27); Azure's later GA releases are the undated v1 API.
 AZURE_OPENAI_API_VERSION_DEFAULT = "2024-10-21"
 ANTHROPIC_BASE_URL_DEFAULT = "https://api.anthropic.com"
+# Messages endpoint root; the Anthropic SDK appends /v1.
+ANTHROPIC_OPENROUTER_BASE_URL = "https://openrouter.ai/api"
 DEEPSEEK_BASE_URL_DEFAULT = "https://api.deepseek.com"
 GROQ_HOST_DEFAULT = "https://api.groq.com"
 CEREBRAS_HOST_DEFAULT = "https://api.cerebras.ai"
@@ -312,6 +317,7 @@ CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "anthropic": ModelPreset("anthropic", _ANTHROPIC_SONNET, 1_000_000),
         "bedrock_claude": ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_OPUS, 1_000_000),
         "azure": ModelPreset("azure", _AZURE_OPENAI_DEFAULT_DEPLOYMENT),
+        "claude_code": ModelPreset("claude_code", _ANTHROPIC_SONNET, _CLAUDE_CODE_CONTEXT_WINDOW),
         "codex": ModelPreset("codex", _CODEX_GPT, _CODEX_CONTEXT_WINDOW, reasoning_effort="medium", display_name="Sol"),
         "kimi": ModelPreset("kimi", _KIMI, 1_048_576),
         "llama_cpp": ModelPreset("llama_cpp", LLAMA_CPP_GEMMA, 128_000),
@@ -346,7 +352,6 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
             ("opus", ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000)),
             ("haiku", ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 1_000_000)),
             ("gemini_hydrogen", ModelPreset("openrouter", _OPENROUTER_GEMINI_HYDROGEN, 1_048_576)),
-            ("gemini_lite", ModelPreset("openrouter", _OPENROUTER_GEMINI_LITE, 1_048_576)),
             ("deepseek", ModelPreset("openrouter", _OPENROUTER_DEEPSEEK, 1_048_576)),
             ("glm", ModelPreset("openrouter", _OPENROUTER_GLM, 1_048_576)),
             ("kimi", ModelPreset("openrouter", _OPENROUTER_KIMI, 1_048_576)),
@@ -364,6 +369,7 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
 # Extra named models that config init writes next to `models.default`.
 CONFIG_INIT_ADDITIONAL_MODELS: Mapping[str, tuple[tuple[str, ModelPreset], ...]] = MappingProxyType(
     {
+        "claude_code": (("haiku", ModelPreset("claude_code", _ANTHROPIC_HAIKU, _CLAUDE_CODE_CONTEXT_WINDOW)),),
         "codex": (
             (
                 "astra",
@@ -392,7 +398,7 @@ CONFIG_INIT_ADDITIONAL_MODELS: Mapping[str, tuple[tuple[str, ModelPreset], ...]]
 )
 
 # Additional model that config init assigns to the router and thread summaries (with their one-shot tags).
-CONFIG_INIT_HELPER_MODELS: Mapping[str, str] = MappingProxyType({"codex": "luna"})
+CONFIG_INIT_HELPER_MODELS: Mapping[str, str] = MappingProxyType({"claude_code": "haiku", "codex": "luna"})
 
 SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
     {
@@ -405,7 +411,6 @@ SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "sonnet": ModelPreset("openrouter", _OPENROUTER_CLAUDE_SONNET, 1_000_000),
         "haiku": ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 1_000_000),
         "gemini_hydrogen": ModelPreset("openrouter", _OPENROUTER_GEMINI_HYDROGEN, 1_048_576),
-        "gemini_lite": ModelPreset("openrouter", _OPENROUTER_GEMINI_LITE, 1_048_576),
         "deepseek": ModelPreset("openrouter", _OPENROUTER_DEEPSEEK, 1_048_576),
         "glm": ModelPreset("openrouter", _OPENROUTER_GLM, 1_048_576),
         "kimi": ModelPreset("openrouter", _OPENROUTER_KIMI, 1_048_576),

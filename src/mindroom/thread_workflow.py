@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.constants import ACTING_REQUESTER_KEY
 from mindroom.matrix.client_visible_messages import bundled_replacement_candidates
 from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
-from mindroom.scheduling.tasks import task_records_with_writers
+from mindroom.scheduling.tasks import task_records
 from mindroom.thread_tags import (
     RESOLVED_THREAD_TAG,
     SNOOZED_THREAD_TAG,
@@ -39,10 +39,10 @@ def classify_thread_workflow(status: Mapping[str, Any], now: int) -> dict[str, o
     """Group a thread by the case file's status keys (absent: false, 0 or unknown), with `why` or known `back_at`."""
     if status.get("pending_approval") or (status.get("has_background_approval") and not status.get("is_resolved")):
         return {"workflow": "needs_you", "why": "approval"}
-    if status.get("pending_question"):
-        return {"workflow": "needs_you", "why": "question"}
     if status.get("is_resolved"):
         return {"workflow": "done"}
+    if status.get("pending_question"):
+        return {"workflow": "needs_you", "why": "question"}
     if (snoozed_until_ts := status.get("snoozed_until_ts")) is not None and snoozed_until_ts > now:
         return {"workflow": "later", "back_at": snoozed_until_ts}
     if status.get("is_streaming") or status.get("has_background_job"):
@@ -129,7 +129,7 @@ def room_thread_facts(
         waits = job["status"] == "awaiting_approval"
         facts[job["thread_id"]]["has_background_approval" if waits else "has_background_job"] = True
     runs: defaultdict[str, list[int | None]] = defaultdict(list)
-    for task, _writer in task_records_with_writers(room_id, state, runtime_paths):
+    for task in task_records(room_id, state, runtime_paths):
         workflow = task.workflow
         execute_at = None if workflow.execute_at is None else int(workflow.execute_at.timestamp() * 1000)
         if workflow.thread_id and not workflow.new_thread and (execute_at is None or execute_at > now):
@@ -149,7 +149,10 @@ def thread_workflow(
     approval_ts: int | None = None,
     question_ts: int | None = None,
 ) -> dict[str, object]:
-    """Label one thread from its `room_thread_facts` entry; a request older than the resolve counts as answered."""
+    """Label one thread from its `room_thread_facts` entry.
+
+    In a resolved thread, questions count as answered and only approvals newer than the resolve can still wait.
+    """
     resolved_ts = facts.get("resolved_ts")
     cutoff = float("-inf") if resolved_ts is None else resolved_ts
     status = {
@@ -157,7 +160,7 @@ def thread_workflow(
         "is_resolved": resolved_ts is not None,
         "is_streaming": replying,
         "pending_approval": approval_ts is not None and approval_ts > cutoff,
-        "pending_question": question_ts is not None and question_ts > max(cutoff, now - _QUESTION_WAITS_MS),
+        "pending_question": question_ts is not None and question_ts > now - _QUESTION_WAITS_MS,
     }
     return classify_thread_workflow(status, now)
 

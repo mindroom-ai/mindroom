@@ -81,6 +81,13 @@ def test_extract_mentioned_agents_from_text() -> None:
     assert result == [expected_agent]
 
 
+def test_no_scheduled_mentions_need_no_prepared_accounts(tmp_path: Path) -> None:
+    """Plain scheduling text does not require looking up any Matrix accounts."""
+    config = Config(agents={"general": AgentConfig(display_name="General Agent")})
+
+    assert _extract_mentioned_agents_from_text("remind me tomorrow", config, test_runtime_paths(tmp_path)) == []
+
+
 def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
     """The model-facing schema must not silently choose a delivery scope."""
     function = toolkit_offers(SchedulerTools(), "schedule")
@@ -105,7 +112,12 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
     tools = SchedulerTools()
     config = _general_config()
     orchestrator = MagicMock()
-    context = replace(_make_context(config), config_provider=lambda: config, orchestrator=orchestrator)
+    context = replace(
+        _make_context(config),
+        target=MessageTarget.resolve(room_id="!room:localhost", thread_id="$thread", reply_to_event_id="$answered"),
+        config_provider=lambda: config,
+        orchestrator=orchestrator,
+    )
 
     with (
         patch(
@@ -156,6 +168,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "history_limit": None,
         "silent": None,
         "model": None,
+        "source_event_id": "$answered",
     }
     assert second_call == {
         "room_id": context.room_id,
@@ -166,6 +179,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "history_limit": None,
         "silent": True,
         "model": None,
+        "source_event_id": "$answered",
     }
     assert third_call == {
         "room_id": context.room_id,
@@ -176,6 +190,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "history_limit": 0,
         "silent": None,
         "model": "cheap",
+        "source_event_id": "$answered",
     }
 
 

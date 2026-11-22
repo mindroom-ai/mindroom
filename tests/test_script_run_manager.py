@@ -52,6 +52,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends.local import _LocalWorkerBackend
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import (
     ScriptResourceProfile,
@@ -842,6 +843,19 @@ async def test_static_worker_backend_rejects_script_before_creating_any_state(tm
     assert client.launched_run_ids == []
 
 
+def test_script_backend_must_actually_support_exact_retirement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cleanup locator is not enough without a real method that can retire a worker."""
+    backend = _LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=10.0,
+    )
+    monkeypatch.setattr(backend, "cleanup_locator", "cleanup-locator")
+
+    with pytest.raises(ScriptRunManagerError, match="does not support exact worker retirement"):
+        manager_module._require_script_worker_backend(backend)
+
+
 @pytest.mark.asyncio
 async def test_kubernetes_worker_rejects_scripts_without_a_gateway_only_listener(tmp_path: Path) -> None:
     """A pod must not receive network access to the primary API's non-gateway routes."""
@@ -1035,6 +1049,21 @@ async def test_launch_allows_an_eligible_toolkit_with_no_current_functions(tmp_p
 
     assert run.grants == (ScriptToolGrant("calculator", "add"),)
     assert run.preapprove_launch_grants is True
+
+
+@pytest.mark.asyncio
+async def test_launch_rejects_an_allowlist_naming_filesystem_by_an_old_name(tmp_path: Path) -> None:
+    """A saved file or coding entry neither grants filesystem nor narrows the allowlist: the launch says what to write."""
+    manager, _backend, _client = _manager(tmp_path)
+    manager.toolkit_name_resolver = lambda _context: frozenset({"calculator", "filesystem"})
+
+    for old_name in ("file", "coding"):
+        with pytest.raises(ScriptRunManagerError, match=rf"toolkit names: {old_name}\. .*name filesystem"):
+            await manager.run(
+                _context(tmp_path),
+                source="print('ok')\n",
+                limits=ScriptRunLimits(allowed_tools=(old_name,)),
+            )
 
 
 @pytest.mark.asyncio

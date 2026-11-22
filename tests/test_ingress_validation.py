@@ -18,6 +18,7 @@ from mindroom.constants import (
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTE_EVENT_TYPE,
     SOURCE_KIND_KEY,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
@@ -41,10 +42,11 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
+from mindroom.journal_dispatch import _route_as_message
 from mindroom.turn_origin import TurnIntent
-from mindroom.turns.facts import command_for, is_router_voice_echo
+from mindroom.turns.facts import command_for, is_voice_echo
 from tests.access_schema_support import with_current_room_member_access
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, parsed_route, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids
 from tests.runtime_fakes import ready_runtime
 
@@ -144,7 +146,7 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
             SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
         }
-        assert is_router_voice_echo(
+        assert is_voice_echo(
             validator.classify_source(ids["router"].full_id, {"content": echo_content}, room_id=room.room_id),
             echo_content,
         )
@@ -245,6 +247,33 @@ async def test_a_reply_decision_settles_what_it_refuses_before_the_fence_opens(t
     validator.deps.turn_policy.can_reply_to_sender_in_room.assert_called_once_with("@user:localhost", "!room:localhost")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routes", [True, False])
+async def test_a_steward_takes_a_message_it_only_routes_past_the_reply_gates(tmp_path: Path, routes: bool) -> None:
+    """Permission to route admits a message to the turn that plans it, and to no decision that only answers."""
+    validator, _ids = _validator(tmp_path)
+    policy = validator.deps.turn_policy
+    policy.can_reply_to_sender_in_room.return_value = False
+    policy.routes_for_sender_in_room.return_value = routes
+    validator.deps.turn_store.is_handled = AsyncMock(return_value=False)
+    validator.deps.turn_store.record_turn = AsyncMock()
+    room = nio.MatrixRoom("!room:localhost", validator.deps.matrix_id.full_id)
+    event = _text("@user:localhost", "hello")
+
+    prechecked = await validator.precheck_event(room, event, validator.classify(event, room_id=room.room_id))
+    async with validator.admitted_reply_decision("@user:localhost", room.room_id, unanswered=("$text",)) as answers:
+        pass
+    async with validator.admitted_reply_decision(
+        "@user:localhost",
+        room.room_id,
+        unanswered=("$text",),
+        or_routed=True,
+    ) as plans:
+        pass
+
+    assert (prechecked, answers, plans) == (routes, False, routes)
+
+
 def _text(sender: str, body: str, **content: object) -> nio.RoomMessageText:
     return nio.RoomMessageText.from_dict(
         {
@@ -330,6 +359,64 @@ def test_a_room_level_router_handoff_names_the_human_message_it_relays(tmp_path:
     )
 
     assert validator.classify(relay, room_id="!room:localhost").discovery_event_id == "$human"
+
+
+@pytest.mark.parametrize("steward", ["router", "research"])
+def test_a_route_is_trusted_from_any_managed_account_and_names_the_message_it_routes(
+    tmp_path: Path,
+    steward: str,
+) -> None:
+    """The room's steward is the owner account or an agent, and its route runs for the person it names."""
+    validator, ids = _validator(tmp_path)
+    route = _route(ids[steward].full_id, ids["general"].full_id)
+
+    facts = validator.classify(_route_as_message(route), room_id="!room:localhost")
+
+    assert (facts.routed_event_id, facts.discovery_event_id) == ("$human", "$human")
+    assert facts.discovery_event_ids == ("$earlier", "$human")
+    assert facts.run_requester_id == "@user:localhost"
+    assert facts.router_relay
+    assert facts.origin.intent is TurnIntent.ROUTER_HANDOFF
+
+
+def _route(sender: str, entity: str) -> nio.UnknownEvent:
+    """Return the hidden route event one account sent to route `$human` to an entity."""
+    return parsed_route(
+        {
+            ROUTE_EVENT_TYPE: {"entity": entity, "event_ids": ["$earlier", "$human"]},
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        },
+        sender=sender,
+        origin_server_ts=1,
+    )
+
+
+def test_route_content_from_an_unmanaged_account_is_not_a_route(tmp_path: Path) -> None:
+    """Only an account the identity registry manages may route."""
+    validator, ids = _validator(tmp_path)
+    forged = _route_as_message(_route("@user:localhost", ids["general"].full_id))
+
+    facts = validator.classify(forged, room_id="!room:localhost")
+
+    assert (facts.routed_event_id, facts.discovery_event_id, facts.router_relay) == (None, None, False)
+    assert facts.run_requester_id == "@user:localhost"
+    assert facts.origin.intent is TurnIntent.USER_MESSAGE
+
+
+def test_a_message_that_carries_route_content_is_not_a_route(tmp_path: Path) -> None:
+    """Only a route event is a route: the same content in a managed account's ordinary message routes nothing."""
+    validator, ids = _validator(tmp_path)
+    content = _route(ids["research"].full_id, ids["general"].full_id).source["content"]
+
+    facts = validator.classify(_text(ids["research"].full_id, "hello", **content), room_id="!room:localhost")
+
+    assert (facts.routed_event_id, facts.discovery_event_id, facts._routed, facts.router_relay) == (
+        None,
+        None,
+        False,
+        False,
+    )
 
 
 def _entity_final_reply_with_tool_markers(validator: IngressValidator, sender: str) -> nio.RoomMessageFormatted:

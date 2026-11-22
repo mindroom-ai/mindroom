@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.config.resolution import entity_model_name
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 
@@ -85,9 +84,7 @@ def build_agent_status_message(
     status_parts.append(f"🤖 Model: {model_info}")
 
     # Add role/purpose for teams and agents
-    if agent_name == ROUTER_AGENT_NAME:
-        status_parts.append("📍 Routes messages to appropriate agents or teams")
-    elif agent_name in config.teams:
+    if agent_name in config.teams:
         team_config = config.teams[agent_name]
         if team_config.role:
             status_parts.append(f"👥 {team_config.role[:100]}")  # Limit length

@@ -27,6 +27,7 @@ from mindroom.config.personal_agents import (
     read_personal_agent_roster_file,
 )
 from mindroom.config.resolution import authored_tool_entries
+from mindroom.config.tool_aliases import canonical_tool_names
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import RESERVED_ENTITY_NAMES, runtime_matrix_homeserver
 from mindroom.durable_write import write_json_file_durable
@@ -394,6 +395,9 @@ def update_generated_agent(
             msg = f"Only {entry.owner} may change co_owners of {agent_name}"
             raise _GeneratedAgentError(msg)
         data = entry.model_dump()
+        if isinstance(tools := changes.get("tools"), list):
+            # Only the tools this change names may say file or coding; a saved edit is read as written.
+            changes = {**changes, "tools": canonical_tool_names(tools)}
         data["edits"] = (data["edits"] or {}) | {field: changes[field] for field in _EDIT_FIELDS if field in changes}
         if "co_owners" in changes:
             data["co_owners"] = changes["co_owners"] or []
@@ -479,6 +483,7 @@ async def provision_created_agent(
     if not slug:
         msg = f"{name!r} has no letters or digits to name the agent by; choose another name"
         raise _GeneratedAgentError(msg)
+    tools = None if tools is None else canonical_tool_names(tools)
     _refuse_tools(tools, config.tool_ceiling(creator))
     owner = resolve_human_requester_alias(requester_id, config, runtime_paths)
     edits = GeneratedAgentEdits(display_name=display_name, role=role, instructions=instructions, tools=tools)

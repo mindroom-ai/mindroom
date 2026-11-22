@@ -17,11 +17,12 @@ from nio.durable import RecordKind, SyncBatch, SyncRecord
 from nio.durable.codec import restore_event
 from nio.durable.model import CryptoEvidence, OwnMembership
 
-from mindroom.constants import AGENT_AUTHORED_KEY, STREAM_STATUS_KEY
+from mindroom.constants import AGENT_AUTHORED_KEY, ROUTE_REVISION_KEY, STREAM_STATUS_KEY
 from mindroom.event_journal import (
     AdmissionFacts,
     DeliveryProjectionPendingError,
     EventJournalStore,
+    EventKind,
     InboundEvent,
     IngestionBatchAdmission,
     IngestionBatchIntegrityError,
@@ -299,7 +300,7 @@ async def test_pump_wakes_the_dispatcher_within_the_recheck_interval_after_batch
     journal_store: EventJournalStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A departing router fails an agent's paused approval without waking it; the agent's next syncs lead to a wake.
+    """A departing card sender fails an agent's paused approval without waking it; its next syncs lead to a wake.
 
     The syncs arrive before the recheck is due and then stop, so only the scheduled wake can find the source.
     """
@@ -308,7 +309,7 @@ async def test_pump_wakes_the_dispatcher_within_the_recheck_interval_after_batch
     router = journal_store.principal("router@shared")
     await approvals.admit_sources(alice)
     await paused_for_approval(alice, replace(approvals.continuation(state="waiting"), runtime_generation="runtime-a"))
-    await approvals.remember_card(router)
+    await approvals.remember_card(router, event_journal_store_tests.CARD_SENDER)
     stream = uuid4()
     consumer = await alice.load_or_create_ingestion_consumer(new_generation=uuid4())
     await alice.bind_ingestion_stream(generation=consumer.generation, stream_id=stream)
@@ -330,7 +331,7 @@ async def test_pump_wakes_the_dispatcher_within_the_recheck_interval_after_batch
     try:
         await asyncio.wait_for(scanned.wait(), 1)
         assert handed == []
-        await admit_room_membership(router, ROOM, "leave")
+        await admit_room_membership(journal_store.principal(event_journal_store_tests.CARD_SENDER), ROOM, "leave")
         started = asyncio.get_running_loop().time()
         pump = asyncio.create_task(
             durable_ingestion.run_ingestion_pump(
@@ -617,6 +618,56 @@ async def test_batch_binding_order_and_semantic_duplicates(journal_database: Cal
 
 
 @pytest.mark.asyncio
+async def test_redelivery_of_a_pending_long_text_edited_to_a_short_one_is_a_duplicate(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """A long text sent as a file and edited to a short one while it waits is still the event it was when redelivered.
+
+    It replays as the text it now is, and its row keeps the kind it was admitted as, settled too.
+    """
+    store = journal_database()
+    original = message("$long")
+    original.source["content"] = {"msgtype": "m.file", "body": "long.txt", "url": "mxc://example.org/long"}
+    batch = SyncBatch(uuid4(), 1, (original,))
+    principal = await principal_for(store, batch.stream_id)
+    await consume_one_ingestion_batch(Session(batch), principal, account_id=ACCOUNT)
+    short = {"msgtype": "m.text", "body": "short", ROUTE_REVISION_KEY: [11, "$edit"]}
+    await principal.revise_pending("$long", short)
+
+    result = await consume_one_ingestion_batch(Session(replace(batch, sequence=2)), principal, account_id=ACCOUNT)
+
+    assert result.receipt_new
+    assert not result.semantic_event_new
+    [pending] = await principal.pending()
+    assert (pending.kind, pending.source["content"]) == (EventKind.MESSAGE, short)
+    await principal.settle("$long")
+    result = await consume_one_ingestion_batch(Session(replace(batch, sequence=3)), principal, account_id=ACCOUNT)
+    assert not result.semantic_event_new
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_redelivery_of_an_unedited_text_as_an_image_is_refused(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """Only an edit a waiting message took changes what it replays as: a batch that contradicts its kind is refused."""
+    store = journal_database()
+    batch = SyncBatch(uuid4(), 1, (message("$text"),))
+    principal = await principal_for(store, batch.stream_id)
+    await consume_one_ingestion_batch(Session(batch), principal, account_id=ACCOUNT)
+    image = message("$text")
+    image.source["content"] = {"msgtype": "m.image", "body": "cat.png", "url": "mxc://example.org/cat"}
+
+    contradiction = Session(SyncBatch(batch.stream_id, 2, (image,)))
+    with pytest.raises(IngestionBatchIntegrityError):
+        await consume_one_ingestion_batch(contradiction, principal, account_id=ACCOUNT)
+
+    [pending] = await principal.pending()
+    assert (pending.kind, pending.source["content"]["body"]) == (EventKind.MESSAGE, "hello")
+    await store.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("duplicate", [False, True])
 async def test_duplicate_cannot_answer_a_question_published_after_source(
     journal_database: Callable[[], EventJournalStore],
@@ -664,6 +715,60 @@ async def test_duplicate_cannot_answer_a_question_published_after_source(
         assert not facts.semantic_event_new
     assert await principal.is_pending("$answer")
     assert await principal.claim_interactive_text(source_event_id="$answer") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("positions", [False, True])
+async def test_a_persons_numeric_answer_selects_whatever_tool_trace_it_carries(
+    journal_database: Callable[[], EventJournalStore],
+    positions: bool,
+) -> None:
+    """Only an agent's reply had tool markers in its text, so nothing is put into a person's answer of ``1``."""
+    store = journal_database()
+    stream = uuid4()
+    principal = store.principal("agent@@bot:example.org")
+    consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
+    await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=stream)
+    thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"}}
+    question = message("$question")
+    question.source.update(
+        sender=ACCOUNT,
+        content={
+            "msgtype": "m.text",
+            "body": "Choose",
+            **thread,
+            "io.mindroom.interactive": {
+                "creator_agent": "agent",
+                "question_text": "Choose",
+                "options": {"1": "one"},
+                "option_labels": {"1": "One"},
+                "source_event_id": "$turn",
+            },
+        },
+    )
+    answer = message("$answer")
+    answer.source["content"] = {"msgtype": "m.text", "body": "1", **thread}
+    if positions:
+        call = {"type": "tool_call_completed", "tool_name": "shell", "body_line": 0, "at": 0}
+        answer.source["content"] |= {
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<p>1</p>\n",
+            "io.mindroom.tool_trace": {"version": 3, "events": [call]},
+        }
+    for sequence, record in enumerate((message("$turn"), question, answer), start=1):
+        batch = validate_ingestion_batch(
+            SyncBatch(stream, sequence, (record,)),
+            account_id=ACCOUNT,
+            sender_is_managed=lambda sender: sender == ACCOUNT,
+        )
+        await principal.admit_ingestion_batch(batch)
+        if record is question:
+            await principal.settle("$question")
+
+    selection = await principal.claim_interactive_text(source_event_id="$answer")
+
+    assert selection is not None
+    assert selection.selected_value == "one"
 
 
 @pytest.mark.asyncio

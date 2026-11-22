@@ -21,7 +21,9 @@ import structlog
 from mindroom.redaction import redact_log_event, redact_sensitive_text
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from contextlib import AbstractContextManager
+    from types import TracebackType
     from typing import TextIO
 
     from structlog.typing import ExceptionRenderer, ExcInfo, Processor
@@ -283,7 +285,7 @@ def _build_logger_levels(
 
 
 # Several minutes of busy logging at tens of records a second, in a few tens of megabytes at most.
-_MAX_QUEUED_LOG_FILE_RECORDS = 10_000
+_MAX_QUEUED_LOG_RECORDS = 10_000
 
 
 class _LogFile(logging.FileHandler):
@@ -297,40 +299,52 @@ class _LogFile(logging.FileHandler):
             self.handleError(record)
 
 
-class _QueuedFileHandler(logging.handlers.QueueHandler):
-    """Format records on the logging thread and append them to the log file from a writer thread.
+class _QueuedLogHandler(logging.handlers.QueueHandler):
+    """Format records on the logging thread and write them to stderr or the log file from a writer thread.
 
-    A log directory on a network file system can stall writes for minutes, and a write on the event loop would stall
-    every agent with it. Formatting stays on the logging thread, so records keep their bound context and timestamps.
+    A slow stderr reader, such as journald or a container log driver under load, or a log directory on a network file
+    system can stall writes for seconds to minutes, and a write on the event loop would stall every agent with it.
+    Formatting stays on the logging thread, so records keep their bound context and timestamps.
     The queue is capped so a long stall cannot grow memory without limit: from the cap until the writer has caught up,
-    records skip the file only, stderr still gets them, and a note in the file says how many it skipped.
+    records skip the stalled output only, the other output still gets them, and a note there says how many it skipped.
     """
 
-    def __init__(self, filename: str, mode: str, encoding: str) -> None:
+    def __init__(self, target: logging.Handler, output: str) -> None:
         # Unlike `queue.Queue`, `SimpleQueue` is reentrant, so a finalizer that logs during a put cannot deadlock it.
         super().__init__(queue.SimpleQueue())
-        self._file = _LogFile(filename, mode=mode, encoding=encoding)
+        self._target = target
+        self.output = output
         self._dropped_records = 0
         # A later `dictConfig`, such as uvicorn's, drops this handler from the list `logging.shutdown` closes at exit.
         atexit.register(self.close)
 
+    @classmethod
+    def to_file(cls, filename: str, mode: str, encoding: str) -> _QueuedLogHandler:
+        """Queue records for a log file."""
+        return cls(_LogFile(filename, mode=mode, encoding=encoding), "log file")
+
+    @classmethod
+    def to_stderr(cls, stream: TextIO) -> _QueuedLogHandler:
+        """Queue records for stderr."""
+        return cls(logging.StreamHandler(stream), "stderr")
+
     def enqueue(self, record: logging.LogRecord) -> None:
         """Queue the formatted record, or count it as dropped from the cap until the writer has caught up."""
         queued_records = cast("queue.SimpleQueue[logging.LogRecord]", self.queue).qsize()
-        if queued_records >= _MAX_QUEUED_LOG_FILE_RECORDS or (self._dropped_records and queued_records):
+        if queued_records >= _MAX_QUEUED_LOG_RECORDS or (self._dropped_records and queued_records):
             self._dropped_records += 1
             return
         if self.listener is None:
             # Any `dictConfig` closes every handler, even one it leaves on the root logger, and a closed `FileHandler`
             # reopens on its next record; this writer starts again the same way.
-            listener = logging.handlers.QueueListener(self.queue, self._file)
+            listener = logging.handlers.QueueListener(self.queue, self._target)
             listener.start()
             self.listener = listener
         self._queue_dropped_records_note()
         self.queue.put_nowait(record)
 
     def _queue_dropped_records_note(self) -> None:
-        """Queue a note where the file skipped records, if it skipped any since the last note."""
+        """Queue a note where the output skipped records, if it skipped any since the last note."""
         if not self._dropped_records:
             return
         note = logging.makeLogRecord(
@@ -338,7 +352,8 @@ class _QueuedFileHandler(logging.handlers.QueueHandler):
                 "name": __name__,
                 "levelno": logging.WARNING,
                 "levelname": "WARNING",
-                "msg": "Log file dropped records while its writes were stalled",
+                "msg": "Log output dropped records while its writes were stalled",
+                "log_output": self.output,
                 "dropped_records": self._dropped_records,
             },
         )
@@ -346,18 +361,41 @@ class _QueuedFileHandler(logging.handlers.QueueHandler):
         # An empty context keeps the bound fields of whichever task logged next off the note.
         self.queue.put_nowait(contextvars.Context().run(self.prepare, note))
 
-    def close(self) -> None:
-        """Write every queued record, then close the file."""
+    def flush(self) -> None:
+        """Write every queued record; the next record starts the writer again."""
         self.acquire()
         try:
             if self.listener is not None:
                 self._queue_dropped_records_note()
                 self.listener.stop()
                 self.listener = None
-            self._file.close()
         finally:
             self.release()
+
+    def close(self) -> None:
+        """Write every queued record, then close the output."""
+        self.flush()
+        self._target.close()
         super().close()
+
+
+def _flush_logs_before_excepthook(
+    exc_type: type[BaseException],
+    exc: BaseException,
+    tb: TracebackType | None,
+) -> None:
+    """Write queued stderr records before the traceback of an uncaught exception, which would otherwise come first.
+
+    The log file drains at exit, so a stalled file cannot hold back the traceback.
+    """
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, _QueuedLogHandler) and handler.output == "stderr":
+            handler.flush()
+    assert _previous_excepthook is not None
+    _previous_excepthook(exc_type, exc, tb)
+
+
+_previous_excepthook: Callable[[type[BaseException], BaseException, TracebackType | None], object] | None = None
 
 
 _current_log_file: Path | None = None
@@ -468,7 +506,7 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
     handlers: dict[str, dict[str, object]] = {
         "console": {
             "level": handler_level,
-            "class": "logging.StreamHandler",
+            "()": _QueuedLogHandler.to_stderr,
             "stream": "ext://sys.stderr",
             "formatter": renderer_name,
             "filters": ["nio_validation", "mem0_keyword_search"],
@@ -477,7 +515,7 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
     if log_file is not None:
         handlers["file"] = {
             "level": handler_level,
-            "()": _QueuedFileHandler,
+            "()": _QueuedLogHandler.to_file,
             "filename": str(log_file),
             "mode": "a",
             "encoding": "utf-8",
@@ -538,6 +576,10 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
         cache_logger_on_first_use=True,
     )
     _route_agno_loggers_to_root(loggers)
+    global _previous_excepthook
+    if _previous_excepthook is None:
+        # Once is enough: Typer installs its own hook before running the command that sets up logging.
+        _previous_excepthook, sys.excepthook = sys.excepthook, _flush_logs_before_excepthook
     return renderer_name
 
 

@@ -37,7 +37,8 @@ def minimal_bash_toolkit(
         """Run a Bash command and return its output.
 
         Start servers and other long work detached with ``nohup cmd > out.log 2>&1 &`` and read the log in later
-        commands.
+        commands. Wait for something inside one command, such as ``until <check>; do sleep 10; done`` with a
+        ``timeout``, not with repeated ``sleep`` calls: every call is a model turn.
 
         Args:
             command: The Bash command to run.

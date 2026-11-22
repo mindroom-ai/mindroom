@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.background_tasks import SupervisedLoop
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import is_human_requester_id
-from mindroom.room_reply_modes import seed_room_reply_mode
+from mindroom.room_settings import seed_room_settings
+from mindroom.room_steward import room_poster, room_steward
 from mindroom.thread_snooze import (
     SNOOZE_RETRY_DELAY,
     THREAD_SNOOZE_CONTENT_KEY,
@@ -136,8 +136,8 @@ class ThreadSnoozeRuntimeCoordinator:
                     parsed = self._parse_state_event(room_id, event)
                     if parsed is not None and parsed[0] not in live_roots:
                         self._apply_state_event(room_id, parsed)
-                # The same read gives the room's reply mode setting, which plugins read before any turn does.
-                seed_room_reply_mode(self.runtime_paths, room_id, response.events)
+                # The same read gives the room's settings, which plugins and replies read before any turn does.
+                seed_room_settings(self.runtime_paths, room_id, response.events)
                 self._restored_rooms.add(room_id)
             except asyncio.CancelledError:
                 raise
@@ -180,9 +180,10 @@ class ThreadSnoozeRuntimeCoordinator:
         return self._is_bot(user_id) and user_id not in self.config_provider().bot_accounts
 
     def _joined_bots(self, room_id: str) -> Iterator[tuple[AgentBot, nio.AsyncClient]]:
-        """Yield the bots joined to a room with their clients, the router first and the rest by name."""
+        """Yield the bots joined to a room with their clients, the steward first and the rest by name; none of them posts."""
         bots = self.bots()
-        for name in sorted(bots, key=lambda name: (name != ROUTER_AGENT_NAME, name)):
+        steward = room_steward(bots, room_id)
+        for name in sorted(bots, key=lambda name: (bots[name] is not steward, name)):
             bot = bots[name]
             client = bot.client
             if bot.running and client is not None and room_id in client.rooms:
@@ -251,15 +252,12 @@ class ThreadSnoozeRuntimeCoordinator:
         return "not_permitted"
 
     async def send_ended(self, snooze: Snooze) -> bool:
-        """Post the wake message into the thread through the first joined bot that delivers it; False when none did."""
-        for bot, _client in self._joined_bots(snooze.room_id):
-            if await self._send_ended_as(bot, snooze):
-                return True
-        return False
-
-    async def _send_ended_as(self, bot: AgentBot, snooze: Snooze) -> bool:
+        """Post the wake message into the thread as the room's poster; False when there is none or it did not deliver."""
+        poster = room_poster(self.bots(), snooze.room_id)
+        if poster is None:
+            return False
         try:
-            event_id = await bot.hook_context.send_message(
+            event_id = await poster.hook_context.send_message(
                 snooze.room_id,
                 wake_message_body(snooze.note),
                 snooze.thread_root_id,
@@ -272,10 +270,10 @@ class ThreadSnoozeRuntimeCoordinator:
         except asyncio.CancelledError:
             raise
         except Exception:
-            # The next bot, or the runtime's retry, sends it instead; the snooze is already removed, so nothing else would.
+            # The runtime's retry sends it instead; the snooze is already removed, so nothing else would.
             logger.warning(
                 "thread_snooze_send_failed",
-                agent=bot.agent_name,
+                agent=poster.agent_name,
                 room_id=snooze.room_id,
                 thread_root_id=snooze.thread_root_id,
                 exc_info=True,

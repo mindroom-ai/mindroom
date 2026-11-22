@@ -53,9 +53,7 @@ Use a canvas when seeing or clicking beats reading or typing; for a quick choice
 
 ## Turn canvases on
 
-Canvases need two switches, and both are off by default.
-
-First, give the agent the [`chat_ui`](https://docs.mindroom.chat/tools/chat-ui/) toolkit with `enable_show_canvas: true`:
+MindRoom Chat ships with canvases on, so an agent needs only the [`chat_ui`](https://docs.mindroom.chat/tools/chat-ui/) toolkit with `enable_show_canvas: true`:
 
 ```yaml
 agents:
@@ -70,25 +68,24 @@ agents:
 
 `enable_show_canvas` (boolean, default `false`) adds the `show_canvas` function; the rest of `chat_ui` works without it.
 It can also be set in the `chat_ui` tool's saved settings for every agent that uses `chat_ui`; an agent's own entry wins, as described in [How Settings Combine](https://docs.mindroom.chat/tools/#how-settings-combine).
-`mindroom config init` and newly provisioned hosted instances already turn it on for the starter Mind agent, so Mind needs only the Chat switch.
+`mindroom config init` and newly provisioned hosted instances already turn it on for the starter Mind agent, so Mind can show canvases without any setup.
 
-Second, enable canvases in the MindRoom Chat deployment's runtime `config.json`:
+A MindRoom Chat deployment can turn canvases off in its runtime `config.json`:
 
 ```json
 {
   "mindroom": {
     "canvas": {
-      "enabled": true
+      "enabled": false
     }
   }
 }
 ```
 
-The shipped MindRoom Chat configuration sets `enabled` to `false`, so only whoever deploys Chat can turn canvases on.
-
 ### Let pages load libraries
 
-Pages can also load libraries such as Chart.js, D3, Mermaid, or KaTeX from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
+Chart.js, D3, Mermaid, and KaTeX need no switch: MindRoom Chat serves its own copies to pages whose agent names them in `show_canvas`, and no viewer's address reaches a CDN.
+Pages can also load any other npm library from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
 This takes two more switches, both off by default; turn on both, because a page that needs a library breaks where Chat blocks it.
 
 ```yaml
@@ -116,7 +113,7 @@ agents:
 
 `enable_canvas_libraries` (boolean, default `false`) tells the agent it may use the source, and Chat's `libraries` lets pages load from it.
 Pages may then load scripts, styles, and fonts from `/npm/` paths only; fetching data, external images, workers, and every other site stay blocked, and libraries that evaluate strings, such as Alpine or Vue in-page templates, do not run.
-Opening a page that uses a library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
+Opening a page that uses a CDN library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
 
 ### Let pages load remote assets
 
@@ -182,8 +179,7 @@ When the panel cannot open, the **Open canvas** button is disabled and a message
 
 | Message | Cause |
 |---|---|
-| Interactive panels are turned off in this app. | The Chat deployment has not enabled canvases. |
-| Interactive panels are not available in the app yet. Open this conversation in a browser. | The native mobile app does not show canvases; Chat in a browser does. |
+| Interactive panels are turned off in this app. | The Chat deployment has turned canvases off. |
 | End the call to open interactive panels. | Chat does not run canvases during a call. |
 
 Other people in the room who use MindRoom Chat on the agent's homeserver see the title and **Open canvas**, not the inline page, and can answer in the panel; everyone else sees only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`

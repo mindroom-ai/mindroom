@@ -68,6 +68,7 @@ Reasoning and finer progress the runtime already had never reached the user.
   A snapshot also carries `compactions`, the reply's `io.mindroom.compactions` entries in start order (the reply keeps only its newest 8, fewer when they exceed 8 KiB of JSON), and a delta carries the whole list only when it changed; old clients ignore the key.
   `tests/live_frames/fixtures/live-frames-v1.json` pins the format; mindroom-chat carries the same file.
 - Cadence: a frame per 100 ms tick when something changed, one send in flight, a snapshot first, after a failed send, and every 5 s.
+  A tick of an unchanged reply reuses the Markdown it last rendered, so a reply waiting on a long tool call does not re-render it ten times a second.
 
 ## Sub-agent frames
 
@@ -96,7 +97,7 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
     Known limit: a call denied at an approval never completes, so a later call that reuses its ID is not counted in `tool_calls`.
     New usage alone sends no frame; it goes out with the run's next frame, the 10-second snapshot at the latest.
     Old clients ignore the key, and a client must show a frame without it.
-  - A snapshot's `meta` also carries `task` (at most 1,000 characters) and, once the status is terminal, `result` (at most 1,000 characters, or `null` for a run that ended with none, such as one cancelled before it answered).
+  - A snapshot's `meta` also carries `task` (at most 1,000 characters), `title` (one line of at most 80 characters, which the `run_subagent` call that started the sub-agent named and its follow-ups keep; absent when it named none) and, once the status is terminal, `result` (at most 1,000 characters, or `null` for a run that ended with none, such as one cancelled before it answered).
     Deltas carry neither, so a client keeps them from the snapshot.
 - Documents: text items are concatenated as the Markdown of `md`.
   Each tool call adds the marker line a reply shows for it (`🔧 \`name\` [n] ⏳`, with the hourglass replaced by the finished form once the call completes), numbered from 1 by its entry in `tools`, in order of appearance.

@@ -82,6 +82,6 @@ if TYPE_CHECKING:
 )
 def confluence_tools() -> type[ConfluenceTools]:
     """Return Confluence tools for wiki management."""
-    from agno.tools.confluence import ConfluenceTools
+    from mindroom.tools.agno_compat_confluence import V1ConfluenceTools
 
-    return ConfluenceTools
+    return V1ConfluenceTools

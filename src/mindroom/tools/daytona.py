@@ -230,7 +230,7 @@ def daytona_tools() -> type[DaytonaTools]:
                 timeout=timeout,
                 auto_create_sandbox=auto_create_sandbox,
                 # AGNO_COMPAT: Daytona disables TLS verification process-wide for any falsy verify_ssl.
-                # Reason: Agno 3.0.9 treats None like False and then patches daytona_api_client.Configuration.__init__
+                # Reason: Agno 3.2.1 treats None like False and then patches daytona_api_client.Configuration.__init__
                 # for the whole process until it restarts, so one such toolkit disables checks for every Daytona client.
                 # Upstream issue: Tracking gap; no matching issue has been verified for either behavior.
                 # Upstream PR: No matching fix identified.

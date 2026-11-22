@@ -60,6 +60,8 @@ class EntityFleetHooks:
 
     # Build bots for entities the published config configures, preparing their Matrix accounts first.
     create_bots: Callable[[set[str]], Awaitable[dict[str, AgentBot]]]
+    # Return the bot to start, the optional owner's built from the account prepared here; a failure is its start failure.
+    before_start: Callable[[AgentBot], Awaitable[AgentBot]]
     # Entities that must not start yet because a required MCP server is unavailable.
     start_blocked: Callable[[set[str]], set[str]]
     # Withdraw capabilities bound to these entities, and drain work borrowing their clients, before any of them stops.
@@ -148,7 +150,8 @@ class EntityFleet:
         blocked = self._hooks.start_blocked({name for name, _slot in slots})
         results.retryable_entities.extend(sorted(blocked))
         slots = [(name, slot) for name, slot in slots if name not in blocked]
-        outcomes = await asyncio.gather(*(_start_once(name, slot.bot) for name, slot in slots))
+        before_start = self._hooks.before_start
+        outcomes = await asyncio.gather(*(_start_once(name, slot, before_start) for name, slot in slots))
         for (name, slot), outcome in zip(slots, outcomes, strict=True):
             slot.disabled = outcome is None
             if outcome is None:
@@ -295,7 +298,7 @@ class EntityFleet:
         unresolved = await self._hooks.reconcile_removed(set(prepared)) if prepared else set()
         if unresolved:
             logger.warning("removed_entities_keep_rooms_for_approval_recovery", entities=sorted(unresolved))
-        # A bot that never started has no Matrix client to leave with; the router's orphan cleanup removes it later.
+        # A bot that never started has no Matrix client to leave with; the owner's orphan cleanup removes it later.
         leave_results = await _phase(
             cancellations,
             *(
@@ -421,10 +424,15 @@ class EntityFleet:
         await self._hooks.entities_changing(set(slots))
 
 
-async def _start_once(entity_name: str, bot: AgentBot) -> bool | None:
+async def _start_once(
+    entity_name: str,
+    slot: _EntitySlot,
+    before_start: Callable[[AgentBot], Awaitable[AgentBot]],
+) -> bool | None:
     """Start one bot once: True when started, False when worth retrying, None when it can never start."""
     try:
-        await bot.start()
+        slot.bot = await before_start(slot.bot)
+        await slot.bot.start()
     except PermanentStartupError as exc:
         logger.error(  # noqa: TRY400 - a permanent configuration error needs no traceback
             "Bot startup failed permanently; leaving bot disabled until configuration changes",

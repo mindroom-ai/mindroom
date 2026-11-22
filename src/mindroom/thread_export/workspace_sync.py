@@ -57,6 +57,9 @@ class _ThreadExportBot(Protocol):
     rooms: list[str]
 
     @property
+    def agent_name(self) -> str: ...
+
+    @property
     def matrix_id(self) -> MatrixID:
         """Return the bot's Matrix identity."""
         ...
@@ -82,6 +85,7 @@ class WorkspaceThreadExportDeps:
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
     bot_provider: Callable[[str], _ThreadExportBot | None]
+    steward_provider: Callable[[str], _ThreadExportBot | None]
     response_admission_gate: ResponseAdmissionGate
     agent_reply_memberships: AgentReplyMembershipIndex
     debounce_seconds: float = _DEBOUNCE_SECONDS
@@ -161,16 +165,18 @@ class WorkspaceThreadExportRunner:
                 raise RuntimeError(msg)
 
             def source_for_group(group: ThreadExportGroup) -> ThreadExportSource:
-                bot = self._deps.bot_provider(group.entity_name)
+                # A configured room is read by its steward, any running bot joined to it.
+                owner = group.rooms[0].room_id if group.entity_name is None else group.entity_name
+                provider = self._deps.steward_provider if group.entity_name is None else self._deps.bot_provider
+                bot = provider(owner)
                 if bot is None or not bot.running or bot.client is None:
-                    msg = f"No running Matrix owner for {group.entity_name}; retry after startup or reload"
+                    msg = f"No running Matrix owner for {owner}; retry after startup or reload"
                     raise RuntimeError(msg)
                 return _source_for_bot(
                     bot,
                     group.rooms,
                     None,
                     config,
-                    entity_name=group.entity_name,
                     membership_index=self._deps.agent_reply_memberships,
                 )
 
@@ -309,7 +315,6 @@ class WorkspaceThreadExportRunner:
                     tuple(rooms),
                     agent_targets,
                     config,
-                    entity_name=agent_name,
                     membership_index=self._deps.agent_reply_memberships,
                     exported=self._exported.setdefault(agent_name, {}),
                 ),
@@ -355,7 +360,6 @@ def _source_for_bot(
     targets: tuple[ThreadExportTarget, ...] | None,
     config: Config,
     *,
-    entity_name: str,
     membership_index: AgentReplyMembershipIndex,
     exported: ExportedThreads | None = None,
 ) -> ThreadExportSource:
@@ -371,7 +375,7 @@ def _source_for_bot(
             self_sender=bot.matrix_id.full_id,
         ),
         rooms=rooms,
-        entity_name=entity_name,
+        entity_name=bot.agent_name,
         membership_index=membership_index,
         target_output_dirs=None if targets is None else tuple(target.output_dir for target in targets),
         exported=exported,

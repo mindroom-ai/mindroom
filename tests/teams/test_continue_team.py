@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.agent_loop.tools import NO_OUTPUT_TEXT
 from mindroom.history.request_messages import build_resume_request
 from mindroom.history.types import HistoryScope
 from mindroom.llm.errors import ProviderError
@@ -22,6 +23,7 @@ from mindroom.llm.provider import TextDelta, TurnCompleted
 from mindroom.llm.runs import RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import TableNames
+from mindroom.teams import delegate_tools
 from mindroom.teams.delegate_tools import MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode
@@ -195,6 +197,31 @@ async def test_a_resumed_member_hands_the_leader_everything_it_wrote_and_never_i
 
     [request] = leader.requests
     assert request.messages[-1].content == handed_over
+
+
+async def test_a_resumed_member_without_any_text_reaches_the_leader_as_a_success_without_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed member whose result has no text answers the leader's call as any empty success does."""
+    monkeypatch.setattr(delegate_tools, "member_result_text", lambda _run: "")
+    paused = _paused_team_approved()
+    leader = scripted("leader-model", answer("The checker said nothing.", usage(1, 1)))
+    checker = scripted("checker-model", answer("", usage(1, 1)))
+
+    await collect(
+        resume_team(
+            squad(leader, scripted("writer-model"), checker),
+            paused,
+            _resume_request(paused),
+            approved={
+                ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
+            },
+            context=lambda run_id: run_context(run_id, SQUAD_APPROVED),
+        ),
+    )
+
+    [request] = leader.requests
+    assert request.messages[-1].content == NO_OUTPUT_TEXT
 
 
 async def test_a_member_that_pauses_again_keeps_the_team_paused_without_a_leader_request() -> None:

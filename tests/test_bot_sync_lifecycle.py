@@ -247,8 +247,8 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         assert gate._active_thread_ids_for_room == runner.active_thread_ids_for_room
         assert gate._room_scope_is_single_conversation == bot._conversation_resolver.room_is_one_conversation
         # The journal's schedule trigger trusts exactly the senders the entity registry manages.
-        assert dispatcher.schedule_trigger_sender_is_managed(bot.matrix_id.full_id)
-        assert not dispatcher.schedule_trigger_sender_is_managed("@user:localhost")
+        assert dispatcher.sender_is_managed(bot.matrix_id.full_id)
+        assert not dispatcher.sender_is_managed("@user:localhost")
 
     @pytest.mark.asyncio
     async def test_live_redaction_callback_only_runs_what_its_admission_ended(self, bot: AgentBot) -> None:
@@ -277,7 +277,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         await bot._turn_store.record_turn(TurnRecord.create(["$recent:localhost"]), room_id="!test:localhost")
 
         async def publish_frame() -> None:
-            await bot._run_sync_response_side_effects(first_sync_response=False)
+            await bot._run_sync_response_side_effects(receipt_new=True, first_sync_response=False)
             await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
         with (
@@ -309,9 +309,11 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         with (
             patch.object(bot, "_schedule_delivery_recovery"),
             patch.object(bot._turn_store, "cleanup", side_effect=blocked_cleanup) as cleanup,
+            # A grant refresh would schedule turn recovery, which runs a retention pass of its own.
+            patch.object(bot.orchestrator.agent_reply_membership_sync, "request_refresh"),
         ):
             bot._next_handled_turn_cleanup_at = 0.0
-            await bot._run_sync_response_side_effects(first_sync_response=False)
+            await bot._run_sync_response_side_effects(receipt_new=True, first_sync_response=False)
             await asyncio.wait_for(started.wait(), timeout=1.0)
 
             bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
@@ -319,7 +321,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             assert cancelled.is_set()
 
             bot._next_handled_turn_cleanup_at = 0.0
-            await bot._run_sync_response_side_effects(first_sync_response=False)
+            await bot._run_sync_response_side_effects(receipt_new=True, first_sync_response=False)
             assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
         assert cleanup.await_count == 1

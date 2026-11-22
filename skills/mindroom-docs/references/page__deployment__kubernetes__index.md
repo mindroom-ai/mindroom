@@ -93,7 +93,7 @@ Optional features:
 
 ## Worker Backends
 
-Worker-routed tools such as `coding`, `docker`, `file`, `python`, and `shell` run in one of two backends.
+Worker-routed tools such as `docker`, `filesystem`, `python`, and `shell` run in one of two backends.
 Which tools are routed and how `worker_scope` shares workers are described in [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 | Helm value | Behavior | Best for |
@@ -161,11 +161,14 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 | `workers.kubernetes.namePrefix` | `MINDROOM_KUBERNETES_WORKER_NAME_PREFIX` | `mindroom-worker` | Prefix for worker resource names |
 | `workers.kubernetes.runtimeClassName` | `MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME` | Cluster default | RuntimeClass for all dedicated workers, including background-script workers |
 | `workers.kubernetes.resources` | `MINDROOM_KUBERNETES_WORKER_CPU_REQUEST`, `_CPU_LIMIT`, `_MEMORY_REQUEST`, `_MEMORY_LIMIT` | `100m`, `500m`, `256Mi`, `1Gi` | Worker container resources |
-| `workers.kubernetes.scriptResources` | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE`, `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | `small`; profiles in `values.yaml` | The `small`, `standard`, and `large` [background script](https://docs.mindroom.chat/tools/background-scripts/) resource profiles, all three required; a [dedicated subagent worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) that names a profile uses it too |
+| `workers.kubernetes.scriptResources` | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE`, `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | `small`; profiles in `values.yaml` | The `small`, `standard`, and `large` [background script](https://docs.mindroom.chat/tools/background-scripts/) resource profiles, all three required; a [dedicated subagent worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) or a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) that names a profile uses it too |
 | `workers.kubernetes.nodeName`, `colocateWithControlPlaneNode` | `MINDROOM_KUBERNETES_WORKER_NODE_NAME`, `MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE` | Unset, `false` | Pin workers to one node (see [Storage Requirements](#storage-requirements)) |
 | `workers.kubernetes.extraEnv` | `MINDROOM_KUBERNETES_WORKER_ENV_JSON` | `{}` | Extra environment variables for worker pods |
 | _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT` | `1Gi` | Size of each worker's `/tmp` |
 | _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON` | `{}` | Per-requester worker resources |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKER_IDLE_TIMEOUT_SECONDS` | `600` | Time without a running command after which a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) is removed, at most the worker idle timeout |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKER_MAX_AGE_SECONDS` | `14400` | Time after its start at which a named worker is removed, whatever runs in it |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` | `16` | Most named workers that may run at once for all agents and requesters together; `0` disables named workers, and negative values are invalid |
 
 Changing the image, environment, resources, or RuntimeClass recreates scaled-down workers on the next cleanup pass and running workers on their next use, so no manual recycling is needed; finish active work before changing them.
 Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior.
@@ -173,6 +176,14 @@ Before selecting a RuntimeClass, verify that its handler is available on every e
 Each worker's `/tmp` is disk-backed, and exceeding its size limit evicts that worker pod rather than refusing writes.
 `MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT` (for example `4Gi`) also requests and limits the same amount of container `ephemeral-storage`, which clusters such as GKE Autopilot otherwise cap at 1 GiB.
 Tool subprocesses already get a `TMPDIR` on persistent storage, so only explicit `/tmp` paths use this space.
+
+Each Kubernetes worker's `sandbox-runner` container (not sidecars or the pod as a whole; Docker workers do not get these) receives its own limits from the Kubernetes downward API as `MINDROOM_KUBERNETES_POD_CPU_LIMIT` (CPU limit rounded up to whole CPUs, or node allocatable when no limit is set) and `MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES` (memory limit in bytes, or node allocatable when unset).
+From those container markers, tool subprocesses, background scripts, plugin services, and `.mindroom/worker-env.sh` hooks receive `MINDROOM_WORKER_CPUS`, `MINDROOM_WORKER_MEMORY_BYTES`, `OMP_NUM_THREADS`, `PYTHON_CPU_COUNT`, and `PYTEST_XDIST_AUTO_NUM_WORKERS`, so GNU coreutils `nproc` (the worker image; BusyBox `nproc` ignores `OMP_NUM_THREADS`), OpenMP/BLAS, Python 3.13+ `os.cpu_count()`/`os.process_cpu_count()`, and `pytest -n auto` match the worker container instead of the node while keeping the runner process's own thread-pool budget unchanged.
+Because `free` cannot be constrained through environment variables and still reports node memory, tools that need the container memory limit should read `MINDROOM_WORKER_MEMORY_BYTES` or cgroup v2 `/sys/fs/cgroup/memory.max`.
+Precedence from lowest to highest is: primary/manifest/`extra_env_passthrough` values < derived pod values < operator `workers.kubernetes.extraEnv` (`MINDROOM_KUBERNETES_WORKER_ENV_JSON`; setting `PYTHON_CPU_COUNT` or `OMP_NUM_THREADS` there also affects the runner process itself) < `.mindroom/worker-env.sh` exports < explicit per-call shell environment (`tool:environment` set or unset).
+The hook step applies only where the hook is sourced (shell commands, background scripts, and the Python tool); plugin services get the derived and operator values without it. A hook overrides by exporting a value: its `unset` does not remove an inherited one, as for any other variable, while a per-call unset does.
+A `.mindroom/worker-env.sh` hook that sets only `MINDROOM_WORKER_CPUS` does not re-derive `OMP_NUM_THREADS`, `PYTHON_CPU_COUNT`, or `PYTEST_XDIST_AUTO_NUM_WORKERS`.
+In `forkserver` mode (production Kubernetes workers), `run_python_code` runs in a Python process started before `.mindroom/worker-env.sh`, so a hook's `PYTHON_CPU_COUNT` updates `os.environ` there without changing `os.cpu_count()`; in `subprocess` mode (and in Python processes started from shell commands), a fresh interpreter starts after the hook and honors its `PYTHON_CPU_COUNT`.
 
 `MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON` maps a Matrix user ID to `requests` and/or `limits` with `cpu` and/or `memory`, for example `{"@alice:example.org": {"limits": {"memory": "4Gi"}}}`.
 Listed quantities replace the global values for that requester's `user` and `user_agent` workers; shared and unscoped workers, other requesters, and background-script profiles are unchanged.

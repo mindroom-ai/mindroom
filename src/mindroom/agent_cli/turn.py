@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from contextvars import Context, copy_context
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -53,6 +53,7 @@ from mindroom.tool_system.agent_tool_calls import (
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.invocation import tool_outcome
+from mindroom.tool_system.runtime_context import call_progress_sink_scope
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, search_tool_metadata, tool_definition
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 
@@ -75,6 +76,11 @@ if TYPE_CHECKING:
 # The catalog separately refuses calls past the agent's per-turn tool-call budget.
 _MAX_CALL_RECEIPTS = 1024
 _MAX_ACTIVE_OPERATIONS = 64
+_MAX_LONG_POLL_SECONDS = 25.0
+_MAX_LONG_POLL_WAITERS = 64
+_CANCEL_SETTLE_TIMEOUT_SECONDS = 5.0
+_MAX_PROGRESS_LENGTH = 256
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 
 class _StaleAttemptError(ValueError):
@@ -98,6 +104,17 @@ class _Call:
 
     arguments_json: str
     receipt: ToolCallReceipt
+    task: asyncio.Task[None] | None = None
+    cancel_requested: bool = False
+    # The approval layer owns a call that waits for approval, so a cancel then takes effect when that wait ends.
+    awaiting_approval: bool = False
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def notify(self) -> None:
+        """Wake all active long-poll and cancel waiters for this call."""
+        event = self.changed
+        self.changed = asyncio.Event()
+        event.set()
 
 
 def _page(items: list[dict[str, object]], cursor: str | None, limit: int) -> dict[str, object]:
@@ -169,6 +186,7 @@ class LiveTurnTools(TurnToolBridge):
         self._delegation = asyncio.Lock()
         self._admission = asyncio.Lock()
         self._calls: dict[str, _Call] = {}
+        self._long_poll_waiters = 0
         self._schema_documents: dict[ToolKey, str] = {}
         # Each admitted task belongs to the Bash window whose command made the call.
         self._active: dict[asyncio.Task[None], str] = {}
@@ -193,6 +211,12 @@ class LiveTurnTools(TurnToolBridge):
             or task_is_process_shutdown(self._response_task)
             or current_task_is_process_shutdown()
         )
+
+    def revoke(self) -> None:
+        """Revoke bearer authority and wake any long-polling receipt readers."""
+        super().revoke()
+        for call in self._calls.values():
+            call.notify()
 
     def _check_live(self) -> None:
         if self._closed or self._revoked:
@@ -315,14 +339,95 @@ class LiveTurnTools(TurnToolBridge):
             else:
                 return page
 
-    async def get_call(self, call_id: str) -> dict[str, object]:
-        """Receipt reads do not acquire the mutation or window locks."""
+    async def _wait_for_call(self, call: _Call, wait_seconds: float, *, keep_waiting: Callable[[], bool]) -> None:
+        with suppress(TimeoutError):
+            async with asyncio.timeout(wait_seconds):
+                while not self._closed and not self._revoked and keep_waiting():
+                    await call.changed.wait()
+
+    async def get_call(
+        self,
+        call_id: str,
+        *,
+        wait: float = 0.0,
+        after_progress: int | None = None,
+    ) -> dict[str, object]:
+        """Receipt reads do not acquire the mutation or window locks or consume active capacity."""
         self._check_live()
         call = self._calls.get(call_id)
         if call is None:
             msg = "Agent CLI authority is unavailable"
             raise CliAuthenticationError(msg)
+        wait_seconds = min(max(wait, 0.0), _MAX_LONG_POLL_SECONDS)
+        if (
+            wait_seconds > 0
+            and call.receipt.status not in _TERMINAL_STATUSES
+            and self._long_poll_waiters < _MAX_LONG_POLL_WAITERS
+        ):
+            seen = call.receipt.progress_revision if after_progress is None else after_progress
+            self._long_poll_waiters += 1
+            try:
+                await self._wait_for_call(
+                    call,
+                    wait_seconds,
+                    keep_waiting=lambda: (
+                        call.receipt.status not in _TERMINAL_STATUSES and call.receipt.progress_revision == seen
+                    ),
+                )
+            finally:
+                self._long_poll_waiters -= 1
+            self._check_live()
         return call.receipt.model_dump(mode="json")
+
+    async def cancel_call(self, call_id: str) -> dict[str, object]:
+        """Idempotently cancel one owned call without cancelling siblings or needing capacity."""
+        self._check_live()
+        call = self._calls.get(call_id)
+        if call is None:
+            msg = "Agent CLI authority is unavailable"
+            raise CliAuthenticationError(msg)
+        if call.receipt.status not in _TERMINAL_STATUSES:
+            first, call.cancel_requested = not call.cancel_requested, True
+            if call.receipt.status == "queued":
+                call.receipt = call.receipt.model_copy(
+                    update={
+                        "status": "cancelled",
+                        "cancel_outcome": "never_ran",
+                        "outcome": "Call cancelled before dispatch",
+                    },
+                )
+                call.notify()
+            # Only the request that cancels the task waits for it, so repeats hold no waiters.
+            if call.awaiting_approval or not first:
+                return call.receipt.model_dump(mode="json")
+            if call.task is not None and not call.task.done():
+                request_task_cancel(call.task, process_shutdown=self._is_shutdown())
+            if call.task is not None and call.receipt.status not in _TERMINAL_STATUSES:
+                await self._wait_for_call(
+                    call,
+                    _CANCEL_SETTLE_TIMEOUT_SECONDS,
+                    keep_waiting=lambda: call.receipt.status not in _TERMINAL_STATUSES,
+                )
+        return call.receipt.model_dump(mode="json")
+
+    @staticmethod
+    def _progress_reporter(call: _Call, loop: asyncio.AbstractEventLoop) -> Callable[[str], None]:
+        def report(message: str) -> None:
+            bounded = message[:_MAX_PROGRESS_LENGTH]
+
+            def _apply() -> None:
+                if call.receipt.status in _TERMINAL_STATUSES or call.receipt.progress == bounded:
+                    return
+                call.receipt = call.receipt.model_copy(
+                    update={"progress": bounded, "progress_revision": call.receipt.progress_revision + 1},
+                )
+                call.notify()
+
+            if not loop.is_closed():
+                with suppress(RuntimeError):
+                    loop.call_soon_threadsafe(_apply)
+
+        return report
 
     def _admit(self, queued: _Queued, window: str) -> None:
         call = self._calls[str(queued.operation.call_id)] if isinstance(queued.operation, ToolCallOperation) else None
@@ -333,6 +438,8 @@ class LiveTurnTools(TurnToolBridge):
             name="agent-cli-admitted",
             context=self._windows[window].copy(),
         )
+        if call is not None:
+            call.task = task
         task.add_done_callback(queued.settle_waiter)
         self._active[task] = window
 
@@ -549,7 +656,13 @@ class LiveTurnTools(TurnToolBridge):
                 return
             if waiting.needs_external_execution and binding.key.toolkit == "delegate" and parent is not None:
                 async with self._delegation:
-                    delegated = self._execute_delegation(binding, waiting, parent=parent, authorize=authorize)
+                    delegated = self._execute_delegation(
+                        binding,
+                        waiting,
+                        call_id=call_id,
+                        parent=parent,
+                        authorize=authorize,
+                    )
                     async with closing_async_stream(delegated):
                         async for event in delegated:
                             emit_cli_tool_event(event, parent)
@@ -566,7 +679,9 @@ class LiveTurnTools(TurnToolBridge):
             await self.checkpoint.persist_approval(parent)
             presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
             presentation.start_tool(waiting.tool_execution.call, origin=ToolCallOrigin(parent, binding.key.toolkit))
-            resolved = await handler(
+            resolved = await self._approved(
+                call_id,
+                handler,
                 PausedAttempt(
                     session_id=self.catalog.run.session_id,
                     run_id=self.catalog.run.run_id,
@@ -593,11 +708,37 @@ class LiveTurnTools(TurnToolBridge):
                 raise ValueError(msg)
             requirement = resolved[0]
 
+    async def _approved(
+        self,
+        call_id: str,
+        handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]],
+        paused: PausedAttempt,
+    ) -> tuple[RunRequirement, ...]:
+        """Wait for one call's approval; a cancel that arrived meanwhile ends the call unrun when the wait ends."""
+        call = self._calls.get(call_id)
+        if call is None:
+            return await handler(paused)
+        call.awaiting_approval = True
+        try:
+            resolved = await handler(paused)
+        finally:
+            call.awaiting_approval = False
+        if call.cancel_requested:
+            # Only a delegation, whose child may have run, has started before it waits for approval.
+            msg = (
+                "Call cancelled before dispatch"
+                if call.receipt.status == "waiting"
+                else "Call interrupted after dispatch; effects may have occurred"
+            )
+            raise _StaleAttemptError(msg)
+        return resolved
+
     async def _execute_delegation(
         self,
         binding: PreparedAgentToolBinding,
         requirement: RunRequirement,
         *,
+        call_id: str,
         parent: str,
         authorize: Callable[[], Awaitable[None]],
     ) -> AsyncIterator[AgentToolCallStep]:
@@ -616,15 +757,17 @@ class LiveTurnTools(TurnToolBridge):
                 if not started:
                     started = True
                     yield AgentToolCallStep("started", binding.key, requirement.tool_execution.call)
-                result = await advance_cli_delegation(
-                    binding,
-                    requirement,
-                    parent_bash_call_id=parent,
-                    delegation_depth=self._delegation_depth,
-                    refresh_scheduler=self._refresh_scheduler,
-                    approval_calls=approval_calls,
-                    on_event=on_child_event,
-                )
+                # The child's worker progress and refusals belong to its own calls, not to this call's receipt.
+                with call_progress_sink_scope(None):
+                    result = await advance_cli_delegation(
+                        binding,
+                        requirement,
+                        parent_bash_call_id=parent,
+                        delegation_depth=self._delegation_depth,
+                        refresh_scheduler=self._refresh_scheduler,
+                        approval_calls=approval_calls,
+                        on_event=on_child_event,
+                    )
             if not isinstance(result, PausedAttempt):
                 yield AgentToolCallStep("completed", binding.key, result.call)
                 return
@@ -642,7 +785,7 @@ class LiveTurnTools(TurnToolBridge):
                 emit_cli_run_event(ToolStarted(tool.call), parent=parent, toolkit_name=child_toolkit)
                 presentation.start_tool(tool.call, origin=ToolCallOrigin(parent, child_toolkit))
             paused = replace(result, response_text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace))
-            resolved = await handler(paused)
+            resolved = await self._approved(call_id, handler, paused)
             approval_calls = approval_calls_for_cli_pause(paused, self.catalog.runtime_context.agent_name, resolved)
 
     def _check_control(self, event: AgentToolCallEvent) -> None:
@@ -708,6 +851,8 @@ class LiveTurnTools(TurnToolBridge):
         arguments = cast("dict[str, object]", read_json(call.arguments_json))
         call.receipt = call.receipt.model_copy(update={"status": "running"})
         started = False
+        refused = False
+        cancelled_never_ran = False
         status = "failed"
         result: object = "Tool did not return a terminal execution"
         media_results: list[ToolValue] = []
@@ -723,28 +868,41 @@ class LiveTurnTools(TurnToolBridge):
                     self._check_dispatch()
                 await self._authorize(key, arguments)
 
-            events = self._execute(
-                binding,
-                call_id,
-                arguments,
-                parent=window,
-                shell_leaf=partial(self._invoke_shell, binding, window=window) if key.toolkit == "shell" else None,
-                authorize=authorize,
-            )
-            async with closing_async_stream(events):
-                async for event in events:
-                    self._check_control(event)
-                    if isinstance(event, AgentToolCallMedia):
-                        self._media.setdefault(window, []).append(event.media)
-                        media_results.append(event.media)
-                    elif isinstance(event, AgentToolCallWaiting):
-                        call.receipt = call.receipt.model_copy(update={"status": "waiting"})
-                    elif event.kind == "started":
-                        started = True
-                        call.receipt = call.receipt.model_copy(update={"status": "running"})
-                    else:
-                        status = "failed" if event.call.is_error else "completed"
-                        result = event.call.result
+            def mark_refused() -> None:
+                nonlocal refused
+                refused = True
+
+            def mark_cancelled_never_ran() -> None:
+                nonlocal cancelled_never_ran
+                cancelled_never_ran = True
+
+            with call_progress_sink_scope(
+                self._progress_reporter(call, asyncio.get_running_loop()),
+                on_refused=mark_refused,
+                on_cancelled_never_ran=mark_cancelled_never_ran,
+            ):
+                events = self._execute(
+                    binding,
+                    call_id,
+                    arguments,
+                    parent=window,
+                    shell_leaf=partial(self._invoke_shell, binding, window=window) if key.toolkit == "shell" else None,
+                    authorize=authorize,
+                )
+                async with closing_async_stream(events):
+                    async for event in events:
+                        self._check_control(event)
+                        if isinstance(event, AgentToolCallMedia):
+                            self._media.setdefault(window, []).append(event.media)
+                            media_results.append(event.media)
+                        elif isinstance(event, AgentToolCallWaiting):
+                            call.receipt = call.receipt.model_copy(update={"status": "waiting"})
+                        elif event.kind == "started":
+                            started = True
+                            call.receipt = call.receipt.model_copy(update={"status": "running"})
+                        else:
+                            status = "failed" if event.call.is_error else "completed"
+                            result = event.saved_output if event.saved_output is not None else event.call.result
         except _StaleAttemptError as exc:
             status = "cancelled"
             result = str(exc)
@@ -772,8 +930,18 @@ class LiveTurnTools(TurnToolBridge):
                     )
                 ]
                 result = project_cli_result(result, self._output_file_policy, key.function)
+                error_kind = "named_worker_refusal" if refused and status == "failed" else None
                 call.receipt = ToolCallReceipt.model_validate(
-                    call.receipt.model_dump() | {"status": status, "outcome": result, "attachments": attachments},
+                    call.receipt.model_dump()
+                    | {
+                        "status": status,
+                        "error_kind": error_kind,
+                        "cancel_outcome": "never_ran"
+                        if status == "cancelled" and (cancelled_never_ran or not started)
+                        else None,
+                        "outcome": result,
+                        "attachments": attachments,
+                    },
                 )
             except Exception:  # Projection failure cannot undo an observed completed execution.
                 call.receipt = call.receipt.model_copy(
@@ -782,6 +950,8 @@ class LiveTurnTools(TurnToolBridge):
                         "outcome": {"error": "Tool result projection failed; execution status is retained"},
                     },
                 )
+            finally:
+                call.notify()
 
     def end_run_for_reload(self) -> None:
         """Stop the attempt's run after its batch and refuse its later calls: a config reload refused one."""
@@ -837,6 +1007,8 @@ class LiveTurnTools(TurnToolBridge):
             self._active.clear()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        for call in self._calls.values():
+            call.notify()
         self._calls.clear()
         for catalog in (*self._retired_catalogs, self.catalog):
             await catalog.close()

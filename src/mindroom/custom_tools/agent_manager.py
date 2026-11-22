@@ -79,8 +79,7 @@ class AgentManagerTools(Toolkit):
 
         The new agent's ID is your name plus `name`. `instructions` replace yours; omit them to keep yours.
         `tools` are toolkit names you have, such as `calculator`, never function names; omit it to give all of yours.
-        The owner approves on a card unless their own /auto_approve window is open;
-        on "Tool approval needs the router in this room", call `invite_router` and retry.
+        The owner approves on a card unless their own /auto_approve window is open.
         """
         try:
             user_id = await self._run(
@@ -112,8 +111,7 @@ class AgentManagerTools(Toolkit):
 
         Call `agent_settings` first. Send only the fields you change: each value replaces the whole field,
         and null restores the base agent's value. `tools` are toolkit names from `allowed_tools`, never function names.
-        The owner approves on a card unless their own /auto_approve window is open;
-        on "Tool approval needs the router in this room", call `invite_router` and retry.
+        The owner approves on a card unless their own /auto_approve window is open.
         """
         if not changes:
             return "Error: no changes given"
@@ -127,8 +125,7 @@ class AgentManagerTools(Toolkit):
         """Set this agent's Matrix profile picture to an image attached in this conversation, cropped to its center square.
 
         Pass the attachment ID, such as `att_...`, of a PNG, JPEG, GIF or WebP image. Only this agent's owners may ask.
-        The owner approves on a card unless their own /auto_approve window is open;
-        on "Tool approval needs the router in this room", call `invite_router` and retry.
+        The owner approves on a card unless their own /auto_approve window is open.
         """
         try:
             context = require_tool_runtime_context()
@@ -165,8 +162,7 @@ class AgentManagerTools(Toolkit):
         """Delete this agent, which only its owner may do and only for an agent made with `create_agent`.
 
         Its Matrix account stays, so the name stays taken.
-        The owner approves on a card unless their own /auto_approve window is open;
-        on "Tool approval needs the router in this room", call `invite_router` and retry.
+        The owner approves on a card unless their own /auto_approve window is open.
         """
         try:
             await self._run(delete_created_agent, agent_name=self.agent_name)

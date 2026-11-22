@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 class _ProbeHandler(BaseHTTPRequestHandler):
     """Report liveness and not-ready readiness; the real API replaces this server once the wait ends."""
 
-    server: _ProbeServer
+    server: _ProbeServer  # ty: ignore[incompatible-mutable-override]  # socketserver assigns the serving server
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path

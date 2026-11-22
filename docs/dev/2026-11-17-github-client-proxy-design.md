@@ -13,12 +13,15 @@ The token never leaves the server.
 
 - **Who:** the caller presents a client session (`presented_session`, the bearer MindRoom Chat gets by trading a Matrix OpenID token), so the route knows the Matrix user. No session: 401.
 - **Whose token:** that user's own `github_oauth` connection, resolved and refreshed through the existing OAuth path (`resolve_oauth_token` in `egress_broker/oauth_source.py` or the same lifecycle the `github` tool uses). Never another user's, never a shared or `GITHUB_TOKEN` credential, never an administrator key.
-- **Body:** `{method, path, body?, accept?}`.
+- **Body:** `{method, path, body?, accept?, max_bytes?}`.
   - `method`: one of `GET`, `POST`, `PUT`, `PATCH`, `DELETE`.
   - `path`: must be `/graphql` or match `^/repos/[^/]+/[^/]+(/.*)?$` (plus `?query`), with no `..`, no `//`, no scheme or host, no control characters. Anything else: 400.
-  - `accept`: optional, only `application/vnd.github+json`, `application/vnd.github.full+json`, `application/vnd.github.diff`; default `application/vnd.github+json`.
-- **Upstream:** always `https://api.github.com` + path, with `Authorization: Bearer <token>`, `X-GitHub-Api-Version: 2022-11-28`, a timeout, no redirects followed, a response size cap.
-- **Answer:** `{status, body, headers}` with GitHub's status and JSON (or text for `.diff`) and only these headers passed through: `x-ratelimit-remaining`, `x-ratelimit-reset`, `retry-after`, `x-github-request-id`. HTTP status of the route itself is 200 for any GitHub answer, so the client can tell GitHub's refusal from the route's.
+  - `accept`: optional, only `application/vnd.github+json`, `application/vnd.github.full+json`, `application/vnd.github.diff`, `application/vnd.github.raw+json`; default `application/vnd.github+json`.
+  - `max_bytes`: optional integer, 1 to 10,485,760; defaults to 10 MiB. Reading stops when the streamed body exceeds the cap, with 502 `github_response_too_large`.
+- **Upstream:** always `https://api.github.com` + path, with `Authorization: Bearer <token>`, `X-GitHub-Api-Version: 2022-11-28`, a timeout and a response size cap. Follows up to 3 redirects that stay on `https://api.github.com`.
+- **Answer:** `{status, body, headers}` with GitHub's status and JSON or text and only these headers passed through: `x-ratelimit-remaining`, `x-ratelimit-reset`, `retry-after`, `x-github-request-id`. Relayed answers use HTTP 200, so the client can tell GitHub's refusal from the route's.
+  A successful answer to `application/vnd.github.raw+json` has a string body decoded as strict UTF-8, or the route answers 502 `github_response_not_text`.
+  Use this raw media type for file contents (`/contents` or `/git/blobs`); with it, other endpoints return successful JSON responses as strings.
 - **Not connected:** 409 `{"error": "github_not_connected"}` (also when the OAuth client is not configured), so the client falls back.
 - **`GET /api/github/status`:** `{connected: bool, login?: str}` for the session's user, from stored state only (no GitHub call), so the panel can choose its path once.
 - **Logs:** the route's own lines carry method, path template and status only; the token and request/response bodies never. HTTP client libraries (httpx at INFO, httpcore at DEBUG) may log the full URL, including repository and query, as for every outbound call; only the operator reads those logs, and the operator already holds the token.

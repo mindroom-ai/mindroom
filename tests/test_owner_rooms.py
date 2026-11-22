@@ -1,0 +1,332 @@
+"""The owner account joins every configured room, and room setup without it administers nothing."""
+
+from __future__ import annotations
+
+from pathlib import Path  # noqa: TC003
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from structlog.testing import capture_logs
+
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.client_room_admin import RoomJoinOutcome
+from mindroom.matrix.state import MatrixState
+from mindroom.matrix.users import AgentMatrixUser
+from mindroom.orchestration.rooms import RoomSetup
+from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.turn_policy import ResponseAction
+from tests.authorization_helpers import (
+    make_test_bot_for_entity,
+)
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_runtime_journal_support,
+    orchestrator_runtime_paths,
+    published_config_load,
+    runtime_paths_for,
+)
+from tests.matrix_state_helpers import save_matrix_state
+
+
+def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
+    return bind_runtime_paths(config, orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"))
+
+
+@pytest.fixture
+def config_with_rooms() -> Config:
+    """Create a config with agents and teams that have rooms."""
+    return Config(
+        agents={
+            "agent1": AgentConfig(
+                display_name="Agent 1",
+                role="Test agent",
+                rooms=["room1", "room2"],
+            ),
+            "agent2": AgentConfig(
+                display_name="Agent 2",
+                role="Another test agent",
+                rooms=["room3"],
+            ),
+        },
+        teams={
+            "team1": TeamConfig(
+                display_name="Team 1",
+                role="Test team",
+                agents=["agent1", "agent2"],
+                rooms=["room4"],
+            ),
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_router_gets_all_configured_rooms(
+    config_with_rooms: Config,
+    tmp_path: Path,
+) -> None:
+    """Test that the router agent is configured to join all rooms from agents and teams."""
+    config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
+
+    # Create a temporary user for the router
+    router_user = AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
+        display_name="MindRoom",
+        password=TEST_PASSWORD,
+    )
+
+    # Create the router bot
+    router_bot = make_test_bot_for_entity(
+        ROUTER_AGENT_NAME,
+        router_user,
+        config_with_rooms,
+        runtime_paths_for(config_with_rooms),
+    )
+
+    # Check that the router has all rooms
+    expected_rooms = {"room1", "room2", "room3", "room4"}
+    assert router_bot is not None
+    assert set(router_bot.rooms) == expected_rooms
+
+
+def test_team_bot_uses_defaults_streaming_setting(
+    config_with_rooms: Config,
+    tmp_path: Path,
+) -> None:
+    """Team bots should inherit defaults.enable_streaming from config."""
+    config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
+    runtime_paths = runtime_paths_for(config_with_rooms)
+
+    config_with_rooms.defaults.enable_streaming = False
+
+    team_user = AgentMatrixUser(
+        agent_name="team1",
+        user_id="@mindroom_team1:localhost",
+        display_name="Team 1",
+        password=TEST_PASSWORD,
+    )
+
+    team_bot = make_test_bot_for_entity(
+        "team1",
+        team_user,
+        config_with_rooms,
+        runtime_paths,
+    )
+
+    assert team_bot is not None
+    assert team_bot._runtime_view.config.defaults.enable_streaming is False
+
+
+def test_team_bot_uses_persisted_member_usernames(
+    config_with_rooms: Config,
+    tmp_path: Path,
+) -> None:
+    """Team bots should resolve configured members through live persisted usernames."""
+    config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
+    runtime_paths = runtime_paths_for(config_with_rooms)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account("agent_agent1", "mindroom_agent1_oldns", "pw", domain=config_with_rooms.get_domain(runtime_paths))
+    state.add_account("agent_agent2", "mindroom_agent2_oldns", "pw", domain=config_with_rooms.get_domain(runtime_paths))
+    save_matrix_state(state, runtime_paths)
+
+    team_bot = make_test_bot_for_entity(
+        "team1",
+        AgentMatrixUser(
+            agent_name="team1",
+            user_id="@mindroom_team1:localhost",
+            display_name="Team 1",
+            password=TEST_PASSWORD,
+        ),
+        config_with_rooms,
+        runtime_paths,
+    )
+
+    action = team_bot._turn_policy.effective_response_action(ResponseAction(kind="individual"))
+    assert action.form_team is not None
+    assert [member.full_id for member in action.form_team.requested_members] == [
+        "@mindroom_agent1_oldns:localhost",
+        "@mindroom_agent2_oldns:localhost",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_router_joins_rooms_on_start(
+    config_with_rooms: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Test that the router actually joins all configured rooms when started."""
+    config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
+    # Track which rooms were joined
+    joined_rooms: list[str] = []
+
+    async def mock_join_room(_client: AsyncMock, room_id: str) -> RoomJoinOutcome:
+        joined_rooms.append(room_id)
+        return RoomJoinOutcome.JOINED
+
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
+
+    # Create router user
+    router_user = AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
+        display_name="MindRoom",
+        password=TEST_PASSWORD,
+    )
+
+    # Create and configure the router bot
+    router_bot = make_test_bot_for_entity(
+        ROUTER_AGENT_NAME,
+        router_user,
+        config_with_rooms,
+        runtime_paths_for(config_with_rooms),
+    )
+
+    # Mock the client
+    mock_client = AsyncMock()
+    assert router_bot is not None
+    router_bot.client = mock_client
+    install_runtime_journal_support(router_bot)
+
+    # Test that the router joins all configured rooms
+    await router_bot._room_lifecycle.join_configured_rooms()
+
+    # Verify all rooms were joined
+    expected_rooms = {"room1", "room2", "room3", "room4"}
+    assert set(joined_rooms) == expected_rooms
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_creates_router_with_all_rooms(
+    config_with_rooms: Config,
+    tmp_path: Path,
+) -> None:
+    """Test that the orchestrator properly initializes the router with all rooms."""
+    config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
+
+    # Create orchestrator
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=config_with_rooms)
+
+    try:
+        # Initialize (creates all bots)
+        await orchestrator.initialize()
+
+        # Check that router exists and has all rooms
+        assert ROUTER_AGENT_NAME in orchestrator.agent_bots
+        router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
+
+        expected_rooms = {"room1", "room2", "room3", "room4"}
+        assert set(router_bot.rooms) == expected_rooms
+    finally:
+        await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_router_updates_rooms_on_config_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Test that the router updates its room list when config changes."""
+    # Initial config with some rooms
+    initial_config = _bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    rooms=["room1"],
+                ),
+            },
+        ),
+        tmp_path,
+    )
+
+    # Updated config with more rooms and a new agent
+    updated_config = _bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    rooms=["room1", "room2"],
+                ),
+                "agent2": AgentConfig(
+                    display_name="Agent 2",
+                    role="New agent",
+                    rooms=["room3"],
+                ),
+            },
+        ),
+        tmp_path,
+    )
+
+    setup_rooms = AsyncMock()
+    monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", setup_rooms)
+    # The agent the update adds starts without logging in.
+    monkeypatch.setattr("mindroom.bot.AgentBot.start", AsyncMock())
+
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=initial_config)
+    monkeypatch.setattr(orchestrator.config_reload, "load_config", lambda: published_config_load(updated_config))
+
+    try:
+        await orchestrator.initialize()
+
+        # Check initial router rooms
+        router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
+        agent1_bot = orchestrator.agent_bots["agent1"]
+        assert set(router_bot.rooms) == {"room1"}
+
+        async def reconcile_room_aliases(bots: list[object]) -> None:
+            orchestrator._rooms.resolve_aliases(bots, orchestrator.config)  # type: ignore[arg-type]
+
+        setup_rooms.side_effect = reconcile_room_aliases
+
+        # A reload reconciles the rooms of running bots only.
+        for bot in orchestrator.agent_bots.values():
+            bot.running = True
+
+        # Update config
+        updated = await orchestrator.config_reload._update_config()
+        assert updated
+
+        # Existing clients stay alive while their desired room lists change.
+        new_router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
+        assert new_router_bot is router_bot
+        assert orchestrator.agent_bots["agent1"] is agent1_bot
+        assert set(new_router_bot.rooms) == {"room1", "room2", "room3"}
+        setup_rooms.assert_awaited_once()
+    finally:
+        await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_room_setup_without_owner_creates_nothing_and_says_so_once(tmp_path: Path) -> None:
+    """Without a running owner account, room setup creates and administers no room, and agents still join theirs."""
+    config = _bind_runtime_paths(
+        Config(agents={"agent1": AgentConfig(display_name="Agent 1", rooms=["room1"])}),
+        tmp_path,
+    )
+    agent = MagicMock(agent_name="agent1", ensure_rooms=AsyncMock())
+    refresh = AsyncMock()
+    setup = RoomSetup(
+        runtime_paths_for(config),
+        lambda: config,
+        owner_client=lambda: None,
+        refresh_agent_reply_memberships=refresh,
+        reconcile_room_states=AsyncMock(),
+    )
+
+    with (
+        capture_logs() as logs,
+        patch("mindroom.orchestration.rooms.ensure_all_rooms_exist", new=AsyncMock()) as create,
+    ):
+        await setup.setup([agent])
+
+    create.assert_not_awaited()
+    agent.ensure_rooms.assert_awaited_once_with()
+    refresh.assert_awaited_once_with()
+    assert [log["event"] for log in logs].count("room_setup_without_owner_account") == 1

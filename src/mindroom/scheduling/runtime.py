@@ -19,16 +19,18 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.approval import manager as approval_manager
-from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE
+from mindroom.entity_resolution import entity_identity_registry, owner_matrix_id
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import bound_log_context, get_logger
+from mindroom.matrix.mentions import parse_mentions_in_text
 from mindroom.message_target import MessageTarget
 from mindroom.requester_identity import equivalent_requester_ids
+from mindroom.room_steward import room_steward
 from mindroom.runtime_shutdown import SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS
 from mindroom.scheduling import executor as scheduling_executor
 from mindroom.scheduling.errors import ScheduledTaskStateReadError, ScheduledTaskStorageError, SchedulingError
-from mindroom.scheduling.ownership import room_from_state, task_owner
+from mindroom.scheduling.ownership import legacy_router_task_owner, room_from_state
 from mindroom.scheduling.recurring_schedule import (
     RecurringCheckpointUnavailableError,
     complete_recurring_occurrence,
@@ -40,7 +42,7 @@ from mindroom.scheduling.tasks import (
     persist_scheduled_task_state,
     scheduled_call_workflow_digest,
     scheduled_task_state_lock,
-    task_records_with_writers,
+    task_records,
     withdraw_scheduled_call,
 )
 
@@ -60,6 +62,8 @@ logger = get_logger(__name__)
 
 # How often a runner checks whether its owner runs again.
 _OWNER_POLL_INTERVAL_SECONDS = 1.0
+# How long a one-time task's final status write is retried, which covers a restart of the bot it goes through.
+_STATUS_WRITE_RETRY_SECONDS = 180.0
 # How often a running task re-reads its persisted state for edits and cancellations.
 _TASK_STATE_POLL_INTERVAL_SECONDS = 30
 # A missed one-time task older than this is marked failed instead of run when its room is restored.
@@ -86,14 +90,23 @@ class ScheduledTaskRuntime:
     _operation_ended: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _stopping: bool = field(default=False, init=False)
 
-    def _start_runner(self, owner: str, task_id: str, workflow: ScheduledWorkflow) -> bool:
-        """Start one task's runner under its owner unless a runner for it already runs."""
+    def _start_runner(self, owner: str, task_id: str, workflow: ScheduledWorkflow, *, handoff: bool = False) -> bool:
+        """Start one task's runner under its owner unless a runner for it already runs.
+
+        Only a task the router owned is ever started under another owner: on a ``handoff`` restore of the same room, a
+        ready heir replaces the runner of an heir that is not ready and never used its bot, which a later read of the
+        room no longer elects.
+        """
         if self._stopping:
             return False
         running = self._runners.get(task_id)
         if running is not None and not running[1].done():
-            logger.debug("Scheduled task already running; skipping duplicate start", task_id=task_id)
-            return False
+            waiting, ready = self._ready_bot(running[0].owner) is None, self._ready_bot(owner) is not None
+            same_task = handoff and running[0].room_id == workflow.room_id
+            if running[0].owner == owner or running[0].used_owner or not (same_task and waiting and ready):
+                logger.debug("Scheduled task already running; skipping duplicate start", task_id=task_id)
+                return False
+            running[1].cancel()
         if not workflow.room_id:
             logger.error("No room_id provided for scheduled task", task_id=task_id)
             return False
@@ -122,6 +135,8 @@ class ScheduledTaskRuntime:
     async def restore_room(self, bot: AgentBot, room_id: str) -> int:
         """Start runners for the pending tasks this bot owns in a room it joined; return how many started.
 
+        A task the router owned gets its runner from the first bot that restores
+        the room, under the heir that bot's one read of the room elects.
         A task whose owner is no longer configured is failed by any restoring bot
         that may write the room's schedule state.
         """
@@ -143,24 +158,42 @@ class ScheduledTaskRuntime:
         if not isinstance(response, nio.RoomGetStateResponse):
             logger.warning("scheduled_task_room_state_unread", room_id=room_id, error=str(response))
             return 0
-        tasks = task_records_with_writers(room_id, response, self.runtime_paths)
+        tasks = task_records(room_id, response, self.runtime_paths)
         if not tasks:
             return 0
-        registry = entity_identity_registry(self.config_provider(), self.runtime_paths)
-        router_id = registry.current_id(ROUTER_AGENT_NAME).full_id
+        config = self.config_provider()
+        registry = entity_identity_registry(config, self.runtime_paths)
+        router_id = owner_matrix_id(self.runtime_paths)
+        agent_ids = sorted(m.full_id for m in registry.current_ids.values() if m.full_id != router_id)
         room = room_from_state(room_id, client.user_id, response.events)
         restored = 0
-        for task, writer_id in tasks:
-            # LEGACY_COMPAT: Scheduled tasks without a stored owner.
-            # Legacy format: Scheduled-task state content without an "owner" field; every task saved before owners
-            #   were stored.
-            # Last legacy release: v2026.10.675 wrote scheduled-task state without an owner; replacement: the next
-            #   release stores the owner's Matrix ID in the task's state content when the task is saved.
-            # Handling: The owner is decided by the current rule over the room's full state, with the task's latest
-            #   state writer standing in for its creator. The field is never written back, so a rewrite keeps the task
-            #   on this rule.
-            # Coverage: tests/test_scheduled_task_runtime.py::test_task_saved_without_an_owner_restores_under_the_rule_over_its_writer.
-            owner_id = task.owner_id or task_owner(room, task.workflow, creator_id=writer_id, router_id=router_id)
+        for task in tasks:
+            # Every task read from a room has an owner; one whose stored owner is no Matrix ID fails as ownerless.
+            owner_id: str | None = task.owner_id or ""
+            legacy = owner_id == router_id
+            if legacy:
+                # LEGACY_COMPAT: Scheduled tasks the router owned.
+                # Legacy format: Scheduled-task state whose "owner" is the router's Matrix ID, or that has no owner
+                #   and was last written by the router; the router ran every task in a room it could serve.
+                # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest
+                #   when written; replacement: unreleased, the first release with this change stores the bot that
+                #   saves a task as its owner.
+                # Handling: The task runs under the first agent or team its message mentions that is joined and may
+                #   post its trigger, else the one with the lowest Matrix ID, read from the room's full state. The first
+                #   bot that restores the room starts that heir's runner, so two reads that disagree start one runner.
+                #   The new owner is never written back; a room with no such agent keeps the task pending and logs a
+                #   warning.
+                # Coverage: tests/test_scheduled_task_runtime.py::test_restore_reowns_router_task_and_fires_through_new_owner,
+                #   tests/test_scheduled_task_runtime.py::test_restores_that_straddle_a_power_change_start_one_runner_for_a_router_task.
+                mentioned = parse_mentions_in_text(task.workflow.message, config, self.runtime_paths)[1]
+                owner_id = legacy_router_task_owner(
+                    room,
+                    task.workflow,
+                    agent_ids=[*(user_id for user_id in mentioned if user_id in agent_ids), *agent_ids],
+                )
+                if owner_id is None:
+                    logger.warning("scheduled_task_of_router_skipped", room_id=room_id, task_id=task.task_id)
+                    continue
             owner = registry.current_entity_name_for_user_id(owner_id)
             if owner is None:
                 if not room.power_levels.can_user_send_state(client.user_id, SCHEDULED_TASK_EVENT_TYPE):
@@ -173,16 +206,19 @@ class ScheduledTaskRuntime:
                     continue
                 await self._fail_owner_removed_task(bot, room_id, task.task_id, owner_id)
                 continue
-            if owner == bot.agent_name and await self._restore_task(bot, client, task):
+            if (legacy or owner == bot.agent_name) and await self._restore_task(owner, client, task, handoff=legacy):
                 restored += 1
         return restored
 
     async def _restore_task(
         self,
-        bot: AgentBot,
+        owner: str,
         client: nio.AsyncClient,
         task: ScheduledTaskRecord,
+        *,
+        handoff: bool = False,
     ) -> bool:
+        """Start one pending task's runner under its owner, through the restoring bot's client."""
         workflow = task.workflow
         if workflow.schedule_type == "cron" and not workflow.cron_schedule:
             logger.warning("skipping_recurring_task_without_cron_schedule", task_id=task.task_id)
@@ -204,11 +240,11 @@ class ScheduledTaskRuntime:
                     logger.exception("Failed to mark ancient task as failed", task_id=task.task_id)
                     return False
                 # An edit or cancellation landed after the room was read: decide on what it left.
-                return current is not None and await self._restore_task(bot, client, current)
+                return current is not None and await self._restore_task(owner, client, current, handoff=handoff)
             if missed_by > 0:
                 # Its runner fires once the owner finished its first sync.
                 logger.warning("Restored missed one-time task", task_id=task.task_id, missed_by_seconds=missed_by)
-        return self._start_runner(bot.agent_name, task.task_id, workflow)
+        return self._start_runner(owner, task.task_id, workflow, handoff=handoff)
 
     async def fail_removed(self, entity_names: set[str]) -> None:
         """Fail the running tasks of entities removed from the config, while their bots still have their clients.
@@ -315,28 +351,27 @@ class ScheduledTaskRuntime:
             yield bot, client
 
     @contextmanager
-    def other_state_writer(self, room_id: str, *, refused_user_id: str) -> Iterator[nio.AsyncClient | None]:
-        """Lend a ready bot, other than the refused account, whose power in the room lets it write schedule state."""
-        for name in self.bots():
-            bot = self._ready_bot(name)
-            client = None if bot is None else bot.client
-            room = None if client is None else client.rooms.get(room_id)
-            if (
-                bot is not None
-                and client is not None
-                and room is not None
-                and client.user_id != refused_user_id
-                and room.power_levels.can_user_send_state(client.user_id, SCHEDULED_TASK_EVENT_TYPE)
-            ):
-                with self._tracked(bot):
-                    yield client
-                return
-        yield None
+    def lend_client(
+        self,
+        room_id: str | None = None,
+        own: nio.AsyncClient | None = None,
+    ) -> Iterator[nio.AsyncClient | None]:
+        """Lend the client of the room's steward, or of any running bot for no room, among the bots not stopping.
 
-    def router_client(self) -> nio.AsyncClient | None:
-        """Return the router's client, the account a room admin should empower for schedule state."""
-        router = self.bots().get(ROUTER_AGENT_NAME)
-        return None if router is None else router.client
+        The steward reads and writes the room's schedule state for the bots and the schedule API.
+        The loan counts as that bot's operation in flight, so its stop waits for it within the stop's bound.
+        A stopping bot is lent only to itself, as the bot whose ``own`` client asks: a removed bot stores its tasks'
+        failure this way.
+        None is lent where no such bot runs.
+        """
+        bots = {name: bot for name, bot in self.bots().items() if bot not in self._fenced or bot.client is own}
+        running = (bot for bot in bots.values() if bot.running and bot.client is not None)
+        bot = next(running, None) if room_id is None else room_steward(bots, room_id)
+        if bot is None or bot.client is None:
+            yield None
+            return
+        with self._tracked(bot):
+            yield bot.client
 
     def _ready_bot(self, entity_name: str) -> AgentBot | None:
         bot = self.bots().get(entity_name)
@@ -362,7 +397,7 @@ class ScheduledTaskRuntime:
             del self._runners[task_id]
 
 
-@dataclass(frozen=True)
+@dataclass
 class _TaskRunner:
     """Run one scheduled task, borrowing its owner's live bot for each Matrix operation."""
 
@@ -370,6 +405,14 @@ class _TaskRunner:
     owner: str
     room_id: str
     task_id: str
+    # Whether this runner ever borrowed its owner's bot; one that did is never replaced.
+    used_owner: bool = field(default=False, init=False)
+
+    @asynccontextmanager
+    async def _operation(self) -> AsyncIterator[tuple[AgentBot, nio.AsyncClient]]:
+        async with self.runtime.operation(self.owner) as borrowed:
+            self.used_owner = True
+            yield borrowed
 
     async def _runnable_task(self) -> ScheduledTaskRecord | None:  # noqa: C901
         """Return runnable state, cancelling departed creators' tasks and retrying uncertainty."""
@@ -378,7 +421,7 @@ class _TaskRunner:
         task: ScheduledTaskRecord | None = None
         while True:
             try:
-                async with runtime.operation(self.owner) as (_bot, client):
+                async with self._operation() as (_bot, client):
                     task = await _get_pending_task_record(
                         client=client,
                         room_id=self.room_id,
@@ -446,7 +489,7 @@ class _TaskRunner:
 
     async def _checkpoint_identity(self) -> tuple[str, str]:
         """Return the homeserver and account that key the owner's recurring checkpoint."""
-        async with self.runtime.operation(self.owner) as (_bot, client):
+        async with self._operation() as (_bot, client):
             return client.homeserver, client.user_id
 
     async def _plan_occurrence(self, workflow: ScheduledWorkflow, cron: str) -> RecurringOccurrence:
@@ -471,7 +514,7 @@ class _TaskRunner:
         workflow: ScheduledWorkflow,
         occurrence: RecurringOccurrence | None = None,
     ) -> scheduling_executor.ScheduledWorkflowOutcome:
-        async with self.runtime.operation(self.owner) as (bot, client):
+        async with self._operation() as (bot, client):
             return await scheduling_executor.execute_scheduled_workflow(
                 client,
                 workflow,
@@ -486,7 +529,7 @@ class _TaskRunner:
             )
 
     async def _send_failure_notice(self, target: MessageTarget, message: str) -> None:
-        async with self.runtime.operation(self.owner) as (bot, client):
+        async with self._operation() as (bot, client):
             await scheduling_executor.send_scheduled_failure_notice(
                 client,
                 target,
@@ -495,26 +538,48 @@ class _TaskRunner:
             )
 
     async def _save_status(self, task: ScheduledTaskRecord, status: str) -> None:
-        """Persist a one-time task's final status; a write cut off by its owner's stop is retried once it runs again.
+        """Persist a one-time task's final status; a write that fails is retried for a few minutes.
 
+        The write fails while the task's owner, or the room's steward it goes through, restarts.
+        Its slot is absent until the replacement finished its first sync, so only time bounds the retry.
         The write holds the task's state lock, so an edit still writing cannot land after it and revive the task.
+        An edit or cancellation saved between two attempts wins: the retry writes nothing, and an edited task gets
+        this runner's slot for a new runner.
         """
+        paths = self.runtime.runtime_paths
+        loop = asyncio.get_running_loop()
+        give_up_at = loop.time() + _STATUS_WRITE_RETRY_SECONDS
+        retrying = False
         while True:
-            async with self.runtime.operation(self.owner) as (bot, client):
+            async with self._operation() as (_bot, client):
                 try:
                     async with scheduled_task_state_lock(client, self.room_id, self.task_id):
+                        if retrying and task != (
+                            stored := await _get_pending_task_record(client, task.room_id, task.task_id, paths)
+                        ):
+                            self.runtime._runner_finished(self.task_id)
+                            if stored is not None:
+                                self.runtime._start_runner(self.owner, self.task_id, stored.workflow)
+                            return
                         await _save_task_status(client, task, status, writers=self.runtime)
-                except Exception:
-                    if bot not in self.runtime._fenced:
+                except Exception as exc:
+                    if loop.time() >= give_up_at:
                         logger.exception(
                             "Failed to persist one-time task final state",
                             task_id=self.task_id,
                             status=status,
                         )
                         return
+                    logger.warning(
+                        "scheduled_task_status_write_failed_retrying",
+                        task_id=self.task_id,
+                        status=status,
+                        error=str(exc),
+                    )
                 else:
                     return
-            logger.warning("scheduled_task_status_write_interrupted_by_owner_stop", task_id=self.task_id, status=status)
+            retrying = True
+            await asyncio.sleep(_OWNER_POLL_INTERVAL_SECONDS)
 
     async def run_cron(self, workflow: ScheduledWorkflow) -> None:
         """Run a recurring task based on its cron schedule.

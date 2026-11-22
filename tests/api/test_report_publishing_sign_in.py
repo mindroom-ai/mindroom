@@ -386,6 +386,8 @@ def test_open_mode_serves_reports_as_before_with_two_privacy_headers(signin: dic
         "expires": "0",
         "x-robots-tag": "noindex, nofollow",
         "referrer-policy": "no-referrer",
+        # Starlette 1.10's CORS middleware marks every response as varying by origin.
+        "vary": "Origin",
     }
     assert index.text == "<!doctype html><script src='app.js'></script><img src='image.png'>"
     assert client.get(f"/reports/public/{UNKNOWN_SLUG}/").json() == {"detail": "Public report was not found."}

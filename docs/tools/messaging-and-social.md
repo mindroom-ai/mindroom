@@ -83,6 +83,7 @@ Deletion is enabled by default; set `enable_delete_message: false` for read and 
 | `enable_list_channels` | `boolean` | `true` | Enable `list_channels()`. |
 | `enable_delete_message` | `boolean` | `true` | Enable `delete_message()`. |
 | `all` | `boolean` | `false` | Enable every function. |
+| `timeout` | `number` | `30` | Per-request HTTP timeout in seconds. |
 
 ## [`telegram`]
 

@@ -22,3 +22,14 @@ class ScheduledTaskStorageError(SchedulingError):
 
 class ScheduledTaskStateReadError(ScheduledTaskStorageError):
     """A scheduled-task state read failed without proving the task absent."""
+
+
+class ScheduledTaskStateRefusedError(ScheduledTaskStorageError):
+    """The room refused a task's state for lack of power; its text is the whole answer to whoever asked."""
+
+
+def refused_for_power(error: BaseException | None) -> ScheduledTaskStateRefusedError | None:
+    """Return the power refusal behind a scheduling failure, through the operations that wrapped it."""
+    while error is not None and not isinstance(error, ScheduledTaskStateRefusedError):
+        error = error.__cause__
+    return error

@@ -16,6 +16,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.users import AgentMatrixUser
@@ -102,9 +103,9 @@ class _Bot:
                 send_response=AsyncMock(return_value=None),
                 change_membership=self._change_membership,
                 admit_response=MagicMock(),
-                refresh_memberships=AsyncMock(),
                 on_configured_room_joined=AsyncMock(),
                 on_room_joined=self.on_room_joined,
+                publish_server_state=AsyncMock(),
                 get_conversation_reader=MagicMock(),
                 get_agent_bot=lambda _name: None,
             ),
@@ -283,6 +284,21 @@ async def test_a_room_taken_off_its_parents_list_is_left(tmp_path: Path) -> None
     await bot.on_space_child(ROOM, listed=False)
 
     assert bot.memberships == [(ROOM, "leave")]
+
+
+@pytest.mark.asyncio
+async def test_the_owner_account_stays_in_a_room_taken_off_its_parents_list(tmp_path: Path) -> None:
+    """Nothing makes the owner account leave a room: it sends no membership command when a room is unlisted."""
+    bot = _Bot(
+        tmp_path,
+        {PARENT: [_create(), _child(ROOM, listed=False)], ROOM: [_create(), _parent(PARENT)]},
+        joined=(PARENT, ROOM),
+    )
+    bot.lifecycle.deps = replace(bot.lifecycle.deps, agent_name=ROUTER_AGENT_NAME)
+
+    await bot.on_space_child(ROOM, listed=False)
+
+    assert bot.memberships == []
 
 
 @pytest.mark.asyncio

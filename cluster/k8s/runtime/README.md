@@ -675,6 +675,7 @@ egressBroker:
 ```
 
 The primary container then exposes an `egress-broker` port and gets `MINDROOM_EGRESS_BROKER_PORT`, `MINDROOM_EGRESS_BROKER_HOST=0.0.0.0`, and `MINDROOM_EGRESS_BROKER_URL`, plus `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` when `egressBroker.tokenTtlSeconds` is set.
+With `egressBroker.enabled: false` it gets `MINDROOM_EGRESS_BROKER_PORT=off` instead, because MindRoom otherwise starts a loopback broker for shell calls in the primary.
 The URL points workers at a `<fullname>-egress-broker` ClusterIP Service for that port.
 The Service is separate from the main runtime Service so `service.type` never exposes the broker port outside the cluster.
 Workers need no changes: each call carries its own token and CA certificate.

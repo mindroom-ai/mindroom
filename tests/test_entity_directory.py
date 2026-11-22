@@ -89,7 +89,7 @@ def test_directory_lists_each_prepared_entity_and_follows_the_config_and_account
     persist_entity_accounts(config, runtime_paths, usernames={"coder": "renamed_coder"})
 
     assert entity_directory(config, runtime_paths) == {
-        "@mindroom_router:localhost": ManagedEntity("router", "router", "RouterAgent", ()),
+        "@mindroom_router:localhost": ManagedEntity("router", "router", "MindRoom", ()),
         "@renamed_coder:localhost": ManagedEntity("coder", "agent", "Coder", ("calculator", "delegate", "scheduler")),
         "@mindroom_writer:localhost": ManagedEntity("writer", "agent", "Writer", ("scheduler", "self_config")),
         "@mindroom_crew:localhost": ManagedEntity("crew", "team", "Crew", ()),
@@ -108,6 +108,6 @@ def test_directory_lists_each_prepared_entity_and_follows_the_config_and_account
     entity = entity_directory(changed, runtime_paths)["@mindroom_editor:localhost"]
     assert (entity.name, entity.kind, entity.display_name) == ("editor", "agent", "Editor")
     # A preset is no toolkit, so the editor lists the toolkits it expands to instead.
-    assert entity.tool_names[:3] == ("file", "scheduler", "shell")
+    assert entity.tool_names[:3] == ("filesystem", "scheduler", "shell")
     assert "browser" in entity.tool_names
     assert "openclaw_compat" not in entity.tool_names

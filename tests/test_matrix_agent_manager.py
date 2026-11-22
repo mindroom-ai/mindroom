@@ -575,6 +575,7 @@ class TestMatrixRegistration:
             "admin": False,
             "mac": expected_mac,
             "displayname": "Test User",
+            "inhibit_login": True,
         }
         mock_client.register.assert_not_called()
         mock_client.register_with_token.assert_not_called()
@@ -1502,7 +1503,7 @@ class TestAgentUserCreation:
     @pytest.mark.parametrize(
         ("colliding_entity_name", "agents", "teams"),
         [
-            ("router", {}, {}),
+            # The optional owner's localpart is checked at its own start, where a collision fails only the owner.
             ("general", {"general": {"display_name": "GeneralAgent"}}, {}),
             (
                 "helpers",

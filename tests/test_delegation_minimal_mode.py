@@ -915,7 +915,7 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
                 operation="tools.call",
                 toolkit="delegate",
                 function="run_subagent",
-                arguments={"agent_name": "helper", "task": "List your tools", "minimal": True},
+                arguments={"agent_name": "helper", "task": "List your tools", "title": "List tools", "minimal": True},
                 call_id=call_id,
             ),
         )

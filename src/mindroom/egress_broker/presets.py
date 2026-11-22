@@ -24,8 +24,8 @@ def _bearer(host: str, path_prefix: str = "/") -> dict[str, object]:
     return {"host": host, "path_prefix": path_prefix, "auth": {"type": "bearer"}}
 
 
-# These APIs read with GET and HEAD, so a connected account allowed read-only is safe there. GitHub is left out: git
-# clone and fetch read with POST to `.../git-upload-pack`, which a path prefix cannot name.
+# These APIs read with GET and HEAD, so a connected account allowed read-only is safe there. GitHub and Overleaf are left
+# out: git clone and fetch read with POST to `.../git-upload-pack`, which a path prefix cannot name.
 _READ_ONLY: dict[str, object] = {"post_paths": []}
 
 
@@ -100,6 +100,12 @@ EGRESS_PRESETS: Mapping[str, dict[str, object]] = MappingProxyType(
             "oauth_provider": "atlassian",
             "rules": [_bearer("api.atlassian.com")],
             "read_only": _READ_ONLY,
+        },
+        "overleaf": {
+            "display_name": "Overleaf",
+            "description": "Overleaf projects over Git (Overleaf premium)",
+            # The Git bridge takes the user's Git authentication token as the password of user `git`.
+            "rules": [{"host": "git.overleaf.com", "auth": {"type": "basic", "username": "git"}}],
         },
         "openai": {
             "display_name": "OpenAI",

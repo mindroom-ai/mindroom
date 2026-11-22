@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.shared_directories.store import SharedDirectory
 
-_SHARE_READING_TOOLS = ("shell", "python", "file", "coding")
+_SHARE_READING_TOOLS = ("shell", "python", "filesystem")
 
 
 def agent_reads_shares_in_worker(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> bool:
@@ -132,7 +132,7 @@ def _mounted_roots(root: Path) -> tuple[SharedDirectoryRoot, ...]:
 
 def _primary_tools_reach_shared_directories(runtime_paths: RuntimePaths) -> bool:
     """Return whether path tools in the primary process may use shared directories in this runtime."""
-    # Workers write shared directories, and file and coding list and search by path after checking it, so worker
+    # Workers write shared directories, and filesystem lists and searches by path after checking it, so worker
     # code could swap an entry for a link that a primary-process search would follow into primary-only storage.
     return not (worker_backend_kind(runtime_paths).dedicated or sandbox_proxy_config(runtime_paths).proxy_url)
 

@@ -11,10 +11,14 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
+import errno
+import functools
 import itertools
 import os
 import re
+import shutil
 import signal
+import subprocess
 import sys
 import time
 import uuid
@@ -29,6 +33,7 @@ from mindroom.shell.output_capture import (
     ShellOutputCapture,
     ShellOutputDestination,
     format_shell_completion,
+    format_shell_timeout,
 )
 from mindroom.tool_jobs.control import job_owns_execution
 
@@ -61,7 +66,11 @@ class _OutputBuffer:
     max_bytes: int = _MAX_OUTPUT_BYTES
     chunks: deque[str] = field(default_factory=deque)
     byte_count: int = 0
-    truncated: bool = False
+    # Which caps dropped output, and every line the command printed, so a notice can say what was left out.
+    bytes_capped: bool = False
+    lines_capped: bool = False
+    newlines: int = 0
+    open_line: bool = False
     # The number of this buffer's latest append, so a reader can tell new output from a full buffer that rotated to
     # the same size, and which stream printed last.
     last_append: int = 0
@@ -70,12 +79,14 @@ class _OutputBuffer:
         if not text:
             return
         self.last_append = next(_APPEND_SEQUENCE)
+        self.newlines += text.count("\n")
+        self.open_line = not text.endswith("\n")
 
         encoded = text.encode("utf-8", errors="replace")
         if len(encoded) > self.max_bytes:
             text = encoded[-self.max_bytes :].decode("utf-8", errors="ignore")
             encoded = text.encode("utf-8", errors="replace")
-            self.truncated = True
+            self.bytes_capped = True
 
         self.chunks.append(text)
         self.byte_count += len(encoded)
@@ -83,47 +94,58 @@ class _OutputBuffer:
         while self.chunks and self.byte_count > self.max_bytes:
             removed = self.chunks.popleft()
             self.byte_count -= len(removed.encode("utf-8", errors="replace"))
-            self.truncated = True
+            self.bytes_capped = True
 
         self._trim_to_max_lines()
 
-    def render(self, *, tail: int | None = None) -> str:
-        output = self._rendered_text()
-        output_lines = output.split("\n") if output else []
-        if tail is not None:
-            output_lines = output_lines[-tail:]
-        output = "\n".join(output_lines)
-        if not self.truncated:
-            return output
+    def lines(self) -> list[str]:
+        """Return every retained line; a final newline ends the last line rather than starting another."""
+        text = "".join(self.chunks)
+        return text.removesuffix("\n").split("\n") if text else []
 
-        notice = (
-            f"[Output truncated to the last {self.max_bytes} bytes. "
-            "Redirect command output to a file for complete results.]"
+    def render(self, *, tail: int | None = None) -> str:
+        """Return the last ``tail`` retained lines, after one notice of what was left out."""
+        return "\n".join(part for part in self.render_parts(tail=tail) if part)
+
+    def render_parts(self, *, tail: int | None = None, stream: str = "") -> tuple[str, str]:
+        """Return the notice of what was left out, empty when nothing was, and the last ``tail`` retained lines."""
+        lines = self.lines()
+        shown = lines if tail is None else lines[-tail:]
+        caps = [f"{self.max_bytes} bytes"] if self.bytes_capped else []
+        if self.lines_capped:
+            caps.append(f"{self.max_lines} lines")
+        printed = self.newlines + self.open_line
+        if len(shown) == printed and not caps:
+            # Whole output ends where its last non-blank line does, as it always has.
+            return "", "\n".join(shown).rstrip("\n")
+        cuts = []
+        if len(shown) < printed:
+            cuts.append(f"Showing the last {len(shown)} of {printed} {stream + ' ' if stream else ''}lines")
+        if caps:
+            noun = stream or "output"
+            cuts.append(f"{noun if cuts else noun.capitalize()} truncated to the last {' and '.join(caps)}")
+        advice = (
+            "Redirect command output to a file for complete results."
+            if caps
+            else "Pass a larger tail, or narrow the command."
         )
-        return f"{notice}\n{output}" if output else notice
+        return f"[{'; '.join(cuts)}. {advice}]", "\n".join(shown)
 
     def __len__(self) -> int:
-        output = self._rendered_text()
-        return len(output.split("\n")) if output else 0
-
-    def last_lines(self, count: int) -> str:
-        """Return the last ``count`` lines retained so far, without the truncation notice."""
-        output = self._rendered_text()
-        return "\n".join(output.split("\n")[-count:]) if output else ""
-
-    def _rendered_text(self) -> str:
-        return "".join(self.chunks).rstrip("\n")
+        return len(self.lines())
 
     def _trim_to_max_lines(self) -> None:
-        output = self._rendered_text()
-        lines = output.split("\n")
-        if len(lines) <= self.max_lines:
+        text = "".join(self.chunks)
+        lines = text.split("\n")
+        # A final newline ends the last line rather than starting another, and stays for the next append.
+        keep = self.max_lines + text.endswith("\n")
+        if len(lines) <= keep:
             return
 
-        output = "\n".join(lines[-self.max_lines :])
-        self.chunks = deque([output])
-        self.byte_count = len(output.encode("utf-8", errors="replace"))
-        self.truncated = True
+        text = "\n".join(lines[-keep:])
+        self.chunks = deque([text])
+        self.byte_count = len(text.encode("utf-8", errors="replace"))
+        self.lines_capped = True
 
 
 @dataclass
@@ -152,7 +174,7 @@ def _progress_lines(buffer: _OutputBuffer) -> str:
 
     It is reported whole, so whoever shows its tail can mask a credential whose label sits above the tail.
     """
-    return "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in buffer.last_lines(buffer.max_lines).split("\n"))
+    return "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in "".join(buffer.chunks).rstrip("\n").split("\n"))
 
 
 class _OutputProgress:
@@ -202,6 +224,7 @@ class ShellRunResult:
     message: str
     handle: str | None = None
     output_file_handled: bool = False
+    execution_error: bool = False
     return_code: int | None = None
     """The exit status of a command that ended within the call; None when it did not start or still runs."""
 
@@ -258,12 +281,13 @@ async def run_command(
     stderr: int = asyncio.subprocess.PIPE,
     kill_group_after_exit: bool = False,
     register_finished: bool = False,
+    launch_failure_exits: bool = False,
 ) -> ShellRunResult:
     """Run one shell command; return output, an error message, or a background handle.
 
     When the command completes within ``timeout`` seconds the last ``tail``
-    lines of stdout are returned; ``None`` waits however long it runs. On
-    non-zero exit, useful stdout is preserved together with stderr. When the
+    lines of stdout, then of any stderr, are returned; ``None`` waits however
+    long it runs. On non-zero exit, stdout is preserved with all of stderr. When the
     timeout is exceeded, ``on_timeout="kill"`` stops the command's whole
     process group and returns its output so far; otherwise the process keeps
     running under *registry* and a handle string is returned for
@@ -277,7 +301,9 @@ async def run_command(
     ``kill_group_after_exit``, whatever remains of the process group is killed
     once the foreground process exits or is cancelled. With ``register_finished``,
     a command that finishes within ``timeout`` is also registered, as a finished
-    record whose handle the caller can check or discard later.
+    record whose handle the caller can check or discard later. With
+    ``launch_failure_exits``, a program that is missing or cannot be executed
+    ends the call as a shell ends it: exit code 127 or 126, the reason on stderr.
     """
     _sweep_stale_records(registry)
     if handle is not None:
@@ -307,6 +333,7 @@ async def run_command(
             stderr=stderr,
             kill_group_after_exit=kill_group_after_exit,
             register_finished=register_finished,
+            launch_failure_exits=launch_failure_exits,
         )
     finally:
         if handle is not None and handle_reservations is not None:
@@ -331,15 +358,26 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
     stderr: int,
     kill_group_after_exit: bool,
     register_finished: bool,
+    launch_failure_exits: bool,
 ) -> ShellRunResult:
     """Spawn one command after any caller-supplied handle is reserved."""
     capture = output_capture
     try:
         if capture is None and output_destination is not None:
-            capture = ShellOutputCapture(output_destination, cwd)
+            capture = ShellOutputCapture(output_destination)
         started_at = time.monotonic()
+        spawn_argv = _idle_launch_argv(argv, env, cwd)
+    except asyncio.CancelledError:
+        if capture is not None:
+            capture.close()
+        raise
+    except Exception as exc:
+        if capture is not None:
+            capture.close()
+        return ShellRunResult(message=f"Error: {exc}", execution_error=True)
+    try:
         process = await asyncio.create_subprocess_exec(
-            *argv,
+            *spawn_argv,
             stdin=stdin,
             stdout=asyncio.subprocess.PIPE,
             stderr=stderr,
@@ -352,14 +390,17 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
             capture.close()
         raise
     except Exception as exc:
-        if capture is not None:
-            capture.close()
-        return ShellRunResult(message=f"Error: {exc}")
+        try:
+            exited = _launch_failure(argv, env, cwd, exc, capture) if launch_failure_exits else None
+            return exited or ShellRunResult(message=f"Error: {exc}", execution_error=True)
+        finally:
+            if capture is not None:
+                capture.close()
     # A busy command, such as a build, must not take the CPU from the process that runs MindRoom; processes the
     # command starts later inherit the priority.
     with contextlib.suppress(OSError):
         os.setpriority(os.PRIO_PGRP, process.pid, 19)
-    if sys.platform == "linux":
+    if sys.platform == "linux" and spawn_argv is argv:
         _schedule_process_tree_idle(process.pid)
 
     stdout_buf = _OutputBuffer()
@@ -450,17 +491,21 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
             )
         finally:
             capture.close()
-    if return_code != 0:
-        return ShellRunResult(
-            message=format_shell_completion(
-                stdout_buf.render(tail=tail),
-                stderr_buf.render(),
-                return_code=return_code,
-            ),
-            handle=finished_handle,
-            return_code=return_code,
-        )
-    return ShellRunResult(message=stdout_buf.render(tail=tail), handle=finished_handle, return_code=return_code)
+    if return_code:
+        # A failure keeps its whole stderr, which explains it.
+        errors = stderr_buf.render() if stderr_buf else None
+        message = format_shell_completion(stdout_buf.render(tail=tail), errors, return_code=return_code)
+    else:
+        message = _success_message(stdout_buf, stderr_buf, tail)
+    return ShellRunResult(message=message, handle=finished_handle, return_code=return_code)
+
+
+def _success_message(stdout_buf: _OutputBuffer, stderr_buf: _OutputBuffer, tail: int) -> str:
+    """Return a success's stdout, then its stderr, both tailed, after the notice of anything either left out."""
+    output_notice, output = stdout_buf.render_parts(tail=tail)
+    errors_notice, errors = stderr_buf.render_parts(tail=tail, stream="stderr")
+    completion = format_shell_completion(output, errors if stderr_buf else None, return_code=0)
+    return "\n".join(part for part in (output_notice, errors_notice, completion) if part)
 
 
 async def _stop_timed_out_process(
@@ -477,12 +522,12 @@ async def _stop_timed_out_process(
     """Stop a command at its timeout and report its output so far; a stopped command saves no output file."""
     await _terminate_process_group(process)
     await _await_reader_tasks_with_grace(stdout_reader, stderr_reader, grace_seconds=_POST_EXIT_READER_GRACE_SECONDS)
-    lines = [f"Stopped after {timeout:g}s." + (" No output file was saved." if output_capture is not None else "")]
-    if output := stdout_buf.render(tail=tail):
-        lines += ["Output:", output]
-    if errors := stderr_buf.render():
-        lines += ["Stderr:", errors]
-    message = "\n".join(lines)
+    message = format_shell_timeout(
+        stdout_buf.render(tail=tail),
+        stderr_buf.render() if stderr_buf else None,
+        timeout=timeout,
+        no_output_file=output_capture is not None,
+    )
     if output_capture is None:
         return ShellRunResult(message=message, return_code=process.returncode)
     output_capture.incomplete = True
@@ -593,12 +638,15 @@ def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle:
     if record.finished:
         if record.output_receipt is not None:
             return record.output_receipt
+        failed = record.return_code != 0
         output = record.stdout_buf.render(tail=record.tail)
-        errors = record.stderr_buf.render()
+        errors = record.stderr_buf.render(tail=None if failed else record.tail)
         result = f"Status: FINISHED (exit code {record.return_code}, ran for {elapsed:.1f}s)\n"
-        if record.return_code != 0 and errors:
+        if failed and record.stderr_buf:
             result += f"Stderr:\n{errors}\n"
         result += f"Output:\n{output}"
+        if record.stderr_buf and not failed:
+            result += f"\nStderr:\n{errors}"
         return result
 
     partial = record.stdout_buf.render(tail=50)
@@ -772,18 +820,104 @@ async def _await_reader_tasks_with_grace(
                 await task
 
 
-def _schedule_process_tree_idle(pid: int) -> None:
-    """Move every thread of ``pid`` and of its descendants to ``SCHED_IDLE``; what they start later inherits it.
+@functools.cache
+def _idle_launcher() -> str | None:
+    """Return a ``chrt`` that can start a program at ``SCHED_IDLE``, or ``None`` when there is none or it fails."""
+    chrt = shutil.which("chrt")
+    if chrt is None:
+        return None
+    chrt = str(Path(chrt).absolute())  # commands run in other directories
+    # A sandbox that refuses the policy makes chrt exit without running the program; then commands start directly.
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        if subprocess.run([chrt, "-i", "0", chrt, "-m"], capture_output=True, timeout=5, check=False).returncode == 0:
+            return chrt
+    return None
+
+
+def _find_program(program: str, env: dict[str, str], cwd: str | None, mode: int = os.F_OK | os.X_OK) -> str | None:
+    """Like Popen, look a bare name up on the command's PATH and a path with a slash up, both from the command's directory."""
+    program = str(Path(cwd, program)) if cwd and os.sep in program else program
+    search = [str(Path(cwd, entry)) if cwd else entry for entry in os.get_exec_path(env)]
+    return shutil.which(program, mode=mode, path=os.pathsep.join(search))
+
+
+# Bash's exit code and words for the spawn errors that are a shell's own exit: of a program named by a path, of a bare
+# name no PATH entry holds, and of a bare name found on PATH. Every other error stays a failed call.
+_PATH_LAUNCH_FAILURES = {
+    errno.ENOENT: (127, "No such file or directory"),
+    errno.ENOTDIR: (126, "Not a directory"),
+    errno.EACCES: (126, "Permission denied"),
+}
+_MISSING_NAME_LAUNCH_FAILURES = dict.fromkeys((errno.ENOENT, errno.ENOTDIR), (127, "command not found"))
+_FOUND_NAME_LAUNCH_FAILURES = {
+    # A file the program needs to start, such as its interpreter, is missing.
+    errno.ENOENT: (127, "cannot execute: required file not found"),
+    errno.ENOTDIR: (127, "cannot execute: required file not found"),
+    errno.EACCES: (126, "Permission denied"),
+}
+
+
+def _launch_failure(
+    argv: list[str],
+    env: dict[str, str],
+    cwd: str | None,
+    exc: Exception,
+    capture: ShellOutputCapture | None,
+) -> ShellRunResult | None:
+    """Return a spawn error of a program that is missing or cannot be executed as Bash reports it, else None.
+
+    The result is the one of a command that exited 127 or 126 with Bash's words on stderr, so everything that reads a
+    failed command's result reads this one. A working directory the command cannot enter fails before any program.
+    The error number and the program's name as given decide alone: the program file is never opened.
+    """
+    if (
+        not isinstance(exc, OSError)
+        or not argv
+        or exc.filename != argv[0]
+        or (cwd is not None and not (Path(cwd).is_dir() and os.access(cwd, os.X_OK)))
+    ):
+        return None
+    program = argv[0]
+    if os.sep in program:
+        failures = _PATH_LAUNCH_FAILURES
+    elif (found := _find_program(program, env, cwd, os.F_OK)) is None:
+        failures = _MISSING_NAME_LAUNCH_FAILURES
+    else:
+        # Bash names a program it found on PATH by where it found it.
+        program, failures = found, _FOUND_NAME_LAUNCH_FAILURES
+    if (failure := failures.get(exc.errno or 0)) is None:
+        return None
+    return_code, said = failure[0], f"{program}: {failure[1]}"
+    if capture is None:
+        return ShellRunResult(message=format_shell_completion("", said, return_code=return_code))
+    capture.stderr.append(f"{said}\n")
+    capture.stdout.reached_eof = capture.stderr.reached_eof = True
+    return ShellRunResult(message=capture.publish(return_code), output_file_handled=True)
+
+
+def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> list[str]:
+    """Return *argv* behind ``chrt -i 0`` on Linux, so the command and everything it starts run at ``SCHED_IDLE``.
 
     Nice 19 lowers a command's CPU share, but the kernel still counts a CPU that runs it as busy when it places
     MindRoom's waking event loop. It counts a CPU that runs only idle-policy threads as free, and a waking normal thread
     preempts them at once.
+    chrt execs the program in the same process with the same environment. A program that cannot be found starts
+    directly instead, so the spawn fails with the same error as before; so does every command when chrt is missing.
+    """
+    if sys.platform != "linux" or not argv or (chrt := _idle_launcher()) is None:
+        return argv
+    if _find_program(argv[0], env, cwd) is None:
+        return argv
+    return [chrt, "-i", "0", *argv]
+
+
+def _schedule_process_tree_idle(pid: int) -> None:
+    """Move every thread of ``pid`` and of its descendants to ``SCHED_IDLE``; what they start later inherits it.
+
+    This is the fallback for a command that did not start behind chrt (see ``_idle_launch_argv``).
     A busy event loop gives the command time to fork and start threads before this runs, so the walk sets each thread
     before it reads that thread's children: whatever the thread starts afterwards inherits the policy. It misses a
     thread started during the walk by a thread it has not reached yet, and a process whose parent already exited.
-    Setting the policy before the command runs needs a launcher process, which needs more code to keep the command's
-    environment and how a program that cannot start is reported: glibc's ``posix_spawn`` refuses ``SCHED_IDLE``, and
-    ``preexec_fn`` would turn off vfork.
     """
     pending = [pid]
     while pending:

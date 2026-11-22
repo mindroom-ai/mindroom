@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 from mindroom.config.egress_broker import EgressBrokerConfig, EgressService
 from mindroom.egress_broker.presets import EGRESS_PRESETS
-from mindroom.egress_broker.rules import match_rule
+from mindroom.egress_broker.rules import inject_credentials, match_rule
 
 _BROKERED = "mindroom-brokered"
 
@@ -65,6 +67,11 @@ _EXPECTED: dict[str, tuple[str | None, list[_ExpectedRule], dict[str, str]]] = {
     "atlassian": (
         "atlassian",
         [("api.atlassian.com", "/", "bearer", None, None)],
+        {},
+    ),
+    "overleaf": (
+        None,
+        [("git.overleaf.com", "/", "basic", "git", None)],
         {},
     ),
     "openai": (
@@ -143,8 +150,21 @@ def test_googleapis_presets_share_host_and_match_by_longest_path() -> None:
     assert match_rule(config, "tasks.googleapis.com", 443, "/tasks/v1/lists").service == "tasks"  # type: ignore[union-attr]
 
 
+def test_overleaf_preset_sends_the_git_token_as_basic_auth_for_user_git() -> None:
+    """Overleaf's Git bridge takes the token as the password of user `git`, on git.overleaf.com only."""
+    config = EgressBrokerConfig(services={"overleaf": EgressService(preset="overleaf")})
+
+    match = match_rule(config, "git.overleaf.com", 443, "/0123456789abcdef01234567/git-upload-pack")
+    assert match is not None
+    assert match.service == "overleaf"
+    assert match_rule(config, "www.overleaf.com", 443, "/project") is None
+
+    headers, _ = inject_credentials([], b"/0123456789abcdef01234567/info/refs", match.rule.auth, "olp_token")
+    assert headers == [(b"authorization", b"Basic " + base64.b64encode(b"git:olp_token"))]
+
+
 def test_presets_declare_read_only() -> None:
-    """The Google presets and Atlassian offer read-only access; GitHub does not, and only Calendar reads with POST."""
+    """The Google presets and Atlassian offer read-only access; git hosts do not, and only Calendar reads with POST."""
     read_only = {name for name in _EXPECTED if EgressService(preset=name).read_only is not None}
 
     assert read_only == {

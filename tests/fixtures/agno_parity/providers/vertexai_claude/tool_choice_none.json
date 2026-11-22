@@ -188,7 +188,7 @@
         "type": "none"
       },
       "stream": true,
-      "anthropic_version": "vertex-2023-10-16"
+      "anthropic_version": "2026-10-21"
     },
     "headers": {
       "accept": "application/json",

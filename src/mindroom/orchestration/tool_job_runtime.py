@@ -35,7 +35,7 @@ from mindroom.matrix.message_builder import build_message_content
 from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals
 from mindroom.tool_jobs.authorization import locally_allowed, toolkit_offered
-from mindroom.tool_jobs.conversation import ConversationKey
+from mindroom.tool_jobs.conversation import ConversationKey, unheld_jobs
 from mindroom.tool_jobs.follow_ups import follow_up_jobs, held_jobs, held_notice, next_follow_up_id
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.provenance import function_provenance
@@ -378,12 +378,16 @@ class ToolJobRuntimeCoordinator:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        if self._runtime is not None:
-            await self._runtime.quiesce()
-            # The jobs it interrupted leave the rooms' state now, not at the next start, which may have jobs off; so
-            # do the subagent jobs it left running in storage for the next start to continue.
-            ended = [job for job in self._runtime.retained_jobs() if job.status in TERMINAL_STATUSES]
-            await self._publisher.publish(self.bot_provider, ended)
+        if (runtime := self._runtime) is not None:
+            await runtime.quiesce()
+            # The jobs it ended leave the rooms' state now; the subagent jobs it kept for the next start to continue
+            # stay listed, unless the authored config turned jobs off for that start, when every job, published as
+            # ended, clears its room. Jobs turned off while MindRoom is down leave them listed until a start with jobs
+            # on, as a crash before a start with jobs off does.
+            jobs = runtime.retained_jobs()
+            if not self.config_provider().background_tool_jobs.enabled:
+                jobs = tuple(replace(job, status="interrupted") for job in jobs)
+            await self._publisher.publish(self.bot_provider, jobs, awaited=runtime.awaited_job_ids())
 
     async def stop(self) -> None:
         """Release the service after response finalization has stopped using its receipts."""
@@ -519,6 +523,7 @@ class ToolJobRuntimeCoordinator:
         a job a human message started counts none. Jobs only the limit holds get one notice instead.
         """
         due: set[str] = set()
+        holds: dict[str, dict[str, bool]] = {}
         for key, group in _follow_up_candidates(runtime.retained_jobs()).items():
             # Jobs an admitted follow-up or a sent notice already reports need no access check again.
             candidates, held = follow_up_jobs(group), held_jobs(group)
@@ -531,6 +536,11 @@ class ToolJobRuntimeCoordinator:
             ended = await runtime.ended_jobs(key)
             if (bot := self.bot_provider(key.recipient)) is None:
                 continue
+            ended = await unheld_jobs(
+                tuple(job for job in ended if job.status != "cancelled"),
+                bot.journal_principal().replies,
+                holds=holds.setdefault(key.recipient, {}),
+            )
             if jobs := follow_up_jobs(ended):
                 follow_up_id = next_follow_up_id(key, jobs)
                 if follow_up_id not in self._admitted_follow_ups:

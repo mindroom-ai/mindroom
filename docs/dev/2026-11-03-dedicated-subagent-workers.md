@@ -46,6 +46,8 @@ Background-job subagents run concurrently, so they compete for that one worker's
 - A worker stays for the idle timeout after its last call, holding its resource requests.
 - Approved-egress grants made for the agent or its normal worker do not reach a dedicated worker, because the egress proxy matches a pod by its own key and reads an agent from the fourth key part; the subagent requests its own grants.
   Teaching the proxy to strip a `subagent=` part would let them carry over.
-- A removal that fails after the Deployment is deleted, such as an I/O error while deleting the worker's files, leaves those files behind, because idle cleanup no longer finds the worker; the same holds for background script workers.
+- A removal that fails after the Deployment is deleted, such as an I/O error while deleting the worker's files, left those files behind, because idle cleanup no longer finds the worker.
+  On Kubernetes, maintenance has since retried it from the files themselves; see the [named workers record](2026-11-19-named-workers.md).
+  The Docker backend still leaves them.
 - Worker Computer opens the agent's normal worker; showing a child's worker would need an authorized choice of child, which a session lookup cannot give that endpoint.
 - As for every worker, a call that has ensured its worker but not yet registered as in flight, or a file request, which never registers, can lose the worker to an idle pass; it needs an idle timeout shorter than a cold start, and closing it means tracking use from before `ensure_worker`.

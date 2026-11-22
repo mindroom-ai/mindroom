@@ -60,7 +60,7 @@ def _bot_with_scheduled_task_runtime(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_name", [ROUTER_AGENT_NAME, "general"])
 async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, agent_name: str) -> None:
-    """Router and agents restore the schedules they own; only the router restores config changes and welcomes."""
+    """Every bot restores the schedules it owns; only the owner account welcomes."""
     config = _bind_runtime(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "role": "General assistant", "rooms": ["lobby"]}},
@@ -78,22 +78,15 @@ async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, 
             return_value=RoomJoinOutcome.JOINED,
         ) as mock_join,
         patch(
-            "mindroom.bot.config_confirmation.restore_pending_changes",
-            new_callable=AsyncMock,
-            return_value=0,
-        ) as mock_restore_configs,
-        patch(
             "mindroom.bot_room_lifecycle.BotRoomLifecycle.send_welcome_message_if_empty",
             new_callable=AsyncMock,
         ) as mock_welcome,
     ):
-        await bot.join_configured_rooms()
+        await bot._room_lifecycle.join_configured_rooms()
 
     mock_join.assert_awaited_once_with(bot.client, "lobby")
     restore_room.assert_awaited_once_with(bot, "lobby")
-    is_router = agent_name == ROUTER_AGENT_NAME
-    assert mock_restore_configs.await_count == int(is_router)
-    assert mock_welcome.await_count == int(is_router)
+    assert mock_welcome.await_count == int(agent_name == ROUTER_AGENT_NAME)
 
 
 @pytest.mark.asyncio
@@ -106,18 +99,12 @@ async def test_router_restores_tasks_without_rejoining_existing_room(tmp_path: P
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=["lobby"]),
         patch("mindroom.matrix.client_room_admin.join_room", new_callable=AsyncMock) as mock_join,
         patch(
-            "mindroom.bot.config_confirmation.restore_pending_changes",
-            new_callable=AsyncMock,
-            return_value=1,
-        ) as mock_restore_configs,
-        patch(
             "mindroom.bot_room_lifecycle.BotRoomLifecycle.send_welcome_message_if_empty",
             new_callable=AsyncMock,
         ) as mock_welcome,
     ):
-        await bot.join_configured_rooms()
+        await bot._room_lifecycle.join_configured_rooms()
 
     mock_join.assert_not_awaited()
     restore_room.assert_awaited_once_with(bot, "lobby")
-    mock_restore_configs.assert_awaited_once_with(bot.client, "lobby")
     mock_welcome.assert_awaited_once_with("lobby")

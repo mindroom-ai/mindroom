@@ -22,9 +22,14 @@ if TYPE_CHECKING:
 class _WorkerStatePathsLike(Protocol):
     """Filesystem paths required for worker metadata persistence."""
 
-    root: Path
-    metadata_dir: Path
-    metadata_file: Path
+    @property
+    def root(self) -> Path: ...
+
+    @property
+    def metadata_dir(self) -> Path: ...
+
+    @property
+    def metadata_file(self) -> Path: ...
 
 
 class _WorkerRecord(Protocol):
@@ -54,7 +59,7 @@ def list_worker_state_paths[PathsT](
 def load_worker_metadata[MetadataT](
     paths: _WorkerStatePathsLike,
     *,
-    metadata_type: type[MetadataT],
+    metadata_type: Callable[..., MetadataT],
 ) -> MetadataT | None:
     """Load one worker metadata JSON document into the requested dataclass type, or ``None`` when it is not one."""
     if not paths.metadata_file.exists():

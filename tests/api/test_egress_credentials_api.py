@@ -29,6 +29,7 @@ from mindroom.config.egress_broker import RESERVED_PLACEHOLDER_NAMES, RESERVED_P
 from mindroom.config.main import Config
 from mindroom.config.personal_agents import PersonalAgentRoster, PersonalAgentRosterEntry, personal_agent_roster_path
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
+from mindroom.credentials.policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
 from mindroom.egress_broker import oauth_source, secrets
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
 from mindroom.egress_broker.env import egress_agent_scope
@@ -572,7 +573,7 @@ def test_every_route_is_a_404_while_the_broker_is_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without a broker port every personal route is a 404 before it authenticates the caller or reads any store."""
-    _restart_with_env(egress_portal, MINDROOM_EGRESS_BROKER_PORT="")
+    _restart_with_env(egress_portal, MINDROOM_EGRESS_BROKER_PORT="off")
     stores_opened: list[object] = []
     monkeypatch.setattr(egress_credentials, "get_runtime_credentials_manager", stores_opened.append)
     routes = sorted(
@@ -902,7 +903,7 @@ def test_portal_state_reads_no_egress_state_while_the_broker_is_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without a broker port the portal sends no egress rows and reads no egress store or scope directory."""
-    _restart_with_env(egress_portal, MINDROOM_EGRESS_BROKER_PORT="")
+    _restart_with_env(egress_portal, MINDROOM_EGRESS_BROKER_PORT="off")
     services_read: list[object] = []
     read_services = egress_status.effective_config
     monkeypatch.setattr(
@@ -956,7 +957,7 @@ def test_portal_catalog_lists_the_egress_tool_only_while_the_broker_is_on(egress
 
     listed = personal_tools()
     assert "egress_credentials" in listed
-    _restart_with_env(portal, MINDROOM_EGRESS_BROKER_PORT="")
+    _restart_with_env(portal, MINDROOM_EGRESS_BROKER_PORT="off")
     assert personal_tools() == [name for name in listed if name != "egress_credentials"]
 
 
@@ -1181,6 +1182,80 @@ def test_personal_account_label_never_reaches_a_shared_agent(oauth_egress_portal
         assert shared["connected"] is False
         assert shared["unavailable_reason"] == "shared_sandbox"
     assert _egress_row(portal, "alice", "personal", "gh")["oauth"]["account_label"] is None
+
+
+def test_listing_offers_the_callers_own_logins_on_a_personal_agent_they_manage(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """A personal agent lists the presets' logins its caller connected, or could connect, for a new service to use."""
+    portal = oauth_egress_portal
+    _connect_account(portal, "bob", "personal", "gh", "github")
+
+    def logins(user: str, agent: str) -> dict[str, tuple[bool, str | None]]:
+        listed = _listed_agents(portal, user)[agent]["oauth_logins"]
+        assert all(set(login) == {"provider", "display_name", "connected", "account_label"} for login in listed)
+        return {login["provider"]: (login["connected"], login["account_label"]) for login in listed}
+
+    assert logins("bob", "personal") == {"github": (True, "alice@example.com"), "google_drive": (False, None)}
+    # A requester-scoped login is the caller's own: Alice has not connected hers.
+    assert logins("alice", "personal") == {"github": (False, None), "google_drive": (False, None)}
+    # A shared agent offers no personal login, not even to its credential manager.
+    assert logins("bob", "shared_dev") == {}
+
+
+def test_listing_finds_logins_without_provisioning_an_oauth_client(
+    egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Looking for logins reads only stored clients: a page load never provisions one over the network."""
+    portal = egress_portal
+    _use_fake_oauth_providers(monkeypatch, portal["paths"])
+    provision = AsyncMock(side_effect=AssertionError("provisioned a client"))
+    monkeypatch.setattr(oauth, "_client_config_resolution_for_request", provision)
+
+    logins = _listed_agents(portal, "alice")["personal"]["oauth_logins"]
+    assert [(login["provider"], login["connected"]) for login in logins] == [("github", False), ("google_drive", False)]
+    provision.assert_not_called()
+
+
+def test_listing_offers_a_localhost_only_client_only_on_a_loopback_host(
+    egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provisioned client returns only to localhost, so a remote page is offered no login to connect with it."""
+    portal = egress_portal
+    _use_fake_oauth_providers(monkeypatch, portal["paths"])
+    get_runtime_credentials_manager(portal["paths"]).save_credentials(
+        "github_oauth_client",
+        {"client_id": "test-client", "client_secret": "test-secret", RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True},
+    )
+
+    def offered(client: TestClient) -> list[str]:
+        response = client.get("/api/connections/egress", headers=portal["headers"]["alice"])
+        assert response.status_code == 200, response.text
+        agent = next(agent for agent in response.json()["agents"] if agent["agent_name"] == "personal")
+        return [login["provider"] for login in agent["oauth_logins"]]
+
+    assert offered(portal["client"]) == ["google_drive"]
+    assert offered(TestClient(main.app, base_url="http://localhost")) == ["github", "google_drive"]
+
+
+def test_an_inactive_entry_names_its_login(egress_portal: dict[str, Any]) -> None:
+    """An ignored entry names its own or its preset's login, whatever its name, so a page can tell what it signs in to."""
+    portal = egress_portal
+    _store_raw_entries(
+        portal,
+        {
+            "work-gh": {"preset": "github", "rules": "not rules"},
+            "drive_copy": {"oauth_provider": "google_drive", "rules": []},
+            "odd": "not a service",
+        },
+    )
+    assert _listed_agents(portal, "alice")["personal"]["inactive_services"] == [
+        {"name": "drive_copy", "reason": "invalid", "oauth_provider": "google_drive"},
+        {"name": "odd", "reason": "invalid", "oauth_provider": None},
+        {"name": "work-gh", "reason": "invalid", "oauth_provider": "github"},
+    ]
 
 
 _GITHUB_TOKEN_RESPONSE = {
@@ -3231,6 +3306,50 @@ def test_user_services_are_loaded_off_the_event_loop(
     assert not any(on_loop)
 
 
+def test_adding_a_service_never_replaces_one_of_the_same_name(egress_portal: dict[str, Any]) -> None:
+    """An Add (`If-None-Match: *`) is refused for a name the scope has, which keeps its rules and key; an edit replaces."""
+    portal = egress_portal
+    client, headers = portal["client"], portal["headers"]["alice"]
+    assert _put_service(portal, "alice", "personal", "notes").status_code == 204
+    assert _put_key(portal, "alice", "personal", "notes", "notes-key").status_code == 204
+    other = {"rules": [{"host": "api.other.example.com", "auth": {"type": "bearer"}}]}
+
+    added = client.put(_service_url("personal", "notes"), json=other, headers={**headers, "If-None-Match": "*"})
+
+    assert added.status_code == 412, added.text
+    assert _get_service(portal, "alice", "personal", "notes").json() == _NOTES
+    assert _egress_row(portal, "alice", "personal", "notes")["configured"] is True
+    assert _put_service(portal, "alice", "personal", "notes", other).status_code == 204
+    assert (
+        client.put(_service_url("personal", "new"), json=other, headers={**headers, "If-None-Match": "*"}).status_code
+        == 204
+    )
+
+
+@pytest.mark.parametrize("entry", ["inactive", "listed-late"])
+def test_an_add_of_any_stored_name_is_a_412_before_anything_changes(
+    egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    entry: str,
+) -> None:
+    """An inactive entry, or one stored after the route read the listing, refuses an Add as well, and keeps its key."""
+    portal = egress_portal
+    if entry == "inactive":
+        _store_raw_entries(portal, {"notes": {"rules": []}})
+    else:
+        assert _put_service(portal, "alice", "personal", "notes").status_code == 204
+        monkeypatch.setattr(egress_credentials, "load_user_services", lambda *_args: {})
+    secrets.save_secret(get_runtime_credentials_manager(portal["paths"]), _scope_target(portal), "notes", "kept")
+    headers = {**portal["headers"]["alice"], "If-None-Match": "*"}
+
+    added = portal["client"].put(_service_url("personal", "notes"), json=_NOTES, headers=headers)
+
+    assert (added.status_code, added.json()["detail"]) == (412, "You already have a service with this name")
+    assert (
+        secrets.load_secret(get_runtime_credentials_manager(portal["paths"]), _scope_target(portal), "notes") == "kept"
+    )
+
+
 # --- Inactive entries ---
 
 
@@ -3254,7 +3373,7 @@ def test_a_shadowed_entry_is_listed_with_its_reason_and_deleted_keeping_the_key(
     _republish(portal)
 
     agent = _listed_agents(portal, "alice")["personal"]
-    assert agent["inactive_services"] == [{"name": "notes", "reason": "shadowed"}]
+    assert agent["inactive_services"] == [{"name": "notes", "reason": "shadowed", "oauth_provider": None}]
     assert [(s["name"], s["source"]) for s in agent["services"] if s["name"] == "notes"] == [("notes", "config")]
 
     deleted = _delete_service(portal, "alice", "personal", "notes")
@@ -3275,15 +3394,17 @@ def test_an_invalid_entry_is_listed_with_its_reason_and_deleted_with_its_key(egr
 
     agent = _listed_agents(portal, "alice")["personal"]
     assert agent["inactive_services"] == [
-        {"name": "odd", "reason": "invalid"},
-        {"name": "stale", "reason": "invalid"},
+        {"name": "odd", "reason": "invalid", "oauth_provider": None},
+        {"name": "stale", "reason": "invalid", "oauth_provider": None},
     ]
     assert [s["name"] for s in agent["services"]] == ["github", "openai", "notes"]
     assert _get_service(portal, "alice", "personal", "stale").status_code == 404
 
     deleted = _delete_service(portal, "alice", "personal", "stale")
     assert deleted.status_code == 204, deleted.text
-    assert _listed_agents(portal, "alice")["personal"]["inactive_services"] == [{"name": "odd", "reason": "invalid"}]
+    assert _listed_agents(portal, "alice")["personal"]["inactive_services"] == [
+        {"name": "odd", "reason": "invalid", "oauth_provider": None},
+    ]
     assert _stored_key(portal, "stale") is None
     assert _delete_service(portal, "alice", "personal", "stale").status_code == 404
     assert _delete_service(portal, "alice", "personal", "odd").status_code == 204
@@ -3296,10 +3417,14 @@ def test_inactive_entries_never_reach_another_requester(egress_portal: dict[str,
     portal = egress_portal
     _store_raw_entries(portal, {"stale": {"rules": []}})
 
-    assert _listed_agents(portal, "alice")["personal"]["inactive_services"] == [{"name": "stale", "reason": "invalid"}]
+    assert _listed_agents(portal, "alice")["personal"]["inactive_services"] == [
+        {"name": "stale", "reason": "invalid", "oauth_provider": None},
+    ]
     assert _listed_agents(portal, "bob")["personal"]["inactive_services"] == []
     assert _delete_service(portal, "bob", "personal", "stale").status_code == 404
-    assert _listed_agents(portal, "alice")["personal"]["inactive_services"] == [{"name": "stale", "reason": "invalid"}]
+    assert _listed_agents(portal, "alice")["personal"]["inactive_services"] == [
+        {"name": "stale", "reason": "invalid", "oauth_provider": None},
+    ]
 
 
 def test_inactive_entries_of_a_shared_agent_are_listed_for_its_users_and_deleted_by_managers(
@@ -3311,7 +3436,7 @@ def test_inactive_entries_of_a_shared_agent_are_listed_for_its_users_and_deleted
 
     for user in ("alice", "bob"):
         assert _listed_agents(portal, user)["shared_dev"]["inactive_services"] == [
-            {"name": "stale", "reason": "invalid"},
+            {"name": "stale", "reason": "invalid", "oauth_provider": None},
         ]
     assert _delete_service(portal, "alice", "shared_dev", "stale").status_code == 403
     assert _delete_service(portal, "bob", "shared_dev", "stale").status_code == 204
@@ -3689,6 +3814,7 @@ def test_presets_are_served_as_the_config_model_expands_them(egress_portal: dict
         "display_name": "GitHub",
         "description": "GitHub API, gh CLI, and git over HTTPS",
         "oauth_provider": "github",
+        "read_only_supported": False,
         "rules": [
             {"host": "api.github.com", "port": None, "path_prefix": "/"},
             {"host": "uploads.github.com", "port": None, "path_prefix": "/"},
@@ -3696,6 +3822,8 @@ def test_presets_are_served_as_the_config_model_expands_them(egress_portal: dict
         ],
         "placeholder_env": {"GH_TOKEN": "mindroom-brokered", "GITHUB_TOKEN": "mindroom-brokered"},
     }
+    # The new-service consent asks how much the account may do where the preset offers read only.
+    assert by_id["atlassian"]["read_only_supported"] is True
     assert by_id["google_gmail"]["rules"] == [
         {"host": "gmail.googleapis.com", "port": None, "path_prefix": "/"},
         {"host": "www.googleapis.com", "port": None, "path_prefix": "/gmail/"},
@@ -3704,7 +3832,15 @@ def test_presets_are_served_as_the_config_model_expands_them(egress_portal: dict
     assert by_id["openai"]["placeholder_env"] == {"OPENAI_API_KEY": "mindroom-brokered"}
     assert by_id["google_sheets"]["placeholder_env"] == {}
     for preset in presets:
-        assert set(preset) == {"id", "display_name", "description", "oauth_provider", "rules", "placeholder_env"}
+        assert set(preset) == {
+            "id",
+            "display_name",
+            "description",
+            "oauth_provider",
+            "read_only_supported",
+            "rules",
+            "placeholder_env",
+        }
         assert all(set(rule) == {"host", "port", "path_prefix"} for rule in preset["rules"])
     assert "x-access-token" not in response.text
     # The account login select offers the registry's providers, the ones a saved service is checked against.

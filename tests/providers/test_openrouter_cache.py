@@ -72,17 +72,23 @@ async def _send(
     return json.loads(built.requests[-1].content), completed
 
 
+def _lookup(call_id: str) -> tuple[Message, Message]:
+    return (
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[{"id": call_id, "type": "function", "function": {"name": "first", "arguments": "{}"}}],
+        ),
+        Message(role="tool", content="Lookup result.", tool_call_id=call_id),
+    )
+
+
 def _conversation(day: str = "Monday") -> list[Message]:
     return [
         Message(role="system", content=_SHARED),
         Message(role="system", content=f"Current day: {day}."),
         Message(role="user", content="Look something up."),
-        Message(
-            role="assistant",
-            content="",
-            tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "first", "arguments": "{}"}}],
-        ),
-        Message(role="tool", content="Lookup result.", tool_call_id="call_1"),
+        *_lookup("call_1"),
         Message(role="assistant", content="Found it."),
         Message(role="user", content="Summarize it."),
     ]
@@ -113,9 +119,9 @@ async def test_an_anthropic_route_gets_the_claude_ladder(tmp_path: Path) -> None
     ]
     assert messages[-1]["content"] == [{"type": "text", "text": "Summarize it.", "cache_control": _ONE_HOUR}]
     assert messages[-2]["content"] == [{"type": "text", "text": "Found it.", "cache_control": _ONE_HOUR}]
-    # Unmarked messages keep their original shape.
-    assert messages[1]["content"] == "Look something up."
-    assert messages[3]["content"] == "Lookup result."
+    # Unmarked messages use the same text-part form as marked ones.
+    assert messages[1]["content"] == [{"type": "text", "text": "Look something up."}]
+    assert messages[3]["content"] == [{"type": "text", "text": "Lookup result."}]
     assert "cache_control" not in payload["tools"][0]
     assert payload["tools"][1]["cache_control"] == _ONE_HOUR
     assert _markers(payload) == [_ONE_HOUR] * 4
@@ -129,7 +135,7 @@ async def test_an_agent_without_instructions_still_caches_its_conversation_and_t
     payload, _ = await _send(tmp_path, conversation, tools=_TOOLS)
 
     messages = payload["messages"]
-    assert messages[0] == {"role": "user", "content": "Look something up."}
+    assert messages[0] == {"role": "user", "content": [{"type": "text", "text": "Look something up."}]}
     assert messages[-2]["content"] == [{"type": "text", "text": "Found it.", "cache_control": _ONE_HOUR}]
     assert messages[-1]["content"] == [{"type": "text", "text": "Summarize it.", "cache_control": _ONE_HOUR}]
     assert payload["tools"][1]["cache_control"] == _ONE_HOUR
@@ -217,8 +223,42 @@ async def test_transient_context_after_the_prompt_takes_no_marker(tmp_path: Path
 
     assert payload["messages"][1:] == [
         {"role": "user", "content": [{"type": "text", "text": "Durable prompt.", "cache_control": _ONE_HOUR}]},
-        {"role": "user", "content": transient},
+        {"role": "user", "content": [{"type": "text", "text": transient}]},
     ]
+
+
+@pytest.mark.asyncio
+async def test_moving_markers_preserves_the_prefix_with_consecutive_user_messages(tmp_path: Path) -> None:
+    """The prompt keeps its wire form across a tool loop and into the next turn."""
+    prefix = [Message(role="system", content=_SHARED), Message(role="user", content="Current message.")]
+    first = [
+        *prefix,
+        Message(role="user", content=render_transient_context(["Current memory."]), add_to_agent_memory=False),
+    ]
+    second = [*first, *_lookup("call_1")]
+    third = [*second, *_lookup("call_2")]
+    fourth = [
+        # A message-limited history replays the conversation without the previous transient context.
+        *(message for message in third if message.add_to_agent_memory),
+        Message(role="assistant", content="Reply."),
+        Message(role="user", content="Next message."),
+        Message(role="user", content=render_transient_context(["Updated memory."]), add_to_agent_memory=False),
+    ]
+    requests = [
+        (await _send(tmp_path / f"r{index}", messages, tools=_TOOLS))[0]["messages"]
+        for index, messages in enumerate((first, second, third, fourth), start=1)
+    ]
+    assert [_markers(messages[1]) for messages in requests] == [[_ONE_HOUR], [_ONE_HOUR], [], []]
+    for messages in requests:
+        for message in messages:
+            if isinstance(content := message.get("content"), list):
+                for part in content:
+                    part.pop("cache_control", None)
+
+    r1, r2, r3, r4 = requests
+    assert json.dumps(r2[: len(r1)]) == json.dumps(r1), "R2 must extend R1"
+    assert json.dumps(r3[: len(r2)]) == json.dumps(r2), "R3 must extend R2"
+    assert json.dumps(r4[: len(prefix)]) == json.dumps(r3[: len(prefix)])
 
 
 @pytest.mark.asyncio

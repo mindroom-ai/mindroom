@@ -921,7 +921,7 @@ async def test_retitling_a_thread_summarizes_it_now_counting_the_message_just_po
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A thread titled again after a post is summarized at once, far short of its threshold, with the posted text in it."""
-    model = ScriptedModel([answer('{"summary": "Launch plan call"}')])
+    model = ScriptedModel([answer('{"title": "Launch plan call"}')])
     install_model_providers(monkeypatch, {"default": model})
     config = _config(tmp_path)
     config.defaults.thread_summary_first_threshold = 50
@@ -971,7 +971,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stale hint just below threshold should still reach the live summary check."""
-    model = ScriptedModel([answer('{"summary": "Summary"}')])
+    model = ScriptedModel([answer('{"title": "Summary"}')])
     install_model_providers(monkeypatch, {"default": model})
     config = _config(tmp_path)
     config.defaults.thread_summary_first_threshold = 5
@@ -1014,7 +1014,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
 ) -> None:
     """Ad-hoc invited rooms should inherit the responding entity's summary model override."""
     # Only "qwen" is served, so summarizing with the default model would fail to build it.
-    model = ScriptedModel([answer('{"summary": "Summary"}')])
+    model = ScriptedModel([answer('{"title": "Summary"}')])
     install_model_providers(monkeypatch, {"qwen": model})
     config = _config(tmp_path)
     config.defaults.thread_summary_first_threshold = 1
@@ -2090,6 +2090,7 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
                 new=AsyncMock(return_value=case.dispatch),
             ),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
+            patch("mindroom.turn_policy.TurnPolicy.aims_command_at_me", new=AsyncMock(return_value=False)),
         ):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
@@ -2210,9 +2211,13 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
             ),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
-                new=AsyncMock(return_value=DispatchPlan(kind="route", router_message="route this")),
+                new=AsyncMock(return_value=DispatchPlan(kind="route")),
             ),
-            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_route,
+            patch(
+                "mindroom.turns.dispatch.execute_router_relay",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_route,
         ):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
@@ -2579,7 +2584,6 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
                     room,
                     event,
                     facts=make_ingress_facts(event.sender),
-                    target=target,
                     envelope=envelope,
                     coalescing_thread_id="$thread",
                     ticket=ticket,

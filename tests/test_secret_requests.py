@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import secret_requests
+from mindroom.config.egress_broker import EgressService
 from mindroom.secret_requests import (
     SECRET_REQUEST_TTL_SECONDS,
     TEMPORARY_SECRET_KEEP_SECONDS,
@@ -155,6 +156,49 @@ async def test_content_carries_a_link_and_a_field_hint_when_given() -> None:
 
     assert (content["url"], content["placeholder"]) == ("https://github.com/settings/tokens", "ghp_…")
     assert "label" not in content
+
+
+@pytest.mark.asyncio
+async def test_content_shows_a_proposed_service_without_any_value() -> None:
+    """A card that adds a service shows its rules (port only when named, auth names, never a template) and env."""
+    service = EgressService.model_validate(
+        {
+            "display_name": "Acme",
+            "rules": [
+                {"host": "api.acme.test", "path_prefix": "/v1/", "auth": {"type": "bearer"}},
+                {
+                    "host": "git.acme.test",
+                    "port": 8443,
+                    "auth": {"type": "header", "name": "X-Key", "template": "k {secret}"},
+                },
+                {"host": "dav.acme.test", "auth": {"type": "basic", "username": "bot"}},
+                {"host": "q.acme.test", "auth": {"type": "query", "name": "api_key"}},
+            ],
+            "placeholder_env": {"ACME_TOKEN": "mindroom-brokered"},
+        },
+    )
+    target = KeyTarget(service="acme", worker_target=worker_target(), hosts=(), new_service=service)
+    request = _SecretRequestRegistry().register(
+        room_id=ROOM,
+        requester_id="@alice:example.org",
+        agent_name="code",
+        target=target,
+        now=1000.0,
+    )
+
+    content = secret_request_content(request, display_name="Acme", reason="to deploy", status="pending")
+
+    assert content["new_service"] == {
+        "name": "acme",
+        "display_name": "Acme",
+        "rules": [
+            {"host": "api.acme.test", "path_prefix": "/v1/", "auth": {"type": "bearer"}},
+            {"host": "git.acme.test", "path_prefix": "/", "port": 8443, "auth": {"type": "header", "name": "X-Key"}},
+            {"host": "dav.acme.test", "path_prefix": "/", "auth": {"type": "basic", "username": "bot"}},
+            {"host": "q.acme.test", "path_prefix": "/", "auth": {"type": "query", "name": "api_key"}},
+        ],
+        "placeholder_env": {"ACME_TOKEN": "mindroom-brokered"},
+    }
 
 
 def test_bodies() -> None:

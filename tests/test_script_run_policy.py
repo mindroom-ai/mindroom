@@ -227,7 +227,7 @@ def test_launch_grants_preserve_concrete_overrides_over_preset_in_any_order(
 
     grants = resolve_script_launch_grants(context)
 
-    assert ScriptToolGrant("coding", "read_file") in grants
+    assert ScriptToolGrant("filesystem", "read_file") in grants
     assert all(grant.toolkit_name != "shell" for grant in grants)
 
 

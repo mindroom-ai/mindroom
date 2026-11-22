@@ -1,4 +1,4 @@
-"""Leaf wire values for structured Matrix thread model commands."""
+"""Leaf wire values for Matrix thread model commands and opening messages."""
 
 from __future__ import annotations
 
@@ -10,18 +10,24 @@ from typing import Literal, NotRequired, TypedDict, TypeGuard, cast
 __all__ = [
     "MODEL_SELECTION_CONTENT_KEY",
     "MODEL_SELECTION_RESULT_CONTENT_KEY",
+    "THREAD_MODEL_CONTENT_KEY",
     "CommandResultContent",
     "ModelSelectionRequest",
     "ModelSelectionResult",
+    "ThreadModelChoice",
     "command_result_content_to_dict",
     "freeze_command_result_content",
+    "model_selection_names_runtime",
     "model_selection_result",
     "model_selection_targets_other_runtime",
     "parse_model_selection",
+    "parse_thread_model_choice",
 ]
 
 MODEL_SELECTION_CONTENT_KEY = "io.mindroom.model_selection"
 MODEL_SELECTION_RESULT_CONTENT_KEY = "io.mindroom.model_selection_result"
+
+THREAD_MODEL_CONTENT_KEY = "io.mindroom.thread_model"
 
 type CommandResultContent = Mapping[str, Mapping[str, str | int | None]]
 
@@ -55,6 +61,40 @@ class ModelSelectionResult(TypedDict):
 
 def _bounded_string(value: object, limit: int) -> TypeGuard[str]:
     return isinstance(value, str) and bool(value.strip()) and len(value) <= limit
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadModelChoice:
+    """A model reference chosen for a new thread on one runtime."""
+
+    runtime_user_id: str
+    runtime_device_id: str
+    model: str
+
+
+def parse_thread_model_choice(content: Mapping[str, object]) -> ThreadModelChoice | None:
+    """Read an opening-message model choice, ignoring absent or malformed metadata."""
+    raw = content.get(THREAD_MODEL_CONTENT_KEY)
+    if not isinstance(raw, Mapping) or set(raw) != {"version", "runtime_user_id", "runtime_device_id", "model"}:
+        return None
+    version, runtime_user_id, runtime_device_id, model = (
+        raw["version"],
+        raw["runtime_user_id"],
+        raw["runtime_device_id"],
+        raw["model"],
+    )
+    if (
+        type(version) is not int
+        or version != 1
+        or not _bounded_string(runtime_user_id, 1024)
+        or runtime_user_id != runtime_user_id.strip()
+        or not _bounded_string(runtime_device_id, 255)
+        or runtime_device_id != runtime_device_id.strip()
+        or not _bounded_string(model, 1024)
+        or model != model.strip()
+    ):
+        return None
+    return ThreadModelChoice(runtime_user_id, runtime_device_id, model)
 
 
 def parse_model_selection(content: Mapping[str, object]) -> ModelSelectionRequest | None:
@@ -100,6 +140,12 @@ def model_selection_targets_other_runtime(content: Mapping[str, object], user_id
             ("runtime_device_id", device_id),
         )
     )
+
+
+def model_selection_names_runtime(content: Mapping[str, object], user_id: str) -> bool:
+    """Return whether a structured selection names this account, whose device answered its discovery."""
+    raw = content.get(MODEL_SELECTION_CONTENT_KEY)
+    return isinstance(raw, Mapping) and cast("Mapping[str, object]", raw).get("runtime_user_id") == user_id
 
 
 def model_selection_result(

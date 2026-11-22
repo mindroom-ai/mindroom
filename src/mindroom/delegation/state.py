@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, get_args
 
 from mindroom.history.types import HistoryScope
+from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -199,6 +200,15 @@ class DelegationChild:
     # Unix seconds when each of the turn's tool calls that has not completed was first announced, across its pauses,
     # by call id; the caller's progress and the feed's row name it.
     tool_started_at: dict[str, float] = field(default_factory=dict)
+    # LEGACY_COMPAT: Delegation child snapshots stored before a subagent call named a title.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `title`.
+    # Last legacy release: v2026.11.445; the next, still unreleased, release writes it.
+    # Handling: The default reads such a child as untitled, so its rows show its task, as those releases' did. It
+    # stays on the model for the reason above.
+    # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did.
+    # What people watching the run see it as, from the call that started it; follow-ups keep it.
+    title: str = ""
     # LEGACY_COMPAT: Delegation child snapshots stored before a workflow run could run agents.
     # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
     # background job's adapter that lacks `workflow_run_id`, `workflow_node_key` and `workflow_generation`.
@@ -222,6 +232,11 @@ class DelegationChild:
         fields: dict[str, Any] = dict(data)
         persona = fields.pop("persona")
         return cls(**fields, persona=None if persona is None else SubagentPersona.from_dict(persona))
+
+
+def display_title(title: object) -> str:
+    """Return ``title`` on one line of at most 80 characters, redacted before it is cut; anything but text is none."""
+    return redact_sensitive_text(" ".join(title.split()), max_length=80) if isinstance(title, str) and title else ""
 
 
 def interrupted_by_restart(child: DelegationChild) -> bool:
@@ -370,7 +385,7 @@ def member_slot_id(member_ids: Collection[str], member: str | None, reported_nam
 
     A name that is not one, None included, has no slot; ``reported_name`` is how the error names it then, if given.
     """
-    if member not in member_ids:
+    if member is None or member not in member_ids:
         msg = f"Team has no frozen member slot for {reported_name or member!r}"
         raise RuntimeError(msg)
     return member

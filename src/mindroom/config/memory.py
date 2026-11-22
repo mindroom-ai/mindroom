@@ -9,7 +9,6 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validat
 from mindroom.config.legacy_fields import (
     RETIRED_AUTO_FLUSH_FIELDS,
     RETIRED_MEMORY_FIELDS,
-    RETIRED_MEMORY_FILE_FIELDS,
     drop_retired_fields,
 )
 from mindroom.config.models import EmbedderConfig, normalize_api_key_setting
@@ -163,29 +162,6 @@ class _MemoryLLMConfig(BaseModel):
         return normalize_api_key_setting(value, "memory.llm.config.api_key")
 
 
-class _MemoryFileConfig(BaseModel):
-    """File-backed memory configuration."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    @model_validator(mode="before")
-    @classmethod
-    def drop_retired_memory_file_fields(cls, data: object) -> object:
-        """Drop the retired fallback root older dashboards saved, before unknown keys are rejected."""
-        return drop_retired_fields(data, RETIRED_MEMORY_FILE_FIELDS)
-
-    max_entrypoint_lines: int = Field(
-        default=200,
-        ge=1,
-        description="Maximum number of lines to preload from MEMORY.md",
-    )
-    max_entrypoint_tokens: int = Field(
-        default=50000,
-        ge=1,
-        description="Maximum tokens, as the turn's model counts them, of whole lines to preload from MEMORY.md",
-    )
-
-
 class _MemoryAutoFlushBatchConfig(BaseModel):
     """Batching controls for background memory auto-flush."""
 
@@ -326,7 +302,6 @@ class MemoryConfig(BaseModel):
         description="Embedder configuration for memory",
     )
     llm: _MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
-    file: _MemoryFileConfig = Field(default_factory=_MemoryFileConfig, description="File-backed memory configuration")
     search: MemorySearchConfig = Field(
         default_factory=MemorySearchConfig,
         description="Search behavior for file-backed memory",

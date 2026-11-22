@@ -33,7 +33,7 @@ from mindroom.llm.messages import system_text
 from mindroom.llm.provider import ToolSpec
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
-from mindroom.tool_system.agent_tools import resolve_agent_tools, room_turn_offers, turn_room_flags
+from mindroom.tool_system.agent_tools import resolve_agent_tools, room_turn_offers, turn_keeps_room_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, offered_refusal
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
@@ -62,6 +62,8 @@ def _runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:
         process_env={
             "MATRIX_HOMESERVER": "http://localhost:8008",
             "MINDROOM_NAMESPACE": "",
+            # Agent Keys is off unless a test sets the broker port.
+            "MINDROOM_EGRESS_BROKER_PORT": "off",
             **env,
         },
     )
@@ -155,10 +157,8 @@ def test_openai_compatible_context_hides_desktop(tmp_path: Path) -> None:
     raw["agents"]["code"]["tools"] = ["calculator", "desktop"]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    room_tools, matrix_room_tools = turn_room_flags(identity)
     candidates = resolve_agent_tools(config, "code", builtin_tool_registry()).candidates(
-        room_tools=room_tools,
-        matrix_room_tools=matrix_room_tools,
+        room_tools=turn_keeps_room_tools(identity),
     )
 
     assert [entry.name for entry in candidates] == ["calculator"]
@@ -204,14 +204,14 @@ def test_config_accepts_inline_deferred_tool_flags(tmp_path: Path) -> None:
     entries = config.agents["code"].tools
     assert [(entry.name, entry.defer, entry.initial) for entry in entries] == [
         ("shell", False, False),
-        ("file", True, True),
+        ("filesystem", True, True),
         ("searxng", True, False),
     ]
     assert entries[1].overrides == {"enable_delete_file": True}
     assert entries[2].overrides == {"fixed_max_results": 10}
     assert config.authored_model_dump()["agents"]["code"]["tools"] == [
         "shell",
-        {"file": {"enable_delete_file": True, "defer": True, "initial": True}},
+        {"filesystem": {"enable_delete_file": True, "defer": True, "initial": True}},
         {"searxng": {"fixed_max_results": 10, "defer": True}},
     ]
 
@@ -359,7 +359,7 @@ def test_eager_preset_expansion_preserves_default_concrete_tool_overrides(tmp_pa
     overrides_by_name = {entry.name: entry.tool_config_overrides for entry in runtime_configs}
 
     assert overrides_by_name["shell"] == {"shell_path_prepend": "/run/wrappers/bin"}
-    assert overrides_by_name["coding"] == {}
+    assert overrides_by_name["filesystem"] == {}
 
 
 def test_attached_deferred_concrete_tool_preserves_override_over_preset_child(tmp_path: Path) -> None:
@@ -627,7 +627,7 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
 
 
 def _egress_broker_env(*, broker_on: bool) -> dict[str, str]:
-    return {"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}
+    return {"MINDROOM_EGRESS_BROKER_PORT": "8768" if broker_on else "off"}
 
 
 @pytest.mark.asyncio
@@ -1857,7 +1857,7 @@ async def test_config_order_decides_which_same_named_function_is_registered(
     """Agno registers the first toolkit's function for a name; deferral follows that owner and search offers only it."""
     raw = _base_config_data()
     raw["models"]["default"] = {"provider": provider, "id": model_id}  # type: ignore[index]
-    tools: list[object] = ["file", {"coding": {"defer": True}}]
+    tools: list[object] = ["filesystem", {"python": {"defer": True}}]
     raw["agents"]["code"]["tools"] = tools[::-1] if deferred_first else tools  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
@@ -1867,7 +1867,7 @@ async def test_config_order_decides_which_same_named_function_is_registered(
     if "tool_search" in _function_names(agent):
         matches = (await _search(agent, "read_file"))["matches"]
         offered = [match["toolkit"] for match in matches if match["name"] == "read_file"]
-        assert offered == (["coding"] if deferred_first else [])
+        assert offered == (["python"] if deferred_first else [])
 
 
 def test_explicit_dynamic_tools_entry_is_ignored_where_call_tool_cannot_be_rewritten(tmp_path: Path) -> None:

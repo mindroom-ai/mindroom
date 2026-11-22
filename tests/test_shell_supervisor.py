@@ -243,6 +243,31 @@ async def test_a_supervised_run_relays_its_progress_before_its_result(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_a_launch_failure_exits_as_a_shell_reports_it_only_for_a_caller_that_asks(tmp_path: Path) -> None:
+    """A missing program ends as a command that exited 127 for a caller that asks, and as an error otherwise."""
+
+    async def run(**asked: bool) -> ShellRunResult:
+        return await run_command_via_supervisor(
+            socket_path,
+            namespace="ns",
+            argv=["/nonexistent-binary-xyz"],
+            env=_MINIMAL_ENV,
+            cwd=str(tmp_path),
+            tail=100,
+            timeout=5.0,
+            on_timeout="kill",
+            **asked,
+        )
+
+    async with _running_server({}) as socket_path:
+        asked, unasked = await run(launch_failure_exits=True), await run()
+
+    assert asked == ShellRunResult(message="Exit code 127\nStderr:\n/nonexistent-binary-xyz: No such file or directory")
+    assert unasked.execution_error
+    assert unasked.message.startswith("Error: [Errno 2]")
+
+
+@pytest.mark.asyncio
 async def test_run_nonzero_exit_returns_stderr() -> None:
     """Non-zero exits should surface their exit code and stderr."""
     registry: dict[str, ProcessRecord] = {}
@@ -1149,7 +1174,7 @@ async def test_toolkit_supervisor_result_includes_workspace_cwd(
     monkeypatch: pytest.MonkeyPatch,
     manager: _ShellSupervisorManager,
 ) -> None:
-    """Supervisor-backed shell results should expose the same cwd contract as local results."""
+    """Supervisor-backed shell results run in the same cwd as local results, without a cwd line."""
     monkeypatch.setenv(SHELL_SUPERVISOR_SOCKET_ENV, manager.ensure())
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1165,7 +1190,7 @@ async def test_toolkit_supervisor_result_includes_workspace_cwd(
 
     result = await run_fn(["pwd"])
 
-    assert result.splitlines() == [f"[cwd: {workspace}]", str(workspace)]
+    assert result == str(workspace)
 
 
 @pytest.mark.asyncio

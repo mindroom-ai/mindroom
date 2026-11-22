@@ -20,7 +20,8 @@ from mindroom.api.connection_agents import SHARED_CREDENTIALS_GATEWAY_MESSAGE
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.plugin import PluginEntryConfig
-from tests.access_schema_support import membership_index
+from mindroom.config.tool_aliases import TOOL_ALIASES
+from tests.access_schema_support import OBSERVER_USER_ID, membership_index
 from tests.api.test_mcp_clients import _connect
 from tests.api.test_mcp_gateway_api import (
     MCP_HEADERS,
@@ -88,7 +89,13 @@ def test_room_membership_grants_require_room_independent_access(
     )
     assert not result["isError"]
     assert json.loads(result["structuredContent"]["result"])["result"] == 3
-    memberships.mark_room_unready(config, snapshot.runtime_paths, "!project:example.com", reason="membership_unknown")
+    memberships.mark_room_unready(
+        config,
+        snapshot.runtime_paths,
+        "!project:example.com",
+        observer_user_id=OBSERVER_USER_ID,
+        reason="membership_unknown",
+    )
     assert gateway_client.get(SELECTION, headers=alice).json()["agents"] == {}
     assert _call(gateway_client, token, "search_tools", {})["structuredContent"] == {"results": []}
     assert _call(
@@ -155,7 +162,7 @@ def test_membership_revocation_during_preparation_stops_tool_body(
                 config,
                 "!project:example.com",
                 event,
-                control_user_id="@router:example.org",
+                control_user_id=OBSERVER_USER_ID,
             )
         finally:
             release.set()
@@ -225,6 +232,32 @@ def test_withdrawal_works_while_a_configured_plugin_does_not_load(
 
     assert response.status_code == 200, response.text
     assert response.json()["agents"] == {}
+
+
+def test_a_new_selection_takes_a_toolkits_other_name_and_a_saved_one_stays_as_saved(
+    gateway_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newly chosen file or coding selects filesystem; a name saved before it became an alias is never revived."""
+    config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
+    headers = {**signed_headers("alice"), "Origin": ORIGIN}
+
+    def select(*tools: str) -> object:
+        response = gateway_client.post(SELECTION, headers=headers, json={"agents": {"personal": list(tools)}})
+        assert response.status_code == 200, response.text
+        return response.json()["agents"]
+
+    config.agents["personal"].tools = ["calculator", "filesystem"]
+    assert select("coding", "calculator") == {"personal": ["filesystem", "calculator"]}
+
+    config.agents["personal"].tools = ["calculator", "duckduckgo"]
+    assert select("duckduckgo") == {"personal": ["duckduckgo"]}
+    config.agents["personal"].tools = ["calculator"]
+    monkeypatch.setitem(TOOL_ALIASES, "duckduckgo", "calculator")
+    assert gateway_client.get(SELECTION, headers=headers).json()["agents"] == {}
+    assert select("duckduckgo") == {}
+    assert select("duckduckgo") == {"personal": ["calculator"]}
 
 
 def test_tool_selection_filters_discovery_and_blocks_unselected_dispatch(

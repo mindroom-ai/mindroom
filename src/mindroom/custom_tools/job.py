@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.tool_jobs.consumption import consume_tool_job, job_failure, job_failure_text
 from mindroom.tool_jobs.control import waiting_on_jobs
-from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_conversation
+from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_ended_jobs
 from mindroom.tool_jobs.runtime import (
     JobAccessError,
     JobUnavailableError,
@@ -65,8 +65,7 @@ async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> str
     """Return every ended, unacknowledged job of this caller with its result, acknowledging each once this call saves."""
     sections: list[str] = []
     collected: list[ToolValue] = []
-    current = current_conversation()
-    for job in () if current is None else await current[0].ended_jobs(current[1]):
+    for job in await current_ended_jobs():
         try:
             waited = await runtime.wait(job.job_id, owner=owner, depth=0, timeout=0)
         except JobAccessError:

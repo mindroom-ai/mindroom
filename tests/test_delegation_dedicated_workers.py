@@ -246,6 +246,30 @@ def test_a_caller_a_reload_removed_is_refused(tmp_path: Path) -> None:
     )
 
 
+def test_a_follow_up_keeps_the_title_its_child_started_with(tmp_path: Path) -> None:
+    """The title the starting call named stays the sub-agent's across its turns, like its worker choice."""
+    paths = _paths(tmp_path, _KUBERNETES)
+    config = _config(paths)
+    child = _child(config, paths, title="Measure cold start")
+
+    follow_up = prepare_child_turn(
+        "leader",
+        "code",
+        "again",
+        owner=_identity(),
+        config=config,
+        runtime_paths=paths,
+        depth=0,
+        budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=child,
+        persona=None,
+    )
+
+    assert (child.title, follow_up.title) == ("Measure cold start", "Measure cold start")
+
+
 def test_a_dedicated_child_records_its_choice_and_its_follow_ups_keep_it(tmp_path: Path) -> None:
     """A follow-up keeps its child's worker and profile; a child's own children choose for themselves."""
     paths = _paths(tmp_path, _KUBERNETES)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from http import HTTPStatus
+from http.client import HTTPException
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -17,9 +19,17 @@ from mindroom.agent_cli.shell_contract import (
     AGENT_CLI_WINDOW_HEADER,
 )
 
+_HTTP_TIMEOUT_SECONDS = 30
+_MAX_LONG_POLL_SECONDS = 25
+_CANCEL_TIMEOUT_SECONDS = 8
+
 
 class AgentCliUnavailableError(RuntimeError):
     """Authority or transport could not yield a known response."""
+
+
+class AgentCliRefusedError(AgentCliUnavailableError):
+    """The server answered a request with a 4xx it gave no reason for, so it did not act on it."""
 
 
 def _rejection(error: HTTPError) -> ValueError:
@@ -27,7 +37,7 @@ def _rejection(error: HTTPError) -> ValueError:
     msg = "Agent CLI request was rejected"
     try:
         body = read_json(error.read(MAX_ENVELOPE_BYTES + 1))
-    except (OSError, ValueError):
+    except (OSError, HTTPException, ValueError):
         body = None
     match body:
         case {"detail": str(detail)} if detail:
@@ -74,11 +84,40 @@ class AgentCliClient:
         """Submit once; callers retain the exact call ID on uncertain acceptance."""
         return self._request("/api/agent-cli/operations", canonical_json(payload).encode("utf-8"))
 
-    def receipt(self, call_id: str) -> dict[str, object]:
-        """Read one canonical call ID without client-side identity selectors."""
-        return self._request(f"/api/agent-cli/calls/{UUID(call_id)}")
+    def receipt(
+        self,
+        call_id: str,
+        *,
+        timeout: float = _HTTP_TIMEOUT_SECONDS,
+        wait: float | None = None,
+        after_progress: int | None = None,
+    ) -> dict[str, object]:
+        """Read one canonical call ID, optionally long-polling up to 25 seconds."""
+        route = f"/api/agent-cli/calls/{UUID(call_id)}"
+        params: list[str] = []
+        if wait is not None and wait > 0:
+            params.append(f"wait={min(wait, _MAX_LONG_POLL_SECONDS):g}")
+        if after_progress is not None and after_progress >= 0:
+            params.append(f"after_progress={after_progress}")
+        if params:
+            route = f"{route}?{'&'.join(params)}"
+        return self._request(route, timeout=min(timeout, _HTTP_TIMEOUT_SECONDS))
 
-    def _request(self, route: str, data: bytes | None = None) -> dict[str, object]:
+    def cancel(self, call_id: str, *, timeout: float = _CANCEL_TIMEOUT_SECONDS) -> dict[str, object]:
+        """Idempotently cancel one canonical call ID."""
+        return self._request(
+            f"/api/agent-cli/calls/{UUID(call_id)}/cancel",
+            b"",
+            timeout=min(timeout, _HTTP_TIMEOUT_SECONDS),
+        )
+
+    def _request(
+        self,
+        route: str,
+        data: bytes | None = None,
+        *,
+        timeout: float = _HTTP_TIMEOUT_SECONDS,
+    ) -> dict[str, object]:
         headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
         if self._window:
             headers[AGENT_CLI_WINDOW_HEADER] = self._window
@@ -88,14 +127,15 @@ class AgentCliClient:
             headers=headers,
         )
         try:
-            with self._opener.open(request, timeout=30) as response:
+            with self._opener.open(request, timeout=timeout) as response:
                 result = read_json(response.read(MAX_ENVELOPE_BYTES + 1))
         except HTTPError as exc:
             if exc.code in {400, 409, 413, 422}:
                 raise _rejection(exc) from None
             msg = "Agent CLI authority or transport is unavailable"
-            raise AgentCliUnavailableError(msg) from None
-        except (OSError, URLError, ValueError) as exc:
+            refused = HTTPStatus.BAD_REQUEST <= exc.code < HTTPStatus.INTERNAL_SERVER_ERROR
+            raise (AgentCliRefusedError if refused else AgentCliUnavailableError)(msg) from None
+        except (OSError, HTTPException, URLError, ValueError) as exc:
             # Name the address so a blocked route back to MindRoom is diagnosable from the shell.
             msg = f"Agent CLI transport outcome is unknown; check that this shell can reach {self._url}"
             raise AgentCliUnavailableError(msg) from exc

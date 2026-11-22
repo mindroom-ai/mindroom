@@ -8,6 +8,7 @@ import pytest
 from mindroom.matrix_rtc.events import (
     CALL_MEMBER_EVENT_TYPE,
     DEFAULT_MEMBERSHIP_EXPIRES_MS,
+    ReceivedFrameKey,
     build_key_to_device_content,
     build_membership_content,
     membership_state_key,
@@ -109,11 +110,11 @@ def test_parse_membership_rejects_non_room_scope(scope: str) -> None:
     [
         None,
         {"type": "other", "focus_selection": "oldest_membership"},
-        {"type": "livekit", "focus_selection": "multi_sfu"},
+        {"type": "livekit", "focus_selection": "unknown"},
     ],
 )
 def test_parse_membership_rejects_unsupported_focus_mode(focus_active: object) -> None:
-    """Only LiveKit oldest-membership focus mode enters the single-SFU bridge."""
+    """Only the supported LiveKit focus modes can enter the call roster."""
     content = build_membership_content(
         user_id=USER,
         device_id=DEVICE,
@@ -122,6 +123,40 @@ def test_parse_membership_rejects_unsupported_focus_mode(focus_active: object) -
     )
 
     assert parse_membership_event(_membership_event({**content, "focus_active": focus_active})) is None
+
+
+@pytest.mark.parametrize(
+    ("transport", "focus"),
+    [
+        ({"type": "livekit", "livekit_service_url": SERVICE_URL, "livekit_alias": "!room:example.org"}, SERVICE_URL),
+        # matrix-js-sdk 45.1.0 src/matrixrtc/LivekitTransport.ts:69-95: a transport may name an SFU directly.
+        ({"type": "livekit", "livekit_service_url": SERVICE_URL, "url": "wss://sfu.example.org"}, SERVICE_URL),
+        ({"type": "livekit", "url": "wss://sfu.example.org"}, None),
+        ({"type": "other", "livekit_service_url": SERVICE_URL}, None),
+    ],
+    ids=["service", "service-and-direct-url", "direct-url", "not-livekit"],
+)
+def test_parse_multi_sfu_membership_is_the_sdk_41_member_advertising_the_same_focus(
+    transport: dict[str, str],
+    focus: str | None,
+) -> None:
+    """Whatever its first transport holds, a ``multi_sfu`` membership parses to the SDK 41 member's exact value."""
+    content = build_membership_content(
+        user_id=USER,
+        device_id=DEVICE,
+        livekit_service_url=SERVICE_URL,
+        expires_ms=123,
+    )
+    content["foci_preferred"] = [transport, {"type": "livekit", "livekit_service_url": "https://later.example.org"}]
+    sdk_41_member = parse_membership_event(_membership_event(content))
+    # matrix-js-sdk 45.1.0 src/matrixrtc/MembershipManager.ts:1038-1059.
+    content["focus_active"] = {"type": "livekit", "focus_selection": "multi_sfu"}
+
+    member = parse_membership_event(_membership_event(content))
+
+    assert sdk_41_member is not None
+    assert sdk_41_member.livekit_service_url == focus
+    assert member == sdk_41_member
 
 
 def test_parse_membership_does_not_scan_past_primary_focus() -> None:
@@ -182,13 +217,21 @@ def test_parse_membership_rejects_boolean_timestamps() -> None:
 def test_key_to_device_content_round_trip() -> None:
     """Key to device content round trip."""
     content = build_key_to_device_content(
-        key_base64="a2V5a2V5a2V5a2V5a2V5a2U=",
+        key_base64="QUJDREVGR0hJSktMTU5PUA==",
         key_index=3,
         room_id="!room:example.org",
         member_id=f"{USER}:{DEVICE}",
         device_id=DEVICE,
         sent_ts=777,
     )
+    # matrix-js-sdk 41.7.0 src/matrixrtc/ToDeviceKeyTransport.ts:73-86.
+    assert content == {
+        "room_id": "!room:example.org",
+        "keys": {"index": 3, "key": "QUJDREVGR0hJSktMTU5PUA=="},
+        "member": {"id": f"{USER}:{DEVICE}", "claimed_device_id": DEVICE},
+        "session": {"application": "m.call", "call_id": "", "scope": "m.room"},
+        "sent_ts": 777,
+    }
     received = parse_key_to_device_content(
         USER,
         content,
@@ -200,6 +243,85 @@ def test_key_to_device_content_round_trip() -> None:
     assert received.received_at_ms == 888
     # A key for a different room must not leak into this session.
     assert parse_key_to_device_content(USER, content, room_id="!other:example.org", received_at_ms=888) is None
+
+
+@pytest.mark.parametrize("variant", ["wire", "modern_only", "different_legacy_key", "malformed_modern_key"])
+def test_parse_sdk_45_to_device_key(variant: str) -> None:
+    """Read the SDK 45 media key, preferring it over the deprecated copy when valid."""
+    room_id = "!room:example.org"
+    key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+    media_key = {"index": 5, "key": key}
+    # matrix-js-sdk 45.1.0 src/matrixrtc/ToDeviceKeyTransport.ts:91-107.
+    content = {
+        "room_id": room_id,
+        "member_id": f"{USER}:{DEVICE}",
+        "media_key": media_key,
+        "keys": media_key,
+        "member": {"id": f"{USER}:{DEVICE}", "claimed_device_id": DEVICE},
+    }
+    # SDK 45 types.ts:78-114 allows omitting the deprecated copies.
+    if variant == "modern_only":
+        del content["keys"]
+        content["member"] = {"claimed_device_id": DEVICE}
+    elif variant == "different_legacy_key":
+        content["keys"] = {"index": 9, "key": "QUJDREVGR0hJSktMTU5PUA=="}
+    elif variant == "malformed_modern_key":
+        content["media_key"] = {"index": True, "key": key}
+
+    received = parse_key_to_device_content(USER, content, room_id=room_id, received_at_ms=888)
+
+    assert received is not None
+    assert received.user_id == USER
+    assert received.claimed_device_id == DEVICE
+    assert received.key_index == 5
+    assert received.key_base64 == key
+    assert received.received_at_ms == 888
+
+
+def test_parse_sdk_45_rejects_invalid_member_id() -> None:
+    """A modern key event with a non-string member ID is malformed."""
+    media_key = {"index": 5, "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="}
+    content = {
+        "room_id": "!room:example.org",
+        "member_id": 42,
+        "media_key": media_key,
+        "keys": media_key,
+        "member": {"id": f"{USER}:{DEVICE}", "claimed_device_id": DEVICE},
+    }
+    assert parse_key_to_device_content(USER, content, room_id="!room:example.org", received_at_ms=888) is None
+
+
+@pytest.mark.parametrize("index", [-1, 256, True, "5", None])
+def test_parse_sdk_45_rejects_invalid_index_without_a_legacy_copy(index: object) -> None:
+    """A message carrying only ``media_key`` has no legacy copy to fall back on."""
+    content = {
+        "room_id": "!room:example.org",
+        "member_id": f"{USER}:{DEVICE}",
+        "media_key": {"index": index, "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="},
+        "member": {"claimed_device_id": DEVICE},
+    }
+    assert parse_key_to_device_content(USER, content, room_id="!room:example.org", received_at_ms=888) is None
+
+
+def test_parse_sdk_45_member_id_does_not_change_the_keys_owner() -> None:
+    """A key belongs to the Matrix sender and its claimed device, whoever the member IDs name."""
+    spoofed = "@victim:example.org:VICTIMDEVICE"
+    content = {
+        "room_id": "!room:example.org",
+        "member_id": spoofed,
+        "media_key": {"index": 5, "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="},
+        "member": {"id": spoofed, "claimed_device_id": DEVICE},
+    }
+
+    received = parse_key_to_device_content(USER, content, room_id="!room:example.org", received_at_ms=888)
+
+    assert received == ReceivedFrameKey(
+        user_id=USER,
+        claimed_device_id=DEVICE,
+        key_base64="AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        key_index=5,
+        received_at_ms=888,
+    )
 
 
 def test_parse_key_content_requires_key_and_claimed_device() -> None:

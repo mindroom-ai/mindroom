@@ -13,12 +13,14 @@ from mindroom.background_tasks import create_background_task, run_blocking_until
 from mindroom.constants import (
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
-    ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     resolve_config_relative_path,
 )
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND
-from mindroom.entity_resolution import current_entity_id, entity_identity_registry, prepared_entity_names_by_user_id
+from mindroom.entity_resolution import (
+    persisted_owner_matrix_id,
+    prepared_entity_names_by_user_id,
+)
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.managed_room_notice import join_names
@@ -32,7 +34,6 @@ from mindroom.matrix.client_room_admin import (
     get_room_members,
     invite_to_room,
 )
-from mindroom.matrix.invited_rooms_store import is_inviter_allowed
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.personal_room_store import (
     PersonalRoomRecord,
@@ -42,7 +43,6 @@ from mindroom.matrix.personal_room_store import (
     read_personal_room,
     write_personal_room,
 )
-from mindroom.matrix.room_accounts import reconcile_room_accounts
 from mindroom.matrix.room_power import privileged_creators, user_power_level
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix_identifiers import managed_room_alias
@@ -78,15 +78,11 @@ _AGENT_REMOVAL_NOTICE = (
     "Inviting {pronoun} here again will remove {pronoun} again."
 )
 _AGENT_REMOVAL_ADVICE = " To talk to {agents}, create a new room and invite {pronoun}."
-# Nobody talks to the router directly, so a new room with it does not help;
-# only an operator listing it in the adoption record lets it stay.
-_ROUTER_REMOVAL_ADVICE = " To keep {router} here, ask an operator to list it in this room's personal-room record."
 # Retries for a removal a member event could not finish. After the last one,
 # the next member event in the room or a restart reconciliation of an eligible
 # owner tries again.
 _GUEST_REMOVAL_RETRY_SECONDS = (30.0, 120.0, 600.0)
 _UNREADABLE_ROOM_ERRCODES = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
-_ROUTER_INVITE_TIMEOUT_SECONDS = 10.0
 # A homeserver that accepts invites itself joins the owner about 100 ms after the invite; Tuwunel retries a failed
 # acceptance after 1 s, so this covers its first attempt and one retry.
 _OWNER_JOIN_WAIT_SECONDS = 2.0
@@ -234,8 +230,14 @@ class PersonalRoomService:
         source_client: nio.AsyncClient,
         *,
         reinvite_departed_owner: bool = False,
+        poster: Callable[[tuple[str | None, str] | None], nio.AsyncClient | None] | None = None,
+        admin: nio.AsyncClient | None = None,
     ) -> str | None:
-        """Reconcile a currently eligible human from a router-observed room."""
+        """Reconcile a currently eligible human from a room its steward observed through ``source_client``.
+
+        ``poster`` gives the account that sends the confirmation, and ``admin`` the one for the optional admin join;
+        the observing account does both where neither is given.
+        """
         if await self._eligible_settings(user_id, source_room_id, source_client) is None:
             return None
         path = personal_room_record_path(self.runtime_paths, self.agent_name, user_id)
@@ -267,32 +269,19 @@ class PersonalRoomService:
                 human_joined = await self._reconcile_membership(
                     record,
                     path,
-                    source_client,
+                    admin or source_client,
                     source_room_id,
                     reinvite_departed_owner,
                 )
-                # Keep the validated room's MindRoom state power levels current, and the state level of a router the
-                # room admits, which publishes its thread mode; then let the router, whose client observed the trigger,
-                # publish the room's accounts if it is already in the room.
-                await ensure_managed_room_power_levels(
-                    self._client(),
-                    record.room_id,
-                    state_writer_ids=self._admitted_router_ids(record),
-                )
-                if record.room_id in source_client.rooms:
-                    await reconcile_room_accounts(
-                        source_client,
-                        self.runtime.config,
-                        self.runtime_paths,
-                        record.room_id,
-                    )
+                # Keep the validated room's MindRoom state power levels current. The room's steward publishes its
+                # thread mode and accounts, as in any room.
+                await ensure_managed_room_power_levels(self._client(), record.room_id)
                 if human_joined is None:
                     return record.room_id
                 await self._finish(record, path, source_room_id, human_joined=human_joined)
                 settings = self._require_current_settings(user_id, source_room_id)
                 if source_room_id == record.source_room_id:
-                    await self._confirm(record, path, settings, source_client)
-                await self._invite_router_if_never_member(record)
+                    await self._confirm(record, path, settings, poster or (lambda _sender: source_client))
                 return record.room_id
         except _PolicyChangedError:
             return None
@@ -349,41 +338,6 @@ class PersonalRoomService:
             msg = "Personal-room invite failed"
             raise RuntimeError(msg)
 
-    def _admitted_router_ids(self, record: PersonalRoomRecord) -> tuple[str, ...]:
-        """Return the router a personal room admits: an imported room's listed router, else this installation's."""
-        if record.adoption is not None:
-            router_id = record.adoption.router_user_id
-            return () if router_id is None else (router_id,)
-        return (current_entity_id(ROUTER_AGENT_NAME, self.runtime_paths).full_id,)
-
-    async def _invite_router_if_never_member(self, record: PersonalRoomRecord) -> None:
-        """Invite the router, which posts approval cards, into a created room it was never in; one that left stays out.
-
-        Runs once the owner's onboarding is done, so a refused router invite never holds up the owner's join or welcome;
-        it fails this attempt, which onboarding retries. A time limit stops a rate-limited invite, which the client
-        retries without end, from holding the owner's lock. Adopted rooms keep the participants their record lists, and a
-        router whose `accept_invites` leaves out this agent never joins, so neither gets an invite.
-        """
-        if record.adoption is not None:
-            return
-        client = self._client()
-        if not is_inviter_allowed(self.runtime.config, self.runtime_paths, ROUTER_AGENT_NAME, client.user_id):
-            return
-        assert record.room_id is not None
-        router_id = current_entity_id(ROUTER_AGENT_NAME, self.runtime_paths).full_id
-        async with asyncio.timeout(_ROUTER_INVITE_TIMEOUT_SECONDS):
-            response = await client.room_get_state_event(record.room_id, "m.room.member", router_id)
-            # The client parses an error other than 404 as this response, with the error as its content.
-            if isinstance(response, nio.RoomGetStateEventResponse) and "membership" in response.content:
-                return
-            if not isinstance(response, nio.RoomGetStateEventError) or response.status_code != "M_NOT_FOUND":
-                msg = "Personal-room router membership unavailable"
-                raise RuntimeError(msg)
-            invited = await invite_to_room(client, record.room_id, router_id)
-        if not invited:
-            msg = "Personal-room router invite failed"
-            raise RuntimeError(msg)
-
     async def _observe_owner_membership(
         self,
         record: PersonalRoomRecord,
@@ -422,7 +376,7 @@ class PersonalRoomService:
             # A homeserver that accepts invites itself may join the owner just after this attempt's invite.
             invited_now = initial_owner_membership is None
             if failure is not None and not (invited_now and await self._owner_joins_within_wait(record)):
-                msg = f"Personal-room initial join failed: the router's admin join {failure}"
+                msg = f"Personal-room initial join failed: the admin join {failure}"
                 raise RuntimeError(msg)
             human_joined = True
         else:
@@ -537,11 +491,7 @@ class PersonalRoomService:
             permitted_members.update(record.adoption.additional_user_ids)
             router_id = record.adoption.router_user_id
             if record.adoption.agent_user_id != agent_id or (
-                router_id is not None
-                and router_id
-                != entity_identity_registry(self.runtime.config, self.runtime_paths)
-                .current_id(ROUTER_AGENT_NAME)
-                .full_id
+                router_id is not None and router_id != persisted_owner_matrix_id(self.runtime_paths)
             ):
                 msg = "Personal-room adopted ownership identity does not match"
                 raise PersonalRoomValidationError(msg)
@@ -627,21 +577,19 @@ class PersonalRoomService:
         """Explain why agents left an adopted room and what the owner can do instead."""
         config = self.runtime.config
         prepared = prepared_entity_names_by_user_id(config, self.runtime_paths)
-        entity_names = {user_id: prepared.get(user_id) for user_id in agent_ids}
-        router_removed = ROUTER_AGENT_NAME in entity_names.values()
         # A blank display name or an unprepared account shows the Matrix ID.
-        agents = sorted(
-            (name and config.entity_display_name(name)) or user_id
-            for user_id, name in entity_names.items()
-            if name != ROUTER_AGENT_NAME
-        )
-        router = config.entity_display_name(ROUTER_AGENT_NAME)
-        removed = sorted([*agents, router]) if router_removed else agents
+        names = {
+            user_id: (name and config.entity_display_name(name)) or user_id
+            for user_id in agent_ids
+            for name in (prepared.get(user_id),)
+        }
+        removed = sorted(names.values())
+        # Nobody talks to the owner account, so a new room with it helps nobody.
+        owner_id = persisted_owner_matrix_id(self.runtime_paths)
+        agents = sorted(name for user_id, name in names.items() if user_id != owner_id)
         notice = _AGENT_REMOVAL_NOTICE.format(agents=join_names(removed, "and"), pronoun=_pronoun(removed))
         if agents:
             notice += _AGENT_REMOVAL_ADVICE.format(agents=join_names(agents, "and"), pronoun=_pronoun(agents))
-        if router_removed:
-            notice += _ROUTER_REMOVAL_ADVICE.format(router=router)
         return notice
 
     async def guest_membership_event(self, room: nio.MatrixRoom, user_id: str, membership: str) -> None:
@@ -855,21 +803,29 @@ class PersonalRoomService:
         record: PersonalRoomRecord,
         path: Path,
         settings: PersonalRoomsConfig,
-        source_client: nio.AsyncClient,
+        poster: Callable[[tuple[str | None, str] | None], nio.AsyncClient | None],
     ) -> None:
         if not settings.confirmation or record.confirmation_event_id is not None:
             return
+        # A retry keeps the account and device its transaction ID is frozen to, while that account is in the room.
+        device_id = record.confirmation_device_id
+        source_client = poster((record.confirmation_user_id, device_id) if device_id else None)
+        if source_client is None:
+            msg = "Personal-room confirmation has no account to send it"
+            raise RuntimeError(msg)
         if record.confirmation_content is None:
             record.confirmation_content = build_message_content(
                 settings.confirmation.format(**self._template_values(record)),
             )
             record.confirmation_content["msgtype"] = "m.notice"
-            record.confirmation_device_id = source_client.device_id
+            record.confirmation_user_id, record.confirmation_device_id = source_client.user_id, source_client.device_id
             await run_blocking_until_complete(write_personal_room, path, record)
         if self._current_settings(record.user_id, record.source_room_id) is None:
             return
-        if not source_client.device_id or record.confirmation_device_id != source_client.device_id:
-            msg = "Personal-room pending confirmation belongs to a different Matrix device"
+        # LEGACY_COMPAT: A record written before confirmation_user_id existed froze only the posting account's device.
+        frozen = (record.confirmation_user_id or source_client.user_id, record.confirmation_device_id)
+        if not source_client.device_id or frozen != (source_client.user_id, source_client.device_id):
+            msg = "Personal-room pending confirmation belongs to a different Matrix account or device"
             raise RuntimeError(msg)
         delivered = await send_message_result(
             source_client,

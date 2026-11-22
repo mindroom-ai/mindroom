@@ -561,7 +561,7 @@ class ConversationResolver:
         """
         history: ThreadHistoryResult | None = None
         if thread_id is not None:
-            snapshot = await self.dispatch_thread_snapshot(room.room_id, thread_id)
+            snapshot = await self._dispatch_thread_snapshot(room.room_id, thread_id)
             history = (
                 await self.fetch_thread_history(room.room_id, thread_id)
                 if is_thread_history_degraded(snapshot)
@@ -643,7 +643,7 @@ class ConversationResolver:
             logger=self.deps.logger,
         )
 
-    async def dispatch_thread_snapshot(
+    async def _dispatch_thread_snapshot(
         self,
         room_id: str,
         thread_id: str,

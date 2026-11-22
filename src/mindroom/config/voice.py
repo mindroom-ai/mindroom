@@ -118,7 +118,8 @@ class VoiceConfig(BaseModel):
     enabled: bool = Field(default=False, description="Enable voice message processing")
     visible_router_echo: bool = Field(
         default=True,
-        description="Show router voice progress, or direct fallback text when transcription is disabled",
+        title="Voice Transcript",
+        description="Post the transcript of a voice message before the reply",
     )
     stt: VoiceSTTConfig = Field(
         default_factory=VoiceSTTConfig,

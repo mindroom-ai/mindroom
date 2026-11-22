@@ -26,11 +26,13 @@ from structlog.testing import capture_logs
 
 from mindroom import agents, constants
 from mindroom.api import config_lifecycle, main
+from mindroom.api import mcp_gateway as mcp_gateway_api
 from mindroom.api.connections_session_cookie import connections_session_cookie, issue_connections_session
 from mindroom.api.mcp_gateway import GatewayRuntime, gateway_cors_origins, gateway_lifespan, install_gateway_routes
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.mcp_gateway import admission
+from mindroom.mcp_gateway import tools as gateway_tools
 from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.runtime_context import current_execution_identity
 from tests.api.conftest import commit_tool_change, trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
@@ -43,6 +45,8 @@ if TYPE_CHECKING:
     import httpx
     from starlette.requests import Request
     from starlette.responses import Response
+
+    from mindroom.api.connection_agents import AgentToolContext
 
 ORIGIN = "https://assistant.example.org"
 RESOURCE = ORIGIN + "/mcp"
@@ -531,6 +535,38 @@ def test_native_dispatch_rejects_changed_publication(
     else:
         assert events == ["close"], "Stale provider body ran after configuration publication"
         assert result == {"error": {"code": "tool_unavailable", "message": "This tool is currently unavailable."}}
+
+
+@pytest.mark.parametrize("operation", ["get_tool", "invoke_tool"])
+def test_a_toolkit_named_by_an_alias_reaches_the_selected_catalog_by_its_registered_name(
+    gateway_client: TestClient,
+    signed_headers: Callable,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """Coding and file select filesystem among the agent's own selected toolkits, never a toolkit of their own."""
+    client_id, code = _code(gateway_client, signed_headers("alice"))
+    token = _exchange(gateway_client, client_id, code).json()["access_token"]
+    seen: list[object] = []
+
+    async def record(context: AgentToolContext, *, toolkit: str, function: str, **_rest: object) -> object:
+        seen.append(toolkit)
+        # The agent has no filesystem toolkit, so the lookup by the registered name finds nothing.
+        return await gateway_tools.get_tool(context, toolkit=toolkit, function=function)
+
+    monkeypatch.setattr(mcp_gateway_api, operation, record)
+    arguments = {"agent": "personal", "toolkit": "coding", "function": "read_file"}
+    if operation == "invoke_tool":
+        arguments["arguments"] = {}
+    response = gateway_client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": operation, "arguments": arguments}},
+        headers={**MCP_HEADERS, "Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert seen == ["filesystem"]
+    assert response.json()["result"]["structuredContent"]["error"]["code"] == "tool_not_found"
 
 
 def test_public_metadata_challenge_and_bearer_boundary(gateway_client: TestClient, signed_headers: Callable) -> None:

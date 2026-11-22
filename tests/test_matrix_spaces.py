@@ -626,6 +626,22 @@ async def test_ensure_root_space_returns_none_when_child_link_fails(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_link_root_space_without_rooms_creates_no_space(tmp_path) -> None:  # noqa: ANN001
+    """An owner that runs only for the emoji room does not create an enabled but empty Space."""
+    orchestrator = _MultiAgentOrchestrator(
+        runtime_paths=orchestrator_runtime_paths(tmp_path),
+        config=_config_with_runtime_paths(tmp_path, matrix_space={"enabled": True}, server_emoji={"enabled": True}),
+    )
+    router_bot = MagicMock(running=True, client=AsyncMock())
+    orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
+
+    with patch("mindroom.orchestration.rooms.ensure_root_space", new=AsyncMock()) as mock_space:
+        await orchestrator._rooms.link_root_space({})
+
+    mock_space.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_ensure_root_space_uses_effective_room_invite_users(tmp_path) -> None:  # noqa: ANN001
     """The root Space should use effective room invitations without implicit users."""
     orchestrator = _MultiAgentOrchestrator(

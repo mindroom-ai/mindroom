@@ -209,7 +209,7 @@ async def _reconcile_joined_existing_room(
 
 
 def _alias_target_problem(state_events: list[dict[str, Any]], router_user_id: str, room_alias: str) -> str | None:
-    """Return why a readable room is not the router's room for one managed alias, or None when it is."""
+    """Return why a readable room is not the owner account's room for one managed alias, or None when it is."""
     state = {(event["type"], event["state_key"]): event for event in state_events}
     create_event = state.get(("m.room.create", ""), {})
     create_content = create_event.get("content")
@@ -218,7 +218,7 @@ def _alias_target_problem(state_events: list[dict[str, Any]], router_user_id: st
     if create_event.get("sender") != router_user_id or additional_creators not in ([], [router_user_id]):
         return f"created by {create_event.get('sender')}, additional creators {additional_creators}"
     # Any account may point an alias at any room, and members with enough power may publish it there,
-    # so only the canonical alias the router set when creating the room binds the alias to it.
+    # so only the canonical alias the owner account set when creating the room binds the alias to it.
     canonical_event = state.get(("m.room.canonical_alias", ""), {})
     canonical_content = canonical_event.get("content")
     if (
@@ -226,7 +226,7 @@ def _alias_target_problem(state_events: list[dict[str, Any]], router_user_id: st
         or not isinstance(canonical_content, dict)
         or canonical_content.get("alias") != room_alias
     ):
-        return f"its canonical alias is not {room_alias} as set by the router"
+        return f"its canonical alias is not {room_alias} as set by the owner account"
     return None
 
 
@@ -252,13 +252,13 @@ async def _verify_alias_target(
     room_id: str,
     room_alias: str,
 ) -> str | _AliasResolution:
-    """Return an unrecorded alias target when the router created it for this alias, or how to proceed instead."""
+    """Return an unrecorded alias target when the owner account created it for this alias, or how to proceed instead."""
     response = await _get_room_state(client, room_id, room_alias)
     if response is None:
         return _AliasResolution.RETRY_LATER
     if isinstance(response, nio.RoomGetStateError):
-        # The router can read every room it created and is still joined to, so a denial is definitive.
-        problem = f"its state is not readable by the router ({response.status_code})"
+        # The owner account can read every room it created and is still joined to, so a denial is definitive.
+        problem = f"its state is not readable by the owner account ({response.status_code})"
     else:
         problem = _alias_target_problem(response.events, str(client.user_id), room_alias)
     if problem is None:
@@ -268,13 +268,13 @@ async def _verify_alias_target(
         room_alias=room_alias,
         room_id=room_id,
         reason=problem,
-        hint="The alias points at a room the router did not create for it, so MindRoom does not adopt that room.",
+        hint="The alias points at a room the owner account did not create for it, so MindRoom does not adopt it.",
     )
     return _AliasResolution.CREATE_WITHOUT_ALIAS
 
 
 async def _republish_missing_alias(client: nio.AsyncClient, room_alias: str, room_id: str) -> bool:
-    """Point a deleted managed alias back at its recorded room, returning False only when the router lost the room."""
+    """Point a deleted managed alias back at its recorded room; False only when the owner account lost the room."""
     response = await _get_room_state(client, room_id, room_alias)
     if isinstance(response, nio.RoomGetStateError):
         return False
@@ -375,7 +375,7 @@ async def _ensure_room_exists(
             logger.info("managed_room_state_updated", room_key=room_key, room_id=resolution, room_alias=full_alias)
         return resolution
 
-    # Either the alias is missing and the router lost any recorded room, or another account holds the alias
+    # Either the alias is missing and the owner account lost any recorded room, or another account holds the alias
     if existing_room is not None:
         # Remove stale entry from state
         logger.debug("managed_room_state_entry_removed", room_key=room_key)
@@ -554,7 +554,7 @@ async def _ensure_root_space_exists(
         joined_space = space_room_id in client.rooms or space_room_id in joined_room_ids
         if not joined_space and await join_room(client, space_room_id) is not RoomJoinOutcome.JOINED:
             logger.warning(
-                "Resolved existing root space but router could not join it; skipping reconciliation",
+                "Resolved existing root space but the owner account could not join it; skipping reconciliation",
                 space_room_id=space_room_id,
                 space_alias=full_alias,
             )
@@ -624,7 +624,7 @@ async def ensure_root_space(
 
 
 async def _is_server_emoji_room(client: nio.AsyncClient, room_id: str, room_alias: str) -> bool:
-    """Return whether a room the router made for the alias is a server emoji room, and not one made for another use."""
+    """Return whether a room the owner account made for the alias is a server emoji room, not one made for another use."""
     response = await _get_room_state(client, room_id, room_alias)
     if not isinstance(response, nio.RoomGetStateResponse):
         return False
@@ -649,7 +649,7 @@ async def _ensure_server_emoji_room_exists(
     alias_localpart: str,
     full_alias: str,
 ) -> str | None:
-    """Return the server emoji room, joining the router's room for the alias or creating it."""
+    """Return the server emoji room, joining the owner account's room for the alias or creating it."""
     known_room_id = matrix_state.matrix_state_for_runtime(runtime_paths).server_emoji_room_id
     joined_room_ids = await get_joined_rooms(client) or []
     # Resolving the alias even for a joined room publishes it again when someone deleted it.

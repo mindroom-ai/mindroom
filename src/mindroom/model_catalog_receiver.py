@@ -1,4 +1,4 @@
-"""Router-owned authenticated, bounded Matrix model discovery lifecycle."""
+"""Owner-account authenticated, bounded Matrix model discovery lifecycle."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, TypeIs, cast
 import nio
 
 from mindroom.config.models import split_model_reference
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import (
     PinnedMatrixDevice,
@@ -22,7 +21,7 @@ from mindroom.matrix.olm_to_device import (
     send_encrypted_to_device,
 )
 from mindroom.model_catalog import ModelCatalog
-from mindroom.model_selection_scope import validate_model_picker_scope
+from mindroom.model_selection_scope import model_picker_thread_root_denial, validate_model_picker_scope
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.turn_model import resolve_inherited_model
 
@@ -42,7 +41,7 @@ _DEADLINE_SECONDS = 12.0
 _MAX_IN_FLIGHT = 8
 # One Matrix account may log in any number of devices, so per-user limits keep
 # it from holding the whole shared pool.
-_MAX_USER_IN_FLIGHT = 2
+_MAX_USER_IN_FLIGHT = 4
 _MAX_USER_REQUESTS = 8
 _MAX_RATE_USERS = 1024
 _MAX_MODELS = 256
@@ -58,7 +57,7 @@ class _Request:
 
 
 class _DroppedError(Exception):
-    """A request the router declines; by design, the client receives no reply."""
+    """A request this device declines; by design, the client receives no reply."""
 
     def __init__(self, *, reason: str) -> None:
         super().__init__(reason)
@@ -137,7 +136,9 @@ class _Receiver:
         runtime_paths: RuntimePaths,
         config_getter: Callable[[], Config],
         membership_index: AgentReplyMembershipIndex,
+        answers_in_room: Callable[[str], bool],
     ) -> None:
+        self.answers_in_room = answers_in_room
         self.client = client
         self.paths = runtime_paths
         self.config_getter = config_getter
@@ -152,13 +153,16 @@ class _Receiver:
         identity = event.authenticated_sender
         return PinnedMatrixDevice(identity.user_id, identity.device_id, identity.ed25519)
 
-    def admit(self, event: nio.AuthenticatedToDeviceEvent) -> bool:  # noqa: PLR0911
+    def admit(self, event: nio.AuthenticatedToDeviceEvent) -> bool:  # noqa: C901, PLR0911
         """Reserve bounded work synchronously, before the task wrapper queues it."""
         if not _is_request(event):
             return False
         request = _parse(event)
         if request is None:
             return _drop(event, None, "unparseable")
+        # One device answers per room, so a client sees one runtime there.
+        if not self.answers_in_room(request.room_id):
+            return _drop(event, request, "not_room_poster")
         target = self._target(event)
         if target is None:
             return _drop(event, request, "unknown_sender_device")
@@ -187,7 +191,14 @@ class _Receiver:
         event: nio.AuthenticatedToDeviceEvent,
         request: _Request,
         config: Config,
+        *,
+        root_first: bool = False,
     ) -> ModelPickerScope:
+        thread_id = request.thread_id
+        if root_first and thread_id is not None:
+            if (denial := await model_picker_thread_root_denial(self.client, request.room_id, thread_id)) is not None:
+                raise _DroppedError(reason=denial)
+            thread_id = None
         scope = await validate_model_picker_scope(
             client=self.client,
             config=config,
@@ -195,7 +206,8 @@ class _Receiver:
             membership_index=self.membership_index,
             room_id=request.room_id,
             requester_user_id=event.sender,
-            thread_id=request.thread_id,
+            thread_id=thread_id,
+            recheck_membership=False,
         )
         if isinstance(scope, str):
             raise _DroppedError(reason=scope)
@@ -230,14 +242,13 @@ class _Receiver:
             raise _DroppedError(reason="too_many_models")
         if not authenticated_sender_matches(self.client, event, target):
             raise _DroppedError(reason="sender_device_changed")
-        await self._scope(event, request, config)
-        entries, revision = await self.catalog.snapshot(config)
         scope = await self._scope(event, request, config)
+        entries, revision = await self.catalog.snapshot(config)
         content: dict[str, object] = {
             "version": 1,
             "request_id": request.request_id,
             "room_id": request.room_id,
-            "capabilities": ["model_selection"],
+            "capabilities": ["model_selection", "thread_model_on_root"],
             "agent_user_ids": list(scope.agent_user_ids),
             "catalog_revision": revision,
             "models": entries,
@@ -252,7 +263,8 @@ class _Receiver:
         # Authorize at the NIO handoff; NIO owns preparation and delivery retries.
         if self.config_getter() is not config:
             raise _DroppedError(reason="config_changed")
-        if await self._scope(event, request, config) != scope:
+        # Reprove the root first so the final membership read catches departures during that lookup.
+        if await self._scope(event, request, config, root_first=True) != scope:
             raise _DroppedError(reason="scope_changed")
         if self.config_getter() is not config:
             raise _DroppedError(reason="config_changed")
@@ -310,23 +322,22 @@ class _Receiver:
 def register_model_catalog_receiver(
     *,
     client: nio.AsyncClient,
-    agent_name: str,
     runtime_paths: RuntimePaths,
     config_getter: Callable[[], Config],
     membership_index: AgentReplyMembershipIndex,
+    answers_in_room: Callable[[str], bool],
     callback_wrapper: Callable[
         [Callable[[nio.AuthenticatedToDeviceEvent], Awaitable[None]]],
         Callable[..., Awaitable[None]],
     ],
 ) -> None:
-    """Register router-only discovery, with admission before background task creation."""
-    if agent_name != ROUTER_AGENT_NAME:
-        return
+    """Register discovery on this bot's device, which answers where ``answers_in_room``, before any task is made."""
     receiver = _Receiver(
         client=client,
         runtime_paths=runtime_paths,
         config_getter=config_getter,
         membership_index=membership_index,
+        answers_in_room=answers_in_room,
     )
     wrapped = callback_wrapper(receiver.on_event)
 

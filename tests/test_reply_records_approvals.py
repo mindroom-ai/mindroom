@@ -132,7 +132,7 @@ async def _approval_bot(
     # Tool markers are not what these tests are about.
     bot.config.defaults.show_tool_calls = False
 
-    async def prepare_event(_room: str, _thread: str | None, content: dict) -> dict:
+    async def prepare_event(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:
         return content
 
     async def send_card(delivery: MatrixDelivery) -> str:
@@ -146,8 +146,8 @@ async def _approval_bot(
         send_approval_delivery=send_card,
         resolve_approval_delivery=AsyncMock(return_value=None),
         cards=bot._journal_store.principal("router@shared"),
-        transport_sender_id=lambda: "@router:localhost",
-        transport_device_id=lambda: "DEVICE",
+        sender_bot=lambda _entity_name, _room_id: object(),
+        sender_device_id=AsyncMock(return_value="DEVICE"),
     )
     try:
         with patch(

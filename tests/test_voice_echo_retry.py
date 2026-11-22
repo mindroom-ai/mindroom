@@ -1,4 +1,4 @@
-"""Voice publication delays must preserve the exact durable reply obligation."""
+"""Voice preparation and transcript failures must preserve the exact durable reply obligation."""
 
 from __future__ import annotations
 
@@ -13,18 +13,12 @@ import pytest
 from mindroom import pending_event_worker
 from mindroom.coalescing.gate import CoalescingGate
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, SOURCE_KIND_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VOICE_TRANSCRIPT_KEY
 from mindroom.conversation_resolver import ConversationResolver
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
-from mindroom.event_journal import EventClass, EventKind, TurnRecordStore, turn_rows
+from mindroom.event_journal import EventClass, EventKind, TurnRecordStore
 from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, _VoiceNormalizationResult
-from mindroom.turn_record import SourceVisibleEcho
-from mindroom.voice.visible_voice_echo import (
-    VisibleVoiceEchoLifecycle,
-    VisibleVoiceEchoRequest,
-    _reset_visible_voice_echo_barriers,
-)
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.journal_helpers import admit_dispatch_event
 from tests.test_turns_focused import (
@@ -36,7 +30,6 @@ from tests.test_turns_focused import (
     _obligation_runner,
     _replace_harness_deps,
     _room_with_members,
-    _settle_dispatcher,
 )
 
 if TYPE_CHECKING:
@@ -106,7 +99,10 @@ def _force_readiness_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _voice_event(config: Config) -> tuple[nio.RoomMessageAudio, PreparedIngress]:
+def _voice_event(
+    config: Config,
+    mentions: tuple[str, ...] = ("general",),
+) -> tuple[nio.RoomMessageAudio, PreparedIngress]:
     """One threaded audio source and its successful transcription."""
     event = cast(
         "nio.RoomMessageAudio",
@@ -121,7 +117,7 @@ def _voice_event(config: Config) -> tuple[nio.RoomMessageAudio, PreparedIngress]
                     "msgtype": "m.audio",
                     "body": "voice.ogg",
                     "url": "mxc://localhost/voice",
-                    "m.mentions": {"user_ids": [_entity_user_id(config, "general")]},
+                    "m.mentions": {"user_ids": [_entity_user_id(config, name) for name in mentions]},
                     "m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT},
                 },
             },
@@ -138,168 +134,14 @@ def _voice_event(config: Config) -> tuple[nio.RoomMessageAudio, PreparedIngress]
                 "msgtype": "m.text",
                 "body": "Please review the new PR",
                 SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+                ORIGINAL_SENDER_KEY: event.sender,
+                VOICE_TRANSCRIPT_KEY: True,
             },
         },
         server_timestamp=event.server_timestamp,
         payload_trusted=True,
     )
     return event, normalized
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("restart_after_echo", [False, True])
-@pytest.mark.parametrize("readiness_fallback", [False, True])
-async def test_delayed_voice_echo_keeps_source_pending_until_one_reply(  # noqa: PLR0915
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    restart_after_echo: bool,
-    readiness_fallback: bool,
-) -> None:
-    """Claim timeout must neither settle the audio nor lose a published echo on restart."""
-    config = bind_runtime_paths(
-        Config(agents={"general": {"display_name": "General"}}, voice={"visible_router_echo": True}),
-        test_runtime_paths(tmp_path / "runtime"),
-    )
-    harness = _build_harness(config, tmp_path)
-    router = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
-    await harness.turn_store.warm()
-    await router.turn_store.warm()
-    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
-    event, normalized = _voice_event(config)
-    normalize = AsyncMock(return_value=_VoiceNormalizationResult(event=normalized))
-    monkeypatch.setattr(
-        InboundTurnNormalizer,
-        "prepare_raw_voice_fallback_event" if readiness_fallback else "prepare_voice_event",
-        normalize,
-    )
-    if readiness_fallback:
-        _force_readiness_fallback(monkeypatch)
-    monkeypatch.setattr(VisibleVoiceEchoLifecycle, "_router_echo_expected", lambda *_: True)
-    dispatcher = _wire_dispatcher(harness, room, tmp_path)
-    await admit_dispatch_event(dispatcher, room, event, EventKind.MEDIA, EventClass.ACTIONABLE)
-    try:
-        await dispatcher.drain_once()
-        await harness.gate.drain_all()
-
-        assert await dispatcher.store.is_pending(event.event_id)
-        assert harness.ignored_dispatch_sources == []
-        assert harness.runner.requests == []
-        assert not harness.turn_store.has_live_turn_claim(event.event_id)
-        assert not harness.gate.has_pending_source_event(event.event_id)
-        assert harness.retried_dispatch_sources == [(event.event_id,)]
-        normalize.assert_awaited_once()
-        normalize.side_effect = RuntimeError("Provider unavailable after deferral")
-        snapshot = await harness.turn_store.prepared_voice_for_source(event.event_id)
-        assert snapshot is not None
-        assert snapshot.body == "Please review the new PR"
-        assert snapshot.to_content() == normalized.source["content"]
-        assert snapshot.thread_id == _THREAD_ROOT
-
-        target = router.ingress.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=_THREAD_ROOT,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        )
-        echo = router.voice.deps.readiness.visible_echo
-        handle = echo.start(
-            VisibleVoiceEchoRequest(
-                source_event_id=event.event_id,
-                target=target,
-                requester_user_id=event.sender,
-                raw_source=event.source,
-            ),
-        )
-        assert handle is not None
-        await echo.finish(handle, normalized)
-        assert len(router.gateway.sent) == 1
-
-        if restart_after_echo:
-            await dispatcher.stop()
-            _reset_visible_voice_echo_barriers()
-            harness = _build_harness(config, tmp_path)
-            await harness.turn_store.warm()
-            assert await harness.turn_store.prepared_voice_for_source(event.event_id) == snapshot
-            dispatcher = _wire_dispatcher(harness, room, tmp_path)
-
-        # The journal's retry timer owns recovery: no new Matrix event is admitted.
-        dispatcher.release_turn_replay()
-        dispatcher.start()
-        await asyncio.wait_for(harness.runner.response_started.wait(), timeout=5)
-        await harness.gate.drain_all()
-        await harness.runner.settle_inbox_responses()
-        assert [request.prompt for request in harness.runner.requests] == ["Please review the new PR"]
-        assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id)
-        assert await harness.turn_store.prepared_voice_for_source(event.event_id) is None
-        normalize.assert_awaited_once()
-
-        await harness.ingress.handle_media_event(room, event)
-        await harness.gate.drain_all()
-        assert len(harness.runner.requests) == 1
-    finally:
-        await dispatcher.stop()
-        await harness.gate.drain_all()
-
-
-@pytest.mark.asyncio
-async def test_echo_journal_read_failure_reuses_prepared_transcription(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An echo lookup failure must preserve completed STT for the journal retry."""
-    config = bind_runtime_paths(
-        Config(agents={"general": {"display_name": "General"}}, voice={"visible_router_echo": True}),
-        test_runtime_paths(tmp_path / "runtime"),
-    )
-    harness = _build_harness(config, tmp_path)
-    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
-    event, normalized = _voice_event(config)
-    router_echo = SourceVisibleEcho("$echo")
-    normalize = AsyncMock(return_value=_VoiceNormalizationResult(event=normalized))
-    monkeypatch.setattr(
-        InboundTurnNormalizer,
-        "prepare_voice_event",
-        normalize,
-    )
-    router_reads: list[object] = [RuntimeError("Temporary journal read failure"), router_echo]
-    real_read = TurnRecordStore.read
-
-    async def read(records: TurnRecordStore, operation: object, *args: object, **kwargs: object) -> object:
-        # The responder's read of the router's echo fails once, then finds it.
-        if records.agent_name == ROUTER_AGENT_NAME and operation is turn_rows.visible_echo and router_reads:
-            outcome = router_reads.pop(0)
-            if isinstance(outcome, Exception):
-                raise outcome
-            return outcome
-        return await real_read(records, operation, *args, **kwargs)
-
-    monkeypatch.setattr(TurnRecordStore, "read", read)
-    monkeypatch.setattr(VisibleVoiceEchoLifecycle, "_router_echo_expected", lambda *_: True)
-    dispatcher = _wire_dispatcher(harness, room, tmp_path)
-    await admit_dispatch_event(dispatcher, room, event, EventKind.MEDIA, EventClass.ACTIONABLE)
-    try:
-        await dispatcher.drain_once()
-        await harness.gate.drain_all()
-
-        assert harness.runner.requests == []
-        assert await dispatcher.store.is_pending(event.event_id)
-        assert harness.retried_dispatch_sources == [(event.event_id,)]
-        assert not harness.turn_store.has_live_turn_claim(event.event_id)
-        normalize.assert_awaited_once()
-        normalize.side_effect = RuntimeError("Provider unavailable after deferral")
-
-        dispatcher.release_turn_replay()
-        dispatcher.start()
-        await asyncio.wait_for(harness.runner.response_started.wait(), timeout=5)
-        await harness.gate.drain_all()
-        await harness.runner.settle_inbox_responses()
-        assert [request.prompt for request in harness.runner.requests] == ["Please review the new PR"]
-        assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id)
-        assert await harness.turn_store.prepared_voice_for_source(event.event_id) is None
-        normalize.assert_awaited_once()
-    finally:
-        await dispatcher.stop()
-        await harness.gate.drain_all()
 
 
 @pytest.mark.asyncio
@@ -313,7 +155,7 @@ async def test_prepared_voice_write_failure_preserves_pending_source_without_raw
         test_runtime_paths(tmp_path / "runtime"),
     )
     harness = _build_harness(config, tmp_path)
-    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    room = _room_with_members(config, "general")
     event, normalized = _voice_event(config)
     normalize = AsyncMock(return_value=_VoiceNormalizationResult(event=normalized))
     fallback = AsyncMock(side_effect=AssertionError("Checkpoint failure must not re-normalize"))
@@ -337,120 +179,6 @@ async def test_prepared_voice_write_failure_preserves_pending_source_without_raw
     finally:
         await dispatcher.stop()
         await harness.gate.drain_all()
-
-
-@pytest.mark.asyncio
-async def test_router_becoming_ready_during_transcription_still_requires_publication(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Final applicability must be rechecked after potentially slow transcription."""
-    config = bind_runtime_paths(
-        Config(agents={"general": {"display_name": "General"}}, voice={"visible_router_echo": True}),
-        test_runtime_paths(tmp_path / "runtime"),
-    )
-    harness = _build_harness(config, tmp_path)
-    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
-    event, normalized = _voice_event(config)
-    router_ready = False
-
-    async def normalize_once(*_: object) -> _VoiceNormalizationResult:
-        nonlocal router_ready
-        router_ready = True
-        return _VoiceNormalizationResult(event=normalized)
-
-    monkeypatch.setattr(InboundTurnNormalizer, "prepare_voice_event", normalize_once)
-    monkeypatch.setattr(VisibleVoiceEchoLifecycle, "_router_echo_expected", lambda *_: router_ready)
-    dispatcher = _wire_dispatcher(harness, room, tmp_path)
-    await admit_dispatch_event(dispatcher, room, event, EventKind.MEDIA, EventClass.ACTIONABLE)
-    try:
-        await dispatcher.drain_once()
-        await harness.gate.drain_all()
-        assert router_ready
-        assert await dispatcher.store.is_pending(event.event_id)
-        assert harness.runner.requests == []
-        assert harness.retried_dispatch_sources == [(event.event_id,)]
-        assert (await harness.turn_store.prepared_voice_for_source(event.event_id)).body == "Please review the new PR"
-    finally:
-        await dispatcher.stop()
-        await harness.gate.drain_all()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("restart", [False, True])
-@pytest.mark.parametrize("send_raises", [False, True])
-@pytest.mark.parametrize("root_audio", [False, True])
-@pytest.mark.parametrize("voice_enabled", [False, True])
-async def test_router_initial_echo_failure_retains_owner_and_reuses_checkpoint(  # noqa: PLR0915
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    restart: bool,
-    send_raises: bool,
-    root_audio: bool,
-    voice_enabled: bool,
-) -> None:
-    """A failed initial publication must leave a router callback to replay, even after restart."""
-    config = bind_runtime_paths(
-        Config(
-            agents={"general": {"display_name": "General"}},
-            voice={"enabled": voice_enabled, "visible_router_echo": True},
-        ),
-        test_runtime_paths(tmp_path / "runtime"),
-    )
-    router = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
-    await router.turn_store.warm()
-    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
-    event, normalized = _voice_event(config)
-    if root_audio:
-        event.source["content"].pop("m.relates_to")
-        normalized.source["content"].pop("m.relates_to")
-    normalize = AsyncMock(return_value=_VoiceNormalizationResult(event=normalized))
-    monkeypatch.setattr(InboundTurnNormalizer, "prepare_voice_event", normalize)
-    send = router.gateway.send_text
-    failed_send = (
-        AsyncMock(side_effect=RuntimeError("Matrix unavailable")) if send_raises else AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(router.gateway, "send_text", failed_send)
-    dispatcher = _wire_dispatcher(router, room, tmp_path)
-    await admit_dispatch_event(dispatcher, room, event, EventKind.MEDIA, EventClass.ACTIONABLE)
-    try:
-        await dispatcher.drain_once()
-        await router.gate.drain_all()
-        assert await dispatcher.store.is_pending(event.event_id)
-        assert not await router.turn_store.is_handled(_ROOM_ID, event.event_id)
-        assert router.ignored_dispatch_sources == []
-        assert router.retried_dispatch_sources == [(event.event_id,)]
-        assert not router.turn_store.has_live_turn_claim(event.event_id)
-        snapshot = await router.turn_store.prepared_voice_for_source(event.event_id)
-        assert snapshot is not None
-        assert snapshot.body == "Please review the new PR"
-        assert snapshot.thread_id == (event.event_id if root_audio else _THREAD_ROOT)
-        assert snapshot.coalescing_thread_id == (None if root_audio else _THREAD_ROOT)
-        assert snapshot.to_content() == normalized.source["content"]
-        normalize.side_effect = AssertionError("Retry must reuse the checkpoint")
-        if restart:
-            await dispatcher.stop()
-            _reset_visible_voice_echo_barriers()
-            router = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
-            await router.turn_store.warm()
-            assert await router.turn_store.prepared_voice_for_source(event.event_id) == snapshot
-            dispatcher = _wire_dispatcher(router, room, tmp_path)
-        else:
-            monkeypatch.setattr(router.gateway, "send_text", send)
-
-        dispatcher.release_turn_replay()
-        dispatcher.start()
-        await _settle_dispatcher(router, dispatcher)
-        await router.gate.drain_all()
-        assert len(router.gateway.sent) == 1
-        assert (await router.turn_store.visible_echo(event.event_id)).event_id == "$sent-1:localhost"
-        normalize.assert_awaited_once()
-        await router.ingress.handle_media_event(room, event)
-        await router.gate.drain_all()
-        assert len(router.gateway.sent) == 1
-    finally:
-        await dispatcher.stop()
-        await router.gate.drain_all()
 
 
 @pytest.mark.asyncio
@@ -498,6 +226,65 @@ async def test_voice_metadata_failure_retries_without_retranscription(
         await harness.runner.settle_inbox_responses()
         assert [request.prompt for request in harness.runner.requests] == ["Please review the new PR"]
         assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id)
+        normalize.assert_awaited_once()
+    finally:
+        await dispatcher.stop()
+        await harness.gate.drain_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("send_raises", [False, True])
+async def test_failed_transcript_send_retries_from_the_checkpoint_and_posts_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    restart: bool,
+    send_raises: bool,
+) -> None:
+    """A transcript that could not be sent leaves the voice message pending; its retry posts it once, then replies."""
+    config = bind_runtime_paths(
+        Config(agents={"general": {"display_name": "General"}}),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path)
+    await harness.turn_store.warm()
+    room = _room_with_members(config, "general")
+    event, normalized = _voice_event(config)
+    normalize = AsyncMock(return_value=_VoiceNormalizationResult(event=normalized))
+    monkeypatch.setattr(InboundTurnNormalizer, "prepare_voice_event", normalize)
+    send = harness.gateway.send_text
+    failed_send = (
+        AsyncMock(side_effect=RuntimeError("Matrix unavailable")) if send_raises else AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(harness.gateway, "send_text", failed_send)
+    dispatcher = _wire_dispatcher(harness, room, tmp_path)
+    await admit_dispatch_event(dispatcher, room, event, EventKind.MEDIA, EventClass.ACTIONABLE)
+    try:
+        await dispatcher.drain_once()
+        await harness.gate.drain_all()
+        assert await dispatcher.store.is_pending(event.event_id)
+        assert harness.runner.requests == []
+        assert not harness.turn_store.has_live_turn_claim(event.event_id)
+        snapshot = await harness.turn_store.prepared_voice_for_source(event.event_id)
+        assert snapshot is not None
+        assert snapshot.to_content() == normalized.source["content"]
+        normalize.side_effect = AssertionError("Retry must reuse the checkpoint")
+        if restart:
+            await dispatcher.stop()
+            harness = _build_harness(config, tmp_path)
+            await harness.turn_store.warm()
+            dispatcher = _wire_dispatcher(harness, room, tmp_path)
+        else:
+            monkeypatch.setattr(harness.gateway, "send_text", send)
+
+        dispatcher.release_turn_replay()
+        dispatcher.start()
+        await asyncio.wait_for(harness.runner.response_started.wait(), timeout=5)
+        await harness.gate.drain_all()
+        await harness.runner.settle_inbox_responses()
+        assert [request.response_text for request in harness.gateway.sent] == ["Please review the new PR"]
+        assert await harness.turn_store.visible_echo(event.event_id) == "$sent-1:localhost"
+        assert [request.prompt for request in harness.runner.requests] == ["Please review the new PR"]
         normalize.assert_awaited_once()
     finally:
         await dispatcher.stop()
