@@ -39,6 +39,7 @@ type IndependentUsageKind = Literal[
     "thread_summary",
     "voice_normalization",
     "voice_transcription",
+    "workflow",
 ]
 # ``pre_ledger`` is the row holding the usage a session's stored totals counted beyond its run rows when this ledger
 # replaced them (``session_storage.legacy_usage_totals``): part of the session's totals, with no date or requester.

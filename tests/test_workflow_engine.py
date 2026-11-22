@@ -110,7 +110,8 @@ async def test_launch_starts_the_first_attempt_with_the_workflow_limits(stack: W
 
     assert (run.state, run.attempt, run.script_run_id) == (WorkflowRunState.RUNNING, 1, stack.attempt.run_id)
     assert stack.attempt.workflow_run_id == run.run_id
-    assert stack.scripts.limits == [ScriptRunLimits(max_concurrent_runs=8, max_tool_calls_per_minute=600)]
+    # The store limits the owner's runs when one is reserved, so the attempt carries no run limit of its own.
+    assert stack.scripts.limits == [ScriptRunLimits(max_tool_calls_per_minute=600)]
 
 
 @pytest.mark.asyncio
@@ -586,6 +587,27 @@ async def test_launch_is_idempotent_and_never_starts_an_ended_run(stack: Workflo
 
 
 @pytest.mark.asyncio
+async def test_engine_stopped_before_a_launch_runs_its_first_step_interrupts_the_run(tmp_path: Path) -> None:
+    """The stop itself ends the runs it was launching, so a launch task cancelled before it ran strands none."""
+    with workflow_stack(tmp_path) as stack:
+        run = stack.reserve()
+        launch = asyncio.create_task(stack.engine.launch(run.run_id, stack.context))
+        # The caller has spawned the engine's launch task, which has not run a step yet.
+        await asyncio.sleep(0)
+
+        await stack.engine.close()
+        await asyncio.wait_for(launch, SETTLE_TIMEOUT_SECONDS)
+
+        stored = await stack.engine.wait(run.run_id)
+        assert stack.scripts.launched == []
+        assert (stored.state, stored.attempt, stored.error) == (
+            WorkflowRunState.INTERRUPTED,
+            0,
+            "MindRoom stopped while the run was starting.",
+        )
+
+
+@pytest.mark.asyncio
 async def test_launch_that_finds_its_run_ended_stops_the_attempt_it_started(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -859,7 +881,8 @@ async def test_ended_run_admits_no_new_call(stack: WorkflowStack) -> None:
     """A request authenticated just before its run ended adds no node, and one sent again still gets its receipt."""
     attempt = stack.attempt
     first = await stack.engine.submit_node(attempt, NodeRequest("@0", "tool", _APPEND, {}))
-    await stack.until(lambda: stack.counting_tool.lines == ["a"])
+    # Until the node has settled, not only until its effect shows: a cancel in between ends it indeterminate.
+    await stack.until(lambda: stack.engine.status(stack.run_id)[1][0].state is WorkflowNodeState.COMPLETED)
     await stack.engine.cancel(stack.run_id, reason="Stopped by the user.")
 
     again = await stack.engine.submit_node(attempt, NodeRequest("@0", "tool", _APPEND, {}))
