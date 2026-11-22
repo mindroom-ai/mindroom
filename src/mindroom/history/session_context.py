@@ -128,7 +128,9 @@ async def load_scrubbed_scope_session(
     scope_context = await run_blocking_until_complete(load_scope)
     if redacted_history_events is not None and scope_context.session is not None:
         removed_event_ids = await remove_history_of_redacted_events(
-            scope_context.storage, scope_context.session, redacted_history_events
+            scope_context.storage,
+            scope_context.session,
+            redacted_history_events,
         )
         if removed_event_ids:
             logger.info(

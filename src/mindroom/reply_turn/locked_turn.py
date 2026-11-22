@@ -333,7 +333,9 @@ class LockedTurns:
         """Refresh model-facing thread history once this turn owns the lifecycle lock."""
         try:
             refreshed_history = await read_fresh_thread_history(
-                self.deps.resolver, request.response_envelope.target, strict=True
+                self.deps.resolver,
+                request.response_envelope.target,
+                strict=True,
             )
         except DegradedThreadHistoryError as degraded:
             refreshed_history = degraded.history
