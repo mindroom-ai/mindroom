@@ -732,7 +732,8 @@ class KubernetesWorkerBackend:
         and all: no reply can reach it, and until it is gone it counts against the limits of those that start.
         """
         if handle.worker_key in self._setup_waits:
-            return None  # A tool caller that waits for this worker's setup is using it.
+            # A tool caller that waits for this worker's setup is using it now, which leaves its age as it is.
+            handle = replace(handle, last_used_at=now, status="ready" if handle.status == "idle" else handle.status)
         named = pinned_worker_kind(handle.worker_key) == "named"
         if named and handle.created_at < self._process_started_at:
             return "retire"
