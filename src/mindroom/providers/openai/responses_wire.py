@@ -29,12 +29,21 @@ from mindroom.llm.provider import (
     hosted_tool_started,
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_state, native_replay_messages
+from mindroom.native_compaction import (
+    NATIVE_CHECKPOINT_KEY,
+    checkpoint_items,
+    checkpoint_tail,
+    native_checkpoint_state,
+)
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
-from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY, assistant_replay_items
+from mindroom.providers.openai.response_replay import (
+    ENCRYPTED_REPLAY_RESET_KEY,
+    RESPONSE_OUTPUT_KEY,
+    assistant_replay_items,
+)
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
@@ -88,6 +97,8 @@ class ResponsesWire:
     explicit_breakpoint: bool
     # Only Codex requests read it, as their instructions; the openai route carries the same prompt unused.
     default_instructions: str
+    # Route scope for persisted sticky-replay reset boundaries (OpenRouter Responses only).
+    reset_scope: str | None = None
 
 
 def request_store(wire: ResponsesWire, request: ModelRequest) -> bool | None:
@@ -111,6 +122,8 @@ class ResponsesReplay:
     sent_from: int
     previous_response_id: str | None
     native_route: str | None
+    # Messages before this index in ``history`` rebuild from canonical text and calls without encrypted state.
+    encrypted_from: int = 0
 
 
 def _latest_response(messages: Sequence[Message]) -> tuple[int, dict[str, Any]] | None:
@@ -183,17 +196,34 @@ def responses_replay(
     store: bool | None,
     portable_replay: bool,
     native_compaction: NativeCompactionReplay | None,
+    reset_scope: str | None = None,
+    strip_encrypted: bool = False,
 ) -> ResponsesReplay:
     """Decide whether a request with storage setting ``store`` continues the latest stored response in ``messages``.
 
     Portable replay, an unstored request, a history without a stored response, and one whose latest response was not
-    stored or holds another conversation send the history explicitly.
+    stored or holds another conversation send the history explicitly. A persisted reset boundary on ``reset_scope``
+    (or ``strip_encrypted``) rebuilds earlier turns without encrypted state until a newer checkpoint supersedes it.
     """
     route = native_compaction.route if native_compaction is not None else None
-    history = native_replay_messages(messages, route)
+    history, encrypted_from = list(messages), len(messages) if strip_encrypted else 0
+    if not strip_encrypted:
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if checkpoint_items(msg, route):
+                history = checkpoint_tail(messages, i)
+                break
+            if (
+                reset_scope is not None
+                and msg.role == "assistant"
+                and (msg.provider_data or {}).get(ENCRYPTED_REPLAY_RESET_KEY) == reset_scope
+            ):
+                encrypted_from = i
+                break
     latest = _latest_response(history)
     continues = (
         latest is not None
+        and latest[0] >= encrypted_from
         and not portable_replay
         and store is not False
         and _continuable(latest[1], history[: latest[0]])
@@ -204,6 +234,7 @@ def responses_replay(
         sent_from=0 if chained is None else chained[0] + 1,
         previous_response_id=None if chained is None else chained[1]["response_id"],
         native_route=route,
+        encrypted_from=encrypted_from,
     )
 
 
@@ -214,6 +245,8 @@ def request_replay(wire: ResponsesWire, request: ModelRequest) -> ResponsesRepla
         store=request_store(wire, request),
         portable_replay=request.portable_replay,
         native_compaction=request.native_compaction,
+        reset_scope=wire.reset_scope,
+        strip_encrypted=request.strip_encrypted_replay,
     )
 
 
@@ -250,6 +283,15 @@ def _call_ids(messages: Sequence[Message]) -> dict[str, str]:
     return call_ids
 
 
+def _assistant_items(replay: ResponsesReplay, index: int, message: Message) -> list[dict[str, Any]]:
+    allow_encrypted = index >= replay.encrypted_from
+    return assistant_replay_items(
+        message,
+        replay.native_route if allow_encrypted else None,
+        encrypted_reasoning=allow_encrypted,
+    )
+
+
 def _input_items(replay: ResponsesReplay, provider: str) -> list[Any]:
     """Convert the messages a request sends to Responses input items, under the tool-call ids the request sends.
 
@@ -259,7 +301,7 @@ def _input_items(replay: ResponsesReplay, provider: str) -> list[Any]:
     canonical = reformat_tool_call_ids(replay.history, "responses")
     call_ids = _call_ids(canonical)
     items: list[Any] = []
-    for message in canonical[replay.sent_from :]:
+    for index, message in enumerate(canonical[replay.sent_from :], start=replay.sent_from):
         if message.role in {"user", "system"}:
             items.append(_prompt_item(message, provider))
         elif message.role == "tool":
@@ -268,7 +310,7 @@ def _input_items(replay: ResponsesReplay, provider: str) -> list[Any]:
                 call_id = call_ids.get(result.call_id, result.call_id)
                 items.append({"type": "function_call_output", "call_id": call_id, "output": result.content})
         else:
-            items.extend(assistant_replay_items(message, replay.native_route))
+            items.extend(_assistant_items(replay, index, message))
     return items
 
 
@@ -292,9 +334,9 @@ def replays_encrypted_state(replay: ResponsesReplay) -> bool:
     canonical = reformat_tool_call_ids(replay.history, "responses")
     return any(
         item.get("encrypted_content")
-        for message in canonical[replay.sent_from :]
+        for index, message in enumerate(canonical[replay.sent_from :], start=replay.sent_from)
         if message.role == "assistant"
-        for item in assistant_replay_items(message, replay.native_route)
+        for item in _assistant_items(replay, index, message)
     )
 
 
@@ -512,6 +554,7 @@ class ResponsesStream:
     portable_replay: bool
     native_compaction: NativeCompactionReplay | None
     conversation_digest: str
+    encrypted_replay_reset: str | None = None
     parts: ResponsesTurnParts = field(default_factory=ResponsesTurnParts)
     # Whether the response ended, completed or incomplete; a stream that stops before then did not finish the turn.
     ended: bool = False
@@ -594,6 +637,8 @@ class ResponsesStream:
         parts.provider_data[_STORED_KEY] = self.store is not False
         if self.store is not False:
             parts.provider_data[_CONVERSATION_DIGEST_KEY] = self.conversation_digest
+        if self.encrypted_replay_reset is not None:
+            parts.provider_data[ENCRYPTED_REPLAY_RESET_KEY] = self.encrypted_replay_reset
         items = [item.model_dump(mode="json", exclude_none=True) for item in response.output] or [
             self._items[index] for index in sorted(self._items)
         ]

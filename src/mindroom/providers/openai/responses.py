@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -21,7 +22,6 @@ from mindroom.providers.openai.replay_estimate import (
     responses_body_parts,
     responses_replay_uses_visual_tokens,
 )
-from mindroom.providers.openai.response_replay import without_encrypted_state
 from mindroom.providers.openai.responses_wire import (
     ResponsesStream,
     ResponsesWire,
@@ -58,11 +58,11 @@ __all__ = ["ResponsesAdapter"]
 _STICKY_PROVIDER_ERROR = "can only be processed by the provider that created it"
 
 
-def _is_sticky_replay_error(error: ProviderError, *, caller_retries: bool) -> bool:
-    """Return whether ``error`` can be caused by OpenRouter pinning encrypted replay state to another upstream."""
-    if isinstance(error, InvalidRequest) and (error.status_code == 400 or error.provider_code == "400"):
-        return _STICKY_PROVIDER_ERROR in str(error).casefold()
-    return isinstance(error, RateLimited) and not caller_retries
+def _fallbacks_disabled(request_params: Mapping[str, Any], extra_body: object) -> bool:
+    provider = extra_body.get("provider") if isinstance(extra_body, Mapping) else None
+    if not isinstance(provider, Mapping):
+        provider = request_params.get("provider")
+    return isinstance(provider, Mapping) and provider.get("allow_fallbacks") is False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -94,15 +94,26 @@ class ResponsesAdapter:
         )
 
     def recover_sticky_replay(self, request: ModelRequest, error: ProviderError) -> ModelRequest | None:
-        """Return ``request`` without provider-encrypted replay state after a sticky-upstream failure, else None.
-
-        Attached to ``Capabilities.sticky_replay_recovery`` on the OpenRouter Responses route only.
-        """
-        if not _is_sticky_replay_error(error, caller_retries=request.overrides.caller_retries):
+        """Return ``request`` without encrypted replay state after an OpenRouter sticky-upstream failure, else None."""
+        rp = self.settings.request_params or {}
+        nested = rp.get("extra_body")
+        effective_extra = nested if "extra_body" in rp else self.settings.extra_body
+        bodies = (rp, self.settings.extra_body or {}, nested if isinstance(nested, Mapping) else {})
+        if request.strip_encrypted_replay or any("input" in body for body in bodies):
             return None
-        if not replays_encrypted_state(request_replay(self.wire, request)):
+        sticky_400 = (
+            isinstance(error, InvalidRequest)
+            and (error.status_code == 400 or error.provider_code == "400")
+            and _STICKY_PROVIDER_ERROR in str(error).casefold()
+        )
+        sticky_429 = (
+            isinstance(error, RateLimited)
+            and not request.overrides.caller_retries
+            and not _fallbacks_disabled(rp, effective_extra)
+        )
+        if not (sticky_400 or sticky_429) or not replays_encrypted_state(request_replay(self.wire, request)):
             return None
-        return replace(request, messages=without_encrypted_state(request.messages))
+        return replace(request, strip_encrypted_replay=True)
 
     def native_compaction_settings(
         self,
@@ -202,6 +213,7 @@ class ResponsesAdapter:
             portable_replay=request.portable_replay,
             native_compaction=request.native_compaction,
             conversation_digest=conversation_digest(request.messages),
+            encrypted_replay_reset=self.wire.reset_scope if request.strip_encrypted_replay else None,
         )
         try:
             client = await self.clients.client()

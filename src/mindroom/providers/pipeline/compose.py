@@ -1,8 +1,7 @@
 """Compose the request pipeline around one provider adapter.
 
 Outermost first: the conversation's held system prompt, portable deferred tool search, media fallback, remote media
-downloads, the malformed tool-call guidance retry, sticky encrypted-replay recovery, stream retry with the idle limit,
-the safeguard refusal, and request
+downloads, the malformed tool-call guidance retry, stream retry with the idle limit, the safeguard refusal, and request
 logging. Each attempt the adapter sends is therefore logged, a refused one included; a URL that cannot be downloaded
 fails inside the media fallback, which sends its note instead; retries never resend media a route rejected or download
 media again, since the guidance retry resends the request the downloads produced; and every attempt of a request
@@ -21,7 +20,7 @@ from mindroom.providers.pipeline.prompt_hold import held_request, prompt_hold_st
 from mindroom.providers.pipeline.refusal import refusal_stream
 from mindroom.providers.pipeline.remote_media import remote_media_stream
 from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
-from mindroom.providers.pipeline.retry import retrying_stream, sticky_replay_stream
+from mindroom.providers.pipeline.retry import retrying_stream
 from mindroom.providers.pipeline.wrapped import RequestProjection, WrappedProvider
 
 if TYPE_CHECKING:
@@ -41,7 +40,6 @@ def wrap_provider(
     provider = WrappedProvider(adapter, partial(logged_stream, log=request_log))
     provider = WrappedProvider(provider, refusal_stream)
     provider = WrappedProvider(provider, partial(retrying_stream, idle_timeout_seconds=idle_timeout_seconds))
-    provider = WrappedProvider(provider, sticky_replay_stream)
     provider = WrappedProvider(provider, guidance_retry_stream)
     provider = WrappedProvider(provider, remote_media_stream)
     provider = WrappedProvider(

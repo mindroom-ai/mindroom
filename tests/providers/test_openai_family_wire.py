@@ -1776,6 +1776,12 @@ _OPENROUTER_RESPONSES = {
         (
             "openai/gpt-6.2-sol",
             "https://openrouter.ai/api/v1",
+            {"request_params": {"extra_body": {"provider": {"only": ["openai"]}}}},
+            True,
+        ),
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
             {"extra_body": {"models": ["openai/gpt-6.2-sol"]}},
             False,
         ),
@@ -1786,6 +1792,16 @@ _OPENROUTER_RESPONSES = {
             {"request_params": {"extra_body": {"model": "anthropic/claude-opus-5.5"}}},
             False,
         ),
+        ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", {"extra_body": {"preset": "@preset/fast"}}, False),
+        ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", {"request_params": {"preset": "@preset/fast"}}, False),
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {"request_params": {"extra_body": {"preset": "@preset/fast"}}},
+            False,
+        ),
+        ("openai/gpt-6.2-sol@preset/fast", "https://openrouter.ai/api/v1", {}, False),
+        ("@preset/fast", "https://openrouter.ai/api/v1", {}, False),
         ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", {"store": True}, False),
         ("openai/gpt-6.2-sol", "https://api.openai.com/v1", {}, False),
         ("gpt-6.2-sol", "https://api.openai.com/v1", {}, True),
@@ -1818,6 +1834,22 @@ def test_openrouter_responses_native_compaction_eligibility(
         assert adapter.wire.explicit_breakpoint is False
     if model_id.endswith("gpt-6.2-sol"):
         assert adapter.capabilities.provider_default_sampling is True
+
+
+def test_codex_with_openrouter_base_url_does_not_enable_native_compaction(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    adapter = build_provider(
+        ModelConfig(
+            provider="codex",
+            id="openai/gpt-6.2-sol",
+            extra_kwargs={"base_url": "https://openrouter.ai/api/v1"},
+        ),
+        runtime,
+    )
+
+    assert isinstance(adapter, ResponsesAdapter)
+    assert adapter.capabilities.native_compaction is False
+    assert adapter.capabilities.sticky_replay_recovery is None
 
 
 @pytest.mark.asyncio
@@ -1886,14 +1918,21 @@ def _encrypted_history(native: NativeCompactionReplay) -> list[Message]:
             "content": [{"type": "output_text", "text": "Compacted answer", "annotations": []}],
         },
     ]
+    tail_call = {
+        "id": "fc_lookup",
+        "call_id": "call_lookup",
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+    }
     tail_output = [
         {"id": "rs_tail", "type": "reasoning", "summary": [], "encrypted_content": "enc-reason-azure-2"},
         {
-            "id": "msg_tail",
-            "type": "message",
-            "role": "assistant",
+            "id": "fc_lookup",
+            "type": "function_call",
+            "call_id": "call_lookup",
+            "name": "get_weather",
+            "arguments": '{"city": "Paris"}',
             "status": "completed",
-            "content": [{"type": "output_text", "text": "Follow-up answer", "annotations": []}],
         },
     ]
     return [
@@ -1918,10 +1957,11 @@ def _encrypted_history(native: NativeCompactionReplay) -> list[Message]:
                 },
             },
         ),
-        Message(role="user", content="Tail question"),
+        Message(role="user", content="Check Paris weather"),
         Message(
             role="assistant",
-            content="Follow-up answer",
+            content=None,
+            tool_calls=[tail_call],
             provider_data={
                 "response_id": "resp_tail",
                 "mindroom_response_stored": False,
@@ -1933,6 +1973,7 @@ def _encrypted_history(native: NativeCompactionReplay) -> list[Message]:
                 },
             },
         ),
+        Message(role="tool", tool_call_id="fc_lookup", content="Sunny, 20C"),
         Message(role="user", content="Next question after provider change"),
     ]
 
@@ -1978,9 +2019,21 @@ async def test_openrouter_responses_recovers_once_from_sticky_400_and_stores_new
     assert "enc-compaction-azure" in json.dumps(first_body["input"])
     assert "enc-reason-azure-2" in json.dumps(first_body["input"])
     # Second attempt drops all compaction items and encrypted_content and replays the full stored history.
-    assert not any(item.get("type") == "compaction" for item in second_body["input"])
-    assert "encrypted_content" not in json.dumps(second_body["input"])
-    assert "Earliest question before compaction" in json.dumps(second_body["input"])
+    second_input = second_body["input"]
+    second_json = json.dumps(second_input)
+    assert not any(item.get("type") == "compaction" for item in second_input)
+    assert "encrypted_content" not in second_json
+    assert "rs_" not in second_json
+    assert "fc_" not in second_json
+    assert "Earliest question before compaction" in second_json
+    fn_calls = [item for item in second_input if item.get("type") == "function_call"]
+    fn_outputs = [item for item in second_input if item.get("type") == "function_call_output"]
+    assert len(fn_calls) == 1
+    assert fn_calls[0]["call_id"] == "call_lookup"
+    assert fn_calls[0]["name"] == "get_weather"
+    assert fn_calls[0]["arguments"] == '{"city": "Paris"}'
+    assert "id" not in fn_calls[0]
+    assert fn_outputs == [{"type": "function_call_output", "call_id": "call_lookup", "output": "Sunny, 20C"}]
     assert second_body["store"] is False
     assert second_body["include"] == ["reasoning.encrypted_content"]
     assert second_body["context_management"] == [{"type": "compaction", "compact_threshold": 50_000}]
@@ -2121,6 +2174,188 @@ async def test_openrouter_responses_recovers_when_only_encrypted_reasoning_is_re
     assert (turn.content, len(sent)) == ("Rebuilt ok", 2)
     assert "enc-reason-azure" in json.dumps(json.loads(sent[0].content)["input"])
     assert "encrypted_content" not in json.dumps(json.loads(sent[1].content)["input"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_replacement_checkpoint", [False, True], ids=["without-checkpoint", "with-checkpoint"])
+async def test_openrouter_responses_recovery_boundary_persists_to_following_request(
+    tmp_path: Path,
+    *,
+    with_replacement_checkpoint: bool,
+) -> None:
+    new_output = [
+        *(
+            [{"id": "cmp_openai", "type": "compaction", "encrypted_content": "enc-compaction-openai"}]
+            if with_replacement_checkpoint
+            else []
+        ),
+        {"id": "rs_openai", "type": "reasoning", "summary": [], "encrypted_content": "enc-reason-openai"},
+        {
+            "id": "msg_new",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Recovered", "annotations": []}],
+        },
+    ]
+    replies = [
+        _json_reply(_STICKY_400_BODY, status=400),
+        _responses_reply(*_text_events("Recovered"), _completed(new_output)),
+        _responses_reply(*_text_events("Next ok"), _completed()),
+    ]
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(replies[len(sent) - 1])
+
+    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    provider = pipeline_provider(adapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+    history = _encrypted_history(native)
+
+    recovered = await complete(provider, ModelRequest(messages=history, native_compaction=native))
+    follow_up_messages = [*history, recovered.message, Message(role="user", content="Follow-up after recovery")]
+    follow_up = await complete(provider, ModelRequest(messages=follow_up_messages, native_compaction=native))
+
+    assert (recovered.content, follow_up.content, len(sent)) == ("Recovered", "Next ok", 3)
+    third_input = json.loads(sent[2].content)["input"]
+    third_json = json.dumps(third_input)
+    # Old upstream's checkpoint and reasoning never reappear on the following request.
+    assert "enc-compaction-azure" not in third_json
+    assert "enc-reason-azure" not in third_json
+    if with_replacement_checkpoint:
+        # New checkpoint supersedes the boundary and replaces earlier history.
+        assert "enc-compaction-openai" in third_json
+        assert "Earliest question before compaction" not in third_json
+    else:
+        # Without a replacement checkpoint, earlier turns stay rebuilt while the recovered turn replays normally.
+        assert not any(item.get("type") == "compaction" for item in third_input)
+        assert "Earliest question before compaction" in third_json
+        assert "enc-reason-openai" in third_json
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_always_429_stops_at_single_stripped_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    transient_attempts = 1 + retry_stage._MAX_TRANSIENT_RETRIES
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(_json_reply(_UPSTREAM_429_BODY, status=429))
+
+    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    provider = pipeline_provider(adapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+
+    with pytest.raises(RateLimited):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    # 5 encrypted attempts (initial + 4 transient retries) + 1 final stripped attempt = 6 total.
+    assert len(sent) == transient_attempts + 1
+    assert "encrypted_content" in json.dumps(json.loads(sent[0].content)["input"])
+    assert "encrypted_content" not in json.dumps(json.loads(sent[-1].content)["input"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra_override",
+    [
+        {"request_params": {"input": "authored override"}},
+        {"extra_body": {"input": "authored override"}},
+        {"request_params": {"extra_body": {"input": "authored override"}}},
+    ],
+    ids=["request_params", "extra_body", "request_params.extra_body"],
+)
+async def test_openrouter_responses_authored_input_skips_429_sticky_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_override: dict[str, Any],
+) -> None:
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    transient_attempts = 1 + retry_stage._MAX_TRANSIENT_RETRIES
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(_json_reply(_UPSTREAM_429_BODY, status=429))
+
+    config = {
+        **_OPENROUTER_RESPONSES,
+        "extra_kwargs": {"base_url": "https://openrouter.ai/api/v1", **extra_override},
+    }
+    adapter = openai_family_adapter(config, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    provider = pipeline_provider(adapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+
+    with pytest.raises(RateLimited):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert len(sent) == transient_attempts
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_allow_fallbacks_false_skips_429_sticky_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    transient_attempts = 1 + retry_stage._MAX_TRANSIENT_RETRIES
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(_json_reply(_UPSTREAM_429_BODY, status=429))
+
+    config = {
+        **_OPENROUTER_RESPONSES,
+        "extra_kwargs": {
+            "base_url": "https://openrouter.ai/api/v1",
+            "request_params": {"extra_body": {"provider": {"only": ["openai"], "allow_fallbacks": False}}},
+        },
+    }
+    adapter = openai_family_adapter(config, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    provider = pipeline_provider(adapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+
+    with pytest.raises(RateLimited):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert len(sent) == transient_attempts
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_plain_non_sticky_400_is_not_retried(tmp_path: Path) -> None:
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(
+            _json_reply({"error": {"message": "Invalid parameter: max_output_tokens", "code": 400}}, status=400),
+        )
+
+    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    provider = pipeline_provider(adapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+
+    with pytest.raises(InvalidRequest, match="Invalid parameter"):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert len(sent) == 1
 
 
 # --- Request settings -----------------------------------------------------------------------------------------

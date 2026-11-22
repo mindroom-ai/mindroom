@@ -192,6 +192,7 @@ class ModelRequest:
     deferred_tools: DeferredTools = DeferredTools()
     portable_replay: bool = False
     native_compaction: NativeCompactionReplay | None = None
+    strip_encrypted_replay: bool = False
     on_send: Callable[[Mapping[str, Any]], Awaitable[None]] = _unobserved
     prompt_hold: Path | None = None
     prompt_hold_pin: list[dict[str, Any] | None] | None = None
