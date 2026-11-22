@@ -283,6 +283,8 @@ class KubernetesWorkerBackend:
         self._progress = WorkerWarmupProgress(self.backend_name)
         self._ready_workers: dict[str, _ReadyWorkerCacheEntry] = {}
         self._ready_workers_lock = threading.Lock()
+        # The setup wait of each worker's latest start, which the tool callers of that worker share.
+        self._setup_waits: dict[str, tuple[threading.Lock, list[tuple[str, WorkerStartReporter, httpx.Response]]]] = {}
         # When each worker directory was first seen without a Deployment, infinity for one no pass removes.
         self._stateless_since: dict[str, float] = {}
 
@@ -300,13 +302,20 @@ class KubernetesWorkerBackend:
     ) -> WorkerHandle:
         """Resolve or start the worker backing the given worker key, from the launch applied when its lock is held."""
         # A caller waiting behind another's start of this worker is sent that start's progress.
-        with self._progress.subscribed(spec.worker_key, progress_sink), self._worker_locks.for_key(spec.worker_key):
-            launch = self._current_launch()
-            timestamp = time.time() if now is None else now
-            cached_handle = self._reuse_cached_ready_worker(spec, launch, now=timestamp)
-            if cached_handle is not None:
-                return cached_handle
-            return self._provision_worker_locked(spec, launch, timestamp=timestamp)
+        with self._progress.subscribed(spec.worker_key, progress_sink):
+            with self._worker_locks.for_key(spec.worker_key):
+                launch = self._current_launch()
+                timestamp = time.time() if now is None else now
+                handle = self._reuse_cached_ready_worker(spec, launch, now=timestamp)
+                if handle is None:
+                    handle = self._provision_worker_locked(spec, launch, timestamp=timestamp)
+            # Outside the worker's lock, so a caller that only shows the worker goes on while tool callers wait here.
+            if spec.wait_for_setup and (setup := self._setup_waits.get(spec.worker_key)) is not None:
+                lock, due = setup
+                with lock:  # The first tool caller waits for the setup; a later one waits here until that ended.
+                    if due:
+                        self._wait_for_worker_setup(*due.pop())
+            return handle
 
     def _provision_worker_locked(  # noqa: C901, PLR0912, PLR0915
         self,
@@ -426,10 +435,9 @@ class KubernetesWorkerBackend:
                 raise
             raise WorkerBackendError(failure_reason) from exc
 
-        if reporter is not None:
-            # A caller that only shows the worker needs it to answer, not to run tools.
-            if spec.wait_for_setup:
-                self._wait_for_worker_setup(worker_id, reporter, health)
+        if reporter is not None and spec.wait_for_setup:
+            self._setup_waits[worker_key] = (threading.Lock(), [(worker_id, reporter, health)])
+        elif reporter is not None:  # A caller that only shows the worker needs it to answer, not to run tools.
             reporter.finish(None)
         final_deployment_annotations = {
             **dict(deployment.metadata.annotations or {}),
@@ -477,6 +485,7 @@ class KubernetesWorkerBackend:
                 break
         if setup is not None and setup != "ready":
             logger.warning("Worker %s did not finish its setup (%s); its first call prepares it", worker_id, setup)
+        reporter.finish(None)
 
     def _compatible_worker_health(self, worker_id: str, *, is_replacement: bool) -> httpx.Response | None:
         """Return the ready worker's health answer, or None when it speaks another protocol and gets replaced.
