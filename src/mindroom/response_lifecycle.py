@@ -754,6 +754,8 @@ class ResponseLifecycleCoordinator:
         with ``ResponseAdmissionRefusedError``. Paused approvals are waited out through
         ``wait_for_approval_release`` without holding admission or the lock, and only an
         approval that appears while this call is queued makes it wait and admit again.
+        FIFO order starts once the call queues on the lock; while it still waits for an
+        approval or for admission, later callers can overtake it.
         ``admit`` must not swallow exceptions raised before the body; if it does, they
         are re-raised. All three callables come from the same runtime and are required,
         so no caller can admit work and leave out the stop checks.
