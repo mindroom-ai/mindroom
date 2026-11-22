@@ -531,7 +531,7 @@ class AgentBot:
                 ),
                 turn_has_live_claim=lambda event_id: self._turn_store.has_live_turn_claim(event_id),
                 replies_ended=self._replies_ended,
-                on_job_follow_up=lambda event: self._response_runner.handoff_job_follow_up(event),
+                on_runtime_source=lambda event: self._response_runner.handoff_runtime_source(event),
             ),
             room_for_id=self._room_for_journal_event,
             # Resolved late: the ingress validator, which owns the trust rule, is built after the dispatcher.

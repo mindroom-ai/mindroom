@@ -7,7 +7,7 @@ import time
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
@@ -148,9 +148,10 @@ from .delivery_gateway import (
     SendTextRequest,
     StreamingDeliveryRequest,
 )
+from .event_journal import EventKind
 from .media_inputs import MediaInputs
 from .response_activity import ActiveResponseIdentity
-from .response_admission import ResponseAdmissionRefusedError
+from .response_admission import ResponseAdmissionRefusedError, admitted_response_decision
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
@@ -482,32 +483,7 @@ class ResponseRunner:
     ) -> SourceFate:
         """Admit one response, then run it under its conversation's lock; return what it did with its sources."""
         gate = self.deps.runtime.response_admission_gate
-        admission_deferred = False
-        while not gate.admit():
-            if not admission_deferred:
-                admission_deferred = True
-                self.deps.logger.info(
-                    "response_deferred_during_replacement",
-                    response_kind=response_kind,
-                    **request.response_envelope.target.log_context,
-                )
-            if not await self.deps.runtime.wait_for_admission_or_shutdown():
-                self.deps.logger.warning(
-                    "response_refused_after_runtime_replacement",
-                    response_kind=response_kind,
-                    **request.response_envelope.target.log_context,
-                )
-                raise ResponseAdmissionRefusedError
-        identity = ActiveResponseIdentity(
-            responder=(
-                f"team/{self.deps.agent_name}"
-                if self.deps.agent_name in self.deps.runtime.config.teams
-                else self.deps.agent_name
-            ),
-            requester_id=request.response_envelope.requester_id,
-        )
-        gate.response_identities.add(identity)
-        self._in_flight_response_count += 1
+        log_context = {"response_kind": response_kind, **request.response_envelope.target.log_context}
 
         async def acknowledge_deferred(key: str, event_id: str) -> None:
             await self.deps.delivery_gateway.send_judgment_reaction(
@@ -518,39 +494,54 @@ class ResponseRunner:
                 kind="mid_turn_defer",
             )
 
-        try:
-            # A contact turn reaches its contact room only through sends its message policy approved.
-            with guarded_room(request.room_id) if request.contact is not None else nullcontext():
-                async with self.deps.replies.span_scope():
-                    fate = await self.lifecycle_coordinator.run_locked_response(
-                        target=request.response_envelope.target,
-                        response_envelope=request.response_envelope,
-                        pipeline_timing=request.pipeline_timing,
-                        mid_turn_gate=_mid_turn_for_request(
-                            request,
-                            self.deps.runtime.config,
-                            self.deps.runtime_paths,
-                            # A contact turn shows only its 👀, never a deferral's reaction on the other side's message.
-                            on_defer=None if request.contact is not None else acknowledge_deferred,
-                        ),
-                        locked_operation=lambda: self._run_locked_ending_span(request, locked_operation),
-                        signal_queued_message=signal_queued_message and not request.quiet,
-                    )
-                    handle = current_span()
-                    if handle is not None and not handle.exited:
-                        # Every exit path is meant to end its span; one that did not is a bug,
-                        # and releasing keeps the reply's sources for a retry.
-                        self.deps.logger.error(
-                            "reply_span_left_unended",
-                            span_id=handle.span_id,
-                            reply_id=handle.reply_id,
+        async with admitted_response_decision(
+            gate,
+            lambda: self.deps.runtime.wait_for_admission_or_shutdown(),
+            on_deferred=lambda: self.deps.logger.info("response_deferred_during_replacement", **log_context),
+            on_refused=lambda: self.deps.logger.warning("response_refused_after_runtime_replacement", **log_context),
+        ):
+            identity = ActiveResponseIdentity(
+                responder=(
+                    f"team/{self.deps.agent_name}"
+                    if self.deps.agent_name in self.deps.runtime.config.teams
+                    else self.deps.agent_name
+                ),
+                requester_id=request.response_envelope.requester_id,
+            )
+            gate.response_identities.add(identity)
+            self._in_flight_response_count += 1
+            try:
+                # A contact turn reaches its contact room only through sends its message policy approved.
+                with guarded_room(request.room_id) if request.contact is not None else nullcontext():
+                    async with self.deps.replies.span_scope():
+                        fate = await self.lifecycle_coordinator.run_locked_response(
+                            target=request.response_envelope.target,
+                            response_envelope=request.response_envelope,
+                            pipeline_timing=request.pipeline_timing,
+                            mid_turn_gate=_mid_turn_for_request(
+                                request,
+                                self.deps.runtime.config,
+                                self.deps.runtime_paths,
+                                # A contact turn shows only its 👀, never a deferral's reaction on the other side's message.
+                                on_defer=None if request.contact is not None else acknowledge_deferred,
+                            ),
+                            locked_operation=lambda: self._run_locked_ending_span(request, locked_operation),
+                            signal_queued_message=signal_queued_message and not request.quiet,
                         )
-                        await self.deps.delivery_gateway.end_reply_span(handle, release_decision(handle))
-                    return fate
-        finally:
-            gate.response_identities.remove(identity)
-            self._in_flight_response_count -= 1
-            gate.release()
+                        handle = current_span()
+                        if handle is not None and not handle.exited:
+                            # Every exit path is meant to end its span; one that did not is a bug,
+                            # and releasing keeps the reply's sources for a retry.
+                            self.deps.logger.error(
+                                "reply_span_left_unended",
+                                span_id=handle.span_id,
+                                reply_id=handle.reply_id,
+                            )
+                            await self.deps.delivery_gateway.end_reply_span(handle, release_decision(handle))
+                        return fate
+            finally:
+                gate.response_identities.remove(identity)
+                self._in_flight_response_count -= 1
 
     async def _run_locked_ending_span(
         self,
@@ -740,14 +731,21 @@ class ResponseRunner:
             signal_queued_message=False,
         )
 
-    async def handoff_job_follow_up(self, event: JournalEvent) -> None:
-        """Hand a follow-up to a detached response owner; its reply, or that owner, settles it.
+    # What runs each kind of runtime source, looked up on the runner so a kind's handler stays its own method.
+    _RUNTIME_SOURCE_HANDLERS: ClassVar[
+        dict[EventKind, Callable[[ResponseRunner, JournalEvent], Coroutine[Any, Any, None]]]
+    ] = {
+        EventKind.JOB_FOLLOW_UP: lambda self, event: self._run_job_follow_up(event),
+    }
 
-        The dispatcher hands over only a follow-up no live owner holds.
+    async def handoff_runtime_source(self, event: JournalEvent) -> None:
+        """Hand a runtime source to a detached response owner; its reply, or that owner, settles it.
+
+        The dispatcher hands over only a source no live owner holds.
         """
         self.inbox.track_inbox_response(
-            self._run_job_follow_up(event),
-            name=f"job_follow_up:{event.event_id}",
+            self._RUNTIME_SOURCE_HANDLERS[event.kind](self, event),
+            name=f"{event.kind}:{event.event_id}",
             room_id=event.room_id,
             source_event_ids=(event.event_id,),
             recovery_proof_ready=lambda: True,
