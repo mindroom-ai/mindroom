@@ -557,15 +557,16 @@ class ResponseLifecycleCoordinator:
             return signal
         # The table is capped softly: an entry stays while a turn is begun on it or a human message waits in it.
         # A held lock always has a begun turn; checking it too keeps a mistake from making a second lock.
-        for candidate, candidate_signal in list(self._thread_queued_signals.items()):
-            if len(self._thread_queued_signals) < 100:
-                break
-            if not (
-                candidate_signal.has_pending_human_messages()
-                or candidate_signal.has_active_response_turn()
-                or candidate_signal.lock.locked()
-            ):
-                del self._thread_queued_signals[candidate]
+        if len(self._thread_queued_signals) >= 100:
+            for candidate, candidate_signal in list(self._thread_queued_signals.items()):
+                if not (
+                    candidate_signal.has_pending_human_messages()
+                    or candidate_signal.has_active_response_turn()
+                    or candidate_signal.lock.locked()
+                ):
+                    del self._thread_queued_signals[candidate]
+                    if len(self._thread_queued_signals) < 100:
+                        break
         signal = _QueuedMessageState()
         self._thread_queued_signals[lifecycle_key] = signal
         return signal
