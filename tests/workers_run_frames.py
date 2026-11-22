@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import base64
 import io
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Buffer
 
 __all__ = ["FakeStream", "command_frames"]
 
@@ -13,9 +17,9 @@ class _Recorded(io.BytesIO):
         super().__init__()
         self._name, self._log = name, log
 
-    def write(self, data: bytes) -> int:  # type: ignore[override]
-        self._log.append((self._name, bytes(data)))
-        return super().write(data)
+    def write(self, buffer: Buffer, /) -> int:
+        self._log.append((self._name, bytes(buffer)))
+        return super().write(buffer)
 
 
 class FakeStream(io.TextIOWrapper):
