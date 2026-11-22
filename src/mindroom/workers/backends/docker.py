@@ -28,7 +28,7 @@ from mindroom.credentials.manager import (
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.redaction import redact_sensitive_text
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.runtime_env_policy import KUBERNETES_POD_LIMIT_ENV_NAMES, SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,
@@ -1153,8 +1153,9 @@ class DockerWorkerBackend(WorkerBackendDefaults):
             del env["MINDROOM_CONFIG_PATH"]
         env["HOME"] = self._container_home_path(worker_key)
         env[_TOKEN_ENV_NAME] = self._control_token(worker_key)
-        # Operator env never replaces a backend-owned variable; the config rejects the names it could collide on.
-        return {**self.config.extra_env, **env}
+        # Operator env never replaces a backend-owned variable or Kubernetes-only pod limit markers.
+        extra_env = {k: v for k, v in self.config.extra_env.items() if k not in KUBERNETES_POD_LIMIT_ENV_NAMES}
+        return {**extra_env, **env}
 
     def _write_startup_manifest(
         self,
