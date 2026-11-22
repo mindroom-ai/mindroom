@@ -24,7 +24,7 @@ from mindroom.llm.runs import RunRequirement
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import execute_tool_call
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.runtime_context import note_call_refusal, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, validate_tool_arguments
 from mindroom.tool_system.tool_function import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
@@ -341,6 +341,8 @@ def _invalid_arguments_reason(binding: PreparedAgentToolBinding, arguments: dict
     ):
         context = binding.catalog.runtime_context
         reason = named_workers_refusal(context.agent_name, context.config, context.runtime_paths)
+        # A CLI call reports this as a named-worker refusal, as it does one its shell raises.
+        note_call_refusal()
         return reason or "Named workers need a shell that runs in a worker."
     return "Invalid tool arguments"
 

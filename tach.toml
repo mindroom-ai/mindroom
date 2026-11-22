@@ -231,6 +231,7 @@ visibility = [
 from = ["mindroom.agent_cli.client"]
 expose = [
     "AgentCliClient",
+    "AgentCliRefusedError",
     "AgentCliUnavailableError",
 ]
 

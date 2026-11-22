@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from http import HTTPStatus
 from http.client import HTTPException
 from typing import cast
 from urllib.error import HTTPError, URLError
@@ -25,6 +26,10 @@ _CANCEL_TIMEOUT_SECONDS = 8
 
 class AgentCliUnavailableError(RuntimeError):
     """Authority or transport could not yield a known response."""
+
+
+class AgentCliRefusedError(AgentCliUnavailableError):
+    """The server answered a request with a 4xx it gave no reason for, so it did not act on it."""
 
 
 def _rejection(error: HTTPError) -> ValueError:
@@ -128,7 +133,8 @@ class AgentCliClient:
             if exc.code in {400, 409, 413, 422}:
                 raise _rejection(exc) from None
             msg = "Agent CLI authority or transport is unavailable"
-            raise AgentCliUnavailableError(msg) from None
+            refused = HTTPStatus.BAD_REQUEST <= exc.code < HTTPStatus.INTERNAL_SERVER_ERROR
+            raise (AgentCliRefusedError if refused else AgentCliUnavailableError)(msg) from None
         except (OSError, HTTPException, URLError, ValueError) as exc:
             # Name the address so a blocked route back to MindRoom is diagnosable from the shell.
             msg = f"Agent CLI transport outcome is unknown; check that this shell can reach {self._url}"

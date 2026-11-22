@@ -651,7 +651,13 @@ class LiveTurnTools(TurnToolBridge):
                 return
             if waiting.needs_external_execution and binding.key.toolkit == "delegate" and parent is not None:
                 async with self._delegation:
-                    delegated = self._execute_delegation(binding, waiting, parent=parent, authorize=authorize)
+                    delegated = self._execute_delegation(
+                        binding,
+                        waiting,
+                        call_id=call_id,
+                        parent=parent,
+                        authorize=authorize,
+                    )
                     async with closing_async_stream(delegated):
                         async for event in delegated:
                             emit_cli_tool_event(event, parent)
@@ -713,7 +719,12 @@ class LiveTurnTools(TurnToolBridge):
         finally:
             call.awaiting_approval = False
         if call.cancel_requested:
-            msg = "Call cancelled before dispatch"
+            # Only a delegation, whose child may have run, has started before it waits for approval.
+            msg = (
+                "Call cancelled before dispatch"
+                if call.receipt.status == "waiting"
+                else "Call interrupted after dispatch; effects may have occurred"
+            )
             raise _StaleAttemptError(msg)
         return resolved
 
@@ -722,6 +733,7 @@ class LiveTurnTools(TurnToolBridge):
         binding: PreparedAgentToolBinding,
         requirement: RunRequirement,
         *,
+        call_id: str,
         parent: str,
         authorize: Callable[[], Awaitable[None]],
     ) -> AsyncIterator[AgentToolCallStep]:
@@ -740,15 +752,17 @@ class LiveTurnTools(TurnToolBridge):
                 if not started:
                     started = True
                     yield AgentToolCallStep("started", binding.key, requirement.tool_execution.call)
-                result = await advance_cli_delegation(
-                    binding,
-                    requirement,
-                    parent_bash_call_id=parent,
-                    delegation_depth=self._delegation_depth,
-                    refresh_scheduler=self._refresh_scheduler,
-                    approval_calls=approval_calls,
-                    on_event=on_child_event,
-                )
+                # The child's worker progress and refusals belong to its own calls, not to this call's receipt.
+                with call_progress_sink_scope(None):
+                    result = await advance_cli_delegation(
+                        binding,
+                        requirement,
+                        parent_bash_call_id=parent,
+                        delegation_depth=self._delegation_depth,
+                        refresh_scheduler=self._refresh_scheduler,
+                        approval_calls=approval_calls,
+                        on_event=on_child_event,
+                    )
             if not isinstance(result, PausedAttempt):
                 yield AgentToolCallStep("completed", binding.key, result.call)
                 return
@@ -766,7 +780,7 @@ class LiveTurnTools(TurnToolBridge):
                 emit_cli_run_event(ToolStarted(tool.call), parent=parent, toolkit_name=child_toolkit)
                 presentation.start_tool(tool.call, origin=ToolCallOrigin(parent, child_toolkit))
             paused = replace(result, response_text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace))
-            resolved = await handler(paused)
+            resolved = await self._approved(call_id, handler, paused)
             approval_calls = approval_calls_for_cli_pause(paused, self.catalog.runtime_context.agent_name, resolved)
 
     def _check_control(self, event: AgentToolCallEvent) -> None:

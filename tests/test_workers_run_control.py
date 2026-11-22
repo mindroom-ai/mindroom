@@ -1654,9 +1654,11 @@ def _real_workers_run(respond, **popen: object) -> Iterator[subprocess.Popen[byt
         def _answer(self) -> None:
             self.rfile.read(int(self.headers.get("Content-Length", "0")))
             body = json.dumps(respond(self.command, self.path)).encode()
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(body)
+            # The CLI may be gone by the time a held answer is written.
+            with suppress(OSError):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body)
 
         do_GET = do_POST = _answer  # noqa: N815
 
