@@ -2111,9 +2111,7 @@ class ResponseRunner:
             # A quiet turn shows none of its calls, and a contact turn's or a silent schedule's answer may never be shown,
             # so its tool hooks read its calls as hidden.
             tool_context=replace(tool_context, tool_calls_shown=show_tool_calls and not request.quiet),
-            participation=participation
-            if participation is not None
-            else _participation_for_request(request, self.deps.runtime.config, self.deps.runtime_paths),
+            participation=participation,
         )
 
     async def generate_response(self, request: ResponseRequest) -> SourceFate:
