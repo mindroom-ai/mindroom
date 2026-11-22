@@ -51,9 +51,10 @@ _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 8192
 # The most bytes of a streamed command's output handed on at once.
 _STREAM_CHUNK_BYTES = 32 * 1024
-# More output than its pipes can hold, read after a streamed command's process group was killed, comes from a process
-# that left the group; it is not read further.
+# Once a streamed command's process group was killed, only what its pipes still held is read. More bytes than pipes
+# hold, or bytes still waited for after this long, come from a process that left the group, and are not read.
 _KILLED_GROUP_PIPE_BYTES = 8 * 1024 * 1024
+_KILLED_GROUP_READ_SECONDS = 1.0
 # How long one chunk of a streamed command's stdin waits to leave before its sender is told to send it again.
 _STDIN_WRITE_SECONDS = 20.0
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
@@ -446,6 +447,9 @@ class _PipeReaders:
         self._on_output = on_output
         self._moved = 0
         self._idle: set[str] = set()
+        # When the command's process group was killed, and how many bytes its pipes may still give.
+        self.killed_at: float | None = None
+        self._left = _KILLED_GROUP_PIPE_BYTES
         self.tasks = {
             asyncio.create_task(self._read(process.stdout, "out")),
             asyncio.create_task(self._read(process.stderr, "err")),
@@ -453,19 +457,27 @@ class _PipeReaders:
 
     async def _read(self, stream: asyncio.StreamReader | None, kind: Literal["out", "err"]) -> None:
         assert stream is not None
+        loop, waited = asyncio.get_running_loop(), 0.0
         while True:
             self._idle.add(kind)
+            asked = loop.time()
             chunk = await stream.read(_STREAM_CHUNK_BYTES)
             self._idle.discard(kind)
+            if self.killed_at is not None:
+                # Time spent handing bytes on is the reader's and does not count: only the wait for new ones does.
+                waited += loop.time() - max(asked, self.killed_at)
+                self._left -= len(chunk)
+                if waited > _KILLED_GROUP_READ_SECONDS or self._left < 0:
+                    return
             if not chunk:
                 return
             await self._on_output(kind, chunk)
             self._moved += len(chunk)
 
-    async def drain(self, until: float | None, most: float = float("inf")) -> None:
-        """Wait, at the pace of ``on_output``, until both pipes ended, stayed silent, or gave ``most`` bytes."""
-        pending, last = self.tasks, self._moved + most
-        while pending and self._moved < last:
+    async def drain(self, until: float | None) -> None:
+        """Wait, at the pace of ``on_output``, until both pipes ended, stayed silent, or are read no further."""
+        pending = self.tasks
+        while pending:
             seen = self._moved
             async with asyncio.timeout_at(until):
                 _, pending = await asyncio.wait(pending, timeout=_POST_EXIT_READER_GRACE_SECONDS)
