@@ -575,6 +575,7 @@ class TestMatrixRegistration:
             "admin": False,
             "mac": expected_mac,
             "displayname": "Test User",
+            "inhibit_login": True,
         }
         mock_client.register.assert_not_called()
         mock_client.register_with_token.assert_not_called()
