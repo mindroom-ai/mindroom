@@ -34,6 +34,7 @@ from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
+    get_call_cancel_confirmed_hook,
     get_call_progress_sink,
     get_tool_runtime_context,
     get_worker_progress_pump,
@@ -1070,7 +1071,11 @@ class WorkerStandIns:
                 raise
             except asyncio.CancelledError:
                 # The blocking request keeps running after this await is cancelled; stop it at the worker too.
-                cancellation.cancel()
+                if (confirm := get_call_cancel_confirmed_hook()) is not None:
+                    if await cancellation.cancel_and_confirm(timeout=4.0):
+                        confirm()
+                else:
+                    cancellation.cancel()
                 raise
 
         return proxy_entrypoint

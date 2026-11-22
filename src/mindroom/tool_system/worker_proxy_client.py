@@ -28,6 +28,7 @@ from mindroom.workers.models import WorkerHandle, normalize_sandbox_runner_api_r
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
     CancelRequest,
+    CancelResponse,
     ExecuteRequest,
     ExecuteResponse,
     FailureKind,
@@ -333,13 +334,15 @@ class WorkerCallCancellation:
         self.request_id = secrets.token_hex(16)
         self._lock = threading.Lock()
         self._cancelled = False
-        self._stop: Callable[[], None] | None = None
+        self._armed = False
+        self._stop: Callable[[], bool] | None = None
 
-    def _arm(self, stop: Callable[[], None]) -> None:
+    def _arm(self, stop: Callable[[], bool]) -> None:
         """Keep the runner stop request until it is needed; refuse to dispatch an abandoned call."""
         with self._lock:
             if self._cancelled:
                 raise asyncio.CancelledError
+            self._armed = True
             self._stop = stop
 
     @property
@@ -352,9 +355,29 @@ class WorkerCallCancellation:
         """Ask the runner to stop the call in the background, so the caller's cancellation stays prompt."""
         with self._lock:
             self._cancelled = True
-            stop = self._stop
+            stop, self._stop = self._stop, None
         if stop is not None:
             threading.Thread(target=stop, name="mindroom-worker-cancel", daemon=True).start()
+
+    async def cancel_and_confirm(self, *, timeout: float) -> bool:
+        """Ask the runner to stop the call and wait up to *timeout* seconds for confirmation."""
+        with self._lock:
+            self._cancelled = True
+            armed, stop, self._stop = self._armed, self._stop, None
+        if stop is None:
+            return not armed
+        done, confirmed = threading.Event(), False
+
+        def _run() -> None:
+            nonlocal confirmed
+            try:
+                confirmed = bool(stop())
+            finally:
+                done.set()
+
+        threading.Thread(target=_run, name="mindroom-worker-cancel", daemon=True).start()
+        await asyncio.to_thread(done.wait, timeout)
+        return done.is_set() and confirmed
 
 
 def _post_execute_cancel(
@@ -362,15 +385,18 @@ def _post_execute_cancel(
     url: str,
     headers: dict[str, str],
     request_id: str,
-) -> None:
-    """Ask the runner to stop one execute request the primary no longer waits for."""
+) -> bool:
+    """Ask the runner to stop one execute request the primary no longer waits for; return whether confirmed."""
     try:
         with client_factory(timeout=_EXECUTE_CANCEL_TIMEOUT_SECONDS) as client:
             request = CancelRequest(protocol=WORKER_PROTOCOL_VERSION, request_id=request_id)
-            client.post(url, json=request.model_dump(mode="json"), headers=headers).raise_for_status()
+            response = client.post(url, json=request.model_dump(mode="json"), headers=headers)
+            response.raise_for_status()
+            return CancelResponse.model_validate(response.json()).cancelled
     except Exception:
         # Best effort: the call was already abandoned, and the runner's own timeouts still apply.
         logger.warning("worker_execute_cancel_failed", url=url, exc_info=True)
+        return False
 
 
 def _ndjson_lines(chunks: Iterator[bytes]) -> Iterator[str]:
