@@ -146,7 +146,6 @@ from mindroom.response_turn import (
     build_matrix_run_metadata,
     stream_response_turn,
 )
-from mindroom.room_model_overrides import set_room_model_override
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     ORDERLY_SHUTDOWN,
@@ -229,6 +228,7 @@ from tests.response_runner_helpers import (
     stream_transport,
     streamed_answer,
 )
+from tests.room_settings_helpers import set_room_model_override
 from tests.scripted_agent_helpers import stored_runs
 from tests.streaming_helpers import FakeReplyRecords
 from tests.test_agent_tool_calls import _catalog

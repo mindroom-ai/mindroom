@@ -24,10 +24,10 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.constants import primary_records_dir
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.message_target import MessageTarget
-from mindroom.room_thread_modes import resolve_room_thread_mode_override
+from mindroom.room_settings import THREAD_MODE, resolve_room_setting
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
-from mindroom.steward_duties import put_room_state_as_steward
+from mindroom.steward_duties import room_state_response_as_steward
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
@@ -622,7 +622,7 @@ def _thread_mode_command_through(
         room_id=THREAD_MODE_ROOM_ID,
         requester_user_id="@admin:localhost",
         sender_user_id="@admin:localhost",
-        put_state=partial(put_room_state_as_steward, runtime.room_steward),
+        put_state=partial(room_state_response_as_steward, runtime.room_steward),
     )
 
 
@@ -632,6 +632,7 @@ async def test_thread_mode_written_by_steward(room_state: RoomState) -> None:
     answering, command = _thread_mode_command_through(room_state, room_state[4])
 
     assert (await command).startswith("✅ This room now uses `room` thread mode")
+    assert room_state[3]["io.mindroom.room_settings", "thread_mode"] == {"value": "room"}
     assert room_state[3]["io.mindroom.thread_mode", ""] == {"mode": "room"}
     answering.room_put_state.assert_not_awaited()
 
@@ -646,18 +647,50 @@ async def test_thread_mode_without_power_says_moderator_rights(room_state: RoomS
 
     assert await command == "I need moderator rights in this room to change the thread mode."
     # Nothing changed: agents keep the mode the room's clients show.
-    assert resolve_room_thread_mode_override(room_state[1], THREAD_MODE_ROOM_ID) is None
+    assert resolve_room_setting(THREAD_MODE, room_state[1], THREAD_MODE_ROOM_ID) is None
     assert ("io.mindroom.thread_mode", "") not in room_state[3]
 
 
 @pytest.mark.asyncio
 async def test_thread_mode_failure_that_is_no_refusal_asks_to_retry(room_state: RoomState) -> None:
-    """A state write that fails for another reason than power does not ask for moderator rights."""
+    """A setting write that fails for another reason than power changes nothing and asks for no moderator rights."""
     failing = AsyncMock(spec=nio.AsyncClient)
     failing.room_put_state.return_value = nio.RoomPutStateError("server error", "M_UNKNOWN")
     _answering, command = _thread_mode_command_through(room_state, failing)
 
+    assert await command == "❌ The room did not take the change. Run the command again to retry."
+    assert resolve_room_setting(THREAD_MODE, room_state[1], THREAD_MODE_ROOM_ID) is None
+    assert ("io.mindroom.thread_mode", "") not in room_state[3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "advice"),
+    [
+        ("M_UNKNOWN", "Run the command again to retry."),
+        ("M_FORBIDDEN", "I need moderator rights in this room to show clients this room's thread mode."),
+    ],
+)
+async def test_a_thread_mode_the_room_took_stays_set_when_it_cannot_be_published(
+    room_state: RoomState,
+    status_code: str,
+    advice: str,
+) -> None:
+    """The room's setting is what agents follow, so a failed publication of the mode clients show undoes nothing."""
+    steward = AsyncMock(spec=nio.AsyncClient)
+    write = room_state[4].room_put_state.side_effect
+
+    async def settings_only(room_id: str, event_type: str, content: dict[str, Any], state_key: str = "") -> object:
+        if event_type == "io.mindroom.thread_mode":
+            return nio.RoomPutStateError("refused", status_code)
+        return await write(room_id, event_type, content, state_key)
+
+    steward.room_put_state.side_effect = settings_only
+    _answering, command = _thread_mode_command_through(room_state, steward)
+
     reply = await command
 
     assert reply.startswith("⚠️ This room now uses `room` thread mode")
-    assert "Run the command again to retry." in reply
+    assert reply.endswith(advice)
+    assert resolve_room_setting(THREAD_MODE, room_state[1], THREAD_MODE_ROOM_ID) == "room"
+    assert ("io.mindroom.thread_mode", "") not in room_state[3]

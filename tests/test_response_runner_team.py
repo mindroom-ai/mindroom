@@ -38,7 +38,6 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponse
 from mindroom.reply_turn.locked_turn import LockedTurns
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import Owned, ResponseSources
-from mindroom.room_model_overrides import set_room_model_override
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_summary.schedule import thread_summary_message_count_hint
@@ -77,6 +76,7 @@ from tests.matrix_state_helpers import save_matrix_state
 from tests.reply_span_helpers import seed_finished_reply
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import recorded_reply_event
+from tests.room_settings_helpers import set_room_model_override
 from tests.runtime_fakes import ready_runtime
 from tests.team_turn_helpers import scripted_team_stream
 
