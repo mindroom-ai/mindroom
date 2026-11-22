@@ -60,6 +60,7 @@ from mindroom.media_delivery import view_agent_image
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
+    KUBERNETES_POD_LIMIT_ENV_NAMES,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     sandbox_runner_startup_process_env,
@@ -937,7 +938,11 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
         for name in request.environment.set_names
         if name in request.execution_env and execution_env.get(name) == request.execution_env[name]
     ]
-    removed_names = [name for name in request.environment.unset_names if name not in execution_env]
+    removed_names = [
+        name
+        for name in request.environment.unset_names
+        if name not in execution_env and name not in KUBERNETES_POD_LIMIT_ENV_NAMES
+    ]
     execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared, execution_env) or execution_env
     # A kept name takes its value as the worker composed it, so its own PATH entries stay around a hook's PATH.
     call_environment: dict[str, str | None] = {name: execution_env[name] for name in kept_set_names}

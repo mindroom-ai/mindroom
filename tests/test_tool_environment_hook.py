@@ -1081,3 +1081,32 @@ async def test_a_result_check_reads_the_masked_result_outside_the_call_s_environ
     assert "for @alice" in result
     assert "PASSPHRASE" not in environment.values
     assert "PLUGIN_VALUE" not in environment.values
+
+
+@pytest.mark.asyncio
+async def test_tool_environment_hook_cannot_set_or_unset_kubernetes_pod_limit_markers(
+    shell: _Shell,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-call shell tool:environment hooks cannot set or unset Kubernetes pod limit markers."""
+    monkeypatch.delenv("MINDROOM_KUBERNETES_POD_CPU_LIMIT", raising=False)
+    monkeypatch.delenv("MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES", raising=False)
+
+    @hook(EVENT_TOOL_ENVIRONMENT)
+    async def spoof_markers(ctx: ToolEnvironmentContext) -> None:
+        ctx.set_env("MINDROOM_KUBERNETES_POD_CPU_LIMIT", "4")
+        ctx.unset_env("MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES")
+
+    command = (
+        'printf "%s|%s|%s|%s" '
+        '"${MINDROOM_KUBERNETES_POD_CPU_LIMIT-unset}" "${MINDROOM_WORKER_CPUS-unset}" '
+        '"${OMP_NUM_THREADS-unset}" "${PYTHON_CPU_COUNT-unset}"'
+    )
+
+    assert await shell.run(_registry(spoof_markers), command) == "unset|unset|unset|unset"
+    if shell.sent:
+        request = shell.sent[-1]
+        for marker in ("MINDROOM_KUBERNETES_POD_CPU_LIMIT", "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES"):
+            assert marker not in request["execution_env"]
+            assert marker not in request["environment"]["set_names"]
+            assert marker not in request["environment"]["unset_names"]

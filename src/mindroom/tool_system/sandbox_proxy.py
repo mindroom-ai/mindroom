@@ -24,7 +24,7 @@ from mindroom.browser.call_limit import browser_request_budget_seconds
 from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.runtime_env_policy import KUBERNETES_POD_LIMIT_ENV_NAMES, SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.timing import reply_timing_binding
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
@@ -836,7 +836,11 @@ def _build_execute_request(
         # The call's set and removed names apply over the worker's own environment and workspace script too,
         # except where the worker's own composition changes them; a set name takes its value from execution_env.
         environment=CallEnvironment(
-            set_names=sorted(name for name, value in call_environment.values.items() if value is not None),
+            set_names=sorted(
+                name
+                for name, value in call_environment.values.items()
+                if value is not None and name not in KUBERNETES_POD_LIMIT_ENV_NAMES
+            ),
             unset_names=sorted(call_environment.removed),
             path_prepend=list(call_environment.path_prepend),
         ),

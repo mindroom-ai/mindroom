@@ -5944,6 +5944,105 @@ def test_primary_pod_limit_markers_do_not_leak_into_request_execution_env(tmp_pa
         assert "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES" not in env
 
 
+@pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
+def test_per_call_shell_environment_omp_num_threads_wins_over_worker_and_hook(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """An explicit per-call shell set_names entry for OMP_NUM_THREADS wins over derived, operator, and hook values."""
+    _set_sandbox_token(monkeypatch)
+    worker_key = "v1:tenant-123:shared:general"
+    worker_root = tmp_path / "workers" / worker_dir_name(worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("MINDROOM_KUBERNETES_POD_CPU_LIMIT", "4")
+    monkeypatch.setenv("OMP_NUM_THREADS", "2")
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    _write_workspace_env_hook(workspace, "export OMP_NUM_THREADS=1\n")
+    _refresh_runner_app_from_env()
+
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "protocol": WORKER_PROTOCOL_VERSION,
+                "tool_name": "shell",
+                "function_name": "run_shell_command",
+                "args": [["bash", "-c", 'printf "%s|%s" "$MINDROOM_WORKER_CPUS" "$OMP_NUM_THREADS"']],
+                "kwargs": {},
+                "worker_key": worker_key,
+                "base_dir": "agents/general/workspace",
+                "execution_env": {
+                    "PATH": os.environ["PATH"],
+                    "OMP_NUM_THREADS": "16",
+                },
+                "environment": {
+                    "set_names": ["OMP_NUM_THREADS"],
+                    "unset_names": [],
+                    "path_prepend": [],
+                },
+            },
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True, data
+    assert _shell_command_output(data["result"]) == "4|16"
+
+
+def test_local_runner_drops_per_call_kubernetes_pod_limit_marker_assignment(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A per-call request carrying MINDROOM_KUBERNETES_POD_CPU_LIMIT is ignored and does not activate hints."""
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "storage"
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    monkeypatch.delenv("MINDROOM_KUBERNETES_POD_CPU_LIMIT", raising=False)
+    monkeypatch.delenv("MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES", raising=False)
+    _refresh_runner_app_from_env()
+
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "protocol": WORKER_PROTOCOL_VERSION,
+                "tool_name": "shell",
+                "function_name": "run_shell_command",
+                "args": [
+                    [
+                        "bash",
+                        "-c",
+                        'printf "%s|%s|%s" "${MINDROOM_KUBERNETES_POD_CPU_LIMIT-unset}" '
+                        '"${MINDROOM_WORKER_CPUS-unset}" "${OMP_NUM_THREADS-unset}"',
+                    ],
+                ],
+                "kwargs": {},
+                "worker_key": "worker-a",
+                "execution_env": {
+                    "PATH": os.environ["PATH"],
+                    "MINDROOM_KUBERNETES_POD_CPU_LIMIT": "4",
+                },
+                "environment": {
+                    "set_names": ["MINDROOM_KUBERNETES_POD_CPU_LIMIT"],
+                    "unset_names": ["MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES"],
+                    "path_prepend": [],
+                },
+            },
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True, data
+    assert _shell_command_output(data["result"]) == "unset|unset|unset"
+
+
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_sandbox_runner_lists_known_workers(
     runner_client: TestClient,
