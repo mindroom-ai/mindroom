@@ -95,7 +95,7 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
 - A closed stdout pipe is not handled by `workers run` yet; that comes with the change to how output travels.
 - A subagent owns the named workers its own turn starts, not its caller's, and only when its own agent sets `named_workers`.
 - Background scripts, OpenAI-compatible API requests, and other calls without a reply's turn cannot name a worker.
-- Each named worker starts with empty package caches and costs a cold start, and nodes the autoscaler adds can take longer than `readyTimeoutSeconds`.
+- Each named worker starts with empty package caches and costs a cold start, and nodes the autoscaler adds can take longer than `readyTimeoutSeconds`. Dedicated workers now warm their venv, shell supervisor, and forkserver template before `/healthz` reports ready, the post-ready health check uses a 0.5 s connect timeout with fast retries, and the forkserver template preloads plugins once (in place for the first request's snapshot) so warm calls do not re-import them. Burst admission still lists Deployments under `_admission_lock` to keep the per-agent and deployment limits exact.
 - With a `ReadWriteOnce` storage claim every worker runs on the runtime's node, so named workers add isolation and their own resource limits there, not capacity.
 - Dedicated subagent workers are still not counted against any limit.
 - The Docker backend runs no named workers and does not retry a failed removal from the worker's files.
