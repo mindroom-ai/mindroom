@@ -15,7 +15,7 @@ import pytest
 from mindroom import response_turn as response_turn_module
 from mindroom import turn_store as turn_store_module
 from mindroom.authorization import ReplyMembershipPendingError
-from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.bot_runtime_view import BotRuntimeState, RunPhase
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.conversation_resolver import DegradedThreadHistoryError, read_fresh_thread_history
@@ -43,6 +43,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.request import requester_remains_authorized
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
+from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import Owned
 from mindroom.response_turn import ResponseTurnContext, TurnRunState
 from mindroom.session_storage.agent_storage import create_state_storage
@@ -748,3 +749,103 @@ async def test_wait_for_admission_or_shutdown_ready_refuses_drain_during_cleanup
     ready_event = asyncio.Event()
     ready_event.set()
     assert await runtime.wait_for_admission_or_shutdown(ready_event.wait()) is False
+
+
+@pytest.mark.parametrize("stop_mode", ["draining", "shutting_down"])
+@pytest.mark.asyncio
+async def test_exclusive_conversation_refuses_when_runtime_already_not_accepting(
+    tmp_path: Path,
+    stop_mode: str,
+) -> None:
+    """With no approval hold and an open gate, lock-only work refuses if the runtime is draining or shutting down."""
+    bot = _bot(tmp_path)
+    runtime = BotRuntimeState(orchestrator=bot.orchestrator)
+    gate = runtime.response_admission_gate
+    coordinator = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$src")
+    body_ran = False
+
+    if stop_mode == "draining":
+        runtime.begin_draining()
+    else:
+        runtime.begin_process_shutdown()
+
+    with pytest.raises(ResponseAdmissionRefusedError):
+        async with coordinator.exclusive_conversation(
+            target,
+            admit=runtime.admission_fence,
+            wait_for_approval_release=runtime.wait_for_admission_or_shutdown,
+            accepting=lambda: runtime.phase is RunPhase.ACCEPTING,
+        ):
+            body_ran = True
+
+    assert body_ran is False
+    assert gate.in_flight_response_count == 0
+    assert not coordinator._response_lifecycle_lock(target).locked()
+    assert target.lifecycle_key not in coordinator._exclusive_users
+
+
+@pytest.mark.parametrize("stop_mode", ["draining", "shutting_down"])
+@pytest.mark.asyncio
+async def test_exclusive_conversation_refuses_when_runtime_stops_while_queued_for_lock(
+    tmp_path: Path,
+    stop_mode: str,
+) -> None:
+    """If drain or shutdown begins while queued for a contended lock, exclusive_conversation refuses before yielding."""
+    bot = _bot(tmp_path)
+    runtime = BotRuntimeState(orchestrator=bot.orchestrator)
+    gate = runtime.response_admission_gate
+    coordinator = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$src")
+    envelope = request_envelope(target=target, prompt="hi", user_id="@user:localhost")
+    reply_locked = asyncio.Event()
+    reply_release = asyncio.Event()
+    body_ran = False
+
+    async def holding_reply(_target: MessageTarget) -> None:
+        reply_locked.set()
+        await reply_release.wait()
+
+    reply_task = asyncio.create_task(
+        coordinator.run_locked_response(
+            target=target,
+            response_envelope=envelope,
+            pipeline_timing=None,
+            locked_operation=holding_reply,
+        ),
+    )
+    await asyncio.wait_for(reply_locked.wait(), timeout=2)
+
+    async def run_exclusive() -> None:
+        nonlocal body_ran
+        async with coordinator.exclusive_conversation(
+            target,
+            admit=runtime.admission_fence,
+            wait_for_approval_release=runtime.wait_for_admission_or_shutdown,
+            accepting=lambda: runtime.phase is RunPhase.ACCEPTING,
+        ):
+            body_ran = True
+
+    exclusive_task = asyncio.create_task(run_exclusive())
+    await asyncio.sleep(0)
+    assert gate.in_flight_response_count == 1
+
+    if stop_mode == "draining":
+        runtime.begin_draining()
+    else:
+        runtime.begin_process_shutdown()
+
+    reply_release.set()
+    await asyncio.wait_for(reply_task, timeout=2)
+    with pytest.raises(ResponseAdmissionRefusedError):
+        await asyncio.wait_for(exclusive_task, timeout=2)
+
+    assert body_ran is False
+    assert gate.in_flight_response_count == 0
+    assert not coordinator._response_lifecycle_lock(target).locked()
+    assert target.lifecycle_key not in coordinator._exclusive_users
+
+
+def test_runtime_source_kinds_matches_runner_handler_table() -> None:
+    """The journal dispatcher's RUNTIME_SOURCE_KINDS stays in lockstep with ResponseRunner's handler table."""
+    assert set(ResponseRunner._RUNTIME_SOURCE_HANDLERS) == set(RUNTIME_SOURCE_KINDS)

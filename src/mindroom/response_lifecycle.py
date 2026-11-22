@@ -733,6 +733,11 @@ class ResponseLifecycleCoordinator:
             if not await wait(self._approval_released.wait()):
                 raise ResponseAdmissionRefusedError
 
+    @staticmethod
+    def _require_accepting(accepting: Callable[[], bool] | None) -> None:
+        if accepting is not None and not accepting():
+            raise ResponseAdmissionRefusedError
+
     @asynccontextmanager
     async def exclusive_conversation(
         self,
@@ -740,13 +745,21 @@ class ResponseLifecycleCoordinator:
         *,
         admit: Callable[[], AbstractAsyncContextManager[None]] | None = None,
         wait_for_approval_release: Callable[[Coroutine[None, None, object]], Awaitable[bool]] | None = None,
+        accepting: Callable[[], bool] | None = None,
     ) -> AsyncIterator[None]:
-        """Acquire exclusive lock-only FIFO ownership of one target, waiting out approvals without admission."""
+        """Acquire exclusive lock-only FIFO ownership of one target.
+
+        When ``wait_for_approval_release`` is given, waits out paused approvals without
+        holding admission or the lock; omitting it disables approval-hold waiting. When
+        ``accepting`` is given, refuses with ``ResponseAdmissionRefusedError`` before
+        admission and again under the lock immediately before yielding.
+        """
         key = target.lifecycle_key
         self._exclusive_users[key] += 1
         try:
             while True:
                 await self._wait_for_approval_release(key, wait_for_approval_release)
+                self._require_accepting(accepting)
                 lock = self._response_lifecycle_lock(target)
                 async with AsyncExitStack() as stack:
                     if admit is not None:
@@ -755,6 +768,7 @@ class ResponseLifecycleCoordinator:
                     stack.callback(lock.release)
                     if wait_for_approval_release is not None and key in self._approval_holds.values():
                         continue
+                    self._require_accepting(accepting)
                     self._lock_only_owners.add(key)
                     stack.callback(self._lock_only_owners.discard, key)
                     yield
