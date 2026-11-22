@@ -178,6 +178,15 @@ class DelegationChild:
     cost_usd: float | None = None
     # What the subagent turns whose results the turn received cost so far, across its pauses, None for none of known cost.
     subagents_cost_usd: float | None = None
+    # LEGACY_COMPAT: Delegation child snapshots stored before a child kept that a subagent's cost was unknown.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `subagents_cost_unknown`.
+    # Last legacy release: v2026.11.444; the next, still unreleased, release writes it.
+    # Handling: The default reads such a child as having received no turn of unknown cost, as those releases did.
+    # It stays on the model for the reason above.
+    # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did.
+    # Whether the turn received a subagent turn whose cost nobody knows, which makes the sum above a lower bound.
+    subagents_cost_unknown: bool = False
     # LEGACY_COMPAT: Delegation child snapshots stored before a child kept when its running tool calls started.
     # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
     # background job's adapter that lacks `tool_started_at`.

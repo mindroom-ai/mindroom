@@ -25,7 +25,7 @@ from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.engine import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
-from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflow_stack
 
 if TYPE_CHECKING:
@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.workflow_runs.models import NodeReceipt, WorkflowNode, WorkflowRun
-    from tests.fakes.scripted_model import ScriptedModel
 
 _PROMPT = {"prompt": "Run the nested workflow."}
 _SOURCE = "def main(args):\n    return 'nested'\n"
@@ -278,6 +277,43 @@ async def test_agent_that_a_restart_continued_is_charged_for_the_turn_it_cut_sho
     used = stack.engine.run_usage(stack.run_id)
     assert (used["input_tokens"], used["cost_unknown"]) == (300_000, False)
     assert (used["cost_usd"], used["attempt_cost_usd"]) == (pytest.approx(0.60), pytest.approx(0.20))
+
+
+@pytest.mark.asyncio
+async def test_cut_short_turn_on_an_unpriced_model_with_a_priced_subagent_leaves_a_lower_bound(
+    stack: WorkflowStack,
+) -> None:
+    """What the turn before the restart spent itself has no price, and what its subagent cost has: both are kept.
+
+    The total holds the subagent's thirty cents and the continued turn's twenty, and says that it is no exact amount.
+    The reproducer of the second full review (Astra M3).
+    """
+    await stack.start()
+    working = asyncio.Event()
+
+    async def held() -> None:
+        working.set()
+        await asyncio.Event().wait()
+
+    helped = calls(tool_call("run_subagent", "c1", task="Help.", agent_name="helper"), metrics=usage(1_000, 0))
+    # A model the operator's configuration has no price for, until the restart.
+    stack.models["watcher"] = ScriptedModel([helped, [Await(held), *answer("never")]])
+    stack.child_script(answer("helped", usage(300_000, 0)), agent="helper")
+    await stack.submit("@0", "agent", _PROMPT)
+    await asyncio.wait_for(working.wait(), 5)
+    await stack.restart()
+    assert await stack.recover() == [stack.run_id]
+    stack.child_script(answer("continued", usage(200_000, 0)))
+
+    await stack.continue_agents()
+
+    assert await stack.result("@0", "agent", _PROMPT) == "continued"
+    used = stack.engine.run_usage(stack.run_id)
+    assert (used["cost_usd"], used["attempt_cost_usd"], used["cost_unknown"]) == (
+        pytest.approx(0.50),
+        pytest.approx(0.20),
+        True,
+    )
 
 
 @pytest.mark.asyncio

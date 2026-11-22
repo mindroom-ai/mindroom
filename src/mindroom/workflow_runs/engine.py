@@ -1159,8 +1159,11 @@ class WorkflowEngine:
         state, result, error = outcome
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
         try:
+            # A turn that no restart cut short worked in the attempt that started it, whichever attempt reads it. What
+            # a restart cut short is of the attempt before the one that reads the turn's end.
+            cut = [turn for turn in usage if str(turn).startswith(EARLIER_TURN)]
             for turn, used in usage.items():
-                attempt = run.attempt - str(turn).startswith(EARLIER_TURN)
+                attempt = run.attempt - (turn in cut) if cut else node.attempt
                 add = partial(self.store.add_usage, node.run_id, node.key, node.generation, turn, attempt, used)
                 await asyncio.to_thread(add)
             with suppress(SupersededAttemptError):

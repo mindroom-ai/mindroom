@@ -963,3 +963,18 @@ def test_prune_keeps_the_run_of_a_job_that_has_not_saved_its_report(tmp_path: Pa
     assert store.prune("2026-11-05T00:00:00Z", {"job-a"}) == 1
     assert [run.run_id for run in store.list_runs()] == [_RUN_A]
     assert store.prune("2026-11-05T00:00:00Z", set()) == 1
+
+
+def test_report_that_was_accepted_is_delivered_in_a_form_that_is_no_larger_than_it_came(tmp_path: Path) -> None:
+    """A small report reads indented; one whose indentation would outgrow what a job's result may hold stays compact."""
+    del tmp_path
+    small = {"items": [1, 2]}
+    deep: object = list(range(40_000))
+    for _ in range(12):
+        deep = [deep]
+    done = WorkflowRunState.COMPLETED
+
+    assert _run(state=done, result=small).outcome_text() == json.dumps(small, indent=2)
+    text = _run(state=done, result=deep).outcome_text()
+    assert json.loads(text) == deep
+    assert len(text) <= len(json.dumps(deep))

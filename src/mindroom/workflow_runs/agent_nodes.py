@@ -24,7 +24,6 @@ from mindroom.delegation.lifecycle import (
 )
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.state import (
-    CONTINUE_SUBAGENT,
     RESTART_INTERRUPTION_REASON,
     RUN_SUBAGENT,
     SPENT_RUNS_KEY,
@@ -329,17 +328,20 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
         # went on after it carries neither. A run without usage made no request, which costs nothing.
         used = turn_usage(prior_usage_of(run), run.metrics)
         own = run_cost_usd(used, model_provider=run.model_provider, model_id=run.model, prices=prices)
-        theirs = resumed_subagent_cost(run.metadata).usd
-        known = [usd for usd in (own, theirs) if usd is not None]
-        usage[f"{EARLIER_TURN}{run.run_id}"] = _spent(run, sum(known) if known or used is None else None)
+        usage[f"{EARLIER_TURN}{run.run_id}"] = _spent(run, 0 if used is None else own)
+        if (theirs := resumed_subagent_cost(run.metadata).usd) is not None:
+            # An entry of its own, as below: a turn without a price keeps what its subagents are known to have cost.
+            usage[f"{EARLIER_TURN}sub:{run.run_id}"] = {"cost_usd": theirs}
     if record is not None:
         # The child's cost is its own and its subagents' together: a cost that is theirs alone prices none of its own.
         cost, theirs = child.cost_usd, child.subagents_cost_usd
         usage[1] = _spent(record, cost if cost is None or theirs is None else None if cost == theirs else cost - theirs)
-        # A subagent the turn ran whose cost nobody knows makes the sum a lower bound, as an unpriced turn does.
-        ran = any(tool.tool_name in (RUN_SUBAGENT, CONTINUE_SUBAGENT) for tool in record.tools or ())
-        if theirs is not None or ran:
+        if theirs is not None:
             usage[f"sub:{child.delegation_id}"] = {"cost_usd": theirs}
+        if child.subagents_cost_unknown:
+            # A subagent turn it received whose cost nobody knows makes the sum a lower bound, as an unpriced turn
+            # does. A delegation that was refused ran no turn, and changes nothing.
+            usage[f"sub:{child.delegation_id}:unpriced"] = {"cost_usd": None}
     stopped = record is not None and reload_stopped_child_result(child, record) is not None
     if job.status == "completed" and not stopped:
         # A turn that completed without a record to read its answer from did what nobody can say.

@@ -5,6 +5,7 @@ Level: engine harness (`WorkflowStack`) with the real job runtime and scripted a
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from contextlib import closing
@@ -17,7 +18,7 @@ from mindroom.config.models import ModelPricing
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
-from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.workflow_helpers import WorkflowStack, workflow_stack
 
 if TYPE_CHECKING:
@@ -145,6 +146,73 @@ async def test_priced_agent_with_a_subagent_on_an_unpriced_model_is_a_lower_boun
 
     assert _costs(stack) == (pytest.approx(0.20), pytest.approx(0.20), True)
     assert _ledger(stack) == [("@0", 1, "1"), ("@0", 1, "sub")]
+
+
+@pytest.mark.asyncio
+async def test_total_with_a_priced_and_an_unpriced_subagent_is_a_lower_bound_and_a_refused_one_changes_nothing(
+    stack: WorkflowStack,
+) -> None:
+    """One helper has a price and one has none: the sum holds the first and says it is no exact amount.
+
+    A delegation that was refused before any child ran spent nothing, so the total of its agent stays exact. The
+    reproducer of the second full review (Astra, verification of M4).
+    """
+
+    def help_from(call_id: str, agent: str) -> dict[str, object]:
+        return tool_call("run_subagent", call_id, task="Read.", agent_name=agent)
+
+    stack.child_script(answer("priced", _usd(0.30)), agent="helper")
+
+    async def unprice_helper() -> None:
+        stack.models["helper"] = ScriptedModel([answer("unpriced", usage(1_000, 0))])
+
+    stack.child_script(
+        calls(help_from("c1", "helper"), metrics=_usd(0.10)),
+        [Await(unprice_helper), *calls(help_from("c2", "helper"), metrics=_usd(0.10))],
+        answer("both", _usd(0.10)),
+        calls(help_from("c3", "nobody"), metrics=_usd(0.10)),
+        answer("declined", _usd(0.10)),
+    )
+
+    assert await stack.result("@0", "agent", _PROMPT) == "both"
+    assert await stack.result("@1", "agent", {"prompt": "Ask somebody who is not there."}) == "declined"
+
+    by_node = stack.store.node_usage(stack.run_id)
+    assert (by_node["@0"]["cost_usd"], by_node["@0"]["cost_unknown"]) == (pytest.approx(0.60), True)
+    assert (by_node["@1"]["cost_usd"], by_node["@1"]["cost_unknown"]) == (pytest.approx(0.20), False)
+
+
+@pytest.mark.asyncio
+async def test_job_that_completed_before_a_restart_is_no_cost_of_the_attempt_that_reads_it(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent's turn ended in the first attempt and MindRoom stopped before its node was settled.
+
+    The next attempt reads the saved answer and asks no model: the twenty cents are the run's, and none of them the
+    second attempt's. The reproducer of the second full review (Sol Major 1).
+    """
+    stack.continues = lambda job: job.kind == "delegation"
+    settling, settle = asyncio.Event(), engine_module.WorkflowEngine._settle_agent
+    first = stack.engine
+
+    async def held(self: engine_module.WorkflowEngine, *args: object, **kwargs: object) -> None:
+        if self is first:
+            settling.set()
+            await asyncio.Event().wait()
+        await settle(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(engine_module.WorkflowEngine, "_settle_agent", held)
+    stack.child_script(answer("done", _usd(0.20)))
+    await stack.submit("@0", "agent", _PROMPT)
+    await asyncio.wait_for(settling.wait(), 5)
+    await stack.until(lambda: stack.node_job("@0").status == "completed")
+
+    await stack.restart()
+    assert await stack.recover() == [stack.run_id]
+
+    assert await stack.result("@0", "agent", _PROMPT) == "done"
+    assert (stack.store.get_run(stack.run_id).attempt, _costs(stack)) == (2, (pytest.approx(0.20), 0.0, False))
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,7 @@ class WorkflowRunState(StrEnum):
 
 LIVE_RUN_STATES = frozenset({WorkflowRunState.STARTING, WorkflowRunState.RUNNING, WorkflowRunState.WAITING})
 TERMINAL_RUN_STATES = frozenset(WorkflowRunState) - LIVE_RUN_STATES
+_INDENTED_REPORT_BYTES = 64 * 1024
 
 
 class WorkflowNodeState(StrEnum):
@@ -105,10 +106,17 @@ class WorkflowRun:
     finished_at: str | None = None
 
     def outcome_text(self) -> str:
-        """Return an ended run's report, a string as it is and any other value as indented JSON, or its error."""
+        """Return an ended run's report, a string as it is and any other value as JSON, or its error.
+
+        A small value is indented. A larger one is not, since indentation can make a report that was accepted many
+        times larger than what a job's result may hold.
+        """
         if self.state is not WorkflowRunState.COMPLETED:
             return self.error or f"Workflow run {self.run_id} ended {self.state.value}."
-        return self.result if isinstance(self.result, str) else json.dumps(self.result, indent=2)
+        if isinstance(self.result, str):
+            return self.result
+        compact = json.dumps(self.result)
+        return json.dumps(self.result, indent=2) if len(compact) <= _INDENTED_REPORT_BYTES else compact
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

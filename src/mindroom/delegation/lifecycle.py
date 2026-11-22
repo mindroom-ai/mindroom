@@ -466,7 +466,7 @@ async def child_run_context(
     context = get_tool_runtime_context()
     previews = parent.previews if parent is not None else context is not None and context.tool_calls_shown
     # The attempt goes on collecting from what the turn's earlier attempts, before its pauses, received.
-    received = SubagentCost(child.subagents_cost_usd)
+    received = SubagentCost(child.subagents_cost_usd, child.subagents_cost_unknown)
     observation = ChildRunObservation(child, audit, parent=parent, previews=previews, subagent_cost=received)
     _open_feed(observation, context)
     token = _CHILD_RUN.set(observation)
@@ -490,7 +490,7 @@ async def child_run_context(
             await flush_child_audit(audit)
         finally:
             try:
-                child.subagents_cost_usd = received.usd
+                child.subagents_cost_usd, child.subagents_cost_unknown = received.usd, received.unknown
                 response = observation.current_record()
                 if response is not None:
                     await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)

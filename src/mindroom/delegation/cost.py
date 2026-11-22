@@ -19,9 +19,13 @@ if TYPE_CHECKING:
 
 @dataclass
 class SubagentCost:
-    """The priced cost of the subagent turns one turn received, None while it received none of known cost."""
+    """The priced cost of the subagent turns one turn received, None while it received none of known cost.
+
+    `unknown` says that it received a turn whose cost nobody knows, so `usd` is a lower bound.
+    """
 
     usd: float | None = None
+    unknown: bool = False
 
 
 _RECEIVING: ContextVar[SubagentCost | None] = ContextVar("received_subagent_cost", default=None)
@@ -42,6 +46,8 @@ def receive_subagent_cost(usd: float | None) -> None:
     cost = _RECEIVING.get()
     if cost is not None and usd is not None:
         cost.usd = (cost.usd or 0.0) + usd
+    elif cost is not None:
+        cost.unknown = True
 
 
 def received_subagent_cost_usd() -> float | None:
