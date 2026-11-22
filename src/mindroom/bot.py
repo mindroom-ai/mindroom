@@ -1099,8 +1099,18 @@ class AgentBot:
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
 
     async def _in_room(self, room_id: str) -> bool:
-        """Return whether this bot is in the room as far as its sync has shown, which a room it never left is."""
-        position = await self.journal_principal().ingestion_membership_position(room_id)
+        """Return whether this bot is in the room: its client lists the room and its journal has no leave of it.
+
+        The client drops a room as soon as sync shows the bot left, which the journal learns a batch later, and the
+        journal knows after a restart. A journal that cannot be read counts as a room the bot is not in.
+        """
+        if self.client is None or room_id not in self.client.rooms:
+            return False
+        try:
+            position = await self.journal_principal().ingestion_membership_position(room_id)
+        except Exception:
+            self.logger.exception("room_membership_unread", room_id=room_id)
+            return False
         return position is None or position.membership == "join"
 
     async def _refresh_room_settings(self, room_id: str) -> None:

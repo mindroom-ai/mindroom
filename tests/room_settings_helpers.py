@@ -27,8 +27,9 @@ class RoomStateHomeserver:
         }
 
     def client(self) -> AsyncMock:
-        """Return a client whose state reads and writes reach this homeserver."""
+        """Return a client in every room, whose state reads and writes reach this homeserver."""
         client = AsyncMock()
+        client.rooms.__contains__.return_value = True
 
         async def read(room_id: str, event_type: str, state_key: str = "") -> object:
             content = self.events.get((event_type, state_key))
