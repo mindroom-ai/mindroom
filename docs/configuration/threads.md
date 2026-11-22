@@ -98,12 +98,13 @@ Each is an `io.mindroom.room_settings` state event with the state key below and 
 | `model` | A `models:` key, or `key@level` for one of its [reasoning levels](models.md#reasoning-levels) | The room's [default model](models.md#model-overrides-in-chat) for every agent and team and for routing, over `room_models` | [`!room_model`](models.md#room_model) |
 | `thread_summary_model` | A `models:` key, or `key@level` | The model that writes the room's [thread titles](../tools/matrix-and-attachments.md#automatic-thread-summaries), over `room_thread_summary_models` | None |
 | `thread_summary_instructions` | Text | Extra rules for the room's [thread titles](../tools/matrix-and-attachments.md#automatic-thread-summaries) | None |
+| `agent_instructions` | Text (up to 2,000 characters) | Extra instructions passed to every agent and team answering in the room (rendered through `ROOM_INSTRUCTIONS_TEMPLATE`; grants no permissions) | None |
 
 MindRoom Chat sets them from the room settings dialog, and any client may send the events.
 They fall under the room's `state_default` power level (normally 50), so moderators and admins can change them there, and agent tools cannot write them.
 The chat commands set the same events through a MindRoom account in the room, for Matrix room admins only.
 A `model` or `thread_summary_model` that names no model in `models:` is ignored until the config defines that model, and `!room_model` reports it as unavailable.
-Agents take a changed `reply_mode`, `thread_mode`, or `model` as soon as their sync shows it, and read them again before handling a room's next event when the last read is more than ten minutes old; the two thread title settings are read each time a title is written.
+Agents take a changed `reply_mode`, `thread_mode`, or `model` as soon as their sync shows it, and read them again before handling a room's next event when the last read is more than ten minutes old; the two thread title settings are read each time a title is written, and `agent_instructions` is read on each reply turn.
 The settings live in the room, so they also apply to a room without a `rooms` entry.
 A `!reply_mode`, `!thread_mode`, or `!room_model` override an older MindRoom stored under `mindroom_data/tracking` moves into the room's setting the first time an agent reads a room that has none.
 
