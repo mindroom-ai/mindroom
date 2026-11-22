@@ -12,8 +12,8 @@ import nio
 
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.event_types import MINDROOM_ACCOUNTS_EVENT_TYPE, ROUTER_BINDING_EVENT_TYPE
-from mindroom.matrix.joined_members import read_joined_members
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -51,7 +51,8 @@ async def reconcile_room_accounts(
 ) -> bool:
     """Refresh the room roster using its bound account when eligible, otherwise the steward.
 
-    The state key is the writer's own user ID; a forbidden read or write needs no retry until the room changes.
+    The state key is the writer's own user ID.
+    A refused roster read or write ends the attempt; a failed member read retries.
     """
     phase = "room_lock"
     event_type = MINDROOM_ACCOUNTS_EVENT_TYPE
@@ -69,30 +70,25 @@ async def reconcile_room_accounts(
             bound = binding.get("user_id") if isinstance(binding, dict) else None
             writer = (get_alternate_clients().get(bound) if isinstance(bound, str) else None) or client
             phase = "joined_members"
-            try:
-                response = await read_joined_members(writer, room_id)
-            except nio.LocalProtocolError as exc:
-                response = exc
-            if isinstance(response, nio.JoinedMembersResponse):
-                members = {member.user_id for member in response.members}
-                content = {"accounts": sorted(members & prepared_entity_names_by_user_id(config, runtime_paths).keys())}
-                phase = "state_get"
-                response = await _read_state(writer, room_id, event_type, writer.user_id)
-                not_found = isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND"
-                if isinstance(response, nio.RoomGetStateEventResponse) or not_found:
-                    if writer is not client and get_alternate_clients().get(writer.user_id) is not writer:
-                        logger.debug("room_accounts_writer_no_longer_eligible", room_id=room_id, user_id=writer.user_id)
-                        return False
-                    if isinstance(response, nio.RoomGetStateEventResponse) and response.content == content:
-                        return True
+            members = await get_room_members(writer, room_id, failure_level=failure_level)
+            if members is None:
+                return False
+            content = {"accounts": sorted(members & prepared_entity_names_by_user_id(config, runtime_paths).keys())}
+            phase = "state_get"
+            response = await _read_state(writer, room_id, event_type, writer.user_id)
+            not_found = isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND"
+            if isinstance(response, nio.RoomGetStateEventResponse) or not_found:
+                if writer is not client and get_alternate_clients().get(writer.user_id) is not writer:
+                    logger.debug("room_accounts_writer_no_longer_eligible", room_id=room_id, user_id=writer.user_id)
+                    return False
+                if not (isinstance(response, nio.RoomGetStateEventResponse) and response.content == content):
                     phase = "state_put"
                     response = await writer.room_put_state(room_id, event_type, content, state_key=writer.user_id)
-                    if isinstance(response, nio.RoomPutStateResponse):
-                        return True
+                if isinstance(response, (nio.RoomGetStateEventResponse, nio.RoomPutStateResponse)):
+                    return True
             forbidden = isinstance(response, nio.ErrorResponse) and response.status_code == "M_FORBIDDEN"
             level = logging.DEBUG if forbidden else failure_level(False)
-            event = "matrix_room_members_fetch_failed" if phase == "joined_members" else "room_accounts_publish_failed"
-            logger.log(level, event, room_id=room_id, error=str(response))
+            logger.log(level, "room_accounts_publish_failed", room_id=room_id, error=str(response))
             return forbidden
     except Exception as exc:
         timed_out = isinstance(exc, TimeoutError)
