@@ -429,6 +429,9 @@ class LiveTurnTools(TurnToolBridge):
                 },
             )
             call.notify()
+        if call.stream is not None:
+            # The worker call's thread may wait to hand on output nobody reads now; it must get to the command's exit.
+            call.stream.close()
         if first and not call.awaiting_approval and call.task is not None and not call.task.done():
             request_task_cancel(call.task, process_shutdown=self._is_shutdown())
 
@@ -458,10 +461,13 @@ class LiveTurnTools(TurnToolBridge):
         if stream.attached:
             msg = "This call's output already has its reader"
             raise CliCallConflictError(msg)
-        stream.attached = True
         return self._relay(call, stream)
 
     async def _relay(self, call: _Call, stream: CallOutputStream) -> AsyncGenerator[dict[str, object]]:
+        # Only a relay that started is the call's reader: one that was asked for and never read keeps nothing.
+        if stream.attached:
+            return
+        stream.attached = True
         revision = 0
         try:
             while not self._closed and not self._revoked:
@@ -475,10 +481,11 @@ class LiveTurnTools(TurnToolBridge):
                     yield receipt.model_dump(mode="json")
                     return
                 else:
-                    frame = asyncio.ensure_future(stream.frames.get())
-                    changed = asyncio.ensure_future(call.changed.wait())
+                    # After a cancel dropped the frames, only the call's end is left to wait for.
+                    frame = None if stream.closed else asyncio.ensure_future(stream.frames.get())
+                    waits = {asyncio.ensure_future(call.changed.wait()), *([frame] if frame else [])}
                     done, pending = await asyncio.wait(
-                        {frame, changed},
+                        waits,
                         timeout=_STREAM_KEEPALIVE_SECONDS,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
@@ -489,8 +496,7 @@ class LiveTurnTools(TurnToolBridge):
                     elif not done:
                         yield {"t": "keepalive"}
         finally:
-            # The frames nobody reads are dropped, and the thread that waits to add one stops.
-            stream.frames.shutdown(immediate=True)
+            stream.close()
             self._request_cancel(call)
 
     async def write_stdin(self, call_id: str, seq: int, data: str, *, eof: bool) -> bool:

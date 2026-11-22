@@ -470,7 +470,8 @@ class CallOutputStream:
     def __init__(self, loop: asyncio.AbstractEventLoop, *, queued_frames: int = 16) -> None:
         self._loop = loop
         self.frames: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=queued_frames)
-        self.attached = False
+        # Whether the call's reader has started to read, and whether what it has not read was dropped by a cancel.
+        self.attached = self.closed = False
         # Set once the command's exit arrived: it ran to its end, or the stop of a cancelled call took effect.
         self.ended = asyncio.Event()
         # Writes one chunk (its number, base64 bytes, and whether stdin ends after it) to the command's stdin and
@@ -483,8 +484,19 @@ class CallOutputStream:
             self._loop.call_soon_threadsafe(self.ended.set)
             if frame.get("cancelled"):
                 return
+        queued = asyncio.run_coroutine_threadsafe(self.frames.put(frame), self._loop)
         with suppress(asyncio.QueueShutDown):
-            asyncio.run_coroutine_threadsafe(self.frames.put(frame), self._loop).result()
+            # An event loop that stopped never answers, so the thread waits only while it runs.
+            while not queued.done() and self._loop.is_running():
+                with suppress(TimeoutError):
+                    queued.result(timeout=1.0)
+            if queued.done():
+                queued.result()
+
+    def close(self) -> None:
+        """Drop the frames nobody reads any more, which also wakes the worker call's thread that waits to add one."""
+        self.closed = True
+        self.frames.shutdown(immediate=True)
 
 
 _CALL_OUTPUT_STREAM: ContextVar[CallOutputStream | None] = ContextVar("call_output_stream", default=None)

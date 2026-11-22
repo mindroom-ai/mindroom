@@ -924,11 +924,15 @@ def _call_proxy_sync(
         on_frame = None
         if stream is not None:
             request = request.model_copy(update={"stream_io": True})
-            # The frame that says the command runs also says whether its worker is a new start, as the result does.
-            header = named.header(worker_handle) if named is not None and worker_handle is not None else None
 
             def on_frame(frame: dict[str, object]) -> None:
-                stream.put({**frame, "header": header} if frame.get("t") == "started" else frame)
+                nonlocal header
+                if frame.get("t") == "started":
+                    # The frame that says the command runs also says whether its worker is a new start, as the
+                    # result does; asked only now, so a call that fails before its command runs does not use it up.
+                    header = named.header(worker_handle) if named is not None and worker_handle is not None else None
+                    frame = {**frame, "header": header}
+                stream.put(frame)
 
         result = execute_worker_proxy_request(
             config=worker_proxy_client_config(
