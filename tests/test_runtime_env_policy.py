@@ -499,20 +499,26 @@ def test_sandbox_subprocess_system_env_uses_policy_allowlist() -> None:
     }
 
 
-def test_worker_resource_limit_env_reaches_subprocesses_without_primary_bleed() -> None:
-    """Worker CPU/memory limit vars reach subprocesses and extra-env overrides without leaking from the primary."""
+def test_sandbox_subprocess_system_env_excludes_host_cpu_thread_hints() -> None:
+    """Host CPU/memory hint vars do not bypass Kubernetes worker gating through the subprocess system allowlist."""
     limit_env = {
         "MINDROOM_WORKER_CPUS": "4",
         "MINDROOM_WORKER_MEMORY_BYTES": "8589934592",
-        "OMP_NUM_THREADS": "4",
-        "PYTHON_CPU_COUNT": "4",
-        "PYTEST_XDIST_AUTO_NUM_WORKERS": "4",
+        "OMP_NUM_THREADS": "1",
+        "PYTHON_CPU_COUNT": "1",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS": "1",
     }
 
-    assert runtime_env_policy.sandbox_subprocess_system_env(limit_env) == limit_env
+    assert runtime_env_policy.sandbox_subprocess_system_env(limit_env) == {}
     assert runtime_env_policy.sandbox_shell_system_env(limit_env) == {}
-    assert runtime_env_policy.isolated_worker_runtime_env(limit_env) == {}
-    assert runtime_env_policy.public_worker_startup_env(limit_env) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env(limit_env) == {
+        "MINDROOM_WORKER_CPUS": "4",
+        "MINDROOM_WORKER_MEMORY_BYTES": "8589934592",
+    }
+    assert runtime_env_policy.public_worker_startup_env(limit_env) == {
+        "MINDROOM_WORKER_CPUS": "4",
+        "MINDROOM_WORKER_MEMORY_BYTES": "8589934592",
+    }
     assert runtime_env_policy.worker_extra_env(limit_env) == limit_env
 
 
