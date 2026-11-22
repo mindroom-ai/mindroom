@@ -46,20 +46,28 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   A handle carries the Deployment's UID, and a failure from a different UID or recorded startup count is ignored.
   The `started` marker uses that same identity to report a new or replaced Deployment. It does not report Kubernetes replacing a pod or restarting a container within an unchanged Deployment.
   A late failure from an earlier pod in the same Deployment can still stop its replacement.
-- **`workers run` wraps `tools call` with minimal control-plane support on `/calls/{id}`.**
+- **`workers run` wraps `tools call` and streams the command's raw bytes.**
+  The submit sets `stream` on the CLI operation, not a tool argument, so approval, hooks, the audit record and named-worker admission see the same `run_shell_command` call as before.
+  The primary then sends `stream_io` on the worker's execute request (worker protocol 10). The runner launches the command itself, with the launch the shell tool builds for that call (`command_launch`, as a terminal's shell is launched), on pipes of its own in a new session at idle priority, and puts `started`, `out`, `err` and `exit` frames on the execute stream before the result line.
+  The call's result, receipt and tool trace hold only the exit line and the byte counts.
+  `GET /api/agent-cli/calls/{id}/stream` relays those frames as NDJSON with warm-up `progress`, a `keepalive` every 5 s, and the settled receipt as its last line.
+  It has one reader (`409` for a second), is not resumable, cancels the call when its reader leaves, and cancels a call nobody reads within 60 s.
+  Every hop is bounded, so a slow reader slows the command: the runner queues 4 frames of at most 32 KiB, the primary 16, and neither buffers past that.
+  `POST /api/agent-cli/calls/{id}/stdin` takes `{seq, b, eof}` chunks and answers once the command's stdin took them, which is the sender's flow control; a repeated `seq` is written once, one ahead of its turn gets `409`, and `open: false` says the command takes no more.
+  The CLI reads the stream however long the command runs; it retries an unreachable stream for a minute, never after its first frame, and exits `141` after cancelling when its own stdout is closed.
+  `GET /api/agent-cli/calls/{id}?wait=N&after_progress=R` (up to 25 s, at most 64 concurrent waiters per owner; a read over the cap answers at once) still long-polls a receipt for other readers without consuming an active-operation slot and returns only the latest `progress` message (no history buffer; intermediate updates between reads may be skipped, while `progress_revision` guarantees the latest is seen).
   `GET /api/agent-cli/calls/{id}?wait=N&after_progress=R` (up to 25 s, at most 64 concurrent waiters per owner; a read over the cap answers at once) long-polls without consuming an active-operation slot and returns only the latest `progress` message (no history buffer; intermediate updates between reads may be skipped, while `progress_revision` guarantees the latest is seen).
-  The CLI leaves at least 0.2 s between two reads, which bounds its reads of a server that ignores `?wait=`.
   `POST /api/agent-cli/calls/{id}/cancel` is scoped to the turn owner's bearer (not the originating Bash window, so another window of the same turn can cancel a known call ID), answers `401` for an unknown ID, leaves a settled call's receipt unchanged, and cancels the admitted task at most once across concurrent requests: only the request that cancels it waits for it to settle, and a repeat answers with the current receipt at once.
   Both routes validate the bearer again after they waited, so a grant that expired or was revoked meanwhile gets `401`, not a receipt.
   Cancel lives in `LiveTurnTools.cancel_call` alone and does not touch the approval layer: while a call waits in its approval handler, a cancel only marks it, and the call ends `cancelled` without running when the handler returns.
   A delegate call whose child waits for approval is deferred the same way, and ends `cancelled` as interrupted, since its child may have run.
   The CLI holds a signal from the moment its handlers are installed until the submit request returns, so its cancel never overtakes its submit; a signal held through a refused submit ends the CLI as that signal and cancels nothing.
   A second signal restores the default handler and ends the CLI at once; during the submit that is before the CLI can send a cancel or print a call ID, so an admitted command runs on to its `--timeout`.
-  It exits with the command's exit code, using `124` for timeout, `125` only for pre-submit failures, any `4xx` answer to the submit (the call was never admitted; this includes a `408` or `429` from a proxy in front of MindRoom), and named-worker refusals (a `NamedWorkerError`, or a `worker` or `resource_profile` argument the agent's shell does not offer), `255` for every other post-submit failure or unknown outcome (don't blindly retry), `128 + signal` when the CLI is signalled while it submits or waits, and `2` for usage errors, with all CLI messages on stderr, or dropped when stderr is closed or fails a write, which changes neither stdout nor the exit code.
-  The result and the cancel notice are printed after the CLI's signal handlers are removed, so a signal during a blocked write stops the CLI as it does on any program.
+  It exits with the command's exit code, using `124` for timeout, `125` only for pre-submit failures, any `4xx` answer to the submit (the call was never admitted; this includes a `408` or `429` from a proxy in front of MindRoom), and named-worker refusals (a `NamedWorkerError`, or a `worker` or `resource_profile` argument the agent's shell does not offer), `255` for every other post-submit failure or unknown outcome (don't blindly retry), `128 + signal` when the CLI is signalled while it submits or reads before the command's exit arrived, `141` when its stdout is closed, and `2` for usage errors, with all CLI messages on stderr beside the command's own, or dropped with it when stderr is closed or fails a write, which changes neither stdout nor the exit code.
+  The cancel notice and the other closing lines are printed after the CLI's signal handlers are removed, so a signal during a blocked write stops the CLI as it does on any program.
   A delegated child's worker progress and refusals are not bound to the delegate call's receipt.
-  It reads the exit code and the stop at the time limit from the words the shell leads its result with, which tests build with the shell's own formatters; a receipt field for the exit status would be a second contract through the runner, the proxy, and the receipt for the same fact.
-  A launch failure is a failed tool call, not command output. When the runner saves the output, the worker header and the shell’s exit line are in the preview.
+  It reads the exit code and the stop at the time limit from the `exit` frame, which follows the last output frame, so a command's exit is known only once all of its output was written.
+  A launch failure is a failed tool call, not command output.
   It submits once and retries only receipt reads, even when the submission response is lost, because a second submission could run the command twice.
 - **Maintenance retries a failed removal from the worker's files.**
   A removal deletes the Deployment before the files, because the pod must be gone first, so a failure in between left files no pass found.
@@ -92,7 +100,8 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
 - Cancelling a command that waits for approval leaves its approval card in place until it is decided or the reply ends; approving the card runs nothing.
   If the reply pauses for that approval, before or right after it is decided (such as a grant expiring during the approval check), the approved command runs when the reply resumes, as without the cancel.
   Withdrawing the card on cancel is left to a follow-up change.
-- A closed stdout pipe is not handled by `workers run` yet; that comes with the change to how output travels.
+- A `workers run` stream that breaks after output arrived is not resumed: the CLI exits `255`, and the command is cancelled.
+- `workers run` gives the command pipes, not a terminal, and the model-facing shell call does not stream.
 - A subagent owns the named workers its own turn starts, not its caller's, and only when its own agent sets `named_workers`.
 - Background scripts, OpenAI-compatible API requests, and other calls without a reply's turn cannot name a worker.
 - Each named worker starts with empty package caches and costs a cold start, and nodes the autoscaler adds can take longer than `readyTimeoutSeconds`.
