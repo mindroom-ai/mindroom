@@ -7761,7 +7761,6 @@ expose = [
     "StructuredStreamChunk",
     "ToolTraceEntry",
     "append_stream_text",
-    "append_tool_marker",
     "body_with_tool_tags",
     "body_without_tool_markers",
     "build_tool_trace_content",

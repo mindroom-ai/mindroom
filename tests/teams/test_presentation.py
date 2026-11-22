@@ -204,32 +204,60 @@ def _hidden_pause_state() -> tuple[dict[str, object], list[ToolTraceEntry]]:
     return state, presentation.tool_trace
 
 
+def test_a_shown_tool_call_separates_the_text_that_follows_it_and_survives_the_snapshot() -> None:
+    """With tool calls shown, text after the leader's marker starts a new paragraph; the snapshot restores that."""
+    presentation = _presentation(show_tool_calls=True)
+    tool = ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={"q": "total"}, result="4")
+    apply_team_event(presentation, TextDelta("Summing up."))
+    apply_team_event(presentation, ToolStarted(tool.call))
+    state = presentation.to_state()
+    assert state["consensus"] == "Summing up.\n\n🔧 `lookup` [1] ⏳"
+    assert state["separate_next_slots"] == [None]
+
+    restored = TeamStreamPresentation.restore(
+        config_names=["ledger_agent", "scout"],
+        show_tool_calls=True,
+        state=state,
+        tool_trace=presentation.tool_trace,
+    )
+    apply_team_event(restored, ToolCompleted(tool.call))
+    apply_team_event(restored, TextDelta("\r\n"))
+    apply_team_event(restored, TextDelta("Four in all."))
+
+    assert restored.consensus == "Summing up.\n\n🔧 `lookup` [1]\n\nFour in all."
+    assert "separate_next_slots" not in restored.to_state()
+
+
+@pytest.mark.parametrize("opening", ["\n", "\n\n", "\r\n"])
+def test_a_member_run_that_opens_with_newlines_still_starts_a_paragraph_below_another_runs_text(opening: str) -> None:
+    """A delta of newlines alone does not use up the paragraph break between two runs' text in one slot."""
+    presentation = _presentation(show_tool_calls=True)
+    for run_id, text in (("run-1", "First."), ("run-2", opening), ("run-2", "Second.")):
+        apply_team_event(presentation, MemberEvent("scout", "Scout", run_id, TextDelta(text)))
+
+    assert presentation.per_member["scout"] == "First.\n\nSecond."
+
+
 @pytest.mark.parametrize(
-    ("separators", "trace_member", "show_tool_calls"),
+    ("separators", "trace_member"),
     [
-        ({"scout": True}, "scout", False),
-        ([["scout"]], "scout", False),
-        (["stranger"], "scout", False),
-        (["scout", "scout"], "scout", False),
-        (["ledger_agent"], "scout", False),
-        (["scout", None], "scout", True),
-        (["scout", None], "stranger", False),
+        ({"scout": True}, "scout"),
+        ([["scout"]], "scout"),
+        (["stranger"], "scout"),
+        (["scout", "scout"], "scout"),
+        (["ledger_agent"], "scout"),
+        (["scout", None], "stranger"),
     ],
 )
-def test_a_snapshot_that_names_a_slot_it_cannot_hold_is_refused(
-    separators: object,
-    trace_member: str,
-    *,
-    show_tool_calls: bool,
-) -> None:
-    """Separators name a slot with text at most once, only with tool calls hidden; every call is in a slot."""
+def test_a_snapshot_that_names_a_slot_it_cannot_hold_is_refused(separators: object, trace_member: str) -> None:
+    """Separators name a slot with text at most once; every call is in a slot."""
     state, trace = _hidden_pause_state()
     trace[0].member_id = trace_member
 
     with pytest.raises(RuntimeError, match=r"snapshot is invalid|not in a frozen presentation slot"):
         TeamStreamPresentation.restore(
             config_names=["ledger_agent", "scout"],
-            show_tool_calls=show_tool_calls,
+            show_tool_calls=False,
             state={**state, "separate_next_slots": separators},
             tool_trace=trace,
         )

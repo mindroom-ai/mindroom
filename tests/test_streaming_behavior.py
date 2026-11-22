@@ -4600,6 +4600,12 @@ async def test_a_failing_final_transform_still_delivers_the_streamed_answer(tmp_
     assert "the streamed answer" in prepared.content["body"]
 
 
+def _sending_client_mock() -> AsyncMock:
+    client = _make_matrix_client_mock()
+    client.room_send.return_value = MagicMock(spec=nio.RoomSendResponse, event_id="$stream-1")
+    return client
+
+
 def _tool_pair(call_id: str, tool_name: str) -> list[object]:
     return [
         ToolStarted(ToolExecution(tool_call_id=call_id, tool_name=tool_name, tool_args={}).call),
@@ -4609,13 +4615,14 @@ def _tool_pair(call_id: str, tool_name: str) -> list[object]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("chunks", "expected_body", "expected_at", "expected_body_line"),
+    ("chunks", "expected_body", "expected_at", "expected_body_line", "expected_hidden"),
     [
         pytest.param(
             [*_tool_pair("call-1", "read_file"), *_tool_pair("call-2", "shell"), TextDelta("Done!")],
             "Done!",
             [0, 0],
             [0, 0],
+            "Done!",
             id="leading-tools",
         ),
         pytest.param(
@@ -4628,6 +4635,7 @@ def _tool_pair(call_id: str, tool_name: str) -> list[object]:
             "Checking.\n\nFound it.",
             [1, 1],
             [2, 2],
+            "Checking.\n\nFound it.",
             id="between-paragraphs",
         ),
         pytest.param(
@@ -4635,6 +4643,7 @@ def _tool_pair(call_id: str, tool_name: str) -> list[object]:
             "Found it.",
             [0],
             [0],
+            "\nFound it.",
             id="leading-lf-after-marker",
         ),
         pytest.param(
@@ -4642,6 +4651,7 @@ def _tool_pair(call_id: str, tool_name: str) -> list[object]:
             "Found it.",
             [0],
             [0],
+            "\n\nFound it.",
             id="split-lf-after-marker",
         ),
         pytest.param(
@@ -4649,6 +4659,7 @@ def _tool_pair(call_id: str, tool_name: str) -> list[object]:
             "Checking.\r\n\nFound",
             [1],
             [2],
+            "Checking.\r\n\nFound",
             id="crlf-around-marker",
         ),
         pytest.param(
@@ -4656,6 +4667,7 @@ def _tool_pair(call_id: str, tool_name: str) -> list[object]:
             "After.",
             [0],
             [0],
+            "\r\n\r\nAfter.",
             id="double-crlf-after-marker",
         ),
         pytest.param(
@@ -4663,6 +4675,7 @@ def _tool_pair(call_id: str, tool_name: str) -> list[object]:
             "X",
             [0],
             [0],
+            "\r\nX",
             id="split-cr-lf-after-marker",
         ),
         pytest.param(
@@ -4670,6 +4683,7 @@ def _tool_pair(call_id: str, tool_name: str) -> list[object]:
             "After.",
             [0],
             [0],
+            "\r\nAfter.",
             id="newline-only-crlf-after-marker",
         ),
         pytest.param(
@@ -4677,6 +4691,7 @@ def _tool_pair(call_id: str, tool_name: str) -> list[object]:
             "Checking.\r\n\nAfter.",
             [1],
             [2],
+            "Checking.\r\n\nAfter.",
             id="lone-cr-before-marker",
         ),
         pytest.param(
@@ -4684,6 +4699,7 @@ def _tool_pair(call_id: str, tool_name: str) -> list[object]:
             "Checking.",
             [1, 1],
             [1, 1],
+            "Checking.",
             id="trailing-completed-markers",
         ),
         pytest.param(
@@ -4694,6 +4710,7 @@ def _tool_pair(call_id: str, tool_name: str) -> list[object]:
             "Checking.",
             [1],
             [1],
+            "Checking.",
             id="trailing-pending-marker",
         ),
     ],
@@ -4704,14 +4721,12 @@ async def test_tool_markers_strip_to_clean_wire_body_without_blank_lines(
     expected_body: str,
     expected_at: list[int],
     expected_body_line: list[int],
+    expected_hidden: str,
 ) -> None:
-    """Streaming, collected, and hidden-tool replies strip to a clean v3 wire body and round-trip byte-exact."""
+    """Streamed and collected replies send a clean v3 body that reads back exactly; hidden calls leave only text."""
     config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
     paths = runtime_paths_for(config)
-    mock_client = _make_matrix_client_mock()
-    mock_response = MagicMock(spec=nio.RoomSendResponse)
-    mock_response.event_id = "$stream-1"
-    mock_client.room_send.return_value = mock_response
+    mock_client = _sending_client_mock()
 
     async def stream() -> AsyncIterator[object]:
         for chunk in chunks:
@@ -4762,19 +4777,15 @@ async def test_tool_markers_strip_to_clean_wire_body_without_blank_lines(
     )
     await _consume_streaming_chunks_for_test(mock_client, stream(), hidden)
     assert hidden.has_progress() is True
-    if not expected_body.startswith(("\r", "\n")):
-        assert hidden.accumulated_text == expected_body or hidden.accumulated_text.lstrip("\r\n") == expected_body
+    assert hidden.accumulated_text == expected_hidden
 
 
 @pytest.mark.asyncio
-async def test_tool_marker_edge_cases_hidden_progress_prose_replacement_and_teams(tmp_path: Path) -> None:
-    """Cover hidden leading progress, calls-only replies, literal marker prose, replacement inline mentions, and teams."""
+async def test_tool_marker_edge_cases_hidden_progress_replacement_and_teams(tmp_path: Path) -> None:
+    """Cover hidden leading progress, calls-only replies, replacement inline mentions, and teams."""
     config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
     paths = runtime_paths_for(config)
-    mock_client = _make_matrix_client_mock()
-    mock_response = MagicMock(spec=nio.RoomSendResponse)
-    mock_response.event_id = "$stream-edge"
-    mock_client.room_send.return_value = mock_response
+    mock_client = _sending_client_mock()
 
     # 1. Leading hidden ToolStarted marks progress while accumulated_text stays empty.
     hidden = StreamingResponse(
@@ -4806,25 +4817,7 @@ async def test_tool_marker_edge_cases_hidden_progress_prose_replacement_and_team
     )
     assert tool_markers_out_of_text(calls_only_content) is calls_only_content
 
-    # 3. Marker-shaped prose split across deltas with no tool events matches a single delta.
-    split_deltas = [TextDelta("Example: "), TextDelta("🔧 `inspect` [1]"), TextDelta(" is the literal marker.")]
-    single_text = "Example: 🔧 `inspect` [1] is the literal marker."
-    prose_stream = StreamingResponse(
-        target=MessageTarget.resolve("!room:localhost", None, "$src"),
-        config=config,
-        runtime_paths=paths,
-        show_tool_calls=True,
-        **reply_hooks(),
-    )
-    await _consume_streaming_chunks_for_test(mock_client, _aiter(*split_deltas), prose_stream)
-    assert prose_stream.accumulated_text == single_text
-    collected_prose, _ = await collect_streamed_response_content(
-        _aiter(*split_deltas),
-        presentation=CollectedStreamPresentation(show_tool_calls=True),
-    )
-    assert collected_prose == single_text
-
-    # 4. Replacement-mode snapshot quoting a pending marker inline still appends and completes the real marker line.
+    # 3. Replacement-mode snapshot quoting a pending marker inline still appends and completes the real marker line.
     inline_sentence = "What does 🔧 `read` [1] ⏳ mean?"
     replacement = ReplacementStreamingResponse(
         target=MessageTarget.resolve("!room:localhost", None, "$src"),
@@ -4847,7 +4840,7 @@ async def test_tool_marker_edge_cases_hidden_progress_prose_replacement_and_team
     assert rep_wire["io.mindroom.tool_trace"]["version"] == 3
     assert tool_markers_in_text(rep_wire) == prepared_rep.content
 
-    # 5. Team slots with consecutive leading and mid-paragraph calls strip cleanly to v3.
+    # 4. Team slots with consecutive leading and mid-paragraph calls strip cleanly to v3.
     team = TeamStreamPresentation.new(["alpha", "beta"], ["Alpha", "Beta"], show_tool_calls=True)
     for cid, name in (("t1", "read_file"), ("t2", "shell")):
         call = ToolExecution(tool_call_id=cid, tool_name=name, tool_args={}, result="ok").call
@@ -4877,3 +4870,81 @@ async def test_tool_marker_edge_cases_hidden_progress_prose_replacement_and_team
         "\n**Team Consensus**:\n\nAgreed."
     )
     assert tool_markers_in_text(team_wire) == team_content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "deltas",
+    [
+        ["🔧 `read` [1]", " is literal."],
+        ["```\n🔧 `x` [1]", "\n```"],
+        ["🔧 `x` [1]", "\n", "next"],
+    ],
+)
+async def test_marker_shaped_prose_joins_as_plain_text_however_its_deltas_split(
+    tmp_path: Path,
+    deltas: list[str],
+) -> None:
+    """With no tool event between them, deltas that look like a marker join as they came, in every kind of reply."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    await _consume_streaming_chunks_for_test(_sending_client_mock(), _aiter(*map(TextDelta, deltas)), streaming)
+    collected, _ = await collect_streamed_response_content(
+        _aiter(*map(TextDelta, deltas)),
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
+    )
+    team = TeamStreamPresentation.new(["alpha"], ["Alpha"], show_tool_calls=True)
+    for delta in deltas:
+        team.append_member_run("alpha", "run-1", delta)
+        team.append_consensus(delta)
+
+    assert streaming.accumulated_text == collected == team.per_member["alpha"] == team.consensus == "".join(deltas)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot", "expected"),
+    [
+        pytest.param(
+            "Example:\n\n```\n🔧 `read` [1] ⏳\n```",
+            "Example:\n\n```\n🔧 `read` [1] ⏳\n```\n\n🔧 `read` [1]",
+            id="fenced-quote",
+        ),
+        pytest.param(
+            "Example:\r\n\r\n🔧 `read` [1] ⏳\r\n\r\nend",
+            "Example:\r\n\r\n🔧 `read` [1] ⏳\r\n\r\nend\n\n🔧 `read` [1]",
+            id="crlf-quote",
+        ),
+        pytest.param("🔧 `read` [1] ⏳\n\nDoc", "🔧 `read` [1]\n\nDoc", id="own-marker-first"),
+        pytest.param("Doc\n\n🔧 `read` [1] ⏳", "Doc\n\n🔧 `read` [1]", id="own-marker-last"),
+    ],
+)
+async def test_a_replacement_snapshot_holds_its_pending_call_as_one_marker_paragraph(
+    tmp_path: Path,
+    snapshot: str,
+    expected: str,
+) -> None:
+    """A snapshot that only quotes its pending call's marker gets the call's own, which alone the completion marks."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    replacement = ReplacementStreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    call = ToolExecution(tool_call_id="call-1", tool_name="read", tool_args={}, result="ok").call
+
+    await _consume_streaming_chunks_for_test(
+        _sending_client_mock(),
+        _aiter(ToolStarted(call), StructuredStreamChunk(content=snapshot), ToolCompleted(call)),
+        replacement,
+    )
+
+    assert replacement.accumulated_text == expected

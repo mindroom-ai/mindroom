@@ -50,7 +50,6 @@ from mindroom.tool_system.events import (
     StreamingToolTracker,
     StructuredStreamChunk,
     append_stream_text,
-    append_tool_marker,
     complete_pending_tool_block,
     remap_visible_tool_marker_indices,
     serialize_tool_trace,
@@ -655,6 +654,7 @@ class StreamingResponse:
     _shows_stream: bool = field(default=False, init=False, repr=False)
     _transport_ended: bool = field(default=False, init=False, repr=False)
     _has_hidden_tool_calls: bool = field(default=False, init=False, repr=False)
+    # Whether the next text starts a paragraph of its own, as text after a tool call does, shown or hidden.
     _separate_next_text: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -762,25 +762,19 @@ class StreamingResponse:
             *_merge_tool_trace(self.tool_trace[resumed_count:], incoming),
         ]
 
-    def _record_appended_text(self, updated: str) -> None:
-        """Advance accumulated text and byte/time bookkeeping by the characters added."""
-        added = len(updated) - len(self.accumulated_text)
-        self.accumulated_text = updated
-        if added:
-            self.chars_since_last_update += added
-            self.last_delta_at = time.time()
-
     def _append_incremental_text(self, new_chunk: str) -> None:
         """Append additive streaming text regardless of snapshot replacement mode."""
-        updated = append_stream_text(self.accumulated_text, new_chunk, separate=self._separate_next_text)
+        self.accumulated_text = append_stream_text(self.accumulated_text, new_chunk, separate=self._separate_next_text)
         if new_chunk.strip("\r\n"):
             self._separate_next_text = False
-        self._record_appended_text(updated)
+        self.chars_since_last_update += len(new_chunk)
+        self.last_delta_at = time.time()
 
     def _append_tool_marker(self, marker: str) -> None:
-        """Append one visible tool marker line regardless of snapshot replacement mode."""
-        self._separate_next_text = False
-        self._record_appended_text(append_tool_marker(self.accumulated_text, marker))
+        """Append a visible tool marker as a paragraph of its own, which the text after it starts another below."""
+        self._separate_next_text = True
+        self._append_incremental_text(marker)
+        self._separate_next_text = True
 
     def _mark_nonadditive_text_mutation(self) -> None:
         """Count a visible in-place text change that did not append characters as one received character."""
@@ -788,10 +782,9 @@ class StreamingResponse:
         self.last_delta_at = time.time()
 
     def _ensure_hidden_tool_gap(self) -> None:
-        """Record hidden tool progress and separate any later text from what came before it."""
+        """Count a hidden tool call as progress; the text after it starts a paragraph below the text before it."""
         self._has_hidden_tool_calls = True
-        if self.accumulated_text:
-            self._separate_next_text = True
+        self._separate_next_text = bool(self.accumulated_text)
 
     def _current_update_interval(self, current_time: float) -> float:
         """Return the current throttling interval.
@@ -1664,11 +1657,10 @@ async def _apply_visible_text_chunk(
     prior_delta_at = streaming.last_delta_at
     apply_chunk(text_chunk)
     if replacement_suffixes and streaming.replaces_text:
-        lines = {line.rstrip("\r") for line in streaming.accumulated_text.split("\n")}
         for suffix in replacement_suffixes:
-            if suffix not in lines:
+            # A pending marker the snapshot holds as a paragraph is the call's own; one it quotes elsewhere is not.
+            if f"\n\n{suffix}\n\n" not in f"\n\n{streaming.accumulated_text}\n\n":
                 streaming._append_tool_marker(suffix)
-                lines.add(suffix)
     completion = _queue_delivery_request(
         delivery_queue,
         force_refresh=force_refresh,
@@ -2434,7 +2426,7 @@ async def stream_progress_edits(
 
     def apply_presentation(text: str) -> None:
         if text.startswith(streaming.accumulated_text):
-            streaming._record_appended_text(text)
+            streaming._append_incremental_text(text[len(streaming.accumulated_text) :])
             return
         streaming.accumulated_text = text
         streaming._mark_nonadditive_text_mutation()

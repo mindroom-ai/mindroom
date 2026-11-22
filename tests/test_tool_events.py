@@ -15,6 +15,7 @@ from mindroom.tool_system.events import (
     StreamingToolTracker,
     ToolTraceEntry,
     _format_tool_started,
+    append_stream_text,
     build_tool_trace_content,
     complete_pending_tool_block,
     deserialize_tool_trace,
@@ -297,6 +298,49 @@ def test_format_tool_combined_with_empty_string_result() -> None:
     assert trace.type == "tool_call_completed"
     assert trace.result_preview is None
     assert trace.truncated is False
+
+
+@pytest.mark.parametrize(
+    ("existing", "delta", "expected"),
+    [
+        ("Before", "After", "Before\n\nAfter"),
+        ("Before\n", "After", "Before\n\nAfter"),
+        ("Before\n\n\n", "After", "Before\n\n\nAfter"),
+        ("Before\r\n", "After", "Before\r\n\nAfter"),
+        ("Before\r\n\r\n", "After", "Before\r\n\r\nAfter"),
+        ("Before\n\r\n", "After", "Before\n\r\nAfter"),
+        ("Before\r", "After", "Before\r\n\nAfter"),
+        ("Before", "\nAfter", "Before\n\nAfter"),
+        ("Before", "\r\n\r\n\nAfter", "Before\n\nAfter"),
+        ("Before", "\r\n", "Before"),
+        ("", "\nAfter", "\nAfter"),
+    ],
+)
+def test_separated_stream_text_starts_one_blank_line_below_the_text_before_it(
+    existing: str,
+    delta: str,
+    expected: str,
+) -> None:
+    """A separated delta adds only the newlines a blank line still lacks, in place of the ones it opens with."""
+    assert append_stream_text(existing, delta, separate=True) == expected
+
+
+@pytest.mark.parametrize(
+    "deltas",
+    [
+        ["🔧 `read` [1]", " is literal."],
+        ["```\n🔧 `x` [1]", "\n```"],
+        ["🔧 `x` [1]", "\n", "next"],
+        ["🔧 `x` [1] ⏳\r\n", "\r\nnext"],
+    ],
+)
+def test_stream_text_that_looks_like_a_marker_joins_as_any_other_text(deltas: list[str]) -> None:
+    """Only a caller that appended a tool call separates the next delta; the look of the text before it never does."""
+    text = ""
+    for delta in deltas:
+        text = append_stream_text(text, delta)
+
+    assert text == "".join(deltas)
 
 
 def test_complete_pending_tool_block_replaces_pending() -> None:

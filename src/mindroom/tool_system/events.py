@@ -259,7 +259,7 @@ class CollectedStreamPresentation:
             content,
             separate=self.separate_next_text,
         )
-        if content and str(content).strip("\r\n"):
+        if str(content or "").strip("\r\n"):
             self.separate_next_text = False
 
     def start_tool(self, call: ReportedCall, *, origin: ToolCallOrigin | None = None) -> None:
@@ -272,9 +272,8 @@ class CollectedStreamPresentation:
             return
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
-            self.response_text = append_tool_marker(self.response_text, text)
-        elif self.response_text:
-            self.separate_next_text = True
+            self.response_text = append_stream_text(self.response_text, text, separate=True)
+        self.separate_next_text = bool(self.response_text)
 
     def visible_tool_count(self) -> int:
         """Return how many tool calls the reply shows so far."""
@@ -920,38 +919,19 @@ def renumbered_tool_trace(body: str, trace: Sequence[ToolTraceEntry]) -> tuple[s
     return remap_visible_tool_marker_indices(body, index_map), entries
 
 
-def _blank_line_gap(existing_text: str) -> str:
-    """Return the newlines needed so ``existing_text`` ends with a blank line."""
-    if existing_text.endswith("\n\n"):
-        return ""
-    if existing_text.endswith("\n"):
-        return "\n"
-    return "\n\n"
-
-
-def append_tool_marker(existing_text: str, marker: str) -> str:
-    """Append one visible tool marker line separated from preceding text by a blank line."""
-    if not existing_text or not marker:
-        return existing_text or marker
-    return f"{existing_text}{_blank_line_gap(existing_text)}{marker}"
-
-
 def append_stream_text(existing_text: str, content: object | None, *, separate: bool = False) -> str:
-    """Append one delta while preserving explicit and visible-tool boundaries."""
-    if not content:
-        return existing_text
-    delta = str(content)
-    if not existing_text:
-        return delta
-    last_line = existing_text.rsplit("\n", maxsplit=1)[-1].rstrip("\r")
-    after_marker = is_visible_tool_marker_line(last_line)
-    if after_marker or separate:
-        trimmed = delta.lstrip("\r\n")
-        if not trimmed:
-            return existing_text
-        gap = "\n\n" if after_marker else _blank_line_gap(existing_text)
-        return f"{existing_text}{gap}{trimmed}"
-    return f"{existing_text}{delta}"
+    """Append one delta or tool marker; ``separate`` puts it one blank line below any text before it.
+
+    A separated delta loses the newlines it opens with, and one of newlines alone adds nothing, so its caller keeps
+    separating until a delta holds other text.
+    """
+    delta = str(content or "")
+    if not (separate and existing_text):
+        return existing_text + delta
+    delta = delta.lstrip("\r\n")
+    if not delta or existing_text.endswith(("\n\n", "\n\r\n")):
+        return existing_text + delta
+    return f"{existing_text}{'\n' if existing_text.endswith('\n') else '\n\n'}{delta}"
 
 
 def tool_markers_match_trace(text: str, tool_trace: Sequence[ToolTraceEntry]) -> bool:
@@ -962,10 +942,6 @@ def tool_markers_match_trace(text: str, tool_trace: Sequence[ToolTraceEntry]) ->
         for index, entry in enumerate(tool_trace, start=1)
     )
     return visible_markers == expected_markers
-
-
-def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool) -> str:
-    return _tool_marker_line(tool_name, tool_index, pending=pending)
 
 
 def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
@@ -1005,7 +981,7 @@ def _format_tool_started(
         args_preview=args_preview or None,
         truncated=truncated,
     )
-    return _format_tool_marker(tool_name, tool_index, pending=True), trace
+    return _tool_marker_line(tool_name, tool_index, pending=True), trace
 
 
 def format_tool_combined(
@@ -1031,7 +1007,7 @@ def format_tool_combined(
         truncated=truncated,
         is_error=is_error,
     )
-    return _format_tool_marker(tool_name, tool_index, pending=False), trace
+    return _tool_marker_line(tool_name, tool_index, pending=False), trace
 
 
 def complete_pending_tool_block(accumulated_text: str, tool_name: str, tool_index: int) -> str:
