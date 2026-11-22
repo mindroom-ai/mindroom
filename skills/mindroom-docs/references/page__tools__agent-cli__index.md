@@ -148,18 +148,21 @@ mindroom-agent workers run NAME [--resource-profile small|standard|large] [--tim
 
 The command is everything after `--`. Multiple arguments run as the exact argument list. A single argument runs as an executable unless it contains whitespace or shell syntax, in which case Bash interprets it as a command line.
 For shell builtins or syntax, pass Bash explicitly, for example `mindroom-agent workers run build -- bash -c 'cd src && pwd'`.
-The CLI waits until the command ends. `--tail` (default 100) selects the last lines of stdout, and of stderr when the command succeeds; for a failed or timed-out command, the result puts stdout under `Output:` and all of stderr under `Stderr:`.
+The CLI long-polls until the command ends. `--tail` (default 100) selects the last lines of stdout, and of stderr when the command succeeds; for a failed or timed-out command, the result puts stdout under `Output:` and all of stderr under `Stderr:`.
+All CLI-originated messages go to stderr as `mindroom-agent:` lines, never stdout: cold-start warm-up progress, `mindroom-agent: started worker NAME` when the call started a new worker, `mindroom-agent: stopped after Ns` on timeout, auto-saved output paths, cancellation notices, and error reasons.
 If the shell result is [auto-saved](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files), the CLI prints its preview to stdout and the saved file's path to stderr. The preview may not include the last lines.
 `--timeout` (default 3600 seconds) stops the command, and `--resource-profile` sizes the worker when its name is first used.
 If the CLI loses the submission response or cannot read a running command’s receipt, it retries reading the receipt for up to a minute. It never submits the command twice.
-Stopping `workers run` itself, with Ctrl-C or at the `timeout` of the shell command it runs in, does not stop its command, which runs on in its worker until it ends or reaches `--timeout`.
+Sending `SIGINT`, `SIGTERM`, or `SIGHUP` to `workers run`, or closing its stdout pipe, asks MindRoom to cancel the remote command and its process tree (with a 5-second confirmation budget) before exiting with `128 + signal`. If cancellation cannot be confirmed, stderr warns that the command may still be running with its call ID.
 
 | Code | Meaning |
 | --- | --- |
 | The command's exit code | The command ran in the named worker; a command a signal killed exits with 128 plus the signal's number, such as `137` |
-| `124` | The command was stopped at `--timeout` |
-| `125` | The command did not run in the named worker, or its outcome is unknown: the call was refused, its command could not start, the call was cancelled, or its result stayed unreadable for a minute while the command may still be running; the reason is on stderr |
-| `2` | Invalid CLI arguments |
+| `124` | The command was stopped at `--timeout`; `mindroom-agent: stopped after Ns` is on stderr |
+| `125` | The command never ran in the named worker: the call was refused, hit a limit, could not start the worker, or was cancelled server-side; the reason is on stderr |
+| `255` | The command's outcome is unknown and it may still be running (for example, the receipt stayed unreadable for a minute); the reason and call ID are on stderr |
+| `128 + signal` | `workers run` itself was stopped by `SIGINT` (`130`), `SIGTERM` (`143`), `SIGHUP` (`129`), or a broken stdout pipe (`141`) after requesting cancellation; the notice and call ID are on stderr |
+| `2` | Invalid CLI arguments (reported on stderr only) |
 
 Run this script from the shared workspace. It runs eight shards at once and fails if any shard fails.
 Each shard writes its full log to the shared workspace from inside its worker, so the log keeps the final summary even when CLI output would be previewed. CLI diagnostics go to a separate log.

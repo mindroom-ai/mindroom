@@ -46,9 +46,10 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   A handle carries the Deployment's UID, and a failure from a different UID or recorded startup count is ignored.
   The `started` marker uses that same identity to report a new or replaced Deployment. It does not report Kubernetes replacing a pod or restarting a container within an unchanged Deployment.
   A late failure from an earlier pod in the same Deployment can still stop its replacement.
-- **`workers run` is a client-side wrapper over `tools call`.**
-  It adds no route and no server state.
-  It exits with the command's exit code, so its own failures use 124 and 125 as `timeout` and `docker run` do, instead of the CLI's 1 to 4, which commands use too.
+- **`workers run` wraps `tools call` with minimal control-plane support on `/calls/{id}`.**
+  `GET /api/agent-cli/calls/{id}?wait=N` (up to 25 s) long-polls on an event set when a receipt settles or its latest warm-up `progress` message changes, without consuming an active-operation slot.
+  `POST /api/agent-cli/calls/{id}/cancel` idempotently cancels a single owned call's task without affecting sibling calls or needing capacity, letting `SIGINT`/`SIGTERM`/`SIGHUP` and broken stdout pipes stop the remote process tree.
+  It exits with the command's exit code, using `124` for timeout, `125` when the command never ran, `255` when its outcome is unknown and it may still be running, `128 + signal` when the CLI itself is signalled, and `2` for usage errors, with all CLI messages on stderr.
   It reads the exit code and the stop at the time limit from the words the shell leads its result with, which tests build with the shell's own formatters; a receipt field for the exit status would be a second contract through the runner, the proxy, and the receipt for the same fact.
   A launch failure is a failed tool call, not command output. When the runner saves the output, the worker header and the shell’s exit line are in the preview.
   It submits once and retries only receipt reads, even when the submission response is lost, because a second submission could run the command twice.
@@ -79,7 +80,7 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
 - While the primary is down nothing is removed; commands stop because their connections drop, and the workers go on the first maintenance pass once the primary is back.
 - A turn that resumes after its fleet was released, such as after an approval that outlived the reply and its jobs, gets new workers, so an agent whose shell commands need approval gets a new worker when the paused turn no longer owns the original fleet. This also applies to CLI approval recovery.
 - Agents whose workers are shared or per user run no named workers.
-- Stopping `workers run` does not stop its command, because the CLI has no operation that cancels a call; the command's own time limit stops it.
+- Cancelling `workers run` via `SIGINT`/`SIGTERM`/`SIGHUP` or broken stdout pipe requests remote cancellation with a 5-second confirmation budget; `SIGKILL` still cannot be caught, leaving the command's own `--timeout` to stop it.
 - A subagent owns the named workers its own turn starts, not its caller's, and only when its own agent sets `named_workers`.
 - Background scripts, OpenAI-compatible API requests, and other calls without a reply's turn cannot name a worker.
 - Each named worker starts with empty package caches and costs a cold start, and nodes the autoscaler adds can take longer than `readyTimeoutSeconds`.
