@@ -45,7 +45,7 @@ class ProviderError(Exception):
     not read or download, or the attachments a provider's rejection names. For an ``InvalidRequest`` the media fallback
     leaves out only those, when the rest of the request's media can still go. ``replay_stripped`` marks the failure
     of an attempt sent without provider-encrypted replay state, which every later reissue of the request keeps out
-    (``providers/pipeline/wrapped.py`` ``attempts``).
+    (``providers/pipeline/wrapped.py`` ``attempts``), with the ``retry_budget`` the retry stage has left for it.
     """
 
     retryable: ClassVar[bool] = False
@@ -69,6 +69,7 @@ class ProviderError(Exception):
         self.retry_after_seconds = retry_after_seconds
         self.rejected_media = rejected_media
         self.replay_stripped = False
+        self.retry_budget: object | None = None
 
 
 class AuthenticationFailed(ProviderError):  # noqa: N818

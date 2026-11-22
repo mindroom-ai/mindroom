@@ -180,7 +180,8 @@ class ModelRequest:
     ``portable_replay`` replays history explicitly instead of continuing provider-stored state, and
     ``native_compaction`` turns on provider-side compaction for routes that support it.
     ``strip_encrypted_replay`` replays the history without provider-encrypted state, which the pipeline sets on the
-    resend after a sticky-upstream failure (``Capabilities.sticky_replay_recovery``).
+    resend after a sticky-upstream failure (``Capabilities.sticky_replay_recovery``), with the ``retry_budget``
+    the retry stage has left for a request it already sent that way.
     The adapter awaits ``on_send`` with the body it hands its SDK just before sending it, without request options such
     as headers, query parameters, or timeouts; the request log sets it.
     ``prompt_hold`` is the file that holds the system prompt of the request's conversation, which the pipeline sends
@@ -198,6 +199,7 @@ class ModelRequest:
     portable_replay: bool = False
     native_compaction: NativeCompactionReplay | None = None
     strip_encrypted_replay: bool = False
+    retry_budget: object | None = None
     on_send: Callable[[Mapping[str, Any]], Awaitable[None]] = _unobserved
     prompt_hold: Path | None = None
     prompt_hold_pin: list[dict[str, Any] | None] | None = None

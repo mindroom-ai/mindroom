@@ -2629,6 +2629,57 @@ async def test_openrouter_responses_media_fallback_after_recovery_stays_stripped
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_failures", "sends", "recovers"),
+    [
+        # A rate limit used the budget up: one stripped send, and its media-free reissue gets no retry either.
+        (1 + 4, 7, False),
+        # A rejection on the first attempt used none: the media-free reissue retries with the whole budget.
+        (0, 4, True),
+    ],
+    ids=["budget-used-up", "budget-unused"],
+)
+async def test_openrouter_responses_media_fallback_after_recovery_shares_the_transient_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_failures: int,
+    sends: int,
+    *,
+    recovers: bool,
+) -> None:
+    """A stripped request the media fallback rewrites keeps the retries its request has left, not a fresh budget."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    assert retry_stage._MAX_TRANSIENT_RETRIES == 4
+    rate_limited = _json_reply(_UPSTREAM_429_BODY, status=429)
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        *([rate_limited] * first_failures or [_json_reply(_STICKY_400_BODY, status=400)]),
+        _json_reply({"error": {"message": "This model does not support image input.", "code": 400}}, status=400),
+        rate_limited,
+        *([_responses_reply(*_text_events("Without the photo"), _completed())] if recovers else []),
+    )
+    history = _encrypted_history(native)
+    history[-1] = replace(history[-1], images=[Image(id="att_photo", content=_PNG, mime_type="image/png")])
+    request = ModelRequest(messages=history, native_compaction=native)
+
+    if recovers:
+        assert (await complete(provider, request)).content == "Without the photo"
+    else:
+        with pytest.raises(RateLimited):
+            await complete(provider, request)
+
+    encrypted_sends = max(first_failures, 1)
+    inputs = [json.dumps(json.loads(request.content)["input"]) for request in sent]
+    assert len(sent) == sends
+    assert ["encrypted_content" in sent_input for sent_input in inputs] == [True] * encrypted_sends + [False] * (
+        sends - encrypted_sends
+    )
+    assert ["input_image" in sent_input for sent_input in inputs] == [True] * (encrypted_sends + 1) + [False] * (
+        sends - encrypted_sends - 1
+    )
+
+
+@pytest.mark.asyncio
 async def test_openrouter_responses_plain_non_sticky_400_is_not_retried(tmp_path: Path) -> None:
     _adapter, provider, native, sent = _openrouter_route(
         tmp_path,

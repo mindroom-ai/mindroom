@@ -148,14 +148,17 @@ def retrying_stream(
     ``sticky_replay_recovery``, a failure the transient retries did not resolve is resent without provider-encrypted
     replay state, once: a failure of that resend, which ``attempts`` marks and keeps without that state, gets only
     the transient retries the request has left. So a rate limit that used them all up gets the one resend, and a
-    rejection on the first attempt leaves its resend every retry.
+    rejection on the first attempt leaves its resend every retry. The budget goes with the failure, so a stage that
+    rewrites a request already sent without that state, such as the media fallback, reissues it with what is left.
     """
     if request.overrides.caller_retries:
         return inner.stream(request)
     identity, recover = inner.identity, inner.capabilities.sticky_replay_recovery
-    transient = partial(_reissue, request=request, budget=_RetryBudget(), model_id=identity.id)
+    budget = request.retry_budget if isinstance(request.retry_budget, _RetryBudget) else _RetryBudget()
+    transient = partial(_reissue, request=request, budget=budget, model_id=identity.id)
 
     def reissue(error: ProviderError) -> Retry | None:
+        error.retry_budget = budget
         retry = transient(error)
         if retry is not None or error.replay_stripped or recover is None:
             return retry
