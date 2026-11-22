@@ -111,7 +111,7 @@ from .response_lifecycle import ResponseHookService, ResponseLifecycleCoordinato
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
-from .room_reply_modes import observe_room_settings_event, refresh_room_reply_mode
+from .room_settings import THREAD_MODE, observe_room_settings_event, refresh_room_setting
 from .steward_duties import StewardDuties, StewardDutiesDeps, room_state_response_as_steward
 from .thread_tags import THREAD_TAGS_EVENT_TYPE
 from .tool_jobs.client_cancel import cancel_room_jobs, cancel_stopped_reply_jobs, handle_job_cancel_event
@@ -142,6 +142,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal.approval_signals import EndedApproval
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
+    from mindroom.room_settings import RoomSetting
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.tool_jobs.conversation import ConversationKey
 
@@ -1090,19 +1091,25 @@ class AgentBot:
         await self.orchestrator.scheduled_tasks.restore_room(self, room_id)
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
 
-    async def _reread_reply_mode(self, client: nio.AsyncClient, room_id: str) -> None:
+    async def _reread_room_setting(self, client: nio.AsyncClient, room_id: str, setting: RoomSetting[str]) -> None:
         put_state = partial(room_state_response_as_steward, self.orchestrator.room_steward)
-        await refresh_room_reply_mode(client, self.runtime_paths, room_id, force=True, put_state=put_state)
+        await refresh_room_setting(setting, client, self.runtime_paths, room_id, force=True, put_state=put_state)
+        if setting is THREAD_MODE:
+            await self.steward_duties.thread_mode_setting_changed(room_id)
 
     def _on_room_state_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
-        """Take a live thread tag or room settings state event from sync; never raise into nio's callback loop."""
+        """Take a live thread tag or room settings state event from sync; never raise into nio's callback loop.
+
+        Each bot reads a changed setting again; the room's steward then republishes a changed thread mode.
+        """
         if "state_key" not in event.source or event.decrypted:
             return
-        if observe_room_settings_event(self.runtime_paths, room.room_id, event.source) and self.client is not None:
+        setting = observe_room_settings_event(self.runtime_paths, room.room_id, event.source)
+        if setting is not None and self.client is not None:
             # The event may be a late copy of an older change: the room's state decides, read at once.
             self.create_owned_task(
-                self._reread_reply_mode(self.client, room.room_id),
-                name=f"room_reply_mode_reread:{room.room_id}",
+                self._reread_room_setting(self.client, room.room_id, setting),
+                name=f"room_setting_reread:{setting.key}:{room.room_id}",
             )
         if event.type != THREAD_TAGS_EVENT_TYPE:
             return

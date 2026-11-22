@@ -17,8 +17,8 @@ from mindroom.thread_summary import schedule
 from mindroom.thread_summary.generation import (
     GeneratedSummary,
     generate_summary,
-    resolve_thread_summary_model_name,
     room_summary_instructions,
+    room_thread_summary_model_name,
     title_error,
 )
 from mindroom.thread_summary.notices import (
@@ -519,7 +519,13 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
             # A routed turn holds no text: it is titled from each of its messages as the thread shows it.
             shown = "\n".join(message.body for message in history if message.event_id in prompt_event_ids)
             body = shown if prompt_as_shown else prompt
-            model_name = resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name)
+            model_name = await room_thread_summary_model_name(
+                client,
+                config,
+                runtime_paths,
+                room_id,
+                entity_name=entity_name,
+            )
             title = await _provisional_title(
                 replace(prompt_message, body=body) if body is not None else None,
                 history,
@@ -660,7 +666,8 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
         # A long legacy title is rewritten once; a retitle asks for a new title outright.
         current_title = _keepable_title(state.summary, retitle=retitle)
         try:
-            model_name = resolve_thread_summary_model_name(
+            model_name = await room_thread_summary_model_name(
+                client,
                 config,
                 runtime_paths,
                 room_id,

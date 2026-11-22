@@ -113,7 +113,7 @@ def resolve_thread_summary_model_name(
     *,
     entity_name: str | None = None,
 ) -> str:
-    """Return the model name for automatic thread summaries in one room.
+    """Return the configured model name for automatic thread summaries in one room.
 
     Precedence: room-scoped override (room ID, room key, or full alias) > responding
     entity's name as a ``room_thread_summary_models`` key (covers ad-hoc
@@ -147,19 +147,43 @@ def _conversation_text(messages: Sequence[ResolvedVisibleMessage]) -> str:
     return "\n".join(lines)
 
 
-async def room_summary_instructions(client: nio.AsyncClient, room_id: str) -> str | None:
-    """Return the room admins' extra title rules, or None when unset; a failed read logs and counts as unset."""
+async def _room_title_setting(client: nio.AsyncClient, room_id: str, key: str) -> str | None:
+    """Return one of the room's title settings as the room holds it now; unset or unreadable is None, logged if unread."""
     try:
-        response = await client.room_get_state_event(room_id, ROOM_SETTINGS_EVENT_TYPE, "thread_summary_instructions")
+        response = await client.room_get_state_event(room_id, ROOM_SETTINGS_EVENT_TYPE, key)
     except Exception:
-        logger.warning("Room thread summary instructions read failed", room_id=room_id, exc_info=True)
+        logger.warning("Room thread summary setting read failed", room_id=room_id, setting=key, exc_info=True)
         return None
     if isinstance(response, nio.RoomGetStateEventResponse):
         value = response.content.get("value")
-        return (value.strip()[:_ROOM_INSTRUCTIONS_MAX_LENGTH] or None) if isinstance(value, str) else None
+        return (value.strip() or None) if isinstance(value, str) else None
     if not isinstance(response, nio.RoomGetStateEventError) or response.status_code != "M_NOT_FOUND":
-        logger.warning("Room thread summary instructions read failed", room_id=room_id, error=str(response))
+        logger.warning("Room thread summary setting read failed", room_id=room_id, setting=key, error=str(response))
     return None
+
+
+async def room_summary_instructions(client: nio.AsyncClient, room_id: str) -> str | None:
+    """Return the room admins' extra title rules, or None when unset; a failed read logs and counts as unset."""
+    instructions = await _room_title_setting(client, room_id, "thread_summary_instructions")
+    return instructions and instructions[:_ROOM_INSTRUCTIONS_MAX_LENGTH]
+
+
+async def room_thread_summary_model_name(
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    room_id: str,
+    *,
+    entity_name: str | None = None,
+) -> str:
+    """Return the model that titles a room's threads now: its `thread_summary_model` setting, else the configured one.
+
+    The setting is a model reference, `name` or `name@level`; one that names no configured model is ignored.
+    """
+    model_name = await _room_title_setting(client, room_id, "thread_summary_model")
+    if model_name is not None and model_name in config.models:
+        return model_name
+    return resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name)
 
 
 @timed("thread_summary_generation")

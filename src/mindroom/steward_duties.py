@@ -55,6 +55,13 @@ def moderator_rights_message(feature: str) -> str:
     return f"I need moderator rights in this room to {feature}."
 
 
+def setting_write_failure_message(taken: bool | None, feature: str) -> str:
+    """Return what a command answers when the room did not take a setting: None is a refusal for lack of power."""
+    if taken is None:
+        return moderator_rights_message(feature)
+    return "❌ The room did not take the change. Run the command again to retry."
+
+
 async def runs_room_hooks(
     orchestrator: OrchestratorRuntime,
     agent_name: str,
@@ -203,6 +210,11 @@ class StewardDuties:
     def mark_joined_for_room_state(self, room_id: str) -> None:
         """Publish the state of a room this bot joined or left by any path, once a sync frame carries its members."""
         self._joined_room_ids.add(room_id)
+
+    async def thread_mode_setting_changed(self, room_id: str) -> None:
+        """Republish a room's thread mode after its `thread_mode` setting changed, when this bot is its steward."""
+        if self.is_steward(room_id):
+            await self._publish_room_state(room_id)
 
     async def power_levels_event(self, room: nio.MatrixRoom, _event: nio.PowerLevelsEvent) -> None:
         """Publish a room's state after its power levels changed, which can change its steward."""
