@@ -567,6 +567,19 @@ def test_script_recovery_contract_survives_image_upgrade() -> None:
     assert backend.script_recovery_signature() == initial
 
 
+@pytest.mark.parametrize("release_id", [None, "c" * 32], ids=["ssh-off", "ssh-on"])
+def test_script_recovery_contract_matches_the_digest_before_tailnet_ssh(release_id: str | None) -> None:
+    """The SSH-only label must not invalidate existing background script workers on upgrade."""
+    backend, _apps, _core = _backend(tailnet_ssh_release_id=release_id)
+    main_payload = backend._script_recovery_payload()
+    main_config = main_payload["config"]
+    assert isinstance(main_config, dict)
+    main_config.pop("tailnet_ssh_release_id", None)
+    main_digest = hashlib.sha256(json.dumps(main_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    assert backend.script_recovery_signature() == main_digest
+
+
 def test_script_recovery_contract_rejects_a_runtime_class_change() -> None:
     """Existing scripts cannot cross a RuntimeClass boundary."""
     backend, _apps, _core = _backend()

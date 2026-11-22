@@ -240,6 +240,8 @@ class KubernetesWorkerBackend:
         config.pop("named_worker_idle_timeout_seconds")
         config.pop("named_worker_max_age_seconds")
         config.pop("named_workers_max")
+        # The SSH release ID only labels interactive workers, not script worker authority.
+        config.pop("tailnet_ssh_release_id")
         return {
             "config": config,
             "owner": self.cleanup_locator,
