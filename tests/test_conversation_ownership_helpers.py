@@ -977,3 +977,42 @@ def test_exclusive_conversation_requires_admission_approval_wait_and_accepting_t
 
     with pytest.raises(TypeError, match=omitted):
         coordinator.exclusive_conversation(target, **wiring)
+
+
+@pytest.mark.asyncio
+async def test_edit_cut_opens_its_store_before_its_first_suspension(tmp_path: Path) -> None:
+    """Edit regeneration opens its store synchronously, so a failed open surfaces before a pending cancellation runs."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$edited")
+    journal_store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
+    order: list[str] = []
+
+    def failing_open(*_args: object, **_kwargs: object) -> None:
+        order.append("open_store")
+        msg = "store unavailable"
+        raise OSError(msg)
+
+    try:
+        store = await _store_with_storage(journal_store, MagicMock())
+        cast("MagicMock", store.deps.state_writer).create_storage.side_effect = failing_open
+        edited_record = TurnRecord.create(
+            ["$edited"],
+            response_event_id="$reply",
+            response_owner="agent",
+            requester_id="@user:example.org",
+            history_scope=HistoryScope(kind="agent", scope_id="agent"),
+            conversation_target=target,
+        )
+        task = asyncio.create_task(
+            store.remove_stale_runs_for_edit(turn_record=edited_record, requester_user_id="@user:example.org"),
+        )
+
+        def stop() -> None:
+            order.append("stop")
+            task.cancel()
+
+        asyncio.get_running_loop().call_soon(stop)
+        with pytest.raises(OSError, match="store unavailable"):
+            await task
+        assert order == ["open_store", "stop"]
+    finally:
+        await journal_store.close()

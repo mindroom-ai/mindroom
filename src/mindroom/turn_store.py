@@ -691,16 +691,16 @@ class TurnStore:
         scope = turn_record.history_scope
         if target is None or scope is None:
             return
-        storage_factory = partial(
-            self.deps.state_writer.create_storage,
+        # Opened before the first suspension, so a failed open surfaces ahead of any pending cancellation.
+        storage = self.deps.state_writer.create_storage(
             self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester_user_id),
             scope=scope,
         )
-        load_scope = partial(load_scope_session_from_storage, scope, target.session_id, storage_factory)
-        scope_context, _ = await load_scrubbed_scope_session(load_scope, partial(self.redacted_history_events, target))
+        load_scope = partial(load_scope_session_from_storage, scope, target.session_id, lambda: storage)
+        await load_scrubbed_scope_session(load_scope, partial(self.redacted_history_events, target))
         removed_any = await run_blocking_until_complete(
             _remove_runs_for_sources,
-            scope_context.storage,
+            storage,
             target.session_id,
             scope,
             turn_record.indexed_event_ids,
