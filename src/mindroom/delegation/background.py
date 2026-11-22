@@ -12,10 +12,12 @@ from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, JobRecoveryBlockedError, JobSpec
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterable
 
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationTerminalStatus
+
+ACKNOWLEDGED_BY = "acknowledged_by_run"
 
 
 def child_snapshot(child: DelegationChild) -> dict[str, Any]:
@@ -29,6 +31,19 @@ def delegation_child(job: BackgroundJob) -> DelegationChild:
         msg = "Job does not represent a native delegation."
         raise SubagentSessionError(msg)
     return DelegationChild.from_dict(job.adapter["child"])
+
+
+def job_acknowledgers(jobs: Iterable[BackgroundJob]) -> dict[str, str | None]:
+    """Return the run that acknowledged each subagent job, by the delegation id its saved child names.
+
+    Its adapter keeps the parent run whose saved result first acknowledged it (``ACKNOWLEDGED_BY``); None stands for a
+    job none acknowledged yet, or one a release that kept no such record acknowledged. Nothing else of a child is read,
+    so one no reader decodes stops no replay; a job whose adapter or child is no mapping, or names no id, is no receipt's.
+    """
+    owned = (job for job in jobs if job.kind == "delegation" and isinstance(job.adapter, dict))
+    read = ((job.adapter.get("child"), job.adapter.get(ACKNOWLEDGED_BY) if job.consumed else None) for job in owned)
+    named = ((child.get("delegation_id"), by) for child, by in read if isinstance(child, dict))
+    return {key: by if isinstance(by, str) else None for key, by in named if isinstance(key, str)}
 
 
 def delegation_outcome(status: DelegationTerminalStatus, text: str) -> BackgroundOutcome:

@@ -34,7 +34,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
-from mindroom.delegation.cost import subagent_cost_metadata
+from mindroom.delegation.cost import receipts_metadata, stored_receipts, subagent_cost_metadata
 from mindroom.history.types import HistoryScope, ScopeSummary, owner_scope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus, TeamRunRecord, ToolExecution
@@ -382,7 +382,10 @@ class ConversationStore:
             if row is None:
                 return False
             parent_run_id, scope_key, status, seq, stored = row
+            # A patch that carries receipts, as a delegation state's does, merges them into the row's.
             metadata = {**(decoded_mapping(stored) or {}), **changes}
+            if patched := stored_receipts(changes):
+                metadata.update(receipts_metadata(stored_receipts(decoded_mapping(stored)), patched))
             connection.execute(f"UPDATE {runs} SET metadata = ? WHERE run_id = ?", (json.dumps(metadata), run_id))  # noqa: S608
             if parent_run_id is None and status not in _NON_VISIBLE:
                 _join_covering_row(connection, self.names, session_id, scope_key, seq, metadata)
@@ -885,8 +888,9 @@ def _write_run(
         # A top-level run saved visible over its paused, cancelled, or errored row finished after the turns it awaited.
         moved = parent_run_id is None and stored.status in _NON_VISIBLE and data["status"] not in _NON_VISIBLE
         created_at, seq = stored.created_at, _next_seq(connection, names) if moved else stored.seq
-    # Every save of a run, however it is handed over, stores what its turn's subagents cost so far.
-    if cost := subagent_cost_metadata(decoded_mapping(stored.metadata) if stored is not None else None):
+    # Every save of a run stores what its turn's subagents cost so far: the record's, its stored row's, the context's.
+    kept = decoded_mapping(stored.metadata) if stored is not None else None
+    if cost := subagent_cost_metadata(data.get("metadata"), kept):
         data = {**data, "metadata": {**(data.get("metadata") or {}), **cost}}
     if stored is None or known is None or known.seq != stored.seq:
         known = None

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import SavedToolJob, ToolJobStore
+    from mindroom.event_journal import EventJournalStore, SavedToolJob, ToolJobStore
     from mindroom.tool_jobs.conversation import ConversationKey
     from mindroom.tool_jobs.execution_authority import JobTool
 
@@ -301,6 +301,15 @@ def _report_failed_drain(job_id: str, drain: asyncio.Task[BackgroundJob]) -> Non
     """Log a failed cancellation drain with its job, which stays for a later canceller, recovery, or shutdown."""
     if not drain.cancelled() and (error := drain.exception()) is not None:
         logger.error("Tool job cancellation drain failed", job_id=job_id, exc_info=error)
+
+
+async def saved_jobs(journal: EventJournalStore) -> list[BackgroundJob]:
+    """Read the saved jobs that parse, owning none: an instance that runs no jobs keeps them for one that does."""
+    jobs: list[BackgroundJob] = []
+    for saved in await journal.tool_jobs("reader").load_all():
+        with suppress(ValueError):
+            jobs.append(_parse_saved_job(saved))
+    return jobs
 
 
 def get_background_runtime(runtime_paths: RuntimePaths) -> ToolJobRuntime | None:
@@ -940,10 +949,18 @@ class ToolJobRuntime:
 
         await run_coroutine_until_complete(release())
 
-    async def acknowledge_wait(self, job_id: str, claim: JobClaim | None, *, returned_inline: bool = False) -> None:
+    async def acknowledge_wait(
+        self,
+        job_id: str,
+        claim: JobClaim | None,
+        *,
+        returned_inline: bool = False,
+        adapter: Mapping[str, Any] | None = None,
+    ) -> None:
         """Mark the claimed outcome consumed, only after the exact parent tool result has been durably saved.
 
-        ``returned_inline`` says that tool result belongs to the call that started the job.
+        ``returned_inline`` says that tool result belongs to the call that started the job, and ``adapter`` holds
+        what the job's kind keeps of its first acknowledgement, which is added to the job's adapter.
         """
         async with self._lock:
             self._ensure_open()
@@ -952,8 +969,11 @@ class ToolJobRuntime:
                 msg = "Tool job wait claim no longer belongs to this waiter."
                 raise ValueError(msg)
             # A later reread of an inline call's result does not make it a job.
-            returned_inline = entry.job.returned_inline or returned_inline
-            await self._publish(entry, _updated(entry.job, consumed=True, returned_inline=returned_inline))
+            job = _updated(entry.job, consumed=True, returned_inline=entry.job.returned_inline or returned_inline)
+            if adapter and not entry.job.consumed:
+                # A copy: a save that fails leaves the job as it was, and a job given nothing keeps its admitted adapter.
+                job = replace(job, adapter={**job.adapter, **adapter})
+            await self._publish(entry, job)
             entry.claim = None
 
     async def request_cancel(self, job_id: str) -> None:

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.constants import RuntimePaths
+    from mindroom.history.run_checkpoint import InterruptedTurn
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -144,10 +145,10 @@ class ConversationStateWriter:
         session_id: str,
         event_ids: Collection[str],
         natively: bool,
-    ) -> list[str]:
+    ) -> InterruptedTurn:
         """Recover the runs a restart cut short while they answered ``event_ids`` (``recover_interrupted_turn``).
 
-        Returns the recovered runs the scope's history now holds, off-loop in the session target's FIFO lane.
+        Returns the attempts their replay continues, off-loop in the session target's FIFO lane.
         """
         return await run_session_storage_operation(
             partial(self.create_storage, execution_identity, scope=scope),

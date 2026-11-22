@@ -17,6 +17,7 @@ from mindroom.ai_runtime import bind_mid_turn_conversation_context
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import memory_backend
+from mindroom.constants import CONTINUED_RUNS_METADATA_KEY
 from mindroom.contacts.turns import contact_room
 from mindroom.conversation_state_writer import session_started_on_creation
 from mindroom.delivery_gateway import ResponseIdentity
@@ -189,10 +190,11 @@ class LockedTurns:
             membership_turn_id=request.response_envelope.source_event_id,
             queue_memory_persistence=queue_memory_persistence,
             queue_skill_review=queue_skill_review,
+            # A reply that continues runs a restart cut short reports their usage too: undated, so budgets recount.
             notify_response_finished=self.response_finished_notifier(
                 request.sources.logical_source_event_ids,
                 request.user_id,
-                request.requested_at,
+                None if CONTINUED_RUNS_METADATA_KEY in (request.matrix_run_metadata or {}) else request.requested_at,
             ),
             persist_response_event_id=persist_response_event_id,
         )
