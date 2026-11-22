@@ -171,8 +171,10 @@ def _both(
     )
 
 
-# How long a Stop waits for an agent's cancelled job to end before its node is settled as nobody could read it.
+# How long the end of a run waits for its agents' cancelled jobs, all together, before each node is settled as it
+# stands: one whose job has not ended is one nobody could read.
 _STOP_SECONDS, _STOP_POLL_SECONDS = 30.0, 0.05
+_STOPPING = "The agent this call replaces is stopping. Try again in a moment."
 # How long a waiter sleeps before it reads the store again, with or without a wake.
 _RECHECK_SECONDS = 1.0
 # How long a tool call above its attempt's calls per minute waits before it asks for room again.
@@ -236,6 +238,8 @@ class WorkflowEngine:
         self._launched: dict[str, int] = {}
         # The runs whose wait for an attempt was logged as refused, so the tries that follow say nothing.
         self._refused: set[str] = set()
+        # The runs that are ending and wait, without their lock, for their agents to stop: they take no call.
+        self._stopping: set[str] = set()
         # The lanes in which a call ran in each attempt.
         self._dirty: dict[str, DirtyLanes] = {}
         # When each running run's working time was last charged, by the engine's clock.
@@ -640,7 +644,7 @@ class WorkflowEngine:
     ) -> NodeReceipt:
         """Decide and save one call for the attempt that began with *epoch*, which every write here names."""
         key, kind, meta = request.key, request.kind, request.meta
-        if run.epoch != epoch or run.state not in _SERVED_RUN_STATES:
+        if run.epoch != epoch or run.state not in _SERVED_RUN_STATES or run.run_id in self._stopping:
             # Before anything is kept for the attempt: one that the run left behind leaves nothing behind here.
             msg = f"Run {run.run_id} takes no more calls from attempt {attempt.run_id}."
             raise SupersededAttemptError(msg)
@@ -661,15 +665,16 @@ class WorkflowEngine:
             return _receipt(saved)
         if saved is not None and action != "return" and saved.state in _LIVE_NODE_STATES:
             # Left live by an attempt that ended: its handle says how it ended, or that its job still runs, before
-            # any rule may run it again. The call that replaces a node whose job still runs stops that job.
+            # any rule may run it again.
             live = await self._reconcile(run, saved, epoch)
-            left, saved = saved, self.store.get_node(run.run_id, key)
+            handle, saved = saved.handle, self.store.get_node(run.run_id, key)
             action = decision(saved, live=live)
-            if live and action == "run":
-                await self._reconcile(run, left, epoch, stop=True)
-                # The stopped turn may have called a tool: then its node is not replaced unasked either.
-                saved = self.store.get_node(run.run_id, key)
-                action = decision(saved)
+            if live and action == "run" and handle is not None:
+                # The call that replaces a node whose job still runs stops that job, and nothing waits for its end
+                # under the run's lock: the script's SDK asks again, and what the stopped turn did decides then. One
+                # that called a tool is not replaced unasked either.
+                await cast("AgentRuntime", self.agents()).jobs.request_cancel(handle.ref)
+                raise ScriptRuntimeUnavailableError(_STOPPING)
         if saved is not None and action != "run":
             # Reused: the node is this attempt's now, and a fan-out whose items changed dirties what follows it.
             stamp: dict[str, object] = {"attempt": run.attempt, "stale": False}
@@ -1145,9 +1150,9 @@ class WorkflowEngine:
     async def _reconcile(self, run: WorkflowRun, node: WorkflowNode, epoch: int, *, stop: bool = False) -> bool:
         """Settle a node that an ended attempt left live from what its handle names; return whether its job still runs.
 
-        A job that still runs is left as it is, for the attempt that reaches its node to wait for. With *stop* it is
-        cancelled and its node with it: the run has ended, or another call replaces the node. The caller holds the
-        run's lock.
+        A job that still runs is left as it is, for the attempt that reaches its node to wait for. With *stop* the
+        run has ended and `_stop_agents` waited for the job: it is read as it stands, and so is one that did not
+        end in time. The caller holds the run's lock.
         """
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
         if node.handle is None or node.handle.kind == "run":
@@ -1181,7 +1186,7 @@ class WorkflowEngine:
                 cancelled = {"kind": "cancelled", "message": _RUN_ENDED}
                 await asyncio.to_thread(partial(settle, state=WorkflowNodeState.CANCELLED, error=cancelled))
                 return False
-            await _stopped(runtime, job_id)
+            await runtime.jobs.request_cancel(job_id)
         try:
             await self._settle_agent(run, node, epoch, block=False)
         except AgentNotReadyError as exc:
@@ -1403,6 +1408,31 @@ class WorkflowEngine:
                     await self.settle(run)
                 break
 
+    async def _stop_agents(self, run: WorkflowRun) -> None:
+        """Ask every agent of the ending *run*, and every run inside it, to stop, and wait for all of them together.
+
+        The run is marked under its lock, so it takes no call from then on, and the lock is not held for the wait.
+        The end of a job says what its turn did, which `_end_run` reads then; one deadline is for all the jobs.
+        """
+        async with self._condition(run.run_id):
+            current = self.store.get_run(run.run_id)
+            if current.epoch != run.epoch or current.state in TERMINAL_RUN_STATES:
+                return
+            self._stopping.add(run.run_id)
+            # Before any call of the run is stopped: the place it gives up starts no call that waited for one.
+            self._places.pop(run.run_id, None)
+            nodes = self.store.nodes(run.run_id, include_stale=True)
+        deadline = asyncio.get_running_loop().time() + _STOP_SECONDS
+        handles = [node.handle for node in nodes if node.state in _LIVE_NODE_STATES and node.handle is not None]
+        runtime = self.agents()
+        jobs = [handle.ref for handle in handles if handle.kind == "job" and runtime is not None]
+        inside = [self.cancel(handle.ref, reason=_RUN_ENDED) for handle in handles if handle.kind == "run"]
+        await asyncio.gather(*inside, *(cast("AgentRuntime", runtime).jobs.request_cancel(job) for job in jobs))
+        with suppress(TimeoutError):
+            async with asyncio.timeout_at(deadline):
+                while any(_works(runtime, job) for job in jobs):  # noqa: ASYNC110 - no event for a job's end
+                    await asyncio.sleep(_STOP_POLL_SECONDS)
+
     async def _end_run(
         self,
         run: WorkflowRun,
@@ -1412,55 +1442,62 @@ class WorkflowEngine:
     ) -> WorkflowRun:
         """End *run*: stop its node tasks, read each unsettled node from its handle, store the state, wake waiters.
 
-        With the state `starting` only the run's attempt is over. A run that has ended, or that moved on from the
-        epoch *run* has, is returned as it is: what was decided about *run* says nothing about it.
+        A run that ends for good first stops its agents (`_stop_agents`), so each node is read from a job that has
+        ended. With the state `starting` only the run's attempt is over. A run that has ended, or that moved on
+        from the epoch *run* has, is returned as it is: what was decided about *run* says nothing about it.
         """
         condition = self._condition(run.run_id)
-        # Held to the run's last write, so no call is admitted between the look at its nodes and its end.
-        async with condition:
-            current = self.store.get_run(run.run_id)
-            if current.epoch != run.epoch or current.state in TERMINAL_RUN_STATES:
-                return current
-            ended = state in TERMINAL_RUN_STATES
-            # Before any call of the run is stopped: the place it gives up starts no call that waited for one.
-            self._places.pop(run.run_id, None)
-            mine = self._tasks.get(run.run_id, set()) if not ended else self._tasks.pop(run.run_id, set())
-            # The wait for a timed agent outlives the attempt: it stops the turn on time while no attempt waits.
-            kept = () if ended else [task for task in mine if task.get_name().startswith(_TIMED)]
-            tasks = mine - {asyncio.current_task(), *kept}
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            current = self.store.get_run(run.run_id)
-            nodes = self.store.nodes(run.run_id, include_stale=True)
-            for node in nodes:
-                # An agent's job outlives an attempt, and so does a nested run: neither outlives its run.
-                waits_for_job = node.handle is not None and node.handle.kind in ("job", "run")
-                if node.state in _LIVE_NODE_STATES and (ended or not waits_for_job):
-                    await self._reconcile(current, node, run.epoch, stop=ended)
-            if state is WorkflowRunState.COMPLETED:
-                # What the completed script no longer reaches leaves the run's current view.
-                stale = stale_keys(nodes, current.attempt)
-                await asyncio.to_thread(self.store.mark_stale, run.run_id, run.epoch, stale)
-            ended_at = current.finished_at or utc_timestamp()
-            changes = {"state": state, "error": error, "finished_at": ended_at, **self._time_left(current), **changes}
-            attempt = current.script_run_id or ""
+        try:
+            if state in TERMINAL_RUN_STATES:
+                # Without the lock, which the wait for the run's agents must not hold.
+                await self._stop_agents(run)
+            # Held to the run's last write, so no call is admitted between the look at its nodes and its end.
+            async with condition:
+                current = self.store.get_run(run.run_id)
+                if current.epoch != run.epoch or current.state in TERMINAL_RUN_STATES:
+                    return current
+                ended = state in TERMINAL_RUN_STATES
+                # Before any call of the run is stopped: the place it gives up starts no call that waited for one.
+                self._places.pop(run.run_id, None)
+                mine = self._tasks.get(run.run_id, set()) if not ended else self._tasks.pop(run.run_id, set())
+                # The wait for a timed agent outlives the attempt: it stops the turn on time while no attempt waits.
+                kept = () if ended else [task for task in mine if task.get_name().startswith(_TIMED)]
+                tasks = mine - {asyncio.current_task(), *kept}
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                current = self.store.get_run(run.run_id)
+                nodes = self.store.nodes(run.run_id, include_stale=True)
+                for node in nodes:
+                    # An agent's job outlives an attempt, and so does a nested run: neither outlives its run.
+                    waits_for_job = node.handle is not None and node.handle.kind in ("job", "run")
+                    if node.state in _LIVE_NODE_STATES and (ended or not waits_for_job):
+                        await self._reconcile(current, node, run.epoch, stop=ended)
+                if state is WorkflowRunState.COMPLETED:
+                    # What the completed script no longer reaches leaves the run's current view.
+                    stale = stale_keys(nodes, current.attempt)
+                    await asyncio.to_thread(self.store.mark_stale, run.run_id, run.epoch, stale)
+                at = current.finished_at or utc_timestamp()
+                changes = {"state": state, "error": error, "finished_at": at, **self._time_left(current), **changes}
+                attempt = current.script_run_id or ""
 
-            def forget(written: asyncio.Future[WorkflowRun]) -> None:
-                if not written.cancelled() and written.exception() is None:
-                    self._dirty.pop(attempt, None)
-                    self._launched.pop(attempt, None)
+                def forget(written: asyncio.Future[WorkflowRun]) -> None:
+                    if not written.cancelled() and written.exception() is None:
+                        self._dirty.pop(attempt, None)
+                        self._launched.pop(attempt, None)
 
-            write = partial(self.store.update_run, run.run_id, run.epoch, **changes)
-            end = asyncio.ensure_future(asyncio.to_thread(write))
-            # What is kept per attempt goes with the write: a task cancelled at the commit leaves none of it behind.
-            end.add_done_callback(forget)
-            ended = await asyncio.shield(end)
-            self._charged.pop(run.run_id, None)
-            self._refused.discard(run.run_id)
-            condition.notify_all()
-            if ended.state in TERMINAL_RUN_STATES and ended.parent_run_id is not None:
-                await self._settle_group(ended)
+                write = partial(self.store.update_run, run.run_id, run.epoch, **changes)
+                end = asyncio.ensure_future(asyncio.to_thread(write))
+                # What is kept per attempt goes with the write: a task cancelled at the commit leaves none of it behind.
+                end.add_done_callback(forget)
+                ended = await asyncio.shield(end)
+                self._charged.pop(run.run_id, None)
+                self._refused.discard(run.run_id)
+                condition.notify_all()
+                if ended.state in TERMINAL_RUN_STATES and ended.parent_run_id is not None:
+                    await self._settle_group(ended)
+        finally:
+            self._stopping.discard(run.run_id)
         return ended
 
     async def _settle_group(self, child: WorkflowRun) -> None:
@@ -1517,18 +1554,6 @@ def _works(runtime: AgentRuntime | None, job_id: str) -> bool:
     """Return whether the job still works, as far as anyone can say: without a job runtime nobody can."""
     jobs = runtime.jobs.retained_jobs() if runtime is not None else ()
     return runtime is None or any(job.job_id == job_id and job.status not in TERMINAL_STATUSES for job in jobs)
-
-
-async def _stopped(runtime: AgentRuntime, job_id: str) -> None:
-    """Ask the job to stop and wait for its end, which says what its turn did: a turn that called a tool is not run again.
-
-    A job that does not end in time is read as it stands, which says the same of a turn nobody can read.
-    """
-    await runtime.jobs.request_cancel(job_id)
-    with suppress(TimeoutError):
-        async with asyncio.timeout(_STOP_SECONDS):
-            while _works(runtime, job_id):  # noqa: ASYNC110 - the job runtime has no event for one job's end
-                await asyncio.sleep(_STOP_POLL_SECONDS)
 
 
 def _require_kept(kept: list[str] | None, grant: ScriptToolGrant) -> None:

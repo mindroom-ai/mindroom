@@ -10010,7 +10010,7 @@ A turn that may not start, for example because the model name is unknown or the 
 `tools`, `skills` or `knowledge` without `system` is refused with `tools, skills and knowledge narrow a copy only together with system=.`
 Stopping one agent from the Sub-agents panel fails only that call with kind `cancelled`; the run goes on.
 An agent that had called a tool when it was stopped, alone or with its run, ends `indeterminate` instead, so no resume runs it again without `rerun`.
-A Stop of the run waits up to 30 seconds for each agent to end before it reads what the agent did.
+A Stop of the run asks all its agents to end at once and waits up to 30 seconds for them together, then reads what each agent did.
 
 While an agent's tool call waits for an approval, the agent's call shows `waiting`, and so does the run when no other call of it is working.
 Time the run spends `waiting` is not charged to its [working time](#working-time).

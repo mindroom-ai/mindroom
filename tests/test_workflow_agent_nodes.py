@@ -350,9 +350,13 @@ async def test_edited_prompt_at_the_same_key_starts_a_new_job_and_stops_the_old_
     await _replayed(stack)
     stack.child_script(answer("new answer"))
 
+    # Nothing waits for the old job under the run's lock: the call is asked again, as the script's SDK does.
+    with pytest.raises(ScriptRuntimeUnavailableError, match="is stopping"):
+        await stack.submit("@0", "agent", {"prompt": "new"})
+    assert not stack.engine._condition(stack.run_id).locked()
+    await wait_for_status(stack.jobs, old, "cancelled")
     assert await stack.result("@0", "agent", {"prompt": "new"}) == "new answer"
     gate.set()
-    await wait_for_status(stack.jobs, old, "cancelled")
 
     node = _node(stack)
     assert (node.generation, node.result, stack.node_job("@0").job_id != old) == (2, "new answer", True)
@@ -431,10 +435,123 @@ async def test_a_stop_does_not_wait_forever_for_an_agent_that_does_not_end(
 
     ended = await asyncio.wait_for(stack.engine.cancel(stack.run_id, reason="Stopped."), 5)
 
+    # Asked before the wait, and once more when its node is read while it still works.
     assert (ended.state, asked, _node(stack).state) == (
         WorkflowRunState.CANCELLED,
-        [job_id],
+        [job_id] * 2,
         WorkflowNodeState.INDETERMINATE,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_stop_waits_for_all_its_agents_together_and_not_under_the_runs_lock(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One deadline for every agent of the run, not one each; meanwhile the run's lock is free and no call gets in."""
+    monkeypatch.setattr(engine_module, "_STOP_SECONDS", 0.6)
+    stack.child_script(*([Await(asyncio.Event().wait), *answer("late")] for _ in range(4)))
+    for index in range(4):
+        await stack.submit(f"@{index}", "agent", {"prompt": f"Task {index}"})
+    asked: list[str] = []
+
+    async def ignored(job_id: str) -> None:
+        asked.append(job_id)
+
+    monkeypatch.setattr(stack.jobs, "request_cancel", ignored)
+    lock, clock = stack.engine._condition(stack.run_id), asyncio.get_running_loop().time
+    began = clock()
+
+    stop = asyncio.create_task(stack.engine.cancel(stack.run_id, reason="Stopped."))
+    # Every agent is asked before any is waited for.
+    async with asyncio.timeout(0.5):
+        while len(asked) < 4:  # noqa: ASYNC110 - the fake has no event.
+            await asyncio.sleep(0.01)
+    with pytest.raises(SupersededAttemptError):
+        await asyncio.wait_for(stack.submit("@4", "agent", _PROMPT), 0.3)
+    assert (lock.locked(), stop.done()) == (False, False)
+    ended = await asyncio.wait_for(stop, 5)
+
+    # Four waits one after the other take 2.4 seconds.
+    assert clock() - began < 1.8
+    states = {node.state for node in stack.store.nodes(stack.run_id)}
+    assert (ended.state, states, len(_node_jobs(stack))) == (
+        WorkflowRunState.CANCELLED,
+        {WorkflowNodeState.INDETERMINATE},
+        4,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_ends_starts_no_agent_in_the_place_its_stopped_agent_leaves(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The script failed while two agents worked and one waited for a place, and one agent ends before the other.
+
+    The place the first gives up, while the end of the run still waits for the second, starts no third agent.
+    """
+    monkeypatch.setattr(engine_module, "_STOP_SECONDS", 0.5)
+    await stack.start(max_concurrent=2)
+    stack.child_script(*([Await(asyncio.Event().wait), *answer("late")] for _ in range(2)))
+    for key in ("@0", "@1"):
+        await stack.submit(key, "agent", {"prompt": f"Task {key}"})
+    assert (await stack.submit("@2", "agent", {"prompt": "Never"})).state == "queued"
+    slow, cancel, jobs = stack.node_job("@1").job_id, stack.jobs.request_cancel, len(_node_jobs(stack))
+
+    async def all_but_one(job_id: str) -> None:
+        if job_id != slow:
+            await cancel(job_id)
+
+    monkeypatch.setattr(stack.jobs, "request_cancel", all_but_one)
+
+    await stack.finish_attempt(error="KeyError: 'x'")
+
+    states = [node.state for node in stack.store.nodes(stack.run_id)]
+    assert (states, len(_node_jobs(stack)) - jobs, stack.store.get_run(stack.run_id).state) == (
+        [WorkflowNodeState.CANCELLED, WorkflowNodeState.INDETERMINATE, WorkflowNodeState.CANCELLED],
+        0,
+        WorkflowRunState.FAILED,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_stop_of_several_agents_says_of_each_what_its_own_turn_did(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agents end together, and then each node is read: only the one whose turn called a tool is not run again."""
+    wrote, gate = asyncio.Event(), asyncio.Event()
+
+    async def held() -> None:
+        wrote.set()
+        await gate.wait()
+
+    waits = ([Await(gate.wait), *answer("late")] for _ in range(2))
+    stack.child_script(calls(tool_call("append", "c1", line="a")), [Await(held), *answer("done")], *waits)
+    await stack.submit("@0", "agent", _PROMPT)
+    await asyncio.wait_for(wrote.wait(), 5)
+    for key in ("@1", "@2"):
+        await stack.submit(key, "agent", {"prompt": f"Task {key}"})
+    lock, cancel, locked = stack.engine._condition(stack.run_id), stack.jobs.request_cancel, []
+
+    async def recorded(job_id: str) -> None:
+        locked.append(lock.locked())
+        await cancel(job_id)
+
+    monkeypatch.setattr(stack.jobs, "request_cancel", recorded)
+
+    await stack.engine.cancel(stack.run_id, reason="Stopped.")
+
+    states = {node.key: node.state for node in stack.store.nodes(stack.run_id)}
+    assert (states, locked, {job.status for job in _node_jobs(stack)}) == (
+        {
+            "@0": WorkflowNodeState.INDETERMINATE,
+            "@1": WorkflowNodeState.CANCELLED,
+            "@2": WorkflowNodeState.CANCELLED,
+        },
+        [False] * 3,
+        {"cancelled"},
     )
 
 
@@ -448,6 +565,9 @@ async def test_a_call_that_replaces_a_working_agent_that_made_a_call_is_not_run_
     await _replayed(stack)
 
     stack.child_script(calls(tool_call("append", "c2", line="a")), answer("edited"))
+    with pytest.raises(ScriptRuntimeUnavailableError):
+        await stack.submit("@0", "agent", {"prompt": "An edited prompt."})
+    await wait_for_status(stack.jobs, stack.node_job("@0").job_id, "cancelled")
     with pytest.raises(NodeFailed) as refused:
         await stack.result("@0", "agent", {"prompt": "An edited prompt."})
 

@@ -163,24 +163,45 @@ async def test_a_run_s_own_call_cannot_cancel_it_or_a_run_around_it(stack: Workf
     assert (child.run_id in str(stopped), stack.store.get_run(child.run_id).state) == (True, WorkflowRunState.CANCELLED)
 
 
+def _lock_at_each_stop(stack: WorkflowStack, parent: str, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool]]:
+    """Return a list that gets, for each stop of a run that still runs, whether the lock of *parent* is held then."""
+    lock, cancel, locked = stack.engine._condition(parent), stack.engine.cancel, []
+
+    async def recorded(run_id: str, **how: Any) -> WorkflowRun:  # noqa: ANN401 - as the engine's `cancel`.
+        if stack.store.get_run(run_id).state is WorkflowRunState.RUNNING:
+            locked.append((run_id, lock.locked()))
+        return await cancel(run_id, **how)
+
+    monkeypatch.setattr(stack.engine, "cancel", recorded)
+    return locked
+
+
 @pytest.mark.asyncio
-async def test_stop_of_the_parent_cancels_the_nested_run(stack: WorkflowStack) -> None:
+async def test_stop_of_the_parent_cancels_the_nested_run(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A run inside a run does not outlive it: the stop of the parent ends the nested run and its group."""
     await stack.start()
     parent = stack.run_id
     stack.child_script(calls(_START), answer("never"))
     await stack.submit("@0", "agent", _PROMPT)
     child = await _nested(stack, parent)
+    locked = _lock_at_each_stop(stack, parent, monkeypatch)
 
     await stack.engine.cancel(parent, reason="Stopped.")
 
     await stack.until(lambda: stack.store.get_run(child.run_id).state is WorkflowRunState.CANCELLED)
-    assert _group(stack, child).state is _CANCELLED
+    # The nested run is stopped while nothing holds the lock of the run around it, also by the agent that waits for it.
+    assert (_group(stack, child).state, set(locked)) == (_CANCELLED, {(parent, False), (child.run_id, False)})
 
 
 @pytest.mark.asyncio
-async def test_stop_of_the_parent_cancels_a_nested_run_nobody_waits_for(stack: WorkflowStack) -> None:
-    """After a restart no call waits for the nested run yet: the stop of the parent still reaches it."""
+async def test_stop_of_the_parent_cancels_a_nested_run_nobody_waits_for(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a restart no call waits for the nested run yet: the stop of the parent still reaches it, without its lock."""
     await stack.start()
     parent = stack.run_id
     stack.child_script(calls(_START), answer("never"))
@@ -189,10 +210,12 @@ async def test_stop_of_the_parent_cancels_a_nested_run_nobody_waits_for(stack: W
     await stack.restart()
     assert set(await stack.recover()) == {parent, child.run_id}
     assert not stack.engine.attended(child.owner)
+    locked = _lock_at_each_stop(stack, parent, monkeypatch)
 
     await stack.engine.cancel(parent, reason="Stopped.")
 
     assert stack.store.get_run(child.run_id).state is WorkflowRunState.CANCELLED
+    assert locked == [(parent, False), (child.run_id, False)]
 
 
 @pytest.mark.asyncio
