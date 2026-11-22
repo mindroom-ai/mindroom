@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -172,6 +173,27 @@ async def test_report_of_a_run_that_a_resume_control_resumed_is_delivered(stack:
     assert len(await stack.follow_ups()) == 1
     [job] = [job for job in stack.jobs.retained_jobs() if job.job_id == job_id]
     assert await stack.collect(job) == "the resumed report"
+
+
+@pytest.mark.asyncio
+async def test_resume_control_delivered_again_after_its_job_is_gone_starts_nothing(stack: WorkflowStack) -> None:
+    """The run remembers the event that took it: the same event resumes it once, whatever is kept of its job."""
+    await _fail(stack)
+    assert await _control(stack) is True
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+    job_id = stack.store.get_run(stack.run_id).job_id
+    await stack.end_attempt(ScriptRunState.FAILED, output="KeyError: 'tide'")
+    kept = lambda: [job for job in stack.jobs.retained_jobs() if job.job_id == job_id]  # noqa: E731
+    await stack.until(lambda: [job.status for job in kept()] == ["failed"])
+
+    async def finished(_job: object) -> bool:
+        return True
+
+    await stack.jobs.expire_ended(now=datetime.now(UTC) + timedelta(days=365), source_finished=finished)
+    assert kept() == []
+
+    assert await _control(stack) is False
+    assert stack.store.get_run(stack.run_id).attempt == 2
 
 
 @pytest.mark.asyncio

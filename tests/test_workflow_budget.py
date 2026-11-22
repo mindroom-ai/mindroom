@@ -12,7 +12,10 @@ import pytest_asyncio
 from mindroom.config.models import ModelPricing
 from mindroom.matrix.event_types import WORKFLOW_QUESTION_CONTENT_KEY
 from mindroom.script_runs import manager as manager_module
+from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import ScriptRunState
+from mindroom.script_runs.reasons import PLUGIN_TOOLS_CHANGED
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs import view as view_module
@@ -182,6 +185,34 @@ async def test_further_turn_of_an_agent_waits_at_the_limit_as_a_new_call_does(st
     assert await _answer(stack, "$budget:1", "Continue with $0.50 more")
     assert await stack.result("@0", "agent", ask) == {"ok": True}
     assert len(model.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_further_turn_that_a_call_finds_due_waits_at_the_limit(stack: WorkflowStack) -> None:
+    """The call that reads a turn's end itself, as after a restart, starts no further turn over the limit either."""
+    await stack.start(max_cost_usd=0.5, max_concurrent=1)
+    gate = asyncio.Event()
+    wrong = [Await(gate.wait), *answer("no json here", _usd(0.6))]
+    model = stack.child_script(wrong, answer('```json\n{"ok": true}\n```', _usd(0.1)))
+    ask = {"prompt": "Does it hold?", "schema": {"type": "object", "required": ["ok"]}}
+    await stack.submit("@0", "agent", ask)
+    await stack.until(lambda: len(model.requests) == 1)
+    # The attempt is lost to an interruption of its process, and nothing waits for the agent, whose turn then ends.
+    for waiting in stack.engine._tasks.pop(stack.run_id):
+        waiting.cancel()
+    await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=PLUGIN_TOOLS_CHANGED)
+    assert await stack.maintain() == [stack.run_id]
+    job_id = stack.store.get_node(stack.run_id, "@0").handle.ref
+    gate.set()
+    jobs = stack.jobs.retained_jobs
+    await stack.until(lambda: all(job.status in TERMINAL_STATUSES for job in jobs() if job.job_id == job_id))
+
+    for _ in range(3):
+        with pytest.raises(ScriptRuntimeUnavailableError, match="cost limit"):
+            await stack.submit("@0", "agent", ask)
+
+    assert len(model.requests) == 1
+    assert "$budget:1" in _states(stack)
 
 
 @pytest.mark.asyncio

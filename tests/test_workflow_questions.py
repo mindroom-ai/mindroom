@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 import nio
@@ -15,6 +16,7 @@ from mindroom.matrix.event_types import (
 )
 from mindroom.workflow_runs.answers import answer_command, answer_question, handle_workflow_answer
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
+from mindroom.workflow_runs.notices import notice, send_notice
 from mindroom.workflow_runs.questions import question_id
 from mindroom.workflow_runs.store import WorkflowRunStoreError
 from tests.workflow_helpers import StackRoom, WorkflowStack, tool_args, workflow_stack
@@ -256,6 +258,24 @@ async def test_answer_counts_only_while_the_requester_has_access(stack: Workflow
     assert [kind for _, kind, _ in _room(stack).events] == ["m.room.message"]
     stack.access = None
     assert await _answer(stack, card, option="Yes") == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_notice_that_a_homeserver_refuses_once_is_sent_again_by_the_same_send(stack: WorkflowStack) -> None:
+    """A send that fails is tried again after a wait, so a homeserver that restarts loses no notice of a run."""
+    room, run = _room(stack), stack.store.get_run(stack.run_id)
+    said = notice(run, "The run asks.", WORKFLOW_QUESTION_CONTENT_KEY, {})
+    room.refuse_sends = True
+
+    async def accept_soon() -> None:
+        await asyncio.sleep(0.01)
+        room.refuse_sends = False
+
+    accepting = asyncio.create_task(accept_soon())
+    assert await send_notice(room.client, run, said, retries=(0.05,)) == room.events[0][0]
+    await accepting
+    room.refuse_sends = True
+    assert await send_notice(room.client, run, said, retries=(0.0,)) is None
 
 
 @pytest.mark.asyncio
