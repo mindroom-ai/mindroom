@@ -4329,6 +4329,7 @@ visibility = [
     "mindroom.matrix.rooms",
     "mindroom.orchestration.plugin_http_runtime",
     "mindroom.orchestration.rooms",
+    "mindroom.reactive_triggers.dispatch",
     "mindroom.thread_tags",
     "mindroom.topic_generator",
 ]
@@ -10755,8 +10756,11 @@ depends_on = []
 [[modules]]
 path = "mindroom.reactive_triggers"
 depends_on = [
+    "mindroom.reactive_triggers.dispatch",
+    "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.store",
+    "mindroom.reactive_triggers.triage",
 ]
 
 [[modules]]
@@ -10767,4 +10771,28 @@ depends_on = []
 path = "mindroom.reactive_triggers.store"
 depends_on = [
     "mindroom.reactive_triggers.models",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers.matching"
+depends_on = [
+    "mindroom.constants",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers.triage"
+depends_on = [
+    "mindroom.config.judgment",
+    "mindroom.judgment.evaluator",
+    "mindroom.judgment.state",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers.dispatch"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.hooks.sender",
+    "mindroom.matrix.room_reconciliation",
+    "mindroom.reactive_triggers.matching",
+    "mindroom.reactive_triggers.store",
 ]

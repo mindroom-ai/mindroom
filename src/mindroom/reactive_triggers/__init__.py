@@ -1,5 +1,17 @@
-"""Reactive triggers core models and SQLite store."""
+"""Reactive triggers core models, SQLite store, matching, triage, and dispatch."""
 
+from mindroom.reactive_triggers.dispatch import (
+    DispatchResult,
+    build_reactive_trigger_body,
+    dispatch_reactive_trigger,
+)
+from mindroom.reactive_triggers.matching import (
+    REACTIVE_TRIGGER_DEDUPE_KEY,
+    REACTIVE_TRIGGER_ID_KEY,
+    is_reactive_trigger_event_content,
+    matches_external_event,
+    matches_room_message,
+)
 from mindroom.reactive_triggers.models import (
     TRIGGER_ID_PATTERN,
     ExternalEventSourceSpec,
@@ -25,10 +37,14 @@ from mindroom.reactive_triggers.store import (
     ReactiveTriggerStoreError,
     RetryResult,
 )
+from mindroom.reactive_triggers.triage import TriageOutcome, evaluate_triage
 
 __all__ = (
+    "REACTIVE_TRIGGER_DEDUPE_KEY",
+    "REACTIVE_TRIGGER_ID_KEY",
     "TRIGGER_ID_PATTERN",
     "ClaimResult",
+    "DispatchResult",
     "ExternalEventSourceSpec",
     "FiringRecord",
     "FiringStatus",
@@ -43,9 +59,16 @@ __all__ = (
     "SourceType",
     "ThreadCheckpoint",
     "ThreadTagSourceSpec",
+    "TriageOutcome",
     "TriageSpec",
     "TriggerEvent",
     "TriggerSourceSpec",
     "TriggerTargetSpec",
+    "build_reactive_trigger_body",
+    "dispatch_reactive_trigger",
+    "evaluate_triage",
     "generate_trigger_id",
+    "is_reactive_trigger_event_content",
+    "matches_external_event",
+    "matches_room_message",
 )
