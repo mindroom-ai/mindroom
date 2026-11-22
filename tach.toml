@@ -575,6 +575,7 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.reaction_dispatch",
     "mindroom.reply_scope",
+    "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.follow_ups",
@@ -838,7 +839,7 @@ depends_on = [
     "mindroom.helper_usage",
     "mindroom.history.interrupted_replay",
     "mindroom.history.run_checkpoint",
-    "mindroom.history.storage",
+    "mindroom.history.session_context",
     "mindroom.history.turn_recorder",
     "mindroom.llm",
     "mindroom.streaming",
@@ -3557,12 +3558,12 @@ depends_on = [
     "mindroom.contacts.turns",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
+    "mindroom.event_journal",
     "mindroom.history.reply_compactions",
     "mindroom.history.storage",
     "mindroom.history.turn_recorder",
     "mindroom.judgment.cold_cache",
     "mindroom.matrix.guarded_rooms",
-    "mindroom.mid_turn",
     "mindroom.mid_turn_judgment",
     "mindroom.orchestration.runtime",
     "mindroom.participation",
@@ -6334,6 +6335,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.event_journal.legacy_turn_rows",
+    "mindroom.history.session_context",
     "mindroom.history.storage",
     "mindroom.turn_record",
 ]
@@ -6442,7 +6444,7 @@ visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.turns.queued_notice"
-depends_on = ["mindroom.mid_turn"]
+depends_on = []
 visibility = [
     "mindroom.turns.ingress",
     "mindroom.voice.ingress",
@@ -8401,6 +8403,8 @@ visibility = [
     "mindroom.history.manual",
     "mindroom.teams",
     "mindroom.delegation.recovery",
+    "mindroom.response_turn",
+    "mindroom.turn_store",
 ]
 
 [[modules]]
@@ -9915,9 +9919,7 @@ visibility = [
     "mindroom.ai_runtime",
     "mindroom.mid_turn_judgment",
     "mindroom.response_lifecycle",
-    "mindroom.response_runner",
     "mindroom.turns.ingress",
-    "mindroom.turns.queued_notice",
 ]
 
 [[modules]]

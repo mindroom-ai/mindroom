@@ -14,7 +14,7 @@ from structlog.testing import capture_logs
 
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.mid_turn import MidTurnGate, MidTurnMode
-from mindroom.response_lifecycle import _QueuedMessageState
+from mindroom.response_lifecycle import _Conversation
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs import runtime as runtime_module
@@ -1027,7 +1027,7 @@ async def test_message_the_mid_turn_judge_lets_wait_keeps_the_wait(
 ) -> None:
     """A message the judge lets wait is acknowledged and keeps the reply waiting; one it must answer releases it."""
     runtime = await tool_job_runtime(tmp_path)
-    state = _QueuedMessageState()
+    state = _Conversation()
     proceed, acknowledgement = asyncio.Event(), asyncio.Event()
     judged: list[tuple[str | None, ...]] = []
     acknowledged: list[str] = []
@@ -1102,7 +1102,7 @@ async def test_message_the_mid_turn_judge_lets_wait_keeps_the_wait(
 async def test_a_job_change_keeps_the_mid_turn_judgment_its_wait_awaits(tmp_path: Path) -> None:
     """A job that changes while the judge decides keeps that one judgment, whose answer still releases the wait."""
     runtime = await tool_job_runtime(tmp_path)
-    state = _QueuedMessageState()
+    state = _Conversation()
     proceed, judging, answer = asyncio.Event(), asyncio.Event(), asyncio.Event()
     judgments = 0
 
@@ -1152,7 +1152,7 @@ async def test_a_message_waiter_whose_judgment_absorbed_its_cancellation_ends_in
 ) -> None:
     """A cancelled message waiter ends once its judgment returns, so it is never left pending for the GC to destroy."""
     runtime = await tool_job_runtime(tmp_path)
-    state = _QueuedMessageState()
+    state = _Conversation()
     proceed, judging, absorbed, answer = asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
     loop = asyncio.get_running_loop()
     reported: list[str] = []
@@ -1174,7 +1174,7 @@ async def test_a_message_waiter_whose_judgment_absorbed_its_cancellation_ends_in
         return BackgroundOutcome("completed", "done")
 
     def message_waiters() -> list[asyncio.Task[object]]:
-        return [task for task in asyncio.all_tasks() if task.get_coro().__qualname__ == "_QueuedMessageState.wait"]
+        return [task for task in asyncio.all_tasks() if task.get_coro().__qualname__ == "_Conversation.wait"]
 
     state.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
     try:
@@ -1215,7 +1215,7 @@ async def test_queue_does_not_release_wait_and_requester_steer_detaches_without_
     """Queue messages leave a job wait blocked; the requester's Steer detaches it unjudged while the job runs on."""
     runtime = await tool_job_runtime(tmp_path)
     requester = "@alice:localhost"
-    state = _QueuedMessageState()
+    state = _Conversation()
     state.bind_active_requester(requester)
     proceed = asyncio.Event()
     attempted = {event_id: asyncio.Event() for event_id in ("$queued", "$later")}

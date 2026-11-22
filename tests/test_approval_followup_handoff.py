@@ -167,7 +167,7 @@ async def _run_follow_up(
     dispatched: asyncio.Event,
     order: list[str],
 ) -> SourceFate:
-    async def answer(_target: MessageTarget) -> SourceFate:
+    async def answer() -> SourceFate:
         order.append("follow-up")
         return Owned()
 
@@ -216,14 +216,15 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
             batch_started.set()
             await release_batch.wait()
             return _pause("call-2")
-        assert lifecycle._get_or_create_queued_signal(target).has_pending_human_messages()
+        assert lifecycle._conversation_for(target).has_pending_human_messages()
         order.append("original handoff")
         return CompletedApprovalRun(
             response_text="A newer message arrived. One report is read; one remains. I will resume after your update.",
             metadata_content={},
         )
 
-    async def initial_model(resolved_target: MessageTarget) -> SourceFate:
+    async def initial_model() -> SourceFate:
+        resolved_target = request.response_envelope.target
         assert checkpoint == "initial"
         # The turn claims its reply, as the locked generation does before the model runs.
         history_scope = runner.deps.state_writer.history_scope()
@@ -258,7 +259,7 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
                 _run_follow_up(runner, target, follow_up_dispatched, order),
             )
             await asyncio.wait_for(follow_up_dispatched.wait(), timeout=5)
-            assert lifecycle._get_or_create_queued_signal(target).has_pending_human_messages()
+            assert lifecycle._conversation_for(target).has_pending_human_messages()
             release_batch.set()
             await asyncio.wait_for(asyncio.gather(original, follow_up), timeout=5)
         finally:
@@ -337,7 +338,7 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
             await asyncio.wait_for(batch_started.wait(), timeout=5)
             follow_up = asyncio.create_task(_run_follow_up(runner, target, follow_up_dispatched, order))
             await asyncio.wait_for(follow_up_dispatched.wait(), timeout=5)
-            assert runner.lifecycle_coordinator._get_or_create_queued_signal(target).has_pending_human_messages()
+            assert runner.lifecycle_coordinator._conversation_for(target).has_pending_human_messages()
             release_batch.set()
             await asyncio.wait_for(asyncio.gather(original, follow_up), timeout=5)
         finally:
@@ -352,7 +353,7 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
     assert waiting.continuation_count == 2
     assert waiting.calls[0].decision is None
     assert await runner.deps.replies.store.is_pending("$source")
-    assert runner.is_held_for_approval(target)
+    assert runner.lifecycle_coordinator.approval_holds(target.room_id, target.resolved_thread_id)
     assert not original.cancelled()
     assert follow_up is not None
     assert not follow_up.cancelled()

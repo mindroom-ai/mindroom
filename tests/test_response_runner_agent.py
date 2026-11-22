@@ -3291,7 +3291,7 @@ class TestAgentBot(AgentBotTestBase):
         ):
             # The paused approval owns the source.
             assert await bot._response_runner.generate_response(request) == Owned()
-            assert not bot._response_runner.has_active_response_for_target(target.target)
+            assert not bot._response_runner.lifecycle_coordinator.has_active_response_for_target(target.target)
 
         suspend.assert_awaited_once()
         effects.assert_not_awaited()
