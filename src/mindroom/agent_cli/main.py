@@ -345,7 +345,9 @@ def _write_stdout(data: bytes) -> None:
 def _discard_stdout() -> None:
     """Point stdout nowhere, so output it still holds for a reader that left or stalled cannot hold up the exit."""
     with suppress(OSError, ValueError, AttributeError):
-        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        nowhere = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(nowhere, sys.stdout.fileno())
+        os.close(nowhere)
 
 
 def _forward_stdin(client: AgentCliClient, call_id: str, done: threading.Event) -> None:
@@ -502,6 +504,8 @@ def _run_in_worker(args: argparse.Namespace) -> int:
         )
         return _EXIT_NOT_RUN
     arguments: dict[str, object] = {"args": args.command, "worker": args.name, "timeout": args.timeout}
+    # `tail` stays an argument, as before output was streamed, so approval, hooks and audit see the same call.
+    arguments["tail"] = args.tail
     if args.resource_profile is not None:
         arguments["resource_profile"] = args.resource_profile
     call_id = str(uuid4())

@@ -6,7 +6,7 @@ import base64
 import os
 from contextlib import contextmanager
 from http import HTTPStatus
-from http.client import HTTPException
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from typing import TYPE_CHECKING, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -93,6 +93,9 @@ class AgentCliClient:
             raise AgentCliUnavailableError(msg) from exc
         # The CLI only calls its own MindRoom API; never send the grant through an environment proxy.
         self._opener = build_opener(ProxyHandler({}), _NoRedirects())
+        # The one connection a command's stdin goes over, straight to that API and following no redirect.
+        connection = HTTPSConnection if parsed.scheme == "https" else HTTPConnection
+        self._stdin = connection(parsed.netloc, timeout=_HTTP_TIMEOUT_SECONDS)
 
     def operation(self, payload: dict[str, object]) -> dict[str, object]:
         """Submit once; callers retain the exact call ID on uncertain acceptance."""
@@ -128,7 +131,27 @@ class AgentCliClient:
     def stdin(self, call_id: str, seq: int, data: bytes, *, eof: bool) -> dict[str, object]:
         """Write chunk ``seq`` to the stdin of a streamed call's command; repeating a chunk writes it once."""
         chunk = {"seq": seq, "b": base64.b64encode(data).decode("ascii"), "eof": eof}
-        return self._request(f"/api/agent-cli/calls/{UUID(call_id)}/stdin", canonical_json(chunk).encode("utf-8"))
+        route, body = f"/api/agent-cli/calls/{UUID(call_id)}/stdin", canonical_json(chunk).encode("utf-8")
+        try:
+            # The chunks share a connection; one the server closed is opened again when this chunk is sent again.
+            self._stdin.request("POST", route, body, self._headers())
+            response = self._stdin.getresponse()
+            payload = response.read(MAX_ENVELOPE_BYTES + 1)
+        except (OSError, HTTPException) as exc:
+            self._stdin.close()
+            msg = f"Agent CLI transport outcome is unknown; check that this shell can reach {self._url}"
+            raise AgentCliUnavailableError(msg) from exc
+        if response.status != HTTPStatus.OK:
+            refused = HTTPStatus.BAD_REQUEST <= response.status < HTTPStatus.INTERNAL_SERVER_ERROR
+            msg = "Agent CLI request was rejected"
+            raise (ValueError if refused else AgentCliUnavailableError)(msg)
+        return _envelope(payload)
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
+        if self._window:
+            headers[AGENT_CLI_WINDOW_HEADER] = self._window
+        return headers
 
     def stream(self, call_id: str) -> Iterator[dict[str, object]]:
         """Yield a streamed call's frames as they arrive: one JSON object per line, the last one its receipt."""
@@ -155,13 +178,10 @@ class AgentCliClient:
         timeout: float = _HTTP_TIMEOUT_SECONDS,
     ) -> Iterator[HTTPResponse]:
         """Open one request and report whatever fails while its response is read as the CLI's own errors."""
-        headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
-        if self._window:
-            headers[AGENT_CLI_WINDOW_HEADER] = self._window
         request = Request(  # noqa: S310 - HTTP(S) origin validated at construction.
             self._url + route,
             data=data,
-            headers=headers,
+            headers=self._headers(),
         )
         try:
             with self._opener.open(request, timeout=timeout) as response:
