@@ -1096,7 +1096,6 @@ async def test_only_a_human_message_releases_a_running_wait(turn: str) -> None:
         else _envelope(_target(thread_id="$thread"))
     )
     notice = coordinator._begin_response_turn_notice(
-        lifecycle_lock=asyncio.Lock(),
         queued_signal=queued,
         response_envelope=envelope,
         # A scheduled turn is no human message for the running reply to hear about.

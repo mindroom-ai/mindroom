@@ -2623,13 +2623,11 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
 
     def observe_response_turn_start(
         *,
-        lifecycle_lock: asyncio.Lock,
         queued_signal: _QueuedMessageState,
         response_envelope: MessageEnvelope,
         signal_queued_message: bool,
     ) -> str | None:
         notice = begin_response_turn_notice(
-            lifecycle_lock=lifecycle_lock,
             queued_signal=queued_signal,
             response_envelope=response_envelope,
             signal_queued_message=signal_queued_message,
@@ -6282,10 +6280,12 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
     """Cancelling a queued reservation removes it without stealing the released lock."""
     coordinator = ResponseLifecycleCoordinator()
     envelope = _queued_envelope("$interactive")
-    lifecycle_lock = coordinator._response_lifecycle_lock(envelope.target)
+    queued_signal = coordinator._get_or_create_queued_signal(envelope.target)
+    lifecycle_lock = queued_signal.lock
+    # The running reply this reservation queues behind.
+    queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
     reservation = await coordinator.reserve_response_lifecycle(envelope)
-    queued_signal = coordinator._get_or_create_queued_signal(envelope.target)
     assert {message.event_id for message in queued_signal.pending_message_snapshot()} == {envelope.source_event_id}
     assert queued_signal.has_active_response_turn()
 
@@ -6308,8 +6308,9 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
     await reservation.release()
     await reservation.release()
     assert {message.event_id for message in queued_signal.pending_message_snapshot()} == set()
-    assert not queued_signal.has_active_response_turn()
     lifecycle_lock.release()
+    queued_signal.finish_response_turn()
+    assert not queued_signal.has_active_response_turn()
 
     assert (
         await asyncio.wait_for(
@@ -6330,7 +6331,7 @@ async def test_response_lifecycle_reservation_surfaces_lock_acquire_failure() ->
     """A failed acquire task must wake reservation startup and remain observable."""
     coordinator = ResponseLifecycleCoordinator()
     envelope = _queued_envelope("$interactive")
-    lifecycle_lock = coordinator._response_lifecycle_lock(envelope.target)
+    lifecycle_lock = coordinator._get_or_create_queued_signal(envelope.target).lock
 
     async def fail_acquire() -> bool:
         msg = "lock acquire failed"

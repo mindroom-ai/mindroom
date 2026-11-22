@@ -1039,8 +1039,9 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
+    lifecycle_lock = lifecycle._get_or_create_queued_signal(response_target).lock
     queued_signal = lifecycle._get_or_create_queued_signal(response_target)
+    queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
 
     try:
@@ -1061,6 +1062,7 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
+        queued_signal.finish_response_turn()
 
     assert not queued_signal.has_pending_human_messages()
 
@@ -1097,8 +1099,9 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._turn_ingress.deps.response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
+    lifecycle_lock = lifecycle._get_or_create_queued_signal(response_target).lock
     queued_signal = lifecycle._get_or_create_queued_signal(response_target)
+    queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
 
     try:
@@ -1119,6 +1122,7 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
+        queued_signal.finish_response_turn()
 
     assert not queued_signal.has_pending_human_messages()
 
@@ -1168,7 +1172,7 @@ async def test_replay_of_a_message_a_restart_cut_short_is_not_a_newer_message(tm
     await bot._take_over_replies()
     assert lifecycle.continued_sources == frozenset({"$replayed"})
 
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    lifecycle_lock = lifecycle._get_or_create_queued_signal(target).lock
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     # Another turn, such as the follow-up for the jobs the restart ended, holds the conversation.
     queued_signal.begin_response_turn()
@@ -1276,8 +1280,9 @@ async def test_generate_response_sets_queued_signal_for_trusted_router_relay(tmp
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
+    lifecycle_lock = lifecycle._get_or_create_queued_signal(response_target).lock
     queued_signal = lifecycle._get_or_create_queued_signal(response_target)
+    queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
 
     try:
@@ -1297,6 +1302,7 @@ async def test_generate_response_sets_queued_signal_for_trusted_router_relay(tmp
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
+        queued_signal.finish_response_turn()
 
     assert not queued_signal.has_pending_human_messages()
 
@@ -1318,8 +1324,9 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
         # Each requester's turn returns a fate of its own, so each task is seen to run its own request.
         return Owned() if request.user_id == "first" else Unclaimed(UnclaimedReason.NOT_DUE)
 
+    conversation = coordinator.lifecycle_coordinator._get_or_create_queued_signal(first_envelope.target)
     with (
-        patch.object(coordinator.lifecycle_coordinator, "_response_lifecycle_lock", return_value=lock),
+        patch.object(conversation, "lock", lock),
         patch.object(ResponseRunner, "_run_locked_turn", new=fake_run_locked_turn),
     ):
         first_task = asyncio.create_task(
@@ -1350,7 +1357,9 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
     response_envelope = _envelope(source_kind=SCHEDULED_SOURCE_KIND)
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle_lock = coordinator.lifecycle_coordinator._response_lifecycle_lock(response_target)
+    queued_signal = coordinator.lifecycle_coordinator._get_or_create_queued_signal(response_target)
+    lifecycle_lock = queued_signal.lock
+    queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
     lifecycle_started = asyncio.Event()
     # Both handoffs this test observes are causal, not timed: the turn is known
@@ -1411,6 +1420,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
+        queued_signal.finish_response_turn()
 
 
 @pytest.mark.asyncio
@@ -1532,7 +1542,7 @@ async def test_generate_response_keeps_room_target_through_run_and_delivery(tmp_
     assert result == Owned()
     assert [target.resolved_thread_id for target in observed_run_targets] == [None]
     assert [target.resolved_thread_id for target in observed_delivery_targets] == [None]
-    lock_keys = set(coordinator.lifecycle_coordinator._response_lifecycle_locks)
+    lock_keys = set(coordinator.lifecycle_coordinator._thread_queued_signals)
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
 
 
@@ -1595,7 +1605,7 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
     assert observed_run_targets == [stable_target]
     assert observed_delivery_targets == [stable_target]
     assert observed_lifecycle_targets == [stable_target]
-    lock_keys = set(coordinator.lifecycle_coordinator._response_lifecycle_locks)
+    lock_keys = set(coordinator.lifecycle_coordinator._thread_queued_signals)
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$other_thread") not in lock_keys
 
@@ -1648,7 +1658,7 @@ async def test_generate_team_response_keeps_room_target_through_run_and_delivery
     assert result == Owned()
     assert [target.resolved_thread_id for target in observed_run_targets] == [None]
     assert [target.resolved_thread_id for target in observed_delivery_targets] == [None]
-    lock_keys = set(coordinator.lifecycle_coordinator._response_lifecycle_locks)
+    lock_keys = set(coordinator.lifecycle_coordinator._thread_queued_signals)
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
 
 
@@ -1716,7 +1726,7 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
     assert result == Owned()
     assert observed_run_targets == [stable_target]
     assert observed_delivery_targets == [stable_target]
-    lock_keys = set(coordinator.lifecycle_coordinator._response_lifecycle_locks)
+    lock_keys = set(coordinator.lifecycle_coordinator._thread_queued_signals)
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$other_thread") not in lock_keys
 
@@ -1760,8 +1770,9 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
+    lifecycle_lock = lifecycle._get_or_create_queued_signal(response_target).lock
     queued_signal = lifecycle._get_or_create_queued_signal(response_target)
+    queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
 
     try:
@@ -1784,6 +1795,7 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
+        queued_signal.finish_response_turn()
 
     assert not queued_signal.has_pending_human_messages()
 
@@ -1798,7 +1810,7 @@ async def test_response_without_reservation_does_not_drain_human_backlog(tmp_pat
     response_target = response_envelope_b.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
+    lifecycle_lock = lifecycle._get_or_create_queued_signal(response_target).lock
     queued_signal = lifecycle._get_or_create_queued_signal(response_target)
     observed_pending: list[bool] = []
     ran_sources: list[str] = []
@@ -1822,6 +1834,7 @@ async def test_response_without_reservation_does_not_drain_human_backlog(tmp_pat
             )
         return await bot._response_runner.generate_response(request)
 
+    queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
     try:
         with patch.object(ResponseRunner, "_run_locked_turn", new=fake_locked):
@@ -1844,6 +1857,7 @@ async def test_response_without_reservation_does_not_drain_human_backlog(tmp_pat
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
+        queued_signal.finish_response_turn()
 
     assert observed_pending == [True, False]
     assert ran_sources == [response_envelope_b.source_event_id, response_envelope_c.source_event_id]
@@ -2707,7 +2721,7 @@ async def test_lifecycle_notice_is_cancelled_when_lock_wait_is_cancelled() -> No
     assert queued_signal.pending_human_messages == 1
     reservation.release()
 
-    lock = lifecycle._response_lifecycle_lock(target)
+    lock = lifecycle._get_or_create_queued_signal(target).lock
     await lock.acquire()
 
     async def locked_operation(_target: MessageTarget) -> SourceFate:

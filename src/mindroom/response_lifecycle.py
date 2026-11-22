@@ -190,8 +190,13 @@ async def _first_of(task: asyncio.Task[bool], event: asyncio.Event) -> None:
 
 @dataclass
 class _QueuedMessageState:
-    """Track queued human ingress while one response lifecycle holds the lock."""
+    """One conversation: the lock its replies take in turn, the turns begun on it, and the human messages that wait.
 
+    A begun turn that has not finished, which includes a pending approval, is what makes the conversation busy;
+    the lock only serializes the replies.
+    """
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _pending_messages: dict[str, QueuedMessage] = field(default_factory=dict)
     mid_turn_gate: MidTurnGate | None = None
     _active_response_turns: int = 0
@@ -422,7 +427,6 @@ class QueuedHumanNoticeReservation:
 class ResponseLifecycleCoordinator:
     """Serialize response turns and signal active turns about queued human ingress."""
 
-    _response_lifecycle_locks: dict[ResponseLifecycleKey, asyncio.Lock] = field(default_factory=dict)
     _thread_queued_signals: dict[ResponseLifecycleKey, _QueuedMessageState] = field(default_factory=dict)
     # A pending approval counts as an active response turn of its conversation, by approval,
     # for each paused reply the journal's approval signals report.
@@ -472,10 +476,7 @@ class ResponseLifecycleCoordinator:
 
     def _has_active_response_for_thread_key(self, lifecycle_key: ResponseLifecycleKey) -> bool:
         queued_signal = self._thread_queued_signals.get(lifecycle_key)
-        if queued_signal is not None and queued_signal.has_active_response_turn():
-            return True
-        lifecycle_lock = self._response_lifecycle_locks.get(lifecycle_key)
-        return lifecycle_lock.locked() if lifecycle_lock is not None else False
+        return queued_signal is not None and queued_signal.has_active_response_turn()
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target already has an active turn."""
@@ -490,54 +491,18 @@ class ResponseLifecycleCoordinator:
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
         """Return canonical thread IDs with active response lifecycles in one room."""
-        known_lifecycle_keys = set(self._thread_queued_signals) | set(self._response_lifecycle_locks)
         return frozenset(
             lifecycle_key.thread_id
-            for lifecycle_key in known_lifecycle_keys
-            if lifecycle_key.room_id == room_id and self._has_active_response_for_thread_key(lifecycle_key)
+            for lifecycle_key, queued_signal in self._thread_queued_signals.items()
+            if lifecycle_key.room_id == room_id and queued_signal.has_active_response_turn()
         )
 
     async def wait_for_thread_idle(self, room_id: str, thread_id: str | None) -> None:
-        """Wait until a response lifecycle lock is idle for one room/thread key."""
+        """Wait until no response turn is active for one room/thread key."""
         lifecycle_key = ResponseLifecycleKey(room_id=room_id, thread_id=thread_id)
+        # Rechecked by key: before this waiter resumes, another turn may begin or the entry may be evicted.
         while self._has_active_response_for_thread_key(lifecycle_key):
-            queued_signal = self._thread_queued_signals.get(lifecycle_key)
-            if queued_signal is not None and queued_signal.has_active_response_turn():
-                await queued_signal.wait_until_idle()
-                continue
-            lifecycle_lock = self._response_lifecycle_locks.get(lifecycle_key)
-            if lifecycle_lock is not None and lifecycle_lock.locked():
-                async with lifecycle_lock:
-                    pass
-                continue
-            return
-
-    def _response_lifecycle_lock(self, target: MessageTarget) -> asyncio.Lock:
-        """Return the per-target lock that serializes one response lifecycle."""
-        lock_key = target.lifecycle_key
-        lock = self._response_lifecycle_locks.get(lock_key)
-        if lock is not None:
-            return lock
-        if len(self._response_lifecycle_locks) >= 100:
-            for candidate, candidate_lock in list(self._response_lifecycle_locks.items()):
-                if len(self._response_lifecycle_locks) < 100:
-                    break
-                if candidate_lock.locked():
-                    continue
-                # An unlocked entry is not necessarily an idle one. Queued human
-                # ingress, and a turn that has begun but not yet taken the lock,
-                # both live in the signal rather than the lock, so evicting on
-                # lock state alone silently drops user input.
-                candidate_signal = self._thread_queued_signals.get(candidate)
-                if candidate_signal is not None and (
-                    candidate_signal.has_pending_human_messages() or candidate_signal.has_active_response_turn()
-                ):
-                    continue
-                self._response_lifecycle_locks.pop(candidate, None)
-                self._thread_queued_signals.pop(candidate, None)
-        lock = asyncio.Lock()
-        self._response_lifecycle_locks[lock_key] = lock
-        return lock
+            await self._thread_queued_signals[lifecycle_key].wait_until_idle()
 
     async def reserve_response_lifecycle(
         self,
@@ -545,15 +510,13 @@ class ResponseLifecycleCoordinator:
     ) -> ResponseLifecycleReservation:
         """Reserve FIFO admission on one canonical lifecycle before response preparation."""
         target = response_envelope.target
-        lifecycle_lock = self._response_lifecycle_lock(target)
         queued_signal = self._get_or_create_queued_signal(target)
         reservation = ResponseLifecycleReservation(
             _coordinator=self,
             _lifecycle_key=target.lifecycle_key,
-            _lifecycle_lock=lifecycle_lock,
+            _lifecycle_lock=queued_signal.lock,
             _queued_signal=queued_signal,
             _notice=self._begin_response_turn_notice(
-                lifecycle_lock=lifecycle_lock,
                 queued_signal=queued_signal,
                 response_envelope=response_envelope,
                 signal_queued_message=True,
@@ -574,6 +537,12 @@ class ResponseLifecycleCoordinator:
         signal = self._thread_queued_signals.get(lifecycle_key)
         if signal is not None:
             return signal
+        # The table is capped softly: an entry stays while a turn is begun on it or a human message waits in it.
+        for candidate, candidate_signal in list(self._thread_queued_signals.items()):
+            if len(self._thread_queued_signals) < 100:
+                break
+            if not (candidate_signal.has_pending_human_messages() or candidate_signal.has_active_response_turn()):
+                del self._thread_queued_signals[candidate]
         signal = _QueuedMessageState()
         self._thread_queued_signals[lifecycle_key] = signal
         return signal
@@ -638,15 +607,12 @@ class ResponseLifecycleCoordinator:
     def _begin_response_turn_notice(
         self,
         *,
-        lifecycle_lock: asyncio.Lock,
         queued_signal: _QueuedMessageState,
         response_envelope: MessageEnvelope,
         signal_queued_message: bool,
     ) -> str | None:
         existing_turn = queued_signal.begin_response_turn()
-        if not signal_queued_message:
-            return None
-        if not (existing_turn or lifecycle_lock.locked()):
+        if not (signal_queued_message and existing_turn):
             return None
         if not self._is_news(response_envelope):
             return None
@@ -678,15 +644,13 @@ class ResponseLifecycleCoordinator:
     ) -> tuple[asyncio.Lock, _QueuedMessageState, str | None]:
         if reservation is not None:
             return reservation._consume(self, target), reservation._queued_signal, None
-        lifecycle_lock = self._response_lifecycle_lock(target)
         queued_signal = self._get_or_create_queued_signal(target)
         notice = self._begin_response_turn_notice(
-            lifecycle_lock=lifecycle_lock,
             queued_signal=queued_signal,
             response_envelope=response_envelope,
             signal_queued_message=signal_queued_message,
         )
-        return lifecycle_lock, queued_signal, notice
+        return queued_signal.lock, queued_signal, notice
 
     @staticmethod
     async def _acquire_response_turn_lock(

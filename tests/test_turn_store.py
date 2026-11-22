@@ -2195,7 +2195,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
                 thread_history=history,
             ),
         )
-        lifecycle_lock = runner.lifecycle_coordinator._response_lifecycle_lock(target)
+        lifecycle_lock = runner.lifecycle_coordinator._get_or_create_queued_signal(target).lock
         await lifecycle_lock.acquire()
         waiting = asyncio.Event()
 

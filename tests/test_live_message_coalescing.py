@@ -1943,7 +1943,7 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    lifecycle_lock = lifecycle._get_or_create_queued_signal(target).lock
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     late_event = _text_event(
         event_id="$bob-late",
@@ -2049,7 +2049,7 @@ async def test_follow_up_run_is_superseded_only_when_no_other_requester_waits(
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    lifecycle_lock = lifecycle._get_or_create_queued_signal(target).lock
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     runs: list[tuple[str | None, str]] = []
 
@@ -2124,7 +2124,7 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    lifecycle_lock = lifecycle._get_or_create_queued_signal(target).lock
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     runs: list[tuple[str | None, str]] = []
 
@@ -2326,7 +2326,7 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    lifecycle_lock = lifecycle._get_or_create_queued_signal(target).lock
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     second_lookup_started = asyncio.Event()
     release_second_lookup = asyncio.Event()
@@ -2417,7 +2417,7 @@ async def test_later_slow_thread_lookup_active_follow_up_lands_as_own_turn(tmp_p
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    lifecycle_lock = lifecycle._get_or_create_queued_signal(target).lock
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     second_lookup_started = asyncio.Event()
     release_second_lookup = asyncio.Event()
@@ -2506,7 +2506,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
     target = MessageTarget.resolve(room.room_id, "$thread", "$text")
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    lifecycle_lock = lifecycle._get_or_create_queued_signal(target).lock
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     captured_requests = []
     payload_requests = []
