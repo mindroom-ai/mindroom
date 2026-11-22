@@ -4,10 +4,18 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
+import os
 import signal
+import subprocess
+import sys
+import termios
+import threading
 import time
 import urllib.request
+from contextlib import contextmanager, suppress
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -36,6 +44,7 @@ from tests.minimal_agent_fixtures import capture_bash_batch
 from tests.test_agent_tool_calls import _catalog, _toolkit
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.agent_cli.turn import LiveTurnTools
@@ -1637,29 +1646,19 @@ def test_cli_signal_handlers_are_removed_before_the_result_is_printed(
     assert all(handlers == restored for handlers in handlers_while_printing)
 
 
-def test_real_sigterm_during_a_blocked_final_write_stops_the_cli() -> None:
-    """SIGTERM stops a CLI that is blocked writing its result to a full stdout pipe, as it does on main."""
-    import fcntl  # noqa: PLC0415
-    import os  # noqa: PLC0415
-    import subprocess  # noqa: PLC0415
-    import sys  # noqa: PLC0415
-    import termios  # noqa: PLC0415
-    import threading  # noqa: PLC0415
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: PLC0415
-
-    if not hasattr(fcntl, "F_SETPIPE_SZ"):
-        pytest.skip("needs a pipe whose size can be set")
-    pipe_bytes = 4096
-    submitted = threading.Event()
+@contextmanager
+def _real_workers_run(respond, **popen: object) -> Iterator[subprocess.Popen[bytes]]:
+    """Run `workers run w -- true` as a real process against a local server that answers with ``respond``."""
 
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
+        def _answer(self) -> None:
             self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            receipt = {"status": "completed", "outcome": "[worker: w]\n" + "x" * (8 * pipe_bytes)}
+            body = json.dumps(respond(self.command, self.path)).encode()
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(json.dumps(receipt).encode())
-            submitted.set()
+            self.wfile.write(body)
+
+        do_GET = do_POST = _answer  # noqa: N815
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
             del format, args
@@ -1672,35 +1671,240 @@ def test_real_sigterm_during_a_blocked_final_write_stops_the_cli() -> None:
         "MINDROOM_AGENT_CLI_URL": f"http://127.0.0.1:{server.server_port}",
         "MINDROOM_AGENT_CLI_TOKEN": "private-capability",
     }
-    read_fd, write_fd = os.pipe()
-    fcntl.fcntl(write_fd, fcntl.F_SETPIPE_SZ, pipe_bytes)
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            "from mindroom.agent_cli.main import main; raise SystemExit(main(['workers', 'run', 'w', '--', 'true']))",
-        ],
-        stdout=write_fd,
-        stderr=subprocess.DEVNULL,
-        env=env,
-    )
-    os.close(write_fd)
+    command = "from mindroom.agent_cli.main import main; raise SystemExit(main(['workers', 'run', 'w', '--', 'true']))"
+    proc = subprocess.Popen([sys.executable, "-c", command], env=env, **popen)
     try:
-        assert submitted.wait(timeout=SETTLE_TIMEOUT_SECONDS)
-        # Nothing reads the pipe, so once it is full the CLI is blocked in its final write.
-        deadline = time.monotonic() + SETTLE_TIMEOUT_SECONDS
-        while int.from_bytes(fcntl.ioctl(read_fd, termios.FIONREAD, bytes(4)), sys.byteorder) < pipe_bytes:
-            assert time.monotonic() < deadline, "the CLI never filled its stdout pipe"
-            time.sleep(0.01)
-        proc.send_signal(signal.SIGTERM)
-        assert proc.wait(timeout=SETTLE_TIMEOUT_SECONDS) == -signal.SIGTERM
+        yield proc
     finally:
         proc.kill()
         proc.wait()
-        os.close(read_fd)
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+_PIPE_BYTES = 4096
+
+
+def _small_pipe() -> tuple[int, int]:
+    """Return a pipe that holds one page, which a test fills to block its writer."""
+    if not hasattr(fcntl, "F_SETPIPE_SZ"):
+        pytest.skip("needs a pipe whose size can be set")
+    read_fd, write_fd = os.pipe()
+    fcntl.fcntl(write_fd, fcntl.F_SETPIPE_SZ, _PIPE_BYTES)
+    return read_fd, write_fd
+
+
+def test_real_sigterm_during_a_blocked_final_write_stops_the_cli() -> None:
+    """SIGTERM stops a CLI that is blocked writing its result to a full stdout pipe, as it does on main."""
+    submitted = threading.Event()
+
+    def respond(_method: str, _path: str) -> dict[str, object]:
+        submitted.set()
+        return {"status": "completed", "outcome": "[worker: w]\n" + "x" * (8 * _PIPE_BYTES)}
+
+    read_fd, write_fd = _small_pipe()
+    try:
+        with _real_workers_run(respond, stdout=write_fd, stderr=subprocess.DEVNULL) as proc:
+            assert submitted.wait(timeout=SETTLE_TIMEOUT_SECONDS)
+            # Nothing reads the pipe, so once it is full the CLI is blocked in its final write.
+            deadline = time.monotonic() + SETTLE_TIMEOUT_SECONDS
+            while int.from_bytes(fcntl.ioctl(read_fd, termios.FIONREAD, bytes(4)), sys.byteorder) < _PIPE_BYTES:
+                assert time.monotonic() < deadline, "the CLI never filled its stdout pipe"
+                time.sleep(0.01)
+            proc.send_signal(signal.SIGTERM)
+            assert proc.wait(timeout=SETTLE_TIMEOUT_SECONDS) == -signal.SIGTERM
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_real_second_sigterm_during_a_blocked_cancel_notice_stops_the_cli() -> None:
+    """The cancel notice is written under the handlers the CLI started with, so a full stderr cannot make it deaf."""
+    polling, cancelled, done = threading.Event(), threading.Event(), threading.Event()
+
+    def respond(method: str, path: str) -> dict[str, object]:
+        if path.endswith("/cancel"):
+            cancelled.set()
+            return {"status": "cancelled"}
+        if method == "GET":
+            polling.set()
+            done.wait(SETTLE_TIMEOUT_SECONDS)
+        return {"status": "running"}
+
+    read_fd, write_fd = _small_pipe()
+    os.set_blocking(write_fd, False)
+    with suppress(BlockingIOError):
+        while True:
+            os.write(write_fd, b"x" * _PIPE_BYTES)
+    os.set_blocking(write_fd, True)
+    try:
+        with _real_workers_run(respond, stdout=subprocess.DEVNULL, stderr=write_fd) as proc:
+            assert polling.wait(timeout=SETTLE_TIMEOUT_SECONDS)
+            proc.send_signal(signal.SIGTERM)
+            assert cancelled.wait(timeout=SETTLE_TIMEOUT_SECONDS)
+            # The cancel has answered, so the CLI goes on to write its notice to the full pipe.
+            time.sleep(0.5)
+            proc.send_signal(signal.SIGTERM)
+            assert proc.wait(timeout=SETTLE_TIMEOUT_SECONDS) == -signal.SIGTERM
+    finally:
+        done.set()
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_real_second_sigterm_during_the_cancel_request_stops_the_cli_at_once() -> None:
+    """A second signal does not wait for the cancel request: it ends the CLI as a signal with no handler does."""
+    polling, cancelling, done = threading.Event(), threading.Event(), threading.Event()
+
+    def respond(method: str, path: str) -> dict[str, object]:
+        if path.endswith("/cancel"):
+            cancelling.set()
+            done.wait(SETTLE_TIMEOUT_SECONDS)
+            return {"status": "cancelled"}
+        if method == "GET":
+            polling.set()
+            done.wait(SETTLE_TIMEOUT_SECONDS)
+        return {"status": "running"}
+
+    try:
+        with _real_workers_run(respond, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as proc:
+            assert polling.wait(timeout=SETTLE_TIMEOUT_SECONDS)
+            proc.send_signal(signal.SIGTERM)
+            assert cancelling.wait(timeout=SETTLE_TIMEOUT_SECONDS)
+            proc.send_signal(signal.SIGTERM)
+            assert proc.wait(timeout=SETTLE_TIMEOUT_SECONDS) == -signal.SIGTERM
+    finally:
+        done.set()
+
+
+def test_cli_submit_refused_with_401_exits_125_at_once(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A submit the server answers 401, 403, or 404 was never admitted, so the CLI exits 125 without reading it."""
+    from mindroom.agent_cli.client import AgentCliRefusedError  # noqa: PLC0415
+
+    class Client:
+        def operation(self, _payload: object):
+            msg = "Agent CLI authority or transport is unavailable"
+            raise AgentCliRefusedError(msg)
+
+        def receipt(self, call_id, **kwargs: object):
+            del call_id, kwargs
+            pytest.fail("a refused submit has no receipt to read")
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setattr("mindroom.agent_cli.main.time.sleep", lambda _seconds: pytest.fail("must not wait"))
+
+    assert main(["workers", "run", "w", "--", "true"]) == 125
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "mindroom-agent: Agent CLI authority or transport is unavailable\n"
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_http_client_reports_a_4xx_without_a_reason_as_refused(status: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 4xx the server gives no reason for is a refusal, which stays an unavailable error for a receipt read."""
+    from mindroom.agent_cli.client import AgentCliRefusedError  # noqa: PLC0415
+
+    class Handler(BaseHTTPRequestHandler):
+        def _refuse(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(status)
+            self.end_headers()
+
+        do_GET = do_POST = _refuse  # noqa: N815
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN", "private-capability")
+    try:
+        client = AgentCliClient()
+        with pytest.raises(AgentCliRefusedError):
+            client.operation({"operation": "tools.list"})
+        with pytest.raises(AgentCliUnavailableError):
+            client.receipt(str(uuid4()))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_cli_signal_held_during_a_rejected_submit_exits_with_the_signal(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signal held while the submit was rejected still ends the CLI as that signal, and cancels nothing."""
+    installed: dict[int, object] = {}
+    submitted: list[str] = []
+
+    def fake_signal(signum, handler):
+        previous = installed.get(signum, signal.SIG_DFL)
+        installed[signum] = handler
+        return previous
+
+    class Client:
+        def operation(self, payload):
+            submitted.append(payload["call_id"])
+            handler = installed[signal.SIGTERM]
+            assert callable(handler)
+            handler(int(signal.SIGTERM), None)
+            msg = "Agent CLI request was rejected: worker name is invalid"
+            raise ValueError(msg)
+
+        def cancel(self, call_id, *, timeout: float = 8.0):
+            del call_id, timeout
+            pytest.fail("a rejected submit admitted nothing to cancel")
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setattr(signal, "signal", fake_signal)
+
+    assert main(["workers", "run", "fan3", "--", "true"]) == 143
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == f"mindroom-agent: cancelled by SIGTERM (call {submitted[0]})\n"
+
+
+def test_cli_signal_during_handler_installation_is_held_until_the_submit_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signal that lands while the handlers are being installed cancels the command after its submit."""
+    installed: dict[int, object] = {}
+    events: list[str] = []
+
+    def fake_signal(signum, handler):
+        previous = installed.get(signum, signal.SIG_DFL)
+        installed[signum] = handler
+        if signum == signal.SIGINT and callable(handler) and not events:
+            events.append("signalled")
+            handler(int(signal.SIGINT), None)
+        return previous
+
+    class Client:
+        def operation(self, payload):
+            events.append("submitted")
+            return {"status": "running", "call_id": payload["call_id"]}
+
+        def receipt(self, call_id, **kwargs: object):
+            del call_id, kwargs
+            pytest.fail("a held signal cancels before the first read")
+
+        def cancel(self, call_id, *, timeout: float = 8.0):
+            del call_id, timeout
+            events.append("cancelled")
+            return {"status": "cancelled"}
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setattr(signal, "signal", fake_signal)
+
+    assert main(["workers", "run", "fan3", "--", "sleep", "300"]) == 130
+    assert events == ["signalled", "submitted", "cancelled"]
 
 
 @pytest.mark.asyncio
