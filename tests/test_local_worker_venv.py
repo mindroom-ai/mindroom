@@ -175,23 +175,23 @@ def test_failed_uv_seed_is_retried_without_losing_existing_worker_files(
 
 
 @_requires_uv_seed
-def test_stuck_venv_creation_fails_and_the_next_request_retries(
+def test_only_an_eager_setup_limits_how_long_venv_creation_may_take(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A venv creation that hangs ends at its time limit, so it holds neither the worker's lock nor its setup forever."""
-    paths = local_workers.local_worker_state_paths_for_root(tmp_path / "worker")
-    stuck_uv = tmp_path / "stuck-uv"
-    stuck_uv.write_text('#!/bin/sh\nfor last; do :; done\nmkdir -p "$last/bin"\ntouch "$last/bin/python"\nexec sleep 30\n')
-    stuck_uv.chmod(0o755)
-    original_which = shutil.which
-    monkeypatch.setattr(shutil, "which", lambda _command: str(stuck_uv))
+    """A request waits for its venv as long as it takes, as before; the eager setup gives a stuck creation up."""
+    slow_uv = tmp_path / "slow-uv"
+    slow_uv.write_text(f'#!/bin/sh\nsleep 2\nexec {shutil.which("uv")} "$@"\n')
+    slow_uv.chmod(0o755)
+    monkeypatch.setattr(shutil, "which", lambda _command: str(slow_uv))
+    # Whatever limit an eager setup uses must not reach a request's own creation.
     monkeypatch.setattr(local_workers, "_VENV_CREATE_TIMEOUT_SECONDS", 0.5, raising=False)
 
-    with pytest.raises(subprocess.TimeoutExpired):
-        local_workers.ensure_local_worker_state_locked(paths)
-    assert not (paths.venv_dir / "bin" / "python").exists()
+    requested = local_workers.local_worker_state_paths_for_root(tmp_path / "requested")
+    local_workers.ensure_local_worker_state_locked(requested)
+    _assert_seeded_worker_environment(requested)
 
-    monkeypatch.setattr(shutil, "which", original_which)
-    local_workers.ensure_local_worker_state_locked(paths)
-    _assert_seeded_worker_environment(paths)
+    eager = local_workers.local_worker_state_paths_for_root(tmp_path / "eager")
+    with pytest.raises(subprocess.TimeoutExpired):
+        local_workers.ensure_local_worker_state_locked(eager, venv_timeout_seconds=0.5)
+    assert not (eager.venv_dir / "bin" / "python").exists()

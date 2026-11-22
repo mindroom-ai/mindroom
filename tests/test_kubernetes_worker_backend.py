@@ -6368,6 +6368,64 @@ def test_kubernetes_worker_health_read_allows_a_slower_handshake_on_each_retry(
     assert connect_timeouts == [0.5, 1.0, 2.0, 4.0, 5.0]
 
 
+@pytest.mark.parametrize(
+    ("budget_seconds", "handshake_seconds", "expected_connect_timeouts"),
+    [
+        # Too short to try twice: the one attempt gets the whole budget.
+        (0.6, 0.55, [0.6]),
+        # No time for another attempt after this one: it may take as long as a single attempt always could.
+        (6.0, 4.5, [0.5, 1.0, 2.0, 5.0]),
+    ],
+    ids=["short-budget", "last-attempt"],
+)
+def test_kubernetes_worker_health_read_never_gives_up_a_handshake_one_full_attempt_would_finish(
+    monkeypatch: pytest.MonkeyPatch,
+    budget_seconds: float,
+    handshake_seconds: float,
+    expected_connect_timeouts: list[float],
+) -> None:
+    """Short first tries never cost an answer that a single try with the whole timeout would have got."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _ControlledMonotonicClock()
+    connect_timeouts: list[float] = []
+
+    class _SlowHandshakeClient:
+        def __init__(self, *, timeout: float | httpx.Timeout) -> None:
+            self.timeout = httpx.Timeout(timeout)
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str, *, timeout: httpx.Timeout | None = None) -> httpx.Response:
+            connect = (timeout or self.timeout).connect
+            assert connect is not None
+            connect_timeouts.append(connect)
+            clock.advance_to(clock.monotonic() + min(connect, handshake_seconds))
+            if connect < handshake_seconds:
+                message = "handshake timed out"
+                raise httpx.ConnectTimeout(message)
+            return httpx.Response(200, json={"status": "ok"})
+
+    monkeypatch.setattr(kubernetes_resources_module.httpx, "Client", _SlowHandshakeClient)
+    monkeypatch.setattr(
+        kubernetes_resources_module,
+        "time",
+        SimpleNamespace(time=clock.monotonic, sleep=lambda seconds: clock.advance_to(clock.monotonic() + seconds)),
+    )
+
+    response = kubernetes_resources_module.KubernetesResourceManager.read_worker_health(
+        backend._resources,
+        "mindroom-worker-abc",
+        timeout_seconds=budget_seconds,
+    )
+
+    assert response.status_code == 200
+    assert connect_timeouts == expected_connect_timeouts
+
+
 def _answer_worker_setup(backend: KubernetesWorkerBackend, setup: Callable[[], str | None]) -> None:
     """Answer each health read with a ready worker whose eager setup is in the state ``setup()`` returns."""
 
@@ -6406,10 +6464,15 @@ def test_kubernetes_backend_waits_for_a_slow_worker_setup_as_progress_and_never_
     _answer_worker_setup(backend, lambda: "preparing" if clock.monotonic() < 88.0 else "ready")
     events: list[WorkerReadyProgress] = []
 
-    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0, progress_sink=events.append)
+    with capture_logs() as logs:
+        handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0, progress_sink=events.append)
 
     assert handle.status == "ready"
     assert handle.failure_count == 0
+    (cold_start,) = _cold_start_records(logs)
+    # The record tells the wait for the worker's answer from the wait for its setup.
+    assert cold_start["healthy_ms"] < 1000.0
+    assert cold_start["wait_ms"] >= 88000.0
     phases = [event.phase for event in events]
     assert phases[0] == "cold_start"
     assert phases[-1] == "ready"
@@ -6456,24 +6519,55 @@ def test_kubernetes_backend_reads_the_setup_timeout() -> None:
     assert config({"MINDROOM_KUBERNETES_WORKER_SETUP_TIMEOUT_SECONDS": "45"}).setup_timeout_seconds == 45.0
 
 
-def test_kubernetes_startup_manifest_asks_for_eager_setup_and_lists_enabled_plugins() -> None:
-    """Only the Kubernetes backend's manifest asks its workers to prepare eagerly, naming the plugins to consider."""
-    applied_config = Config(
-        plugins=[
-            {"path": "./plugins/enabled"},
-            {"path": "./plugins/disabled", "enabled": False},
-        ],
-    )
-    backend, _apps_api, _core_api = _backend(applied_config=applied_config)
-
+def _manifest_and_template_hash(backend: KubernetesWorkerBackend, apps_api: _FakeAppsApi) -> tuple[dict, str]:
     handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
-
     state_root = backend.storage_root / str(handle.debug_metadata["state_subpath"])
     manifest = json.loads(sandbox_startup_manifest_path(state_root).read_text(encoding="utf-8"))
-    assert manifest["eager_setup_plugins"] == ["./plugins/enabled"]
+    annotations = apps_api.created_bodies[0]["spec"]["template"]["metadata"]["annotations"]
+    return manifest, annotations[_ANNOTATION_STARTUP_MANIFEST_HASH]
+
+
+def test_kubernetes_startup_manifest_and_template_ignore_plugins_that_do_not_opt_in() -> None:
+    """Adding or disabling a plugin that is imported per call changes no worker's template, as before."""
+    storage_root = _default_storage_root()
+
+    def backend_with(plugins: list[dict[str, object]]) -> tuple[KubernetesWorkerBackend, _FakeAppsApi]:
+        runtime_paths = resolve_primary_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_root)
+        backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, applied_config=Config(plugins=plugins))
+        return backend, apps_api
+
+    without_plugins = _manifest_and_template_hash(*backend_with([]))
+    with_plugins = _manifest_and_template_hash(
+        *backend_with([{"path": "./plugins/enabled"}, {"path": "./plugins/disabled", "enabled": False}]),
+    )
+
+    assert with_plugins[0]["eager_setup_plugins"] == []
+    assert with_plugins == without_plugins
     # A manifest written without the list, as the Docker backend writes it, leaves the worker preparing lazily.
-    other_manifest = write_startup_manifest(Path(tempfile.mkdtemp()), backend.runtime_paths, public_runtime=True)
+    other_manifest = write_startup_manifest(
+        Path(tempfile.mkdtemp()), backend_with([])[0].runtime_paths, public_runtime=True
+    )
     assert "eager_setup_plugins" not in json.loads(other_manifest.read_text(encoding="utf-8"))
+
+
+def test_kubernetes_startup_manifest_lists_the_plugins_that_opt_in() -> None:
+    """Only the plugins the primary found to set ``worker_preload`` reach a worker's manifest."""
+    backend, apps_api, _core_api = _backend()
+    _BACKEND_LAUNCHES[backend] = replace(_launch_of(backend), worker_preload_plugins=("./plugins/opted",))
+
+    manifest, _template_hash = _manifest_and_template_hash(backend, apps_api)
+
+    assert manifest["eager_setup_plugins"] == ["./plugins/opted"]
+
+
+def test_kubernetes_script_recovery_signature_ignores_the_setup_timeout() -> None:
+    """A setting that only times the primary's wait never revokes the scripts an earlier release started."""
+    backend, _apps_api, _core_api = _backend()
+    signature = backend.script_recovery_signature()
+
+    assert "setup_timeout_seconds" not in backend._script_recovery_payload()["config"]
+    object.__setattr__(backend.config, "setup_timeout_seconds", 45.0)
+    assert backend.script_recovery_signature() == signature
 
 
 def test_kubernetes_backend_progress_respects_real_elapsed_time(

@@ -123,6 +123,7 @@ _STABLE_EVENTS = {
         "outcome",
         "wait_ms",
         "pod_ready_ms",
+        "healthy_ms",
     },
 }
 _STABLE_EVENT_LEVELS = {

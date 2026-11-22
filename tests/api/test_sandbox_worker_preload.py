@@ -23,6 +23,7 @@ from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.tool_system import plugin_imports
+from mindroom.tool_system import plugins as plugins_module
 from tests.api.sandbox_runner_support import execute_call
 
 if TYPE_CHECKING:
@@ -45,12 +46,14 @@ _PLUGIN_SOURCE = '''
 import os
 import sys
 from pathlib import Path
+
+import yaml
 {at_import}
 from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool
 
 DATA = (Path(__file__).parent / "data.txt").read_text(encoding="utf-8")
 with Path({import_log!r}).open("a", encoding="utf-8") as _log:
-    _log.write(f"{name}|{{os.getpid()}}|{{os.getcwd()}}|{{DATA}}\\n")
+    _log.write(f"{name}|{{os.getpid()}}|{{os.getppid()}}|{{os.getcwd()}}|{{DATA}}\\n")
 
 
 class _ReportTool(Toolkit):
@@ -59,9 +62,10 @@ class _ReportTool(Toolkit):
 
     @tool
     def report(self) -> str:
-        """Return the data read at import, the loaded plugin modules, and the preload variable of this process."""
+        """Return the data read at import, the plugin modules, the preload variable, and a leaked global of this process."""
         modules = sorted(name for name in sys.modules if name.startswith("mindroom_plugin_"))
-        return f"{{DATA}}|{{','.join(modules)}}|{{os.environ.get({preload_env!r})}}"
+        leaked = "!left-by-import" in yaml.SafeLoader.yaml_constructors
+        return f"{{DATA}}|{{','.join(modules)}}|{{os.environ.get({preload_env!r})}}|{{leaked}}"
 
 
 @register_tool_with_metadata(
@@ -102,23 +106,38 @@ def _imports(root: Path, name: str) -> list[tuple[int, str, str]]:
     log = root / "imports.log"
     lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
     records = [line.split("|") for line in lines]
-    return [(int(pid), cwd, data) for plugin, pid, cwd, data in records if plugin == name and int(pid) != os.getpid()]
+    return [
+        (int(pid), cwd, data)
+        for plugin, pid, _parent, cwd, data in records
+        if plugin == name and int(pid) != os.getpid()
+    ]
+
+
+def _import_parents(root: Path, name: str) -> list[int]:
+    """Return the parent process of each process that imported ``name``, outside this test process."""
+    lines = (root / "imports.log").read_text(encoding="utf-8").splitlines()
+    records = [line.split("|") for line in lines]
+    return [int(parent) for plugin, pid, parent, _cwd, _data in records if plugin == name and int(pid) != os.getpid()]
 
 
 def _runtime(tmp_path: Path) -> RuntimePaths:
     return resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
-        process_env={"MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "forkserver"},
+        process_env={
+            "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "forkserver",
+            "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "30",
+        },
     )
 
 
-def _preload_spec(runtime_paths: RuntimePaths, plugins: list[PluginEntryConfig]) -> str:
+def _preload_spec(runtime_paths: RuntimePaths, plugins: list[PluginEntryConfig], *, budget_seconds: float = 60) -> str:
     return json.dumps(
         {
             "config_path": str(runtime_paths.config_path),
             "storage_root": str(runtime_paths.storage_root),
             "plugins": [plugin.path for plugin in plugins],
+            "budget_seconds": budget_seconds,
         },
     )
 
@@ -143,20 +162,48 @@ def manager(monkeypatch: pytest.MonkeyPatch) -> Iterator[_SandboxForkserver]:
         forkserver.shutdown()
 
 
-def _report(runtime_paths: RuntimePaths, plugins: list[PluginEntryConfig], name: str) -> list[str]:
-    """Call ``name``'s tool under a config of ``plugins`` and return its data, plugin modules, and preload variable."""
+def _call(
+    runtime_paths: RuntimePaths,
+    plugins: list[PluginEntryConfig],
+    tool_name: str,
+    function_name: str,
+    *args: object,
+) -> object:
+    """Run one tool call under a config of ``plugins``, as the runner dispatches it, and return its result."""
     response: ExecuteResponse = sandbox_runner_module._execute_request_subprocess_sync(
         execute_call(
             runtime_paths,
             Config(plugins=plugins),
-            tool_name=f"{name}_tool",
-            function_name="report",
-            args=[],
+            tool_name=tool_name,
+            function_name=function_name,
+            args=list(args),
             kwargs={},
         ),
     )
     assert response.ok is True, response.error
-    return str(response.result).split("|")
+    return response.result
+
+
+def _report(runtime_paths: RuntimePaths, plugins: list[PluginEntryConfig], name: str) -> list[str]:
+    """Call ``name``'s tool and return its data, plugin modules, preload variable, and whether a global leaked."""
+    return str(_call(runtime_paths, plugins, f"{name}_tool", "report")).split("|")
+
+
+def _replace_keeping_size_and_mtime(path: Path, *, in_place: bool) -> None:
+    """Change a file's content the way a timestamp-preserving copy or sync does."""
+    before = path.stat()
+    content = path.read_text(encoding="utf-8").swapcase()
+    # Coarse filesystem clocks give two writes within a few milliseconds one change time.
+    time.sleep(0.05)
+    if in_place:
+        path.write_text(content, encoding="utf-8")
+    else:
+        replacement = path.with_name(f"{path.name}.new")
+        replacement.write_text(content, encoding="utf-8")
+        replacement.replace(path)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
 
 
 def test_only_opt_in_plugins_import_once_and_the_others_import_in_every_call(
@@ -235,8 +282,8 @@ def test_a_request_for_other_plugins_never_sees_the_preloaded_ones_and_keeps_the
     plain = _write_plugin(tmp_path, "plain")
     manager.template_preload = _preload_spec(runtime_paths, [opted])
 
-    _data, with_opted, _env = _report(runtime_paths, [opted, plain], "plain")
-    _data, without_opted, _env = _report(runtime_paths, [plain], "plain")
+    with_opted = _report(runtime_paths, [opted, plain], "plain")[1]
+    without_opted = _report(runtime_paths, [plain], "plain")[1]
     _report(runtime_paths, [opted], "opted")
 
     assert "opted" in with_opted
@@ -289,11 +336,81 @@ def test_a_template_has_no_control_channel_and_hides_its_preload_from_tools(
     opted = _write_plugin(tmp_path, "opted", worker_preload=True)
     manager.template_preload = _preload_spec(runtime_paths, [opted])
 
-    _data, _modules, preload_env = _report(runtime_paths, [opted], "opted")
+    preload_env = _report(runtime_paths, [opted], "opted")[2]
 
     assert preload_env == "None"
     assert sorted(path.name for path in manager.spawned[0].runtime_dir.iterdir()) == ["template.err", "template.sock"]
     assert not hasattr(manager, "_preload_template_in_place")
+
+
+def test_a_request_the_preload_does_not_match_runs_where_those_plugins_were_never_imported(
+    manager: _SandboxForkserver,
+    tmp_path: Path,
+) -> None:
+    """What a preloaded plugin registered globally at import never reaches a call that does not use that preload."""
+    runtime_paths = _runtime(tmp_path)
+    registers = "yaml.SafeLoader.add_constructor('!left-by-import', lambda loader, node: None)"
+    opted = _write_plugin(tmp_path, "opted", worker_preload=True, at_import=registers)
+    plain = _write_plugin(tmp_path, "plain")
+    manager.template_preload = _preload_spec(runtime_paths, [opted])
+
+    assert _report(runtime_paths, [opted, plain], "plain")[3] == "True"
+    preloading_template = manager.spawned[0].process.pid
+    assert _import_parents(tmp_path, "opted") == []
+
+    # Another set of opt-in plugins: this call has no use for the preload.
+    assert _report(runtime_paths, [plain], "plain")[3] == "False"
+
+    # The same set with a changed file: the call imports the plugin itself, in a process that never had the old one.
+    _replace_keeping_size_and_mtime(tmp_path / "opted" / "data.txt", in_place=True)
+    assert _report(runtime_paths, [opted], "opted")[0] == "V1"
+    assert preloading_template not in _import_parents(tmp_path, "opted")
+    assert manager.spawned[0].process.poll() is None
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["rewritten", "renamed-over"])
+@pytest.mark.parametrize("changed", ["tools.py", "data.txt", "assets/logo.txt"])
+def test_the_fingerprint_sees_a_replaced_file_of_the_same_size_and_time(
+    tmp_path: Path,
+    changed: str,
+    in_place: bool,
+) -> None:
+    """A file replaced without a new size or modification time, also behind a linked directory, is a changed plugin."""
+    runtime_paths = _runtime(tmp_path)
+    opted = _write_plugin(tmp_path, "opted", worker_preload=True)
+    shared_assets = tmp_path / "shared-assets"
+    shared_assets.mkdir()
+    (shared_assets / "logo.txt").write_text("logo", encoding="utf-8")
+    (tmp_path / "opted" / "assets").symlink_to(shared_assets, target_is_directory=True)
+    # A link back to the plugin's own directory must not make the walk endless.
+    (shared_assets / "back").symlink_to(tmp_path / "opted", target_is_directory=True)
+    config = Config(plugins=[opted])
+    _entries, fingerprint = plugins_module._worker_preload_plugins(config, runtime_paths)
+    assert plugins_module._worker_preload_plugins(config, runtime_paths)[1] == fingerprint
+
+    _replace_keeping_size_and_mtime(tmp_path / "opted" / changed, in_place=in_place)
+
+    assert plugins_module._worker_preload_plugins(config, runtime_paths)[1] != fingerprint
+
+
+def test_a_plugin_whose_import_hangs_is_given_up_and_other_calls_run(
+    manager: _SandboxForkserver,
+    tmp_path: Path,
+) -> None:
+    """A preload has its own time limit, after which calls run in a template that never tried it."""
+    runtime_paths = _runtime(tmp_path)
+    hangs = _write_plugin(tmp_path, "hangs", worker_preload=True, at_import="import time\ntime.sleep(600)")
+    manager.template_preload = _preload_spec(runtime_paths, [hangs], budget_seconds=1)
+    started_at = time.monotonic()
+
+    assert _call(runtime_paths, [], "calculator", "add", 1, 2) is not None
+    assert "ok" in str(_call(runtime_paths, [], "shell", "run_shell_command", ["bash", "-c", "printf ok"]))
+    assert _call(runtime_paths, [], "calculator", "add", 1, 2) is not None
+
+    assert time.monotonic() - started_at < 20
+    # Only the first template tried the preload; the one that serves never does.
+    assert len(_imports(tmp_path, "hangs")) == 1
+    assert manager.spawned[0].process.poll() is not None
 
 
 @pytest.mark.parametrize("execution_mode", ["forkserver", "subprocess"])
@@ -358,7 +475,7 @@ def _dedicated_worker_app(
         process_env={
             "MINDROOM_SANDBOX_RUNNER_MODE": "true",
             "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "forkserver",
-            "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "120",
+            "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "40",
             "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": _WORKER_KEY,
             "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(worker_root),
         },
@@ -383,20 +500,31 @@ def _wait_for_setup(client: TestClient, state: str) -> None:
         time.sleep(0.2)
 
 
-def _http_report(client: TestClient, plugins: list[PluginEntryConfig], name: str) -> dict[str, object]:
+def _http_call(
+    client: TestClient,
+    plugins: list[PluginEntryConfig],
+    tool_name: str,
+    function_name: str,
+    *args: object,
+) -> dict[str, object]:
     response = client.post(
         "/api/sandbox-runner/execute",
         headers={"X-Mindroom-Sandbox-Token": _TOKEN},
         json={
             "protocol": sandbox_runner_module.WORKER_PROTOCOL_VERSION,
-            "tool_name": f"{name}_tool",
-            "function_name": "report",
+            "tool_name": tool_name,
+            "function_name": function_name,
+            "args": list(args),
             "private_agent_names": [],
             "config_snapshot": {"plugins": [{"path": plugin.path} for plugin in plugins]},
         },
     )
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def _http_report(client: TestClient, plugins: list[PluginEntryConfig], name: str) -> dict[str, object]:
+    return _http_call(client, plugins, f"{name}_tool", "report")
 
 
 def test_eager_setup_runs_behind_the_health_check_and_preloads_only_opt_in_plugins(
@@ -442,6 +570,30 @@ def test_eager_setup_runs_behind_the_health_check_and_preloads_only_opt_in_plugi
     # Each call imports the other plugin itself, after it moved to the request's working directory.
     assert len({pid for pid, _cwd, _data in plain_imports}) == 4
     assert {cwd for _pid, cwd, _data in plain_imports} == {workspace}
+
+
+def test_a_setup_that_outlasts_its_budget_ends_the_preload_and_calls_run(
+    manager: _SandboxForkserver,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A preload still running when the setup budget ends is killed, and calls run in a template without it."""
+    hangs = _write_plugin(tmp_path, "hangs", worker_preload=True, at_import="import time\ntime.sleep(600)")
+    app, _worker_root = _dedicated_worker_app(monkeypatch, tmp_path, eager_setup_plugins=[hangs.path])
+    monkeypatch.setattr(sandbox_runner_module, "_EAGER_SETUP_BUDGET_SECONDS", 6.0)
+
+    with TestClient(app) as client:
+        _wait_for_setup(client, "failed")
+        started_at = time.monotonic()
+
+        assert _http_call(client, [], "calculator", "add", 1, 2)["ok"] is True
+        shell = _http_call(client, [], "shell", "run_shell_command", ["bash", "-c", "printf ok"])
+        assert shell["ok"] is True, shell
+        assert "ok" in str(shell["result"])
+
+        assert time.monotonic() - started_at < 25
+        assert manager.spawned[0].process.poll() is not None
+    assert len(_imports(tmp_path, "hangs")) == 1
 
 
 def test_a_failed_eager_setup_leaves_the_worker_healthy_and_its_first_call_reports_the_real_error(
