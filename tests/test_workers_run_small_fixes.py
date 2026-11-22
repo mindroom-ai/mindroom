@@ -1,0 +1,615 @@
+"""Tests for `mindroom-agent workers run` items 7, 10, and 11."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import signal
+import sys
+import threading
+from contextlib import contextmanager
+from dataclasses import asdict
+from io import StringIO
+from typing import TYPE_CHECKING, Any, Self
+from uuid import uuid4
+
+import httpx
+import pytest
+
+from mindroom.agent_cli.client import AgentCliUnavailableError
+from mindroom.agent_cli.main import main
+from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER
+from mindroom.agent_cli.turn import ToolKey
+from mindroom.shell.execution import ProcessRecord, run_command
+from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.shell.output_capture import format_shell_completion
+from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _parse_supervisor_response
+from mindroom.tool_system.catalog import builtin_tool_registry, get_tool_by_name
+from mindroom.tool_system.sandbox_proxy import WorkerStandIns
+from mindroom.workers.models import WorkerHandle
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
+from tests.test_workers_run_control import (
+    SETTLE_TIMEOUT_SECONDS,
+    _make_app,
+    _make_owner,
+    capture_bash_batch,
+    response_cli_lifetime,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+
+def _shell_entrypoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, base_dir: Path | None = None):
+    monkeypatch.delenv(SHELL_SUPERVISOR_SOCKET_ENV, raising=False)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
+    )
+    overrides: dict[str, object] = {}
+    if base_dir is not None:
+        overrides["base_dir"] = str(base_dir)
+    shell = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        runs_in_worker=False,
+        worker_target=None,
+        tool_init_overrides=overrides or None,
+    )
+    return shell.functions["run_shell_command"]
+
+
+def _cli_with_completed(monkeypatch: pytest.MonkeyPatch, outcome: str) -> list[str]:
+    submitted: list[str] = []
+
+    class Client:
+        def operation(self, payload: dict[str, object]) -> dict[str, object]:
+            call_id = str(payload["call_id"])
+            submitted.append(call_id)
+            return {"status": "completed", "call_id": call_id, "outcome": outcome}
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    return submitted
+
+
+# ---------------------------------------------------------------------------
+# Item 7: Missing / non-executable binary -> 127 / 126
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_item7_missing_absolute_binary_completes_as_127_on_stderr(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Running a missing absolute binary completes and exits 127 with a clean stderr message and no call id."""
+    run_shell = _shell_entrypoint(tmp_path, monkeypatch)
+    shell_result = await run_shell(["/nonexistent-binary-xyz"], worker="w1")
+    assert isinstance(shell_result, str)
+
+    submitted = _cli_with_completed(monkeypatch, f"[worker: w1]\n{shell_result}")
+    exit_code = main(["workers", "run", "w1", "--", "/nonexistent-binary-xyz"])
+    output = capsys.readouterr()
+
+    assert exit_code == 127
+    assert output.out == ""
+    assert output.err == "mindroom-agent: /nonexistent-binary-xyz: No such file or directory\n"
+    assert submitted[0] not in output.err
+    assert "ValueError" not in output.err
+
+
+@pytest.mark.asyncio
+async def test_item7_missing_bare_command_completes_as_127_on_stderr(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Running a missing bare command completes and exits 127 with command not found on stderr."""
+    run_shell = _shell_entrypoint(tmp_path, monkeypatch)
+    shell_result = await run_shell(["__missing_bare_cmd_xyz__"], worker="w1")
+    assert isinstance(shell_result, str)
+
+    submitted = _cli_with_completed(monkeypatch, f"[worker: w1, started]\n{shell_result}")
+    exit_code = main(["workers", "run", "w1", "--", "__missing_bare_cmd_xyz__"])
+    output = capsys.readouterr()
+
+    assert exit_code == 127
+    assert output.out == ""
+    assert output.err == (
+        "mindroom-agent: started worker w1\n"
+        "mindroom-agent: __missing_bare_cmd_xyz__: command not found\n"
+    )
+    assert submitted[0] not in output.err
+
+
+@pytest.mark.asyncio
+async def test_item7_non_executable_file_completes_as_126_on_stderr(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Running a non-executable file completes and exits 126 with Permission denied on stderr."""
+    nonexec = tmp_path / "not-executable.txt"
+    nonexec.write_text("hello\n")
+    nonexec.chmod(0o644)
+
+    run_shell = _shell_entrypoint(tmp_path, monkeypatch)
+    shell_result = await run_shell([str(nonexec)], worker="w1")
+    assert isinstance(shell_result, str)
+
+    submitted = _cli_with_completed(monkeypatch, f"[worker: w1]\n{shell_result}")
+    exit_code = main(["workers", "run", "w1", "--", str(nonexec)])
+    output = capsys.readouterr()
+
+    assert exit_code == 126
+    assert output.out == ""
+    assert output.err == f"mindroom-agent: {nonexec}: Permission denied\n"
+    assert submitted[0] not in output.err
+
+
+@pytest.mark.asyncio
+async def test_item7_missing_cwd_still_fails_as_execution_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing working directory is still an execution error (not 127 command not found)."""
+    missing_dir = tmp_path / "missing-cwd"
+    run_shell = _shell_entrypoint(tmp_path, monkeypatch, base_dir=missing_dir)
+    with pytest.raises(ValueError, match="missing-cwd"):
+        await run_shell(["echo", "hi"], worker="w1")
+
+
+@pytest.mark.asyncio
+async def test_item7_supervisor_response_preserves_launch_exit_code(tmp_path: Path) -> None:
+    """Supervisor JSON serialization preserves launch_exit_code and launch_error across the boundary."""
+    registry: dict[str, ProcessRecord] = {}
+    result = await run_command(
+        registry,
+        namespace="test",
+        argv=["/nonexistent-binary-xyz"],
+        env={},
+        cwd=str(tmp_path),
+        tail=10,
+        timeout=5.0,
+    )
+    parsed = _parse_supervisor_response(json.dumps(asdict(result)).encode("utf-8") + b"\n")
+    assert parsed.launch_exit_code == 127
+    assert parsed.launch_error == "/nonexistent-binary-xyz: No such file or directory"
+
+
+# ---------------------------------------------------------------------------
+# Item 10: Confirmed cancel says so
+# ---------------------------------------------------------------------------
+
+
+def _run_signalled_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    worker: str,
+    cancel_response: dict[str, object] | Exception,
+    sig: signal.Signals = signal.SIGTERM,
+) -> tuple[int, str]:
+    installed: dict[int, object] = {}
+    submitted: list[str] = []
+
+    def fake_signal(signum: int, handler: object) -> object:
+        prev = installed.get(signum, signal.SIG_DFL)
+        installed[signum] = handler
+        return prev
+
+    class Client:
+        def operation(self, payload: dict[str, object]) -> dict[str, object]:
+            call_id = str(payload["call_id"])
+            submitted.append(call_id)
+            return {"status": "running", "call_id": call_id}
+
+        def receipt(self, call_id: str, *, timeout: float = 30, wait: float | None = None, after_progress: int | None = None):
+            del call_id, timeout, wait, after_progress
+            handler = installed[int(sig)]
+            assert callable(handler)
+            handler(int(sig), None)
+            pytest.fail("signal handler should interrupt wait")
+
+        def cancel(self, call_id: str, *, timeout: float = 8.0) -> dict[str, object]:
+            del call_id, timeout
+            if isinstance(cancel_response, Exception):
+                raise cancel_response
+            return cancel_response
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setattr(signal, "signal", fake_signal)
+    code = main(["workers", "run", worker, "--", "sleep", "60"])
+    return code, submitted[0]
+
+
+def test_item10_confirmed_cancel_prints_stopped_notice_without_call_id(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When cancel returns status=cancelled with cancel_confirmed=True, print stopped notice without call id."""
+    code, call_id = _run_signalled_cli(
+        monkeypatch,
+        worker="f2",
+        cancel_response={"status": "cancelled", "cancel_confirmed": True},
+    )
+    output = capsys.readouterr()
+    assert code == 128 + int(signal.SIGTERM)
+    assert output.out == ""
+    assert output.err == "mindroom-agent: cancelled by SIGTERM; stopped the command in worker f2\n"
+    assert call_id not in output.err
+
+
+@pytest.mark.parametrize(
+    "cancel_response",
+    [
+        {"status": "cancelled", "cancel_confirmed": False},
+        {"status": "cancelled"},
+        {"status": "running"},
+        {"status": "failed", "outcome": "boom"},
+        AgentCliUnavailableError("timed out"),
+    ],
+)
+def test_item10_unconfirmed_cancel_keeps_may_still_be_running(
+    cancel_response: dict[str, object] | Exception,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When cancel is not confirmed, stderr keeps 'may still be running' with the call id."""
+    code, call_id = _run_signalled_cli(monkeypatch, worker="f2", cancel_response=cancel_response)
+    output = capsys.readouterr()
+    assert code == 128 + int(signal.SIGTERM)
+    assert output.out == ""
+    assert (
+        output.err
+        == f"mindroom-agent: cancelled by SIGTERM; the command may still be running in worker f2 (call {call_id})\n"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runner_cancel_response", "expected_confirmed"),
+    [
+        (httpx.Response(200, json={"cancelled": True}), True),
+        (httpx.Response(200, json={"cancelled": False}), False),
+        (httpx.Response(500, json={"detail": "boom"}), False),
+    ],
+)
+async def test_item10_server_cancel_sets_cancel_confirmed_from_runner_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner_cancel_response: httpx.Response,
+    expected_confirmed: bool,
+) -> None:
+    """Server cancel route sets cancel_confirmed only when the worker runner confirms the cancel."""
+    outer_entered = asyncio.Event()
+    release_outer = asyncio.Event()
+    in_flight = threading.Event()
+    release_stream = threading.Event()
+
+    handle = WorkerHandle(
+        worker_id="worker-f2",
+        worker_key="agent:test:named=f2",
+        endpoint="http://worker/api/sandbox-runner/execute",
+        auth_token="test-token",
+        status="ready",
+        backend_name="kubernetes",
+        last_used_at=0.0,
+        created_at=0.0,
+    )
+
+    class _FakeWorkerManager:
+        def ensure_worker(self, _spec: object, **_kwargs: object) -> WorkerHandle:
+            return handle
+
+        def touch_worker(self, _key: str) -> WorkerHandle:
+            return handle
+
+        def record_failure(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+        def cleanup_locator(self, _handle: object) -> None:
+            return None
+
+    class _FakeHttpClient:
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return
+
+        @contextmanager
+        def stream(self, method: str, url: str, **_kwargs: Any) -> Iterator[httpx.Response]:
+            in_flight.set()
+            release_stream.wait(timeout=5.0)
+            body = json.dumps({"ok": False, "error": "Tool call was cancelled.", "failure_kind": "tool"}).encode()
+            yield httpx.Response(200, content=body, request=httpx.Request(method, url))
+
+        def post(self, url: str, **_kwargs: Any) -> httpx.Response:
+            release_stream.set()
+            return httpx.Response(
+                runner_cancel_response.status_code,
+                content=runner_cancel_response.content,
+                headers=runner_cancel_response.headers,
+                request=httpx.Request("POST", url),
+            )
+
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_WORKER_BACKEND": "kubernetes"},
+    )
+
+    @contextmanager
+    def fake_lease(_rp: object, _pc: object) -> Iterator[_FakeWorkerManager]:
+        yield _FakeWorkerManager()
+
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.lease_worker_manager", fake_lease)
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy._build_execute_request",
+        lambda *_args, **_kwargs: (
+            __import__("mindroom.workers.protocol", fromlist=["ExecuteRequest"]).ExecuteRequest(
+                protocol=WORKER_PROTOCOL_VERSION,
+                tool_name="shell",
+                function_name="run_shell_command",
+                args=[],
+                kwargs={"args": ["sleep", "60"]},
+            ),
+            handle,
+        ),
+    )
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeHttpClient)
+
+    async def local_placeholder(args: str) -> str:
+        return args
+
+    stand_ins = WorkerStandIns(
+        tool_name="shell",
+        runtime_paths=runtime_paths,
+        credentials_manager=None,
+        tools=builtin_tool_registry(),
+    )
+    proxied_shell = stand_ins("run_shell_command", local_placeholder)
+
+    async def run_shell_command(args: str) -> str:
+        if args == "outer":
+            outer_entered.set()
+            await release_outer.wait()
+            return "outer done"
+        return str(await proxied_shell(args))
+
+    owner, token = await _make_owner(tmp_path, run_shell_command)
+    app = _make_app(owner)
+    headers = {"Authorization": f"Bearer {token}", AGENT_CLI_WINDOW_HEADER: "outer-1"}
+
+    try:
+        async with response_cli_lifetime():
+            await capture_bash_batch(owner, ("outer-1", {"command": "outer"}))
+            bash_task = asyncio.create_task(
+                owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, "outer-1"),
+            )
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                await outer_entered.wait()
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as http:
+                    call_id = str(uuid4())
+                    resp = await http.post(
+                        "/api/agent-cli/operations",
+                        headers=headers,
+                        json={
+                            "operation": "tools.call",
+                            "call_id": call_id,
+                            "toolkit": "shell",
+                            "function": "run_shell_command",
+                            "arguments": {"args": "sleep"},
+                        },
+                    )
+                    assert resp.status_code == 200
+                    assert await asyncio.to_thread(in_flight.wait, 2.0), repr((await owner.get_call(call_id))["outcome"])
+
+                    cancel_resp = await http.post(
+                        f"/api/agent-cli/calls/{call_id}/cancel",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    assert cancel_resp.status_code == 200
+                    receipt = cancel_resp.json()
+                    assert receipt["status"] == "cancelled"
+                    assert receipt["cancel_confirmed"] is expected_confirmed
+                release_outer.set()
+                await bash_task
+    finally:
+        release_stream.set()
+        await owner.close()
+
+
+# ---------------------------------------------------------------------------
+# Item 11: Progress rewrites in place on a TTY
+# ---------------------------------------------------------------------------
+
+
+class _FakeTtyStderr(StringIO):
+    def __init__(self, *, is_tty: bool, fail_after: int | None = None) -> None:
+        super().__init__()
+        self._is_tty = is_tty
+        self._fail_after = fail_after
+        self._writes = 0
+
+    def isatty(self) -> bool:
+        return self._is_tty
+
+    def write(self, s: str) -> int:
+        self._writes += 1
+        if self._fail_after is not None and self._writes > self._fail_after:
+            raise OSError("broken pipe")
+        return super().write(s)
+
+
+def _run_progress_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stderr_stream: _FakeTtyStderr,
+    header: str = "[worker: f1, started]",
+    body: str = "done",
+) -> tuple[int, str, str]:
+    receipts = iter(
+        [
+            {"status": "running", "progress": "starting worker f1...", "progress_revision": 1},
+            {"status": "running", "progress": "starting worker f1... (5s)", "progress_revision": 2},
+            {"status": "running", "progress": "worker f1 ready (7s)", "progress_revision": 3},
+            {"status": "completed", "outcome": f"{header}\n{format_shell_completion(body, None, return_code=0)}"},
+        ],
+    )
+
+    class Client:
+        def operation(self, payload: dict[str, object]) -> dict[str, object]:
+            return {"status": "queued", "call_id": payload["call_id"]}
+
+        def receipt(self, call_id: str, *, timeout: float = 30, wait: float | None = None, after_progress: int | None = None):
+            del call_id, timeout, wait, after_progress
+            return next(receipts)
+
+    stdout_stream = StringIO()
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setattr("mindroom.agent_cli.main._POLL_FLOOR_SECONDS", 0.0)
+    monkeypatch.setattr(sys, "stderr", stderr_stream)
+    monkeypatch.setattr(sys, "stdout", stdout_stream)
+    code = main(["workers", "run", "f1", "--", "echo", "done"])
+    return code, stdout_stream.getvalue(), stderr_stream.getvalue()
+
+
+def test_item11_tty_progress_rewrites_in_place_and_ends_with_newline_before_cli_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a TTY, progress rewrites in place with \\r + clear-to-EOL and ends with \\n before other CLI lines."""
+    tty = _FakeTtyStderr(is_tty=True)
+    code, out, err = _run_progress_cli(monkeypatch, stderr_stream=tty, header="[worker: f1, started]", body="done")
+
+    assert code == 0
+    assert out == "done\n"
+    assert err == (
+        "\r\x1b[Kmindroom-agent: starting worker f1..."
+        "\r\x1b[Kmindroom-agent: starting worker f1... (5s)"
+        "\r\x1b[Kmindroom-agent: worker f1 ready (7s)\n"
+        "mindroom-agent: started worker f1\n"
+    )
+
+
+def test_item11_tty_progress_ends_with_newline_before_command_output_without_other_cli_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When there are no further CLI lines after progress, the progress line still ends with \\n before stdout."""
+    events: list[tuple[str, str]] = []
+
+    class _RecordingStream(StringIO):
+        def __init__(self, name: str, *, is_tty: bool = False) -> None:
+            super().__init__()
+            self._name = name
+            self._is_tty = is_tty
+
+        def isatty(self) -> bool:
+            return self._is_tty
+
+        def write(self, s: str) -> int:
+            events.append((self._name, s))
+            return super().write(s)
+
+    receipts = iter(
+        [
+            {"status": "running", "progress": "starting worker f1...", "progress_revision": 1},
+            {"status": "completed", "outcome": "[worker: f1]\nhello"},
+        ],
+    )
+
+    class Client:
+        def operation(self, payload: dict[str, object]) -> dict[str, object]:
+            return {"status": "queued", "call_id": payload["call_id"]}
+
+        def receipt(self, call_id: str, *, timeout: float = 30, wait: float | None = None, after_progress: int | None = None):
+            del call_id, timeout, wait, after_progress
+            return next(receipts)
+
+    err_stream = _RecordingStream("err", is_tty=True)
+    out_stream = _RecordingStream("out")
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setattr("mindroom.agent_cli.main._POLL_FLOOR_SECONDS", 0.0)
+    monkeypatch.setattr(sys, "stderr", err_stream)
+    monkeypatch.setattr(sys, "stdout", out_stream)
+
+    assert main(["workers", "run", "f1", "--", "echo", "hello"]) == 0
+    assert events == [
+        ("err", "\r\x1b[Kmindroom-agent: starting worker f1..."),
+        ("err", "\n"),
+        ("out", "hello"),
+        ("out", "\n"),
+    ]
+
+
+def test_item11_non_tty_progress_keeps_one_line_per_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-TTY stderr keeps one newline-terminated line per progress update with no escape codes."""
+    pipe = _FakeTtyStderr(is_tty=False)
+    code, out, err = _run_progress_cli(monkeypatch, stderr_stream=pipe, header="[worker: f1, started]", body="done")
+
+    assert code == 0
+    assert out == "done\n"
+    assert "\r" not in err
+    assert "\x1b[K" not in err
+    assert err == (
+        "mindroom-agent: starting worker f1...\n"
+        "mindroom-agent: starting worker f1... (5s)\n"
+        "mindroom-agent: worker f1 ready (7s)\n"
+        "mindroom-agent: started worker f1\n"
+    )
+
+
+def test_item11_tty_progress_ignores_stderr_write_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TTY progress stays best-effort when stderr fails mid-run."""
+    flaky = _FakeTtyStderr(is_tty=True, fail_after=1)
+    code, out, _err = _run_progress_cli(monkeypatch, stderr_stream=flaky, header="[worker: f1]", body="ok")
+
+    assert code == 0
+    assert out == "ok\n"
+
+
+def test_item11_tty_progress_ends_with_newline_before_cancel_notice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A signal while a TTY progress line is open ends that line with \n before the cancel notice."""
+    installed: dict[int, object] = {}
+
+    def fake_signal(signum: int, handler: object) -> object:
+        prev = installed.get(signum, signal.SIG_DFL)
+        installed[signum] = handler
+        return prev
+
+    step = 0
+
+    class Client:
+        def operation(self, payload: dict[str, object]) -> dict[str, object]:
+            return {"status": "running", "call_id": payload["call_id"], "progress": "starting worker f1...", "progress_revision": 1}
+
+        def receipt(self, call_id: str, *, timeout: float = 30, wait: float | None = None, after_progress: int | None = None):
+            nonlocal step
+            del call_id, timeout, wait, after_progress
+            step += 1
+            handler = installed[int(signal.SIGTERM)]
+            assert callable(handler)
+            handler(int(signal.SIGTERM), None)
+            pytest.fail("signal handler should interrupt wait")
+
+        def cancel(self, call_id: str, *, timeout: float = 8.0) -> dict[str, object]:
+            del call_id, timeout
+            return {"status": "cancelled", "cancel_confirmed": True}
+
+    tty = _FakeTtyStderr(is_tty=True)
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setattr(signal, "signal", fake_signal)
+    monkeypatch.setattr(sys, "stderr", tty)
+
+    assert main(["workers", "run", "f1", "--", "sleep", "60"]) == 128 + int(signal.SIGTERM)
+    assert tty.getvalue() == (
+        "\r\x1b[Kmindroom-agent: starting worker f1...\n"
+        "mindroom-agent: cancelled by SIGTERM; stopped the command in worker f1\n"
+    )
