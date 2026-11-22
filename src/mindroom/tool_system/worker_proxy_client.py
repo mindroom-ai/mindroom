@@ -383,22 +383,20 @@ def _post_execute_cancel(
 async def _post_execute_stdin(post: Callable[..., _WorkerProxyResponse], seq: int, data: str, eof: bool) -> bool:
     """Write one chunk to the stdin of a streamed call's command, and return whether its stdin takes more.
 
-    ``post`` sends through the call's own client, which keeps one connection for the chunks. TimeoutError says the
-    command has not read what it was sent, which the runner answers within its own limit; the sender repeats it.
+    ``post`` sends through the call's own client, which keeps one connection for the chunks. Only the runner's
+    answer says that stdin is closed. TimeoutError says the chunk is to be sent again, which writes it once: the
+    command has not read what it was sent, or the request or its answer was lost on the way. A call that ended
+    closed its client, and the chunk sent again finds no call to write to.
     """
     request = StdinRequest(protocol=WORKER_PROTOCOL_VERSION, seq=seq, b=data, eof=eof)
     try:
         response = await asyncio.to_thread(post, json=request.model_dump(mode="json"))
-    except httpx.TimeoutException:
-        raise TimeoutError from None
+        if not (refused := httpx.codes.is_client_error(response.status_code)):
+            response.raise_for_status()
     except (httpx.HTTPError, RuntimeError):
-        # The call ended and closed its client.
-        return False
-    if response.status_code == httpx.codes.GATEWAY_TIMEOUT:
-        raise TimeoutError
-    if httpx.codes.is_client_error(response.status_code):
+        raise TimeoutError from None
+    if refused:
         raise ValueError(_proxy_http_error_message(response))
-    response.raise_for_status()
     return StdinResponse.model_validate(response.json()).open
 
 
