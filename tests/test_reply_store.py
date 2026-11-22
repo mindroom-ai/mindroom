@@ -1862,8 +1862,10 @@ async def test_a_removed_entity_s_approval_held_job_follow_up_stays_for_its_appr
     journal_store: EventJournalStore,
 ) -> None:
     """A follow-up paused on an approval is the approval's to settle; the entity that returns still replays it."""
-    principal = journal_store.principal(PRINCIPAL)
+    principal, second_login = journal_store.principal(PRINCIPAL), journal_store.principal("agent@bob")
     await _admit_runtime_source(principal, EventKind.JOB_FOLLOW_UP, "job:held")
+    # The entity's other login has a row of the same id that no approval holds.
+    await _admit_runtime_source(second_login, EventKind.JOB_FOLLOW_UP, "job:held")
     await _admit_runtime_source(principal, EventKind.JOB_FOLLOW_UP, "job:orphan")
     await _admit_runtime_source(principal, EventKind.COMPACTION, "compaction:orphan")
     continuation = await paused_for_approval(
@@ -1884,6 +1886,7 @@ async def test_a_removed_entity_s_approval_held_job_follow_up_stays_for_its_appr
     held = await principal.load_event("job:held")
     assert held is not None
     assert held.source == {"requester_id": "@user:example.org"}
+    assert not await second_login.is_pending("job:held")
     assert not await principal.is_pending("job:orphan")
     assert not await principal.is_pending("compaction:orphan")
     # The entity is configured again: its new bot is offered the continuation's source, and nothing else.
