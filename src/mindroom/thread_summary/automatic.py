@@ -18,8 +18,7 @@ from mindroom.thread_summary.generation import (
     GeneratedSummary,
     generate_summary,
     resolve_thread_summary_model_name,
-    room_summary_instructions,
-    room_summary_model,
+    room_title_settings,
     title_error,
 )
 from mindroom.thread_summary.notices import (
@@ -112,9 +111,13 @@ async def _provisional_title(
     config: Config,
     runtime_paths: RuntimePaths,
     model_name: str,
-    room_instructions: Callable[[], Awaitable[str | None]],
-) -> str | None:
-    """Return a new thread's first title: a fork's parent's short title without a model, else its prompt's, if any."""
+    room_settings: Callable[[], Awaitable[tuple[str | None, str | None]]],
+) -> tuple[str, str] | None:
+    """Return a new thread's first title and its model: a fork's parent's short title, else its prompt's, if any.
+
+    A parent's title is copied without a model or a read of ``room_settings``, the room's title model and rules; a
+    prompt's is written by the room's model, else ``model_name``.
+    """
     parent_thread_id = fork_parent_thread_id(history, thread_id)
     parent_state = None if parent_thread_id is None else await parent_summary(parent_thread_id)
     # A parent title over the short-title limits, such as a long pin, is not copied: the fork titles its prompt.
@@ -122,18 +125,21 @@ async def _provisional_title(
     if title is None:
         if prompt_message is None:
             return None
+        room_model, room_instructions = await room_settings()
+        model_name = room_model or model_name
         generated = await generate_summary(
             [prompt_message],
             config,
             runtime_paths,
             model_name=model_name,
             tag_vocabulary=None,
-            room_instructions=await room_instructions(),
+            room_instructions=room_instructions,
         )
         if generated is None:
             return None
         title = generated.summary
-    return _publishable_title(title, history, thread_id) or None
+    title = _publishable_title(title, history, thread_id)
+    return (title, model_name) if title else None
 
 
 async def _thread_is_resolved(
@@ -520,13 +526,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
             # A routed turn holds no text: it is titled from each of its messages as the thread shows it.
             shown = "\n".join(message.body for message in history if message.event_id in prompt_event_ids)
             body = shown if prompt_as_shown else prompt
-            model_name = await room_summary_model(client, config, room_id) or resolve_thread_summary_model_name(
-                config,
-                runtime_paths,
-                room_id,
-                entity_name=entity_name,
-            )
-            title = await _provisional_title(
+            titled = await _provisional_title(
                 replace(prompt_message, body=body) if body is not None else None,
                 history,
                 thread_id,
@@ -543,11 +543,12 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 ),
                 config=config,
                 runtime_paths=runtime_paths,
-                model_name=model_name,
-                room_instructions=partial(room_summary_instructions, client, room_id),
+                model_name=resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name),
+                room_settings=partial(room_title_settings, client, config, room_id),
             )
-            if title is None:
+            if titled is None:
                 return
+            title, model_name = titled
             # A different runtime can title or pin the thread while the model
             # runs. Keep that title even though this runtime holds its lock.
             history = await refetched_thread_history(
@@ -666,7 +667,8 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
         # A long legacy title is rewritten once; a retitle asks for a new title outright.
         current_title = _keepable_title(state.summary, retitle=retitle)
         try:
-            model_name = await room_summary_model(client, config, room_id) or resolve_thread_summary_model_name(
+            room_model, room_instructions = await room_title_settings(client, config, room_id)
+            model_name = room_model or resolve_thread_summary_model_name(
                 config,
                 runtime_paths,
                 room_id,
@@ -678,7 +680,7 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
                 runtime_paths,
                 model_name=model_name,
                 tag_vocabulary=tag_vocabulary,
-                room_instructions=await room_summary_instructions(client, room_id),
+                room_instructions=room_instructions,
                 current_title=current_title,
             )
         except Exception:

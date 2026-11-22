@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING
@@ -35,6 +36,8 @@ _MAX_INITIAL_TAGS = 3
 _MAX_MESSAGES_BEFORE_TRUNCATION = 50
 _TRUNCATION_SAMPLE_SIZE = 3
 _ROOM_INSTRUCTIONS_MAX_LENGTH = 2000
+# Each room's `thread_summary_model` setting that names no configured model, which is logged once.
+_unknown_room_models_logged: set[tuple[str, str]] = set()
 # A new generated title over these after normalization goes back to the model; a person's pin may use
 # ``THREAD_SUMMARY_MAX_LENGTH``.
 GENERATED_TITLE_MAX_LENGTH = 80
@@ -172,10 +175,21 @@ async def room_summary_instructions(client: nio.AsyncClient, room_id: str) -> st
 async def room_summary_model(client: nio.AsyncClient, config: Config, room_id: str) -> str | None:
     """Return the model the room's `thread_summary_model` setting names, `name` or `name@level`.
 
-    None when it is unset or unreadable, or names no configured model; the configured summary model then applies.
+    None when it is unset or unreadable, or names no configured model, which is logged once; the configured summary
+    model then applies.
     """
     model_name = await _room_title_setting(client, room_id, "thread_summary_model")
-    return model_name if model_name is not None and model_name in config.models else None
+    if model_name is None or model_name in config.models:
+        return model_name
+    if (room_id, model_name) not in _unknown_room_models_logged:
+        _unknown_room_models_logged.add((room_id, model_name))
+        logger.warning("Room thread summary model ignored", room_id=room_id, model=model_name)
+    return None
+
+
+async def room_title_settings(client: nio.AsyncClient, config: Config, room_id: str) -> tuple[str | None, str | None]:
+    """Return the room's title model and its admins' extra title rules, read at once."""
+    return await asyncio.gather(room_summary_model(client, config, room_id), room_summary_instructions(client, room_id))
 
 
 @timed("thread_summary_generation")

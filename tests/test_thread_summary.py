@@ -55,6 +55,7 @@ from mindroom.thread_summary.generation import (
     generate_summary,
     resolve_thread_summary_model_name,
     room_summary_instructions,
+    room_title_settings,
     title_error,
 )
 from mindroom.thread_summary.notices import (
@@ -986,6 +987,9 @@ class TestMaybeGenerateThreadSummary:
         assert sent["message_count"] == 0
         # An untitled parent's fork, and one whose parent title is over the limits, title their prompt.
         assert len(model.requests) == (parent_title is None or len(parent_title) > GENERATED_TITLE_MAX_LENGTH)
+        # Only a title a model writes reads the room's title settings, both at once.
+        state_reads = [call.args[1] for call in self.client.room_get_state_event.await_args_list]
+        assert state_reads.count(ROOM_SETTINGS_EVENT_TYPE) == 2 * len(model.requests)
 
     @pytest.mark.parametrize("parent_title", ["Trip plan", None], ids=["parent-title", "untitled-parent"])
     async def test_a_batch_starting_a_fork_gets_only_its_parents_title(self, parent_title: str | None) -> None:
@@ -1175,16 +1179,25 @@ class TestMaybeGenerateThreadSummary:
     async def test_a_room_title_model_that_names_no_model_leaves_the_configured_one(
         self,
         setting: dict[str, object] | nio.RoomGetStateEventError,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A setting that names no configured model, is cleared, or cannot be read titles with the configured model."""
+        """A setting that names no configured model, is cleared, or cannot be read titles with the configured model.
+
+        A name this runtime does not configure is logged once per room and name.
+        """
+        monkeypatch.setattr("mindroom.thread_summary.generation._unknown_room_models_logged", set())
         self.room_state.title_model = setting
         model = self._summarizer(_title("Trip plan"))
         self._history(_make_thread_history(1))
 
-        await self._provisional()
+        with capture_logs() as logs:
+            await self._provisional()
+            await room_title_settings(self.client, _mock_config(), _ROOM)
 
         assert len(model.requests) == 1
         assert _sent_summaries(self.client)[0]["summary"] == "Trip plan"
+        ignored = [log["model"] for log in logs if log["event"] == "Room thread summary model ignored"]
+        assert ignored == (["gone"] if setting == {"value": "gone"} else [])
 
     @pytest.mark.parametrize(
         "rules",
