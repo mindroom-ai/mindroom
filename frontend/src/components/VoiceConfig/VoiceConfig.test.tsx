@@ -284,7 +284,7 @@ describe("VoiceConfig", () => {
     });
   });
 
-  it("updates visible router echo from the voice tab", async () => {
+  it("updates voice transcript toggle from the voice tab", async () => {
     const config = createConfig();
     if (!config.voice) throw new Error("Expected voice config");
     config.voice.visible_router_echo = false;
@@ -292,10 +292,11 @@ describe("VoiceConfig", () => {
 
     render(<VoiceConfig />);
 
-    const visibleRouterEchoToggle = document.getElementById(
-      "visible-router-echo",
+    const voiceTranscriptToggle = screen.getByLabelText(
+      "Voice Transcript",
     ) as HTMLInputElement;
-    fireEvent.click(visibleRouterEchoToggle);
+    expect(voiceTranscriptToggle).toHaveAttribute("id", "visible-router-echo");
+    fireEvent.click(voiceTranscriptToggle);
 
     await waitFor(() => {
       expect(mockUpdateConfigValue).toHaveBeenCalledWith(["voice"], {
@@ -311,8 +312,8 @@ describe("VoiceConfig", () => {
           model: "default",
         },
       });
-      expect(screen.getByText("Visible Router Echo:")).toBeInTheDocument();
-      expect(visibleRouterEchoToggle).toBeChecked();
+      expect(screen.getByText("Voice Transcript:")).toBeInTheDocument();
+      expect(voiceTranscriptToggle).toBeChecked();
     });
   });
 
