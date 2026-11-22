@@ -104,7 +104,7 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
     receipts = job.adapter.get(_RECEIPTS_KEY) or {}
     if run is not None:
         own_usd, ran = child_own_usage(run, config)[1], {run.run_id, *prior_usage_by_run(run.metadata)}
-        jobs = job_acknowledgers(runtime.retained_jobs(), child.session_id)
+        jobs = job_acknowledgers(runtime.retained_jobs())
         left_out = {LEGACY_COST_ID, *(key for key, by in jobs.items() if by not in ran)}
         received = {key: usd for key, usd in stored_receipts(run.metadata).items() if key not in left_out}
         receipts = merge_by_key((receipts, received, {} if own_usd is None else {child.delegation_id: own_usd}), float)

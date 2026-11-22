@@ -126,7 +126,7 @@ from mindroom.thread_models import set_thread_model_override
 from mindroom.timing import bind_reply_pipeline_timing, timed
 from mindroom.tool_jobs.conversation import unheld_jobs
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
-from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_jobs.runtime import get_background_runtime, saved_jobs
 from mindroom.tool_system.agent_tools import room_turn_offers
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
@@ -1160,13 +1160,16 @@ class ResponseRunner:
         recovered: dict[str, Any] = {}
         if restarts and history_scope is not None:
             runtime = get_background_runtime(self.deps.runtime_paths)
+            # An instance that runs no jobs, or has yet to recover them, still tells whose each saved one is.
+            journal = self.deps.runtime.orchestrator.event_journal_store()
+            jobs = runtime.retained_jobs() if runtime is not None else await saved_jobs(journal)
             recovered = await self.deps.state_writer.recover_interrupted_turn(
                 execution_identity=execution_identity,
                 scope=history_scope,
                 session_id=session_id,
                 event_ids={*request.sources.pending_event_ids, *request.sources.logical_source_event_ids},
                 natively=restarts <= _NATIVE_RECOVERY_LIMIT,
-                jobs={} if runtime is None else job_acknowledgers(runtime.retained_jobs(), session_id),
+                jobs=job_acknowledgers(jobs),
             )
         if recovered:
             # The turn's runs name the recovered runs they continue, which its answer links and whose cost it reports.

@@ -43,7 +43,10 @@ Success: a reply's `cost.usd` and `cost.subagents_usd` count every attempt at it
    A job no run acknowledged is left to the turn that collects it again, the replay included, which receives it then.
    The acknowledging run is kept in the job's adapter, not in a new job field, because an older backend rejects a job with a field it does not know; a tool's job keeps its adapter as admitted, which a reattaching call must match.
    A job acknowledged with no run recorded is left out too: a keyed receipt beside such a job can only come from an older backend that acknowledged it after a rollback, whose own reply reported it if it collected it, so carrying it could count it twice and leaving it out cannot.
-   Only the jobs of the replay's own conversation are read, so a saved child that no longer decodes elsewhere stops no replay.
+   Of a saved job, recovery reads its consumed flag, its acknowledging run, and the delegation id its saved child names, and decodes no child, so a snapshot no reader decodes stops no replay.
+   A filter by conversation was not enough for that: a session id names a room and thread, which several agents and requesters share, and a turn never collects their jobs.
+   The jobs are the job runtime's or, on an instance that runs no jobs or has yet to recover them, the saved job records, read without taking them over.
+   Turning jobs off keeps the saved ones for the next enabled start, whose turns still collect an unacknowledged one, so a replay without a runtime must leave that one out too.
 7. **A turn starts from what its run metadata holds.**
    The driver merges the receipts and the prior usage of `ctx.matrix_run_metadata` into the holder it binds, a caller's holder too, and into the turn's prior usage.
    A replay needs no new request field or stream parameter, and the approval paths keep their explicit seeds, which hold the same ids.
@@ -52,7 +55,7 @@ Success: a reply's `cost.usd` and `cost.subagents_usd` count every attempt at it
    An attempt that resumes a child's stored run adds that row's receipts to its holder, and pricing a child takes the larger of the handle's sum and its row's (`price_child`), so a settlement that finds a stale handle beside a newer completed row counts the row.
 9. **A restart-continued subagent job receives its cut-short turn.**
    The continuation starts from what the job's earlier continuation started from, what the cut-short turn's row received, and that turn's own priced usage under its `delegation_id`.
-   What the row received is carried under decision 6's rule, for the nested jobs of the child's own session and the runs of its cut-short turn.
+   What the row received is carried under decision 6's rule, for the runs of its cut-short turn.
    The delegation records of a continued chain therefore overlap: each continuation's record includes the turns before it, so a total over a chain sums replies, not `run.json` records.
    The job adapter keeps that map (`continuation_receipts`) for a continuation whose process is killed before it stores a run, and the continuation's handle starts with its sum as `cost_usd`, so one refused before its first run still reports it.
    The continuation's rows and delegation record keep only its own usage, and the continuation cap is still checked first.
@@ -89,6 +92,9 @@ Success: a reply's `cost.usd` and `cost.subagents_usd` count every attempt at it
   Per row sums one receipt over a model switch, and a maximum plus a job collected again counts that job twice.
 - **Carrying the cut-short child turn as one inclusive receipt.**
   Its nested receipts must stay under their own ids, in case its continuation collects one of them again.
+- **Carrying every receipt, or none, when no job runtime runs.**
+  Without the job records a job's receipt reads like a foreground child's.
+  Carrying all of them counted an unacknowledged job twice once jobs ran again; carrying none would drop the foreground receipts and the jobs the turn itself acknowledged, and the saved records are a few lines away.
 - **Reading a job's consumed flag as the turn's own acknowledgement.**
   The flag says some run acknowledged the job, not which, so a job another turn collected after the crash counted in both replies.
 - **Leaving out completed unlinked runs** to fix limitation 5.
@@ -109,7 +115,9 @@ Success: a reply's `cost.usd` and `cost.subagents_usd` count every attempt at it
 | A job another turn acknowledged after the crash counts in both replies | Decision 6: the job names its acknowledging run. |
 | A continuation carries a nested job no run acknowledged | Decision 9. |
 | A same-run resume after a rollback and a second upgrade loses what the older backend received | Decision 12, for receipts; limitation 9 for prior usage. |
-| One undecodable saved child fails every replay | Decision 6: only the conversation's jobs are read. |
+| One undecodable saved child fails every replay, or every replay in its thread | Decision 6: only the id its child names is read. |
+| A replay on an instance that runs no jobs carries a job it did not acknowledge, which its later collector counts again | Decision 6: the saved job records are read. |
+| An acknowledgement changes the job's adapter before its save lands | The save publishes a copy, so a failed one leaves the job as it was. |
 | Hook-refused continuation loses its known cost | Decision 9: the continuation's handle starts with it. |
 | Job ended at the continuation cap reports no cost | Decision 10. |
 | A member's receipt the leader's checkpoint predates is lost | Decision 5. |
@@ -130,6 +138,7 @@ Each is at parity with the behaviour before this change or better, except 5.
    A billed empty reply whose retry is cut short before its first checkpoint is lost the same way, since only the retry's row names it.
 2. A receipt of a job no turn acknowledged reaches a reply only if a turn collects the job again.
    A job that left retention, 30 days after it ended, names no acknowledger any more, so a replay that late carries its receipt as any delegation's.
+   A saved job record that does not parse is read the same way on an instance without a runtime; no runtime recovers past such a record to collect it.
 3. A cut-short child turn whose latest run left no row carries only what its job's earlier continuation started from: its own usage, and what its earlier runs received, are lost.
 4. A foreground child that a restart cuts short is not continued; its cost is on its handle, but no turn receives it.
 5. Any run with the turn's source ids that no reply linked is counted by a later restart recovery of that turn.
@@ -142,16 +151,16 @@ Each is at parity with the behaviour before this change or better, except 5.
 
 ## Testing
 
-- Unit: saving a row twice, merging two rows, patching a row, and resuming from a row give the same receipts; recovery merges rows by id, drops sums and the jobs its runs did not acknowledge, and counts a team run's member rows; a subagent job keeps its first acknowledging run over a restart and a reread.
-- Scenarios through the response runner: one and two restarts, a lost attempt, past the crash-loop limit, a model switch before a restart, a billed empty retry over one and two restarts, a job follow-up replay with the job acknowledged, collected again, or left for a later turn, a job another turn collects between the crash and the replay, an undecodable job in another conversation, and the undated budget cost.
+- Unit: saving a row twice, merging two rows, patching a row, and resuming from a row give the same receipts; recovery merges rows by id, drops sums and the jobs its runs did not acknowledge, and counts a team run's member rows; a subagent job keeps its first acknowledging run over a restart and a reread, and its adapter when the save fails; the saved jobs are read without a runtime past one that does not parse; an acknowledger is read beside the id a saved child names, whatever else it holds.
+- Scenarios through the response runner: one and two restarts, a lost attempt, past the crash-loop limit, a model switch before a restart, a billed empty retry over one and two restarts, a job follow-up replay with the job acknowledged, collected again, or left for a later turn, a job another turn collects between the crash and the replay, a replay on an instance that runs no jobs for a job its run did and did not acknowledge, an undecodable job in another conversation and of another requester in the thread, and the undated budget cost.
 - Continued subagent jobs: over two restarts, at the cap, refused by a hook, after a model switch and an approval, killed before the continuation's first row, from a row that stored a sum, and with nested jobs its runs did and did not acknowledge.
 - Approval paths: an approval, then a continuation, then an approval with no restart, for a receipt held by id and for a sum; a child that goes on in a new run after its approval; a completed child run settled from a stale handle; a team turn cut short and replayed.
 - A reply whose run metadata holds receipts reports them, streamed or collected into its caller's holder, and a delegation state's save keeps what its run holds.
 - The usage ledger holds each run's own usage once in the restart scenarios.
-- The first tests were written after the code, so each rule was then removed in a scratch copy to see its test fail; the reproductions of the third review round were written first and seen to fail.
+- The first tests were written after the code, so each rule was then removed in a scratch copy to see its test fail; the reproductions of the third and fourth review rounds were written first and seen to fail.
 
 ## Size
 
-Net `src/` lines against the base are +187, against +199 for the first implementation; no lock is added.
-The change was sized for 160 and stood at +165 before the third review round, whose fixes, net of its simplifications, added 22.
-The largest pieces are the keyed holder and its stored forms (`delegation/cost.py`, +50), recovery (`history/run_checkpoint.py`, +26), the continuation's receipts (`delegation/continuation.py`, +17), and the job's acknowledging run (`tool_jobs/runtime.py`, +16, seven of them a signature that no longer fits one line).
+Net `src/` lines against the base are +200, against +199 for the first implementation; no lock is added.
+The change was sized for 160 and stood at +165 before the third review round, whose fixes, net of its simplifications, added 22; the fourth round's added 13.
+The largest pieces are the keyed holder and its stored forms (`delegation/cost.py`, +50), recovery (`history/run_checkpoint.py`, +26), the job's acknowledging run and the read of the saved jobs (`tool_jobs/runtime.py`, +25, seven of them a signature that no longer fits one line), and the continuation's receipts (`delegation/continuation.py`, +17).

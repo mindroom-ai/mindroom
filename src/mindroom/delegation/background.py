@@ -31,14 +31,16 @@ def delegation_child(job: BackgroundJob) -> DelegationChild:
     return DelegationChild.from_dict(job.adapter["child"])
 
 
-def job_acknowledgers(jobs: Iterable[BackgroundJob], session_id: str | None) -> dict[str, str | None]:
-    """Return the run that acknowledged each subagent job of conversation ``session_id``, by its child's delegation id.
+def job_acknowledgers(jobs: Iterable[BackgroundJob]) -> dict[str, str | None]:
+    """Return the run that acknowledged each subagent job, by the delegation id its saved child names.
 
     None stands for a job no run acknowledged yet, and for one a release that kept no such record acknowledged. The
     turn whose run acknowledges a job reports its cost, though a crash can store its result on another turn's run.
+    Nothing else of a child is read, so one no reader decodes stops no turn's replay; one without an id is no receipt's.
     """
-    owned = (job for job in jobs if job.kind == "delegation" and job.owner.session_id == session_id)
-    return {delegation_child(job).delegation_id: job.acknowledged_by for job in owned}
+    children = ((job, job.adapter.get("child")) for job in jobs if job.kind == "delegation")
+    ids = ((job, child.get("delegation_id")) for job, child in children if isinstance(child, dict))
+    return {key: job.acknowledged_by for job, key in ids if isinstance(key, str)}
 
 
 def delegation_outcome(status: DelegationTerminalStatus, text: str) -> BackgroundOutcome:

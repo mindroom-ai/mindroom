@@ -610,6 +610,37 @@ async def test_a_subagent_job_keeps_the_run_that_first_acknowledged_its_outcome(
 
 
 @pytest.mark.asyncio
+async def test_an_instance_that_runs_no_jobs_reads_the_saved_ones_that_parse_and_owns_none(tmp_path: Path) -> None:
+    """Reading the saved jobs takes none of them over, and a snapshot that does not parse costs the others nothing."""
+    runtime = await tool_job_runtime(tmp_path)
+    journal = tool_job_journal(tmp_path)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    try:
+        await start_job(
+            runtime,
+            "kept",
+            tool_name="worker",
+            depth=0,
+            kind="delegation",
+            adapter={"child": asdict(job_child())},
+            owner=job_owner(),
+            operation=operation,
+        )
+        waited = await runtime.wait("kept", owner=job_owner(), depth=0)
+        await runtime._store.accept("unparsable", "{}")
+        assert [(job.job_id, job.consumed) for job in await runtime_module.saved_jobs(journal)] == [("kept", False)]
+        # The runtime still owns the jobs, so its acknowledgement lands, and the next read finds it.
+        await runtime.acknowledge_wait("kept", waited.claim, run_id="first-run")
+        assert [job.acknowledged_by for job in await runtime_module.saved_jobs(journal)] == ["first-run"]
+    finally:
+        await journal.close()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_expiry_rechecks_a_read_completed_during_source_lookup(tmp_path: Path) -> None:
     """A concurrent reader renews retention before a previously eligible candidate is deleted."""
     runtime = await tool_job_runtime(tmp_path)
@@ -1620,12 +1651,15 @@ async def test_failed_cancellation_persistence_can_be_retried(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["tool", "delegation"])
 async def test_failed_receipt_save_preserves_the_previous_saved_job(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    kind: str,
 ) -> None:
-    """A receipt save that fails changes nothing saved, and the claim can still acknowledge."""
+    """A receipt save that fails changes nothing saved or current, and the claim can still acknowledge."""
     runtime = await tool_job_runtime(tmp_path)
+    adapter = {"child": asdict(job_child())} if kind == "delegation" else {}
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "saved")
@@ -1641,7 +1675,8 @@ async def test_failed_receipt_save_preserves_the_previous_saved_job(
             "atomic",
             tool_name="tool",
             depth=0,
-            adapter={},
+            kind=kind,
+            adapter=dict(adapter),
             owner=job_owner(),
             operation=operation,
         )
@@ -1650,9 +1685,10 @@ async def test_failed_receipt_save_preserves_the_previous_saved_job(
         with monkeypatch.context() as patch:
             intercept_job_saves(patch, before=fail_receipt)
             with pytest.raises(OSError, match="receipt save failed"):
-                await runtime.acknowledge_wait("atomic", waited.claim)
+                await runtime.acknowledge_wait("atomic", waited.claim, run_id="a-run")
             assert await saved_jobs(tmp_path) == before
-        await runtime.acknowledge_wait("atomic", waited.claim)
+            assert [job.adapter for job in runtime.retained_jobs()] == [adapter]
+        await runtime.acknowledge_wait("atomic", waited.claim, run_id="a-run")
         assert (await saved_jobs(tmp_path))["atomic"].consumed
     finally:
         await runtime.shutdown()

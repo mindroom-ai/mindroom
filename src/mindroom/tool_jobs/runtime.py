@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import SavedToolJob, ToolJobStore
+    from mindroom.event_journal import EventJournalStore, SavedToolJob, ToolJobStore
     from mindroom.tool_jobs.conversation import ConversationKey
     from mindroom.tool_jobs.execution_authority import JobTool
 
@@ -306,6 +306,15 @@ def _report_failed_drain(job_id: str, drain: asyncio.Task[BackgroundJob]) -> Non
     """Log a failed cancellation drain with its job, which stays for a later canceller, recovery, or shutdown."""
     if not drain.cancelled() and (error := drain.exception()) is not None:
         logger.error("Tool job cancellation drain failed", job_id=job_id, exc_info=error)
+
+
+async def saved_jobs(journal: EventJournalStore) -> list[BackgroundJob]:
+    """Read the saved jobs that parse, owning none: an instance that runs no jobs keeps them for one that does."""
+    jobs: list[BackgroundJob] = []
+    for saved in await journal.tool_jobs("reader").load_all():
+        with suppress(ValueError):
+            jobs.append(_parse_saved_job(saved))
+    return jobs
 
 
 def get_background_runtime(runtime_paths: RuntimePaths) -> ToolJobRuntime | None:
@@ -965,11 +974,11 @@ class ToolJobRuntime:
                 msg = "Tool job wait claim no longer belongs to this waiter."
                 raise ValueError(msg)
             # A later reread of an inline call's result does not make it a job.
-            returned_inline = entry.job.returned_inline or returned_inline
+            job = _updated(entry.job, consumed=True, returned_inline=entry.job.returned_inline or returned_inline)
             if entry.job.kind == "delegation" and not entry.job.consumed:
                 # A tool's job keeps the adapter it was admitted with, which a call that reattaches to it must match.
-                entry.job.adapter["acknowledged_by_run"] = run_id
-            await self._publish(entry, _updated(entry.job, consumed=True, returned_inline=returned_inline))
+                job = replace(job, adapter={**job.adapter, "acknowledged_by_run": run_id})
+            await self._publish(entry, job)
             entry.claim = None
 
     async def request_cancel(self, job_id: str) -> None:

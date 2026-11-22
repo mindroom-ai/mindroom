@@ -31,7 +31,7 @@ from mindroom.constants import (
     SUBAGENT_RECEIPTS_RUN_METADATA_KEY,
 )
 from mindroom.delegation import hooks as delegation_hooks
-from mindroom.delegation.background import delegation_child
+from mindroom.delegation.background import delegation_child, job_acknowledgers
 from mindroom.delegation.cost import (
     SubagentCost,
     merge_by_key,
@@ -64,7 +64,7 @@ from mindroom.session_storage.schema import quote_identifier
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_event
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
-from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, register_background_runtime
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
@@ -229,6 +229,40 @@ async def _run_until_stall_and_shutdown(coro: Coroutine[Any, Any, object]) -> No
         await task
 
 
+def _charge(call_id: str, usd: float) -> list[Any]:
+    """Return a priced request whose call receives a subagent result that cost ``usd``."""
+    return calls(tool_call("charge_subagent", call_id, usd=usd), metrics=_REQ_USAGE)
+
+
+def _stall(call_id: str) -> list[Any]:
+    """Return a priced request whose call waits for the shutdown that cuts its attempt short."""
+    return calls(tool_call("stall", call_id), metrics=_REQ_USAGE)
+
+
+def _collect(call_id: str) -> list[Any]:
+    """Return a priced request whose call collects the conversation's ended jobs."""
+    return calls(tool_call("job", call_id, action="collect"), metrics=_REQ_USAGE)
+
+
+async def _run_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    bot: AgentBot,
+    response: Coroutine[Any, Any, object],
+    *turns: Any,  # noqa: ANN401
+    cut_short: bool = False,
+    streamed: bool = True,
+) -> ScriptedModel:
+    """Run ``response`` on a model scripted with ``turns``, to its answer or, ``cut_short``, a shutdown at ``stall()``."""
+    model = _scripted_model(bot, list(turns))
+    install_model_providers(monkeypatch, {"default": model})
+    with patch_response_runner_module(
+        should_use_streaming=AsyncMock(return_value=streamed),
+        typing_indicator=_noop_typing,
+    ):
+        await (_run_until_stall_and_shutdown(response) if cut_short else response)
+    return model
+
+
 def _final_ai_run_metadata(bot: AgentBot) -> tuple[str, dict[str, Any]]:
     """Return ``(event_id, io.mindroom.ai_run)`` from the last Matrix message edit/send carrying it."""
     for call in reversed(bot.client.room_send.await_args_list):
@@ -286,32 +320,11 @@ async def test_restart_recovered_turn_includes_prior_attempt_own_and_subagent_co
     request = _user_request(source_event_id=source)
     session_id = request.response_envelope.target.session_id
 
-    model_attempt_1 = _scripted_model(
-        bot,
-        [
-            calls(tool_call("charge_subagent", "c1", usd=0.5), metrics=_REQ_USAGE),
-            calls(tool_call("stall", "s1"), metrics=_REQ_USAGE),
-        ],
-    )
-    install_model_providers(monkeypatch, {"default": model_attempt_1})
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await _run_until_stall_and_shutdown(runner.generate_response(request))
-
+    attempt = runner.generate_response(request)
+    await _run_turn(monkeypatch, bot, attempt, _charge("c1", 0.5), _stall("s1"), cut_short=True)
     await _simulate_restart(bot, "gen-2")
-
-    model_attempt_2 = _scripted_model(
-        bot,
-        [
-            calls(tool_call("charge_subagent", "c2", usd=0.25), metrics=_REQ_USAGE),
-            answer("Done.", metrics=_REQ_USAGE),
-        ],
-    )
-    install_model_providers(monkeypatch, {"default": model_attempt_2})
-    with patch_response_runner_module(
-        should_use_streaming=AsyncMock(return_value=streamed),
-        typing_indicator=_noop_typing,
-    ):
-        await runner.generate_response(request)
+    replay = (_charge("c2", 0.25), answer("Done.", metrics=_REQ_USAGE))
+    await _run_turn(monkeypatch, bot, runner.generate_response(request), *replay, streamed=streamed)
 
     _, ai_run = _final_ai_run_metadata(bot)
     # 4 requests * $1.20 = $4.80 own cost; $0.50 + $0.25 = $0.75 subagent cost.
@@ -351,37 +364,13 @@ async def test_two_restarts_in_one_turn_sum_every_attempt_once_without_double_co
     session_id = request.response_envelope.target.session_id
 
     # Attempt A: 2 requests ($2.40) + $0.40 subagent cost -> restart #1.
-    install_model_providers(
-        monkeypatch,
-        {
-            "default": _scripted_model(
-                bot,
-                [
-                    calls(tool_call("charge_subagent", "ca", usd=0.4), metrics=_REQ_USAGE),
-                    calls(tool_call("stall", "sa"), metrics=_REQ_USAGE),
-                ],
-            ),
-        },
-    )
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await _run_until_stall_and_shutdown(runner.generate_response(request))
+    attempt = runner.generate_response(request)
+    await _run_turn(monkeypatch, bot, attempt, _charge("ca", 0.4), _stall("sa"), cut_short=True)
     await _simulate_restart(bot, "gen-2")
 
     # Attempt B: continues A, spends 2 requests ($2.40) + $0.30 subagent cost -> restart #2.
-    install_model_providers(
-        monkeypatch,
-        {
-            "default": _scripted_model(
-                bot,
-                [
-                    calls(tool_call("charge_subagent", "cb", usd=0.3), metrics=_REQ_USAGE),
-                    calls(tool_call("stall", "sb"), metrics=_REQ_USAGE),
-                ],
-            ),
-        },
-    )
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await _run_until_stall_and_shutdown(runner.generate_response(request))
+    attempt = runner.generate_response(request)
+    await _run_turn(monkeypatch, bot, attempt, _charge("cb", 0.3), _stall("sb"), cut_short=True)
 
     runs_after_b = _stored_runs(runner, session_id)
     assert len(runs_after_b) == 2
@@ -392,20 +381,8 @@ async def test_two_restarts_in_one_turn_sum_every_attempt_once_without_double_co
     await _simulate_restart(bot, "gen-3")
 
     # Attempt C: continues A and B, spends 2 requests ($2.40) + $0.10 subagent cost -> completes.
-    install_model_providers(
-        monkeypatch,
-        {
-            "default": _scripted_model(
-                bot,
-                [
-                    calls(tool_call("charge_subagent", "cc", usd=0.1), metrics=_REQ_USAGE),
-                    answer("Finally done.", metrics=_REQ_USAGE),
-                ],
-            ),
-        },
-    )
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await runner.generate_response(request)
+    final = (_charge("cc", 0.1), answer("Finally done.", metrics=_REQ_USAGE))
+    await _run_turn(monkeypatch, bot, runner.generate_response(request), *final)
 
     _, ai_run = _final_ai_run_metadata(bot)
     # 6 requests * $1.20 = $7.20 own cost; 0.4 + 0.3 + 0.1 = 0.8 subagent cost.
@@ -435,25 +412,10 @@ async def test_restart_with_only_prior_subagent_cost_publishes_it_from_the_conti
     request = _user_request(source_event_id=source)
     session_id = request.response_envelope.target.session_id
 
-    install_model_providers(
-        monkeypatch,
-        {
-            "default": _scripted_model(
-                bot,
-                [
-                    calls(tool_call("charge_subagent", "c1", usd=1.25), metrics=_REQ_USAGE),
-                    calls(tool_call("stall", "s1"), metrics=_REQ_USAGE),
-                ],
-            ),
-        },
-    )
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await _run_until_stall_and_shutdown(runner.generate_response(request))
+    attempt = runner.generate_response(request)
+    await _run_turn(monkeypatch, bot, attempt, _charge("c1", 1.25), _stall("s1"), cut_short=True)
     await _simulate_restart(bot, "gen-2")
-
-    install_model_providers(monkeypatch, {"default": _scripted_model(bot, [answer("Done.", metrics=_REQ_USAGE)])})
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await runner.generate_response(request)
+    await _run_turn(monkeypatch, bot, runner.generate_response(request), answer("Done.", metrics=_REQ_USAGE))
 
     _, ai_run = _final_ai_run_metadata(bot)
     assert ai_run["cost"] == {"usd": "3.6", "subagents_usd": "1.25"}
@@ -501,20 +463,8 @@ async def test_restart_with_lost_attempt_no_stored_row_publishes_remaining_cost(
     )
     await _simulate_restart(bot, "gen-2")
 
-    install_model_providers(
-        monkeypatch,
-        {
-            "default": _scripted_model(
-                bot,
-                [
-                    calls(tool_call("charge_subagent", "c2", usd=0.2), metrics=_REQ_USAGE),
-                    answer("Done.", metrics=_REQ_USAGE),
-                ],
-            ),
-        },
-    )
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await runner.generate_response(request)
+    replay = (_charge("c2", 0.2), answer("Done.", metrics=_REQ_USAGE))
+    await _run_turn(monkeypatch, bot, runner.generate_response(request), *replay)
 
     _, ai_run = _final_ai_run_metadata(bot)
     assert ai_run["cost"] == {"usd": "2.4", "subagents_usd": "0.2"}
@@ -536,32 +486,13 @@ async def test_restart_past_native_recovery_limit_still_counts_all_unlinked_atte
 
     # 3 restarts (> _NATIVE_RECOVERY_LIMIT == 2): attempts A, B, C each cut short, then D finishes with natively=False.
     for idx, (sub_cost, next_gen) in enumerate([(0.3, "gen-2"), (0.2, "gen-3"), (0.1, "gen-4")], start=1):
-        install_model_providers(
-            monkeypatch,
-            {
-                "default": _scripted_model(
-                    bot,
-                    [
-                        calls(tool_call("charge_subagent", f"c{idx}", usd=sub_cost), metrics=_REQ_USAGE),
-                        calls(tool_call("stall", f"s{idx}"), metrics=_REQ_USAGE),
-                    ],
-                ),
-            },
-        )
-        with patch_response_runner_module(
-            should_use_streaming=AsyncMock(return_value=True),
-            typing_indicator=_noop_typing,
-        ):
-            await _run_until_stall_and_shutdown(runner.generate_response(request))
+        attempt = runner.generate_response(request)
+        await _run_turn(monkeypatch, bot, attempt, _charge(f"c{idx}", sub_cost), _stall(f"s{idx}"), cut_short=True)
         await _simulate_restart(bot, next_gen)
 
     # Attempt D runs past _NATIVE_RECOVERY_LIMIT (natively=False).
-    install_model_providers(
-        monkeypatch,
-        {"default": _scripted_model(bot, [answer("Fresh after crash loop.", metrics=_REQ_USAGE)])},
-    )
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await runner.generate_response(request)
+    final = answer("Fresh after crash loop.", metrics=_REQ_USAGE)
+    await _run_turn(monkeypatch, bot, runner.generate_response(request), final)
 
     _, ai_run = _final_ai_run_metadata(bot)
     # 3 interrupted attempts * 2 reqs + 1 final req = 7 reqs * $1.20 = $8.40; subagents = 0.3 + 0.2 + 0.1 = $0.60.
@@ -638,6 +569,72 @@ async def _completed_research_job(
     return job.job_id
 
 
+_FOLLOW_UP_ID = "job-follow-up:conv1:jobs1:1"
+
+
+def _serve_jobs(bot: AgentBot, runtime: ToolJobRuntime | None) -> None:
+    """Start an instance of ``bot``'s storage root that runs background jobs on ``runtime``, or runs none."""
+    bot.config.background_tool_jobs.enabled = runtime is not None
+    pin_background_tool_jobs(bot.config, bot.runtime_paths)
+    if runtime is not None:
+        register_background_runtime(bot.runtime_paths, runtime)
+
+
+async def _run_job_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    bot: AgentBot,
+    turn: str,
+    *turns: Any,  # noqa: ANN401
+    cut_short: bool = False,
+) -> dict[str, Any]:
+    """Run the user's turn or the job follow-up on a model scripted with ``turns``; return what its reply reports."""
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    if turn == "user turn":
+        response = runner.generate_response(_user_request(source_event_id="$asks"))
+    else:
+        event = await bot.journal_principal().load_event(_FOLLOW_UP_ID)
+        assert event is not None
+        response = runner._run_job_follow_up(event)
+    await _run_turn(monkeypatch, bot, response, *turns, cut_short=cut_short)
+    return {} if cut_short else _final_ai_run_metadata(bot)[1]
+
+
+async def _collect_a_job_then_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crashed: str,
+    *,
+    acknowledged: bool = False,
+) -> tuple[AgentBot, ToolJobRuntime, ConversationKey, str]:
+    """Let the ``crashed`` turn collect a completed $0.60 subagent job and stall, then restart; the job runtime stays.
+
+    Unless ``acknowledged``, the crash comes between the checkpoint that saved the job's result and its acknowledgement.
+    """
+    bot = _priced_bot(tmp_path, background_jobs=True)
+    await bot._take_over_replies()
+    key, owner = _job_conversation()
+    # The jobs are saved in the journal the bot's instance opens, as the coordinator's runtime saves them.
+    runtime: ToolJobRuntime = await tool_job_runtime(bot.runtime_paths.storage_root)
+    _serve_jobs(bot, runtime)
+    try:
+        job_id = await _completed_research_job(runtime, owner)
+        await _admit_user_message(bot, source_event_id="$asks")
+        await bot.journal_principal().admit(
+            follow_up_event(key, _FOLLOW_UP_ID, sender_id="@mindroom_general:localhost", now_ms=2),
+        )
+        acknowledge = runtime.acknowledge_wait
+        if not acknowledged:
+            monkeypatch.setattr(runtime, "acknowledge_wait", AsyncMock())
+        await _run_job_turn(monkeypatch, bot, crashed, _collect("collect-1"), _stall("s1"), cut_short=True)
+        assert [ended.job_id for ended in await runtime.ended_jobs(key)] == ([] if acknowledged else [job_id])
+        monkeypatch.setattr(runtime, "acknowledge_wait", acknowledge)
+        await _simulate_restart(bot, "gen-2")
+    except BaseException:
+        await runtime.shutdown()
+        raise
+    return bot, runtime, key, job_id
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("acknowledged", "collects_again", "expected_cost"),
@@ -663,65 +660,23 @@ async def test_restart_interrupted_job_follow_up_continues_natively_and_carries_
     The cut-short attempt's row holds the job's cost. Its replay carries it only once a turn acknowledged the job: a
     job a crash left unacknowledged is still collected by some turn, this replay or a later one, which receives it.
     """
-    bot = _priced_bot(tmp_path, background_jobs=True)
-    await bot._take_over_replies()
+    # Attempt 1 collects the completed job ($0.60) and stalls; it acknowledged the job unless the crash came first.
+    bot, runtime, key, job_id = await _collect_a_job_then_restart(
+        tmp_path,
+        monkeypatch,
+        "job follow-up",
+        acknowledged=acknowledged,
+    )
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    key, owner = _job_conversation()
-    runtime: ToolJobRuntime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(bot.config, bot.runtime_paths)
-    register_background_runtime(bot.runtime_paths, runtime)
-
-    follow_up_id = "job-follow-up:conv1:jobs1:1"
     try:
-        job_id = await _completed_research_job(runtime, owner)
-
-        acknowledge = runtime.acknowledge_wait
-        if not acknowledged:
-            # A crash between the checkpoint that saved the result and the acknowledgement at the attempt's end.
-            monkeypatch.setattr(runtime, "acknowledge_wait", AsyncMock())
-        await bot.journal_principal().admit(
-            follow_up_event(key, follow_up_id, sender_id="@mindroom_general:localhost", now_ms=1),
-        )
-        event = await bot.journal_principal().load_event(follow_up_id)
+        event = await bot.journal_principal().load_event(_FOLLOW_UP_ID)
         assert event is not None
-
-        # Attempt 1: collects the completed delegation job ($0.60 subagent cost), then stalls -> restart!
-        install_model_providers(
-            monkeypatch,
-            {
-                "default": _scripted_model(
-                    bot,
-                    [
-                        calls(tool_call("job", "collect-1", action="collect"), metrics=_REQ_USAGE),
-                        calls(tool_call("stall", "s1"), metrics=_REQ_USAGE),
-                    ],
-                ),
-            },
-        )
-        with patch_response_runner_module(
-            should_use_streaming=AsyncMock(return_value=True),
-            typing_indicator=_noop_typing,
-        ):
-            await _run_until_stall_and_shutdown(runner._run_job_follow_up(event))
-
-        # Attempt 1 acknowledged the job before the restart, unless the crash came first.
-        assert [ended.job_id for ended in await runtime.ended_jobs(key)] == ([] if acknowledged else [job_id])
-        monkeypatch.setattr(runtime, "acknowledge_wait", acknowledge)
-
-        await _simulate_restart(bot, "gen-2")
-
         # Attempt 2: replays the follow-up; must natively continue attempt 1 and report both attempts' costs.
-        collect_again = [calls(tool_call("job", "collect-2", action="collect"), metrics=_REQ_USAGE)]
-        model_attempt_2 = _scripted_model(
-            bot,
-            [*(collect_again if collects_again else []), answer("Reported research.", metrics=_REQ_USAGE)],
+        replay = (
+            *([_collect("collect-2")] if collects_again else []),
+            answer("Reported research.", metrics=_REQ_USAGE),
         )
-        install_model_providers(monkeypatch, {"default": model_attempt_2})
-        with patch_response_runner_module(
-            should_use_streaming=AsyncMock(return_value=True),
-            typing_indicator=_noop_typing,
-        ):
-            await runner._run_job_follow_up(event)
+        model_attempt_2 = await _run_turn(monkeypatch, bot, runner._run_job_follow_up(event), *replay)
 
         _, ai_run = _final_ai_run_metadata(bot)
         assert ai_run["cost"] == expected_cost
@@ -759,80 +714,91 @@ async def test_a_job_another_turn_acknowledged_is_reported_by_that_turn_alone(
     The other turn's run acknowledges the job, so that turn's reply reports its cost. The replay's cut-short row still
     holds the receipt, which it leaves out: the thread shows the job's $0.60 once.
     """
-    bot = _priced_bot(tmp_path, background_jobs=True)
-    await bot._take_over_replies()
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    key, owner = _job_conversation()
-    runtime: ToolJobRuntime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(bot.config, bot.runtime_paths)
-    register_background_runtime(bot.runtime_paths, runtime)
-    follow_up_id = "job-follow-up:conv1:jobs1:1"
-
-    async def run(turn: str, *turns: Any, until_stall: bool = False) -> dict[str, Any]:  # noqa: ANN401
-        """Run the user's turn or the job follow-up on a model that takes ``turns``; return what its reply reports."""
-        install_model_providers(monkeypatch, {"default": _scripted_model(bot, list(turns))})
-        if turn == "user turn":
-            response = runner.generate_response(_user_request(source_event_id="$asks"))
-        else:
-            event = await bot.journal_principal().load_event(follow_up_id)
-            assert event is not None
-            response = runner._run_job_follow_up(event)
-        with patch_response_runner_module(
-            should_use_streaming=AsyncMock(return_value=True),
-            typing_indicator=_noop_typing,
-        ):
-            await (_run_until_stall_and_shutdown(response) if until_stall else response)
-        return {} if until_stall else _final_ai_run_metadata(bot)[1]
-
+    bot, runtime, key, _ = await _collect_a_job_then_restart(tmp_path, monkeypatch, crashed)
+    other = "job follow-up" if crashed == "user turn" else "user turn"
     try:
-        job_id = await _completed_research_job(runtime, owner)
-        await _admit_user_message(bot, source_event_id="$asks")
-        await bot.journal_principal().admit(
-            follow_up_event(key, follow_up_id, sender_id="@mindroom_general:localhost", now_ms=2),
-        )
-        other = "job follow-up" if crashed == "user turn" else "user turn"
-
-        # The crash comes between the checkpoint that saved the job's result and its acknowledgement.
-        acknowledge = runtime.acknowledge_wait
-        monkeypatch.setattr(runtime, "acknowledge_wait", AsyncMock())
-        await run(
-            crashed,
-            calls(tool_call("job", "collect-1", action="collect"), metrics=_REQ_USAGE),
-            calls(tool_call("stall", "s1"), metrics=_REQ_USAGE),
-            until_stall=True,
-        )
-        assert [ended.job_id for ended in await runtime.ended_jobs(key)] == [job_id]
-        monkeypatch.setattr(runtime, "acknowledge_wait", acknowledge)
-        await _simulate_restart(bot, "gen-2")
-
         # The other turn gets the conversation first: it collects the job, acknowledges it, and reports it.
-        reported = await run(
-            other,
-            calls(tool_call("job", "collect-2", action="collect"), metrics=_REQ_USAGE),
-            answer("Reported research.", metrics=_REQ_USAGE),
-        )
+        collects = (_collect("collect-2"), answer("Reported research.", metrics=_REQ_USAGE))
+        reported = await _run_job_turn(monkeypatch, bot, other, *collects)
         assert reported["cost"] == {"usd": "2.4", "subagents_usd": "0.6"}
         assert await runtime.ended_jobs(key) == ()
 
         # The replay reads the result in its recovered history and reports its three requests alone.
-        replayed = await run(crashed, answer("Done.", metrics=_REQ_USAGE))
+        replayed = await _run_job_turn(monkeypatch, bot, crashed, answer("Done.", metrics=_REQ_USAGE))
         assert replayed["cost"] == {"usd": "3.6"}
     finally:
         await runtime.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_a_job_of_another_conversation_that_cannot_be_read_does_not_stop_a_replay(
+@pytest.mark.parametrize(
+    ("crashed", "acknowledged"),
+    [("user turn", False), ("job follow-up", False), ("user turn", True)],
+    ids=["user turn left it", "job follow-up left it", "user turn acknowledged it"],
+)
+async def test_a_replay_on_an_instance_that_runs_no_jobs_reads_who_acknowledged_the_saved_ones(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    crashed: str,
+    acknowledged: bool,
 ) -> None:
-    """A replay reads only its own conversation's jobs, so a saved child no reader decodes elsewhere leaves it alone."""
+    """A restart with background jobs turned off keeps the saved jobs, so its replay still tells whose each is.
+
+    The replay carries the job its cut-short run acknowledged and leaves out the one a crash left for a later turn,
+    which collects it once jobs run again: the thread shows the job's $0.60 once either way.
+    """
+    bot, runtime, key, job_id = await _collect_a_job_then_restart(
+        tmp_path,
+        monkeypatch,
+        crashed,
+        acknowledged=acknowledged,
+    )
+    other = "job follow-up" if crashed == "user turn" else "user turn"
+    try:
+        await runtime.shutdown()
+        _serve_jobs(bot, None)
+        replayed = await _run_job_turn(monkeypatch, bot, crashed, answer("Done.", metrics=_REQ_USAGE))
+        assert replayed["cost"] == ({"usd": "3.6", "subagents_usd": "0.6"} if acknowledged else {"usd": "3.6"})
+
+        # The next start runs jobs again and finds the unacknowledged one, which the turn that collects it reports.
+        runtime = await tool_job_runtime(bot.runtime_paths.storage_root)
+        await runtime.recover()
+        _serve_jobs(bot, runtime)
+        assert (job_id in {ended.job_id for ended in await runtime.ended_jobs(key)}) is not acknowledged
+        if not acknowledged:
+            collects = (_collect("collect-2"), answer("Reported research.", metrics=_REQ_USAGE))
+            reported = await _run_job_turn(monkeypatch, bot, other, *collects)
+            assert reported["cost"] == {"usd": "2.4", "subagents_usd": "0.6"}
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("same_thread", "child"),
+    [
+        (False, {"written_by": "a release this one cannot read"}),
+        (True, {"written_by": "a release this one cannot read"}),
+        (True, {"delegation_id": "another-requester-s", "field_of_a_later_release": 1}),
+    ],
+    ids=["another conversation", "another requester in the thread", "another requester's, with its id"],
+)
+async def test_a_saved_child_no_reader_decodes_does_not_stop_another_turn_s_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    same_thread: bool,
+    child: dict[str, Any],
+) -> None:
+    """A replay reads a saved job's delegation id and nothing else of its child, so no snapshot stops it.
+
+    A thread's session is shared by every agent and requester in it, whose jobs a turn there never collects.
+    """
     bot = _priced_bot(tmp_path, background_jobs=True)
     await bot._take_over_replies()
     runner = unwrap_extracted_collaborator(bot._response_runner)
     runtime: ToolJobRuntime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(bot.config, bot.runtime_paths)
-    register_background_runtime(bot.runtime_paths, runtime)
+    _serve_jobs(bot, runtime)
+    another = replace(_job_conversation()[1], agent_name="another-agent", requester_id="@another:localhost")
 
     async def finish() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "Done elsewhere.")
@@ -843,31 +809,19 @@ async def test_a_job_of_another_conversation_that_cannot_be_read_does_not_stop_a
             "unreadable",
             tool_name="worker",
             depth=0,
-            owner=job_owner(),
+            owner=another if same_thread else job_owner(),
             kind="delegation",
-            adapter={"child": {"written_by": "a release this one cannot read"}},
+            adapter={"child": child},
             operation=finish,
         )
         await wait_for_status(runtime, "unreadable", "completed")
         source = "$beside-an-unreadable-job"
         await _admit_user_message(bot, source_event_id=source)
         request = _user_request(source_event_id=source)
-        first = [
-            calls(tool_call("charge_subagent", "c1", usd=0.5), metrics=_REQ_USAGE),
-            calls(tool_call("stall", "s1"), metrics=_REQ_USAGE),
-        ]
-        install_model_providers(monkeypatch, {"default": _scripted_model(bot, first)})
-        with patch_response_runner_module(
-            should_use_streaming=AsyncMock(return_value=True),
-            typing_indicator=_noop_typing,
-        ):
-            await _run_until_stall_and_shutdown(runner.generate_response(request))
-            await _simulate_restart(bot, "gen-2")
-            install_model_providers(
-                monkeypatch,
-                {"default": _scripted_model(bot, [answer("Done.", metrics=_REQ_USAGE)])},
-            )
-            await runner.generate_response(request)
+        attempt = runner.generate_response(request)
+        await _run_turn(monkeypatch, bot, attempt, _charge("c1", 0.5), _stall("s1"), cut_short=True)
+        await _simulate_restart(bot, "gen-2")
+        await _run_turn(monkeypatch, bot, runner.generate_response(request), answer("Done.", metrics=_REQ_USAGE))
 
         assert _final_ai_run_metadata(bot)[1]["cost"] == {"usd": "3.6", "subagents_usd": "0.5"}
     finally:
@@ -888,20 +842,8 @@ async def test_restart_with_stored_then_lost_attempt_counts_stored_and_final(
     request = _user_request(source_event_id=source)
 
     # Attempt A stores a checkpoint ($2.40 own, $0.50 subagent) -> restart #1.
-    install_model_providers(
-        monkeypatch,
-        {
-            "default": _scripted_model(
-                bot,
-                [
-                    calls(tool_call("charge_subagent", "c1", usd=0.5), metrics=_REQ_USAGE),
-                    calls(tool_call("stall", "s1"), metrics=_REQ_USAGE),
-                ],
-            ),
-        },
-    )
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await _run_until_stall_and_shutdown(runner.generate_response(request))
+    attempt = runner.generate_response(request)
+    await _run_turn(monkeypatch, bot, attempt, _charge("c1", 0.5), _stall("s1"), cut_short=True)
     await _simulate_restart(bot, "gen-2")
 
     # Attempt B claims the reply and dies before storing any run row -> restart #2.
@@ -924,12 +866,8 @@ async def test_restart_with_stored_then_lost_attempt_counts_stored_and_final(
     await _simulate_restart(bot, "gen-3")
 
     # Attempt C completes ($1.20 own, no new subagents).
-    install_model_providers(
-        monkeypatch,
-        {"default": _scripted_model(bot, [answer("Recovered after lost middle attempt.", metrics=_REQ_USAGE)])},
-    )
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await runner.generate_response(request)
+    final = answer("Recovered after lost middle attempt.", metrics=_REQ_USAGE)
+    await _run_turn(monkeypatch, bot, runner.generate_response(request), final)
 
     _, ai_run = _final_ai_run_metadata(bot)
     assert ai_run["cost"] == {"usd": "3.6", "subagents_usd": "0.5"}
@@ -1157,35 +1095,15 @@ async def test_model_switch_before_restart_does_not_double_count_subagent_cost(
 
     switch_call = tool_call("switch_thread_model", "sw-1", model_name="default", when="after-toolcall")
     attempt_1_turns = [
-        calls(tool_call("charge_subagent", "c1", usd=0.5), metrics=_REQ_USAGE),
+        _charge("c1", 0.5),
         calls(switch_call, metrics=_REQ_USAGE),
-        *(
-            [calls(tool_call("charge_subagent", "c2", usd=second_sub), metrics=_REQ_USAGE)]
-            if second_sub is not None
-            else []
-        ),
-        calls(tool_call("stall", "s1"), metrics=_REQ_USAGE),
+        *([_charge("c2", second_sub)] if second_sub is not None else []),
+        _stall("s1"),
     ]
-    install_model_providers(monkeypatch, {"default": _scripted_model(bot, attempt_1_turns)})
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await _run_until_stall_and_shutdown(runner.generate_response(request))
-
+    await _run_turn(monkeypatch, bot, runner.generate_response(request), *attempt_1_turns, cut_short=True)
     await _simulate_restart(bot, "gen-2")
-
-    install_model_providers(
-        monkeypatch,
-        {
-            "default": _scripted_model(
-                bot,
-                [
-                    calls(tool_call("charge_subagent", "c3", usd=replay_sub), metrics=_REQ_USAGE),
-                    answer("Done after switch and restart.", metrics=_REQ_USAGE),
-                ],
-            ),
-        },
-    )
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await runner.generate_response(request)
+    replay = (_charge("c3", replay_sub), answer("Done after switch and restart.", metrics=_REQ_USAGE))
+    await _run_turn(monkeypatch, bot, runner.generate_response(request), *replay)
 
     _, ai_run = _final_ai_run_metadata(bot)
     assert ai_run["cost"] == {"usd": expected_own, "subagents_usd": expected_sub}
@@ -1209,59 +1127,19 @@ async def test_billed_empty_response_retried_before_restart_is_counted_exactly_o
     request = _user_request(source_event_id=source)
 
     # Attempt 1: empty answer ($1.20, no run row) -> retry charges $0.50 ($1.20) + stalls ($1.20) -> restart #1.
-    install_model_providers(
-        monkeypatch,
-        {
-            "default": _scripted_model(
-                bot,
-                [
-                    answer("", metrics=_REQ_USAGE),
-                    calls(tool_call("charge_subagent", "c1", usd=0.5), metrics=_REQ_USAGE),
-                    calls(tool_call("stall", "s1"), metrics=_REQ_USAGE),
-                ],
-            ),
-        },
-    )
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await _run_until_stall_and_shutdown(runner.generate_response(request))
+    first = (answer("", metrics=_REQ_USAGE), _charge("c1", 0.5), _stall("s1"))
+    await _run_turn(monkeypatch, bot, runner.generate_response(request), *first, cut_short=True)
     await _simulate_restart(bot, "gen-2")
 
     if restarts == 2:
         # Attempt 2: charges $0.10 ($1.20) + stalls ($1.20) -> restart #2.
-        install_model_providers(
-            monkeypatch,
-            {
-                "default": _scripted_model(
-                    bot,
-                    [
-                        calls(tool_call("charge_subagent", "c2", usd=0.1), metrics=_REQ_USAGE),
-                        calls(tool_call("stall", "s2"), metrics=_REQ_USAGE),
-                    ],
-                ),
-            },
-        )
-        with patch_response_runner_module(
-            should_use_streaming=AsyncMock(return_value=True),
-            typing_indicator=_noop_typing,
-        ):
-            await _run_until_stall_and_shutdown(runner.generate_response(request))
+        attempt = runner.generate_response(request)
+        await _run_turn(monkeypatch, bot, attempt, _charge("c2", 0.1), _stall("s2"), cut_short=True)
         await _simulate_restart(bot, "gen-3")
 
     # Final replay: charges $0.25 ($1.20) + answers ($1.20).
-    install_model_providers(
-        monkeypatch,
-        {
-            "default": _scripted_model(
-                bot,
-                [
-                    calls(tool_call("charge_subagent", "cf", usd=0.25), metrics=_REQ_USAGE),
-                    answer("Done.", metrics=_REQ_USAGE),
-                ],
-            ),
-        },
-    )
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await runner.generate_response(request)
+    final = (_charge("cf", 0.25), answer("Done.", metrics=_REQ_USAGE))
+    await _run_turn(monkeypatch, bot, runner.generate_response(request), *final)
 
     _, ai_run = _final_ai_run_metadata(bot)
     if restarts == 1:
@@ -1296,9 +1174,8 @@ async def test_restart_continued_reply_passes_undated_started_at_to_budgets_to_a
     # Normal (non-continued) reply passes a non-None started_at datetime.
     normal_source = "$normal-budget-turn"
     await _admit_user_message(bot, source_event_id=normal_source)
-    install_model_providers(monkeypatch, {"default": _scripted_model(bot, [answer("Normal.", metrics=_REQ_USAGE)])})
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await runner.generate_response(_user_request(source_event_id=normal_source))
+    normal = runner.generate_response(_user_request(source_event_id=normal_source))
+    await _run_turn(monkeypatch, bot, normal, answer("Normal.", metrics=_REQ_USAGE))
     assert len(recorded_calls) == 1
     assert recorded_calls[0][1] == pytest.approx(1.2)
     assert recorded_calls[0][2] is not None
@@ -1307,25 +1184,10 @@ async def test_restart_continued_reply_passes_undated_started_at_to_budgets_to_a
     source = "$restart-budget-turn"
     await _admit_user_message(bot, source_event_id=source)
     request = _user_request(source_event_id=source)
-    install_model_providers(
-        monkeypatch,
-        {
-            "default": _scripted_model(
-                bot,
-                [
-                    calls(tool_call("charge_subagent", "c1", usd=0.5), metrics=_REQ_USAGE),
-                    calls(tool_call("stall", "s1"), metrics=_REQ_USAGE),
-                ],
-            ),
-        },
-    )
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await _run_until_stall_and_shutdown(runner.generate_response(request))
+    attempt = runner.generate_response(request)
+    await _run_turn(monkeypatch, bot, attempt, _charge("c1", 0.5), _stall("s1"), cut_short=True)
     await _simulate_restart(bot, "gen-2")
-
-    install_model_providers(monkeypatch, {"default": _scripted_model(bot, [answer("Continued.", metrics=_REQ_USAGE)])})
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
-        await runner.generate_response(request)
+    await _run_turn(monkeypatch, bot, runner.generate_response(request), answer("Continued.", metrics=_REQ_USAGE))
 
     assert len(recorded_calls) == 2
     assert recorded_calls[1][0] == "@user:localhost"
@@ -1617,6 +1479,29 @@ def test_recovery_merges_what_the_attempts_rows_hold_by_id_and_leaves_out_jobs_t
     assert recovered[SUBAGENT_COST_RUN_METADATA_KEY] == 2.0
     # A delegation that is no job of the conversation, such as a subagent the turn waited for, is carried as it is.
     assert stored_receipts(_recovered(bot)) == {"d1": 0.5, "own": 0.6, "other": 0.7, "none": 0.8, "member-s": 0.9}
+
+
+def test_a_job_s_acknowledger_is_read_beside_the_id_its_saved_child_names_and_nothing_else() -> None:
+    """A subagent job whose saved child names an id is that receipt's job, whatever else its snapshot holds or lacks."""
+
+    def job(kind: str, child: object, *, consumed: bool = False, run: str | None = None) -> BackgroundJob:
+        adapter = {"child": child} if run is None else {"child": child, "acknowledged_by_run": run}
+        return BackgroundJob("a-job", job_owner(), "worker", 0, kind=kind, adapter=adapter, consumed=consumed)
+
+    jobs = [
+        job("delegation", {"delegation_id": "acknowledged", "field_of_a_later_release": 1}, consumed=True, run="run-1"),
+        job("delegation", {"delegation_id": "acknowledged by an earlier release"}, consumed=True),
+        job("delegation", {"delegation_id": "left for a later turn"}),
+        job("delegation", {"delegation_id": ["not", "an", "id"]}),
+        job("delegation", {"written_by": "a release this one cannot read"}),
+        job("delegation", "not a snapshot"),
+        job("tool", {"delegation_id": "a tool's own adapter"}, consumed=True, run="run-1"),
+    ]
+    assert job_acknowledgers(jobs) == {
+        "acknowledged": "run-1",
+        "acknowledged by an earlier release": None,
+        "left for a later turn": None,
+    }
 
 
 def test_values_stored_as_sums_resume_as_one_entry_that_restart_recovery_drops(tmp_path: Path) -> None:

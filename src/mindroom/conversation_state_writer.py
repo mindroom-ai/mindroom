@@ -150,8 +150,7 @@ class ConversationStateWriter:
 
         Returns the run metadata their replay's runs carry, off-loop in the session target's FIFO lane.
         """
-        recover = partial(recover_interrupted_turn, natively=natively, jobs=jobs)
         return await run_session_storage_operation(
             partial(self.create_storage, execution_identity, scope=scope),
-            lambda storage: recover(storage, session_id, scope, event_ids),
+            lambda store: recover_interrupted_turn(store, session_id, scope, event_ids, natively=natively, jobs=jobs),
         )
