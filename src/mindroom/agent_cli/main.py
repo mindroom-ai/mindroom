@@ -33,6 +33,8 @@ _WORKER_COMMAND_TIMEOUT_SECONDS = 3600
 _EXIT_TIMED_OUT = 124
 _EXIT_NOT_RUN = 125
 _EXIT_UNKNOWN = 255
+# How long `workers run` keeps trying to reach its command's output before it gives up on a command that may run.
+_OUTPUT_UNREACHABLE_SECONDS = 60
 # What a command whose reader left exits with when SIGPIPE ends it, which is how `workers run` exits then.
 _EXIT_STDOUT_CLOSED = 128 + signal.SIGPIPE
 _CANCEL_TIMEOUT_SECONDS = 8.0
@@ -309,11 +311,11 @@ def _discard_stdout() -> None:
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
-def _forward_stdin(client: AgentCliClient, call_id: str) -> None:
+def _forward_stdin(client: AgentCliClient, call_id: str, done: threading.Event) -> None:
     """Send the CLI's stdin to the command in order as it arrives, then its end; a terminal sends its end at once.
 
     Each chunk is answered once the command took it, so a command that reads slowly slows this down. It runs in a
-    daemon thread: a command that ends without reading its stdin does not wait for it.
+    daemon thread until ``done``: a command that ends without reading its stdin does not wait for it.
     """
     seq = 0
     while True:
@@ -322,19 +324,43 @@ def _forward_stdin(client: AgentCliClient, call_id: str) -> None:
             data = os.read(sys.stdin.fileno(), _STDIN_CHUNK_BYTES) if piped else b""
         except (OSError, ValueError):
             data = b""
-        while True:
+        taking_more = None
+        while taking_more is None:
+            if done.is_set():
+                return
             try:
-                taking_more = client.stdin(call_id, seq, data, eof=not data).get("open")
+                taking_more = bool(client.stdin(call_id, seq, data, eof=not data).get("open"))
             except (AgentCliRefusedError, ValueError):
                 return
             except AgentCliUnavailableError:
                 # The command has not read yet, or the answer was lost: the same chunk again is written once.
-                time.sleep(_STDIN_RETRY_SECONDS)
-            else:
-                break
+                done.wait(_STDIN_RETRY_SECONDS)
         if not data or not taking_more:
             return
         seq += 1
+
+
+def _frames(client: AgentCliClient, call_id: str) -> Iterator[dict[str, object]]:
+    """Yield a streamed call's frames as they arrive.
+
+    The command runs on in its worker, so a stream that cannot be reached is tried again for a minute. Once its
+    first frame arrived it is not: MindRoom keeps no output for a second reader, and cancels the call of one that left.
+    """
+    delay, give_up = 0.2, None
+    while True:
+        started, reached = time.monotonic(), False
+        try:
+            for frame in client.stream(call_id):
+                reached = True
+                yield frame
+        except AgentCliUnavailableError:
+            give_up = started + _OUTPUT_UNREACHABLE_SECONDS if give_up is None else give_up
+            if reached or (remaining := give_up - time.monotonic()) <= 0:
+                raise
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 1.5, 2.0)
+        else:
+            return
 
 
 def _relay(client: AgentCliClient, call_id: str, worker: str, ended: dict[str, object]) -> dict[str, object]:
@@ -343,7 +369,21 @@ def _relay(client: AgentCliClient, call_id: str, worker: str, ended: dict[str, o
     The command's exit, which follows the last of its output, is kept in ``ended``, so a signal that then stops
     the relay loses nothing. A stream that ends before the exit or the receipt leaves the command's outcome unknown.
     """
-    for frame in client.stream(call_id):
+    done = threading.Event()
+    try:
+        return _relay_frames(client, call_id, worker, ended, done)
+    finally:
+        done.set()
+
+
+def _relay_frames(
+    client: AgentCliClient,
+    call_id: str,
+    worker: str,
+    ended: dict[str, object],
+    done: threading.Event,
+) -> dict[str, object]:
+    for frame in _frames(client, call_id):
         kind = frame.get("t")
         if kind is None:
             return frame
@@ -356,7 +396,7 @@ def _relay(client: AgentCliClient, call_id: str, worker: str, ended: dict[str, o
         elif kind == "started":
             if frame.get("header") == f"[worker: {worker}, started]":
                 _note(f"mindroom-agent: started worker {worker}")
-            threading.Thread(target=_forward_stdin, args=(client, call_id), daemon=True).start()
+            threading.Thread(target=_forward_stdin, args=(client, call_id, done), daemon=True).start()
         elif kind == "exit":
             ended.update(frame)
     if ended:

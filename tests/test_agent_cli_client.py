@@ -13,7 +13,7 @@ import pytest
 
 from mindroom.agent_cli.client import AgentCliClient, AgentCliUnavailableError
 from mindroom.agent_cli.main import main
-from mindroom.shell.output_capture import format_shell_completion
+from tests.workers_run_frames import command_frames
 
 
 @pytest.mark.parametrize("redirect", [False, True])
@@ -63,7 +63,7 @@ def test_real_http_client_and_redirect_fence(monkeypatch: pytest.MonkeyPatch, re
 
 
 @pytest.mark.parametrize("status", [200, 409])
-def test_workers_run_handles_a_truncated_chunked_receipt_without_resubmitting(
+def test_workers_run_handles_a_truncated_chunked_stream_without_resubmitting(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     status: int,
@@ -74,9 +74,12 @@ def test_workers_run_handles_a_truncated_chunked_receipt_without_resubmitting(
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            submitted.append(payload["call_id"])
             self.send_response(200)
             self.end_headers()
+            if self.path.endswith("/stdin"):
+                self.wfile.write(b'{"open":false}')
+                return
+            submitted.append(payload["call_id"])
             self.wfile.write(b'{"status":"running"}')
 
         def do_GET(self) -> None:
@@ -87,11 +90,9 @@ def test_workers_run_handles_a_truncated_chunked_receipt_without_resubmitting(
                 self.end_headers()
                 self.wfile.write(b"20\r\npartial")  # Close before the advertised chunk is complete.
                 return
-            result = format_shell_completion("shard ok", None, return_code=0)
-            receipt = {"status": "completed", "outcome": f"[worker: w]\n{result}"}
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(json.dumps(receipt).encode())
+            self.wfile.write(b"".join(json.dumps(frame).encode() + b"\n" for frame in command_frames(b"shard ok\n")))
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib override
             del format, args
@@ -112,11 +113,11 @@ def test_workers_run_handles_a_truncated_chunked_receipt_without_resubmitting(
     output = capsys.readouterr()
     if status == 200:
         assert exit_code == 0
-        assert polled == [f"/api/agent-cli/calls/{call_id}?wait=25&after_progress=0"] * 2
+        assert polled == [f"/api/agent-cli/calls/{call_id}/stream"] * 2
         assert (output.out, output.err) == ("shard ok\n", "")
     else:
         assert exit_code == 255
-        assert polled == [f"/api/agent-cli/calls/{call_id}?wait=25&after_progress=0"]
+        assert polled == [f"/api/agent-cli/calls/{call_id}/stream"]
         assert "Agent CLI request was rejected" in output.err
 
 

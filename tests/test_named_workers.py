@@ -862,18 +862,16 @@ async def test_a_shell_call_runs_in_the_worker_it_names(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exit_code", [0, 17])
-async def test_workers_run_prints_saved_output_from_its_named_worker(
+async def test_a_cli_call_reads_saved_output_from_its_named_worker(
     runtime_paths: RuntimePaths,
     backend: _FakeBackend,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
     exit_code: int,
 ) -> None:
-    """The CLI keeps the real exit status and saved output path after the runner auto-saves a result."""
+    """A CLI call's receipt keeps the real exit status and saved output path after the runner auto-saves a result."""
     from uuid import uuid4  # noqa: PLC0415
 
-    from mindroom.agent_cli.main import main  # noqa: PLC0415
     from mindroom.agent_cli.protocol import ToolCallOperation  # noqa: PLC0415
     from mindroom.agent_cli.session import CliTurnOwner  # noqa: PLC0415
     from mindroom.agent_cli.shell_contract import AgentCliShellEnv  # noqa: PLC0415
@@ -934,16 +932,14 @@ async def test_workers_run_prints_saved_output_from_its_named_worker(
         cli_receipt = await settled_receipt(owner, queued["call_id"])
     await owner.close()
 
-    class Client:
-        def operation(self, payload: dict[str, Any]) -> dict[str, object]:
-            assert payload["arguments"]["args"] == command
-            return cli_receipt
-
-    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
-    assert main(["workers", "run", "shard", "--", *command]) == exit_code
-    output = capsys.readouterr()
-    assert "shard-output" in output.out
-    assert f"full output saved to {receipt['path']}" in output.err
+    # `workers run` streams its command's output instead, so only a `tools call` reads a saved result.
+    assert cli_receipt["status"] == "completed"
+    saved_to = cli_receipt["outcome"]["mindroom_tool_output"]
+    assert saved_to["path"] == receipt["path"]
+    header, _, preview = saved_to["preview"].partition("\n")
+    assert header == "[worker: shard, started]"
+    assert preview.startswith(f"Exit code {exit_code}\n") is bool(exit_code)
+    assert "shard-output" in preview
 
 
 @pytest.mark.asyncio
@@ -1023,6 +1019,9 @@ async def test_cli_catalog_explains_why_named_workers_are_not_offered(
     class Client:
         def operation(self, _payload: object) -> dict[str, object]:
             return receipt
+
+        def stream(self, _call_id: str) -> object:
+            return iter([receipt])
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     assert main(["workers", "run", "build", "--", "true"]) == 125
