@@ -65,7 +65,7 @@ from mindroom.providers.pipeline.media import (
 from mindroom.providers.pipeline.refusal import refusal_stream
 from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
 from mindroom.providers.pipeline.retry import retrying_stream
-from mindroom.providers.pipeline.wrapped import WrappedProvider
+from mindroom.providers.pipeline.wrapped import Retry, WrappedProvider, attempts
 from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.scripted_model import Await, scripted_body
 from tests.fakes.token_counter import fake_token_counter
@@ -197,6 +197,20 @@ async def test_a_retried_turn_keeps_the_answering_attempt_s_context() -> None:
     assert isinstance(finished, TurnCompleted)
     assert finished.message.metrics.context == TokenCounts(input_tokens=90)
     assert finished.message.metrics.tokens.input_tokens == 130
+
+
+@pytest.mark.asyncio
+async def test_a_reissue_keeps_a_stripped_requests_budget_after_a_failure_that_carries_none() -> None:
+    """A stage above the retry stage can fail a stripped request itself, such as a download that fails."""
+    budget = object()
+    base = ModelRequest(messages=[_user()])
+    inner = _ScriptedProvider([[InvalidRequest("cannot download", provider="Scripted")], [_turn()]])
+    stripped = replace(base, strip_encrypted_replay=True, retry_budget=budget)
+
+    events = [event async for event in attempts(inner, stripped, lambda _error: Retry(base))]
+
+    assert isinstance(events[-1], TurnCompleted)
+    assert [(sent.strip_encrypted_replay, sent.retry_budget) for sent in inner.requests] == [(True, budget)] * 2
 
 
 @pytest.mark.asyncio

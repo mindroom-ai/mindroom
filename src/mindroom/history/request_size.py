@@ -16,7 +16,7 @@ from mindroom.history.native import with_native_history
 from mindroom.history.request_messages import request_layout
 from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.model_usage import message_context_tokens
-from mindroom.native_compaction import checkpoint_items
+from mindroom.native_compaction import native_replay
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -79,16 +79,17 @@ class RequestSizer:
     def _anchor(self, request: ModelRequest) -> tuple[int, int] | None:
         """Return the index and reported size of the latest answer whose request ``request`` extends.
 
-        The latest native checkpoint for the request's route bounds the search: projection replaced the transcript
-        before it, which every earlier answer's size, and the checkpoint's own, still describe.
+        The replay's boundary bounds the search (``native_replay``): the latest native checkpoint for the request's
+        route replaced the transcript before it, which every earlier answer's size, and the checkpoint's own, still
+        describe; and an answer before a later encrypted-replay reset sized a request that still sent the checkpoint.
         """
         prefixes = request_prefixes(self.model, request)
         route = request.native_compaction.route if request.native_compaction is not None else None
+        scope = self.model.capabilities.replay_reset_scope
+        replay = native_replay(request.messages, route, reset_scope=scope, stripped=request.strip_encrypted_replay)
         identity = self.model.identity
-        for index in range(len(request.messages) - 1, -1, -1):
+        for index in range(len(request.messages) - 1, replay.boundary, -1):
             message = request.messages[index]
-            if checkpoint_items(message, route):
-                return None
             recorded = (message.provider_data or {}).get(REQUEST_IDENTITY_KEY)
             if message.role != "assistant" or recorded is None or recorded != prefixes[index]:
                 continue
