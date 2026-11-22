@@ -1835,7 +1835,11 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
             "_active_thread_ids_for_room",
             new=lambda _room_id: frozenset(active_threads),
         ),
-        patch.object(bot._response_runner, "reserve_waiting_human_message", return_value=MagicMock()),
+        patch.object(
+            bot._response_runner.lifecycle_coordinator,
+            "reserve_waiting_human_message",
+            return_value=MagicMock(),
+        ),
     ):
         for event, requester_user_id in ((first, "@alice:localhost"), (second, "@bob:localhost")):
             await _enqueue_for_dispatch(

@@ -49,7 +49,6 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.matrix.guarded_rooms import allowed_send, guarded_room
 from mindroom.matrix.presence import should_use_streaming
-from mindroom.mid_turn import MidTurnMode
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     classify_cancel_source,
@@ -161,9 +160,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import JournalEvent
-    from mindroom.event_journal.approval_signals import ApprovalSignals
     from mindroom.history.types import CompactionLifecycle, HistoryScope
-    from mindroom.hooks import EnrichmentItem, MessageEnvelope
+    from mindroom.hooks import EnrichmentItem
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.message_target import MessageTarget
@@ -177,9 +175,7 @@ if TYPE_CHECKING:
     from mindroom.turn_origin import TurnOrigin
 
     from .response_lifecycle import (
-        QueuedHumanNoticeReservation,
         ResponseLifecycleCoordinator,
-        ResponseLifecycleReservation,
     )
 
 
@@ -471,63 +467,6 @@ class ResponseRunner:
                 substantive=delivery.delivered_substantive_content,
             )
             request.pipeline_timing.mark("response_complete")
-
-    def has_active_response_for_target(self, target: MessageTarget) -> bool:
-        """Return whether one canonical conversation target already has an active turn."""
-        return self.lifecycle_coordinator.has_active_response_for_target(target)
-
-    def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
-        """Return canonical thread IDs with active response lifecycles in one room."""
-        return self.lifecycle_coordinator.active_thread_ids_for_room(room_id)
-
-    def note_continued_sources(self, source_event_ids: frozenset[str]) -> None:
-        """Remember the sources of the replies an older instance left to continue, so their replays are no news."""
-        self.lifecycle_coordinator.continued_sources = source_event_ids
-
-    def note_edited_source(self, source_event_id: str) -> None:
-        """Count a continued reply's source as news again once its sender edits it."""
-        self.lifecycle_coordinator.continued_sources -= {source_event_id}
-
-    def follow_approval_holds(self, signals: ApprovalSignals, principal_id: str, freed: Callable[[str], None]) -> None:
-        """Hold the conversation of each pending approval of this principal, from the ones pending now on."""
-        self.lifecycle_coordinator.follow_approval_holds(signals, principal_id, freed)
-
-    def stop_following_approval_holds(self) -> None:
-        """Stop holding conversations for approvals that pause or end from now on."""
-        self.lifecycle_coordinator.stop_following_approval_holds()
-
-    def is_held_for_approval(self, target: MessageTarget) -> bool:
-        """Return whether a pending approval keeps this conversation busy."""
-        return bool(self.lifecycle_coordinator.approval_holds(target.room_id, target.resolved_thread_id))
-
-    async def wait_for_thread_response_idle(self, room_id: str, thread_id: str | None) -> None:
-        """Wait until one canonical room/thread has no active response turn."""
-        await self.lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id)
-
-    def reserve_waiting_human_message(
-        self,
-        *,
-        target: MessageTarget,
-        response_envelope: MessageEnvelope,
-        mentions_nobody: bool = False,
-        transcript: str | None = None,
-        mode: MidTurnMode = MidTurnMode.AUTO,
-    ) -> QueuedHumanNoticeReservation | None:
-        """Reserve a queued-human notice for an active response before dispatch owns ingress."""
-        return self.lifecycle_coordinator.reserve_waiting_human_message(
-            target=target,
-            response_envelope=response_envelope,
-            mentions_nobody=mentions_nobody,
-            transcript=transcript,
-            mode=mode,
-        )
-
-    async def reserve_response_lifecycle(
-        self,
-        response_envelope: MessageEnvelope,
-    ) -> ResponseLifecycleReservation:
-        """Reserve one canonical response lifecycle before detached preparation starts."""
-        return await self.lifecycle_coordinator.reserve_response_lifecycle(response_envelope)
 
     async def _active_response_event_ids(self, room_id: str) -> set[str]:
         """Return the events of one room's replies whose span runs in this bot instance."""

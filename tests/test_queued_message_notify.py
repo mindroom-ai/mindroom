@@ -90,7 +90,6 @@ from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turns.dispatch import TurnDispatcher
-from mindroom.turns.queued_notice import queued_notice_reservation_if_busy
 from tests.access_schema_support import with_current_room_member_access
 from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.bot_helpers import make_test_agent_bot
@@ -1179,12 +1178,15 @@ async def test_replay_of_a_message_a_restart_cut_short_is_not_a_newer_message(tm
     await lifecycle_lock.acquire()
     try:
         # Ingress: a live message is news, the replay is not.
-        notice = queued_notice_reservation_if_busy(runner, target=target, envelope=live)
+        notice = runner.lifecycle_coordinator.reserve_waiting_human_message(target=target, response_envelope=live)
         assert notice is not None
         notice.release()
-        assert queued_notice_reservation_if_busy(runner, target=target, envelope=replayed) is None
+        assert (
+            runner.lifecycle_coordinator.reserve_waiting_human_message(target=target, response_envelope=replayed)
+            is None
+        )
         # An interactive selection's reservation.
-        selection = await runner.reserve_response_lifecycle(replayed)
+        selection = await runner.lifecycle_coordinator.reserve_response_lifecycle(replayed)
         assert queued_signal.pending_message_snapshot() == ()
         await selection.release()
         # Turn start: the replay waits for the lock unannounced.
@@ -1205,8 +1207,8 @@ async def test_replay_of_a_message_a_restart_cut_short_is_not_a_newer_message(tm
             lifecycle_lock.release()
             assert await task == Owned()
         # Once its sender edits the replay again, it carries something new.
-        runner.note_edited_source("$replayed")
-        edited = queued_notice_reservation_if_busy(runner, target=target, envelope=replayed)
+        runner.lifecycle_coordinator.note_edited_source("$replayed")
+        edited = runner.lifecycle_coordinator.reserve_waiting_human_message(target=target, response_envelope=replayed)
         assert edited is not None
         edited.release()
     finally:
@@ -2692,22 +2694,31 @@ def test_real_queued_notice_helper_forwards_mode_through_runner(tmp_path: Path) 
     envelope = _envelope(source_event_id="$queued", target=target)
     queued_signal = runner.lifecycle_coordinator._get_or_create_queued_signal(target)
 
-    assert queued_notice_reservation_if_busy(runner, target=target, envelope=envelope, mode=MidTurnMode.QUEUE) is None
+    assert (
+        runner.lifecycle_coordinator.reserve_waiting_human_message(
+            target=target,
+            response_envelope=envelope,
+            mode=MidTurnMode.QUEUE,
+        )
+        is None
+    )
     assert queued_signal.pending_message_snapshot() == ()
 
     queued_signal.begin_response_turn()
     try:
-        reservation = queued_notice_reservation_if_busy(
-            runner,
+        reservation = runner.lifecycle_coordinator.reserve_waiting_human_message(
             target=target,
-            envelope=envelope,
+            response_envelope=envelope,
             mode=MidTurnMode.QUEUE,
         )
         assert reservation is not None
         # A caller that names no mode, as voice and other content-less ingress, keeps Auto.
         later_target = MessageTarget.resolve("!room:localhost", "$thread", "$later")
         later = replace(envelope, source_event_id="$later", target=later_target)
-        assert queued_notice_reservation_if_busy(runner, target=later.target, envelope=later) is not None
+        assert (
+            runner.lifecycle_coordinator.reserve_waiting_human_message(target=later.target, response_envelope=later)
+            is not None
+        )
         assert [(message.event_id, message.mode) for message in queued_signal.pending_message_snapshot()] == [
             ("$queued", MidTurnMode.QUEUE),
             ("$later", MidTurnMode.AUTO),
@@ -3214,7 +3225,7 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
 
     def queue_followup() -> str:
         """Queue a follow-up while the turn works."""
-        reservation = runner.reserve_waiting_human_message(
+        reservation = runner.lifecycle_coordinator.reserve_waiting_human_message(
             target=envelope.target,
             response_envelope=replace(envelope, source_event_id="$queued", body="Thanks"),
         )

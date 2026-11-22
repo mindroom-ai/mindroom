@@ -353,7 +353,7 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
     assert waiting.continuation_count == 2
     assert waiting.calls[0].decision is None
     assert await runner.deps.replies.store.is_pending("$source")
-    assert runner.is_held_for_approval(target)
+    assert runner.lifecycle_coordinator.approval_holds(target.room_id, target.resolved_thread_id)
     assert not original.cancelled()
     assert follow_up is not None
     assert not follow_up.cancelled()

@@ -334,16 +334,18 @@ async def test_a_pending_approval_keeps_its_conversation_busy_until_it_ends(tmp_
         await _respond(bot)
         target = _target()
         runner = bot._response_runner
-        assert runner.is_held_for_approval(target)
-        assert target.resolved_thread_id in runner.active_thread_ids_for_room(target.room_id)
-        idle = asyncio.create_task(runner.wait_for_thread_response_idle(target.room_id, target.resolved_thread_id))
+        assert runner.lifecycle_coordinator.approval_holds(target.room_id, target.resolved_thread_id)
+        assert target.resolved_thread_id in runner.lifecycle_coordinator.active_thread_ids_for_room(target.room_id)
+        idle = asyncio.create_task(
+            runner.lifecycle_coordinator.wait_for_thread_idle(target.room_id, target.resolved_thread_id),
+        )
         await asyncio.sleep(0)
         assert not idle.done()
         with _journal_wakes(bot) as wakes:
             assert await asyncio.wait_for(await _stop(bot, "$sent1", 5), timeout=5)
         await _run_approval_wakes(bot, wakes)
         # The approval's end lets the conversation answer what waited.
-        assert not runner.is_held_for_approval(target)
+        assert not runner.lifecycle_coordinator.approval_holds(target.room_id, target.resolved_thread_id)
         await asyncio.wait_for(idle, timeout=5)
 
 
@@ -425,7 +427,7 @@ async def test_a_message_sent_while_an_approval_waits_is_answered_once_after_it_
             runner = unwrap_extracted_collaborator(bot._response_runner)
             assert runner.lifecycle_coordinator._get_or_create_queued_signal(_target()).has_pending_human_messages()
             model.assert_not_awaited()
-            assert runner.is_held_for_approval(_target())
+            assert runner.lifecycle_coordinator.approval_holds(_target().room_id, _target().resolved_thread_id)
 
             with _journal_wakes(bot) as wakes:
                 assert await asyncio.wait_for(await _stop(bot, "$sent1", 5), timeout=5)
@@ -463,7 +465,7 @@ async def test_a_message_in_another_conversation_is_answered_while_an_approval_w
         assert _reactions(bot) == [{"rel_type": "m.annotation", "event_id": "$followup", "key": "⏳"}]
         assert not await bot._reply_runtime.store.is_pending("$other")
         # The approval still waits and still holds its own conversation.
-        assert bot._response_runner.is_held_for_approval(paused)
+        assert bot._response_runner.lifecycle_coordinator.approval_holds(paused.room_id, paused.resolved_thread_id)
         assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is not None
 
 
@@ -473,9 +475,15 @@ async def test_a_restart_keeps_the_conversation_of_a_pending_approval_busy(tmp_p
         await _respond(bot)
         # A restart replaces the bot inside the runtime that owns the journal.
         restarted = make_test_agent_bot(bot.agent_user, orchestrator=cast("ReadyRuntime", bot.orchestrator))
-        assert not restarted._response_runner.is_held_for_approval(_target())
+        assert not restarted._response_runner.lifecycle_coordinator.approval_holds(
+            _target().room_id,
+            _target().resolved_thread_id,
+        )
         await restarted._take_over_replies()
-        assert restarted._response_runner.is_held_for_approval(_target())
+        assert restarted._response_runner.lifecycle_coordinator.approval_holds(
+            _target().room_id,
+            _target().resolved_thread_id,
+        )
 
 
 async def test_a_stopped_bot_holds_no_conversation_for_an_approval_that_pauses_later(tmp_path: Path) -> None:
@@ -491,10 +499,10 @@ async def test_a_stopped_bot_holds_no_conversation_for_an_approval_that_pauses_l
     try:
         await bot._take_over_replies()
         await pause("approval-1", held)
-        assert bot._response_runner.is_held_for_approval(held)
+        assert bot._response_runner.lifecycle_coordinator.approval_holds(held.room_id, held.resolved_thread_id)
         await bot.stop()
         await pause("approval-2", later)
-        assert not bot._response_runner.is_held_for_approval(later)
+        assert not bot._response_runner.lifecycle_coordinator.approval_holds(later.room_id, later.resolved_thread_id)
     finally:
         await store.close()
 
@@ -530,7 +538,10 @@ async def test_deleting_the_message_of_a_paused_reply_cancels_its_approval_and_r
 
         assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
         assert await bot._journal_store.principal("router@shared").approvals.pending_approval_room_ids() == ()
-        assert not bot._response_runner.is_held_for_approval(_target())
+        assert not bot._response_runner.lifecycle_coordinator.approval_holds(
+            _target().room_id,
+            _target().resolved_thread_id,
+        )
 
         async def redacted() -> rl.Reply:
             while (reply := await _reply(bot)).redaction_pending:  # noqa: ASYNC110

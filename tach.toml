@@ -3560,7 +3560,6 @@ depends_on = [
     "mindroom.history.turn_recorder",
     "mindroom.judgment.cold_cache",
     "mindroom.matrix.guarded_rooms",
-    "mindroom.mid_turn",
     "mindroom.mid_turn_judgment",
     "mindroom.orchestration.runtime",
     "mindroom.participation",
@@ -6453,7 +6452,7 @@ visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.turns.queued_notice"
-depends_on = ["mindroom.mid_turn"]
+depends_on = []
 visibility = [
     "mindroom.turns.ingress",
     "mindroom.voice.ingress",

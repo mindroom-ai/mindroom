@@ -42,7 +42,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.mid_turn import MID_TURN_MODE_KEY, MidTurnGate, MidTurnMode
-from mindroom.response_runner import ResponseRunner
+from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 from mindroom.room_reply_modes import (
     ReplyModeRead,
     _drop_legacy_override,
@@ -1311,9 +1311,14 @@ async def _general_nudged_and_shown_waiting(
     Return whether the message asked general's running response to wrap up, and whether general reacted ⏳ to it.
     """
     with (
-        patch.object(ResponseRunner, "has_active_response_for_target", return_value=True),
-        patch.object(ResponseRunner, "reserve_waiting_human_message", autospec=True, return_value=None) as reserve,
-        patch.object(ResponseRunner, "is_held_for_approval", return_value=True),
+        patch.object(ResponseLifecycleCoordinator, "has_active_response_for_target", return_value=True),
+        patch.object(
+            ResponseLifecycleCoordinator,
+            "reserve_waiting_human_message",
+            autospec=True,
+            return_value=None,
+        ) as reserve,
+        patch.object(ResponseLifecycleCoordinator, "approval_holds", return_value=("approval",)),
     ):
         _acted, bots = await _who_acts(
             tmp_path,
@@ -1470,7 +1475,7 @@ async def _general_answering_in_its_thread(
         with (
             _reading_general_thread(paths),
             patch.object(bot._turn_ingress, "_adaptive_text_debounce_seconds", AsyncMock(return_value=60.0)),
-            patch.object(bot._response_runner, "is_held_for_approval", return_value=True),
+            patch.object(bot._response_runner.lifecycle_coordinator, "approval_holds", return_value=("approval",)),
         ):
             yield bot, room, paths, running
     finally:

@@ -1136,10 +1136,10 @@ class TestAgentBot(AgentBotTestBase):
         )
         await _start_selection_response(bot, prepare_forever, target=target)
         await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
-        assert bot._response_runner.has_active_response_for_target(target)
+        assert bot._response_runner.lifecycle_coordinator.has_active_response_for_target(target)
 
         assert await bot._response_runner.inbox.drain_inbox_responses(cancel_after_seconds=0.01) is False
-        assert not bot._response_runner.has_active_response_for_target(target)
+        assert not bot._response_runner.lifecycle_coordinator.has_active_response_for_target(target)
 
     @pytest.mark.asyncio
     async def test_interactive_postresponse_settlement_failure_does_not_run_prestart_cleanup(
@@ -1720,7 +1720,7 @@ class TestAgentBot(AgentBotTestBase):
                 lifecycle_lock.release()
                 conversation.finish_response_turn()
                 lock_owned_by_test = False
-            assert not bot._response_runner.has_active_response_for_target(target)
+            assert not bot._response_runner.lifecycle_coordinator.has_active_response_for_target(target)
         finally:
             if lock_owned_by_test:
                 lifecycle_lock.release()

@@ -79,7 +79,7 @@ _LockedResponseResult = TypeVar("_LockedResponseResult")
 
 
 @dataclass(slots=True)
-class ResponseLifecycleReservation:
+class _ResponseLifecycleReservation:
     """One reply's place in its conversation: a begun turn, its notice to the running reply, and then the lock.
 
     A reply that reserves its place before it prepares queues for the lock in a task of its own; any other reply
@@ -156,7 +156,7 @@ class ResponseLifecycleReservation:
         await asyncio.shield(self._release_task)
 
 
-_current_response_lifecycle_reservation: ContextVar[ResponseLifecycleReservation | None] = ContextVar(
+_current_response_lifecycle_reservation: ContextVar[_ResponseLifecycleReservation | None] = ContextVar(
     "current_response_lifecycle_reservation",
     default=None,
 )
@@ -164,7 +164,7 @@ _current_response_lifecycle_reservation: ContextVar[ResponseLifecycleReservation
 
 @contextmanager
 def response_lifecycle_reservation_context(
-    reservation: ResponseLifecycleReservation,
+    reservation: _ResponseLifecycleReservation,
 ) -> Iterator[None]:
     """Carry one detached response's lifecycle reservation into execution."""
     token = _current_response_lifecycle_reservation.set(reservation)
@@ -470,6 +470,10 @@ class ResponseLifecycleCoordinator:
         lifecycle_key = ResponseLifecycleKey(room_id=room_id, thread_id=thread_id)
         return tuple(approval_id for approval_id, key in self._approval_holds.items() if key == lifecycle_key)
 
+    def note_edited_source(self, source_event_id: str) -> None:
+        """Count a continued reply's source as news again once its sender edits it."""
+        self.continued_sources -= {source_event_id}
+
     def _has_active_response_for_thread_key(self, lifecycle_key: ResponseLifecycleKey) -> bool:
         queued_signal = self._thread_queued_signals.get(lifecycle_key)
         return queued_signal is not None and queued_signal.has_active_response_turn()
@@ -503,7 +507,7 @@ class ResponseLifecycleCoordinator:
     async def reserve_response_lifecycle(
         self,
         response_envelope: MessageEnvelope,
-    ) -> ResponseLifecycleReservation:
+    ) -> _ResponseLifecycleReservation:
         """Reserve FIFO admission on one canonical lifecycle before response preparation."""
         reservation = self._begin_response_turn(response_envelope, signal_queued_message=True)
         try:
@@ -518,10 +522,10 @@ class ResponseLifecycleCoordinator:
         response_envelope: MessageEnvelope,
         *,
         signal_queued_message: bool,
-    ) -> ResponseLifecycleReservation:
+    ) -> _ResponseLifecycleReservation:
         """Begin one reply's turn on its conversation; a newer human message tells the running reply it waits."""
         queued_signal = self._get_or_create_queued_signal(response_envelope.target)
-        return ResponseLifecycleReservation(
+        return _ResponseLifecycleReservation(
             _coordinator=self,
             _lifecycle_key=response_envelope.target.lifecycle_key,
             _queued_signal=queued_signal,

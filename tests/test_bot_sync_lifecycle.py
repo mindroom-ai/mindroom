@@ -243,8 +243,8 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         assert gate._on_dispatch_failure == dispatcher.retry_turn_sources
         assert gate._on_undelivered_source == dispatcher.retry_turn_source
         assert gate._on_intentionally_ignored_sources == dispatcher.settle_intentionally_ignored_turn_sources
-        assert gate._wait_for_thread_response_idle == runner.wait_for_thread_response_idle
-        assert gate._active_thread_ids_for_room == runner.active_thread_ids_for_room
+        assert gate._wait_for_thread_response_idle == runner.lifecycle_coordinator.wait_for_thread_idle
+        assert gate._active_thread_ids_for_room == runner.lifecycle_coordinator.active_thread_ids_for_room
         assert gate._room_scope_is_single_conversation == bot._conversation_resolver.room_is_one_conversation
         # The journal's schedule trigger trusts exactly the senders the entity registry manages.
         assert dispatcher.sender_is_managed(bot.matrix_id.full_id)

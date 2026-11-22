@@ -256,11 +256,16 @@ class _RecordingResponseRunner:
         """Stand in for the runner's inbox ownership too, which ``track_inbox_response`` records."""
         return self
 
+    @property
+    def lifecycle_coordinator(self) -> _RecordingResponseRunner:
+        """Stand in for the conversations the runner shares too, none of which has a running reply."""
+        return self
+
     def has_active_response_for_target(self, target: MessageTarget) -> bool:  # noqa: ARG002
         return False
 
-    def is_held_for_approval(self, target: MessageTarget) -> bool:  # noqa: ARG002
-        return self.held_for_approval
+    def approval_holds(self, room_id: str, thread_id: str | None) -> tuple[str, ...]:  # noqa: ARG002
+        return ("approval",) if self.held_for_approval else ()
 
     def note_edited_source(self, source_event_id: str) -> None:
         self.edited_sources.append(source_event_id)
@@ -268,14 +273,9 @@ class _RecordingResponseRunner:
     async def reserve_response_lifecycle(self, response_envelope: MessageEnvelope) -> _ImmediateLifecycleReservation:  # noqa: ARG002
         return _ImmediateLifecycleReservation()
 
-    def reserve_waiting_human_message(
-        self,
-        *,
-        target: MessageTarget,  # noqa: ARG002
-        response_envelope: MessageEnvelope,  # noqa: ARG002
-    ) -> QueuedHumanNoticeReservation:
-        msg = "Queued-notice reservations are not part of these focused turn tests"
-        raise AssertionError(msg)
+    def reserve_waiting_human_message(self, **_kwargs: object) -> QueuedHumanNoticeReservation | None:
+        """Reserve nothing, as a conversation with no running reply does."""
+        return None
 
     def track_inbox_response(
         self,
