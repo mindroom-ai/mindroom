@@ -28,7 +28,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
-from mindroom.workflow_runs.engine import WorkflowLimits, calling_node, nested_key
+from mindroom.workflow_runs.engine import WorkflowLimits, calling_node, ceiling, nested_key
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
     WorkflowNodeState,
@@ -354,7 +354,7 @@ class WorkflowTools(Toolkit):
             raise WorkflowRunStoreError(msg)
         edited = source is not None or path is not None
         text = (await engine.scripts.resolve_source(context, source=source, path=path)).decode() if edited else None
-        return run, {"source": text, "rerun": list(rerun), "epoch": run.epoch}
+        return run, {"source": text, "rerun": list(rerun), "epoch": run.epoch, "persona": ceiling(context)}
 
     async def _reserve(
         self,
@@ -389,8 +389,9 @@ class WorkflowTools(Toolkit):
             room_id=context.room_id,
             thread_root_event_id=context.resolved_thread_id,
             execution_identity=serialize_tool_execution_identity(context.execution_identity),
-            # The tools a narrowed agent was left with are the run's, whatever its agent has.
-            persona=asdict(context.persona) if context.persona is not None else None,
+            # The tools a narrowed agent was left with are the run's, whatever its agent has, and a run inside a
+            # run has no more than that run.
+            persona=ceiling(context, engine.store.get_run(outer[0]).persona if outer else None),
             # Kept whole: a frame that shows it shortens it.
             title=str(title) if title else None,
             source=text,

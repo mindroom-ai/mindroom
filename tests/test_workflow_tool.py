@@ -47,7 +47,7 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function_n
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
-from mindroom.workflow_runs.engine import WorkflowLimits
+from mindroom.workflow_runs.engine import WorkflowLimits, ceiling
 from mindroom.workflow_runs.models import WorkflowRunState
 from tests.access_schema_support import with_responder_access
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
@@ -970,6 +970,83 @@ async def _failed(stack: WorkflowStack, **arguments: object) -> dict[str, str]:
     return handle
 
 
+def _persona(tools: tuple[str, ...] | None, skills: tuple[str, ...] | None = None) -> SubagentPersona:
+    return SubagentPersona("inline", "counter", "Count.", tools=tools, skills=skills)
+
+
+@pytest.mark.parametrize(
+    ("own", "saved", "tools", "skills"),
+    [
+        (_persona(("workflow", "counter.text")), None, ["workflow", "counter.text"], None),
+        (None, _persona(("workflow", "counter.text")), ["workflow", "counter.text"], None),
+        # A whole toolkit and one of its functions keep the function; a function of a toolkit the other lacks goes.
+        (_persona(("workflow", "counter")), _persona(("counter.text", "shell.run")), ["counter.text"], []),
+        (_persona(("counter.text",)), _persona(("counter.append",)), [], []),
+        # A list of tools without one of skills keeps no skill, whatever the other side kept.
+        (_persona(("counter",)), _persona(None, ("notes",)), ["counter"], []),
+        (_persona(None, ("notes", "maps")), _persona(None, ("maps",)), None, ["maps"]),
+    ],
+)
+def test_a_runs_ceiling_is_what_its_caller_and_its_saved_persona_both_keep(
+    stack: WorkflowStack,
+    own: SubagentPersona | None,
+    saved: SubagentPersona | None,
+    tools: list[str] | None,
+    skills: list[str] | None,
+) -> None:
+    """The one rule for a start, a start inside a run and a resume: the intersection, so nothing ever widens."""
+    kept = ceiling(replace(stack.context, persona=own), saved and asdict(saved))
+    assert kept is not None
+    as_lists = [None if kept[name] is None else list(kept[name]) for name in ("tools", "skills")]  # type: ignore[call-overload]
+    assert as_lists == [tools, skills]
+    assert ceiling(stack.context, None) is None
+
+
+@pytest.mark.asyncio
+async def test_a_turn_whose_tools_a_filter_narrows_starts_and_resumes_no_run(stack: WorkflowStack) -> None:
+    """A listening turn keeps to a list that no saved persona holds, so a run of it would get the agent's every tool."""
+    first = await _failed(stack)
+    filtered = replace(stack.context, tool_function_filter=lambda function: function.name != "append")
+    refusal = "A turn that is limited to some of its agent's tools cannot start or resume a workflow."
+
+    assert await _refused(stack, "start_workflow", context=filtered, source=SCRIPT) == refusal
+    assert await _refused(stack, "resume_workflow", context=filtered, run_id=first["run_id"]) == refusal
+    assert [run.run_id for run in stack.store.list_runs()] == [first["run_id"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", [{"source": SCRIPT + "# edited\n"}, {"rerun": ["n1"]}], ids=["edited", "rerun"])
+async def test_a_narrowed_copys_resume_leaves_the_run_what_both_keep(
+    stack: WorkflowStack,
+    edit: dict[str, Any],
+) -> None:
+    """A copy of the owner that kept fewer tools resumes its run: the run has no more than the copy from then on.
+
+    The job holds what the resume was accepted with, so a restart before the job took the run narrows it the same.
+    """
+    first = await _failed(stack)
+    assert stack.store.get_run(stack.run_id).persona is None
+    narrowed = replace(stack.context, persona=_persona(("workflow", "counter.text")))
+
+    handle = json.loads(await stack.call("resume_workflow", context=narrowed, run_id=first["run_id"], **edit))
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+
+    persona = stack.store.get_run(stack.run_id).persona
+    assert persona is not None
+    assert persona["tools"] == ["workflow", "counter.text"]
+    [job] = [job for job in stack.jobs.retained_jobs() if job.job_id == handle["job_id"]]
+    assert list(job.adapter["resume"]["persona"]["tools"]) == ["workflow", "counter.text"]
+    with pytest.raises(NodeFailed, match=r"counter\.append is not a tool of the agent that started this run"):
+        await stack.result("@1", "tool", tool_args("counter", "append", line="outside the persona"))
+    assert stack.counting_tool.lines == ["a"]
+    # The owner resumes it again with every tool: a resume never widens.
+    await stack.end_attempt(ScriptRunState.FAILED, output="KeyError: 'tide'")
+    assert (await _ended_job(stack, handle["job_id"])).status == "failed"
+    await stack.call("resume_workflow", run_id=first["run_id"])
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 3)
+    assert stack.store.get_run(stack.run_id).persona == persona
+
+
 @pytest.mark.asyncio
 async def test_resume_registers_a_new_job_when_the_old_one_ended(stack: WorkflowStack) -> None:
     """The resumed run is a new job with the same handle shape; the run keeps the job that first started it."""
@@ -991,7 +1068,7 @@ async def test_resume_registers_a_new_job_when_the_old_one_ended(stack: Workflow
         "workflow_job": handle["job_id"],
         "workflow": first["run_id"],
         # What the run was when the resume was accepted: the epoch its end gave it.
-        "resume": {"source": None, "rerun": [], "epoch": ended},
+        "resume": {"source": None, "rerun": [], "epoch": ended, "persona": None},
     }
     assert (run.origin_job_id, run.job_id) == (first["job_id"], handle["job_id"])
     assert stack.counting_tool.lines == ["a"]

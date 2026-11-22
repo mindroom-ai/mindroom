@@ -10,7 +10,7 @@ import time
 from collections import Counter, deque
 from contextlib import suppress
 from contextvars import ContextVar
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -19,6 +19,7 @@ from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
 from mindroom.delegation.personas import persona_allows
+from mindroom.delegation.state import SubagentPersona
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
@@ -108,6 +109,7 @@ _STOPPED_JOB_STATUSES = frozenset({"cancel_requested", "cancelled", "denied"})
 _NOT_CONTINUED_YET = "The agent of this call has not been continued yet after a restart. Try again in a moment."
 _RUN_ENDED = "The run ended before the agent did."
 _NO_SESSIONS = 'A workflow script cannot call delegate.{function} yet. Start a fresh agent with agent() or tool("delegate", "run_subagent", ...).'
+_FILTERED_TURN = "A turn that is limited to some of its agent's tools cannot start or resume a workflow."
 # The node of the script's tool call that the current task runs, for a call of the `workflow` toolkit made in it.
 _CALLING_NODE: ContextVar[tuple[str, str, int] | None] = ContextVar("workflow_calling_node", default=None)
 
@@ -125,6 +127,47 @@ def nested_key(outer: tuple[str, str, int], source: bytes, args: object) -> str:
     """
     identity = [*outer, hashlib.sha256(source).hexdigest(), args]
     return "nested:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def ceiling(context: ToolRuntimeContext, *saved: Mapping[str, object] | None) -> dict[str, object] | None:
+    """Return the persona a run is saved with: what the turn in *context* and every persona of *saved* all keep.
+
+    *saved* is the run's own persona when the turn resumes it, and its outer run's when the turn starts it inside
+    that run. A run so never has more than the turn that started it, nor more than a narrower one that resumed it.
+    A turn that a filter narrows keeps a list no persona holds, so it is refused.
+    """
+    if context.tool_function_filter is not None:
+        raise WorkflowRunStoreError(_FILTERED_TURN)
+    kept = context.persona
+    for other in (SubagentPersona.from_dict(persona) for persona in saved if persona is not None):
+        kept = (
+            other
+            if kept is None
+            else replace(
+                kept,
+                tools=_both(kept.tools, other.tools, toolkits=True),
+                skills=_both(kept.kept_skills, other.kept_skills),
+                knowledge=_both(kept.kept_knowledge, other.kept_knowledge),
+            )
+        )
+    return asdict(kept) if kept is not None else None
+
+
+def _both(
+    one: tuple[str, ...] | None,
+    other: tuple[str, ...] | None,
+    *,
+    toolkits: bool = False,
+) -> tuple[str, ...] | None:
+    """Return the names both lists hold, where None holds every name and a toolkit holds each of its functions."""
+    if one is None or other is None:
+        return other if one is None else one
+    names = dict.fromkeys((*one, *other))
+    return tuple(
+        name
+        for name in names
+        if all(name in side or (toolkits and name.partition(".")[0] in side) for side in (one, other))
+    )
 
 
 # How long a waiter sleeps before it reads the store again, with or without a wake.
@@ -404,6 +447,7 @@ class WorkflowEngine:
         owner: str | None = None,
         job_id: str | None = None,
         epoch: int | None = None,
+        persona: Mapping[str, object] | None = None,
     ) -> tuple[WorkflowRun, bool]:
         """Make an ended run ready for its next attempt, with the full working time; `launch` then starts it.
 
@@ -415,7 +459,8 @@ class WorkflowEngine:
         of *rerun* are marked. A run that is *owner*'s already was taken by this same invocation, delivered again,
         and is returned as it is. *epoch* is the one the run had when the resume was accepted: a run that another
         resume took since, also one whose attempt never started, is refused, as is one over its owner's limit of
-        live runs. A job was accepted with its request, so it waits here while `admit` cannot answer yet.
+        live runs. A job was accepted with its request, so it waits here while `admit` cannot answer yet. *persona*
+        is that of the turn the resume was accepted from: the run keeps what it, *context* and the run all keep.
         """
         limits = limits or WorkflowLimits()
         run = self.store.get_run(run_id)
@@ -434,6 +479,7 @@ class WorkflowEngine:
             state=WorkflowRunState.STARTING,
             source=text,
             source_digest=hashlib.sha256(text.encode()).hexdigest(),
+            persona=ceiling(context, persona, run.persona),
             previous_source_digest=run.source_digest,
             runtime_seconds_left=limits.max_runtime_hours * 3600 if limits.max_runtime_hours else None,
             idle_resumes=0,

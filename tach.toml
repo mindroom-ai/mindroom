@@ -2562,6 +2562,7 @@ expose = [
 path = "mindroom.workflow_runs.engine"
 depends_on = [
     "mindroom.delegation.personas",
+    "mindroom.delegation.state",
     "mindroom.tool_jobs.runtime",
     "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.faults",
@@ -2573,7 +2574,15 @@ depends_on = [
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.engine"]
-expose = ["ResumeAccess", "SupersededAttemptError", "WorkflowEngine", "WorkflowLimits", "calling_node", "nested_key"]
+expose = [
+    "ResumeAccess",
+    "SupersededAttemptError",
+    "WorkflowEngine",
+    "WorkflowLimits",
+    "calling_node",
+    "ceiling",
+    "nested_key",
+]
 
 [[modules]]
 path = "mindroom.orchestration.workflow_runtime"

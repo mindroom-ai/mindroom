@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from contextlib import closing
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -16,6 +17,7 @@ import pytest_asyncio
 from mindroom.approval.tool_approval import ToolApprovalDecision
 from mindroom.config.models import ModelPricing
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id
+from mindroom.delegation.state import SubagentPersona
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.workflow_runs import agent_nodes
@@ -604,6 +606,28 @@ async def test_restart_during_a_scripts_nested_run_ends_its_call_indeterminate(s
     assert cut_short.value.kind == "indeterminate"
     inside = [(run.run_id, run.state) for run in stack.store.child_runs(parent)]
     assert inside == [(child.run_id, WorkflowRunState.RUNNING)]
+
+
+@pytest.mark.asyncio
+async def test_a_run_started_by_the_script_of_a_narrowed_run_has_no_more_tools_than_that_run(
+    stack: WorkflowStack,
+) -> None:
+    """The broker's context has no persona, so the run inside takes the one its outer run was saved with."""
+    persona = SubagentPersona("inline", "counter", "Count.", tools=("workflow", "counter.text"))
+    await stack.start(persona=asdict(persona))
+    parent = stack.run_id
+    with pytest.raises(NodeFailed, match="not a tool of the agent"):
+        await stack.result("@0", "tool", tool_args("counter", "append", line="outer"))
+
+    await stack.submit("@1", "tool", tool_args("workflow", "start_workflow", source=_SOURCE))
+    child = await _nested(stack, parent)
+    stack.run_id = child.run_id
+
+    assert child.persona is not None
+    assert child.persona["tools"] == ["workflow", "counter.text"]
+    with pytest.raises(NodeFailed, match="not a tool of the agent"):
+        await stack.result("@0", "tool", tool_args("counter", "append", line="widened"))
+    assert stack.counting_tool.lines == []
 
 
 @pytest.mark.asyncio
