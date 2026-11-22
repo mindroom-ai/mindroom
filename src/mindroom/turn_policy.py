@@ -24,7 +24,7 @@ from mindroom.managed_room_notice import managed_room_notice, responder_display_
 from mindroom.matrix.room_membership import cached_joined_member_ids
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.responder_availability import filter_materializable_responders
-from mindroom.room_settings import SettingRead, refresh_room_settings
+from mindroom.room_settings import REPLY_MODE, SettingRead, event_reply_mode, refresh_room_setting
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.steward_duties import room_state_response_as_steward
 from mindroom.teams.formation import (
@@ -662,10 +662,12 @@ class TurnPolicy:
         wrote follow the room's ordinary rules.
         """
         context = dispatch.context
-        read = None
-        if (client := self.deps.runtime.client) is not None:
-            # Every turn passes here, so the room's other settings are read with its reply mode.
-            read = await refresh_room_settings(
+        # The read made before the turn's event was dispatched decides; only a turn of a room no event was read for
+        # reads the reply mode itself.
+        read = event_reply_mode(self.deps.runtime_paths, dispatch.target.room_id)
+        if read is None and (client := self.deps.runtime.client) is not None:
+            read = await refresh_room_setting(
+                REPLY_MODE,
                 client,
                 self.deps.runtime_paths,
                 dispatch.target.room_id,

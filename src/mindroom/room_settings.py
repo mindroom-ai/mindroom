@@ -118,6 +118,8 @@ _NEVER_READ = _Copy(None, 0, _UNCONFIRMED)
 _writes: WeakValueDictionary[_Key, asyncio.Lock] = WeakValueDictionary()
 # Each model setting that names no configured model, which is logged once.
 _stale_models_logged: set[_Key] = set()
+# What the read before a room's latest event found its reply mode to be, which a turn decides by.
+_event_reply_modes: dict[tuple[Path, str], SettingRead[RoomReplyMode]] = {}
 # What a runtime has tell a room's steward that a read found the room's `thread_mode` changed.
 _thread_mode_changed: dict[Path, Callable[[str], object]] = {}
 
@@ -286,6 +288,10 @@ async def refresh_room_setting[T: str](  # noqa: PLR0911 - one outcome per answe
     ``force`` reads it whatever the copy's age. A caller deciding now uses the result, not the copy, which a later
     event may already have changed. A failed read keeps the copy. ``put_state``, the room steward's, writes an older
     runtime's override into a room without the setting; the read a write ends with passes None and moves nothing.
+    ``client`` must be in the room: one that left is answered with the room's state as it left it.
+
+    The move is a read, then a write, and the room has no way to refuse the write over a newer setting: one that a
+    client other than this runtime sets between the two is overwritten.
     """
     import nio  # noqa: PLC0415 - config reads the copy above without loading the Matrix client
 
@@ -347,17 +353,24 @@ async def refresh_room_settings(
 ) -> SettingRead[RoomReplyMode]:
     """Refresh every setting a turn uses, at once, and return what the reply mode's read found.
 
-    Every event of a room is dispatched after this, so nothing an event decides by the runtime's copy, such as its
-    conversation, an edit's scope or a command's model, is decided before the room was read: not after a restart,
+    Every event of a room that uses a setting is dispatched after this, so nothing it decides by the runtime's copy,
+    such as its conversation, an edit's scope or its model, is decided before the room was read: not after a restart,
     when the runtime has no copy, and not by a copy no read confirmed recently. Each read gives up after a few
-    seconds, and the event then goes on by what the runtime knew.
+    seconds, and the event then goes on by what the runtime knew. Its turn decides by the reply mode found here and
+    reads nothing, so a room that does not answer costs an event that one wait.
     """
     reply_mode, _model, _thread_mode = await asyncio.gather(
         refresh_room_setting(REPLY_MODE, client, runtime_paths, room_id, put_state=put_state),
         refresh_room_setting(MODEL, client, runtime_paths, room_id, put_state=put_state),
         refresh_room_setting(THREAD_MODE, client, runtime_paths, room_id, put_state=put_state),
     )
+    _event_reply_modes[runtime_paths.storage_root, room_id] = reply_mode
     return reply_mode
+
+
+def event_reply_mode(runtime_paths: RuntimePaths, room_id: str) -> SettingRead[RoomReplyMode] | None:
+    """Return what the read before the room's latest event found its reply mode to be, None when none was made."""
+    return _event_reply_modes.get((runtime_paths.storage_root, room_id))
 
 
 async def write_room_setting[T: str](

@@ -36,6 +36,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
 )
 from mindroom.entity_resolution import current_entity_id
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.llm.media import Audio
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.matrix.state import MatrixState
@@ -69,6 +70,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.journal_helpers import admit_dispatch_event
 from tests.matrix_state_helpers import save_matrix_state
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.room_settings_helpers import RoomStateHomeserver as _Homeserver
@@ -968,6 +970,39 @@ async def test_a_turn_reads_the_rooms_setting_it_has_not_seen_yet(
 
     with patch(f"{__name__}._policy_for", new=policy_reading_the_homeserver):
         assert await _answers(config, _Turn()) == expected
+
+
+@pytest.mark.asyncio
+async def test_a_room_that_does_not_answer_costs_a_message_one_wait(tmp_path: Path) -> None:
+    """The read made before a message is dispatched decides its turn, which does not wait for the room again."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", rooms=[ROOM_ID])}),
+        test_runtime_paths(tmp_path),
+    )
+    paths = runtime_paths_for(config)
+    bot = _ingress_bot(config, paths, ready_runtime(config, paths), "general")
+    generate = AsyncMock()
+    install_generate_response_mock(bot, generate)
+    room = nio.MatrixRoom(ROOM_ID, bot.client.user_id)
+    for member in (SENDER, bot.client.user_id):
+        room.add_member(member, member, None)
+
+    async def stalls(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    bot.client.room_get_state_event = AsyncMock(side_effect=stalls)
+
+    with patch("mindroom.room_settings._REQUEST_TIMEOUT_SECONDS", 0.05):
+        message = _text_message(paths, "$event", "hello")
+        message.source["type"] = "m.room.message"
+        await admit_dispatch_event(bot._journal_dispatcher, room, message, EventKind.MESSAGE, EventClass.ACTIONABLE)
+        async with asyncio.timeout(5):
+            await bot._journal_dispatcher.drain_once()
+            await drain_coalescing(bot)
+
+    assert generate.await_count == 1
+    reads = [call.args[2] for call in bot.client.room_get_state_event.await_args_list]
+    assert sorted(reads) == ["model", "reply_mode", "thread_mode"]
 
 
 @pytest.mark.asyncio
