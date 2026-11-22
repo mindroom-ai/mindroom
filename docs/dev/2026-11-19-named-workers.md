@@ -112,7 +112,10 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   Neither does a tailnet SSH link, whose sshd uses none of what the setup prepares.
   The setup wait runs outside the worker's provisioning lock, so such a caller goes on once the worker answers while a tool caller waits; a later tool caller waits behind the first one's wait and reads no health of its own.
   Whether a caller waits is left out of what a worker spec compares, so it never makes a cached ready worker stale.
-  A pending setup wait counts as use: idle cleanup leaves the worker alone while a tool caller waits, and a wait of at least one poll records the worker as used when it hands the worker to its caller, so a setup longer than the idle timeout never ends in a stopped worker.
+  A pending setup wait counts as current use of the worker and nothing else: it spares the worker the idle timeout while a tool caller waits, and a named worker's maximum age still ends it.
+  A wait of at least one poll records the worker as used at the time it hands the worker to its caller, so a setup longer than the idle timeout does not end in a stopped worker.
+  That record never moves the worker's last use back, and a cluster that refuses it only logs a warning, because a start records no use after the worker is ready.
+  A wait is published and forgotten under the worker's lock, so a wait that ends never forgets the wait of a newer start.
   A request whose plugins do not begin with what the template imported runs in a second, plain template that never imported them, started on the first such request: an import's global effects, such as a registered YAML constructor, cannot be undone in the process that ran it, and starting an interpreter per call would cost the whole tool import each time.
   So no request replaces a template another request is about to fork from, at the price of a second template's memory in a worker that serves both kinds of request.
   The runner chooses the template before it dispatches, so each request is dispatched once and keeps one deadline; a child that decided for itself needed a second dispatch.
