@@ -2330,7 +2330,7 @@ async def test_get_thread_tag_content_raises_on_other_errors() -> None:
 
 @pytest.mark.asyncio
 async def test_get_thread_tag_content_raises_on_a_server_error_body() -> None:
-    """A non-404 answer fails the read, even one whose body says M_NOT_FOUND; only a 404 means the tag is unset."""
+    """A non-404 answer fails the read, even one whose body says M_NOT_FOUND; only a 404 M_NOT_FOUND means unset."""
     answers = {
         '["$root","snoozed"]': (500, {"errcode": "M_UNKNOWN", "error": "boom"}),
         '["$proxy","snoozed"]': (503, {"errcode": "M_NOT_FOUND", "error": "upstream down"}),
