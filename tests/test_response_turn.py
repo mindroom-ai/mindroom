@@ -23,7 +23,7 @@ from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, Del
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history import storage as history_storage
 from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput
-from mindroom.history.session_context import ScopeSessionContext, scrub_scope_session_redactions
+from mindroom.history.session_context import ScopeSessionContext, load_scrubbed_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
@@ -683,10 +683,7 @@ async def test_history_cleanup_repeats_until_a_pass_removes_nothing_new(monkeypa
         storage_factory=lambda: Mock(spec=ConversationStore),
     )
 
-    await scrub_scope_session_redactions(
-        scope_context,
-        redacted_history_events,
-    )
+    await load_scrubbed_scope_session(lambda: scope_context, redacted_history_events)
 
     # The third pass still sees "$z" but has nothing new to remove, so it stops.
     assert removed == ["$x", "$z"]

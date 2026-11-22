@@ -91,7 +91,6 @@ def resolve_bound_team_scope(
 
 
 def load_scope_session_from_storage(
-    *,
     scope: HistoryScope,
     session_id: str,
     storage_factory: Callable[[], ConversationStore],
@@ -99,14 +98,7 @@ def load_scope_session_from_storage(
     """Open one scope's conversation store and load its session context."""
     storage = storage_factory()
     session = storage.load_session(session_id)
-    return ScopeSessionContext(
-        scope=scope,
-        storage=storage,
-        session=session,
-        session_id=session_id,
-        storage_factory=storage_factory,
-        session_exists=session is not None,
-    )
+    return ScopeSessionContext(scope, storage, session, session_id, storage_factory, session_exists=session is not None)
 
 
 def load_scope_session(
@@ -118,39 +110,14 @@ def load_scope_session(
     execution_identity: ToolExecutionIdentity | None,
 ) -> ScopeSessionContext:
     """Load the session context of one already-resolved persisted history scope for the current request."""
-    return load_scope_session_from_storage(
+    storage_factory = partial(
+        create_scope_session_storage,
         scope=scope,
-        session_id=session_id,
-        storage_factory=partial(
-            create_scope_session_storage,
-            scope=scope,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        ),
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
     )
-
-
-async def scrub_scope_session_redactions(
-    scope_context: ScopeSessionContext,
-    redacted_history_events: Callable[[tuple[str, ...]], Awaitable[Mapping[str, str | None]]] | None,
-) -> list[str]:
-    """Remove persisted history derived from events since redacted, before the history is used."""
-    if redacted_history_events is None or scope_context.session is None:
-        return []
-    removed_event_ids = await remove_history_of_redacted_events(
-        scope_context.storage,
-        scope_context.session,
-        redacted_history_events,
-    )
-    if removed_event_ids:
-        logger.info(
-            "Removed history derived from redacted events",
-            session_id=scope_context.session.session_id,
-            history_scope=scope_context.scope.key,
-            redacted_event_ids=removed_event_ids,
-        )
-    return removed_event_ids
+    return load_scope_session_from_storage(scope, session_id, storage_factory)
 
 
 async def load_scrubbed_scope_session(
@@ -159,7 +126,19 @@ async def load_scrubbed_scope_session(
 ) -> ScopeSessionContext:
     """Load one scope session off the event loop, drained of cancellation, without redacted history."""
     scope_context = await run_blocking_until_complete(load_scope)
-    await scrub_scope_session_redactions(scope_context, redacted_history_events)
+    if redacted_history_events is not None and scope_context.session is not None:
+        removed_event_ids = await remove_history_of_redacted_events(
+            scope_context.storage,
+            scope_context.session,
+            redacted_history_events,
+        )
+        if removed_event_ids:
+            logger.info(
+                "Removed history derived from redacted events",
+                session_id=scope_context.session.session_id,
+                history_scope=scope_context.scope.key,
+                redacted_event_ids=removed_event_ids,
+            )
     return scope_context
 
 

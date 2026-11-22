@@ -696,15 +696,8 @@ class TurnStore:
             self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester_user_id),
             scope=scope,
         )
-        scope_context = await load_scrubbed_scope_session(
-            partial(
-                load_scope_session_from_storage,
-                scope=scope,
-                session_id=target.session_id,
-                storage_factory=storage_factory,
-            ),
-            partial(self.redacted_history_events, target),
-        )
+        load_scope = partial(load_scope_session_from_storage, scope, target.session_id, storage_factory)
+        scope_context = await load_scrubbed_scope_session(load_scope, partial(self.redacted_history_events, target))
         removed_any = await run_blocking_until_complete(
             _remove_runs_for_sources,
             scope_context.storage,

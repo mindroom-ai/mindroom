@@ -86,11 +86,8 @@ class DegradedThreadHistoryError(RuntimeError):
     """Raised when a strict post-lock thread-history read returned degraded history."""
 
     def __init__(self, target: MessageTarget, history: ThreadHistoryResult) -> None:
-        self.target = target
-        self.history = history
-        super().__init__(
-            f"Thread history read degraded for room={target.room_id} thread={target.resolved_thread_id}",
-        )
+        self.target, self.history = target, history
+        super().__init__(f"Thread history degraded for {target.room_id}/{target.resolved_thread_id}")
 
 
 def existing_event(request: ResponseRequest) -> tuple[str | None, bool]:
@@ -295,15 +292,12 @@ class LockedTurns:
         reply_entity_names: Sequence[str] = (),
     ) -> bool:
         """Recheck one requester under the conversation lock with resolved membership."""
-        entity_names = reply_authorization_entity_names(
-            self.deps.runtime.config,
-            self.deps.agent_name,
-            reply_entity_names,
-        )
+        config = self.deps.runtime.config
+        entity_names = reply_authorization_entity_names(config, self.deps.agent_name, reply_entity_names)
         return is_sender_allowed_for_entity_replies_in_room(
             requester_id,
             entity_names,
-            self.deps.runtime.config,
+            config,
             room_id,
             self.deps.runtime_paths,
             self.deps.runtime.agent_reply_memberships,
@@ -321,9 +315,7 @@ class LockedTurns:
         if self.requester_remains_authorized(requester_id, request.room_id, reply_entity_names=reply_entity_names):
             return True
         entity_names = reply_authorization_entity_names(
-            self.deps.runtime.config,
-            self.deps.agent_name,
-            reply_entity_names,
+            self.deps.runtime.config, self.deps.agent_name, reply_entity_names
         )
         self.deps.logger.info(
             "response_suppressed_after_authorization_revocation",
@@ -355,16 +347,12 @@ class LockedTurns:
         return persist_response_event_id
 
     async def read_fresh_thread_history(
-        self,
-        target: MessageTarget,
-        *,
-        strict: bool = False,
+        self, target: MessageTarget, *, strict: bool = False
     ) -> ThreadHistoryResult | None:
         """Read fresh, fork-aware thread history for one locked target; None for a room-mode target."""
-        thread_id = target.resolved_thread_id
-        if thread_id is None:
+        if target.resolved_thread_id is None:
             return None
-        history = await self.deps.resolver.fetch_thread_history(target.room_id, thread_id)
+        history = await self.deps.resolver.fetch_thread_history(target.room_id, target.resolved_thread_id)
         if strict and is_thread_history_degraded(history):
             raise DegradedThreadHistoryError(target, history)
         return history

@@ -728,8 +728,7 @@ class ResponseLifecycleCoordinator:
         admit: Callable[[], AbstractAsyncContextManager[None]] | None = None,
         wait_for_approval_release: Callable[[Coroutine[None, None, object]], Awaitable[bool]] | None = None,
         reservation: ResponseLifecycleReservation | None = None,
-        on_lock_wait_start: Callable[[], None] | None = None,
-        on_lock_acquired: Callable[[], None] | None = None,
+        pipeline_timing: DispatchPipelineTiming | None = None,
         counts_as_reply: bool = False,
     ) -> AsyncIterator[None]:
         """Acquire exclusive FIFO ownership of one target, waiting out approvals without admission when requested."""
@@ -744,8 +743,8 @@ class ResponseLifecycleCoordinator:
                 async with AsyncExitStack() as stack:
                     if admit is not None:
                         await stack.enter_async_context(admit())
-                    if on_lock_wait_start is not None:
-                        on_lock_wait_start()
+                    if pipeline_timing is not None:
+                        pipeline_timing.mark("lock_wait_start")
                     if reservation is not None:
                         await reservation.wait_until_acquired()
                         stack.push_async_callback(reservation.release)
@@ -754,8 +753,8 @@ class ResponseLifecycleCoordinator:
                         stack.callback(lock.release)
                     if wait_for_approval_release is not None and key in self._approval_holds.values():
                         continue
-                    if on_lock_acquired is not None:
-                        on_lock_acquired()
+                    if pipeline_timing is not None:
+                        pipeline_timing.mark("lock_acquired")
                     if not counts_as_reply:
                         self._lock_only_owners.add(key)
                         stack.callback(self._lock_only_owners.discard, key)
@@ -793,8 +792,7 @@ class ResponseLifecycleCoordinator:
             async with self.exclusive_conversation(
                 target,
                 reservation=reservation,
-                on_lock_wait_start=(lambda: pipeline_timing.mark("lock_wait_start")) if pipeline_timing else None,
-                on_lock_acquired=(lambda: pipeline_timing.mark("lock_acquired")) if pipeline_timing else None,
+                pipeline_timing=pipeline_timing,
                 counts_as_reply=True,
             ):
                 self._consume_response_turn_notice(
