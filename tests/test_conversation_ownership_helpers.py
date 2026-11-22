@@ -859,8 +859,10 @@ def test_runtime_source_kinds_matches_runner_handler_table() -> None:
 
 def _suppressing_fence(
     runtime: BotRuntimeState,
-    suppressed: type[Exception],
+    suppressed: type[BaseException],
     admissions: list[None],
+    *,
+    resume_on_exit: bool = False,
 ) -> Callable[[], AbstractAsyncContextManager[None]]:
     """Return the runtime's admission fence wrapped to swallow one exception type raised while it is held."""
 
@@ -870,6 +872,8 @@ def _suppressing_fence(
         async with runtime.admission_fence():
             with suppress(suppressed):
                 yield
+            if resume_on_exit:
+                runtime.resume()
 
     return fence
 
@@ -905,11 +909,17 @@ async def test_exclusive_conversation_ends_after_one_admission_when_admit_suppre
     assert target.lifecycle_key not in coordinator._exclusive_users
 
 
+@pytest.mark.parametrize("failure", ["refused", "refused_then_resumed", "cancelled"])
 @pytest.mark.asyncio
-async def test_exclusive_conversation_still_refuses_when_admit_suppresses_the_refusal_under_the_lock(
+async def test_exclusive_conversation_reraises_a_pre_body_exception_that_admit_suppresses(
     tmp_path: Path,
+    failure: str,
 ) -> None:
-    """A refusal raised under the lock, before the body, still reaches the caller when ``admit`` suppresses it."""
+    """A refusal or cancellation before the body reaches the caller, after one admission, when ``admit`` suppresses it.
+
+    The helper never tries again, so a runtime that resumes while the fence unwinds cannot start the refused body.
+    """
+    expected = asyncio.CancelledError if failure == "cancelled" else ResponseAdmissionRefusedError
     bot = _bot(tmp_path)
     runtime = BotRuntimeState(orchestrator=bot.orchestrator)
     gate = runtime.response_admission_gate
@@ -939,7 +949,12 @@ async def test_exclusive_conversation_still_refuses_when_admit_suppresses_the_re
         nonlocal body_ran
         async with coordinator.exclusive_conversation(
             target,
-            admit=_suppressing_fence(runtime, ResponseAdmissionRefusedError, admissions),
+            admit=_suppressing_fence(
+                runtime,
+                expected,
+                admissions,
+                resume_on_exit=failure == "refused_then_resumed",
+            ),
             wait_for_approval_release=runtime.wait_for_admission_or_shutdown,
             accepting=lambda: runtime.phase is RunPhase.ACCEPTING,
         ):
@@ -949,10 +964,14 @@ async def test_exclusive_conversation_still_refuses_when_admit_suppresses_the_re
     await asyncio.sleep(0)
     assert gate.in_flight_response_count == 1
 
-    runtime.begin_draining()
+    if failure == "cancelled":
+        exclusive_task.cancel()
+        await asyncio.sleep(0)
+    else:
+        runtime.begin_draining()
     reply_release.set()
     await asyncio.wait_for(reply_task, timeout=2)
-    with pytest.raises(ResponseAdmissionRefusedError):
+    with pytest.raises(expected):
         await asyncio.wait_for(exclusive_task, timeout=2)
 
     assert body_ran is False

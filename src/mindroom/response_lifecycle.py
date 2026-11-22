@@ -749,14 +749,18 @@ class ResponseLifecycleCoordinator:
     ) -> AsyncIterator[None]:
         """Acquire exclusive lock-only FIFO ownership of one target, admitted by one runtime.
 
-        Waits out paused approvals through ``wait_for_approval_release`` without holding
-        admission or the lock, and refuses with ``ResponseAdmissionRefusedError`` once
-        ``accepting`` is false: before admission, and again under the lock immediately
-        before yielding. All three come from the same runtime and are required, so no
-        caller can admit work and leave out the stop checks.
+        The body starts only while ``accepting()`` is true, checked under the lock
+        immediately before yielding (and once before admission); otherwise the call ends
+        with ``ResponseAdmissionRefusedError``. Paused approvals are waited out through
+        ``wait_for_approval_release`` without holding admission or the lock, and only an
+        approval that appears while this call is queued makes it wait and admit again.
+        ``admit`` must not swallow exceptions raised before the body; if it does, they
+        are re-raised. All three callables come from the same runtime and are required,
+        so no caller can admit work and leave out the stop checks.
         """
         key = target.lifecycle_key
         self._exclusive_users[key] += 1
+        failure: BaseException | None = None
         try:
             while True:
                 await self._wait_for_approval_release(key, wait_for_approval_release)
@@ -764,21 +768,30 @@ class ResponseLifecycleCoordinator:
                 lock = self._response_lifecycle_lock(target)
                 owned = False
                 async with AsyncExitStack() as stack:
-                    await stack.enter_async_context(admit())
-                    await self._acquire_response_turn_lock(lock, None)
-                    stack.callback(lock.release)
-                    if key in self._approval_holds.values():
-                        continue
-                    self._require_accepting(accepting)
+                    try:
+                        await stack.enter_async_context(admit())
+                        await self._acquire_response_turn_lock(lock, None)
+                        stack.callback(lock.release)
+                        if key in self._approval_holds.values():
+                            continue
+                        self._require_accepting(accepting)
+                    except BaseException as exc:
+                        failure = exc
+                        raise
                     self._lock_only_owners.add(key)
                     stack.callback(self._lock_only_owners.discard, key)
                     owned = True
                     yield
-                # Reached without a ``continue`` only when ``admit`` suppressed an exception: one from the
-                # body ends the context as suppressed, and one from before the body tries again.
+                # Only the ``continue`` above tries again. Here either the body ran, and it finished or ``admit``
+                # suppressed its exception, or ``admit`` swallowed an exception raised before the body.
                 if owned:
                     return
+                if failure is None:
+                    msg = "exclusive_conversation left admission without running its body"
+                    raise RuntimeError(msg)
+                raise failure
         finally:
+            failure = None  # Its traceback holds this frame, so keeping it would leave a reference cycle.
             self._exclusive_users[key] -= 1
             if not self._exclusive_users[key]:
                 del self._exclusive_users[key]
