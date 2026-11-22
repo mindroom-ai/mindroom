@@ -12,6 +12,7 @@ import json
 import re
 import sqlite3
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -20,7 +21,8 @@ import pytest_asyncio
 import structlog
 
 from mindroom import authorization
-from mindroom.config.agent import AgentConfig
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.custom_tools import workflow as workflow_tool_module
 from mindroom.custom_tools.workflow import workflow_job_standing
 from mindroom.orchestration import tool_job_runtime as coordinator_module
@@ -37,11 +39,13 @@ from mindroom.script_runs.reasons import (
     RUNTIME_SHUTDOWN,
     WORKFLOW_TOOL_REMOVED,
 )
+from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.engine import SupersededAttemptError
 from mindroom.workflow_runs.models import NodeRequest, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStoreError
+from tests.access_schema_support import with_responder_access
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.tool_job_helpers import wait_for_status
 from tests.workflow_helpers import NodeFailed, WorkflowStack, set_run, tool_args, workflow_stack
@@ -1313,6 +1317,50 @@ async def test_run_goes_on_only_once_its_bot_is_synced_and_still_in_the_runs_roo
 
     run = stack.store.get_run(stack.run_id)
     assert (run.state, run.error, len(stack.scripts.launched)) == ends
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_run_that_a_teams_member_started_is_answered_for_by_the_team(stack: WorkflowStack) -> None:
+    """The requester reaches the member through the team, and only the team's bot is in the room: the run goes on.
+
+    The real resolver answers. A plain script of the same member is its agent's own, as it was.
+    """
+    context, alice = stack.context, stack.context.requester_id
+    config = context.config.model_copy(deep=True)
+    config.teams["crew"] = TeamConfig(display_name="Crew", role="Answers together.", agents=[context.agent_name])
+    with_responder_access(config, "crew", users=[alice])
+    with_responder_access(config, context.agent_name, users=["@somebody-else:example.test"])
+
+    def bot(*rooms: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            running=True,
+            first_sync_complete=True,
+            client=SimpleNamespace(rooms=dict.fromkeys(rooms)),
+            config=config,
+            orchestrator=SimpleNamespace(agent_reply_memberships=AgentReplyMembershipIndex()),
+            tool_runtime_support=SimpleNamespace(build_context=lambda _target, **_owner: context),
+        )
+
+    bots = {context.agent_name: bot(), "crew": bot(context.room_id)}
+    resolver = _LiveScriptRuntimeResolver(context.runtime_paths, bots.get, lambda _run: None)  # type: ignore[arg-type]
+    script_runtime = SimpleNamespace(
+        resolver=resolver,
+        runtime_paths=context.runtime_paths,
+        config_provider=lambda: config,
+    )
+    lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
+    await stack.start(SCRIPT)
+    served = serialize_tool_execution_identity(replace(context.execution_identity, transport_agent_name="crew"))
+    run = replace(stack.store.get_run(stack.run_id), execution_identity=served)
+
+    access = lifecycle._access(run)
+
+    assert isinstance(access, tuple)
+    assert access[0] is context
+    attempt = replace(stack.attempt, execution_identity=served)
+    assert resolver.is_authorized(attempt) is True
+    assert resolver.is_authorized(replace(attempt, workflow_run_id=None)) is False
 
 
 _NOT_READY = "The run's agent is not ready in the run's room yet. Try again in a moment."

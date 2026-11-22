@@ -87,10 +87,11 @@ class WorkflowRuntimeLifecycle:
             or "workflow" not in config.resolve_agent(run.agent_name).tools.tool_names
         ):
             return "revoked"
-        bot = resolver.bot_provider(run.agent_name)
-        if bot is None or not bot.first_sync_complete or bot.client is None:
-            return "pending"
         try:
+            # The bot that answers for the run: its agent's, or the team's that its agent answered in.
+            bot = resolver.serving_bot(owner, config)
+            if bot is None or not bot.first_sync_complete or bot.client is None:
+                return "pending"
             authorized = resolver.is_authorized(owner, require_resolved_membership=True)
             if authorized is None:
                 return "pending"

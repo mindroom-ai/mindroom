@@ -212,19 +212,26 @@ class _LiveScriptRuntimeResolver:
 
         With *require_resolved_membership*, room membership that is still loading raises instead of denying.
         """
-        bot = self.bot_provider(run.agent_name)
-        if bot is None or not bot.running:
+        bot = self.serving_bot(run, config)
+        if bot is None:
             return None
         current_config = bot.config if config is None else config
         return is_sender_allowed_for_agent_reply_in_room(
             run.owner_user_id,
-            run.agent_name,
+            _serving_entity(run, current_config),
             current_config,
             run.room_id,
             self.runtime_paths,
             bot.orchestrator.agent_reply_memberships,
             require_resolved_membership=require_resolved_membership,
         )
+
+    def serving_bot(self, run: ScriptRunRecord, config: Config | None = None) -> AgentBot | None:
+        """Return the running bot that answers for *run*, None while it or the bot of the run's agent is not running."""
+        bot = self.bot_provider(run.agent_name)
+        if bot is not None and bot.running and _of_workflow(run):
+            bot = self.bot_provider(_serving_entity(run, config or bot.config))
+        return bot if bot is not None and bot.running else None
 
     def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
         """Rebuild a context only from the exact durable Matrix execution identity."""
@@ -240,8 +247,8 @@ class _LiveScriptRuntimeResolver:
         ):
             msg = "Background script execution identity does not match its durable owner."
             raise ValueError(msg)
-        bot = self.bot_provider(run.agent_name)
-        if bot is None or not bot.running:
+        bot = self.serving_bot(run)
+        if bot is None:
             msg = f"Agent runtime '{run.agent_name}' is restarting."
             raise _ScriptRuntimeUnavailableError(msg)
         target = MessageTarget(
@@ -1213,6 +1220,24 @@ def build_script_runtime(
         api_enabled=api_enabled,
         retention_seconds=_script_retention_seconds(runtime_paths),
     )
+
+
+def _of_workflow(run: ScriptRunRecord) -> bool:
+    """Return whether *run* is a workflow run, which the workflow lifecycle asks for, or an attempt of one."""
+    return getattr(run, "workflow_run_id", run.run_id) is not None
+
+
+def _serving_entity(run: ScriptRunRecord, config: Config) -> str:
+    """Return whose bot and whose access answer for *run*: its agent, or the team its agent answered in.
+
+    Only for a workflow run, or an attempt of one, that a member of a configured team started in that team: the
+    requester reaches the member through the team there. A plain script is its agent's own.
+    """
+    if not _of_workflow(run):
+        return run.agent_name
+    recipient = _run_execution_identity(run).recipient
+    team = config.teams.get(recipient)
+    return recipient if team is not None and run.agent_name in team.agents else run.agent_name
 
 
 def _run_execution_identity(run: ScriptRunRecord) -> ToolExecutionIdentity:
