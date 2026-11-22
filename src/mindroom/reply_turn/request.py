@@ -24,11 +24,11 @@ if TYPE_CHECKING:
     from mindroom.contacts.store import ContactRecord, SideName
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.hooks import EnrichmentItem, MessageEnvelope
-    from mindroom.llm.usage import RunMetrics
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.media_inputs import MediaInputs
     from mindroom.participation import ParticipationGate
     from mindroom.response_payload_preparation import ResponsePayloadPreparation
+    from mindroom.response_turn import TurnResume
     from mindroom.skill_learning.capture import SkillReviewCapture
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_jobs.conversation import ConversationKey
@@ -89,9 +89,8 @@ class ResponseRequest:
     # The turn's own ID, which its hooks and tool calls carry; unlike the correlation ID, no other turn shares it.
     turn_id: str = field(default_factory=lambda: uuid4().hex)
     matrix_run_metadata: Mapping[str, Any] | None = None
-    # Own usage and received subagent cost of restart-interrupted attempts this turn continues.
-    prior_usage: tuple[RunMetrics, ...] = ()
-    prior_subagent_cost_usd: float | None = None
+    # Carried prior usage and subagent cost of restart-interrupted attempts this turn continues.
+    resume: TurnResume | None = None
     participating_agent_names: tuple[str, ...] = ()
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()

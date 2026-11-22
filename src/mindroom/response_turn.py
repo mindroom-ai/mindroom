@@ -39,7 +39,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
-from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
+from mindroom.delegation.cost import SubagentCost, advance_subagent_cost, receiving_subagent_cost
 from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput, persist_interrupted_replay_snapshot
@@ -525,6 +525,8 @@ class TurnRunState:
     # The calls the turn's spent attempts finished, and their usage, before a retry or a continuation started another.
     prior_completed_tools: tuple[ToolTraceEntry, ...] = ()
     prior_usage: tuple[RunMetrics, ...] = ()
+    # Immediately preceding rowless attempts (such as retried empty replies) that no stored run row owns yet.
+    unstored_prior_usage: tuple[RunMetrics, ...] = ()
     empty_response_retried: bool = False
     attempt: _LiveAttempt | None = None
 
@@ -948,8 +950,14 @@ def _drop_spent_attempt(run: TurnRunState, resolution: CompletedAttempt) -> None
     interrupted record; an empty run is no turn, so its retry still does.
     """
     run.prior_completed_tools = (*run.prior_completed_tools, *resolution.completed_tools)
-    if not resolution.is_empty:
+    advance_subagent_cost()
+    if resolution.is_empty:
+        if resolution.usage is not None:
+            run.unstored_prior_usage = (*run.unstored_prior_usage, resolution.usage)
+    else:
         run.turn_input = NO_TURN_INPUT
+        # The completed run is stored and already carries any earlier unstored attempts; reset so the next run does not repeat them.
+        run.unstored_prior_usage = ()
     if resolution.usage is not None:
         run.prior_usage = (*run.prior_usage, resolution.usage)
     run.attempt = None

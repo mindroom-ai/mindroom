@@ -53,6 +53,7 @@ _MODEL_DEFAULTED_CHILD_FIELDS: dict[str, object] = {
     "worker_resource_profile": None,
     "cost_usd": None,
     "subagents_cost_usd": None,
+    "prior_cost_usd": None,
     "tool_started_at": {},
     "title": "",
 }

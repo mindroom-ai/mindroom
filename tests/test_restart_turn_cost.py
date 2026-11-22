@@ -22,11 +22,11 @@ from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     CONTINUED_RUNS_METADATA_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
+    PRIOR_SUBAGENT_COST_RUN_METADATA_KEY,
     SUBAGENT_COST_RUN_METADATA_KEY,
 )
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.cost import (
-    continued_subagent_cost_usd,
     receive_subagent_cost,
     received_subagent_cost_usd,
     receiving_subagent_cost,
@@ -45,6 +45,7 @@ from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import build_matrix_run_metadata
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_event
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -120,12 +121,18 @@ def _scripted_model(bot: AgentBot, turns: list[Any]) -> ScriptedModel:
     return ScriptedModel(turns, identity=model_identity(bot.config.models["default"]))
 
 
-def _priced_bot(tmp_path: Path, *, background_jobs: bool = False, with_worker: bool = False) -> AgentBot:
+def _priced_bot(
+    tmp_path: Path,
+    *,
+    background_jobs: bool = False,
+    with_worker: bool = False,
+    extra_tools: tuple[str, ...] = (),
+) -> AgentBot:
     agents: dict[str, AgentConfig] = {
         "general": AgentConfig(
             display_name="General",
             rooms=["!room:localhost"],
-            tools=[_COST_PROBE_TOOL],
+            tools=[_COST_PROBE_TOOL, *extra_tools],
             delegate_to=["worker"] if with_worker else [],
         ),
     }
@@ -727,29 +734,33 @@ async def test_restart_with_stored_then_lost_attempt_counts_stored_and_final(
 
 
 def test_resumed_subagent_cost_with_continued_runs_keeps_per_run_metadata_disjoint() -> None:
-    """An approval resume of a restart-continuing run reports A+B while storing only B on its row."""
-    stored_runs_meta = {
-        "run-a": {SUBAGENT_COST_RUN_METADATA_KEY: 0.4},
-        "run-b": {
-            SUBAGENT_COST_RUN_METADATA_KEY: 0.3,
-            CONTINUED_RUNS_METADATA_KEY: ["run-a"],
-        },
+    """An approval resume of a restart-continuing run restores both own and prior cost while keeping keys separate."""
+    run_b_meta = {
+        SUBAGENT_COST_RUN_METADATA_KEY: 0.3,
+        PRIOR_SUBAGENT_COST_RUN_METADATA_KEY: 0.4,
     }
-    prior_usd = continued_subagent_cost_usd(stored_runs_meta["run-b"], stored_runs_meta.get)
-    cost = resumed_subagent_cost(stored_runs_meta["run-b"], prior_usd=prior_usd)
+    cost = resumed_subagent_cost(run_b_meta)
     with receiving_subagent_cost(cost):
         receive_subagent_cost(0.2)
-        # Reply publishes total (0.4 + 0.3 + 0.2 = 0.9), while stored metadata keeps only run-b's own (0.5).
+        # Reply publishes total (0.4 + 0.3 + 0.2 = 0.9), while stored metadata keeps own (0.5) separate from prior (0.4).
         assert received_subagent_cost_usd() == pytest.approx(0.9)
-        assert subagent_cost_metadata() == {SUBAGENT_COST_RUN_METADATA_KEY: pytest.approx(0.5)}
+        assert subagent_cost_metadata() == {
+            SUBAGENT_COST_RUN_METADATA_KEY: pytest.approx(0.5),
+            PRIOR_SUBAGENT_COST_RUN_METADATA_KEY: pytest.approx(0.4),
+        }
 
 
-@pytest.mark.asyncio
-async def test_restart_continued_subagent_job_carries_pre_restart_own_and_nested_cost_to_parent_reply(
+async def _run_subagent_job_with_restarts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A subagent job continued across restarts rolls all attempts' own and nested subagent costs into the parent reply."""
+    *,
+    worker_turns: list[Any],
+    restarts: int,
+    expected_status: str,
+    start_source: str,
+    collect_source: str,
+) -> tuple[AgentBot, Any, dict[str, Any]]:
+    """Run one background subagent job through ``restarts`` restarts, wait for ``expected_status``, and collect it."""
     bot = _priced_bot(tmp_path, background_jobs=True, with_worker=True)
     await bot._take_over_replies()
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -767,19 +778,7 @@ async def test_restart_continued_subagent_job_carries_pre_restart_own_and_nested
 
     runtime = await start_runtime()
     try:
-        worker_model = _scripted_model(
-            bot,
-            [
-                # Attempt 1: $1.20 + $0.50 nested subagent + $1.20 -> stall (restart #1).
-                calls(tool_call("charge_subagent", "w1", usd=0.5), metrics=_REQ_USAGE),
-                calls(tool_call("stall", "ws1"), metrics=_REQ_USAGE),
-                # Attempt 2 (continuation #1): $1.20 + $0.30 nested subagent + $1.20 -> stall (restart #2).
-                calls(tool_call("charge_subagent", "w2", usd=0.3), metrics=_REQ_USAGE),
-                calls(tool_call("stall", "ws2"), metrics=_REQ_USAGE),
-                # Attempt 3 (continuation #2): $1.20 -> complete.
-                answer("Worker finished.", metrics=_REQ_USAGE),
-            ],
-        )
+        worker_model = ScriptedModel(worker_turns, identity=model_identity(bot.config.models["worker_model"]))
         leader_model_1 = _scripted_model(
             bot,
             [
@@ -787,55 +786,31 @@ async def test_restart_continued_subagent_job_carries_pre_restart_own_and_nested
                     tool_call("run_subagent", "deleg-1", agent_name="worker", task="Investigate", background_after=0),
                     metrics=_REQ_USAGE,
                 ),
-                answer("Started worker in background.", metrics=_REQ_USAGE),
+                answer("Started worker.", metrics=_REQ_USAGE),
             ],
         )
-        worker_model = ScriptedModel(
-            worker_model.turns,
-            identity=model_identity(bot.config.models["worker_model"]),
-        )
         install_model_providers(monkeypatch, {"default": leader_model_1, "worker_model": worker_model})
-
-        source_1 = "$start-subagent"
-        await _admit_user_message(bot, source_event_id=source_1)
-        request_1 = _user_request(source_event_id=source_1)
+        await _admit_user_message(bot, source_event_id=start_source)
+        request_1 = _user_request(source_event_id=start_source)
         with patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=True),
             typing_indicator=_noop_typing,
         ):
             await runner.generate_response(request_1)
-
-        # Wait for worker attempt 1 to stall, then restart #1.
-        await asyncio.wait_for(_CostProbeTools.stalled.wait(), 10)
-        _CostProbeTools.stalled = asyncio.Event()
-        await runtime.shutdown()
-        runtime = await start_runtime()
-        await runtime.recover()
-        tool_ctx = runner.deps.tool_runtime.build_turn_context(
-            request_1.response_envelope.target,
-            user_id="@user:localhost",
-            active_model_name="default",
-            source_envelope=request_1.response_envelope,
-            turn_id=request_1.turn_id,
-        )
-        await continue_stopped_jobs(runtime, bot.config, bot.runtime_paths, tool_ctx)
-
-        # Wait for worker attempt 2 (continuation #1) to stall, then restart #2.
-        await asyncio.wait_for(_CostProbeTools.stalled.wait(), 10)
-        _CostProbeTools.stalled = asyncio.Event()
-        await runtime.shutdown()
-        runtime = await start_runtime()
-        await runtime.recover()
-        tool_ctx = runner.deps.tool_runtime.build_turn_context(
-            request_1.response_envelope.target,
-            user_id="@user:localhost",
-            active_model_name="default",
-            source_envelope=request_1.response_envelope,
-            turn_id=request_1.turn_id,
-        )
-        await continue_stopped_jobs(runtime, bot.config, bot.runtime_paths, tool_ctx)
-
-        # Wait for worker attempt 3 (continuation #2) to complete.
+        for _ in range(restarts):
+            await asyncio.wait_for(_CostProbeTools.stalled.wait(), 10)
+            _CostProbeTools.stalled = asyncio.Event()
+            await runtime.shutdown()
+            runtime = await start_runtime()
+            await runtime.recover()
+            tool_ctx = runner.deps.tool_runtime.build_turn_context(
+                request_1.response_envelope.target,
+                user_id="@user:localhost",
+                active_model_name="default",
+                source_envelope=request_1.response_envelope,
+                turn_id=request_1.turn_id,
+            )
+            await continue_stopped_jobs(runtime, bot.config, bot.runtime_paths, tool_ctx)
         leader_owner = replace(
             job_owner(),
             agent_name="general",
@@ -846,12 +821,8 @@ async def test_restart_continued_subagent_job_carries_pre_restart_own_and_nested
             session_id=request_1.response_envelope.target.session_id,
         )
         [job_info] = await runtime.list_jobs(owner=leader_owner, depth=0)
-        await wait_for_status(runtime, job_info.job_id, "completed")
-        done = await lookup(runtime, job_info.job_id, owner=leader_owner, depth=0)
-        # 5 requests * $1.20 = $6.00 own + ($0.50 + $0.30) nested subagents = $6.80.
-        assert delegation_child(done).cost_usd == pytest.approx(6.8)
-
-        # Parent collects the finished job in its next reply and publishes the full $6.80 subagent cost.
+        await wait_for_status(runtime, job_info.job_id, expected_status)
+        settled_job = await lookup(runtime, job_info.job_id, owner=leader_owner, depth=0)
         leader_model_2 = _scripted_model(
             bot,
             [
@@ -860,16 +831,290 @@ async def test_restart_continued_subagent_job_carries_pre_restart_own_and_nested
             ],
         )
         install_model_providers(monkeypatch, {"default": leader_model_2, "worker_model": worker_model})
-        source_2 = "$collect-subagent"
-        await _admit_user_message(bot, source_event_id=source_2)
-        request_2 = _user_request(source_event_id=source_2)
+        await _admit_user_message(bot, source_event_id=collect_source)
         with patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=True),
             typing_indicator=_noop_typing,
         ):
-            await runner.generate_response(request_2)
-
+            await runner.generate_response(_user_request(source_event_id=collect_source))
         _, ai_run = _final_ai_run_metadata(bot)
-        assert ai_run["cost"] == {"usd": "2.4", "subagents_usd": "6.8"}
+        return bot, settled_job, ai_run
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_restart_continued_subagent_job_carries_pre_restart_own_and_nested_cost_to_parent_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subagent job continued across restarts rolls all attempts' own and nested subagent costs into the parent reply."""
+    bot, done, ai_run = await _run_subagent_job_with_restarts(
+        tmp_path,
+        monkeypatch,
+        worker_turns=[
+            calls(tool_call("charge_subagent", "w1", usd=0.5), metrics=_REQ_USAGE),
+            calls(tool_call("stall", "ws1"), metrics=_REQ_USAGE),
+            calls(tool_call("charge_subagent", "w2", usd=0.3), metrics=_REQ_USAGE),
+            calls(tool_call("stall", "ws2"), metrics=_REQ_USAGE),
+            answer("Worker finished.", metrics=_REQ_USAGE),
+        ],
+        restarts=2,
+        expected_status="completed",
+        start_source="$start-subagent",
+        collect_source="$collect-subagent",
+    )
+    child_done = delegation_child(done)
+    assert child_done.cost_usd == pytest.approx(6.8)
+    assert ai_run["cost"] == {"usd": "2.4", "subagents_usd": "6.8"}
+    # Astra #3: worker's stored per-run subagent costs stay disjoint ([0.5, 0.3, None]).
+    worker_storage = create_session_storage("worker", bot.config, bot.runtime_paths, execution_identity=None)
+    worker_runs = [r for r in worker_storage.list_runs(child_done.session_id) if isinstance(r, RunRecord)]
+    assert [(r.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) for r in worker_runs] == [
+        pytest.approx(0.5),
+        pytest.approx(0.3),
+        None,
+    ]
+    # Opus minor 3: final delegation record's run.json usage keeps only its own attempt (100k in, 10k out).
+    deleg_glob = "agents/worker/workspace/.mindroom/delegations/*/*/run.json"
+    record_files = list(bot.runtime_paths.storage_root.glob(deleg_glob))
+    final_records = [
+        json.loads(p.read_text())
+        for p in record_files
+        if json.loads(p.read_text())["delegation_id"] == child_done.delegation_id
+    ]
+    assert len(final_records) == 1
+    assert final_records[0]["usage"]["input_tokens"] == 100_000
+    assert final_records[0]["usage"]["output_tokens"] == 10_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_sub", "replay_sub", "expected_sub", "expected_own", "expected_stored"),
+    [
+        # Astra #1: A receives 0.5 + switches, B receives nothing + stalls, C receives 0.25.
+        (None, 0.25, "0.75", "6", [pytest.approx(0.5), None, pytest.approx(0.25)]),
+        # Sol #1: A receives 0.5 + switches, B receives 0.25 + stalls, C receives 0.125.
+        (0.25, 0.125, "0.875", "7.2", [pytest.approx(0.5), pytest.approx(0.25), pytest.approx(0.125)]),
+    ],
+    ids=["astra-no-b-receipt", "sol-with-b-receipt"],
+)
+async def test_model_switch_before_restart_does_not_double_count_subagent_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    second_sub: float | None,
+    replay_sub: float,
+    expected_sub: str,
+    expected_own: str,
+    expected_stored: list[object],
+) -> None:
+    """Switching models inside a turn resets per-run subagent receipts so a later restart never double-counts."""
+    bot = _priced_bot(tmp_path, extra_tools=("thread_model",))
+    await bot._take_over_replies()
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    source = "$model-switch-restart"
+    await _admit_user_message(bot, source_event_id=source)
+    request = _user_request(source_event_id=source)
+    session_id = request.response_envelope.target.session_id
+
+    switch_call = tool_call("switch_thread_model", "sw-1", model_name="default", when="after-toolcall")
+    attempt_1_turns = [
+        calls(tool_call("charge_subagent", "c1", usd=0.5), metrics=_REQ_USAGE),
+        calls(switch_call, metrics=_REQ_USAGE),
+        *(
+            [calls(tool_call("charge_subagent", "c2", usd=second_sub), metrics=_REQ_USAGE)]
+            if second_sub is not None
+            else []
+        ),
+        calls(tool_call("stall", "s1"), metrics=_REQ_USAGE),
+    ]
+    install_model_providers(monkeypatch, {"default": _scripted_model(bot, attempt_1_turns)})
+    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
+        await _run_until_stall_and_shutdown(runner.generate_response(request))
+
+    await _simulate_restart(bot, "gen-2")
+
+    install_model_providers(
+        monkeypatch,
+        {
+            "default": _scripted_model(
+                bot,
+                [
+                    calls(tool_call("charge_subagent", "c3", usd=replay_sub), metrics=_REQ_USAGE),
+                    answer("Done after switch and restart.", metrics=_REQ_USAGE),
+                ],
+            ),
+        },
+    )
+    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
+        await runner.generate_response(request)
+
+    _, ai_run = _final_ai_run_metadata(bot)
+    assert ai_run["cost"] == {"usd": expected_own, "subagents_usd": expected_sub}
+    runs = _stored_runs(runner, session_id)
+    assert [(r.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) for r in runs] == expected_stored
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restarts", [1, 2], ids=["one-restart", "two-restarts"])
+async def test_billed_empty_response_retried_before_restart_is_counted_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    restarts: int,
+) -> None:
+    """A billed empty reply (usage ledger only, no run row) retried before a restart is counted once across restarts."""
+    bot = _priced_bot(tmp_path)
+    await bot._take_over_replies()
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    source = f"$empty-retry-restart-{restarts}"
+    await _admit_user_message(bot, source_event_id=source)
+    request = _user_request(source_event_id=source)
+
+    # Attempt 1: empty answer ($1.20, no run row) -> retry charges $0.50 ($1.20) + stalls ($1.20) -> restart #1.
+    install_model_providers(
+        monkeypatch,
+        {
+            "default": _scripted_model(
+                bot,
+                [
+                    answer("", metrics=_REQ_USAGE),
+                    calls(tool_call("charge_subagent", "c1", usd=0.5), metrics=_REQ_USAGE),
+                    calls(tool_call("stall", "s1"), metrics=_REQ_USAGE),
+                ],
+            ),
+        },
+    )
+    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
+        await _run_until_stall_and_shutdown(runner.generate_response(request))
+    await _simulate_restart(bot, "gen-2")
+
+    if restarts == 2:
+        # Attempt 2: charges $0.10 ($1.20) + stalls ($1.20) -> restart #2.
+        install_model_providers(
+            monkeypatch,
+            {
+                "default": _scripted_model(
+                    bot,
+                    [
+                        calls(tool_call("charge_subagent", "c2", usd=0.1), metrics=_REQ_USAGE),
+                        calls(tool_call("stall", "s2"), metrics=_REQ_USAGE),
+                    ],
+                ),
+            },
+        )
+        with patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ):
+            await _run_until_stall_and_shutdown(runner.generate_response(request))
+        await _simulate_restart(bot, "gen-3")
+
+    # Final replay: charges $0.25 ($1.20) + answers ($1.20).
+    install_model_providers(
+        monkeypatch,
+        {
+            "default": _scripted_model(
+                bot,
+                [
+                    calls(tool_call("charge_subagent", "cf", usd=0.25), metrics=_REQ_USAGE),
+                    answer("Done.", metrics=_REQ_USAGE),
+                ],
+            ),
+        },
+    )
+    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
+        await runner.generate_response(request)
+
+    _, ai_run = _final_ai_run_metadata(bot)
+    if restarts == 1:
+        # 1 empty ($1.20) + 2 checkpointed ($2.40) + 2 final ($2.40) = $6.00; subagents = 0.5 + 0.25 = 0.75.
+        assert ai_run["cost"] == {"usd": "6", "subagents_usd": "0.75"}
+        assert sum(inp for _, inp, _ in _recorded_usage_tokens(bot)) == 500_000
+    else:
+        # 1 empty ($1.20) + 2 + 2 + 2 = 7 requests = $8.40; subagents = 0.5 + 0.1 + 0.25 = 0.85.
+        assert ai_run["cost"] == {"usd": "8.4", "subagents_usd": "0.85"}
+        assert sum(inp for _, inp, _ in _recorded_usage_tokens(bot)) == 700_000
+
+
+@pytest.mark.asyncio
+async def test_restart_continued_reply_passes_undated_started_at_to_budgets_to_avoid_double_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restart-continued reply passes started_at=None to budgets so pre-restart usage is recounted, not double-counted."""
+    bot = _priced_bot(tmp_path)
+    await bot._take_over_replies()
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    recorded_calls: list[tuple[str | None, float | None, object]] = []
+    original = bot.orchestrator.budgets.response_finished
+
+    def capture(requester_id: str | None, cost_usd: float | None, started_at: object) -> None:
+        recorded_calls.append((requester_id, cost_usd, started_at))
+        original(requester_id, cost_usd, started_at)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(bot.orchestrator.budgets, "response_finished", capture)
+
+    # Normal (non-continued) reply passes a non-None started_at datetime.
+    normal_source = "$normal-budget-turn"
+    await _admit_user_message(bot, source_event_id=normal_source)
+    install_model_providers(monkeypatch, {"default": _scripted_model(bot, [answer("Normal.", metrics=_REQ_USAGE)])})
+    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
+        await runner.generate_response(_user_request(source_event_id=normal_source))
+    assert len(recorded_calls) == 1
+    assert recorded_calls[0][1] == pytest.approx(1.2)
+    assert recorded_calls[0][2] is not None
+
+    # Restart-continued reply must pass started_at=None.
+    source = "$restart-budget-turn"
+    await _admit_user_message(bot, source_event_id=source)
+    request = _user_request(source_event_id=source)
+    install_model_providers(
+        monkeypatch,
+        {
+            "default": _scripted_model(
+                bot,
+                [
+                    calls(tool_call("charge_subagent", "c1", usd=0.5), metrics=_REQ_USAGE),
+                    calls(tool_call("stall", "s1"), metrics=_REQ_USAGE),
+                ],
+            ),
+        },
+    )
+    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
+        await _run_until_stall_and_shutdown(runner.generate_response(request))
+    await _simulate_restart(bot, "gen-2")
+
+    install_model_providers(monkeypatch, {"default": _scripted_model(bot, [answer("Continued.", metrics=_REQ_USAGE)])})
+    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
+        await runner.generate_response(request)
+
+    assert len(recorded_calls) == 2
+    assert recorded_calls[1][0] == "@user:localhost"
+    assert recorded_calls[1][1] == pytest.approx(3.6)
+    assert recorded_calls[1][2] is None
+
+
+@pytest.mark.asyncio
+async def test_subagent_job_refused_at_continuation_cap_still_reports_known_cost_to_parent_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a subagent job hits the restart continuation cap and ends interrupted, its spent cost still reaches the parent."""
+    _, stopped, ai_run = await _run_subagent_job_with_restarts(
+        tmp_path,
+        monkeypatch,
+        worker_turns=[
+            calls(tool_call("charge_subagent", "w1", usd=0.5), metrics=_REQ_USAGE),
+            calls(tool_call("stall", "ws1"), metrics=_REQ_USAGE),
+            calls(tool_call("charge_subagent", "w2", usd=0.3), metrics=_REQ_USAGE),
+            calls(tool_call("stall", "ws2"), metrics=_REQ_USAGE),
+            calls(tool_call("stall", "ws3"), metrics=_REQ_USAGE),
+        ],
+        restarts=3,
+        expected_status="interrupted",
+        start_source="$start-cap-subagent",
+        collect_source="$collect-cap-subagent",
+    )
+    assert delegation_child(stopped).cost_usd == pytest.approx(6.8)
+    assert ai_run["cost"] == {"usd": "2.4", "subagents_usd": "6.8"}

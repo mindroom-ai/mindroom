@@ -252,9 +252,9 @@ async def settle_child_response(
     if response.run_id != child.run_id or response.session_id != child.session_id:
         msg = "Delegation child response does not match its retained run"
         raise ValueError(msg)
-    tokens, own_usd = _own_usage(response, config)
+    tokens, own_usd = child_own_usage(response, config)
     _publish(child.delegation_id, lambda feed: feed.usage(tokens, own_usd))
-    known = [usd for usd in (own_usd, child.subagents_cost_usd) if usd is not None]
+    known = [usd for usd in (child.prior_cost_usd, own_usd, child.subagents_cost_usd) if usd is not None]
     child.cost_usd = sum(known) if known else None
     content = response.handover_content
     if stopped := reload_stopped_child_result(child, response):
@@ -320,7 +320,7 @@ async def finish_child_turn(
     return await finish_child_record(child, config=config, runtime_paths=runtime_paths)
 
 
-def _own_usage(record: RunRecord, config: Config) -> tuple[tuple[int, int] | None, float | None]:
+def child_own_usage(record: RunRecord, config: Config) -> tuple[tuple[int, int] | None, float | None]:
     """Return the input and output tokens the turn of ``record``'s run has used, its earlier runs included, and their cost.
 
     The input tokens are whole prompts, cached tokens included, so runs on providers that count their cache
@@ -359,7 +359,7 @@ def _publish_usage(observation: ChildRunObservation, config: Config) -> None:
     """Publish what the child's turn has used as its live record counts it, unless the child has moved to a new run."""
     record = observation.running
     if observation.owns(record):
-        _publish(observation.child.delegation_id, lambda feed: feed.usage(*_own_usage(record, config)))
+        _publish(observation.child.delegation_id, lambda feed: feed.usage(*child_own_usage(record, config)))
 
 
 def _publish(delegation_id: str, update: Callable[[ActivityFeed], object]) -> None:
@@ -489,7 +489,7 @@ async def child_run_context(
             await flush_child_audit(audit)
         finally:
             try:
-                child.subagents_cost_usd = received.usd
+                child.subagents_cost_usd = received.total_usd
                 response = observation.current_record()
                 if response is not None:
                     await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)

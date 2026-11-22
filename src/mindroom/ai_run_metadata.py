@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
-from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
+from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
+    PRIOR_USAGE_RUN_METADATA_KEY,
+    UNSTORED_PRIOR_USAGE_RUN_METADATA_KEY,
+)
 from mindroom.delegation.cost import received_subagent_cost_usd
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.usage import RunMetrics
@@ -280,15 +284,18 @@ def turn_usage(prior_usage: Sequence[RunMetrics], metrics: RunMetrics | None) ->
     return total
 
 
-def with_prior_usage(metadata: dict[str, Any] | None, prior_usage: Sequence[RunMetrics]) -> dict[str, Any] | None:
-    """Return the metadata a run's record stores: ``metadata``, with ``prior_usage``, what its turn spent before it.
-
-    The record keeps that usage summed (``turn_usage``), so whichever resume continues the run after a pause, even
-    after a restart, reports it with the run's own (``prior_usage_of``). A turn's first run keeps none. ``metadata``
-    is the turn's, which holds no other run's usage (``without_run_usage``).
-    """
-    usage = turn_usage(prior_usage, None)
-    return metadata if usage is None else {**(metadata or {}), PRIOR_USAGE_RUN_METADATA_KEY: usage.to_dict()}
+def with_prior_usage(
+    metadata: dict[str, Any] | None,
+    prior_usage: Sequence[RunMetrics],
+    unstored_prior_usage: Sequence[RunMetrics] = (),
+) -> dict[str, Any] | None:
+    """Store ``prior_usage`` (for approval resumes) and rowless ``unstored_prior_usage`` (for restart recovery)."""
+    pairs = (
+        (PRIOR_USAGE_RUN_METADATA_KEY, turn_usage(prior_usage, None)),
+        (UNSTORED_PRIOR_USAGE_RUN_METADATA_KEY, turn_usage(unstored_prior_usage, None)),
+    )
+    entries = {k: u.to_dict() for k, u in pairs if u is not None}
+    return {**(metadata or {}), **entries} if entries else metadata
 
 
 def prior_usage_of(record: AnyRunRecord) -> tuple[RunMetrics, ...]:
@@ -303,6 +310,12 @@ def prior_usage_of(record: AnyRunRecord) -> tuple[RunMetrics, ...]:
     # releases did; the usage ledger counts the earlier attempts either way.
     # Coverage: tests/test_approval_turn_continuation.py::test_a_pause_stored_without_its_turn_s_earlier_usage_resumes_publishing_the_paused_run_s.
     stored = (record.metadata or {}).get(PRIOR_USAGE_RUN_METADATA_KEY)
+    return (RunMetrics.from_dict(stored),) if isinstance(stored, dict) else ()
+
+
+def unstored_prior_usage_of(record: AnyRunRecord) -> tuple[RunMetrics, ...]:
+    """Return the usage of immediately preceding rowless attempts stored on ``record``, if any."""
+    stored = (record.metadata or {}).get(UNSTORED_PRIOR_USAGE_RUN_METADATA_KEY)
     return (RunMetrics.from_dict(stored),) if isinstance(stored, dict) else ()
 
 

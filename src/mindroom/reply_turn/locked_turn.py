@@ -189,10 +189,12 @@ class LockedTurns:
             membership_turn_id=request.response_envelope.source_event_id,
             queue_memory_persistence=queue_memory_persistence,
             queue_skill_review=queue_skill_review,
+            # A restart-continued reply reports earlier attempts' usage that a startup budget scan may already
+            # have counted, so leave its cost undated and let budgets recount instead (matching approval resumes).
             notify_response_finished=self.response_finished_notifier(
                 request.sources.logical_source_event_ids,
                 request.user_id,
-                request.requested_at,
+                None if request.resume is not None and request.resume.prior_usage else request.requested_at,
             ),
             persist_response_event_id=persist_response_event_id,
         )

@@ -309,7 +309,7 @@ async def test_a_leader_cut_short_mid_delegation_recovers_as_a_turn_of_its_own_c
     with suppress(asyncio.CancelledError):
         await turn
 
-    assert recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True)
+    assert recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True).run_ids
     text = await team.respond(message="Next question", ctx=team.ctx(run_id="run-2"))
 
     assert text.endswith("Next answer.")

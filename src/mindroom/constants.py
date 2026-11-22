@@ -1113,8 +1113,12 @@ HOOK_SOURCE_RUN_METADATA_KEY = "hook_source"
 TURN_INTENT_RUN_METADATA_KEY = "turn_intent"
 # Run metadata key holding the usage of the attempts the run's turn spent before it, summed, as run metrics are stored.
 PRIOR_USAGE_RUN_METADATA_KEY = "mindroom_prior_usage"
-# Run metadata key holding what the subagent turns whose results the run's turn received cost so far, in USD.
+# Run metadata key holding the usage of immediately preceding rowless attempts (such as retried empty replies) that have no stored run row.
+UNSTORED_PRIOR_USAGE_RUN_METADATA_KEY = "mindroom_unstored_prior_usage"
+# Run metadata key holding what the subagent turns whose results this run itself received cost so far, in USD.
 SUBAGENT_COST_RUN_METADATA_KEY = "mindroom_subagent_cost_usd"
+# Run metadata key holding what earlier attempts at this turn received from subagents before this run started, in USD.
+PRIOR_SUBAGENT_COST_RUN_METADATA_KEY = "mindroom_prior_subagent_cost_usd"
 MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 # The recovered runs a turn's replay continued, which its answer's message is linked to as well.

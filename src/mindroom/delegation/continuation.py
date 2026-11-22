@@ -6,18 +6,16 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.ai import run_delegated_child_response
-from mindroom.ai_run_metadata import prior_usage_of, turn_usage
-from mindroom.delegation.background import delegation_child
-from mindroom.delegation.cost import stored_subagent_cost_usd
+from mindroom.delegation.background import child_snapshot, delegation_child
+from mindroom.delegation.cost import resumed_subagent_cost, sum_subagent_cost_usd
 from mindroom.delegation.execution import delegation_call_job
-from mindroom.delegation.lifecycle import authorize_delegation, delegation_grant, prepare_child_turn
+from mindroom.delegation.lifecycle import authorize_delegation, child_own_usage, delegation_grant, prepare_child_turn
 from mindroom.delegation.personas import follow_up_refusal
 from mindroom.delegation.recovery import read_child_run, settled_subagent
-from mindroom.delegation.sessions import SubagentSessionError
+from mindroom.delegation.sessions import SubagentSessionError, update_subagent_turn
 from mindroom.delegation.state import CONTINUE_SUBAGENT, interrupted_by_restart
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, is_recovered_run
-from mindroom.llm.usage import RunMetrics
 from mindroom.tool_system.events import format_tool_completed_event
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
@@ -34,8 +32,8 @@ if TYPE_CHECKING:
 _CONTINUATIONS_KEY = "restart_continuations"
 # What the job's latest continuation was sent in place of its task, saved with the job and nowhere a room reads.
 _PROMPT_KEY = "continuation_prompt"
-# Usage spent by earlier restart-interrupted attempts of this job, kept in case a follow-up dies before saving a run.
-_PRIOR_USAGE_KEY = "continuation_prior_usage"
+# Priced cost (USD) of earlier restart-interrupted attempts of this job, kept in case a continuation dies early.
+_PRIOR_COST_KEY = "continuation_prior_cost_usd"
 # How many restarts may cut one subagent job short before the next one ends it, in case continuing is what stops it.
 _RESTART_CONTINUATION_LIMIT = 2
 # How much of what the cut-short turn was sent the continuation prompt repeats.
@@ -56,20 +54,45 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
     first call sends it again.
     """
     context = require_tool_runtime_context()
-    config, runtime_paths, owner = context.current_config, context.runtime_paths, job.owner
+    config, runtime_paths = context.current_config, context.runtime_paths
     continuations = job.adapter.get(_CONTINUATIONS_KEY, 0)
-    if continuations >= _RESTART_CONTINUATION_LIMIT:
-        return f"restarts already cut it short {continuations + 1} times"
     child = await _stopped_turn(job, config, runtime_paths)
     if isinstance(child, str):
-        return child
+        return (
+            f"restarts already cut it short {continuations + 1} times"
+            if continuations >= _RESTART_CONTINUATION_LIMIT
+            else child
+        )
     run = await read_child_run(child, config, runtime_paths)
+    carried_cost = _carried_job_cost_usd(job, child, run, config)
+    result = _build_continuation_spec(job, runtime, child, run, continuations=continuations, carried_cost=carried_cost)
+    if isinstance(result, str) and carried_cost is not None:
+        child.cost_usd = carried_cost
+        await update_subagent_turn(child, runtime_paths)
+        await runtime.save_adapter(job.job_id, child=child_snapshot(child))
+    return result
+
+
+def _build_continuation_spec(
+    job: BackgroundJob,
+    runtime: ToolJobRuntime,
+    child: DelegationChild,
+    run: RunRecord | None,
+    *,
+    continuations: int,
+    carried_cost: float | None,
+) -> JobSpec | str:
+    context = require_tool_runtime_context()
+    config, runtime_paths, owner = context.current_config, context.runtime_paths, job.owner
+    if continuations >= _RESTART_CONTINUATION_LIMIT:
+        return f"restarts already cut it short {continuations + 1} times"
     prompt = _continuation_prompt(job, child, run, config)
     if prompt is None:
         return "its turn's run holds calls recovery could not finish, as a run paused for a decision or a subagent does"
     tools = config_plugins(config, runtime_paths).tools
-    refusal = follow_up_refusal(child.persona, owner.agent_name, config, tools, delegation_depth=job.depth)
-    if refusal is not None:
+    if (
+        refusal := follow_up_refusal(child.persona, owner.agent_name, config, tools, delegation_depth=job.depth)
+    ) is not None:
         return refusal
     authorized = authorize_delegation(
         owner.agent_name,
@@ -98,8 +121,7 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         persona=child.persona,
         parent_tool_call_id=child.parent_tool_call_id,
     )
-    prior_usage = _carried_prior_usage(job, run)
-    follow_up.subagents_cost_usd = _carried_subagents_cost_usd(child, run)
+    follow_up.prior_cost_usd = carried_cost
     arguments = {"subagent_id": child.subagent_id, "message": child.task}
     if OUTPUT_PATH_ARGUMENT in job.adapter:
         arguments[OUTPUT_PATH_ARGUMENT] = job.adapter[OUTPUT_PATH_ARGUMENT]
@@ -114,15 +136,14 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         arguments=arguments,
         run_child=run_delegated_child_response,
         prompt=prompt,
-        prior_usage=prior_usage,
         config=authorized,
         runtime_paths=runtime_paths,
         refresh_scheduler=None if orchestrator is None else orchestrator.knowledge_refresh_scheduler,
     )
     if not isinstance(spec, str):
         spec.adapter.update({_CONTINUATIONS_KEY: continuations + 1, _PROMPT_KEY: prompt})
-        if (carried := turn_usage(prior_usage, None)) is not None:
-            spec.adapter[_PRIOR_USAGE_KEY] = carried.to_dict()
+        if carried_cost is not None:
+            spec.adapter[_PRIOR_COST_KEY] = carried_cost
     return spec
 
 
@@ -148,19 +169,22 @@ async def _stopped_turn(job: BackgroundJob, config: Config, runtime_paths: Runti
     return child if interrupted_by_restart(child) else f"its turn ended {child.status} before the restart settled it"
 
 
-def _carried_prior_usage(job: BackgroundJob, run: RunRecord | None) -> tuple[RunMetrics, ...]:
-    """Return the own model usage spent by earlier restart-interrupted attempts of ``job``."""
-    if run is not None:
-        return (*prior_usage_of(run), *(() if run.metrics is None else (run.metrics,)))
-    saved = job.adapter.get(_PRIOR_USAGE_KEY)
-    return (RunMetrics.from_dict(saved),) if isinstance(saved, dict) else ()
-
-
-def _carried_subagents_cost_usd(child: DelegationChild, run: RunRecord | None) -> float | None:
-    """Return the cumulative nested subagent cost received by earlier attempts of this job."""
-    stored = stored_subagent_cost_usd(run.metadata) if run is not None else None
-    known = [usd for usd in (stored, child.subagents_cost_usd) if usd is not None]
-    return max(known) if known else None
+def _carried_job_cost_usd(
+    job: BackgroundJob,
+    child: DelegationChild,
+    run: RunRecord | None,
+    config: Config,
+) -> float | None:
+    """Return the priced cost of all cut-short attempts of ``job`` so far, keeping per-run records disjoint."""
+    raw = job.adapter.get(_PRIOR_COST_KEY)
+    saved_prior = float(raw) if isinstance(raw, int | float) and not isinstance(raw, bool) else None
+    if child.delegation_id != delegation_child(job).delegation_id:
+        return saved_prior
+    prior_before = child.prior_cost_usd if child.prior_cost_usd is not None else saved_prior
+    own_usd = None if run is None else child_own_usage(run, config)[1]
+    run_nested = None if run is None else resumed_subagent_cost(run.metadata).total_usd
+    nested_usd = max((usd for usd in (run_nested, child.subagents_cost_usd) if usd is not None), default=None)
+    return sum_subagent_cost_usd((prior_before, own_usd, nested_usd))
 
 
 def _continuation_prompt(

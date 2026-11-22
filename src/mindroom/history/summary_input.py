@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
+    PRIOR_SUBAGENT_COST_RUN_METADATA_KEY,
     PRIOR_USAGE_RUN_METADATA_KEY,
     SUBAGENT_COST_RUN_METADATA_KEY,
+    UNSTORED_PRIOR_USAGE_RUN_METADATA_KEY,
 )
 from mindroom.history.conversation_text import spoken_message
 from mindroom.history.message_content import media_payload_snapshot, message_media_entries, render_message_content
@@ -40,8 +42,10 @@ _SUMMARY_METADATA_OMIT_KEYS = frozenset(
         # The run's own messages already carry its prompts.
         MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
         COMPACTED_REQUESTS_METADATA_KEY,
+        PRIOR_SUBAGENT_COST_RUN_METADATA_KEY,
         PRIOR_USAGE_RUN_METADATA_KEY,
         SUBAGENT_COST_RUN_METADATA_KEY,
+        UNSTORED_PRIOR_USAGE_RUN_METADATA_KEY,
         # LEGACY_COMPAT: Run metadata stored with the route's ``model_params``.
         # Legacy format: the metadata of every Matrix agent and team run holds ``model_params``, the route's
         #   non-secret settings, which nothing read.

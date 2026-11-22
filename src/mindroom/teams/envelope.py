@@ -499,7 +499,7 @@ class _TeamTurn:
                 run_id=attempt.run_id,
                 user_id=self.ctx.requester_id,
                 # The team run's record keeps the usage of the attempts the turn spent before it.
-                metadata=with_prior_usage(prepared.run_metadata, run.prior_usage),
+                metadata=with_prior_usage(prepared.run_metadata, run.prior_usage, run.unstored_prior_usage),
                 records=attempt.records,
             )
         events = drive_team_delegations(

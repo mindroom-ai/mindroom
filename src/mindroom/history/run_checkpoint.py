@@ -15,11 +15,13 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.agent_loop.tools import tool_result_message
+from mindroom.ai_run_metadata import unstored_prior_usage_of
 from mindroom.constants import CONTINUED_RUNS_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
-from mindroom.delegation.cost import stored_subagent_cost_usd, sum_subagent_cost_usd
+from mindroom.delegation.cost import resumed_subagent_cost, sum_subagent_cost_usd
 from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
 from mindroom.llm.messages import CUT_OFF_TEXT_KEY, Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.usage import team_run_usage
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.store import source_event_ids, write_with_session_state
 from mindroom.session_storage.summary_rows import folded_tool_call_ids
@@ -223,30 +225,13 @@ class RecoveredTurn:
     prior_usage: tuple[RunMetrics, ...] = ()
     subagent_cost_usd: float | None = None
 
-    def __bool__(self) -> bool:
-        """Return whether recovery found any unlinked attempts for this turn."""
-        return bool(self.run_ids)
 
-
-def _members_by_parent(runs: Sequence[AnyRunRecord]) -> dict[str, list[AnyRunRecord]]:
-    members: dict[str, list[AnyRunRecord]] = {}
+def _member_metrics_by_parent(runs: Sequence[AnyRunRecord]) -> dict[str, list[RunMetrics | None]]:
+    members: dict[str, list[RunMetrics | None]] = {}
     for run in runs:
         if run.parent_run_id is not None:
-            members.setdefault(run.parent_run_id, []).append(run)
+            members.setdefault(run.parent_run_id, []).append(run.metrics)
     return members
-
-
-def _attempt_own_usage(run: AnyRunRecord, member_runs: Sequence[AnyRunRecord]) -> RunMetrics | None:
-    """Return ``run``'s own usage, summing stored member runs for a team attempt within the leader's duration."""
-    if not isinstance(run, TeamRunRecord) or not member_runs:
-        return run.metrics
-    metrics = [part.metrics for part in (run, *member_runs) if part.metrics is not None]
-    if not metrics:
-        return None
-    total = sum(metrics[1:], metrics[0])
-    if len(metrics) > 1 and run.metrics is not None:
-        total.duration = run.metrics.duration
-    return total
 
 
 def recover_interrupted_turn(
@@ -263,9 +248,10 @@ def recover_interrupted_turn(
     continues from the interrupted attempt's own messages. Without ``natively``, for a turn that keeps being
     interrupted, nothing is recovered and the runs recovered for it earlier leave history as failed runs, so its next
     attempt starts from the conversation before the turn. Either way, every attempt at the turn no answer links yet is
-    returned along with each attempt's own metrics and stored subagent cost, whatever recovery did with it, so the
-    turn's answer links it (``link_response_event``) and reports the whole turn's cost: a summary can hold its work,
-    from its own mid-turn fold or a later compaction, and redacting the answer removes that too.
+    returned along with each attempt's own metrics, any immediately preceding rowless attempts it recorded
+    (``unstored_prior_usage_of``, such as a retried empty reply that stored no run row), and its own stored subagent
+    cost, whatever recovery did with it. Aggregate ``mindroom_prior_usage`` and ``mindroom_prior_subagent_cost_usd``
+    are ignored here so stored runs are never double-counted across repeated restarts.
     """
     session = store.load_session(session_id)
     if session is None:
@@ -273,7 +259,7 @@ def recover_interrupted_turn(
     loaded = {run.run_id for run in session.runs}
     # The loaded session leaves out the runs a summary covers, so the turn's attempts are read from every stored run.
     all_runs = store.list_runs(session_id)
-    members_by_parent = _members_by_parent(all_runs)
+    members_by_parent = _member_metrics_by_parent(all_runs)
     attempts: list[str] = []
     prior_usage: list[RunMetrics] = []
     subagent_costs: list[float | None] = []
@@ -288,9 +274,15 @@ def recover_interrupted_turn(
             store.save_interrupted_record(session, replace(run, status=RunStatus.error, error=_CRASH_LOOP_ERROR))
         if MATRIX_RESPONSE_EVENT_ID_METADATA_KEY not in (run.metadata or {}):
             attempts.append(run.run_id)
-            if (usage := _attempt_own_usage(run, members_by_parent.get(run.run_id, ()))) is not None:
-                prior_usage.append(usage)
-            subagent_costs.append(stored_subagent_cost_usd(run.metadata))
+            prior_usage.extend(unstored_prior_usage_of(run))
+            own_usage = (
+                team_run_usage(run.metrics, members_by_parent.get(run.run_id, ()))
+                if isinstance(run, TeamRunRecord)
+                else run.metrics
+            )
+            if own_usage is not None:
+                prior_usage.append(own_usage)
+            subagent_costs.append(resumed_subagent_cost(run.metadata).usd)
     return RecoveredTurn(
         run_ids=tuple(attempts),
         prior_usage=tuple(prior_usage),
