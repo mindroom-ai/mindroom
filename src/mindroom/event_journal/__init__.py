@@ -41,6 +41,7 @@ from .approval_continuations import (
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .journal import validate_ingestion_batch_admission
 from .models import (
+    RUNTIME_SOURCE_KINDS,
     TURN_BACKED_KINDS,
     AdmissionFacts,
     AdmissionResult,
@@ -106,6 +107,7 @@ __all__ = [
     "REPLY_STOPPED_REASON",
     "SCHEDULED_APPROVAL_WINDOW_NS",
     "TIMEOUT_REASON",
+    "RUNTIME_SOURCE_KINDS",
     "TURN_BACKED_KINDS",
     "AdmissionFacts",
     "AdmissionResult",

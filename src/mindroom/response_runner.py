@@ -7,7 +7,7 @@ import time
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
@@ -141,6 +141,7 @@ from mindroom.turn_model import (
 from mindroom.turn_origin import SenderKind, TurnIntent
 from mindroom.turn_record import RevisionSnapshotChangedError
 
+from .event_journal import EventKind
 from .delivery_gateway import (
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
@@ -805,26 +806,37 @@ class ResponseRunner:
             signal_queued_message=False,
         )
 
-    async def handoff_job_follow_up(self, event: JournalEvent) -> None:
-        """Hand a follow-up to a detached response owner; its reply, or that owner, settles it.
-
-        The dispatcher hands over only a follow-up no live owner holds.
-        """
+    async def handoff_runtime_source(self, event: JournalEvent) -> None:
+        """Hand a runtime source to a detached owner; its reply, or that owner, settles it."""
+        handler = self._RUNTIME_SOURCE_HANDLERS.get(event.kind)
+        if handler is None:
+            self.deps.logger.warning("unknown_runtime_source_kind", kind=str(event.kind), source=event.event_id)
+            await self.deps.settle_ignored_sources((event.event_id,))
+            return
+        name_prefix, run_source = handler
         self.inbox.track_inbox_response(
-            self._run_job_follow_up(event),
-            name=f"job_follow_up:{event.event_id}",
+            run_source(self, event),
+            name=f"{name_prefix}:{event.event_id}",
             room_id=event.room_id,
             source_event_ids=(event.event_id,),
             recovery_proof_ready=lambda: True,
         )
+
+    async def _settle_if_unclaimed(self, source_event_id: str, fate: SourceFate) -> None:
+        """Settle a runtime source when no reply claimed it."""
+        if isinstance(fate, Unclaimed):
+            await self.deps.settle_ignored_sources((source_event_id,))
 
     async def _run_job_follow_up(self, event: JournalEvent) -> None:
         """Run the turn a follow-up asks for, then settle a follow-up no reply took."""
         fate = await self._generate_job_follow_up(
             self._job_follow_up_request(follow_up_key(event, self.deps.agent_name), event.event_id),
         )
-        if isinstance(fate, Unclaimed):
-            await self.deps.settle_ignored_sources((event.event_id,))
+        await self._settle_if_unclaimed(event.event_id, fate)
+
+    _RUNTIME_SOURCE_HANDLERS: ClassVar[
+        Mapping[EventKind, tuple[str, Callable[[ResponseRunner, JournalEvent], Awaitable[None]]]]
+    ] = {EventKind.JOB_FOLLOW_UP: ("job_follow_up", _run_job_follow_up)}
 
     async def _follow_up_due(self, request: ResponseRequest) -> bool:
         """Decide under the conversation lock whether a follow-up still has jobs to report.

@@ -467,3 +467,49 @@ async def test_reply_admission_fence_logs_deferred_and_refused_events(tmp_path: 
     assert logger_spy.warning.call_args.kwargs["response_kind"] == "ai"
     assert runner.in_flight_response_count == 0
     assert gate.in_flight_response_count == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_source_handoff_dispatches_by_kind_and_settles_unclaimed(tmp_path: Path) -> None:
+    """Runtime sources dispatch via RUNTIME_SOURCE_KINDS and handoff_runtime_source's kind table."""
+    from mindroom.event_journal import EventClass, EventKind, InboundEvent, RUNTIME_SOURCE_KINDS
+    from mindroom.tool_jobs.conversation import ConversationKey
+    from mindroom.tool_jobs.follow_ups import follow_up_event
+
+    assert EventKind.JOB_FOLLOW_UP in RUNTIME_SOURCE_KINDS
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    store = bot.journal_principal()
+    key = ConversationKey(
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        recipient=bot.agent_name,
+        silent=False,
+    )
+    await store.admit(follow_up_event(key, "job-follow-up:seam-1", sender_id=bot.matrix_id.full_id, now_ms=1_000))
+    event = await store.load_event("job-follow-up:seam-1")
+    assert event is not None
+    await runner.handoff_runtime_source(event)
+    await runner.inbox.drain_inbox_responses()
+    assert not await store.is_pending("job-follow-up:seam-1")
+    # A second drain finds no remaining inbox work.
+    await runner.inbox.drain_inbox_responses()
+
+    # An unregistered kind settles cleanly instead of wedging the lane.
+    await store.admit(
+        InboundEvent(
+            event_id="unknown-runtime:1",
+            room_id="!room:localhost",
+            thread_id=None,
+            kind=EventKind.OPAQUE_HISTORY,
+            event_class=EventClass.ACTIONABLE,
+            sender=bot.matrix_id.full_id,
+            origin_server_ts=1_001,
+            source={},
+        ),
+    )
+    unknown = await store.load_event("unknown-runtime:1")
+    assert unknown is not None
+    await runner.handoff_runtime_source(unknown)
+    assert not await store.is_pending("unknown-runtime:1")
