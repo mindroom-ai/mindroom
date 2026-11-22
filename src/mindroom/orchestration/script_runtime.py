@@ -615,6 +615,7 @@ class ScriptRuntimeLifecycle:
             for agent_name in continuing_agents
             if current_config.agents[agent_name].private != new_config.agents[agent_name].private
         }
+        configs = (current_config, new_config)
         # A run's entry is also the name of the tool that launches it, so each tool's removal revokes its own runs.
         script_tool_removals = {
             (agent_name, entry)
@@ -622,10 +623,13 @@ class ScriptRuntimeLifecycle:
             for entry in ("script", "workflow")
             if _agent_has_tool(current_config, agent_name, entry) and not _agent_has_tool(new_config, agent_name, entry)
         }
+        # What the worker of a tool the agent keeps may do changed. A tool that was removed revokes only its own runs.
         process_authority_changes = {
             agent_name
             for agent_name in continuing_agents
-            if script_process_authority(current_config, agent_name) != script_process_authority(new_config, agent_name)
+            for entry in ("script", "workflow")
+            if None not in (old_new := [script_process_authority(c, agent_name, entry) for c in configs])
+            and old_new[0] != old_new[1]
         }
         if (
             not removed_agents

@@ -1149,19 +1149,46 @@ async def test_active_runs_treat_an_unresolved_worker_backend_as_interruptible(t
     assert [(info.run_id, info.recoverable) for info in active] == [(run.run_id, False)]
 
 
-def test_process_authority_exists_only_for_a_configured_agent_with_the_script_tool() -> None:
-    """A run of a removed agent, or of an agent without the script tool, has no process authority to recover."""
+def test_process_authority_exists_only_for_a_configured_agent_with_the_tool_that_started_the_run() -> None:
+    """A run of a removed agent, or of an agent without the tool that started it, has no process authority."""
     config = Config(
         agents={
             "watcher": {"display_name": "Watcher", "tools": ["script"]},
+            "flows": {"display_name": "Flows", "tools": ["workflow"]},
             "helper": {"display_name": "Helper", "tools": []},
         },
         defaults={"tools": []},
     )
 
-    assert script_process_authority(config, "watcher") is not None
-    assert script_process_authority(config, "helper") is None
-    assert script_process_authority(config, "removed") is None
+    assert script_process_authority(config, "watcher", "script") is not None
+    assert script_process_authority(config, "watcher", "workflow") is None
+    assert script_process_authority(config, "flows", "workflow") is not None
+    assert script_process_authority(config, "flows", "script") is None
+    assert script_process_authority(config, "helper", "script") is None
+    assert script_process_authority(config, "removed", "script") is None
+
+
+@pytest.mark.asyncio
+async def test_startup_revokes_a_plain_script_whose_agent_kept_only_the_workflow_tool(tmp_path: Path) -> None:
+    """The `script` tool was removed while MindRoom was down: `workflow` signs nothing for a plain script's process."""
+    runtime, run, backend, _client = _recovery_scenario(tmp_path)
+    kept = Config(
+        agents={"watcher": {"display_name": "Watcher", "tools": ["workflow", "calculator"]}},
+        defaults={"tools": []},
+    )
+    runtime.config_provider = lambda: kept
+
+    assert not run_matches_recovery_signature(
+        run=run,
+        backend=backend,
+        config=kept,
+        gateway_url=runtime.manager.gateway_url,
+    )
+    try:
+        assert await runtime._recover_startup_runs([run]) == set()
+        assert runtime.store.get_run(run.run_id).cancellation_reason == WORKER_CONFIGURATION_CHANGED
+    finally:
+        await runtime.shutdown()
 
 
 def test_recovery_signature_of_a_fixed_authority_is_stable_across_releases() -> None:
