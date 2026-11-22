@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -595,6 +596,36 @@ async def test_call_that_waits_for_an_approval_uses_none_of_the_runs_time(timed:
     await timed.until(lambda: _left(timed) == 2700)
 
     assert timed.store.get_run(timed.run_id).state is WorkflowRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_working_time_is_read_and_charged_on_the_event_loop_only(
+    timed: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The clock and the time of the last charge are the loop's: the look at the run in a thread is handed both."""
+    seen, clock = set(), timed.engine._clock
+
+    def read() -> float:
+        seen.add(threading.current_thread())
+        return clock()
+
+    class Charged(dict[str, float]):
+        def __setitem__(self, run_id: str, at: float) -> None:
+            seen.add(threading.current_thread())
+            super().__setitem__(run_id, at)
+
+    monkeypatch.setattr(timed.engine, "_clock", read)
+    monkeypatch.setattr(timed.engine, "_charged", Charged(timed.engine._charged))
+    timed.now += 600
+    timed.resolver.hold_approvals = asyncio.Event()
+    await timed.submit("@0", "tool", _A)
+    await timed.until(lambda: timed.store.get_run(timed.run_id).state is WorkflowRunState.WAITING)
+    timed.resolver.hold_approvals.set()
+    assert await timed.result("@0", "tool", _A) == "appended"
+    await timed.until(lambda: timed.store.get_run(timed.run_id).state is WorkflowRunState.RUNNING)
+
+    assert (seen, _left(timed)) == ({threading.current_thread()}, 3000)
 
 
 @pytest.mark.asyncio

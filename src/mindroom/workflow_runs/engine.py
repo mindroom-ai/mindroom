@@ -828,11 +828,15 @@ class WorkflowEngine:
         """Show the run as waiting while a call of it waits for a person and none runs, and as running otherwise.
 
         Time spent waiting is no working time, so the change charges what the run used up to it. The caller holds
-        the run's lock.
+        the run's lock. The clock and the time of the last charge are read and written here, on the loop: the
+        thread that looks at the run is handed both.
         """
-        await asyncio.to_thread(self._restated, run_id)
+        now = self._clock()
+        if await asyncio.to_thread(self._restated, run_id, (self._charged.get(run_id, now), now)):
+            self._charged[run_id] = now
 
-    def _restated(self, run_id: str) -> None:
+    def _restated(self, run_id: str, span: tuple[float, float]) -> bool:
+        """Save the state the run has now and what it used in *span*; return whether its state changed."""
         with suppress(SupersededAttemptError, WorkflowRunStoreError):
             run = self.store.get_run(run_id)
             if run.state in _SERVED_RUN_STATES:
@@ -840,8 +844,10 @@ class WorkflowEngine:
                 waits = WorkflowNodeState.WAITING in states and not states & _UNSETTLED_NODE_STATES
                 state = WorkflowRunState.WAITING if waits else WorkflowRunState.RUNNING
                 if state is not run.state:
-                    changes = {"state": state, **self._time_left(run)}
+                    changes = {"state": state, **self._time_left(run, span)}
                     partial(self.store.update_run, run_id, run.epoch, when=_SERVED_RUN_STATES)(**changes)
+                    return True
+        return False
 
     async def node_receipt(self, attempt: ScriptRunRecord, node_id: str, *, wait: float) -> NodeReceipt:
         """Return a node's receipt, held up to *wait* seconds until the node has ended, while the attempt is served."""
@@ -996,14 +1002,16 @@ class WorkflowEngine:
                 out_of_time = _OUT_OF_TIME.format(hours=hours)
                 await self.cancel(run_id, reason=out_of_time, state=WorkflowRunState.INTERRUPTED, epoch=epoch)
 
-    def _time_left(self, run: WorkflowRun) -> dict[str, object]:
+    def _time_left(self, run: WorkflowRun, span: tuple[float, float] | None = None) -> dict[str, object]:
         """Return, as a change to save, the working time *run* has left after what it used since the last charge.
 
         Only a running run uses any, up to where its script ended: time spent waiting for a person, starting or
-        ended is not charged, and neither is the time until somebody looked at a script that had ended.
+        ended is not charged, and neither is the time until somebody looked at a script that had ended. Off the
+        loop, *span* is the time of the last charge and now, which the caller read there and records itself.
         """
-        now = self._clock()
-        since, self._charged[run.run_id] = self._charged.get(run.run_id, now), now
+        since, now = span or (None, self._clock())
+        if since is None:
+            since, self._charged[run.run_id] = self._charged.get(run.run_id, now), now
         if run.state is not WorkflowRunState.RUNNING or run.runtime_seconds_left is None:
             return {}
         with suppress(ScriptRunNotFoundError):
