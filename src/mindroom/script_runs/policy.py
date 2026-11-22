@@ -54,9 +54,9 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
 _WORKFLOW_RESTRICTED_TOOLKITS = frozenset({"compact_context", "dynamic_tools", "slack"})
 
 
-def resolve_script_launch_grants(context: ToolRuntimeContext, *, workflow: bool = False) -> tuple[ScriptToolGrant, ...]:
-    """Resolve the stable registered function surface captured when a script or a workflow attempt launches."""
-    entries = _visible_script_tool_entries(context, context.config, workflow=workflow)
+def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToolGrant, ...]:
+    """Resolve the stable registered function surface captured when a script launches."""
+    entries = _visible_script_tool_entries(context, context.config)
     toolkits = _build_script_toolkits(context, context.config, entries)
     return tuple(
         ScriptToolGrant(entry.name, function_name)

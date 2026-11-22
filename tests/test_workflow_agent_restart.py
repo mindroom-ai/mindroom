@@ -40,7 +40,7 @@ _APPEND = tool_args("counter", "append", line="a")
 
 
 async def _opened(stack: WorkflowStack, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(engine_module, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.05)
     stack.continues = lambda job: job.kind == "delegation"
     await stack.open_jobs()
     stack.script_agents(monkeypatch)

@@ -113,7 +113,7 @@ class _Cards:
 async def gated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
     """The harness with the real job runtime and scripted agents; `append` asks for an approval, on `stack.cards`."""
     with workflow_stack(tmp_path, extra_tools=("workflow",)) as stack:
-        monkeypatch.setattr(engine_module, "_RECHECK_SECONDS", 0.05)
+        monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.05)
         stack.continues = lambda job: job.kind == "delegation"
         await stack.open_jobs()
         stack.script_agents(monkeypatch)

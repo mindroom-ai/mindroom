@@ -54,8 +54,8 @@ _PROMPT: dict[str, object] = {"prompt": "Say hi"}
 @pytest_asyncio.fixture
 async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
     """The harness with the real job runtime, scripted agents and one started run; no tool asks for approval."""
-    monkeypatch.setattr(engine_module, "_RECHECK_SECONDS", 0.05)
-    monkeypatch.setattr(agent_nodes, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(agent_nodes, "RECHECK_SECONDS", 0.05)
     with workflow_stack(tmp_path, extra_tools=("workflow",), require_approval=()) as stack:
         await stack.open_jobs()
         stack.script_agents(monkeypatch)
@@ -93,7 +93,7 @@ async def test_agent_node_runs_a_child_job_and_saves_the_raw_answer_and_usage(st
 @pytest_asyncio.fixture
 async def gated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
     """The same harness, whose operator asks for approval before `append` runs; `cards` holds the open cards."""
-    monkeypatch.setattr(engine_module, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.05)
     with workflow_stack(tmp_path, extra_tools=("workflow",)) as stack:
         await stack.open_jobs()
         stack.script_agents(monkeypatch)

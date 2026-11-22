@@ -2465,10 +2465,14 @@ depends_on = []
 from = ["mindroom.workflow_runs.models"]
 expose = [
     "DispatchHandle",
+    "LIVE_NODE_STATES",
     "LIVE_RUN_STATES",
     "NodeReceipt",
     "NodeRequest",
+    "RECHECK_SECONDS",
+    "SERVED_RUN_STATES",
     "TERMINAL_RUN_STATES",
+    "UNSETTLED_NODE_STATES",
     "WorkflowNode",
     "WorkflowNodeState",
     "WorkflowRun",
@@ -2552,7 +2556,6 @@ depends_on = [
 from = ["mindroom.workflow_runs.agent_nodes"]
 expose = [
     "EARLIER_TURN",
-    "FRESH_AGENT_FUNCTION",
     "AgentNodeError",
     "AgentNotReadyError",
     "AgentRuntime",
@@ -6104,6 +6107,7 @@ visibility = [
     "mindroom.api.sandbox_execute_stream",
     "mindroom.api.sandbox_runner",
     "mindroom.tool_system.worker_proxy_client",
+    "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.output_files",
 ]

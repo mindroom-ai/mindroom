@@ -15,7 +15,9 @@ from typing import TYPE_CHECKING, Any
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.script_runs.models import utc_timestamp
 from mindroom.workflow_runs.models import (
+    LIVE_NODE_STATES,
     LIVE_RUN_STATES,
+    SERVED_RUN_STATES,
     TERMINAL_RUN_STATES,
     DispatchHandle,
     WorkflowNode,
@@ -46,19 +48,13 @@ _RUN_UPDATE_FIELDS = frozenset(field.name for field in fields(WorkflowRun)) - {
     "depth",
     *_OWNER_COLUMNS,
 }
-_ENDED_NODE_STATES = frozenset(WorkflowNodeState) - {
-    WorkflowNodeState.QUEUED,
-    WorkflowNodeState.RUNNING,
-    WorkflowNodeState.WAITING,
-}
+_ENDED_NODE_STATES = frozenset(WorkflowNodeState) - LIVE_NODE_STATES
 # What a stamp may change on a node: never its identity, its generation, or its outcome.
 _NODE_STAMP_FIELDS = frozenset(
     {"state", "waiting_on", "handle", "attempt", "stale", "label", "name", "phase", "group_key", "members"}
     | {"session_key", "cached", "started_at", "links"},
 )
 _BLANK_NODE = WorkflowNode(run_id="", key="", kind="", lane="", idx=0, digest="", request={}, attempt=0)
-# The states one attempt moves between: every other change of state begins or ends an attempt.
-_SERVED_RUN_STATES = frozenset({WorkflowRunState.RUNNING, WorkflowRunState.WAITING})
 _TERMINAL_STATE_VALUES = tuple(sorted(TERMINAL_RUN_STATES))
 _TERMINAL_STATE_PLACEHOLDERS = ", ".join("?" * len(_TERMINAL_STATE_VALUES))
 
@@ -195,7 +191,7 @@ class WorkflowRunStore:
                 "UPDATE workflow_nodes SET digest = '' WHERE run_id = ? AND key = ?",
                 [(run_id, key) for key in rerun],
             )
-            moves = "state" in changes and not {run.state, changes["state"]} <= _SERVED_RUN_STATES
+            moves = "state" in changes and not {run.state, changes["state"]} <= SERVED_RUN_STATES
             return _write_run(connection, run, changes | ({"epoch": epoch + 1} if moves else {}))
 
     def list_runs(
@@ -726,7 +722,8 @@ _SCHEMA_STATEMENTS = (
     """
     CREATE TABLE workflow_runs (
         run_id TEXT PRIMARY KEY, origin_job_id TEXT UNIQUE, reservation_digest TEXT NOT NULL,
-        parent_run_id TEXT, parent_node_key TEXT,
+        parent_run_id TEXT, parent_node_key TEXT, depth INTEGER NOT NULL,
+        epoch INTEGER NOT NULL, owner TEXT, claims_json TEXT NOT NULL,
         agent_name TEXT NOT NULL, owner_user_id TEXT NOT NULL, room_id TEXT NOT NULL, thread_root_event_id TEXT,
         execution_identity_json TEXT NOT NULL, persona_json TEXT NOT NULL, title TEXT,
         source TEXT NOT NULL, source_digest TEXT NOT NULL, previous_source_digest TEXT, args_json TEXT NOT NULL,
@@ -753,7 +750,7 @@ _SCHEMA_STATEMENTS = (
     """
     CREATE TABLE workflow_usage (
         run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
-        key TEXT NOT NULL, generation INTEGER NOT NULL, turn INTEGER NOT NULL, attempt INTEGER NOT NULL,
+        key TEXT NOT NULL, generation INTEGER NOT NULL, turn TEXT NOT NULL, attempt INTEGER NOT NULL,
         usage_json TEXT NOT NULL,
         PRIMARY KEY (run_id, key, generation, turn)
     )
@@ -766,40 +763,16 @@ _SCHEMA_STATEMENTS = (
     )
     """,
     "CREATE INDEX workflow_log_run_idx ON workflow_log(run_id, id)",
-)
-
-
-def _add_epoch_and_owner(connection: sqlite3.Connection) -> None:
-    """Give each run the epoch its writes name and the invocation that owns it: its job, or the call that reserved it."""
-    connection.execute("ALTER TABLE workflow_runs ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0")
-    connection.execute("ALTER TABLE workflow_runs ADD COLUMN owner TEXT")
-    connection.execute("UPDATE workflow_runs SET owner = COALESCE(job_id, origin_job_id)")
-
-
-def _add_claims_and_depth(connection: sqlite3.Connection) -> None:
-    """Give each run the list of the invocations that took it after it had ended, and the depth of its owner."""
-    connection.execute("ALTER TABLE workflow_runs ADD COLUMN claims_json TEXT NOT NULL DEFAULT '{}'")
-    connection.execute("ALTER TABLE workflow_runs ADD COLUMN depth INTEGER NOT NULL DEFAULT 0")
-
-
-def _add_calls(connection: sqlite3.Connection) -> None:
-    """Add the tool calls of agents that reserved runs inside their runs, each with the run it got."""
-    connection.execute(
-        """
-        CREATE TABLE workflow_calls (
-            run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
-            key TEXT NOT NULL, generation INTEGER NOT NULL, call_id TEXT NOT NULL, child_run_id TEXT NOT NULL,
-            PRIMARY KEY (run_id, key, generation, call_id, child_run_id)
-        )
-        """,
+    # The tool calls of agents that reserved runs inside their runs, each with the run it got.
+    """
+    CREATE TABLE workflow_calls (
+        run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+        key TEXT NOT NULL, generation INTEGER NOT NULL, call_id TEXT NOT NULL, child_run_id TEXT NOT NULL,
+        PRIMARY KEY (run_id, key, generation, call_id, child_run_id)
     )
-
+    """,
+)
 
 # Each entry upgrades the database by one schema version; the stored version is how many have run.
-_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
-    _create_schema,
-    _add_epoch_and_owner,
-    _add_claims_and_depth,
-    _add_calls,
-)
+_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_create_schema,)
 SCHEMA_VERSION = len(_MIGRATIONS)

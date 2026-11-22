@@ -11,7 +11,6 @@ import uuid
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from weakref import WeakValueDictionary
@@ -244,7 +243,7 @@ class ScriptRunManager:
     worker_client: ScriptWorkerClient
     worker_backend: WorkerBackend | None
     gateway_url: str
-    grant_resolver: Callable[..., tuple[ScriptToolGrant, ...]] = resolve_script_launch_grants
+    grant_resolver: Callable[[ToolRuntimeContext], tuple[ScriptToolGrant, ...]] = resolve_script_launch_grants
     toolkit_name_resolver: Callable[[ToolRuntimeContext], frozenset[str]] = resolve_script_launch_toolkit_names
     cancellation_grace_seconds: float = 2.0
     cancellation_poll_interval_seconds: float = 0.05
@@ -323,12 +322,9 @@ class ScriptRunManager:
         self,
         context: ToolRuntimeContext,
         limits: ScriptRunLimits,
-        *,
-        workflow: bool,
     ) -> tuple[ScriptToolGrant, ...]:
         """Resolve one launch snapshot and apply its authored toolkit allowlist."""
-        resolver = partial(self.grant_resolver, workflow=True) if workflow else self.grant_resolver
-        launch_grants = await asyncio.to_thread(resolver, context)
+        launch_grants = await asyncio.to_thread(self.grant_resolver, context)
         if limits.allowed_tools is None:
             return launch_grants
         allowed_tools = frozenset(limits.allowed_tools)
@@ -410,7 +406,8 @@ class ScriptRunManager:
             msg = "Background scripts require a worker or an explicitly disabled sandbox."
             raise ScriptRunManagerError(msg)
 
-        launch_grants = await self._resolve_launch_grants(context, effective_limits, workflow=workflow)
+        # A workflow attempt keeps no list: each of its calls is resolved from its owner's tools when it is made.
+        launch_grants = () if workflow else await self._resolve_launch_grants(context, effective_limits)
         token, token_hash = mint_script_capability()
         run = ScriptRunRecord(
             run_id=run_id,

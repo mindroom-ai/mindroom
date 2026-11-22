@@ -26,7 +26,11 @@ class WorkflowRunState(StrEnum):
 
 LIVE_RUN_STATES = frozenset({WorkflowRunState.STARTING, WorkflowRunState.RUNNING, WorkflowRunState.WAITING})
 TERMINAL_RUN_STATES = frozenset(WorkflowRunState) - LIVE_RUN_STATES
+# The states one attempt moves between, in which it may submit calls: every other change begins or ends an attempt.
+SERVED_RUN_STATES = frozenset({WorkflowRunState.RUNNING, WorkflowRunState.WAITING})
 _INDENTED_REPORT_BYTES = 64 * 1024
+# How long a waiter sleeps before it reads the store or a job again, with or without a wake.
+RECHECK_SECONDS = 1.0
 
 
 class WorkflowNodeState(StrEnum):
@@ -39,6 +43,10 @@ class WorkflowNodeState(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     INDETERMINATE = "indeterminate"
+
+
+UNSETTLED_NODE_STATES = frozenset({WorkflowNodeState.QUEUED, WorkflowNodeState.RUNNING})
+LIVE_NODE_STATES = UNSETTLED_NODE_STATES | {WorkflowNodeState.WAITING}
 
 
 @dataclass(frozen=True, slots=True)

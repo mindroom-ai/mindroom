@@ -35,7 +35,7 @@ from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, JobAccessError
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
-from mindroom.workflow_runs.models import DispatchHandle, WorkflowNodeState
+from mindroom.workflow_runs.models import RECHECK_SECONDS, DispatchHandle, WorkflowNodeState
 from mindroom.workflow_runs.replay import may_have_written
 
 if TYPE_CHECKING:
@@ -49,8 +49,6 @@ if TYPE_CHECKING:
     from mindroom.workflow_runs.models import WorkflowNode, WorkflowRun
     from mindroom.workflow_runs.store import WorkflowRunStore
 
-# The function of `delegate` a script's `tool()` call may name: it starts a fresh agent, as the SDK's `agent()` does.
-FRESH_AGENT_FUNCTION = RUN_SUBAGENT
 # The options of the SDK's `agent()` as the arguments of `run_subagent`, whose rules resolve them.
 _RENAMED = {"prompt": "task", "agent": "agent_name", "system": "system_prompt", "output_path": OUTPUT_PATH_ARGUMENT}
 _OPTIONS = (
@@ -67,8 +65,6 @@ _NARROWS_WITH_SYSTEM = "tools, skills and knowledge narrow a copy only together 
 _INTERRUPTED = "The agent was stopped before it started a tool call. A resume runs it again."
 _NO_ANSWER = "The agent's turn left no record of how it ended."
 _NODE_ENDED = "The call ended before its agent started."
-# How long a wait for a job that cannot be read yet, while its requester's access resolves, sleeps before it asks again.
-_RECHECK_SECONDS = 1.0
 
 # How one agent turn ended: `completed` and its answer, or the kind of its error and what to tell the script.
 type ChildOutcome = tuple[str, str]
@@ -294,7 +290,7 @@ async def await_child(  # noqa: C901
             await jobs.request_cancel(job_id)
         else:
             # The job cannot be read while its requester's access resolves.
-            await asyncio.sleep(_RECHECK_SECONDS)
+            await asyncio.sleep(RECHECK_SECONDS)
     try:
         outcome, usage = await _job_outcome(job, runtime)
     except BaseException:

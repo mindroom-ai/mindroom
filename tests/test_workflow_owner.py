@@ -44,7 +44,7 @@ _TAKEN = "Run {} was resumed by another call."
 async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
     """The harness with the real job runtime, which keeps the jobs the coordinator continues after a restart."""
     monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: True)
-    monkeypatch.setattr(engine_module, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.05)
     with workflow_stack(tmp_path, extra_tools=("workflow",)) as stack:
         stack.continues = coordinator_module._continues
         await stack.open_jobs()

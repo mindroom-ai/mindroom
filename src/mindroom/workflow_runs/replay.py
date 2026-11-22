@@ -6,14 +6,12 @@ import hashlib
 import json
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.workflow_runs.models import WorkflowNode, WorkflowNodeState
+from mindroom.workflow_runs.models import LIVE_NODE_STATES, UNSETTLED_NODE_STATES, WorkflowNode, WorkflowNodeState
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
 type _Action = Literal["return", "hit", "attach", "reconcile", "raise_indeterminate", "run"]
-_UNSETTLED_STATES = frozenset({WorkflowNodeState.QUEUED, WorkflowNodeState.RUNNING})
-_LIVE_STATES = _UNSETTLED_STATES | {WorkflowNodeState.WAITING}
 
 
 def node_digest(kind: str, args: dict[str, object]) -> str:
@@ -72,13 +70,13 @@ def decide(
         action = "run"
     elif saved.attempt == attempt and not saved.stale:
         action = "return"
-    elif saved.state in _UNSETTLED_STATES and not live:
+    elif saved.state in UNSETTLED_NODE_STATES and not live:
         action = "reconcile"
     elif saved.state is WorkflowNodeState.INDETERMINATE and not rerun:
         action = "raise_indeterminate"
     elif rerun or dirty or saved.digest != digest:
         action = "run"
-    elif saved.state in _LIVE_STATES:
+    elif saved.state in LIVE_NODE_STATES:
         action = "attach"
     elif saved.state is WorkflowNodeState.COMPLETED and cached:
         action = "hit"

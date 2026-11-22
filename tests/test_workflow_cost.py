@@ -38,8 +38,8 @@ def _usd(amount: float) -> MessageMetrics:
 
 
 async def _opened(stack: WorkflowStack, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
-    monkeypatch.setattr(engine_module, "_RECHECK_SECONDS", 0.05)
-    monkeypatch.setattr(agent_nodes, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(agent_nodes, "RECHECK_SECONDS", 0.05)
     await stack.open_jobs()
     stack.script_agents(monkeypatch)
     await stack.start()

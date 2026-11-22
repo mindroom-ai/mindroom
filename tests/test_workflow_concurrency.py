@@ -33,7 +33,7 @@ _COMPLETED, _CANCELLED = WorkflowNodeState.COMPLETED, WorkflowNodeState.CANCELLE
 
 
 async def _opened(stack: WorkflowStack, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
-    monkeypatch.setattr(engine_module, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.05)
     await stack.open_jobs()
     stack.script_agents(monkeypatch)
     yield stack

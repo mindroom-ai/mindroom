@@ -36,6 +36,7 @@ from mindroom.tool_system.worker_routing import serialize_tool_execution_identit
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 from mindroom.workflow_runs.engine import WorkflowLimits, calling_node, ceiling, nested_key
 from mindroom.workflow_runs.models import (
+    LIVE_NODE_STATES,
     TERMINAL_RUN_STATES,
     WorkflowNodeState,
     WorkflowRun,
@@ -117,7 +118,6 @@ _AT_MOST_ONE_SOURCE = "Give at most one of source or path."
 _NEEDS_JOBS = "Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow."
 
 
-_ACTIVE = frozenset({WorkflowNodeState.QUEUED, WorkflowNodeState.RUNNING, WorkflowNodeState.WAITING})
 _FAILED = frozenset({WorkflowNodeState.FAILED, WorkflowNodeState.INDETERMINATE})
 _JOB_STATUS: dict[WorkflowRunState, Literal["completed", "failed", "cancelled", "interrupted"]] = {
     WorkflowRunState.COMPLETED: "completed",
@@ -218,7 +218,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         engine, context = _runtime()
         run = _owned(engine, context, run_id)
         listed = await asyncio.to_thread(engine.store.nodes, run.run_id)
-        shown = {"active": _ACTIVE, "failed": _FAILED, "all": frozenset(WorkflowNodeState)}[nodes]
+        shown = {"active": LIVE_NODE_STATES, "failed": _FAILED, "all": frozenset(WorkflowNodeState)}[nodes]
         # What each call used, over every time it ran; a call that asked no model has none.
         used = await asyncio.to_thread(engine.store.node_usage, run.run_id)
         status = {

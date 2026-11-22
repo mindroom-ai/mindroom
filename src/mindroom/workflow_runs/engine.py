@@ -19,7 +19,7 @@ from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
 from mindroom.delegation.personas import persona_allows
-from mindroom.delegation.state import SubagentPersona
+from mindroom.delegation.state import RUN_SUBAGENT, SubagentPersona
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
@@ -41,7 +41,6 @@ from mindroom.script_runs.store import (
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
 from mindroom.workflow_runs.agent_nodes import (
     EARLIER_TURN,
-    FRESH_AGENT_FUNCTION,
     AgentNodeError,
     AgentNotReadyError,
     AgentRuntime,
@@ -51,7 +50,11 @@ from mindroom.workflow_runs.agent_nodes import (
 )
 from mindroom.workflow_runs.faults import hold
 from mindroom.workflow_runs.models import (
+    LIVE_NODE_STATES,
+    RECHECK_SECONDS,
+    SERVED_RUN_STATES,
     TERMINAL_RUN_STATES,
+    UNSETTLED_NODE_STATES,
     DispatchHandle,
     NodeReceipt,
     WorkflowNode,
@@ -83,12 +86,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_UNSETTLED_NODE_STATES = frozenset({WorkflowNodeState.QUEUED, WorkflowNodeState.RUNNING})
-_LIVE_NODE_STATES = _UNSETTLED_NODE_STATES | {WorkflowNodeState.WAITING}
 # How many failed calls the first line of a report names; `get_workflow` lists them all.
 _MAX_FAILED_NAMED = 10
-# The states in which a run's attempt may submit calls: a run that is starting names no attempt that may.
-_SERVED_RUN_STATES = frozenset({WorkflowRunState.RUNNING, WorkflowRunState.WAITING})
 _SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
 _MAX_LABEL_CHARS = 80
 # The owner of the tasks that admit calls: they outlive their requests, and a run's end waits for them, not stops them.
@@ -183,8 +182,6 @@ def _both(
 # stands: one whose job has not ended is one nobody could read.
 _STOP_SECONDS, _STOP_POLL_SECONDS = 30.0, 0.05
 _STOPPING = "The agent this call replaces is stopping. Try again in a moment."
-# How long a waiter sleeps before it reads the store again, with or without a wake.
-_RECHECK_SECONDS = 1.0
 # How long a tool call above its attempt's calls per minute waits before it asks for room again.
 _RATE_WAIT_SECONDS = 1.0
 # How long after its report a script's exit is looked for, before the script runtime's own pass finds it.
@@ -510,7 +507,7 @@ class WorkflowEngine:
         if owner is not None and run.owner == owner:
             return run, False
         while job_id is not None and self.admit(run, context, limits) is None:  # noqa: ASYNC110 - access has no event
-            await asyncio.sleep(_RECHECK_SECONDS)
+            await asyncio.sleep(RECHECK_SECONDS)
         text = run.source if source is None else source
         take = partial(
             self.store.update_run,
@@ -566,11 +563,11 @@ class WorkflowEngine:
                     # The saved run decides: a wake only shortens the wait, since a writer cancelled at its commit
                     # sends none.
                     with suppress(TimeoutError):
-                        await asyncio.wait_for(condition.wait(), _RECHECK_SECONDS)
+                        await asyncio.wait_for(condition.wait(), RECHECK_SECONDS)
             if launch is None or run.state in TERMINAL_RUN_STATES:
                 return run
             if (await launch()).state is WorkflowRunState.STARTING:
-                await asyncio.sleep(_RECHECK_SECONDS)
+                await asyncio.sleep(RECHECK_SECONDS)
 
     async def attend(
         self,
@@ -680,7 +677,7 @@ class WorkflowEngine:
     ) -> NodeReceipt:
         """Decide and save one call for the attempt that began with *epoch*, which every write here names."""
         key, kind, meta = request.key, request.kind, request.meta
-        if run.epoch != epoch or run.state not in _SERVED_RUN_STATES or run.run_id in self._stopping:
+        if run.epoch != epoch or run.state not in SERVED_RUN_STATES or run.run_id in self._stopping:
             # Before anything is kept for the attempt: one that the run left behind leaves nothing behind here.
             msg = f"Run {run.run_id} takes no more calls from attempt {attempt.run_id}."
             raise SupersededAttemptError(msg)
@@ -699,7 +696,7 @@ class WorkflowEngine:
         if saved is not None and action == "return":
             # A request the script sent twice never repeats work, not even failed work.
             return _receipt(saved)
-        if saved is not None and action != "return" and saved.state in _LIVE_NODE_STATES:
+        if saved is not None and action != "return" and saved.state in LIVE_NODE_STATES:
             # Left live by an attempt that ended: its handle says how it ended, or that its job still runs, before
             # any rule may run it again.
             live = await self._reconcile(run, saved, epoch)
@@ -851,7 +848,7 @@ class WorkflowEngine:
                     break
                 except ScriptRuntimeUnavailableError:
                     # The bot of the call's agent is still starting, or its owner's access is not known yet.
-                    await asyncio.sleep(_RECHECK_SECONDS)
+                    await asyncio.sleep(RECHECK_SECONDS)
         except SupersededAttemptError:
             # The run moved on: what it left queued is the next attempt's to run.
             self._leave(run_id, key)
@@ -875,7 +872,7 @@ class WorkflowEngine:
         The node is saved as a queued one is, with no handle: nothing is started before the gate answers, so a
         restart or a stop meanwhile finds a call that never ran. The caller holds the run's lock.
         """
-        if grant.function_name != FRESH_AGENT_FUNCTION:
+        if grant.function_name != RUN_SUBAGENT:
             refused = {"kind": "refused", "message": _NO_SESSIONS.format(function=grant.function_name)}
             node = replace(node, state=WorkflowNodeState.FAILED, error=refused, ended_at=node.started_at)
             return _receipt(await asyncio.to_thread(partial(self.store.put_node, node, run.epoch, dirty_after=True)))
@@ -1260,13 +1257,13 @@ class WorkflowEngine:
         """Save the state the run has now and what it used in *span*; return whether its state changed."""
         with suppress(SupersededAttemptError, WorkflowRunStoreError):
             run = self.store.get_run(run_id)
-            if run.state in _SERVED_RUN_STATES:
+            if run.state in SERVED_RUN_STATES:
                 states = self.store.node_states(run_id)
-                waits = WorkflowNodeState.WAITING in states and not states & _UNSETTLED_NODE_STATES
+                waits = WorkflowNodeState.WAITING in states and not states & UNSETTLED_NODE_STATES
                 state = WorkflowRunState.WAITING if waits else WorkflowRunState.RUNNING
                 if state is not run.state:
                     changes = {"state": state, **self._time_left(run, span)}
-                    partial(self.store.update_run, run_id, run.epoch, when=_SERVED_RUN_STATES)(**changes)
+                    partial(self.store.update_run, run_id, run.epoch, when=SERVED_RUN_STATES)(**changes)
                     return True
         return False
 
@@ -1280,10 +1277,10 @@ class WorkflowEngine:
             async with (condition := self._condition(run.run_id)):
                 node = self._node(run.run_id, node_id)
                 remaining = deadline - loop.time()
-                if node.state not in _LIVE_NODE_STATES or remaining <= 0:
+                if node.state not in LIVE_NODE_STATES or remaining <= 0:
                     return _receipt(node)
                 with suppress(TimeoutError):
-                    await asyncio.wait_for(condition.wait(), min(remaining, _RECHECK_SECONDS))
+                    await asyncio.wait_for(condition.wait(), min(remaining, RECHECK_SECONDS))
 
     def node_prompt(self, run_id: str, key: str | None, generation: int | None) -> str | None:
         """Return the prompt of the agent call that is *generation* of the node at *key*, while it waits for its agent.
@@ -1291,7 +1288,7 @@ class WorkflowEngine:
         None once the call has an outcome, was replaced, or went with its run: nothing waits for its job any more.
         """
         node = self.store.get_node(run_id, key) if key else None
-        live = node is not None and node.generation == generation and node.state in _LIVE_NODE_STATES
+        live = node is not None and node.generation == generation and node.state in LIVE_NODE_STATES
         if live and (runtime := self.agents()) is not None:
             # A Stop of the run's own job ends the run at its next pass: until then nothing of the run goes on.
             owner, jobs = self.store.get_run(run_id).job_id, runtime.jobs.retained_jobs()
@@ -1315,7 +1312,7 @@ class WorkflowEngine:
         script did not reach, takes nothing from the report of the attempt the run serves.
         """
         run = await self._current_run(attempt)
-        report = partial(self.store.update_run, run.run_id, run.epoch, when=_SERVED_RUN_STATES)
+        report = partial(self.store.update_run, run.run_id, run.epoch, when=SERVED_RUN_STATES)
         await asyncio.to_thread(partial(report, result=result, error=error, finished_at=utc_timestamp()))
         self._spawn(run.run_id, self._observe_exit(attempt.run_id))
 
@@ -1475,7 +1472,7 @@ class WorkflowEngine:
             self._places.pop(run.run_id, None)
             nodes = self.store.nodes(run.run_id, include_stale=True)
         deadline = asyncio.get_running_loop().time() + _STOP_SECONDS
-        handles = [node.handle for node in nodes if node.state in _LIVE_NODE_STATES and node.handle is not None]
+        handles = [node.handle for node in nodes if node.state in LIVE_NODE_STATES and node.handle is not None]
         runtime = self.agents()
         jobs = [handle.ref for handle in handles if handle.kind == "job" and runtime is not None]
         inside = [self.cancel(handle.ref, reason=_RUN_ENDED) for handle in handles if handle.kind == "run"]
@@ -1523,7 +1520,7 @@ class WorkflowEngine:
                 for node in nodes:
                     # An agent's job outlives an attempt, and so does a nested run: neither outlives its run.
                     waits_for_job = node.handle is not None and node.handle.kind in ("job", "run")
-                    if node.state in _LIVE_NODE_STATES and (ended or not waits_for_job):
+                    if node.state in LIVE_NODE_STATES and (ended or not waits_for_job):
                         await self._reconcile(current, node, run.epoch, stop=ended)
                 if state is WorkflowRunState.COMPLETED:
                     # What the completed script no longer reaches leaves the run's current view.

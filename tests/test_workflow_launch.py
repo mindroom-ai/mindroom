@@ -19,6 +19,7 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.script_runs import launch_contract
+from mindroom.script_runs import policy as policy_module
 from mindroom.script_runs.broker import ScriptToolBroker, ScriptToolCallRequest
 from mindroom.script_runs.manager import (
     ScriptRunLimits,
@@ -63,9 +64,9 @@ def _shell_allowed(config: Config) -> Config:
     )
 
 
-def _workflow_grants(_context: ToolRuntimeContext, *, workflow: bool = False) -> tuple[ScriptToolGrant, ...]:
-    assert workflow
-    return (ScriptToolGrant("calculator", "add"),)
+def _workflow_grants(_context: ToolRuntimeContext) -> tuple[ScriptToolGrant, ...]:
+    msg = "A workflow attempt saves no list of grants: its calls are resolved when they are made."
+    raise AssertionError(msg)
 
 
 def test_no_backend_and_shell_allowed_runs_locally(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,7 +141,7 @@ async def test_workflow_attempt_has_no_recovery_signature_and_crosses_the_worker
 
     stored = manager.store.get_run(attempt.run_id)
     assert (stored.workflow_run_id, stored.entry, stored.recovery_signature) == (RUN, "workflow", None)
-    assert stored.grants == (ScriptToolGrant("calculator", "add"),)
+    assert stored.grants == ()
     assert client.launch_entries == ["workflow"]
 
 
@@ -339,7 +340,8 @@ def test_grants_include_memory_and_delegate_but_not_compact_context(tmp_path: Pa
     """A workflow may call what a plain script may not, except the tools that act on a calling turn."""
     context = _owner_context(tmp_path, ["calculator", "memory", "delegate", "compact_context", "dynamic_tools"])
 
-    workflow_toolkits = {grant.toolkit_name for grant in resolve_script_launch_grants(context, workflow=True)}
+    entries = policy_module._visible_script_tool_entries(context, context.config, workflow=True)
+    workflow_toolkits = {entry.name for entry in entries}
     script_toolkits = {grant.toolkit_name for grant in resolve_script_launch_grants(context)}
 
     assert {"calculator", "memory", "delegate"} <= workflow_toolkits

@@ -73,7 +73,7 @@ SCRIPT = "def main(args):\n    return 'counted'\n"
 def _scripts_can_run_here(monkeypatch: pytest.MonkeyPatch) -> None:
     """Let the placement check pass on every platform; the stack starts no process. A job asks again soon."""
     monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: True)
-    monkeypatch.setattr(engine_module, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.05)
 
 
 @pytest_asyncio.fixture

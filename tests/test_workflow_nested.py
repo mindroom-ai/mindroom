@@ -41,8 +41,8 @@ _RUNNING, _COMPLETED, _CANCELLED = WorkflowNodeState.RUNNING, WorkflowNodeState.
 
 
 async def _opened(stack: WorkflowStack, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
-    monkeypatch.setattr(engine_module, "_RECHECK_SECONDS", 0.05)
-    monkeypatch.setattr(agent_nodes, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(agent_nodes, "RECHECK_SECONDS", 0.05)
     # As the job coordinator rules in production: a restart keeps the jobs of agents to continue them.
     stack.continues = lambda job: job.kind == "delegation"
     await stack.open_jobs()
