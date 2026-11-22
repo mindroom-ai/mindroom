@@ -1063,6 +1063,7 @@ async def _execute_prepared_request_inprocess(
         except OAuthConnectionRequired as exc:
             return _oauth_connection_required_response(prepared, exc)
 
+        ran = False
         try:
             call_environment = ToolEnvironment(
                 values=prepared.call_environment,
@@ -1071,6 +1072,7 @@ async def _execute_prepared_request_inprocess(
             structured = structured_tool_result() if prepared.structured_result else nullcontext()
             with collected_tool_environment(call_environment), structured as metadata:
                 result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
+            ran = True
             result = await asyncio.to_thread(serialize_worker_tool_result, result)
         except OAuthConnectionRequired as exc:
             return _oauth_connection_required_response(prepared, exc)
@@ -1085,6 +1087,9 @@ async def _execute_prepared_request_inprocess(
                 ok=False,
                 error=f"Sandbox tool execution failed: {type(exc).__name__}: {exc}",
                 failure_kind="tool",
+                # The tool ran and its result could not be sent: a caller that stores results must not read the
+                # failure as a tool that ended without its effect.
+                metadata={"unanswered": True} if ran and prepared.structured_result else None,
             )
 
     return ExecuteResponse(ok=True, result=result, metadata=metadata or None)

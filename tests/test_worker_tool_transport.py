@@ -317,6 +317,53 @@ async def test_workflow_call_on_a_worker_fails_as_safe_to_rerun_only_when_the_to
     assert (ended.value.kind, effect.read_text(), len(worker_requests)) == (kind, "ran\n", 1)
 
 
+def _unsendable(_result: object) -> object:
+    msg = "The result is larger than the worker may send."
+    raise ValueError(msg)
+
+
+@pytest.mark.asyncio
+async def test_workflow_write_on_a_worker_whose_result_could_not_be_sent_is_not_safe_to_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_requests: list[dict[str, object]],
+) -> None:
+    """The tool ran and its result did not fit the wire: the worker says so, and no resume runs the write again."""
+    monkeypatch.setattr(sandbox_runner, "serialize_worker_tool_result", _unsendable)
+    effect = tmp_path / "effect.txt"
+    with workflow_stack(tmp_path, process_env=_PROXY_ENV) as stack:
+        await stack.start()
+        command = tool_args("shell", "run_shell_command", args=f"echo ran >> {effect}", timeout=30)
+
+        with pytest.raises(NodeFailed) as ended:
+            await stack.result("@0", "tool", command)
+
+        await stack.engine.close()
+    assert (ended.value.kind, effect.read_text(), len(worker_requests)) == ("indeterminate", "ran\n", 1)
+
+
+def test_a_plain_worker_call_whose_result_could_not_be_sent_fails_as_it_always_did(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_requests: list[dict[str, object]],
+) -> None:
+    """A call that asked for no structured result gets the failure it got before, with no new field on the wire."""
+    answers: list[dict[str, object]] = []
+    execute = sandbox_runner._execute_request_inprocess
+
+    async def recording(call: sandbox_runner._ExecuteCall) -> sandbox_runner.ExecuteResponse:
+        answer = await execute(call)
+        answers.append(answer.model_dump(mode="json"))
+        return answer
+
+    monkeypatch.setattr(sandbox_runner, "_execute_request_inprocess", recording)
+    monkeypatch.setattr(sandbox_runner, "serialize_worker_tool_result", _unsendable)
+
+    with pytest.raises(RuntimeError, match="The result is larger than the worker may send"):
+        _worker_shell(tmp_path, "true")
+    assert (len(worker_requests), answers[0].keys()) == (1, {"ok", "result", "error", "failure_kind"})
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("reply", "kind"),

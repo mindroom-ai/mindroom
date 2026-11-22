@@ -507,8 +507,9 @@ def execute_worker_proxy_request(
 
     with suppress(ValidationError):
         final = ExecuteResponse.model_validate(data)
-        if final.ok or final.failure_kind == "tool":
-            report_tool_metadata(unanswered=False)
+        if not final.ok and final.failure_kind == "tool":
+            # The worker's word that the tool ended, unless it says the tool ran and only its result was lost.
+            report_tool_metadata(unanswered=bool((final.metadata or {}).get("unanswered")))
     answer = _checked_worker_answer(
         data,
         ExecuteResponse,
@@ -519,7 +520,8 @@ def execute_worker_proxy_request(
     )
     if worker_handle is not None:
         worker_manager.touch_worker(worker_handle.worker_key)
-    report_tool_metadata(**(answer.metadata or {}))
+    # Answered only once nothing after the tool's success can fail the call: a failure there is no failed tool.
+    report_tool_metadata(**(answer.metadata or {}), unanswered=False)
     return answer.result
 
 

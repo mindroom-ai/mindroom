@@ -85,6 +85,7 @@ from mindroom.tool_system.metadata import (
     get_tool_by_name,
 )
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy
+from mindroom.tool_system.progress import structured_tool_result
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
@@ -4185,6 +4186,61 @@ def test_proxy_holds_manager_lease_through_success_bookkeeping(
 
     assert result == "proxied"
     assert events == ["enter", "build", "touch", "exit"]
+
+
+def test_a_worker_call_that_succeeded_stays_unanswered_when_its_bookkeeping_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tool ran on the worker: a failure to note the worker's use must not read as a tool that failed."""
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="all",
+    )
+    worker_handle = WorkerHandle(
+        worker_id="worker-1",
+        worker_key="worker-key",
+        endpoint="http://worker/api/sandbox-runner/execute",
+        auth_token=_TEST_AUTH_TOKEN,
+        status="ready",
+        backend_name="docker",
+        last_used_at=1.0,
+        created_at=0.0,
+    )
+
+    class _FailingBookkeeping:
+        cleanup_locator = None
+
+        def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
+            msg = f"could not write the metadata of {worker_key} at {now}"
+            raise OSError(msg)
+
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "lease_primary_worker_manager",
+        lambda *_args, **_kwargs: contextlib.nullcontext(_FailingBookkeeping()),
+    )
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "worker_route",
+        lambda **_route: (WorkerRoute(protocol=WORKER_PROTOCOL_VERSION, worker_key="worker-key"), worker_handle),
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(responder=lambda _url, _json: {"ok": True, "result": "proxied"}),
+    )
+
+    with structured_tool_result() as facts, pytest.raises(OSError, match="could not write the metadata"):
+        call_proxy_sync_for_test(
+            runtime_paths=runtime_paths,
+            tool_name="calculator",
+            function_name="add",
+            args=(1, 2),
+            kwargs={},
+            credentials_manager=None,
+        )
+    assert facts == {"unanswered": True}
 
 
 def test_proxy_holds_manager_lease_through_failure_bookkeeping(
