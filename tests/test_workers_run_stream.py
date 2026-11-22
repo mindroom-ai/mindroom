@@ -919,3 +919,75 @@ async def test_a_stdout_that_fails_its_writes_is_reported_and_stops_the_command(
         assert process.returncode == 1
         assert stderr.startswith(b"mindroom-agent: cannot write the command's output: No space left on device")
         await _until(lambda: not _alive(int(leader.read_text())), what="the command outlived its writer")
+
+
+@pytest.mark.parametrize("status", [408, 429])
+async def test_a_stdin_chunk_the_runner_asks_to_send_again_is_sent_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    """An answer of the runner that passes is no refusal: the chunk is sent again, and written once."""
+    write = execution.CommandStdin.write
+    writes = 0
+
+    async def busy_once(self: execution.CommandStdin, seq: int, data: bytes, *, eof: bool) -> bool:
+        nonlocal writes
+        writes += 1
+        if writes == 3:
+            raise HTTPException(status_code=status, detail="busy")
+        return await write(self, seq, data, eof=eof)
+
+    monkeypatch.setattr(execution.CommandStdin, "write", busy_once)
+    sent = os.urandom(300_000)
+    async with _stack(tmp_path) as stack:
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            code, stdout, stderr = await stack.run("--", "cat", stdin=sent)
+    assert writes > 3
+    assert (code, hashlib.sha256(stdout).hexdigest(), stderr) == (0, hashlib.sha256(sent).hexdigest(), b"")
+
+
+@pytest.mark.parametrize("cancel_answers", [True, False])
+async def test_a_refused_stdin_chunk_stops_the_command_before_the_cli_writes_to_a_stderr_nobody_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_answers: bool,
+) -> None:
+    """The cancel goes out and the stream is closed before the CLI says why, whether or not the cancel is answered."""
+
+    async def refusing(*_: object, **__: object) -> bool:
+        raise HTTPException(status_code=403, detail="refused")
+
+    async def failing(*_: object) -> dict[str, object]:
+        raise HTTPException(status_code=500)
+
+    monkeypatch.setattr(turn.LiveTurnTools, "write_stdin", refusing)
+    if not cancel_answers:
+        monkeypatch.setattr(turn.LiveTurnTools, "cancel_call", failing)
+    leader = tmp_path / "leader"
+    # A stderr that is full to its last byte: whatever the CLI writes to it waits until it is read.
+    reading, writing = os.pipe()
+    os.set_blocking(writing, False)
+    for size in (4096, 1):
+        with suppress(BlockingIOError):
+            while True:
+                os.write(writing, bytes(size))
+    os.set_blocking(writing, True)
+    async with _stack(tmp_path) as stack:
+        try:
+            process = await stack.spawn("--", f"echo $$ > {leader}; cat", stdin=asyncio.subprocess.PIPE, stderr=writing)
+        finally:
+            os.close(writing)
+        try:
+            assert process.stdin is not None
+            process.stdin.write(b"data\n")
+            pid = await _pid(leader)
+            await _until(lambda: not _alive(pid), what="the command ran on while the CLI could not write")
+            assert process.returncode is None
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                said = await asyncio.to_thread(lambda: open(reading, "rb").read())  # noqa: PTH123, SIM115
+                assert await process.wait() == 255
+            assert said.lstrip(b"\0").startswith(b"mindroom-agent: the command's stdin was refused (HTTP 403)")
+        finally:
+            with suppress(ProcessLookupError):
+                process.kill()
