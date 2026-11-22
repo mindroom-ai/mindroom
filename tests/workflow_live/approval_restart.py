@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import secrets
 import sys
 import time
@@ -66,13 +67,16 @@ def _require_approval(deployment: Deployment) -> bool:
     text = path.read_text()
     if _RULE in text:
         return False
-    if "\ntool_approval:" not in text:
+    # The section's own lines: everything indented under its key, whatever else the section sets.
+    section = re.search(r"^tool_approval:\n((?:[ \t]+.*\n|\n)*)", text, re.MULTILINE)
+    if section is None:
         text += f"\ntool_approval:\n  rules:\n{_RULE}"
-    elif "\ntool_approval:\n  rules:\n" in text:
-        text = text.replace("\ntool_approval:\n  rules:\n", f"\ntool_approval:\n  rules:\n{_RULE}", 1)
+    elif (rules := re.search(r"^  rules:\n", section.group(1), re.MULTILINE)) is not None:
+        # First in the list: the first rule that matches a call decides.
+        at = section.start(1) + rules.end()
+        text = text[:at] + _RULE + text[at:]
     else:
-        msg = "config.yaml has a tool_approval section without rules; add a require_approval rule for save_file"
-        raise LiveError(msg)
+        text = text[: section.start(1)] + f"  rules:\n{_RULE}" + text[section.start(1) :]
     path.write_text(text)
     return True
 
