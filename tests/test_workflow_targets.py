@@ -49,6 +49,8 @@ _ROOMS = {
     "secret": [_ROOM],
     "stranger": ["!other:example.org"],
     "late": [],
+    # A bot that exists and has no client yet: it is still logging in.
+    "login": None,
 }
 
 
@@ -83,7 +85,10 @@ def _authorize(
     """Ask as the workflow of `dev`, for Alice, in the room, with each bot's own list of the rooms it is in."""
     config, paths = config or _config(), _runtime_paths(tmp_path)
     bots = {
-        name: SimpleNamespace(client=SimpleNamespace(rooms=dict.fromkeys(rooms)), first_sync_complete=name != "late")
+        name: SimpleNamespace(
+            client=None if rooms is None else SimpleNamespace(rooms=dict.fromkeys(rooms)),
+            first_sync_complete=name not in ("late", "login"),
+        )
         for name, rooms in _ROOMS.items()
     }
     context = _delegate_runtime_context(config, paths, execution_identity=_IDENTITY, agent_name="dev")
@@ -124,13 +129,24 @@ def test_joined_agent_the_requester_may_not_address_is_refused(tmp_path: Path) -
     assert _authorize(tmp_path, "secret") == "Cannot delegate to 'secret': that agent is not allowed to reply to you."
 
 
-def test_agent_whose_bot_is_unknown_is_refused(tmp_path: Path) -> None:
-    """No list of a bot's rooms is no proof that it is in the run's room."""
+@pytest.mark.parametrize("target", ["absent", "login"])
+def test_configured_agent_whose_bot_is_not_there_yet_is_asked_for_again(tmp_path: Path, target: str) -> None:
+    """A configured agent without a bot, or whose bot is still logging in, is starting: that is no refusal."""
     config = _config()
-    config.agents["absent"] = AgentConfig(display_name="Absent")
-    with_responder_access(config, "absent", users=[_ALICE])
+    config.agents[target] = AgentConfig(display_name=target.title())
+    with_responder_access(config, target, users=[_ALICE])
 
-    assert "Cannot delegate to 'absent'" in str(_authorize(tmp_path, "absent", config=config))
+    with pytest.raises(DelegationPendingError, match=f"'{target}'"):
+        _authorize(tmp_path, target, config=config)
+    assert f"Cannot delegate to '{target}'" in str(_authorize(tmp_path, target, config=config, grant="delegate"))
+
+
+def test_room_agent_is_asked_for_again_while_the_requesters_membership_is_loading(tmp_path: Path) -> None:
+    """Access through membership of a room that is not loaded yet is undecided, which is neither yes nor no."""
+    config = with_responder_access(_config(), "reviewer", members_of_rooms=["!grant:example.org"])
+
+    with pytest.raises(DelegationPendingError, match="'reviewer'"):
+        _authorize(tmp_path, "reviewer", config=config)
 
 
 def test_agent_whose_bot_has_not_synced_yet_is_not_ready_instead_of_refused(tmp_path: Path) -> None:
@@ -200,7 +216,7 @@ def test_job_runtime_grants_the_job_of_a_runs_agent_by_the_same_rule(
 ) -> None:
     """The job runtime asks at admission, on every pass and before a continuation: it answers as the dispatch did."""
     config, paths = _config(), _runtime_paths(tmp_path)
-    rooms = {name: SimpleNamespace(rooms=dict.fromkeys(joined)) for name, joined in _ROOMS.items()}
+    rooms = {name: SimpleNamespace(rooms=dict.fromkeys(joined or ())) for name, joined in _ROOMS.items()}
     bots = {name: SimpleNamespace(first_sync_complete=synced, client=client) for name, client in rooms.items()}
     coordinator = ToolJobRuntimeCoordinator(
         runtime_paths=paths,
@@ -233,7 +249,7 @@ def test_job_runtime_grants_a_team_members_own_copy_to_a_requester_of_the_team(
     config.teams["crew"] = TeamConfig(display_name="Crew", role="Builds things.", agents=["dev"])
     with_responder_access(config, "crew", users=[_ALICE])
     with_responder_access(config, "dev", users=["@bob:example.org"])
-    rooms = {name: SimpleNamespace(rooms=dict.fromkeys(joined)) for name, joined in _ROOMS.items()}
+    rooms = {name: SimpleNamespace(rooms=dict.fromkeys(joined or ())) for name, joined in _ROOMS.items()}
     bots = {name: SimpleNamespace(first_sync_complete=True, client=client) for name, client in rooms.items()}
     coordinator = ToolJobRuntimeCoordinator(
         runtime_paths=paths,

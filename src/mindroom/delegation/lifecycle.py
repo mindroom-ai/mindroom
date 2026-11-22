@@ -8,13 +8,13 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from mindroom.agent_cli.session import CONFIG_RELOAD_CALL
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.ai_run_metadata import model_payload, prior_usage_of, prompt_input_tokens, turn_usage
-from mindroom.authorization import is_sender_allowed_for_responder
+from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.budgets.pricing import model_prices, run_cost_usd
 from mindroom.constants import runtime_matrix_homeserver
@@ -595,13 +595,16 @@ class DelegationPendingError(Exception):
 def _bot_in_room(context: ToolRuntimeContext | None, agent_name: str) -> bool | None:
     """Return whether the agent's own bot is in the room of *context*, None while that bot does not know its rooms.
 
-    A bot knows the rooms it is in once it has completed its first sync. An agent without a bot is in no room.
+    A bot knows the rooms it is in once it has completed its first sync: one that is not built yet, or is still
+    logging in, is starting as well. Where no orchestrator holds the bots, nobody can say, which is no.
     """
     orchestrator = context.orchestrator if context is not None else None
-    bot = orchestrator.agent_bots.get(agent_name) if orchestrator is not None else None
-    if context is None or bot is None or bot.client is None:
+    if context is None or orchestrator is None:
         return False
-    return context.room_id in bot.client.rooms if bot.first_sync_complete else None
+    bot = orchestrator.agent_bots.get(agent_name)
+    if bot is None or bot.client is None or not bot.first_sync_complete:
+        return None
+    return context.room_id in bot.client.rooms
 
 
 def _run_runs_agent(caller_name: str, agent_name: str, config: Config, context: ToolRuntimeContext | None) -> bool:
@@ -611,6 +614,16 @@ def _run_runs_agent(caller_name: str, agent_name: str, config: Config, context: 
         msg = f"The bot of '{agent_name}' is still starting. Try again in a moment."
         raise DelegationPendingError(msg)
     return runs
+
+
+def _answers_requester(grant: _DelegationGrant, requester_id: str, agent_name: str, *access: Any) -> bool:  # noqa: ANN401
+    """Return whether the agent may reply to the requester; for a workflow run, raise while that is undecided."""
+    try:
+        options = {"require_resolved_membership": True} if grant == "workflow" else {}
+        return is_sender_allowed_for_responder(requester_id, agent_name, *access, **options)
+    except ReplyMembershipPendingError as exc:
+        msg = f"Whether '{agent_name}' may reply to you is still loading. Try again in a moment."
+        raise DelegationPendingError(msg) from exc
 
 
 def _target_refusal(
@@ -696,9 +709,8 @@ def authorize_delegation(  # noqa: PLR0911
     # A workflow participant is the caller's own copy inside the caller's tool call, so the requester
     # the caller already serves, possibly only through a team's access, keeps that access. So does the copy of
     # itself that a workflow run's script runs; any other agent of a run must answer the requester, as a subagent.
-    if (
-        grant == "delegate" or (grant == "workflow" and agent_name != caller_name)
-    ) and not is_sender_allowed_for_responder(
+    if (grant == "delegate" or (grant == "workflow" and agent_name != caller_name)) and not _answers_requester(
+        grant,
         requester_id,
         agent_name,
         authorization_room_id,

@@ -585,6 +585,9 @@ async def test_turn_that_delegation_refuses_is_refused_and_starts_no_job(
 ) -> None:
     """The rules of `run_subagent` decide, with their own sentences, as kind `refused`; the options reach them."""
     with workflow_stack(tmp_path, extra_tools=("workflow",), other_agents=("stranger",)) as stack:
+        # Its bot is up and knows its rooms, and the run's room is not one of them.
+        stack.bot_rooms["stranger"] = ("!elsewhere:example.test",)
+        stack._open()
         await stack.open_jobs()
         stack.script_agents(monkeypatch)
         await stack.start()
