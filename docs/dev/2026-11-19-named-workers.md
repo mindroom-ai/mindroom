@@ -51,13 +51,15 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   The primary then sends `stream_io` on the worker's execute request (worker protocol 10). The runner launches the command itself, with the launch the shell tool builds for that call (`command_launch`, as a terminal's shell is launched), on pipes of its own in a new session at idle priority, and puts `started`, `out`, `err` and `exit` frames on the execute stream before the result line.
   The call's result, receipt and tool trace hold only the exit line and the byte counts.
   `GET /api/agent-cli/calls/{id}/stream` relays those frames as NDJSON with warm-up `progress`, a `keepalive` every 5 s, and the settled receipt as its last line.
-  It has one reader (`409` for a second), is not resumable, cancels the call when its reader leaves, and cancels a call nobody reads within 60 s; only a relay that started counts as the reader.
+  It has one reader (`409` for a second), is not resumable, cancels the call when its reader leaves, and cancels a call nobody reads within 60 s. Asking for the stream claims the reader before the response starts; a claimed stream that is never read keeps the claim, and the call is cancelled at those 60 s.
   The route checks the bearer again before each frame it sends, so a grant that expired or was revoked ends the stream, which cancels the call.
   Every hop is bounded, so a slow reader slows the command: the runner queues 4 frames of at most 32 KiB, the primary 16, and neither buffers past that.
   The time the primary waits to hand a frame to that reader does not count against the time the call may take at the runner, so a paused reader still gets the output and the exit, also a stop at the time limit.
   The runner's time limit runs until the command's leader exited and both pipes ended (a pipe only a silent process it left behind keeps open is not waited for), and the stop, at that limit or by a cancel, kills the session's whole process group, also once the leader has exited.
+  After the stop at the time limit the runner reads the pipes to their end at the reader's pace before it sends the `exit` frame, so nothing the group had written is dropped; it stops reading after 8 MiB, which only a process that left the group can still write.
   `POST /api/agent-cli/calls/{id}/stdin` takes `{seq, b, eof}` chunks and answers once the command's stdin took them, which is the sender's flow control; a repeated `seq` is written once, one ahead of its turn gets `409`, and `open: false` says the command takes no more.
   One chunk at most waits to leave for a command that does not read: the runner waits 20 s for it and then answers `504`, as it answers at once any chunk that arrives while one waits, and the sender repeats the chunk.
+  A request to the runner that fails on the way, or whose answer is lost, gets the same `504`: only the runner's own answer says `open: false`.
   The chunks share one connection from the CLI to the primary, and from the primary to the runner the call's own client.
   The CLI reads the stream however long the command runs; it retries an unreachable stream for a minute, never after its first frame, and exits `141` after cancelling when its own stdout is closed.
   `GET /api/agent-cli/calls/{id}?wait=N&after_progress=R` (up to 25 s, at most 64 concurrent waiters per owner; a read over the cap answers at once) still long-polls a receipt for other readers without consuming an active-operation slot and returns only the latest `progress` message (no history buffer; intermediate updates between reads may be skipped, while `progress_revision` guarantees the latest is seen).
@@ -73,8 +75,9 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   It reads the exit code and the stop at the time limit from the `exit` frame, which follows the last output frame, so a command's exit is known only once all of its output was written.
   A program the worker cannot find or execute ends as a command that exited `127` or `126` with a shell's words on stderr: an `err` frame and an `exit` frame for `workers run`, and for every other shell call the result of a failed command, so output saving and an output path treat it as any failed command.
   The runner decides this from the spawn error's number and the program's name as given alone, never by opening the program file, so every error outside its list remains a failed tool call.
-  A cancelled receipt carries `cancel_outcome`: `never_ran` when the call was cancelled while queued or before dispatch to the runner, `stopped` when the exit of a streamed command confirmed that it ended, and nothing otherwise.
+  A cancelled receipt carries `cancel_outcome`: `never_ran` when the call was cancelled while queued or before dispatch to the runner, `stopped` when the runner confirmed that it stopped a streamed command, and nothing otherwise.
   For `stopped`, the runner puts an `exit` frame marked `cancelled` on the execute stream once the command's process group is gone (no process answers a signal to the group), in place of the output nobody reads any more; the primary reads a cancelled streamed call up to 3 s longer for it, and settles the receipt after it.
+  A command's own `exit` frame never counts as `stopped`, since it may have left processes running.
   The signalled CLI has closed its stream by then, so it reads the confirmation from the cancel's answer; a reader that left cancels the call without using up the one cancel request that waits for the call to end.
   A cancel drops the frames nobody has read, which wakes the worker call's thread that waited to hand one on, so it reaches the exit frame.
   It submits once and retries only reaching the stream, even when the submission response is lost, because a second submission could run the command twice.
@@ -111,6 +114,7 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   Withdrawing the card on cancel is left to a follow-up change.
 - A `workers run` stream that breaks after output arrived is not resumed: the CLI exits `255`, and the command is cancelled.
 - `workers run` gives the command pipes, not a terminal, and the model-facing shell call does not stream.
+- The bytes `workers run` streams reach the CLI before secret masking and `tool:result_transform` hooks, which see the call's result (the exit line and byte counts). The CLI runs inside an agent's own shell call, whose result passes through both before the model sees it.
 - A subagent owns the named workers its own turn starts, not its caller's, and only when its own agent sets `named_workers`.
 - Background scripts, OpenAI-compatible API requests, and other calls without a reply's turn cannot name a worker.
 - Each named worker starts with empty package caches and costs a cold start, and nodes the autoscaler adds can take longer than `readyTimeoutSeconds`.
