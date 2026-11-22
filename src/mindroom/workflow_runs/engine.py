@@ -1177,13 +1177,7 @@ class WorkflowEngine:
                 cancelled = {"kind": "cancelled", "message": _RUN_ENDED}
                 await asyncio.to_thread(partial(settle, state=WorkflowNodeState.CANCELLED, error=cancelled))
                 return False
-            # The job's end says what its turn did: one that called a tool is not run again unasked. A job that
-            # does not end in time is read as it stands, which says the same of a turn nobody can read.
-            await runtime.jobs.request_cancel(job_id)
-            with suppress(TimeoutError):
-                async with asyncio.timeout(_STOP_SECONDS):
-                    while _works(runtime, job_id):
-                        await asyncio.sleep(_STOP_POLL_SECONDS)
+            await _stopped(runtime, job_id)
         try:
             await self._settle_agent(run, node, epoch, block=False)
         except AgentNotReadyError as exc:
@@ -1519,6 +1513,18 @@ def _works(runtime: AgentRuntime | None, job_id: str) -> bool:
     """Return whether the job still works, as far as anyone can say: without a job runtime nobody can."""
     jobs = runtime.jobs.retained_jobs() if runtime is not None else ()
     return runtime is None or any(job.job_id == job_id and job.status not in TERMINAL_STATUSES for job in jobs)
+
+
+async def _stopped(runtime: AgentRuntime, job_id: str) -> None:
+    """Ask the job to stop and wait for its end, which says what its turn did: a turn that called a tool is not run again.
+
+    A job that does not end in time is read as it stands, which says the same of a turn nobody can read.
+    """
+    await runtime.jobs.request_cancel(job_id)
+    with suppress(TimeoutError):
+        async with asyncio.timeout(_STOP_SECONDS):
+            while _works(runtime, job_id):  # noqa: ASYNC110 - the job runtime has no event for one job's end
+                await asyncio.sleep(_STOP_POLL_SECONDS)
 
 
 def _require_kept(kept: list[str] | None, grant: ScriptToolGrant) -> None:
