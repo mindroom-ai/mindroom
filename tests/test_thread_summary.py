@@ -2619,8 +2619,8 @@ class TestConversationText:
             # Even spacing for 100 messages with 5 + 12 + 5 -> 13 gaps of 6 omitted each.
             assert marker_lines == ["[... 6 messages omitted ...]"] * (_TRUNCATION_MIDDLE_COUNT + 1)
 
-    async def test_long_thread_clips_head_and_tail_and_skips_whitespace_only(self) -> None:
-        """Long-thread sampling keeps head and tail of overlong bodies and drops whitespace-only messages."""
+    async def test_long_thread_clips_head_and_tail_with_whitespace_only(self) -> None:
+        """Long-thread sampling keeps head and tail of overlong bodies and renders whitespace-only bodies empty."""
         exact = "a" * _MAX_MESSAGE_CHARS
         overlong = f"  HEAD_START {'b' * (_MAX_MESSAGE_CHARS + 200)} REAL_TAIL_QUESTION?  "
         history = [
@@ -2639,7 +2639,36 @@ class TestConversationText:
         assert clipped_body.startswith("HEAD_START")
         assert clipped_body.endswith("REAL_TAIL_QUESTION?")
         assert len(clipped_body) <= _MAX_MESSAGE_CHARS
-        assert "@blank:localhost" not in text
+        assert lines[2] == "@blank:localhost: "
+
+    async def test_long_thread_at_51_with_whitespace_only_stays_sampled_and_clipped(self) -> None:
+        """A 51-message thread with a whitespace-only body stays sampled and clips every rendered body."""
+        long_paste = f"START {'x' * (_MAX_MESSAGE_CHARS * 4)} END_QUESTION?"
+        history = [
+            ResolvedVisibleMessage.synthetic(sender="@blank:localhost", body="   \n  ", event_id="$m0"),
+            ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body=long_paste, event_id="$m1"),
+            *(
+                ResolvedVisibleMessage.synthetic(
+                    sender=f"@user{i}:localhost",
+                    body=long_paste if i % 5 == 0 else f"Message {i}",
+                    event_id=f"$m{i}",
+                )
+                for i in range(2, _MAX_MESSAGES_BEFORE_TRUNCATION + 1)
+            ),
+        ]
+        assert len(history) == _MAX_MESSAGES_BEFORE_TRUNCATION + 1
+
+        text = await self._conversation(history)
+
+        lines = text.splitlines()
+        message_lines = [line for line in lines if not line.startswith("[...")]
+        marker_lines = [line for line in lines if line.startswith("[...")]
+        assert len(message_lines) == 2 * _TRUNCATION_EDGE_COUNT + _TRUNCATION_MIDDLE_COUNT
+        assert len(marker_lines) == _TRUNCATION_MIDDLE_COUNT + 1
+        assert message_lines[0] == "@blank:localhost: "
+        for line in message_lines:
+            _sender, body = line.split(": ", 1)
+            assert len(body) <= _MAX_MESSAGE_CHARS
 
     async def test_short_thread_long_body_not_clipped(self) -> None:
         """Threads at or below the truncation threshold render long bodies verbatim, unclipped."""

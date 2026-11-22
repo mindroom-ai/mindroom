@@ -135,8 +135,8 @@ def _conversation_text(messages: Sequence[ResolvedVisibleMessage]) -> str:
 
     Threads at or under ``_MAX_MESSAGES_BEFORE_TRUNCATION`` messages are rendered
     verbatim. Longer threads sample the first and last ``_TRUNCATION_EDGE_COUNT``
-    non-empty messages plus ``_TRUNCATION_MIDDLE_COUNT`` evenly spaced middle
-    messages with omission notes for each gap, clipping overlong bodies to
+    messages plus ``_TRUNCATION_MIDDLE_COUNT`` evenly spaced middle messages
+    with omission notes for each gap, clipping overlong bodies to
     ``_MAX_MESSAGE_CHARS`` characters while keeping both head and tail.
     """
     entries: list[tuple[str, str]] = []
@@ -146,22 +146,7 @@ def _conversation_text(messages: Sequence[ResolvedVisibleMessage]) -> str:
         if body:
             entries.append((sender, body))
 
-    if len(entries) <= _MAX_MESSAGES_BEFORE_TRUNCATION:
-        return "\n".join(f"{sender}: {body}" for sender, body in entries)
-
-    lines: list[str] = []
-    head_chars = _MAX_MESSAGE_CHARS - _CLIP_TAIL_CHARS - len(_CLIP_SEPARATOR)
-    for sender, body in entries:
-        stripped = body.strip()
-        if not stripped:
-            continue
-        if len(stripped) > _MAX_MESSAGE_CHARS:
-            head = stripped[:head_chars].rstrip()
-            tail = stripped[-_CLIP_TAIL_CHARS:].lstrip()
-            stripped = f"{head}{_CLIP_SEPARATOR}{tail}"
-        lines.append(f"{sender}: {stripped}")
-
-    total = len(lines)
+    total = len(entries)
     if total <= _MAX_MESSAGES_BEFORE_TRUNCATION:
         return "\n".join(f"{sender}: {body}" for sender, body in entries)
 
@@ -172,6 +157,7 @@ def _conversation_text(messages: Sequence[ResolvedVisibleMessage]) -> str:
         for step in range(1, _TRUNCATION_MIDDLE_COUNT + 1)
     ]
     selected = sorted({*range(edge), *middle_indices, *range(total - edge, total)})
+    head_chars = _MAX_MESSAGE_CHARS - _CLIP_TAIL_CHARS - len(_CLIP_SEPARATOR)
     sampled: list[str] = []
     prev = -1
     for index in selected:
@@ -179,7 +165,13 @@ def _conversation_text(messages: Sequence[ResolvedVisibleMessage]) -> str:
         if omitted > 0:
             unit = "message" if omitted == 1 else "messages"
             sampled.append(f"[... {omitted} {unit} omitted ...]")
-        sampled.append(lines[index])
+        sender, body = entries[index]
+        stripped = body.strip()
+        if len(stripped) > _MAX_MESSAGE_CHARS:
+            head = stripped[:head_chars].rstrip()
+            tail = stripped[-_CLIP_TAIL_CHARS:].lstrip()
+            stripped = f"{head}{_CLIP_SEPARATOR}{tail}"
+        sampled.append(f"{sender}: {stripped}")
         prev = index
     return "\n".join(sampled)
 
