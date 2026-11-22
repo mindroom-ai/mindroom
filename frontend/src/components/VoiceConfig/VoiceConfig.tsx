@@ -217,7 +217,7 @@ export function VoiceConfig() {
             <Info className="h-4 w-4" />
             <AlertDescription>
               {voiceConfig.enabled
-                ? "Voice messages will be automatically transcribed and answered by one agent or team."
+                ? "MindRoom transcribes voice messages when it can and handles them with the same reply rules as text messages."
                 : "Voice message handling is currently disabled. You can still review and edit settings below."}
             </AlertDescription>
           </Alert>
