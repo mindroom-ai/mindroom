@@ -1491,7 +1491,8 @@ def _settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
 def settle_runtime_sources_of(transaction: Transaction, ends: Callable[[str], bool]) -> None:
     """Settle the pending runtime sources of every principal whose entity ``ends`` names: it has no bot any more.
 
-    Only the entity's own runtime runs such a source, so its row would wait for an owner that never comes.
+    Only the entity's own runtime runs such a source, so its row would wait for an owner that never comes. One an
+    approval continuation holds is that approval's to settle, and replays if the entity returns before it does.
     """
     kinds = tuple(sorted(kind.value for kind in RUNTIME_SOURCE_KINDS))
     # Placeholders are generated, values are still bound.
@@ -1500,7 +1501,14 @@ def settle_runtime_sources_of(transaction: Transaction, ends: Callable[[str], bo
     for principal_id in (str(row["principal_id"]) for row in principals):
         if ends(agent_of_principal(principal_id)):
             transaction.execute(
-                f"UPDATE journal_events SET state = ?, source_json = '' WHERE principal_id = ? AND {owed}",  # noqa: S608
+                f"""
+                UPDATE journal_events SET state = ?, source_json = '' WHERE principal_id = ? AND {owed}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM {approval_continuations.HELD_SOURCES}
+                      WHERE held_source.principal_id = journal_events.principal_id
+                        AND held_source.event_id = journal_events.event_id
+                  )
+                """,  # noqa: S608
                 (SETTLED_STATE, principal_id, *kinds),
             )
 
