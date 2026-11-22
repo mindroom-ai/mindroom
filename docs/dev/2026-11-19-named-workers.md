@@ -114,7 +114,7 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   Whether a caller waits is left out of what a worker spec compares, so it never makes a cached ready worker stale.
   A pending setup wait counts as current use of the worker and nothing else: it spares the worker the idle timeout while a tool caller waits, and a named worker's maximum age still ends it.
   A wait of at least one poll records the worker as used at the time it hands the worker to its caller, so a setup longer than the idle timeout does not end in a stopped worker.
-  That record never moves the worker's last use back, and a cluster that refuses it only logs a warning, because a start records no use after the worker is ready.
+  That record never moves the worker's last use back, and whatever keeps it from being written, a refusing or an unreachable cluster alike, only logs a warning, because a start records no use after the worker is ready.
   A wait is published and forgotten under the worker's lock, so a wait that ends never forgets the wait of a newer start.
   A request whose plugins do not begin with what the template imported runs in a second, plain template that never imported them, started on the first such request: an import's global effects, such as a registered YAML constructor, cannot be undone in the process that ran it, and starting an interpreter per call would cost the whole tool import each time.
   So no request replaces a template another request is about to fork from, at the price of a second template's memory in a worker that serves both kinds of request.
