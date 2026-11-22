@@ -19,10 +19,10 @@ from mindroom.approval import manager as approval_manager
 from mindroom.delegation import continuation, recovery
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.recovery import read_child_run
-from mindroom.delegation.state import child_card_id
+from mindroom.delegation.state import RESTART_INTERRUPTION_REASON, child_card_id
 from mindroom.event_journal import ApprovalDecisionMetadata, CallKey, tool_job_run_id
 from mindroom.event_journal.opening import event_journal_sqlite_path
-from mindroom.llm.runs import RunStatus, ToolExecution
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.models import WorkflowNodeState
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
@@ -41,7 +41,6 @@ if TYPE_CHECKING:
 
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.event_journal import BackgroundApprovalDecision
-    from mindroom.llm.runs import RunRecord
     from mindroom.workflow_runs.models import WorkflowNode
 
 _PROMPT: dict[str, object] = {"prompt": "Write a, then b and c"}
@@ -372,3 +371,15 @@ async def test_ordinary_subagent_approval_wait_at_a_restart_is_unchanged(gated: 
     assert run is not None
     assert (ended.status, run.status, gated.jobs.awaiting_continuation()) == ("interrupted", RunStatus.error, ())
     assert (await cards.decision("c2"), await cards.decision("c3")) == ("denied", "denied")
+
+
+@pytest.mark.parametrize(("of_run", "listed"), [(True, False), (False, True)])
+def test_only_a_workflow_agents_account_leaves_out_the_calls_that_waited(of_run: bool, listed: bool) -> None:
+    """An ordinary subagent's account of its cut-short run names every call, as it did before workflows."""
+    waited = ToolExecution(tool_call_id="c2", tool_name="append", result=RESTART_INTERRUPTION_REASON, is_error=True)
+    done = ToolExecution(tool_call_id="c1", tool_name="text", result="xxx")
+    run = RunRecord(run_id="run-1", session_id="session-1", status=RunStatus.error, tools=[done, waited])
+
+    account = continuation._calls_account(run, {}, of_run=of_run)
+
+    assert ("`text` tool" in account, "`append` tool" in account) == (True, listed)
