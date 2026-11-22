@@ -130,10 +130,10 @@ async def put_room_state_as_steward(
     return isinstance(response, nio.RoomPutStateResponse)
 
 
-def _republish_thread_mode_as_steward(room_steward: Callable[[str], AgentBot | None], room_id: str) -> None:
+def republish_thread_mode_as_steward(room_steward: Callable[[str], AgentBot | None], room_id: str) -> None:
     """Have the room's steward republish the thread mode clients see, after a read found its setting changed."""
     if (steward := room_steward(room_id)) is not None:
-        steward.steward_duties.thread_mode_setting_changed(room_id)
+        steward.steward_duties._thread_mode_setting_changed(room_id)
 
 
 async def reconcile_held_room_states(runtime: OrchestratorRuntime) -> None:
@@ -180,6 +180,8 @@ class StewardDuties:
     _room_state_retrying: set[str] = field(default_factory=set, init=False, repr=False)
     # Pending operations, including fresh failures that race an in-flight retry.
     _room_state_reruns: dict[str, set[str]] = field(default_factory=dict, init=False, repr=False)
+    # Rooms whose thread mode is being republished after a change to the setting.
+    _thread_mode_republishes: set[str] = field(default_factory=set, init=False, repr=False)
 
     @property
     def _is_owner(self) -> bool:
@@ -198,7 +200,7 @@ class StewardDuties:
         The owner account removes managed accounts the config no longer has from the rooms it can see.
         """
         runtime = self.deps.runtime
-        republish = partial(_republish_thread_mode_as_steward, runtime.orchestrator.room_steward)
+        republish = partial(republish_thread_mode_as_steward, runtime.orchestrator.room_steward)
         on_thread_mode_change(runtime.runtime_paths, republish)
         if not self._is_owner:
             return
@@ -224,12 +226,23 @@ class StewardDuties:
         """Publish the state of a room this bot joined or left by any path, once a sync frame carries its members."""
         self._joined_room_ids.add(room_id)
 
-    def thread_mode_setting_changed(self, room_id: str) -> None:
+    def _thread_mode_setting_changed(self, room_id: str) -> None:
         """Republish the thread mode of a room this bot stewards, alone, after its `thread_mode` setting changed.
 
-        The republish reads the setting itself. It runs in the background, so no sync frame or turn waits for it.
+        Every bot that sees the change in sync tells the steward, whose own sync may not show it. The republish reads
+        the setting itself and writes only a mode that differs. It runs in the background, so no sync frame or turn
+        waits for it, and one republish serves every change told while it runs: it ends only once the mode it
+        published is the setting the runtime holds.
         """
-        self._publish_in_background(self._publish_room_state(room_id, {"mode"}), "steward_thread_mode")
+        if room_id not in self._thread_mode_republishes:
+            self._thread_mode_republishes.add(room_id)
+            self._publish_in_background(self._republish_thread_mode(room_id), "steward_thread_mode")
+
+    async def _republish_thread_mode(self, room_id: str) -> None:
+        try:
+            await self._publish_room_state(room_id, {"mode"})
+        finally:
+            self._thread_mode_republishes.discard(room_id)
 
     async def power_levels_event(self, room: nio.MatrixRoom, _event: nio.PowerLevelsEvent) -> None:
         """Publish a room's state after its power levels changed, which can change its steward."""

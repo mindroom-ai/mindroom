@@ -112,7 +112,12 @@ from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
 from .room_settings import THREAD_MODE, observe_room_settings_event, refresh_room_setting
-from .steward_duties import StewardDuties, StewardDutiesDeps, room_state_response_as_steward
+from .steward_duties import (
+    StewardDuties,
+    StewardDutiesDeps,
+    republish_thread_mode_as_steward,
+    room_state_response_as_steward,
+)
 from .thread_tags import THREAD_TAGS_EVENT_TYPE
 from .tool_jobs.client_cancel import cancel_room_jobs, cancel_stopped_reply_jobs, handle_job_cancel_event
 from .tool_jobs.follow_ups import follow_up_event
@@ -1092,18 +1097,20 @@ class AgentBot:
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
 
     async def _reread_room_setting(self, client: nio.AsyncClient, room_id: str, setting: RoomSetting[Any]) -> None:
-        if setting is THREAD_MODE and self.steward_duties.is_steward(room_id):
-            # The steward's republish reads the setting. One that returns before that read, in a room without a
-            # joined responder or whose steward changed, leaves the live value unconfirmed until the next read.
-            self.steward_duties.thread_mode_setting_changed(room_id)
-            return
+        if setting is THREAD_MODE:
+            # Every bot tells the room's steward, whose sync may not show the event. The steward's republish reads
+            # the setting. One that returns before that read, in a room without a joined responder or whose steward
+            # changed, leaves the live value unconfirmed until the next read.
+            republish_thread_mode_as_steward(self.orchestrator.room_steward, room_id)
+            if self.steward_duties.is_steward(room_id):
+                return
         put_state = partial(room_state_response_as_steward, self.orchestrator.room_steward)
         await refresh_room_setting(setting, client, self.runtime_paths, room_id, force=True, put_state=put_state)
 
     def _on_room_state_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Take a live thread tag or room settings state event from sync; never raise into nio's callback loop.
 
-        Each bot reads a changed setting again; the room's steward republishes a changed thread mode instead.
+        Each bot reads a changed setting again and has the room's steward republish a changed thread mode.
         """
         if "state_key" not in event.source or event.decrypted:
             return

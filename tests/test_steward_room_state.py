@@ -15,6 +15,7 @@ from aiohttp import web
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import RunPhase
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
@@ -1365,7 +1366,7 @@ async def test_only_the_steward_republishes_a_changed_thread_mode_setting(room_s
     duties = _router_duties(room_state)
     duties.deps.runtime.orchestrator.room_steward.return_value = MagicMock(agent_name=steward)
 
-    duties.thread_mode_setting_changed(ROOM_ID)
+    duties._thread_mode_setting_changed(ROOM_ID)
     await asyncio.gather(*duties._room_state_publishes)
 
     if steward == ROUTER_AGENT_NAME:
@@ -1401,6 +1402,46 @@ async def test_a_read_that_finds_the_thread_mode_changed_has_the_steward_republi
 
 
 @pytest.mark.asyncio
+async def test_a_thread_mode_change_only_another_bot_sees_is_republished_by_the_steward(room_state: RoomState) -> None:
+    """While the steward's sync shows nothing, the bot whose sync shows the event has the steward republish the mode."""
+    _, paths, _, events, client = room_state
+    duties = _router_duties(room_state)
+    events[SETTING] = {"value": "room"}
+    other_bot = MagicMock(runtime_paths=paths)
+    other_bot.orchestrator.room_steward.return_value = MagicMock(steward_duties=duties)
+    other_bot.steward_duties.is_steward.return_value = False
+
+    observe_room_settings_event(
+        paths,
+        ROOM_ID,
+        {"type": SETTING[0], "state_key": SETTING[1], "content": events[SETTING]},
+    )
+    await AgentBot._reread_room_setting(other_bot, client, ROOM_ID, THREAD_MODE)
+    await asyncio.gather(*duties._room_state_publishes)
+
+    assert events[EVENT_TYPE, ""] == {"mode": "room"}
+
+
+@pytest.mark.asyncio
+async def test_changes_told_while_a_thread_mode_republish_runs_share_it(room_state: RoomState) -> None:
+    """Each bot in the room tells the steward of the same change; one republish reads and publishes it."""
+    _, _, _, events, client = room_state
+    duties = _router_duties(room_state)
+    events[SETTING] = {"value": "room"}
+
+    for _ in range(3):
+        duties._thread_mode_setting_changed(ROOM_ID)
+        await asyncio.sleep(0)
+    await asyncio.gather(*duties._room_state_publishes)
+
+    assert [call.args[1] for call in client.room_get_state_event.await_args_list].count(SETTING[0]) == 1
+    assert events[EVENT_TYPE, ""] == {"mode": "room"}
+    duties._thread_mode_setting_changed(ROOM_ID)
+    assert len(duties._room_state_publishes) == 1
+    await asyncio.gather(*duties._room_state_publishes)
+
+
+@pytest.mark.asyncio
 async def test_a_thread_mode_republish_that_fails_is_retried_alone(
     room_state: RoomState,
     monkeypatch: pytest.MonkeyPatch,
@@ -1413,7 +1454,7 @@ async def test_a_thread_mode_republish_that_fails_is_retried_alone(
     write = client.room_put_state.side_effect
     client.room_put_state.side_effect = [nio.RoomPutStateError("Temporarily unavailable", "M_UNKNOWN")]
 
-    duties.thread_mode_setting_changed(ROOM_ID)
+    duties._thread_mode_setting_changed(ROOM_ID)
     await asyncio.gather(*duties._room_state_publishes)
     client.room_put_state.side_effect = write
     await asyncio.wait_for(duties._room_state_retries[ROOM_ID], timeout=3)

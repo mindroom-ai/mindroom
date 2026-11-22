@@ -6,9 +6,9 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, Mock, call, patch
@@ -37,8 +37,6 @@ from tests.conftest import test_runtime_paths
 from tests.room_settings_helpers import RoomStateHomeserver
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from aioresponses import aioresponses
 
     from mindroom.constants import RuntimePaths
@@ -169,10 +167,9 @@ async def test_an_override_file_that_cannot_be_read_is_not_a_room_without_an_ove
         )
 
     assert await read() == SettingRead(ok=True, value=value)
-    # Reading a directory fails as a file without permission does, for any user; its time is not the file's.
+    # Reading a directory fails as a file without permission does, for any user.
     aside = legacy.rename(legacy.with_suffix(".aside"))
     legacy.mkdir()
-    os.utime(legacy, ns=(0, 0))
 
     assert await read() == SettingRead(ok=False, value=value)
     assert resolve_room_setting(setting, runtime_paths, ROOM_ID) == value
@@ -181,6 +178,43 @@ async def test_an_override_file_that_cannot_be_read_is_not_a_room_without_an_ove
     aside.rename(legacy)
     assert await read() == SettingRead(ok=True, value=value)
     assert set(json.loads(legacy.read_text())) == {ROOM_ID}
+
+
+@pytest.mark.asyncio
+@_SETTINGS
+@pytest.mark.parametrize("failure", [PermissionError("denied"), "{"], ids=["unreadable", "undecodable"])
+async def test_an_override_file_read_that_fails_once_keeps_the_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: RoomSetting[Any],
+    failure: OSError | str,
+) -> None:
+    """One read of the file decides: when it fails, the room is not taken for one without an override."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    value = _VALUES[setting.key]
+    legacy = _write_legacy_overrides(runtime_paths, setting, (ROOM_ID,))
+    homeserver = RoomStateHomeserver()
+    client = homeserver.client()
+    read_text = Path.read_text
+
+    def failing_read(path: Path, *args: Any, **kwargs: Any) -> str:  # noqa: ANN401
+        if path != legacy:
+            return read_text(path, *args, **kwargs)
+        if isinstance(failure, OSError):
+            raise failure
+        return failure
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "read_text", failing_read)
+        failed = await refresh_room_setting(setting, client, runtime_paths, ROOM_ID, put_state=client.room_put_state)
+    assert not failed.ok
+    client.room_put_state.assert_not_awaited()
+
+    read = await refresh_room_setting(setting, client, runtime_paths, ROOM_ID, put_state=client.room_put_state)
+
+    assert read == SettingRead(ok=True, value=value)
+    assert homeserver.events[ROOM_SETTINGS_EVENT_TYPE, setting.key] == {"value": value}
+    assert json.loads(legacy.read_text()) == {}
 
 
 @pytest.mark.asyncio
@@ -354,22 +388,25 @@ async def test_a_live_setting_change_is_read_again_once(
     *,
     steward: bool,
 ) -> None:
-    """A bot reads a changed setting again; the steward leaves a changed thread mode to its republish, which reads it."""
+    """A bot reads a changed setting again, and whichever bot sees a changed thread mode tells the room's steward.
+
+    The steward itself leaves that read to its republish.
+    """
     runtime_paths = test_runtime_paths(tmp_path)
     homeserver = RoomStateHomeserver()
     homeserver.events[ROOM_SETTINGS_EVENT_TYPE, setting.key] = {"value": _VALUES[setting.key]}
     client = homeserver.client()
+    elected = SimpleNamespace(steward_duties=Mock())
     bot = SimpleNamespace(
         runtime_paths=runtime_paths,
-        orchestrator=SimpleNamespace(room_steward=lambda _room_id: None),
+        orchestrator=SimpleNamespace(room_steward=lambda _room_id: elected),
         steward_duties=Mock(is_steward=Mock(return_value=steward)),
     )
 
     await AgentBot._reread_room_setting(bot, client, ROOM_ID, setting)
 
-    republishes = steward and setting is THREAD_MODE
-    assert bot.steward_duties.thread_mode_setting_changed.call_count == republishes
-    assert client.room_get_state_event.await_count == (not republishes)
+    assert elected.steward_duties._thread_mode_setting_changed.call_count == (setting is THREAD_MODE)
+    assert client.room_get_state_event.await_count == (not (steward and setting is THREAD_MODE))
 
 
 @pytest.mark.asyncio
