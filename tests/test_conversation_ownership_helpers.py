@@ -512,3 +512,94 @@ async def test_runtime_source_handoff_dispatches_by_kind_and_settles_unclaimed(t
     assert unknown is not None
     await runner.handoff_runtime_source(unknown)
     assert not await store.is_pending("unknown-runtime:1")
+
+
+@pytest.mark.asyncio
+async def test_exclusive_conversation_rejects_reservation_and_holds_canonical_lock_across_retry(
+    tmp_path: Path,
+) -> None:
+    """Public exclusive_conversation never accepts a reservation and always holds the canonical lock on retry."""
+    bot = _bot(tmp_path)
+    runtime = BotRuntimeState(orchestrator=bot.orchestrator)
+    coordinator = ResponseLifecycleCoordinator()
+    store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$src")
+    envelope = request_envelope(target=target, prompt="hi", user_id="@user:localhost")
+
+    try:
+        reservation = await coordinator.reserve_response_lifecycle(envelope)
+        try:
+            with pytest.raises(TypeError):
+                async with coordinator.exclusive_conversation(target, reservation=reservation):  # type: ignore[call-arg]
+                    pass
+        finally:
+            await reservation.release()
+
+        # Verify retry after an approval hold still acquires and holds the canonical target lock exclusively.
+        coordinator.follow_approval_holds(store.approval_signals, "agent@general", lambda _room_id: None)
+        reply_locked = asyncio.Event()
+        reply_release = asyncio.Event()
+        first_entered = asyncio.Event()
+        first_release = asyncio.Event()
+        second_entered = asyncio.Event()
+        lock_held_in_body: list[bool] = []
+
+        async def pausing_reply(_target: MessageTarget) -> None:
+            reply_locked.set()
+            await reply_release.wait()
+            await store.backend.write(
+                lambda tx: approval_signals.paused(
+                    tx,
+                    PausedReply("agent@general", "appr-retry", "!room:localhost", "$thread"),
+                ),
+            )
+
+        reply_task = asyncio.create_task(
+            coordinator.run_locked_response(
+                target=target,
+                response_envelope=envelope,
+                pipeline_timing=None,
+                locked_operation=pausing_reply,
+            ),
+        )
+        await asyncio.wait_for(reply_locked.wait(), timeout=2)
+
+        async def first_exclusive() -> None:
+            async with coordinator.exclusive_conversation(
+                target,
+                admit=runtime.admission_fence,
+                wait_for_approval_release=runtime.wait_for_admission_or_shutdown,
+            ):
+                lock_held_in_body.append(coordinator._response_lifecycle_lock(target).locked())
+                first_entered.set()
+                await first_release.wait()
+
+        async def second_exclusive() -> None:
+            async with coordinator.exclusive_conversation(
+                target,
+                admit=runtime.admission_fence,
+                wait_for_approval_release=runtime.wait_for_admission_or_shutdown,
+            ):
+                second_entered.set()
+
+        first_task = asyncio.create_task(first_exclusive())
+        await asyncio.sleep(0)
+        reply_release.set()
+        await asyncio.wait_for(reply_task, timeout=2)
+        await asyncio.sleep(0)
+        assert not first_entered.is_set()
+
+        await store.backend.write(lambda tx: approval_signals.ended(tx, "agent@general", "appr-retry", None))
+        await asyncio.wait_for(first_entered.wait(), timeout=2)
+        assert lock_held_in_body == [True]
+
+        second_task = asyncio.create_task(second_exclusive())
+        await asyncio.sleep(0)
+        assert not second_entered.is_set()
+
+        first_release.set()
+        await asyncio.wait_for(first_task, timeout=2)
+        await asyncio.wait_for(second_task, timeout=2)
+        assert second_entered.is_set()
+    finally:
+        await store.close()

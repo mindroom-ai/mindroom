@@ -740,39 +740,50 @@ class ResponseLifecycleCoordinator:
         *,
         admit: Callable[[], AbstractAsyncContextManager[None]] | None = None,
         wait_for_approval_release: Callable[[Coroutine[None, None, object]], Awaitable[bool]] | None = None,
-        reservation: ResponseLifecycleReservation | None = None,
-        pipeline_timing: DispatchPipelineTiming | None = None,
-        counts_as_reply: bool = False,
     ) -> AsyncIterator[None]:
-        """Acquire exclusive FIFO ownership of one target, waiting out approvals without admission when requested."""
+        """Acquire exclusive lock-only FIFO ownership of one target, waiting out approvals without admission."""
         key = target.lifecycle_key
-        lock = reservation._lifecycle_lock if reservation is not None else self._response_lifecycle_lock(target)
         self._exclusive_users[key] += 1
         try:
             while True:
                 await self._wait_for_approval_release(key, wait_for_approval_release)
+                lock = self._response_lifecycle_lock(target)
                 async with AsyncExitStack() as stack:
                     if admit is not None:
                         await stack.enter_async_context(admit())
-                    if pipeline_timing is not None:
-                        pipeline_timing.mark("lock_wait_start")
-                    await self._acquire_response_turn_lock(lock, reservation)
-                    stack.push_async_callback(reservation.release) if reservation is not None else stack.callback(
-                        lock.release,
-                    )
+                    await self._acquire_response_turn_lock(lock, None)
+                    stack.callback(lock.release)
                     if wait_for_approval_release is not None and key in self._approval_holds.values():
                         continue
-                    if pipeline_timing is not None:
-                        pipeline_timing.mark("lock_acquired")
-                    if not counts_as_reply:
-                        self._lock_only_owners.add(key)
-                        stack.callback(self._lock_only_owners.discard, key)
+                    self._lock_only_owners.add(key)
+                    stack.callback(self._lock_only_owners.discard, key)
                     yield
                     return
         finally:
             self._exclusive_users[key] -= 1
             if not self._exclusive_users[key]:
                 del self._exclusive_users[key]
+
+    @asynccontextmanager
+    async def _reply_lock(
+        self,
+        lifecycle_lock: asyncio.Lock,
+        reservation: ResponseLifecycleReservation | None,
+        pipeline_timing: DispatchPipelineTiming | None,
+    ) -> AsyncIterator[None]:
+        """Acquire and release one validated reply turn's lock or one-shot reservation."""
+        if pipeline_timing is not None:
+            pipeline_timing.mark("lock_wait_start")
+        await self._acquire_response_turn_lock(lifecycle_lock, reservation)
+        if pipeline_timing is not None:
+            pipeline_timing.mark("lock_acquired")
+        try:
+            yield
+        finally:
+            if reservation is not None:
+                await reservation.release()
+            else:
+                lifecycle_lock.release()
 
     async def run_locked_response(
         self,
@@ -787,7 +798,7 @@ class ResponseLifecycleCoordinator:
         """Run one locked response operation with shared queued-message bookkeeping."""
         self._assert_target_matches_envelope(target, response_envelope)
         reservation = _current_response_lifecycle_reservation.get()
-        _, queued_signal, notice = self._start_response_turn(
+        lifecycle_lock, queued_signal, notice = self._start_response_turn(
             target=target,
             response_envelope=response_envelope,
             signal_queued_message=signal_queued_message,
@@ -798,12 +809,7 @@ class ResponseLifecycleCoordinator:
             # must acquire their own lifecycle instead of inheriting this one-shot claim.
             _current_response_lifecycle_reservation.set(None)
         try:
-            async with self.exclusive_conversation(
-                target,
-                reservation=reservation,
-                pipeline_timing=pipeline_timing,
-                counts_as_reply=True,
-            ):
+            async with self._reply_lock(lifecycle_lock, reservation, pipeline_timing):
                 self._consume_response_turn_notice(
                     reservation=reservation,
                     notice=notice,
