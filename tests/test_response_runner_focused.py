@@ -9,6 +9,7 @@ without booting an orchestrator or syncing with Matrix.
 from __future__ import annotations
 
 import asyncio
+import gc
 import html
 import inspect
 import json
@@ -6437,6 +6438,27 @@ async def test_response_lifecycle_reservation_surfaces_lock_acquire_failure() ->
             await reservation.wait_until_acquired()
     finally:
         await reservation.release()
+
+
+@pytest.mark.asyncio
+async def test_a_reservation_released_unused_leaves_no_unretrieved_lock_acquire_failure() -> None:
+    """A place given back before anything waited for its lock collects the failure its queueing ended with."""
+    coordinator = ResponseLifecycleCoordinator()
+    envelope = _queued_envelope("$interactive")
+    reported: list[dict[str, Any]] = []
+    asyncio.get_running_loop().set_exception_handler(lambda _loop, context: reported.append(context))
+
+    async def fail_acquire() -> bool:
+        msg = "lock acquire failed"
+        raise RuntimeError(msg)
+
+    coordinator._get_or_create_queued_signal(envelope.target).lock.acquire = fail_acquire  # type: ignore[method-assign]
+    reservation = await coordinator.reserve_response_lifecycle(envelope)
+    await reservation.release()
+    del reservation
+    gc.collect()
+
+    assert reported == []
 
 
 @pytest.mark.asyncio

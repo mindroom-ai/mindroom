@@ -142,6 +142,9 @@ class _ResponseLifecycleReservation:
         if acquire_task is not None and not acquire_task.done():
             acquire_task.cancel()
             await asyncio.gather(acquire_task, return_exceptions=True)
+        elif acquire_task is not None and not acquire_task.cancelled():
+            # Nothing may have waited for the lock; a failure to queue for it is collected here instead.
+            acquire_task.exception()
         if self._owns_lock:
             self._owns_lock = False
             self._queued_signal.lock.release()
