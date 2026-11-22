@@ -39,6 +39,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from functools import partial
@@ -63,6 +64,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 SHELL_SUPERVISOR_SOCKET_ENV = "MINDROOM_SANDBOX_SHELL_SUPERVISOR_SOCKET"
+SHELL_SUPERVISOR_REQUEST_ID_ENV = "MINDROOM_SANDBOX_SHELL_SUPERVISOR_REQUEST_ID"
+_MAX_STOPPED_RUNS = 256
 
 _REQUEST_LIMIT_BYTES = 4 * 1024 * 1024
 _PARENT_POLL_INTERVAL_SECONDS = 1.0
@@ -121,6 +124,62 @@ def parse_shell_supervisor_kill(message: str) -> Literal["signalled", "finished"
 # ---------------------------------------------------------------------------
 
 
+def _remember_stopped(stopped_runs: OrderedDict[str, None], request_id: str) -> None:
+    stopped_runs[request_id] = None
+    while len(stopped_runs) > _MAX_STOPPED_RUNS:
+        stopped_runs.popitem(last=False)
+
+
+async def _handle_cancel(
+    active_runs: dict[str, asyncio.Task[ShellRunResult]],
+    stopped_runs: OrderedDict[str, None],
+    request_id: str,
+) -> bool:
+    task = active_runs.get(request_id)
+    if task is not None:
+        task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+        if task.cancelled():
+            stopped_runs.pop(request_id, None)
+            return True
+        return False
+    return stopped_runs.pop(request_id, None) is not None
+
+
+async def _await_run_or_eof(
+    registry: dict[str, ProcessRecord],
+    run_task: asyncio.Task[ShellRunResult],
+    reader: asyncio.StreamReader,
+    *,
+    request_id: str | None,
+    active_runs: dict[str, asyncio.Task[ShellRunResult]] | None,
+    stopped_runs: OrderedDict[str, None] | None,
+) -> ShellRunResult | None:
+    if request_id is not None and active_runs is not None:
+        active_runs[request_id] = run_task
+    eof_task = asyncio.create_task(reader.read())
+    try:
+        done, _pending = await asyncio.wait({run_task, eof_task}, return_when=asyncio.FIRST_COMPLETED)
+        if eof_task in done:
+            if not run_task.done():
+                run_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await run_task
+            elif not run_task.cancelled() and (result := await run_task).handle is not None:
+                discard_background_record(registry, result.handle)
+            return None
+        eof_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await eof_task
+        return None if run_task.cancelled() else await run_task
+    finally:
+        if request_id is not None and stopped_runs is not None and run_task.cancelled():
+            _remember_stopped(stopped_runs, request_id)
+        if request_id is not None and active_runs is not None and active_runs.get(request_id) is run_task:
+            active_runs.pop(request_id, None)
+
+
 async def _handle_run(
     registry: dict[str, ProcessRecord],
     handle_reservations: set[str],
@@ -129,6 +188,8 @@ async def _handle_run(
     deadline_tasks: set[asyncio.Task[None]] | None = None,
     *,
     write_progress: Callable[[str], None] | None = None,
+    active_runs: dict[str, asyncio.Task[ShellRunResult]] | None = None,
+    stopped_runs: OrderedDict[str, None] | None = None,
 ) -> ShellRunResult | None:
     """Run one command, cancelling it if the client disconnects mid-wait.
 
@@ -172,28 +233,18 @@ async def _handle_run(
             output_destination=output_destination,
         ),
     )
-    # EOF before the run response means the client (a per-request tool
-    # subprocess) died; cancel the run so the command is killed exactly like a
-    # cancelled local run instead of lingering with an undelivered handle.
-    eof_task = asyncio.create_task(reader.read())
-    done, _pending = await asyncio.wait({run_task, eof_task}, return_when=asyncio.FIRST_COMPLETED)
-    if eof_task in done:
-        # The client is gone even if the run finished in the same loop cycle:
-        # a handle registered by that run is undeliverable, so discard it
-        # instead of leaving the command running with no owner.
-        if run_task.done():
-            result = await run_task
-            if result.handle is not None:
-                discard_background_record(registry, result.handle)
-        else:
-            run_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await run_task
+    raw_request_id = payload.get("request_id")
+    request_id = raw_request_id if isinstance(raw_request_id, str) and raw_request_id else None
+    result = await _await_run_or_eof(
+        registry,
+        run_task,
+        reader,
+        request_id=request_id,
+        active_runs=active_runs,
+        stopped_runs=stopped_runs,
+    )
+    if result is None:
         return None
-    eof_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await eof_task
-    result = await run_task
     if result.handle is not None and deadline_at is not None:
         record = registry.get(result.handle)
         if record is not None:
@@ -264,6 +315,8 @@ async def _handle_connection(
     registry: dict[str, ProcessRecord],
     handle_reservations: set[str],
     deadline_tasks: set[asyncio.Task[None]],
+    active_runs: dict[str, asyncio.Task[ShellRunResult]],
+    stopped_runs: OrderedDict[str, None],
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
@@ -281,9 +334,16 @@ async def _handle_connection(
                 reader,
                 deadline_tasks,
                 write_progress=partial(_write_progress, writer),
+                active_runs=active_runs,
+                stopped_runs=stopped_runs,
             )
             if result is None:
                 return
+        elif op == "cancel":
+            stopped = await _handle_cancel(active_runs, stopped_runs, str(payload["request_id"]))
+            writer.write(json.dumps({"stopped": stopped}).encode("utf-8") + b"\n")
+            await writer.drain()
+            return
         elif op == "check":
             result = ShellRunResult(
                 message=check_command(registry, namespace=str(payload["namespace"]), handle=str(payload["handle"])),
@@ -318,12 +378,14 @@ async def _serve(socket_path: str) -> int:
     registry: dict[str, ProcessRecord] = {}
     handle_reservations: set[str] = set()
     deadline_tasks: set[asyncio.Task[None]] = set()
+    active_runs: dict[str, asyncio.Task[ShellRunResult]] = {}
+    stopped_runs: OrderedDict[str, None] = OrderedDict()
     parent_pid = os.getppid()
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, stop_event.set)
     server = await asyncio.start_unix_server(
-        partial(_handle_connection, registry, handle_reservations, deadline_tasks),
+        partial(_handle_connection, registry, handle_reservations, deadline_tasks, active_runs, stopped_runs),
         path=socket_path,
         limit=_REQUEST_LIMIT_BYTES,
     )
@@ -372,6 +434,7 @@ async def run_command_via_supervisor(
     handle: str | None = None,
     max_runtime_seconds: float | None = None,
     output_destination: ShellOutputDestination | None = None,
+    request_id: str | None = None,
 ) -> ShellRunResult:
     """Run one shell command and preserve its execution and output-file ownership; see ``run_command``."""
     request = {
@@ -384,14 +447,14 @@ async def run_command_via_supervisor(
         "timeout": timeout,
         "on_timeout": on_timeout,
     }
-    if handle is not None:
-        request["handle"] = handle
-    if max_runtime_seconds is not None:
-        request["max_runtime_seconds"] = max_runtime_seconds
-    if output_destination is not None:
-        request["output_destination"] = asdict(output_destination)
-    if on_progress is not None:
-        request["progress"] = True
+    optional = {
+        "handle": handle,
+        "max_runtime_seconds": max_runtime_seconds,
+        "output_destination": asdict(output_destination) if output_destination is not None else None,
+        "progress": True if on_progress is not None else None,
+        "request_id": request_id,
+    }
+    request.update({k: v for k, v in optional.items() if v is not None})
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path, limit=_REQUEST_LIMIT_BYTES)
     except OSError as exc:
@@ -418,6 +481,19 @@ async def run_command_via_supervisor(
         with suppress(OSError):
             await writer.wait_closed()
     return _parse_supervisor_response(line)
+
+
+def cancel_supervised_run(socket_path: str, request_id: str, *, timeout: float = 3.0) -> bool:
+    """Cancel one supervised run by request_id and confirm its process group is gone."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(timeout)
+            conn.connect(socket_path)
+            conn.sendall(json.dumps({"op": "cancel", "request_id": request_id}).encode("utf-8") + b"\n")
+            line = _recv_line(conn)
+        return json.loads(line).get("stopped") is True
+    except (OSError, json.JSONDecodeError, AttributeError, ValueError):
+        return False
 
 
 def check_command_via_supervisor(socket_path: str, *, namespace: str, handle: str) -> str:

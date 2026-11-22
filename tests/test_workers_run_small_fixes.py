@@ -273,7 +273,7 @@ def test_item10_confirmed_cancel_prints_stopped_notice_without_call_id(
     code, call_id = _run_signalled_cli(
         monkeypatch,
         worker="f2",
-        cancel_response={"status": "cancelled", "cancel_confirmed": True},
+        cancel_response={"status": "cancelled", "cancel_outcome": "stopped"},
     )
     output = capsys.readouterr()
     assert code == 128 + int(signal.SIGTERM)
@@ -285,7 +285,7 @@ def test_item10_confirmed_cancel_prints_stopped_notice_without_call_id(
 @pytest.mark.parametrize(
     "cancel_response",
     [
-        {"status": "cancelled", "cancel_confirmed": False},
+        {"status": "cancelled", "cancel_outcome": None},
         {"status": "cancelled"},
         {"status": "running"},
         {"status": "failed", "outcome": "boom"},
@@ -410,18 +410,18 @@ def _install_fake_worker_proxy(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("runner_cancel_response", "expected_confirmed"),
+    ("runner_cancel_response", "expected_outcome"),
     [
-        (httpx.Response(200, json={"cancelled": True}), True),
-        (httpx.Response(200, json={"cancelled": False}), False),
-        (httpx.Response(500, json={"detail": "boom"}), False),
+        (httpx.Response(200, json={"cancelled": True, "stopped": True}), "stopped"),
+        (httpx.Response(200, json={"cancelled": True, "stopped": False}), None),
+        (httpx.Response(500, json={"detail": "boom"}), None),
     ],
 )
 async def test_item10_server_cancel_sets_cancel_confirmed_from_runner_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     runner_cancel_response: httpx.Response,
-    expected_confirmed: bool,
+    expected_outcome: str | None,
 ) -> None:
     """Server cancel route sets cancel_confirmed only when the worker runner confirms the cancel."""
     outer_entered = asyncio.Event()
@@ -478,7 +478,7 @@ async def test_item10_server_cancel_sets_cancel_confirmed_from_runner_response(
                     assert cancel_resp.status_code == 200
                     receipt = cancel_resp.json()
                     assert receipt["status"] == "cancelled"
-                    assert receipt["cancel_confirmed"] is expected_confirmed
+                    assert receipt["cancel_outcome"] == expected_outcome
                 release_outer.set()
                 await bash_task
     finally:
@@ -682,7 +682,7 @@ def test_item11_tty_progress_ends_with_newline_before_cancel_notice(monkeypatch:
 
         def cancel(self, call_id: str, *, timeout: float = 8.0) -> dict[str, object]:
             del call_id, timeout
-            return {"status": "cancelled", "cancel_confirmed": True}
+            return {"status": "cancelled", "cancel_outcome": "stopped"}
 
     tty = _FakeTtyStderr(is_tty=True)
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)

@@ -6,7 +6,7 @@ import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from uuid import uuid4
 
 from mindroom.attachments.ids import unique_attachment_ids
@@ -458,8 +458,8 @@ _CALL_LAUNCH_ERROR_HOOK: ContextVar[Callable[[int, str], None] | None] = Context
     "call_launch_error_hook",
     default=None,
 )
-_CALL_CANCEL_CONFIRMED_HOOK: ContextVar[Callable[[], None] | None] = ContextVar(
-    "call_cancel_confirmed_hook",
+_CALL_CANCEL_OUTCOME_HOOK: ContextVar[Callable[[Literal["never_ran", "stopped"]], None] | None] = ContextVar(
+    "call_cancel_outcome_hook",
     default=None,
 )
 
@@ -520,9 +520,9 @@ def note_call_launch_error(exit_code: int, message: str) -> None:
         hook(exit_code, message)
 
 
-def get_call_cancel_confirmed_hook() -> Callable[[], None] | None:
-    """Return the active CLI call's cancel-confirmation hook, if any."""
-    return _CALL_CANCEL_CONFIRMED_HOOK.get()
+def get_call_cancel_outcome_hook() -> Callable[[Literal["never_ran", "stopped"]], None] | None:
+    """Return the active CLI call's cancel-outcome hook, if any."""
+    return _CALL_CANCEL_OUTCOME_HOOK.get()
 
 
 def scope_hook_context_kwargs(
@@ -772,18 +772,18 @@ def call_progress_sink_scope(
     sink: Callable[[str], None] | None,
     *,
     on_refused: Callable[[], None] | None = None,
-    on_cancel_confirmed: Callable[[], None] | None = None,
+    on_cancel_outcome: Callable[[Literal["never_ran", "stopped"]], None] | None = None,
     on_launch_error: Callable[[int, str], None] | None = None,
 ) -> Iterator[None]:
     """Bind per-call progress, refusal, launch-error, and cancel hooks for one CLI tool call."""
     progress_token = _CALL_PROGRESS_SINK.set(sink)
     refusal_token = _CALL_REFUSAL_HOOK.set(on_refused)
-    cancel_token = _CALL_CANCEL_CONFIRMED_HOOK.set(on_cancel_confirmed)
+    cancel_token = _CALL_CANCEL_OUTCOME_HOOK.set(on_cancel_outcome)
     launch_token = _CALL_LAUNCH_ERROR_HOOK.set(on_launch_error)
     try:
         yield
     finally:
         _CALL_LAUNCH_ERROR_HOOK.reset(launch_token)
-        _CALL_CANCEL_CONFIRMED_HOOK.reset(cancel_token)
+        _CALL_CANCEL_OUTCOME_HOOK.reset(cancel_token)
         _CALL_REFUSAL_HOOK.reset(refusal_token)
         _CALL_PROGRESS_SINK.reset(progress_token)

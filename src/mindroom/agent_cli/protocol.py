@@ -105,7 +105,7 @@ class ToolCallReceipt(_Operation):
     error_kind: Literal["named_worker_refusal"] | None = None
     launch_exit_code: Literal[126, 127] | None = None
     launch_error: str | None = Field(default=None, max_length=1024)
-    cancel_confirmed: bool = False
+    cancel_outcome: Literal["never_ran", "stopped"] | None = None
     outcome: JsonValue = None
     attachments: list[dict[str, JsonValue]] = Field(default_factory=list)
 

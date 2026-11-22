@@ -22,7 +22,11 @@ from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import run_command, shell_call_timeout
 from mindroom.shell.output_capture import ShellOutputDestination
-from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, run_command_via_supervisor
+from mindroom.shell.supervisor import (
+    SHELL_SUPERVISOR_REQUEST_ID_ENV,
+    SHELL_SUPERVISOR_SOCKET_ENV,
+    run_command_via_supervisor,
+)
 from mindroom.terminal.lines import PROMPT_COMMAND
 from mindroom.terminal.session import TerminalError, TerminalLaunch
 from mindroom.tool_system.authoring import Toolkit
@@ -608,6 +612,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                     on_timeout="kill",
                     on_progress=report_tool_progress,
                     output_destination=output_destination,
+                    request_id=os.environ.get(SHELL_SUPERVISOR_REQUEST_ID_ENV) or None,
                 )
             else:
                 result = await run_command(

@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
@@ -359,25 +359,34 @@ class WorkerCallCancellation:
         if stop is not None:
             threading.Thread(target=stop, name="mindroom-worker-cancel", daemon=True).start()
 
-    async def cancel_and_confirm(self, *, wait_seconds: float) -> bool:
-        """Ask the runner to stop the call and wait up to *wait_seconds* for confirmation."""
+    async def cancel_and_confirm(self, *, wait_seconds: float) -> Literal["never_ran", "stopped"] | None:
+        """Ask the runner to stop the call and wait up to *wait_seconds* on the event loop for confirmation."""
         with self._lock:
             self._cancelled = True
             armed, stop, self._stop = self._armed, self._stop, None
         if stop is None:
-            return not armed
-        done, confirmed = threading.Event(), False
+            return "never_ran" if not armed else None
+        loop = asyncio.get_running_loop()
+        done: asyncio.Future[bool] = loop.create_future()
+
+        def _resolve(confirmed: bool) -> None:
+            if not done.done():
+                done.set_result(confirmed)
 
         def _run() -> None:
-            nonlocal confirmed
+            confirmed = False
             try:
                 confirmed = bool(stop())
             finally:
-                done.set()
+                with suppress(RuntimeError):
+                    loop.call_soon_threadsafe(_resolve, confirmed)
 
         threading.Thread(target=_run, name="mindroom-worker-cancel", daemon=True).start()
-        await asyncio.to_thread(done.wait, wait_seconds)
-        return done.is_set() and confirmed
+        try:
+            confirmed = await asyncio.wait_for(done, timeout=wait_seconds)
+        except TimeoutError:
+            return None
+        return "stopped" if confirmed else None
 
 
 def _post_execute_cancel(
@@ -392,7 +401,7 @@ def _post_execute_cancel(
             request = CancelRequest(protocol=WORKER_PROTOCOL_VERSION, request_id=request_id)
             response = client.post(url, json=request.model_dump(mode="json"), headers=headers)
             response.raise_for_status()
-            return CancelResponse.model_validate(response.json()).cancelled
+            return CancelResponse.model_validate(response.json()).stopped
     except Exception:
         # Best effort: the call was already abandoned, and the runner's own timeouts still apply.
         logger.warning("worker_execute_cancel_failed", url=url, exc_info=True)
