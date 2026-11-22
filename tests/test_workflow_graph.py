@@ -114,6 +114,7 @@ def test_label_is_name_or_first_prompt_line_redacted_and_cut() -> None:
     assert node_label("ask", {"question": "Deploy?\nPlease answer."}, None) == "Deploy?"
     assert node_label("tool", {"toolkit": "shell", "function": "run_shell_command"}, None) == "shell.run_shell_command"
     assert node_label("group", {"op": "foreach"}, None) == "foreach"
+    assert node_label("error", {"type": "KeyError", "message": "'x'"}, None) == "KeyError"
     assert len(node_label("agent", {"prompt": "x" * 500}, None)) == 80
     secret = node_label("agent", {"prompt": "Use api_key=sk-inventedinventedinvented1234 now"}, None)
     assert "sk-invented" not in secret

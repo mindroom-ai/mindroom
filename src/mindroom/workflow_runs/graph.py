@@ -47,12 +47,12 @@ class Graph:
 
 
 def node_label(kind: str, args: Mapping[str, object], name: object = None) -> str:
-    """Return what a call is shown as: its name, else the first line of its prompt, message or question.
+    """Return what a call is shown as: its name, else the first line of its prompt or question.
 
     A call with neither is named by its function or its operation. The label goes into the call's job, the room and
     the run's view, so it is redacted and cut to 80 characters.
     """
-    text = name or args.get("prompt") or args.get("message") or args.get("question")
+    text = name or args.get("prompt") or args.get("question")
     if not text:
         function = f"{args.get('toolkit')}.{args.get('function')}"
         text = function if kind == "tool" else args.get("op") or args.get("type") or kind
