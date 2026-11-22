@@ -124,7 +124,7 @@ Choose a model with a larger context window or shorten the prompt; MindRoom neve
 MindRoom supports automatic [OpenAI Responses compaction](https://developers.openai.com/api/docs/guides/compaction) and [Claude threshold compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-threshold).
 
 - **OpenAI**: GPT-5.3 Codex, GPT-5.4, and GPT-6 model families on the official Responses endpoint, the Codex login backend, or [OpenRouter's Responses endpoint](models.md#gpt-through-openrouter-responses) (with `openai/` model IDs).
-  An explicit `store: true`, background mode, another OpenAI-compatible endpoint, OpenRouter model-rerouting fields (`models`, `model`, or `route`), or a custom context-management request keeps the model on text compaction.
+  An explicit `store: true`, background mode, another OpenAI-compatible endpoint, OpenRouter model-rerouting fields (`models`, `model`, `route`, `preset`, or `@preset/` IDs), or a custom context-management request keeps the model on text compaction.
 - **Claude**: direct Anthropic, [OpenRouter's Messages endpoint](models.md#claude-through-openrouter), and Vertex AI Claude on Sonnet 4.6 and later, Opus 4.6 and later, Haiku 5.5 and later, Fable, and Mythos models.
   This is a provider beta and needs a trigger of at least 50,000 tokens.
   Other Anthropic gateways, and OpenRouter models with a `models` or `fallbacks` list, use text compaction; an authored `compact_20260112` policy is sent as written.
