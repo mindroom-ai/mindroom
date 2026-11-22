@@ -867,6 +867,7 @@ async def test_non_200_roster_get_stops_before_put(
     steward_id, bound_id = ids[ROUTER_AGENT_NAME].full_id, ids["agent1"].full_id
     joined = {identity.full_id: {} for identity in ids.values()}
     puts: list[str] = []
+    roster_reads: list[str] = []
 
     async def handle(request: web.Request) -> web.StreamResponse:
         if request.method == "PUT":
@@ -876,6 +877,7 @@ async def test_non_200_roster_get_stops_before_put(
             return web.json_response({"user_id": bound_id})
         if request.path.endswith("/joined_members"):
             return web.json_response({"joined": joined})
+        roster_reads.append(request.path.rsplit("/", 1)[-1])
         return _error_http_response(response_kind)
 
     async with _http_state_clients(handle, steward_id, bound_id) as (steward, bound):
@@ -884,6 +886,7 @@ async def test_non_200_roster_get_stops_before_put(
             result = await reconcile_room_accounts(steward, config, paths, ROOM_ID, get_alternate_clients=alternates)
     assert result is expected_done
     assert puts == []
+    assert roster_reads == [bound_id if writer_kind == "bound" else steward_id]
     assert [log["log_level"] for log in logs if log["event"] == "room_accounts_publish_failed"] == [expected_level]
 
 
